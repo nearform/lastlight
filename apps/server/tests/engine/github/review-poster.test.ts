@@ -5,6 +5,7 @@ import {
   buildReview,
   buildBodyOnlyReview,
   resolveEvent,
+  worstAxis,
   type ReviewFinding,
 } from "#src/engine/github/review-poster.js";
 
@@ -90,6 +91,76 @@ describe("resolveEvent", () => {
   });
   it("honours an explicit event", () => {
     expect(resolveEvent({ event: "REQUEST_CHANGES", findings: [] })).toBe("REQUEST_CHANGES");
+  });
+});
+
+/**
+ * The split verdict — issue #271's fix 7.
+ *
+ * *"A blended verdict lets the passing axis hide the failing one."* In
+ * production, 58 of 59 approvals carried zero inline findings, so "no findings
+ * ⇒ APPROVE" is precisely the rule that hid every spec miss.
+ */
+describe("resolveEvent — the split verdict", () => {
+  it("is a no-op when no verdict is recorded (every review written before WP0)", () => {
+    expect(resolveEvent({ findings: [] })).toBe("APPROVE");
+    expect(resolveEvent({ event: "APPROVE", findings: [] })).toBe("APPROVE");
+    expect(resolveEvent({ verdict: {}, findings: [] })).toBe("APPROVE");
+  });
+
+  it("stops a spec failure being approved by a clean standards pass", () => {
+    // The whole point: zero standards findings, so every rule that existed
+    // before this one says APPROVE.
+    expect(resolveEvent({ verdict: { spec: "fail", standards: "pass" }, findings: [] })).toBe("COMMENT");
+  });
+
+  it("downgrades an EXPLICIT approve too — otherwise the verdict is inert", () => {
+    // Today's skill makes `event` a required field, so an always-present
+    // explicit event would mean the verdict never bites. "Explicit wins"
+    // governs the CHOICE of event; the axis is a floor under it, exactly like
+    // the existing "never APPROVE over an open human CHANGES_REQUESTED" rule.
+    expect(resolveEvent({ event: "APPROVE", verdict: { spec: "fail" }, findings: [] })).toBe("COMMENT");
+  });
+
+  it("never escalates — a failing axis reaches COMMENT and no further", () => {
+    // Auto-REQUEST_CHANGES flips the `last-light/review` check run to `failure`
+    // and closes a merge gate on a heuristic. Deliberately out of reach.
+    expect(resolveEvent({ verdict: { spec: "fail", standards: "fail" }, findings: [] })).toBe("COMMENT");
+    // …and an explicitly-chosen REQUEST_CHANGES is still honoured.
+    expect(
+      resolveEvent({ event: "REQUEST_CHANGES", verdict: { spec: "fail" }, findings: [] }),
+    ).toBe("REQUEST_CHANGES");
+  });
+
+  it("treats `unknown` as not-assessed, which does not block", () => {
+    // Most PRs state no acceptance criteria. Blocking on `unknown` would stop
+    // the reviewer approving anything — a worse reviewer, not a stricter one.
+    expect(resolveEvent({ verdict: { spec: "unknown", standards: "pass" }, findings: [] })).toBe("APPROVE");
+    expect(resolveEvent({ verdict: { spec: "unknown", standards: "unknown" }, findings: [] })).toBe("APPROVE");
+  });
+
+  it("passes both axes through to APPROVE when both pass", () => {
+    expect(resolveEvent({ verdict: { spec: "pass", standards: "pass" }, findings: [] })).toBe("APPROVE");
+  });
+
+  it("worstAxis orders fail > unknown > pass, and ignores junk", () => {
+    expect(worstAxis(undefined)).toBeUndefined();
+    expect(worstAxis({})).toBeUndefined();
+    expect(worstAxis({ spec: "pass" })).toBe("pass");
+    expect(worstAxis({ spec: "pass", standards: "unknown" })).toBe("unknown");
+    expect(worstAxis({ spec: "unknown", standards: "fail" })).toBe("fail");
+    // A model writing `"spec": "FAIL"` or `"spec": true` has recorded nothing,
+    // and nothing must not be read as a failure — it would block every review
+    // a slightly-off prompt produced.
+    expect(worstAxis({ spec: "FAIL" as never })).toBeUndefined();
+  });
+
+  it("carries the verdict through buildReview and the body-only fallback alike", () => {
+    const doc = { summary: "s", event: "APPROVE" as const, verdict: { spec: "fail" as const }, findings: [] };
+    expect(buildReview(doc, null).event).toBe("COMMENT");
+    // The 422 retry re-renders from the same doc; it must not silently recover
+    // the APPROVE the axis floor just took away.
+    expect(buildBodyOnlyReview(doc).event).toBe("COMMENT");
   });
 });
 

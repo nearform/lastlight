@@ -873,6 +873,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const holdRaw = isPlainObject(raw.hold) ? raw.hold : {};
   const exploreRaw = isPlainObject(raw.explore) ? raw.explore : {};
   const reviewRaw = isPlainObject(raw.review) ? raw.review : {};
+  const analysisRaw = isPlainObject(reviewRaw.analysis) ? reviewRaw.analysis : {};
   const fixRaw = isPlainObject(raw.fix) ? raw.fix : {};
   const dependenciesRaw = isPlainObject(raw.dependencies) ? raw.dependencies : {};
   const approvalRaw = isPlainObject(raw.approval) ? raw.approval : {};
@@ -984,6 +985,15 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     generatedPaths: Array.isArray(reviewRaw.generatedPaths)
       ? reviewRaw.generatedPaths.filter((p): p is string => typeof p === "string" && !!p.trim()).map((p) => p.trim())
       : reviewDefaults.generatedPaths,
+    // The evidence pipeline. `enabled` reads exactly like `postsCheck` above —
+    // anything that is not literally `true` is OFF — because locked decision 8
+    // makes "off" the byte-for-byte-today path, and a truthy-ish string in an
+    // overlay must not switch a deployment onto an unmeasured pipeline.
+    analysis: {
+      enabled: analysisRaw.enabled === true,
+      maxSpecObligations:
+        nonNegativeNumber(analysisRaw.maxSpecObligations) ?? reviewDefaults.analysis.maxSpecObligations,
+    },
   };
 
   const maxWorkflows =

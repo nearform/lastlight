@@ -24,6 +24,7 @@ import type { StateDb } from "../state/db.js";
 import type { WorkflowRun } from "../state/workflow-run-store.js";
 import type { GitHubClient } from "./github/github.js";
 import type { CiFailureReport } from "./github/github.js";
+import type { SpecLinkedIssue } from "./review-spec.js";
 import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
 import { prScopedWorkflows } from "../workflows/pr-scope.js";
 import { readHarvestedMarkers, type HarvestedFixMarkers } from "./fix-harvest.js";
@@ -221,6 +222,35 @@ export interface PrState {
    * check, so it is only fetched when there is something to explain.
    */
   ciReport: CiFailureReport | null;
+  /**
+   * The issues this PR declares it will close, with their bodies — **what was
+   * asked for**, and the first end of every `spec` obligation
+   * (`docs/plans/review-evidence-pipeline/`, §D7).
+   *
+   * `[]` on every dispatch until {@link resolveSpecContext} fills it, which
+   * happens only when `review.analysis.enabled` is on. That is not laziness: it
+   * is locked decision 8. `enabled: false` has to reproduce today's review
+   * byte-for-byte, and this field's only consumer is a template variable that
+   * must therefore be ABSENT rather than empty.
+   *
+   * The PR's own body needs no field here — {@link body} has always carried it;
+   * what was missing was any projection of it into a prompt (§E2).
+   */
+  closes: SpecLinkedIssue[];
+  /**
+   * The paths this PR changes — the CANDIDATE SET that is the second end of
+   * every `spec` obligation, and the reason that family does not violate locked
+   * decision 3.
+   *
+   * `null` means "not read" — either the axis is off (the default) or the read
+   * failed. It is deliberately not `[]`: a PR that changes nothing and a PR we
+   * could not ask about are different facts, and conflating them is the
+   * dependency-cruiser failure locked decision 6 exists to prevent. The
+   * obligation builder refuses to emit anything at all on `null`, because
+   * without this end an obligation would name only what was asked — which IRIS
+   * measured at −3, worse than seeding nothing.
+   */
+  changedFiles: string[] | null;
 
   // ── derived from our own history, keyed on the PR ───────────────────────────
 
@@ -528,6 +558,10 @@ export async function resolvePrState(
     lastBotReview: null,
     pathsSinceLastBotReview: null,
     ciReport: null,
+    // Both stay at their "not read" values unless `resolveSpecContext` is
+    // called — see their field docs, and locked decision 8.
+    closes: [],
+    changedFiles: null,
     attempt: 1,
     flakyDeferrals: 0,
     escalatedAtSha: null,
@@ -651,6 +685,71 @@ export async function resolvePrState(
 
   await applyDerivedState(state, deps);
   return state;
+}
+
+/**
+ * Fill the two `spec`-axis fields on an already-resolved snapshot:
+ * {@link PrState.closes} and {@link PrState.changedFiles}.
+ *
+ * **A separate, opt-in step rather than part of {@link resolvePrState}**, and
+ * the split is the whole design:
+ *
+ * - It costs two live reads (one GraphQL, one REST) that nothing needed before
+ *   WP0, and `resolvePrState` runs on every PR-scoped dispatch on every route.
+ *   Folding them in would spend them on `pr-fix` and the dependency crons, which
+ *   read neither.
+ * - Locked decision 8 says `review.analysis.enabled: false` reproduces today's
+ *   review byte-for-byte. The cheapest way to guarantee that is for the inputs
+ *   never to be fetched, so the projection has nothing to project and the
+ *   template context is unchanged rather than changed-but-empty.
+ *
+ * Called at the `dispatchWorkflow` choke point, right before `renderContext`, so
+ * every route — webhook, cron fan-out, `/api/run`, admin retry — gets the same
+ * enrichment or none of it. The webhook route's snapshot arrives here on
+ * `_prState` and is enriched in place, which is why this mutates rather than
+ * returning a copy: the object is the one persisted on `context.prState`.
+ *
+ * **Never throws.** Same contract as every read in `resolvePrState`: a failure
+ * lands in {@link PrState.readErrors} and leaves the field at the value that
+ * cannot cause a wrong claim — `changedFiles: null`, which makes the obligation
+ * builder emit nothing rather than a one-ended seed.
+ */
+export async function resolveSpecContext(
+  state: PrState,
+  deps: Pick<PrStateDeps, "github">,
+): Promise<void> {
+  const github = deps.github;
+  if (!github || !state.prNumber) return;
+  const [owner, name] = state.repo.split("/");
+  if (!owner || !name) return;
+
+  const note = (what: string, err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    state.readErrors.push(`${what}: ${msg}`);
+    log.warn("Read failed", { repo: state.repo, prNumber: state.prNumber, what, err });
+  };
+
+  const [closes, changedFiles] = await Promise.all([
+    github.listPullRequestClosingIssues(owner, name, state.prNumber).catch((err: unknown) => {
+      note("listPullRequestClosingIssues", err);
+      // `[]`, not a throw: a PR genuinely linked to nothing is the common case,
+      // and the spec axis degrades to the PR body alone rather than vanishing.
+      return [];
+    }),
+    github.listPullRequestFilePaths(owner, name, state.prNumber).catch((err: unknown) => {
+      note("listPullRequestFilePaths", err);
+      return null;
+    }),
+  ]);
+
+  state.closes = closes.map((i) => ({
+    number: i.number,
+    title: i.title,
+    body: i.body,
+    url: i.url,
+    state: i.state,
+  }));
+  state.changedFiles = changedFiles;
 }
 
 /**

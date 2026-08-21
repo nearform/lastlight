@@ -31,6 +31,29 @@ export interface ReviewFinding {
   suggestion?: string;
 }
 
+/** One axis of the split verdict. `unknown` = not assessed, which is not a pass. */
+export type AxisVerdict = "pass" | "fail" | "unknown";
+
+/**
+ * The per-axis verdict — issue #271's fix 7.
+ *
+ * > *"A blended verdict lets the passing axis hide the failing one."*
+ *
+ * A change that is clean by every standards check but does not do what the
+ * issue asked is exactly the case a single `event` cannot express, and the
+ * production numbers say it is not hypothetical: 71% APPROVE, 58 of 59
+ * approvals carrying zero inline findings.
+ *
+ * `unknown` is a first-class value and deliberately does NOT block: it is the
+ * honest answer when a PR states no acceptance criteria, which is most of them.
+ * Treating "not assessed" as "failed" would stop the reviewer approving
+ * anything, which is a worse reviewer, not a stricter one.
+ */
+export interface SplitVerdict {
+  spec?: AxisVerdict;
+  standards?: AxisVerdict;
+}
+
 /**
  * The findings document the agent writes. `pr_number` / `base_ref` /
  * `head_sha` are intentionally NOT here — the harness knows them from its own
@@ -41,6 +64,14 @@ export interface ReviewFindingsDoc {
   summary?: string;
   event?: ReviewEvent;
   findings?: ReviewFinding[];
+  /**
+   * Optional per-axis verdict. Absent ⇒ today's behaviour exactly, which is
+   * what makes the field safe to add before anything writes it.
+   *
+   * The `post-review` handler strips this unless `review.analysis.enabled`, so
+   * inertness is structural rather than a promise about what a prompt says.
+   */
+  verdict?: SplitVerdict;
 }
 
 /** An inline review comment in the shape GitHub's create-review API expects. */
@@ -187,13 +218,53 @@ export function toInlineComments(list: ReviewFinding[]): InlineComment[] {
 }
 
 /**
+ * The worse of the two axes, or `undefined` when neither was recorded.
+ *
+ * Ordering is `fail` > `unknown` > `pass`, and only `fail` is load-bearing —
+ * see {@link SplitVerdict} for why `unknown` must not block.
+ */
+export function worstAxis(verdict: SplitVerdict | undefined): AxisVerdict | undefined {
+  if (!verdict) return undefined;
+  const axes = [verdict.spec, verdict.standards].filter(
+    (v): v is AxisVerdict => v === "pass" || v === "fail" || v === "unknown",
+  );
+  if (axes.length === 0) return undefined;
+  if (axes.includes("fail")) return "fail";
+  if (axes.includes("unknown")) return "unknown";
+  return "pass";
+}
+
+/**
  * Resolve the review event. An explicit `doc.event` wins; otherwise an empty
  * findings set is an `APPROVE` and anything else is a `COMMENT` (never an
  * automatic `REQUEST_CHANGES` — that stays an explicit, deliberate call).
+ *
+ * ## The split verdict's one effect
+ *
+ * A `fail` on EITHER axis stops the review being an `APPROVE`; it becomes a
+ * `COMMENT`. Nothing else changes: the event is never escalated to
+ * `REQUEST_CHANGES`, and among the non-APPROVE events an explicit `doc.event`
+ * still wins, so a fork choosing `REQUEST_CHANGES` over `COMMENT` keeps its
+ * choice.
+ *
+ * **Why the downgrade also applies to an EXPLICIT `APPROVE`**, which is the one
+ * judgement call in this function. `06-adjudicate.md` says `resolveEvent` "takes
+ * the worse of the two axes" while `event` "remains explicit-wins". Read
+ * strictly, those contradict: today's skill makes `event` a REQUIRED field, so
+ * an always-present explicit event would make the split verdict inert by
+ * construction — the passing axis would go on hiding the failing one, which is
+ * the entire defect #271 filed. So "explicit-wins" is read as governing the
+ * CHOICE OF EVENT, and the axis verdict as a FLOOR under it, exactly like the
+ * skill's existing "never APPROVE over an open human CHANGES_REQUESTED" rule.
+ * An agent that writes `event: APPROVE` beside `verdict.spec: "fail"` has
+ * contradicted itself, and the safe reading of a self-contradiction is the one
+ * that does not silently approve a change that does not do what was asked.
  */
 export function resolveEvent(doc: ReviewFindingsDoc): ReviewEvent {
   const findings = Array.isArray(doc.findings) ? doc.findings : [];
-  return doc.event || (findings.length === 0 ? "APPROVE" : "COMMENT");
+  const event = doc.event || (findings.length === 0 ? "APPROVE" : "COMMENT");
+  if (event === "APPROVE" && worstAxis(doc.verdict) === "fail") return "COMMENT";
+  return event;
 }
 
 /**

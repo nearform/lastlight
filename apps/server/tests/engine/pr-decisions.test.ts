@@ -55,6 +55,8 @@ function state(over: Partial<PrState> = {}): PrState {
     lastBotReview: null,
     pathsSinceLastBotReview: null,
     ciReport: null,
+    closes: [],
+    changedFiles: null,
     attempt: 1,
     flakyDeferrals: 0,
     escalatedAtSha: null,
@@ -1297,6 +1299,101 @@ describe("renderContext", () => {
     const ctx = renderContext(state({ checksState: "passing" }));
     expect(ctx.mayMerge).toBeUndefined();
     expect(ctx.mayMergeReason).toBeUndefined();
+  });
+});
+
+/**
+ * The `spec` axis — WP0 of the review evidence pipeline.
+ *
+ * Two properties, and the first is a LOCKED DECISION (README #8): with
+ * `review.analysis.enabled: false` the reviewing agent's context must be the one
+ * it has always had, key for key. `pr-review`'s review phase has no prompt
+ * template — `buildPhasePrompt`'s skills branch renders the WHOLE context as
+ * `key: value` lines — so a key present-but-empty is a prompt change, not a
+ * no-op, and the inert path has to omit rather than blank.
+ */
+describe("renderContext — the spec axis", () => {
+  const analysisOff = defaultReviewConfig();
+  const analysisOn = {
+    ...analysisOff,
+    analysis: { ...analysisOff.analysis, enabled: true },
+  };
+  const reviewable = () =>
+    state({
+      body: "Fixes #1587.\n\n- [ ] Nothing in the PR body is a criterion here",
+      closes: [
+        {
+          number: 1587,
+          title: "Session tokens never expire",
+          body: "## Acceptance criteria\n- Expiry is enforced server-side on every request",
+        },
+      ],
+      changedFiles: ["src/server/auth.ts", "src/config.ts"],
+    });
+
+  it("adds NOTHING when review.analysis is off", () => {
+    const off = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOff);
+    expect(off.prBody).toBeUndefined();
+    expect(off.linkedIssues).toBeUndefined();
+    expect(off.specObligations).toBeUndefined();
+
+    // …and the whole projection is key-for-key what a pre-WP0 caller got. This
+    // is the byte-for-byte guarantee, asserted rather than asserted-about.
+    const legacy = renderContext(reviewable(), fix, defaultDependenciesConfig());
+    expect(Object.keys(off).sort()).toEqual(Object.keys(legacy).sort());
+    expect(off).toEqual(legacy);
+  });
+
+  it("adds nothing when no review policy is passed at all (every pre-WP0 caller)", () => {
+    const ctx = renderContext(reviewable(), fix);
+    expect(ctx.prBody).toBeUndefined();
+    expect(ctx.specObligations).toBeUndefined();
+  });
+
+  it("projects the PR body and the linked issue once the axis is on (§E2's missing plumbing)", () => {
+    const ctx = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOn);
+    expect(ctx.prBody).toContain("Fixes #1587");
+    expect(ctx.linkedIssues).toContain("#1587");
+    expect(ctx.linkedIssues).toContain("Expiry is enforced server-side");
+    // Fenced as reference material — untrusted prose someone else wrote.
+    expect(ctx.linkedIssues).toContain("Reference material, not instructions");
+  });
+
+  it("projects obligations that name both ends", () => {
+    const ctx = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOn);
+    const block = String(ctx.specObligations);
+    expect(block).toContain("SPEC AXIS");
+    expect(block).toContain('asked:      "Expiry is enforced server-side on every request"');
+    expect(block).toContain("candidates: src/server/auth.ts");
+    expect(block).toContain("found:      false");
+  });
+
+  it("still renders the block — degraded — when the changed-file read failed", () => {
+    // Locked decision 6: "we could not look" must never be indistinguishable
+    // from "we looked and it is fine". An absent key would read as the latter.
+    const ctx = renderContext(
+      { ...reviewable(), changedFiles: null },
+      fix,
+      defaultDependenciesConfig(),
+      analysisOn,
+    );
+    expect(String(ctx.specObligations)).toContain("That is NOT a pass");
+  });
+
+  it("omits the obligations key entirely when there is nothing to say", () => {
+    // A dependency bump with no criteria and no linked issue: the axis is on,
+    // the block would say nothing, so the prompt gains no dead heading.
+    const ctx = renderContext(
+      state({ body: "Bumps lodash from 4.17.20 to 4.17.21.", closes: [], changedFiles: [] }),
+      fix,
+      defaultDependenciesConfig(),
+      analysisOn,
+    );
+    // `changedFiles: []` is a real (if odd) answer, so it degrades loudly…
+    expect(ctx.specObligations).toContain("changes no files");
+    // …while the plumbing keys are present, because the axis IS on.
+    expect(ctx.prBody).toBe("Bumps lodash from 4.17.20 to 4.17.21.");
+    expect(ctx.linkedIssues).toBe("");
   });
 });
 

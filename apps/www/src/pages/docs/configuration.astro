@@ -406,6 +406,9 @@ review:
     - "*.min.js"
     - "*.generated.*"
     - "**/__generated__/**"
+  analysis:
+    enabled: false             # the review evidence pipeline — off, and inert
+    maxSpecObligations: 6      # per-PR budget for the `spec` obligation family
 
 fix:                           # every PR-fixing workflow: pr-fix, dependabot-ci-fix
   maxAttempts: 3               # attempts ACROSS runs for one PR, then a human is asked
@@ -489,6 +492,36 @@ dependencies:
 		leaves the PR alone, but this one would otherwise strand a required check on
 		a head nobody reviewed. Its conclusion mirrors that earlier review, so a
 		<code>CHANGES_REQUESTED</code> carried forward still blocks the merge.
+	</p>
+
+	<p>
+		<code>analysis</code> is the <strong>review evidence pipeline</strong>, and
+		it ships off. <code>enabled: false</code> reproduces the review you get
+		today byte for byte — not "the feature is on but finds nothing": the
+		variables it governs are absent from the agent's context entirely, and the
+		extra GitHub reads it needs are never issued. Switch it on per deployment,
+		once you want it.
+	</p>
+
+	<p>
+		What it adds today is a <strong>spec axis</strong>. Every item in the
+		reviewer's rubric — correctness, contracts, edge cases, security, test
+		coverage — is a <em>standards</em> check, and none of them asks whether the
+		change does what was asked. Turning <code>analysis</code> on hands the
+		reviewer the PR's body and the issues it closes (which it had never been
+		shown), extracts the acceptance criteria out of them, and pairs each one
+		with the files the PR actually changed. The reviewer then has to quote the
+		line that implements a criterion, or say that no changed file does. It also
+		lets the review carry a verdict <em>per axis</em>: a change that is clean by
+		every standards check but doesn't do what the issue asked can no longer be
+		approved on the strength of the half that passed.
+	</p>
+
+	<p>
+		This one is <strong>operator-only</strong> — a repo's own
+		<code>.lastlight/</code> can't turn it on or off. It buys analysis on your
+		budget, and there is no "more conservative" direction for a repo to move it
+		in.
 	</p>
 
 	<p>

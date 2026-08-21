@@ -33,6 +33,7 @@ import { HOLD_LABEL } from "../cron/dependabot-discovery.js";
 import { ATTEMPT_FREE_CLASSES } from "./fix-markers.js";
 import { renderPrNotes } from "./pr-notes.js";
 import { PR_NOTES_FILE_NAME, VERIFY_SCRIPT_NAME } from "./fix-scratch.js";
+import { buildSpecObligations, renderLinkedIssues, renderSpecObligations } from "./review-spec.js";
 
 /**
  * A skip that must be ESCALATED on the pull request — labelled `requires-human`
@@ -1252,15 +1253,24 @@ export function resolveDispatchDisposition(
  * Pure: the CI report was already fetched into the snapshot, so this renders it
  * rather than fetching it.
  *
- * `fix` and `dependencies` are optional because the variables they contribute
- * are policy, not state — they come from the run's already-repo-clamped config
- * blocks, not from the PR. Omitting one leaves its variables undefined, which
- * the prompts' own `{{#if maxAttempts}}`-style guards already handle.
+ * `fix`, `dependencies` and `review` are optional because the variables they
+ * contribute are policy, not state — they come from the run's already-repo-clamped
+ * config blocks, not from the PR. Omitting one leaves its variables undefined,
+ * which the prompts' own `{{#if maxAttempts}}`-style guards already handle.
+ *
+ * **The `spec` axis is ADDITIVE and off by default** (locked decision 8). With
+ * `review.analysis.enabled` false — or with no `review` block handed in at all,
+ * which is what every pre-WP0 caller does — this returns exactly the keys it
+ * always returned. Nothing is rendered empty, nothing is rendered `false`; the
+ * keys are simply absent, so `pr-review`'s prompt (which is built by listing the
+ * whole context, `buildPhasePrompt`'s skills branch) is byte-identical to
+ * today's.
  */
 export function renderContext(
   state: PrState,
   fix?: FixConfig,
   dependencies?: DependenciesConfig,
+  review?: ReviewConfig,
 ): Record<string, unknown> {
   // The merge gate, decided ONCE here rather than re-derived in prose by the
   // merge prompt. 09's thesis is one source and three renderings; a predicate
@@ -1274,6 +1284,7 @@ export function renderContext(
   const merge = dependencies ? mayMerge(state, dependencies) : undefined;
   const failedChecks = state.ciReport ? renderCiFailureReport(state.ciReport) : "";
   return {
+    ...specContext(state, review),
     // Identity / targeting.
     headSha: state.headSha,
     branch: state.headRef,
@@ -1354,5 +1365,51 @@ export function renderContext(
     maxFlakyDeferrals: fix?.maxFlakyDeferrals,
     flakyPromoted:
       fix !== undefined && state.flakyDeferrals >= fix.maxFlakyDeferrals,
+  };
+}
+
+/**
+ * The `spec`-axis half of {@link renderContext} — the review evidence pipeline's
+ * WP0 (`docs/plans/review-evidence-pipeline/` §D7).
+ *
+ * Returns `{}` unless `review.analysis.enabled`, and that empty object IS the
+ * inertness guarantee (locked decision 8): with the axis off, the reviewing
+ * agent's Context block is character-for-character the one it has always had.
+ *
+ * Three variables, and the first two are the plumbing §E2 found missing.
+ * `prBody` is a declared `TemplateContext` field that nothing has ever
+ * populated, and `closingIssuesReferences` existed on the client with
+ * `repo-digest.ts` as its only consumer — so the reviewer has never once been
+ * told what the change was FOR. That is the whole reason every candidate to
+ * date could only ever have moved the standards axis.
+ *
+ * They are gated with the obligations rather than shipped unconditionally
+ * because nothing else consumes them yet: an ungated `prBody` would change the
+ * `pr-review` prompt on a deployment that has not opted into the pipeline, which
+ * is precisely what locked decision 8 forbids. WP1+ can un-gate them the moment
+ * a second consumer exists.
+ */
+function specContext(state: PrState, review?: ReviewConfig): Record<string, unknown> {
+  if (!review?.analysis?.enabled) return {};
+  const rendered = renderSpecObligations(
+    buildSpecObligations({
+      prBody: state.body,
+      closes: state.closes,
+      changedFiles: state.changedFiles,
+      max: review.analysis.maxSpecObligations,
+    }),
+  );
+  return {
+    // The PR's own description — what the AUTHOR says they did.
+    prBody: state.body,
+    // The issues it closes — what was ASKED, fenced as reference material by
+    // `renderLinkedIssues` for the same reason `priorNotes` is fenced: this is
+    // text a stranger wrote, and it must never read as instructions to the agent.
+    linkedIssues: renderLinkedIssues(state.closes),
+    // A `{{#if specObligations}}`-able string. Absent (not empty) when there is
+    // genuinely nothing to say AND nothing degraded — but a DEGRADED set still
+    // renders, because "we could not look" and "we looked and it is fine" must
+    // stay distinguishable (locked decision 6).
+    ...(rendered ? { specObligations: rendered } : {}),
   };
 }

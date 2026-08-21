@@ -55,12 +55,14 @@
 import {
   defaultDependenciesConfig,
   defaultFixConfig,
+  defaultReviewConfig,
   renderContext,
   type CiFailureReport,
   type CiJobFailure,
   type DependenciesConfig,
   type FixConfig,
   type PrState,
+  type ReviewConfig,
 } from "lastlight-core/evals";
 
 /** One failing CI job, as a case writes it. */
@@ -109,9 +111,32 @@ export interface PrStateSeed {
   notes?: { kind: string; text: string; stale?: boolean }[];
   cumulative_cost_usd?: number;
   cost_baseline_usd?: number;
-  /** Overrides on the two policy blocks; anything omitted takes the shipped default. */
+  /**
+   * The issues the PR says it closes, with their bodies — the FIRST end of every
+   * `spec` obligation (`docs/plans/review-evidence-pipeline/` §D7).
+   *
+   * Seeded rather than read, for the same reason the whole snapshot is: in
+   * production `resolveSpecContext` fetches it from
+   * `closingIssuesReferences`, and the fake GitHub answers GraphQL for one
+   * mutation only. A case that omits it measures the axis with the PR body as
+   * its only source, which is a weaker arm — not a broken one.
+   */
+  closes?: { number: number; title: string; body: string; state?: string; url?: string }[];
+  /**
+   * The PR's changed paths — the SECOND end. Absent ⇒ `null` ⇒ the obligation
+   * builder emits nothing at all, which is the correct degradation: a
+   * one-ended seed measured WORSE than no seed in IRIS's ablation.
+   */
+  changed_files?: string[];
+  /** Overrides on the three policy blocks; anything omitted takes the shipped default. */
   fix?: Partial<FixConfig>;
   dependencies?: Partial<DependenciesConfig>;
+  /**
+   * `review:` overrides — in practice `{ analysis: { enabled: true } }`, which
+   * is what turns the `spec` axis on for an arm. Off by default so every
+   * existing case keeps measuring the shipped two-phase review.
+   */
+  review?: Partial<ReviewConfig>;
 }
 
 const CHECKS_DEFAULT = "none" as const;
@@ -181,6 +206,18 @@ export function buildPrState(args: {
     lastBotReview: null,
     pathsSinceLastBotReview: null,
     ciReport: toCiReport(s.ci_jobs),
+    // The `spec` axis's two ends. Both inert unless the case seeds them AND the
+    // arm turns `review.analysis` on — with the axis off, `renderContext` omits
+    // every variable they feed, so a case that seeds neither is byte-identical
+    // to one written before WP0.
+    closes: (s.closes ?? []).map((c) => ({
+      number: c.number,
+      title: c.title,
+      body: c.body,
+      ...(c.state ? { state: c.state } : {}),
+      ...(c.url ? { url: c.url } : {}),
+    })),
+    changedFiles: s.changed_files ?? null,
     attempt: s.attempt ?? 1,
     flakyDeferrals: s.flaky_deferrals ?? 0,
     escalatedAtSha: null,
@@ -215,10 +252,20 @@ export function buildPrState(args: {
 export function prPolicy(seed?: PrStateSeed): {
   fix: FixConfig;
   dependencies: DependenciesConfig;
+  review: ReviewConfig;
 } {
+  const reviewDefaults = defaultReviewConfig();
   return {
     fix: { ...defaultFixConfig(), ...(seed?.fix ?? {}) },
     dependencies: { ...defaultDependenciesConfig(), ...(seed?.dependencies ?? {}) },
+    review: {
+      ...reviewDefaults,
+      ...(seed?.review ?? {}),
+      // A one-level spread would drop `maxSpecObligations` the moment a case
+      // seeded `{ analysis: { enabled: true } }`, so the nested block merges
+      // leaf-by-leaf.
+      analysis: { ...reviewDefaults.analysis, ...(seed?.review?.analysis ?? {}) },
+    },
   };
 }
 
@@ -241,9 +288,12 @@ export function prContextPatch(args: {
   seed?: PrStateSeed;
 }): Record<string, unknown> {
   const state = buildPrState(args);
-  const { fix, dependencies } = prPolicy(args.seed);
+  const { fix, dependencies, review } = prPolicy(args.seed);
   return {
-    ...renderContext(state, fix, dependencies),
+    // `review` is passed but deliberately NOT seeded top-level the way `fix` and
+    // `dependencies` are: `build.yaml` already emits `output_var: review`, and a
+    // top-level object would shadow it (see `apps/server/CLAUDE.md`).
+    ...renderContext(state, fix, dependencies, review),
     prNumber: args.prNumber,
     fix: fix as unknown as Record<string, unknown>,
     dependencies: dependencies as unknown as Record<string, unknown>,

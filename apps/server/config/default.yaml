@@ -280,6 +280,34 @@ review:
     - "*.min.css"
     - "*.generated.*"
     - "**/__generated__/**"
+  # The review evidence pipeline (docs/plans/review-evidence-pipeline/).
+  #
+  # OFF by default and that is a locked decision: `enabled: false` reproduces
+  # today's two-phase review BYTE-FOR-BYTE — every variable this block governs
+  # is absent from the template context rather than present-and-empty. Each
+  # stage lands dark and is switched on per deployment once it is measured.
+  #
+  # What `enabled: true` adds today (WP0, the `spec` axis):
+  #   - `{{prBody}}` + `{{linkedIssues}}` — the PR body and the issues it closes
+  #     (`closingIssuesReferences`), neither of which reached a prompt before.
+  #   - `{{specObligations}}` — one obligation per acceptance criterion found in
+  #     the issue/PR body, each naming BOTH ENDS of the mechanism: the criterion
+  #     itself, and the changed files that could satisfy it with `found: false`.
+  #     A one-ended seed measures WORSE than no seed (IRIS ablation: -3), which
+  #     is why the second end is the mechanical changed-file list and never
+  #     prose.
+  #   - the split verdict: `findings.json` may carry
+  #     `verdict: { spec, standards }` and a `fail` on either axis stops the
+  #     review being an APPROVE, so a clean standards pass can no longer hide a
+  #     spec miss (issue #271 fix 7).
+  #
+  # OPERATOR-ONLY — unlike every other `review:` key, a repo may not set this.
+  # It is spend, with no "more conservative" direction to clamp towards.
+  analysis:
+    enabled: false
+    # A budget, not a target: the extractor ranks, truncates, and records how
+    # many it dropped in the block it renders.
+    maxSpecObligations: 6
 
 # Retry policy for every PR_FIX_SHAPED workflow — pr-fix and dependabot-ci-fix
 # (issue #251). The loop diagnoses a CI failure before it retries, and these are

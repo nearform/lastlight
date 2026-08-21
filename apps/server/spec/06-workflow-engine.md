@@ -247,6 +247,21 @@ deterministic `bash` / `script` pair (a command, no LLM).
   hand-writing `pr_number`/`base_ref`/`head_sha` into the JSON and silently
   `exit 0`'d on any mismatch.
 
+  The document may also carry an optional **split verdict** (issue #271's fix
+  7) — `verdict: { spec, standards }`, each `pass` / `fail` / `unknown`. A
+  `fail` on **either** axis stops the review being an `APPROVE`; it becomes a
+  `COMMENT`. Nothing else changes: the event is never escalated to
+  `REQUEST_CHANGES` on a heuristic (that would flip the `last-light/review`
+  check to `failure` and shut a merge gate), and among the non-`APPROVE` events
+  an explicit `event` still wins. `unknown` means *not assessed* and does not
+  block — most PRs state no acceptance criteria, and blocking on `unknown` would
+  stop the reviewer approving anything. The point is that a change clean by
+  every standards check but not doing what the issue asked is a case one `event`
+  cannot express, and 58 of 59 production approvals carried zero findings. An
+  absent `verdict` is today's behaviour exactly, and the handler **discards**
+  the field entirely unless `review.analysis.enabled` — so the inertness is
+  structural rather than a promise about what a prompt writes.
+
 The `bash`/`script` deterministic types share the agent phase's dedup ledger
 (`runCommandPhase` → `runPhaseLedger`), so they get an `executions` row and
 dedup on resume like everything else. They also inherit the run's minted

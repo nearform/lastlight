@@ -216,13 +216,45 @@ export function reviewTriggerRank(trigger: ReviewTrigger): number {
 }
 
 /**
- * The `review:` block. Every key is repo-settable, and every one is CLAMPED
- * towards less automation: `postsCheck` and `skipDraft` are add-only `true` (a
- * repo may ask for the check and may skip drafts; it may not suppress an
- * operator's check or force reviews onto drafts), `trigger` takes the lower
- * {@link reviewTriggerRank} of repo and operator, `generatedPaths` is
- * superset-only (a longer list suppresses MORE re-reviews), and `requestLabel`
- * is free — naming a label only ever adds an explicit, human-initiated route.
+ * The `review.analysis:` sub-block — the evidence pipeline
+ * (`docs/plans/review-evidence-pipeline/`).
+ *
+ * **OFF by default, and that is a locked decision** (README locked decision 8):
+ * `enabled: false` must reproduce today's two-phase review byte-for-byte, so
+ * every projection this block governs is *absent* from the template context
+ * rather than present-and-empty. Each stage lands dark and is switched on per
+ * deployment once it has been measured.
+ *
+ * **Operator-only, unlike every other `review:` leaf.** It buys analysis on the
+ * operator's budget, which is the same argument that made `review.trigger`
+ * clamped rather than free (#256) — except there is no "more conservative"
+ * direction here to clamp towards, so a repo asking for it answers
+ * `key-not-allowed` exactly as `fix.escalateModelAfterAttempt` does.
+ */
+export interface ReviewAnalysisConfig {
+  /** `false` ⇒ today's two-phase review, byte-for-byte. */
+  enabled: boolean;
+  /**
+   * How many `spec` obligations one PR may carry.
+   *
+   * A **budget**, not a target: the extractor ranks and truncates, and records
+   * in the rendered block how many it dropped — a silently truncated list is
+   * the failure locked decision 6 exists to prevent. Seven-ish per family is
+   * the shape of the 40-per-PR budget in §D8.
+   */
+  maxSpecObligations: number;
+}
+
+/**
+ * The `review:` block. Every key except `analysis` is repo-settable, and every
+ * one of those is CLAMPED towards less automation: `postsCheck` and `skipDraft`
+ * are add-only `true` (a repo may ask for the check and may skip drafts; it may
+ * not suppress an operator's check or force reviews onto drafts), `trigger`
+ * takes the lower {@link reviewTriggerRank} of repo and operator,
+ * `generatedPaths` is superset-only (a longer list suppresses MORE
+ * re-reviews), and `requestLabel` is free — naming a label only ever adds an
+ * explicit, human-initiated route. {@link ReviewAnalysisConfig} is
+ * operator-only; see its own doc.
  */
 export interface ReviewConfig {
   /** Post the `last-light/review` Check Run. */
@@ -252,6 +284,8 @@ export interface ReviewConfig {
    * that also touched a hand-written file — see `resolveReviewTrigger`.
    */
   generatedPaths: string[];
+  /** The evidence pipeline. Off by default — see {@link ReviewAnalysisConfig}. */
+  analysis: ReviewAnalysisConfig;
 }
 
 /**
@@ -309,5 +343,6 @@ export function defaultReviewConfig(): ReviewConfig {
       "*.generated.*",
       "**/__generated__/**",
     ],
+    analysis: { enabled: false, maxSpecObligations: 6 },
   };
 }

@@ -450,6 +450,61 @@ describe("post-review action (runPostReview)", () => {
       expect((await executor.execute(NODE, {})).status).toBe("succeeded");
       expect(reviews).toHaveLength(1);
     });
+
+    /**
+     * The split verdict's inertness, enforced HERE rather than promised in a
+     * prompt (locked decision 8).
+     *
+     * `resolveEvent` honours a `verdict` whenever one is present, which is what
+     * makes it unit-testable. The deployment-level guarantee is this handler's:
+     * with `review.analysis.enabled: false`, a findings file that carries a
+     * verdict — a forked prompt, an overlay ahead of its config, a model
+     * improvising the field — cannot change the event this deployment would
+     * have posted yesterday.
+     */
+    describe("split verdict — inert unless review.analysis is enabled", () => {
+      const withAnalysis = (enabled: boolean) =>
+        withReviewConfig({
+          trigger: "on-request",
+          analysis: { ...defaultReviewConfig().analysis, enabled },
+        });
+
+      it("ignores a verdict when the analysis pipeline is OFF", async () => {
+        withAnalysis(false);
+        const taskId = "widget-42-verdict-off";
+        seedFindings(taskId, "widget", {
+          summary: "ok",
+          event: "APPROVE",
+          verdict: { spec: "fail", standards: "pass" },
+          findings: [],
+        });
+
+        const { executor } = makeExecutor(taskId);
+        expect((await executor.execute(NODE, {})).status).toBe("succeeded");
+        expect(reviews).toHaveLength(1);
+        expect((reviews[0]!.body as { event: string }).event).toBe("APPROVE");
+      });
+
+      it("downgrades the APPROVE when the analysis pipeline is ON", async () => {
+        withAnalysis(true);
+        const taskId = "widget-42-verdict-on";
+        seedFindings(taskId, "widget", {
+          summary: "ok",
+          event: "APPROVE",
+          verdict: { spec: "fail", standards: "pass" },
+          findings: [],
+        });
+
+        const { executor } = makeExecutor(taskId);
+        const outcome = await executor.execute(NODE, {});
+        expect(outcome.status).toBe("succeeded");
+        expect(reviews).toHaveLength(1);
+        expect((reviews[0]!.body as { event: string }).event).toBe("COMMENT");
+        // …and says so in the ledger row, or "event=COMMENT" on a doc that says
+        // APPROVE reads as a bug rather than as the axis floor doing its job.
+        expect(outcome.results[0]!.output).toContain("downgraded from APPROVE");
+      });
+    });
   });
   /**
    * The duplicate-review guard (issue #271).

@@ -652,12 +652,16 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
     review modes are equally *safe* but not equally *expensive* — `eager`
     buys a full agent review per push on the operator's budget — and the
     audit comment is the record of a major this deployment auto-merged,
-    whose only silenceable party is the one being audited.) Three leaves are
+    whose only silenceable party is the one being audited.) Four leaves are
     **operator-only** and answer `key-not-allowed` instead:
     `fix.escalateModelAfterAttempt` (spend),
-    `fix.gateTimeoutSeconds` (shared resource), and
+    `fix.gateTimeoutSeconds` (shared resource),
     `dependencies.minSettledChecks` — where a `max(repo, operator)` clamp would
-    weld the escape hatch shut for a repo with no CI at all. `fix` +
+    weld the escape hatch shut for a repo with no CI at all — and
+    `review.analysis` (the review evidence pipeline: spend, with no
+    more-conservative direction to clamp towards, and the one `review:` leaf
+    that NESTS, so its provenance reports under a dotted `analysis.enabled`
+    key like `notifications.slack.channel`). `fix` +
     `dependencies` are now **live**: the PR dispatch gate (below) reads the
     run's repo-clamped blocks — on every route, webhook included — and enforces
     `fix.maxAttempts` / `fix.maxCostUsd` and

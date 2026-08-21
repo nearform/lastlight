@@ -6,6 +6,7 @@ import {
   buildReview,
   buildBodyOnlyReview,
   parseDiff,
+  worstAxis,
   type ReviewFindingsDoc,
 } from "../../engine/github/review-poster.js";
 import { getRuntimeConfig } from "../../config/config.js";
@@ -149,6 +150,25 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       return fail(`post-review: could not read findings (${findingsPath}): ${msg}`);
     }
 
+    // The split verdict (#271 fix 7) only exists when the evidence pipeline is
+    // on. Dropping it here rather than trusting nothing to write it is what
+    // makes locked decision 8 STRUCTURAL: with `review.analysis.enabled: false`
+    // a findings file that carries a `verdict` — a forked prompt, an overlay
+    // that got ahead of its config, a model improvising the field — cannot
+    // change the event this deployment would have posted yesterday.
+    //
+    // Operator-layer config on purpose, matching `staleAgainstCurrentHead`
+    // below: this runs in-process against a run whose repo-clamped block is not
+    // threaded here, and `review.analysis` is operator-only anyway, so the two
+    // cannot disagree.
+    if (!getRuntimeConfig()?.review?.analysis?.enabled && doc.verdict) {
+      log.info("Ignoring a split verdict: review.analysis is disabled", {
+        repo: `${owner}/${repo}`,
+        prNumber,
+      });
+      doc = { ...doc, verdict: undefined };
+    }
+
     if (doc.skip) {
       return succeed(`skipped: ${doc.summary || "agent skipped review"}`);
     }
@@ -216,8 +236,15 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
         comments: review.comments,
         commitId: headSha,
       });
+      // Name the downgrade in the ledger row when the split verdict caused one.
+      // Without it "event=COMMENT" on a doc whose `event` says APPROVE reads as
+      // a bug rather than as the axis floor doing its job.
+      const downgraded =
+        doc.event === "APPROVE" && review.event !== "APPROVE" && worstAxis(doc.verdict) === "fail"
+          ? `, downgraded from APPROVE by verdict spec=${doc.verdict?.spec ?? "-"}/standards=${doc.verdict?.standards ?? "-"}`
+          : "";
       return succeed(
-        `posted review: ${review.inlineCount} inline, ${review.demotedCount} in body, event=${review.event}`,
+        `posted review: ${review.inlineCount} inline, ${review.demotedCount} in body, event=${review.event}${downgraded}`,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
