@@ -17,31 +17,30 @@ git -C ~/work/lastlight log --oneline -1
 git -C ~/work/lastlight status --porcelain | wc -l
 ```
 
-If `HEAD` is `c8530b83` (WP1) and the status count is large, **a full day of
-WP1b work is uncommitted** and that is the first thing to fix. It splits into
-these units — each carries a distinct *why*, so do not squash them into one:
+**As of 2026-08-22 everything through the engine swap is committed** — WP1b in
+five commits ending `948e25d1`, then `7602ef47` (the tsgo seam) and `5a79f2da`
+(ts-morph removed). If `HEAD` is one of those and the tree is clean, skip to §1.
 
-```
-fix(code-facts): diff the merge base, not the branch tip
-fix(code-facts): canonicalType, stripImportPaths, @throws — three phantom-delta sources
-feat(code-facts): one program per tsconfig the diff touches, with an allocated budget
-feat(code-facts): enumerate from the git tree, honouring .gitignore
-feat(code-facts): the language-agnostic layer — manifests, coverage formats, languages[]
-fix(code-facts): rules/review.yaml was never valid YAML; 7 rules → 32 across five languages
-feat(code-facts): selfcheck, the noise floor, and its sensitivity proofs
-feat(code-facts): the syntactic engine and the name-match gate
-feat(evals): the corpus harness, frozen anchors, and evidence coverage
-docs(plan): WP1b — what measurement found, and the TypeScript-first reorder
-```
+If `HEAD` is `c8530b83` (WP1) and the status count is large, you are on an older
+checkout and a full day of WP1b work is uncommitted; the units it splits into
+are in the git log of this branch.
 
 ## 1. Prove the tree is sane — three commands, ~2 minutes
 
 ```bash
 cd ~/work/lastlight
-pnpm turbo run typecheck test build            # expect 24/24 tasks, ~376 code-facts tests
-pnpm --filter lastlight-code-facts selfcheck   # real-commit census; expect ~30 of 31 analysed, exit 0
-cd ~/work/lastlight-evals && npx tsx scripts/facts-corpus.ts --profile smoke   # 8 cases
+pnpm turbo run typecheck test build            # expect 24/24 tasks, 417 code-facts tests
+pnpm --filter lastlight-code-facts selfcheck   # real-commit census; expect 31 of 31 analysed, exit 0
+cd ~/work/lastlight/apps/evals && npx tsx scripts/facts-corpus.ts --profile smoke \
+  --dataset ~/work/lastlight-evals/datasets/pr-review/instances.json \
+  --cache   ~/work/lastlight-evals/.eval-cache                      # 8 cases
 ```
+
+The corpus scripts live in **`apps/evals/`** (this monorepo) while the 5.9 GB of
+bare mirrors and the gitignored `instances.json` still live in the standalone
+`~/work/lastlight-evals` checkout, hence the two flags. `lastlight-core#test`
+has flaked twice under parallel load and passed standalone both times — see the
+load-sensitive tests in §4 before concluding a red gate means a real break.
 
 `selfcheck` is the fastest honest signal: it runs `all` against a real commit of
 this repo and exits non-zero on a `removed` delta with no deletion in the diff,
@@ -65,8 +64,9 @@ read on the `skillspro` set, which is TypeScript; grammars move the *Martian*
 corpus, so they raise the generality claim rather than the shipping path.
 
 ```
-✅ the 2 GB agent-cap decision — SETTLED by measurement, not taken
-             WP3  seed + six surveys
+✅ the 2 GB agent-cap decision — RETIRED. cap raised to 8g, not engineered around
+✅ the FACT ENGINE          — ts-morph replaced by the TS 7 API (docs/plans/fact-engine/)
+             WP3  seed + six surveys          ← YOU ARE HERE. first model spend
              WP4  prepare + falsify           ← also the only thing that makes `coverage` live
              WP6  adjudicate + 7a/7b
    ── ship-capable on TypeScript here ──
@@ -75,6 +75,61 @@ corpus, so they raise the generality claim rather than the shipping path.
              [R]  release → WP7c
 WP2 parallel · WP5 PARKED
 ```
+
+### The engine swap — 2026-08-22, after WP1b and before WP3
+
+`packages/code-facts` no longer uses `ts-morph`. The type-aware tier runs on
+`typescript@7.0.2`'s `unstable/sync` API (the Go compiler). The full argument,
+the gates and the module-by-module end state are in
+[`docs/plans/fact-engine/`](../fact-engine/README.md); what a WP3 reader needs:
+
+- **Fidelity was the gate, and it held.** Entity sets compared as SETS on this
+  repo's `HEAD~1..HEAD`: `facts` 44 = 44 symbols, 138 = 138 reference sites,
+  contract keys 13 = 13, `consumersOutsideDiff` 32 = 32. Speed 3.2x (`facts`)
+  and 2.6x (`contracts`); 9.6x / 6.9x against the old `--resolution full`.
+- **Mechanisms deleted, not merely made faster.** `--resolution` entire,
+  `--max-projects`, the cross-project file budget, `selectNeighbourhood`,
+  `globCandidates`, and the second worktree for the base side. `project.ts`
+  1252 → 296 lines. If a doc in THIS folder still reasons about a file budget
+  or a resolution tier, it is describing something that no longer exists.
+- **Bug 4 is fixed at the root**: a file under no tsconfig gets an inferred
+  project with a working checker. On a real commit, 30 of 31 → **31 of 31**.
+- **`--max-files` SURVIVES**, but it now means the ceiling on the repo-wide
+  literal scan and the tier-2 name index (`DEFAULT_MAX_SCANNED_FILES` in
+  `syntactic.ts`), never a compiler budget. It still backs the "an absence claim
+  over a truncated file set is unsound" guard.
+- **Envelope is `version: 2`**; `engine` is `["tsgo","ast-grep","none"]`. Safe
+  only because `code-facts` still has **zero call sites in `apps/server`** —
+  WP3 is what ends that, so schema changes get expensive from here.
+
+**Two open items WP3 inherits.** Neither blocks it; both are the silent kind.
+
+1. **Memory is UNMEASURED for the new engine, and the old figures do not
+   transfer.** Any `process.memoryUsage.rss()` reading now excludes the compiler,
+   which is a child process. Child-inclusive it is roughly 600 MB per open
+   snapshot plus 200 MB of node. Do not quote this plan's older peak-RSS numbers
+   against the current engine — they are ts-morph's.
+2. **The base view diverges from the old one when the working tree is dirty.**
+   The overlay serves base blobs for CHANGED files and falls through to the real
+   filesystem for everything else; the old worktree served base blobs for
+   everything. They agree exactly when the checkout is clean at head. Measured:
+   a `languageBreakdown` delta the worktree reported and the overlay did not,
+   because `schema.ts` was modified in the tree but absent from the changed set.
+   This widens the caveat already in §4 below and wants a loud `degraded[]`
+   entry on a dirty tree.
+
+**Two bugs the swap surfaced, both fixed or pinned.** `.es6` panics the compiler
+child and takes the whole snapshot with it, so it is kept analysable for
+ast-grep and never handed to the compiler. And an unexecutable compiler binary
+**wedges** rather than crashes — `spawnSync` had not returned after 50 s against
+a 60 s timeout — which is worse than an OOM for a workflow phase, because it
+burns the budget and fails anyway. Narrowed by a pre-flight, **not closed**;
+§D12's shell-level catch stays mandatory.
+
+**One thing to know before running `selfcheck` on your own work-in-progress:**
+`facts`/`contracts` read head from the filesystem, so on a dirty tree the
+default `HEAD~1..HEAD` invocation compares old blobs to new files and is
+meaningless. Run it against a clean clone, or a `git stash create` snapshot.
 
 Two gates are now available that this plan did not originally have, both free of
 model spend, so use them *before* burning budget on a rung:
