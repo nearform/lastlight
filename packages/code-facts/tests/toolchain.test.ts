@@ -21,10 +21,13 @@ import {
   loadManifest,
   packageRoot,
   parseVersion,
+  platformKey,
   resolveFactsBin,
   resolveToolBin,
+  sourceFor,
   stampTool,
   toolchainStamp,
+  PLATFORM_KEYS,
 } from "../src/toolchain.js";
 
 function fakeBin(name: string, body = "#!/bin/sh\necho 1.2.3\n"): { dir: string; bin: string } {
@@ -178,5 +181,71 @@ describe("the manifest (§D3)", () => {
     const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { name: string };
     expect(pkg.name).toBe("lastlight-code-facts");
     expect(root).toBe(fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, ""));
+  });
+});
+
+/**
+ * WS6 stage 0 — `sources` is per-platform.
+ *
+ * This is a manifest bug, not a platform limit, and the distinction is the
+ * point: the third consumer of this file "refuses on a mismatch, printing the
+ * commands to fix it", and on darwin it printed a `manylinux_x86` URL. Both
+ * release streams DO publish a darwin-arm64 build at the pinned version —
+ * verified against the GitHub releases, not guessed — and darwin-arm64 is where
+ * the eval harness actually runs, because `--sandbox none` on a Mac cannot see
+ * `/opt/lastlight/` at all.
+ */
+describe("per-platform sources (WS6 stage 0)", () => {
+  it("carries every platform key for every binary", () => {
+    for (const [name, entry] of Object.entries(loadManifest().binaries)) {
+      expect(Object.keys(entry.sources).sort(), name).toEqual([...PLATFORM_KEYS].sort());
+      for (const [key, url] of Object.entries(entry.sources)) {
+        expect(url, `${name} ${key}`).not.toBe("");
+      }
+    }
+  });
+
+  it("bumps the manifest schema version, because `source` became `sources`", () => {
+    expect(loadManifest().version).toBe(2);
+  });
+
+  it("resolves the REAL published asset for each host, darwin included", () => {
+    // The exact asset names on the pinned releases. A guess here is the bug.
+    expect(sourceFor("opengrep", "linux-x64")).toBe(
+      "https://github.com/opengrep/opengrep/releases/download/v1.27.1/opengrep_manylinux_x86",
+    );
+    expect(sourceFor("opengrep", "darwin-arm64")).toBe(
+      "https://github.com/opengrep/opengrep/releases/download/v1.27.1/opengrep_osx_arm64",
+    );
+    expect(sourceFor("gitleaks", "darwin-arm64")).toBe(
+      "https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_darwin_arm64.tar.gz",
+    );
+    // The row that unbreaks an arm64 image build; sandbox-base.Dockerfile now
+    // picks between these two on TARGETARCH.
+    expect(sourceFor("gitleaks", "linux-arm64")).toBe(
+      "https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_arm64.tar.gz",
+    );
+  });
+
+  it("maps process.platform/arch onto a manifest key, and refuses the rest", () => {
+    expect(platformKey("darwin", "arm64")).toBe("darwin-arm64");
+    expect(platformKey("linux", "x64")).toBe("linux-x64");
+    expect(platformKey("linux", "arm64")).toBe("linux-arm64");
+    // `null` rather than a linux default: a wrong install command is worse than
+    // an absent one, because the operator runs it and it half-works.
+    expect(platformKey("win32", "x64")).toBeNull();
+    expect(platformKey("linux", "ppc64")).toBeNull();
+    expect(sourceFor("gitleaks", null)).toBeNull();
+    expect(sourceFor("no-such-tool", "linux-x64")).toBeNull();
+  });
+
+  it("stamps WHICH BUILD resolved, on probed and unprobed entries alike", () => {
+    const here = platformKey();
+    const stamp = toolchainStamp(["gitleaks"], { PATH: "" });
+    expect(stamp.binaries.gitleaks.platform).toBe(here);
+    expect(stamp.binaries.opengrep.status).toBe("unprobed");
+    // A scorecard measured on a Mac and one measured in the image are different
+    // measurements, and nothing in the envelope used to say which.
+    expect(stamp.binaries.opengrep.platform).toBe(here);
   });
 });

@@ -5,6 +5,15 @@ JSON facts about the change — the substrate every later phase reasons over. No
 model spend, no network beyond the package registry, no dependency on the rest
 of the workspace.
 
+> **Amended 2026-08-21.** WP1 landed, and a day of measurement against real
+> commits found **seven bugs, six of them the same species — a wrong or absent
+> answer that looked like a clean result.** That work is
+> [01b-code-facts-hardening.md](01b-code-facts-hardening.md), and where it
+> contradicts this file, it wins. The claims corrected in place below are
+> flagged inline. The package's own reference documentation — which is now
+> considerably ahead of this WP — is
+> [`packages/code-facts/CLAUDE.md`](../../../packages/code-facts/CLAUDE.md).
+
 **Why this is the first work package.** v3's enumerator was regexes over the
 diff, and it still produced the investigation's only gold match
 ([00-evidence §3](00-evidence.md)). The one converted finding had exactly this
@@ -45,9 +54,18 @@ packages/code-facts/
 "bin": { "lastlight-facts": "dist/cli.js" }
 ```
 
-**Not published.** It reaches the sandbox by vendoring
+~~**Not published.** It reaches the sandbox by vendoring
 ([WP2](02-sandbox-image.md)), the same route `agentic-pi` takes. Keeping it
-private avoids a seventh npm package and a release-order edge.
+private avoids a seventh npm package and a release-order edge.~~
+
+> **Corrected 2026-08-21, on landing WP1.** It **is** published, as
+> `lastlight-code-facts` — the seventh npm package. §D1 made it a dependency of
+> the `lastlight` CLI (the eval harness cannot reach `/opt/lastlight/`), and
+> `pnpm pack` rewrites `workspace:*` to a concrete version, so a published CLI
+> cannot depend on an unpublished package. `private: true` was written when
+> delivery was image-only. The consequence is a **one-time human step** —
+> registering it as a trusted publisher on npmjs.com before the first Release —
+> and it is item 8 on [HANDOFF.md](HANDOFF.md)'s sign-off list.
 
 ## The TS 7 landmine — read before writing `project.ts`
 
@@ -122,6 +140,20 @@ unavailable analyser must never be indistinguishable.**
 
 All take `--repo <dir> --base <ref> --head <ref> --out <file>` and write JSON.
 
+> **Corrected 2026-08-21 ([WP1b](01b-code-facts-hardening.md)): every diff is
+> against the MERGE BASE.** This WP said `base`/`head` without saying which
+> range, and the implementation chose two-dot. `base..head` additionally
+> contains every commit that landed on the base *branch* since the PR forked,
+> and the author wrote none of it. Production was already **inconsistent with
+> itself** — `post-review.ts:415-455` did three-dot with an unshallow retry —
+> and the workflow reads `pull_request.base.sha`, the tip at event time, so a
+> review against a busy base branch analysed thousands of untouched files.
+> Measured: `sentry-greptile-1` **6125 files two-dot against 3 at the merge
+> base**, and that single case was the corpus's entire over-90 s count and its
+> 2.7 GB RSS ceiling. `prepare()` now resolves the fork point once and threads
+> it through, so the envelope's `baseSha` records the commit actually compared —
+> which matters because `contracts` materialises the base worktree from it.
+
 ### `facts` — the impact cone
 
 The core extractor. Answers, for every symbol the diff touched:
@@ -194,6 +226,19 @@ directly the `getUser() -> User | null` → `throws NotFound` class of regressio
 > `maxObligations` budget and crowding out the real one. **Every extractor needs
 > a "run it on a real commit and read the output" step before it is believed** —
 > the unit tests all passed throughout.
+>
+> **Extended 2026-08-21 ([WP1b](01b-code-facts-hardening.md)): three causes was
+> not all of them, and "needs a step" was not enough.** Two more phantom vectors
+> survived this fix — `canonicalType`'s `splitTopLevel` counting the `>` of `=>`
+> as a closing bracket (12 phantom deltas on a one-parameter change), and
+> `stripImportPaths` matching only the qualified `import("…").Member` form so
+> that `typeof import("./x.js")` kept its absolute specifier. And a third,
+> `@throws`, was making **absence claims** wrong rather than merely noisy. The
+> discipline this box asks for was made **mechanical** instead: `src/selfcheck.ts`
+> cross-checks the document against **git**, `tests/noise-floor.test.ts` pins
+> each ceiling against the floor it would be *without* the fix, and
+> `facts-corpus.ts` runs the whole thing over 50 real PRs with no gold labels
+> needed.
 
 ### `constants` — references **minus** literals
 
@@ -216,7 +261,10 @@ Critical. Emit that as a first-class shape:
 ```
 
 `sides` is a heuristic partition (path-prefix based, configurable); it is a hint
-for the seeder, never a finding on its own.
+for the seeder, never a finding on its own. It is a partition **of** `references`,
+so both fields are `null` — never `[]`, never all-zeros — when there is no
+reference set to partition (tier 2). `sideDefinitions` ships regardless, so
+`server: 0` stays auditable.
 
 ### `deps` — manifest delta and staged source
 
@@ -252,6 +300,31 @@ rather than inventing a second one.
 **These are evidence, not findings.** They are seeds for the survey, and they
 are never posted directly. A static-analyser hit rewritten prettily by an LLM
 and posted is the anti-pattern.
+
+> **Corrected 2026-08-21 ([WP1b](01b-code-facts-hardening.md)), twice.**
+>
+> **The ruleset is five languages, not one.** 40 of the 50 PRs in the corpus are
+> not TypeScript, so a TS-only ruleset hands four fifths of the measurement set
+> an empty envelope. `rules/review.yaml` now carries six families across
+> typescript · javascript · java · go · python · ruby, with the language
+> identifiers verified against `opengrep --show-supported-languages` on the
+> pinned 1.27.1 rather than guessed.
+>
+> **And the shipped ruleset had never been valid YAML** — an unquoted scalar
+> containing `: `, so opengrep refused the **entire config on every run since the
+> file was written**. It interlocked with `toolchain.json` publishing a
+> linux-x86-only download URL, so nobody on a Mac could install the binary to
+> discover it. The extractor degraded honestly and *for the wrong reason*, and
+> the family was unobservable. `tests/rules.test.ts` is the guard, in two halves
+> on purpose: a dependency-free lint for that exact YAML shape that runs
+> everywhere, and — skipped when the binary is absent — real opengrep over a
+> fixture tree holding **a true positive and a near-miss true negative for every
+> rule**. A rule that fires on neither is not coverage; it *reads* as coverage,
+> which is worse.
+>
+> **Even fixed, `patterns` is not a discovery axis.** With both binaries
+> installed the corpus yields **13 findings and +0 EC-loose** — not one points
+> at a place any gold finding is about. See [WP3](03-seed-and-survey.md).
 
 ### ~~`mutants` — diff-scoped mutation seeding~~ — CUT
 
@@ -322,6 +395,16 @@ Sequencing note: coverage subsumes a good part of what `mutants` is for, at a
 fraction of the cost. If the rung-3 ablation shows `mutants` not earning its
 keep, build this instead of tuning it.
 
+> **Built, and STRUCTURALLY DEAD until WP4 — measured 2026-08-21.** The
+> `coverage` extractor shipped with WP1 and **reads an existing report** (
+> istanbul · lcov · JaCoCo · Cobertura · Go coverprofile · SimpleCov). It never
+> runs a suite, and across all **50** corpus cases it found **zero artifacts** —
+> one `degraded[]` entry per case, every time, on every single run of the day.
+> §D13 traded `mutants` away for it on the grounds that it is mechanical; that
+> is true and it is also inert. The `tests` obligation family cannot convert
+> until [WP4](04-probe-oracle.md)'s `prepare` produces an artifact, which is now
+> recorded there as a **hard ordering constraint** rather than a nicety.
+
 ### `seed` — obligations
 
 Pure function over the outputs above. Specified in
@@ -334,13 +417,23 @@ TypeScript/JavaScript is first-class. Everything else degrades **explicitly**:
 
 | Tier | Available | Extractors |
 |---|---|---|
-| 1 | TS/JS with a resolvable project | all |
-| 2 | TS/JS, project load failed | `deps`, `patterns`, `constants` (ast-grep only, no `A` set) |
-| 3 | any other language | `deps`, `patterns` |
+| 1 | TS/JS with a resolvable project | all, `resolution: "type-aware"` |
+| 2 | TS/JS, project load failed | `deps`, `patterns`, `constants` (ast-grep only, no `A` set), `coverage`, and `facts` at `resolution: "name-match"` |
+| 3 | any other language | `deps`, `patterns`, `coverage` |
 
 A tier-2 or tier-3 run emits `coverage: "degraded"` and a populated `degraded[]`
 naming what is missing. **Silence is the failure mode we are engineering
 against.**
+
+> **Corrected 2026-08-21.** Tier 2 used to emit nothing for `facts`;
+> `src/syntactic.ts` gives it a name-matched reference set, stamped
+> `resolution: "name-match"` with `nameAmbiguity` beside it so a consumer can
+> tell the two engines apart. **The tier is not the coverage** either — a tier-1
+> envelope with `filesAnalysed ≪ changedFiles` looks healthy and is nearly
+> blind, which is what one-tsconfig-per-diff produced on every monorepo (1 of 31
+> changed files on this repo; 58 of 8,514 across the corpus). See
+> [WP1b](01b-code-facts-hardening.md) and
+> [`packages/code-facts/CLAUDE.md`](../../../packages/code-facts/CLAUDE.md).
 
 ## Acceptance criteria
 
@@ -359,6 +452,14 @@ against.**
 6. Wall clock under **90 s** on a `skillspro`-sized PR with a warm cache. If it
    is slower, that is the signal to revisit locked decision 4 (index vs
    recompute) — record the number either way.
+
+   > **Measured 2026-08-21 over 50 real PRs:** p50 **3.3 s**, p90 **8.4 s**, max
+   > **26.9 s**, **0 over 90 s**. The one case that ever exceeded the budget
+   > (157.9 s) was the two-dot diff-range bug, not the analysis. Locked decision
+   > 4 stands — recompute is comfortably inside the budget and nothing here
+   > argues for an index. Peak RSS is the constraint instead: max **2,988 MB**,
+   > against a production sandbox with a **2 GB agent cap**. That is an open
+   > question, not a closed one — see [HANDOFF.md](HANDOFF.md).
 7. `pnpm turbo run typecheck test build` green, including the import-boundary
    gate.
 

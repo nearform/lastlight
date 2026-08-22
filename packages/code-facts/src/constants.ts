@@ -12,20 +12,21 @@
  * config, read by the client, never compared server-side — is exactly the
  * `1587-r2` Critical, the single gold finding the investigation ever converted.
  * `sides` is a heuristic path-prefix partition: A HINT FOR THE SEEDER, never a
- * finding on its own.
+ * finding on its own — and it is `null`, never all-zeros, whenever `references`
+ * is `null`, because a partition of a set that was never computed is an absence
+ * claim built from no data.
  *
  * ast-grep rather than a text scan is not fussiness — it is what keeps `900` in
  * a comment, or inside an unrelated string, out of set B. A literal search that
  * matches prose produces obligations about nothing, and an obligation about
  * nothing gets honestly discharged (00-evidence §3, v3 iteration 2).
  */
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, relative, sep } from "node:path";
-import { Lang, parse } from "@ast-grep/napi";
-import type { Project } from "ts-morph";
 import { Node as TsNode } from "ts-morph";
-import type { ConstantFact, ConstantsPayload } from "./schema.js";
-import { hasAnalysableExtension, isIgnoredPath, repoRelative } from "./project.js";
+import type { ConstantFact, ConstantsPayload, DegradedEntry } from "./schema.js";
+import type { Programs } from "./project.js";
+import { DEFAULT_MAX_FILES, repoRelative, sourceFileAt, toProjects } from "./project.js";
+import type { ListingSource } from "./git.js";
+import { buildSyntacticIndex, scanChangedFiles, unquote } from "./syntactic.js";
 import type { ChangedFileIndex } from "./facts.js";
 
 /**
@@ -64,106 +65,94 @@ function sideOf(path: string, sides: Record<string, string[]>): string | null {
   return best?.side ?? null;
 }
 
-function langFor(path: string): Lang | null {
-  if (path.endsWith(".tsx") || path.endsWith(".jsx")) return Lang.Tsx;
-  if (path.endsWith(".ts") || path.endsWith(".mts") || path.endsWith(".cts")) return Lang.TypeScript;
-  if (path.endsWith(".js") || path.endsWith(".mjs") || path.endsWith(".cjs")) {
-    return Lang.JavaScript;
-  }
-  return null;
-}
-
-function walk(dir: string, root: string, out: string[], limit: number): void {
-  if (out.length >= limit) return;
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    const full = join(dir, entry);
-    const rel = relative(root, full).split(sep).join("/");
-    if (isIgnoredPath(`${rel}/`)) continue;
-    let stats;
-    try {
-      stats = statSync(full);
-    } catch {
-      continue;
-    }
-    if (stats.isDirectory()) walk(full, root, out, limit);
-    else if (hasAnalysableExtension(full)) out.push(rel);
-    if (out.length >= limit) return;
-  }
-}
-
 export interface LiteralHit {
   path: string;
   line: number;
 }
 
+export interface LiteralScan {
+  occurrences: Map<string, LiteralHit[]>;
+  /** True when the listing hit `maxFiles` — set B is a PREFIX, not the repo. */
+  truncated: boolean;
+  /** Files that passed the filters, BEFORE the ceiling. */
+  filesEligible: number;
+  filesScanned: number;
+  filesSkipped: number;
+  /** Listed but unreadable — a hole in set B, and never silent. */
+  filesUnread: number;
+  /** `"walk"` means `.gitignore` was NOT honoured. Always degrade on it. */
+  source: ListingSource;
+  /** A written reason whenever `source === "walk"`. */
+  sourceReason: string | null;
+}
+
+export interface LiteralScanOptions {
+  /**
+   * The commit set B is resolved against — the SAME `headSha` the envelope
+   * stamps. `null` falls back to the working directory, which is what a caller
+   * outside a git repository gets, and it is reported as such.
+   */
+  ref?: string | null;
+  maxFiles?: number;
+}
+
 /**
- * Set B: every occurrence of each literal value across the repo.
+ * Set B: every occurrence of each literal value across the repository at `ref`.
+ *
+ * **The file set comes from `git ls-tree`, not from `readdirSync`.** Three
+ * things ride on that and each was a bug:
+ *
+ *  - `.gitignore` is honoured by construction, including nested ones. The old
+ *    walk read `apps/evals/dist-site/**` (ignored two directories down) and
+ *    `apps/server/data/sandboxes/**` (cloned review workspaces) as if they were
+ *    source: **44,633 hard-coded duplicates on this monorepo, 41,079 of them
+ *    from `data/sandboxes` alone**.
+ *  - The scan resolves against the HEAD COMMIT. Every `hardCodedDuplicates`
+ *    entry is a `path:line` citation and the envelope stamps `headSha`; reading
+ *    the working directory made those citations a claim about the checkout.
+ *  - The ceiling starts meaning something, because it is charged after the
+ *    filtering rather than before it.
  *
  * One pass, with a substring pre-filter so only files that could possibly
  * contain one of the values are parsed. Constants are few and files are many;
  * the alternative (one ast-grep pass per constant) is quadratic and was the
- * obvious way to blow the phase's wall-clock budget.
+ * obvious way to blow the phase's wall-clock budget. Contents are visited one
+ * file at a time and dropped, so the scan holds the hits and nothing else.
+ *
+ * It returns the TRUNCATION FLAG and the LISTING SOURCE alongside the hits, and
+ * `extractConstants` turns both into `degraded[]` entries. Without the first
+ * this extractor reports an absence claim — "no other site hard-codes this
+ * value" — over an arbitrary prefix of the repository; without the second, a
+ * walk-tier result is indistinguishable from a tree-tier one.
  */
 export function findLiteralOccurrences(
   repo: string,
   values: Map<string, "string" | "number" | "boolean">,
-  maxFiles = 6000,
-): Map<string, LiteralHit[]> {
-  const out = new Map<string, LiteralHit[]>();
-  for (const value of values.keys()) out.set(value, []);
-  if (values.size === 0) return out;
-
-  const files: string[] = [];
-  walk(repo, repo, files, maxFiles);
-
-  for (const path of files) {
-    const lang = langFor(path);
-    if (!lang) continue;
-    let source: string;
-    try {
-      source = readFileSync(join(repo, path), "utf8");
-    } catch {
-      continue;
-    }
-    const present = [...values.keys()].filter((value) => source.includes(value));
-    if (present.length === 0) continue;
-
-    let root;
-    try {
-      root = parse(lang, source).root();
-    } catch {
-      // A file ast-grep cannot parse contributes nothing to set B. It is not a
-      // reason to fail: the reference set (A) is unaffected, and the extractor
-      // records the miss through the file never appearing in the hits.
-      continue;
-    }
-    const literals = root.findAll({
-      rule: { any: [{ kind: "number" }, { kind: "string" }, { kind: "true" }, { kind: "false" }] },
-    });
-    for (const node of literals) {
-      const text = unquote(node.text());
-      const bucket = out.get(text);
-      if (!bucket) continue;
-      bucket.push({ path, line: node.range().start.line + 1 });
-    }
-  }
-  return out;
+  options: LiteralScanOptions = {},
+): LiteralScan {
+  // ONE PASS, shared with the name index — see `syntactic.ts`. This function is
+  // now a projection of `SyntacticIndex` onto the shape `constants` has always
+  // read, which is the whole reason the syntactic engine is cheap: the walk,
+  // the blob reads and the parse were already being paid for here.
+  const index = buildSyntacticIndex({
+    repo,
+    ref: options.ref ?? null,
+    values,
+    maxFiles: options.maxFiles,
+  });
+  return {
+    occurrences: index.literals,
+    truncated: index.truncated,
+    filesEligible: index.filesEligible,
+    filesScanned: index.filesScanned,
+    filesSkipped: index.filesSkipped,
+    filesUnread: index.filesUnread,
+    source: index.source as ListingSource,
+    sourceReason: index.sourceReason,
+  };
 }
 
-/** `"hello"` / `'hello'` / `` `hello` `` → `hello`. Numbers pass through. */
-export function unquote(text: string): string {
-  const first = text[0];
-  if ((first === '"' || first === "'" || first === "`") && text.at(-1) === first) {
-    return text.slice(1, -1);
-  }
-  return text;
-}
+export { unquote } from "./syntactic.js";
 
 interface ConstantDeclaration {
   name: string;
@@ -175,15 +164,15 @@ interface ConstantDeclaration {
   references: string[] | null;
 }
 
-/** Tier 1: declarations and references from the compiled project. */
+/** Tier 1: declarations and references from the compiled project(s). */
 function declarationsFromProject(
   repo: string,
-  project: Project,
+  project: Programs,
   hunkIndex: Map<string, ChangedFileIndex>,
 ): ConstantDeclaration[] {
   const out: ConstantDeclaration[] = [];
   for (const [path, entry] of hunkIndex) {
-    const file = project.getSourceFile((f) => repoRelative(repo, f.getFilePath()) === path);
+    const file = sourceFileAt(project, repo, path);
     if (!file) continue;
     for (const statement of file.getVariableStatements()) {
       if (statement.getDeclarationKind() !== "const") continue;
@@ -229,38 +218,40 @@ function declarationsFromProject(
 /**
  * Tier 2: the project would not load, so declarations come from ast-grep over
  * the changed files and there is NO set A. The document says so through
- * `references: []` plus a `degraded[]` entry — never by looking clean.
+ * `references: null` — and therefore `sides: null` — plus a `degraded[]` entry.
+ * Never by looking clean.
  */
 function declarationsFromAstGrep(
   repo: string,
+  headSha: string | null,
   hunkIndex: Map<string, ChangedFileIndex>,
 ): ConstantDeclaration[] {
+  // The descriptor's `constantDeclarations` rule, not a hand-written ast-grep
+  // pattern: the pattern was `const $NAME = $VALUE`, which is the TS/JS spelling
+  // of "an immutable binding" and nothing else's. Going through the descriptor
+  // is what lets a second language reach this extractor without a second copy
+  // of the extractor.
+  const scan = scanChangedFiles({ repo, headSha, paths: [...hunkIndex.keys()] });
   const out: ConstantDeclaration[] = [];
-  for (const [path, entry] of hunkIndex) {
-    const lang = langFor(path);
-    if (!lang) continue;
-    let source: string;
-    try {
-      source = readFileSync(join(repo, path), "utf8");
-    } catch {
-      continue;
-    }
-    let root;
-    try {
-      root = parse(lang, source).root();
-    } catch {
-      continue;
-    }
-    for (const match of root.findAll({ rule: { pattern: "const $NAME = $VALUE" } })) {
-      const name = match.getMatch("NAME")?.text();
-      const valueNode = match.getMatch("VALUE");
-      if (!name || !valueNode) continue;
-      const literal = literalOf(valueNode.text());
-      if (!literal) continue;
-      const line = match.range().start.line + 1;
-      if (!intersects(entry, line, match.range().end.line + 1)) continue;
-      out.push({ name, path, line, value: literal.value, valueKind: literal.kind, references: null });
-    }
+  for (const site of scan.declarations) {
+    const entry = hunkIndex.get(site.path);
+    if (!entry || site.valueText === null) continue;
+    // `literalOf` rather than the grammar's own literal kinds, deliberately —
+    // it additionally accepts `-5`, which the grammar spells as a
+    // `unary_expression`. Narrowing a shipped extractor under a refactor is not
+    // a refactor.
+    const literal = literalOf(site.valueText);
+    if (!literal) continue;
+    if (!intersects(entry, site.startLine, site.endLine)) continue;
+    out.push({
+      name: site.localName,
+      path: site.path,
+      line: site.line,
+      value: literal.value,
+      valueKind: literal.kind,
+      // Tier 2 has NO set A: there is no compiler to ask. `null`, never `[]`.
+      references: null,
+    });
   }
   return out;
 }
@@ -287,26 +278,87 @@ export function literalOf(
 
 export interface ExtractConstantsOptions {
   repo: string;
-  /** `null` on tier 2 — ast-grep only, no reference set. */
-  project: Project | null;
+  /**
+   * `null`/`[]` on tier 2 — ast-grep only, no reference set. On tier 1 it is
+   * ONE PROGRAM PER TSCONFIG the diff touches, and a declaration is read out of
+   * whichever program contains its file.
+   */
+  project: Programs;
   hunkIndex: Map<string, ChangedFileIndex>;
   sides?: Record<string, string[]>;
   maxFiles?: number;
+  /**
+   * The commit set B is enumerated at — the same `headSha` the envelope stamps,
+   * so a `path:line` citation names the analysed commit rather than whatever the
+   * checkout holds. Omitted (library use, or a directory that is not a git
+   * repository) it falls back to a directory walk and SAYS SO in `degraded[]`.
+   */
+  headSha?: string | null;
 }
 
-export function extractConstants(options: ExtractConstantsOptions): ConstantsPayload {
+export interface ExtractConstantsResult {
+  payload: ConstantsPayload;
+  degraded: DegradedEntry[];
+}
+
+export function extractConstants(options: ExtractConstantsOptions): ExtractConstantsResult {
   const sides = options.sides ?? DEFAULT_SIDES;
-  const declarations = options.project
-    ? declarationsFromProject(options.repo, options.project, options.hunkIndex)
-    : declarationsFromAstGrep(options.repo, options.hunkIndex);
+  const degraded: DegradedEntry[] = [];
+  const declarations =
+    toProjects(options.project).length > 0
+      ? declarationsFromProject(options.repo, options.project, options.hunkIndex)
+      : declarationsFromAstGrep(options.repo, options.headSha ?? null, options.hunkIndex);
 
   const values = new Map<string, "string" | "number" | "boolean">();
   for (const declaration of declarations) values.set(declaration.value, declaration.valueKind);
-  const occurrences = findLiteralOccurrences(options.repo, values, options.maxFiles);
+  const scan = findLiteralOccurrences(options.repo, values, {
+    ref: options.headSha ?? null,
+    maxFiles: options.maxFiles,
+  });
+  const { occurrences } = scan;
+
+  if (scan.source === "walk") {
+    // Walk-tier output is not tree-tier output, and the difference is not
+    // cosmetic: the walk cannot honour `.gitignore`, so build output and
+    // vendored checkouts are in set B, and it reads the working DIRECTORY, so
+    // every citation is a claim about the checkout rather than about `headSha`.
+    degraded.push({
+      extractor: "constants",
+      reason: `${scan.sourceReason ?? "the file set came from a directory walk"} — \`hardCodedDuplicates\` from this run is walk-tier evidence and must not be read as a complete or commit-accurate set B`,
+    });
+  }
+
+  if (scan.filesUnread > 0) {
+    // A file that was listed and then could not be read is a HOLE in set B, and
+    // it looks exactly like a file that contained none of the values. Small,
+    // usually zero, and never worth being silent about in the extractor whose
+    // output is an absence claim.
+    degraded.push({
+      extractor: "constants",
+      reason: `${scan.filesUnread} of ${scan.filesEligible} listed file(s) could not be read, so set B has a hole in it — a value that appears only in one of them is reported as appearing nowhere`,
+    });
+  }
+
+  if (scan.truncated) {
+    // The severe one. `constants` is the extractor that makes ABSENCE claims —
+    // "referenced only client-side, zero server references" is the single gold
+    // finding this investigation ever converted — and an absence claim over an
+    // arbitrary prefix of the repository is not a weak claim, it is an unsound
+    // one. Before this entry existed the document looked identical to a
+    // complete scan.
+    const ceiling = options.maxFiles ?? DEFAULT_MAX_FILES;
+    degraded.push({
+      extractor: "constants",
+      reason: `the literal scan stopped at the ${ceiling}-file ceiling (--max-files): ${scan.filesEligible} file(s) were eligible and ${scan.filesScanned} were read — set B covers a PREFIX of the repository, not the repository, so \`hardCodedDuplicates\` is incomplete and no "the value appears nowhere else" reading is available from this document`,
+    });
+  }
 
   const constants: ConstantFact[] = declarations.map((declaration) => {
-    const references = declaration.references ?? [];
-    const referenceSet = new Set(references);
+    // M6. `?? []` here collapsed "tier 2, there is NO set A" into "the compiler
+    // looked and found no references" — the founding distinction of this
+    // package, in the one field that carries it.
+    const references = declaration.references;
+    const referenceSet = new Set(references ?? []);
     const hardCodedDuplicates = (occurrences.get(declaration.value) ?? [])
       .map((hit) => `${hit.path}:${hit.line}`)
       // The declaration's own initializer is an occurrence of its value; it is
@@ -314,12 +366,20 @@ export function extractConstants(options: ExtractConstantsOptions): ConstantsPay
       .filter((at) => at !== `${declaration.path}:${declaration.line}`)
       .filter((at) => !referenceSet.has(at));
 
-    const sideCounts: Record<string, number> = {};
-    for (const side of Object.keys(sides)) sideCounts[side] = 0;
-    sideCounts.other = 0;
-    for (const at of references) {
-      const side = sideOf(at.split(":")[0], sides) ?? "other";
-      sideCounts[side] = (sideCounts[side] ?? 0) + 1;
+    // M6 again, in the field that carries the ABSENCE claim. `sides` is a
+    // partition OF `references`, so with no set A there is nothing to partition
+    // — and an all-zeros record built from a reference set that does not exist
+    // reads exactly like a measured `{server: 0}`, which is the `1587-r2` shape.
+    // `sideDefinitions` still ships, so the partition remains auditable.
+    let sideCounts: Record<string, number> | null = null;
+    if (references !== null) {
+      sideCounts = {};
+      for (const side of Object.keys(sides)) sideCounts[side] = 0;
+      sideCounts.other = 0;
+      for (const at of references) {
+        const side = sideOf(at.split(":")[0], sides) ?? "other";
+        sideCounts[side] = (sideCounts[side] ?? 0) + 1;
+      }
     }
 
     return {
@@ -334,5 +394,5 @@ export function extractConstants(options: ExtractConstantsOptions): ConstantsPay
   });
 
   constants.sort((a, b) => a.declaredAt.localeCompare(b.declaredAt));
-  return { sideDefinitions: sides, constants };
+  return { payload: { sideDefinitions: sides, constants }, degraded };
 }

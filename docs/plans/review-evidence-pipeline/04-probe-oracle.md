@@ -83,6 +83,65 @@ Write `.lastlight/pr-review/probes/env.json`
 (`{ installed: true|false, packageManager, typecheck: "clean"|"errors"|"skipped",
 durationMs }`) so downstream phases read a fact, not a substring of stdout.
 
+> **`prepare` also unblocks the `tests` family — measured 2026-08-21
+> ([WP1b](01b-code-facts-hardening.md)), and it is a HARD ORDERING
+> CONSTRAINT.** §D13 cut `mutants` for `coverage` on the grounds that coverage
+> is mechanical and cheap. True — and **inert**: `coverage` *reads* an existing
+> report and never runs a suite, and across all **50** corpus cases it found
+> **zero artifacts**, one `degraded[]` entry per case, every time. So the
+> `tests` obligation family cannot convert until `prepare` produces one.
+>
+> Two consequences. First, **`prepare` must emit a coverage artifact**, not just
+> install dependencies — that is a scope addition to this phase, and it is the
+> whole of what §D13 traded `suite` away for. Second, until it lands, a WP3 arm
+> reports five live families and one that was **not measured**; label it that
+> way (§D2's rule for the absent scanners), because "the `tests` family did not
+> convert" and "the `tests` family had no input" are the same row in a table and
+> opposite conclusions.
+
+> **Corrected 2026-08-21, later the same day: `prepare`'s install was an
+> unrecorded OOM dependency on [WP3](03-seed-and-survey.md)'s phase — and the
+> selective-resolution default is what removes it.** This page costed `prepare`
+> as time, money and **disk**, and that list was incomplete. It also costs
+> **memory, in a different phase**.
+>
+> `lastlight-facts all` fits the 2 GB agent cap today at 0.8–1.3 GB **only
+> because the review workspace has no install** — `pr-review.yaml` has no
+> install phase and the pre-clone is bare, and nothing enforced it. Peak RSS in
+> `code-facts` is dominated by `node_modules`, not by `--max-files`: on a
+> three-file diff of this repo, 637 ts-morph source files against **9,647** files
+> the `ts.Program` actually binds, **8,947 of them under `node_modules`**
+> (7,374 `.d.ts`, 78 MB of declarations). So the moment `prepare` installs
+> dependencies, WP3's `facts` phase inherits an installed tree — and it inherits
+> it on every re-review too, because the cross-run refresh is deliberately
+> `git clean -fdx -e node_modules`.
+>
+> Measured on five commits of this repo, installed, at the old `--resolution
+> full` default: **3699 / 3902 / 4347 / 3481 / 4430 MB**, and the 4347 is an
+> **OOM — exit 134, no envelope**. That is §D12's exact failure: the phase dies,
+> the run dies, `assessedHeadShaByWorkflow` is populated **from SUCCEEDED runs
+> only**, and `cron-review.yaml` re-dispatches every thirty minutes forever. WP4
+> would have re-opened the $1.30-an-hour loop from inside WP3's phase, by
+> installing dependencies for an unrelated reason — and **the shell-level catch
+> §D12 relies on would have been firing on every review** rather than never.
+>
+> **What removes it** is a `resolutionHost` that refuses bare specifiers into
+> `node_modules` against an allow-list computed from the changed files' own
+> imports (`--resolution changed`), which the same sweep measures at **1022 /
+> 1274 / 1600 / 1387 / 2157 MB** — inside the cap on four of five, and at **zero
+> type-fidelity cost across 499 contract entries** on the two largest commits.
+> The sweep, the fidelity table and the by-construction argument are in
+> [01b-code-facts-hardening.md](01b-code-facts-hardening.md) → "Where the memory
+> actually goes".
+>
+> Two things follow for this WP. **`prepare` is no longer memory-free**: it is
+> the phase that changes *another* phase's memory profile, so any change to what
+> it installs is a change to `facts`' peak RSS and has to be re-measured there.
+> And **AC2 gains a case**: a workspace where `prepare` succeeded must be
+> exercised by the `facts` phase in the same measurement, because a bare
+> workspace stops being the shape production runs in the moment this phase
+> ships.
+
 ### ~~`suite` — only for mutation seeding~~ — CUT
 
 > **Cut 2026-08-21 ([10-design-review.md](10-design-review.md) §D13),** together
@@ -157,6 +216,13 @@ workspace size, and prod has hit 100% disk before (issue #106). Re-check the
 sweep bounds (`retentionHours: 12`, `maxDirs: 40`) before enabling on a busy
 instance, and treat `prepare` as the thing that makes #106's reaping load-bearing
 rather than precautionary.
+
+> **Amended 2026-08-21.** The table above is missing a column and the sentence
+> "the **disk** is the real operational risk" is now only half right. Installing
+> dependencies also **triples `facts`' peak RSS in a later phase** — 0.8–1.3 GB
+> bare against 3.5–4.4 GB installed at `--resolution full`, against a 2 GB agent
+> cap. See the correction under `prepare` above. Disk is still a real risk; it is
+> not the only one, and memory is the one that ends in exit 134.
 
 ### If we ship it off by default, what does quality lose?
 
@@ -287,8 +353,14 @@ tell which part earned the recall.
 
 ## Acceptance criteria
 
-1. A red base test suite yields a **succeeded** run and `mutants` reporting
-   `degraded`, not `0 surviving mutants`.
+1. ~~A red base test suite yields a **succeeded** run and `mutants` reporting
+   `degraded`, not `0 surviving mutants`.~~ **Replaced 2026-08-21**, since
+   §D13 cut `mutants` and this criterion had not been updated: **`prepare`
+   produces a coverage artifact the `coverage` extractor can read**, and a run
+   where it does not still yields a **succeeded** run with `coverage` reporting
+   `degraded` — never an empty uncovered-line list, which reads as "well
+   tested". Verified on the corpus before WP4: 0 artifacts across 50 cases, so
+   the current answer is honestly `degraded` on every one.
 2. `prepare` failing or timing out records `installed: false`, `falsify` degrades
    to read-only reasoning, and the review still posts.
 2b. **No phase re-derives `checksState`.** A test asserts the pipeline reads CI's
@@ -297,9 +369,17 @@ tell which part earned the recall.
    `unprobed`, **not** dropped. Unit-test this directly — it is the BitsAI-CR
    failure mode and the most likely regression.
 4. A refuted hypothesis carries its transcript.
-5. **Measurement gate:** on the blind split, micro-recall improves over the WP3
-   arm. `1641-r2` specifically is the case to inspect by hand — read
-   `sessions/<instance>/trial-1/full.jsonl`, not the scorecard.
+5. **Measurement gate:** the **mechanism** metrics plus the latency number
+   (§D6). Probe executions attempted / succeeded / reproduced / refuted is the
+   oracle's own hit rate and is the number with real power here; micro-recall on
+   the blind split is **reported** with its paired p, not gated on — three cases
+   swing 33% on one finding. `1641-r2` specifically is the case to inspect by
+   hand — read `sessions/<instance>/trial-1/full.jsonl`, not the scorecard.
+
+   > **Corrected 2026-08-21 (§D6).** *"On the blind split, micro-recall improves
+   > over the WP3 arm"* is below the detection floor by construction — the blind
+   > split is three cases. §D6 re-expressed this gate as a mechanism gate and
+   > the criterion had not been updated.
 6. Wall-clock and cost recorded per case; the arm stays inside ~2–3× the
    baseline.
 

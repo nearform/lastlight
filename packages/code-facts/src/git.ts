@@ -33,17 +33,25 @@ export interface GitResult {
   status: number;
 }
 
+const MAX_GIT_BUFFER = 256 * 1024 * 1024;
+
+/**
+ * A repo the harness owns but the current uid does not is a real shape in the
+ * sandbox (the workspace is chowned to `agent`); without this, every git call
+ * fails with "dubious ownership" and the whole run degrades for a reason that
+ * has nothing to do with the code.
+ */
+function gitEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, GIT_CONFIG_PARAMETERS: "'safe.directory=*'" };
+}
+
 /** Run git in `repo`. Never throws on a non-zero status — callers decide. */
 export function tryGit(repo: string, args: string[]): GitResult {
   const result = spawnSync("git", args, {
     cwd: repo,
     encoding: "utf8",
-    maxBuffer: 256 * 1024 * 1024,
-    // A repo the harness owns but the current uid does not is a real shape in
-    // the sandbox (the workspace is chowned to `agent`); without this, every
-    // git call fails with "dubious ownership" and the whole run degrades for a
-    // reason that has nothing to do with the code.
-    env: { ...process.env, GIT_CONFIG_PARAMETERS: "'safe.directory=*'" },
+    maxBuffer: MAX_GIT_BUFFER,
+    env: gitEnv(),
   });
   return {
     stdout: result.stdout ?? "",
@@ -269,6 +277,341 @@ export function showFile(repo: string, ref: string, path: string): string | null
   return result.status === 0 ? result.stdout : null;
 }
 
+// ── enumerating the files to scan ────────────────────────────────────────────
+//
+// **The file set comes from GIT, not from `readdirSync`.** Four things follow
+// from that one change, and each was a measured bug:
+//
+//   1. `.gitignore` is honoured BY CONSTRUCTION — an ignored file is not in the
+//      tree. Nested `.gitignore` files, `.git/info/exclude` and the global
+//      excludes come with it, and no hand-maintained denylist can see any of
+//      them. On this monorepo `apps/evals/dist-site/` is ignored by a NESTED
+//      `.gitignore` two directories down.
+//   2. The scan resolves against the HEAD COMMIT, not the working directory.
+//      `constants` cites `path:line` for every hard-coded duplicate and stamps
+//      `headSha` in its envelope; a checkout sitting on some other commit made
+//      every one of those citations wrong while the document validated cleanly.
+//   3. Build output and vendored checkouts disappear for free. MEASURED on this
+//      monorepo at `HEAD~1..HEAD`: **44,633 "hard-coded duplicates" across ten
+//      constants, 41,079 of them from `apps/server/data/sandboxes/**` alone** —
+//      whole cloned review workspaces, gitignored, and under a path no
+//      conventional denylist names.
+//   4. The file ceiling starts meaning something. The same repo walks 6,000+
+//      files (the ceiling, hit) and holds **731** analysable blobs at head.
+
+/** One file to scan. */
+export interface ListedFile {
+  /** Repo-relative, forward-slashed — exactly what the tree stores. */
+  path: string;
+  /** The blob id, or `null` when this came from the fallback walk. */
+  oid: string | null;
+  size: number;
+}
+
+/**
+ * Where a listing came from. `"walk"` is the degraded tier and MUST be named in
+ * `degraded[]` by whoever asked for it — walk-tier output is not tree-tier
+ * output, because the walk cannot honour `.gitignore` and reads the working
+ * directory rather than a commit.
+ */
+export type ListingSource = "tree" | "worktree" | "walk";
+
+export interface FileListing {
+  files: ListedFile[];
+  source: ListingSource;
+  /** A written reason whenever `source === "walk"`. `null` otherwise. */
+  reason: string | null;
+  /** True when `limit` cut the list short — set B is then a PREFIX. */
+  truncated: boolean;
+  /** Candidates that passed `accept`, BEFORE the ceiling was applied. */
+  total: number;
+  /** Rejected by `accept` or `maxBytes`. Hygiene, not blindness. */
+  rejected: number;
+}
+
+export interface ListFilesOptions {
+  /** The directory to enumerate. Git runs with this as its cwd. */
+  dir: string;
+  /**
+   * The commit whose tree IS the file set, or `null` to list the working tree
+   * (`git ls-files`, tracked plus untracked-but-not-ignored). A working-tree
+   * listing is what a consumer that then reads files OFF DISK wants — the
+   * ts-morph glob fallback is the only one.
+   */
+  ref: string | null;
+  /** Path filter: the extension test plus the residual denylist. */
+  accept(path: string): boolean;
+  /** Files larger than this are rejected. `0` disables the check. */
+  maxBytes?: number;
+  /** A ceiling on how many files are returned. `0` disables it. */
+  limit?: number;
+}
+
+/** `<mode> SP <type> SP <oid> SP <size> TAB <path>`, NUL-separated. */
+function parseTreeRecord(record: string): ListedFile | null {
+  const tab = record.indexOf("\t");
+  if (tab < 0) return null;
+  const meta = record.slice(0, tab).split(/\s+/);
+  if (meta.length < 4) return null;
+  const [mode, type, oid, size] = meta;
+  // Regular files only. `120000` is a symlink whose "contents" are a path,
+  // `160000` a submodule gitlink — parsing either as source is a category error.
+  if (type !== "blob" || (mode !== "100644" && mode !== "100755")) return null;
+  const bytes = Number(size);
+  return { path: record.slice(tab + 1), oid, size: Number.isFinite(bytes) ? bytes : 0 };
+}
+
+/**
+ * Every regular blob at `ref`, with its size — `git ls-tree -r -l -z`.
+ *
+ * `-l` is what makes the size ceiling free: a 4 MB bundle is rejected from the
+ * listing without a single byte of it ever being read. `-z` is not optional
+ * either — without it git applies `core.quotePath` and a path with a non-ASCII
+ * character comes back C-quoted.
+ *
+ * `null` means git could not answer: not a repository, a ref that does not
+ * resolve, or a blobless/partial clone. The caller falls back to the walk and
+ * SAYS SO.
+ */
+function listTreeBlobs(dir: string, ref: string): ListedFile[] | null {
+  const result = tryGit(dir, ["ls-tree", "-r", "-l", "-z", `${ref}^{tree}`]);
+  if (result.status !== 0) return null;
+  const out: ListedFile[] = [];
+  for (const record of result.stdout.split("\0")) {
+    if (record.length === 0) continue;
+    const file = parseTreeRecord(record);
+    if (file) out.push(file);
+  }
+  return out;
+}
+
+/**
+ * The working tree, minus everything `.gitignore` excludes — tracked files plus
+ * untracked ones git would not ignore.
+ *
+ * Paths come back relative to `dir`, so running this with `dir` set to a package
+ * root scopes the listing to that package with no pathspec arithmetic. Sizes are
+ * unknown here (git does not stat for `ls-files`), so `listFiles` stats lazily
+ * and only when a `maxBytes` ceiling was actually asked for.
+ */
+function listWorktreeFiles(dir: string): ListedFile[] | null {
+  const result = tryGit(dir, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]);
+  if (result.status !== 0) return null;
+  const out: ListedFile[] = [];
+  const seen = new Set<string>();
+  for (const path of result.stdout.split("\0")) {
+    // `--cached --others` can list the same path twice; a duplicate would be
+    // charged against the ceiling twice and parsed twice.
+    if (path.length === 0 || seen.has(path)) continue;
+    seen.add(path);
+    out.push({ path, oid: null, size: -1 });
+  }
+  return out;
+}
+
+/**
+ * The fallback: `readdirSync`, the way this package used to enumerate always.
+ *
+ * It cannot honour `.gitignore` and it reads the working directory rather than a
+ * commit, so a caller that lands here has WEAKER output than a caller that did
+ * not — which is why `FileListing.reason` is populated and every consumer is
+ * required to put it in `degraded[]`.
+ */
+function walkFiles(root: string, accept: (path: string) => boolean): ListedFile[] {
+  const out: ListedFile[] = [];
+  const walk = (dir: string): void => {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry === ".git") continue;
+      const full = join(dir, entry);
+      const rel = relative(root, full).split(sep).join("/");
+      let stats;
+      try {
+        stats = statSync(full);
+      } catch {
+        continue;
+      }
+      if (stats.isDirectory()) {
+        // The walk has no `.gitignore`, so the denylist is all it has. A
+        // trailing separator is what makes the directory patterns match.
+        if (accept(`${rel}/`)) walk(full);
+      } else if (stats.isFile() && accept(rel)) {
+        out.push({ path: rel, oid: null, size: stats.size });
+      }
+    }
+  };
+  walk(root);
+  return out;
+}
+
+/**
+ * The single enumeration seam. Tree first, walk only when git cannot answer.
+ *
+ * The ceiling is applied AFTER filtering, which is the point of doing it here:
+ * the 6000 slots used to be spent on build output before the walk ever reached
+ * `src/`, so a repo could truncate while none of its source had been read.
+ */
+export function listFiles(options: ListFilesOptions): FileListing {
+  const maxBytes = options.maxBytes ?? 0;
+  const limit = options.limit ?? 0;
+
+  let raw = options.ref === null ? listWorktreeFiles(options.dir) : listTreeBlobs(options.dir, options.ref);
+  let source: ListingSource = options.ref === null ? "worktree" : "tree";
+  let reason: string | null = null;
+  if (raw === null) {
+    source = "walk";
+    reason =
+      `git could not enumerate ${options.ref === null ? "the working tree" : `the tree at ${options.ref.slice(0, 8)}`} ` +
+      `in ${options.dir} (not a repository, an unresolvable ref, or a partial clone), so the file set came from a ` +
+      `DIRECTORY WALK instead. A walk cannot honour .gitignore — build output, vendored checkouts and untracked ` +
+      `scratch files are in scope — and it reads the working directory rather than a commit, so any path:line this ` +
+      `run cites is a claim about the checkout, not about the analysed commit`;
+    raw = walkFiles(options.dir, options.accept);
+  }
+
+  const files: ListedFile[] = [];
+  let rejected = 0;
+  let total = 0;
+  let truncated = false;
+  for (const file of raw) {
+    if (!options.accept(file.path)) {
+      rejected++;
+      continue;
+    }
+    let size = file.size;
+    if (maxBytes > 0 && size < 0) {
+      // Only the `ls-files` path gets here, and only when a ceiling was asked
+      // for — a stat per file is worth avoiding when nobody reads the answer.
+      try {
+        size = statSync(join(options.dir, file.path)).size;
+      } catch {
+        rejected++;
+        continue;
+      }
+    }
+    if (maxBytes > 0 && size > maxBytes) {
+      rejected++;
+      continue;
+    }
+    total++;
+    if (limit > 0 && files.length >= limit) {
+      truncated = true;
+      continue;
+    }
+    files.push({ ...file, size });
+  }
+
+  return { files, source, reason, truncated, total, rejected };
+}
+
+/**
+ * Roughly this many bytes of blob per `git cat-file --batch` invocation.
+ *
+ * The batch is what keeps this from being either N subprocesses (6,000 of them)
+ * or one enormous buffer (a whole repository in memory at once). Contents are
+ * handed to `visit` and dropped; nothing accumulates.
+ */
+const BLOB_BATCH_BYTES = 4 * 1024 * 1024;
+const BLOB_BATCH_FILES = 256;
+
+/**
+ * Read every listed file and hand its contents to `visit`, one at a time.
+ *
+ * Files with an `oid` are read **from the object database at the commit that was
+ * enumerated**, not from disk. That is what makes a `path:line` citation a claim
+ * about the analysed commit rather than about whatever the checkout happens to
+ * hold — the two are the same thing on the normal path and silently different on
+ * a workspace that is not at head.
+ *
+ * Returns how many files could not be read, which is the caller's cue to
+ * degrade.
+ */
+export function readListedFiles(
+  dir: string,
+  files: ListedFile[],
+  visit: (file: ListedFile, contents: string) => void,
+): number {
+  let unreadable = 0;
+  let batch: ListedFile[] = [];
+  let batchBytes = 0;
+
+  const flush = (): void => {
+    if (batch.length === 0) return;
+    const pending = batch;
+    batch = [];
+    batchBytes = 0;
+    const result = spawnSync("git", ["cat-file", "--batch"], {
+      cwd: dir,
+      input: `${pending.map((file) => file.oid).join("\n")}\n`,
+      maxBuffer: MAX_GIT_BUFFER,
+      env: gitEnv(),
+    });
+    const out = result.stdout;
+    if (result.status !== 0 || !out) {
+      unreadable += pending.length;
+      return;
+    }
+    let offset = 0;
+    for (const file of pending) {
+      const newline = out.indexOf(0x0a, offset);
+      if (newline < 0) {
+        unreadable++;
+        continue;
+      }
+      const header = out.toString("utf8", offset, newline).split(" ");
+      // `<oid> missing` — the object vanished between the listing and here.
+      if (header.length < 3) {
+        unreadable++;
+        offset = newline + 1;
+        continue;
+      }
+      const size = Number(header[2]);
+      const start = newline + 1;
+      if (!Number.isFinite(size)) {
+        unreadable++;
+        break;
+      }
+      visit(file, out.toString("utf8", start, start + size));
+      offset = start + size + 1; // git writes a trailing LF after the contents
+    }
+  };
+
+  for (const file of files) {
+    if (file.oid === null) {
+      // The walk tier, and the only path that touches the filesystem.
+      try {
+        visit(file, readFileSync(join(dir, file.path), "utf8"));
+      } catch {
+        unreadable++;
+      }
+      continue;
+    }
+    batch.push(file);
+    batchBytes += Math.max(file.size, 0);
+    if (batch.length >= BLOB_BATCH_FILES || batchBytes >= BLOB_BATCH_BYTES) flush();
+  }
+  flush();
+  return unreadable;
+}
+
+export interface WorktreeOptions {
+  /**
+   * Symlink the head tree's `node_modules` into the base worktree. **Defaults
+   * to true** — see `mirrorNodeModules` for why a comparison without it is not
+   * a comparison.
+   *
+   * `false` exists so the mirror's value can be a NUMBER in a test rather than
+   * a paragraph in a comment: `tests/noise-floor.test.ts` runs one commit both
+   * ways and asserts the un-mirrored side is worse by a lower bound.
+   */
+  mirrorNodeModules?: boolean;
+}
+
 /**
  * Materialise `sha` in a throwaway worktree and hand the path to `fn`.
  *
@@ -276,7 +619,12 @@ export function showFile(repo: string, ref: string, path: string): string | null
  * `finally` keeps the target repo's `.git/worktrees` from accumulating stale
  * entries across the ~40 workspaces the review sweep keeps warm.
  */
-export function withWorktree<T>(repo: string, sha: string, fn: (dir: string) => T): T {
+export function withWorktree<T>(
+  repo: string,
+  sha: string,
+  fn: (dir: string) => T,
+  opts?: WorktreeOptions,
+): T {
   const dir = mkdtempSync(join(tmpdir(), "lastlight-facts-base-"));
   try {
     git(repo, ["worktree", "add", "--detach", "--force", dir, sha]);
@@ -285,7 +633,7 @@ export function withWorktree<T>(repo: string, sha: string, fn: (dir: string) => 
     throw err;
   }
   try {
-    mirrorNodeModules(repo, dir);
+    if (opts?.mirrorNodeModules !== false) mirrorNodeModules(repo, dir);
     return fn(dir);
   } finally {
     tryGit(repo, ["worktree", "remove", "--force", dir]);
@@ -302,12 +650,20 @@ export function withWorktree<T>(repo: string, sha: string, fn: (dir: string) => 
  * worktree must see the same modules, because **a comparison between a resolved
  * program and an unresolved one is not a comparison.**
  *
- * Measured, on this monorepo's own WP0 commit: without the mirror, every export
- * whose type touched an unresolvable external read as changed or removed — 227
- * "contract deltas" of which 4 were real. Phantom deltas are not merely noisy;
- * IRIS measured a half-mechanism seed as ACTIVELY HARMFUL (−3, worse than no
- * seed), and *"this PR removed the export `foo`"* when it did nothing of the
- * kind is exactly that shape.
+ * The surface is narrower than it first reads, and the narrowing is MEASURED:
+ * it moves **inferred** types only. An ANNOTATED `function f(x: Ext): Ext`
+ * prints as `(x: Ext) => Ext` on both sides even when `@fixture/ext` does not
+ * resolve — the type really is `any` (`isAny() === true`), but the printer falls
+ * back to the written name, so the two sides compare equal. Inference is where
+ * an unresolved module actually shows: `toExt(id)` is `Ext` when the module
+ * resolves and `any` when it does not.
+ *
+ * Still load-bearing at that smaller surface, and `tests/noise-floor.test.ts`
+ * is where it becomes a number: on `makeMonorepoFixture()` the un-mirrored run
+ * yields 17 deltas against the mirrored run's 1, and the phantom's `before` is
+ * literally `any`. Phantom deltas are not merely noisy — IRIS measured a
+ * half-mechanism seed as ACTIVELY HARMFUL (−3, worse than no seed), and *"this
+ * PR removed the export `foo`"* when it did nothing of the kind is that shape.
  *
  * Symlinks, not copies: a pnpm workspace's `node_modules` is hundreds of MB and
  * the base tree is read-only to us. A PR that changes dependencies makes the

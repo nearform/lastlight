@@ -1,5 +1,9 @@
 # PR review as a program-analysis system — design
 
+> **Picking this up in a new session? Start at [RESTART.md](RESTART.md)** — tree
+> state, the three commands that prove it is sane, what is next, and how to
+> drive sub-agents on it. This file is the *why*; that one is the *how*.
+
 Turn `pr-review` from **one agent turn over a diff** into a pipeline where
 deterministic program analysis constructs the world the model reasons in, and an
 executable oracle decides which of its hypotheses survive.
@@ -66,6 +70,7 @@ answer, and two contradict standard advice we would otherwise have followed.
 | 11 | **We never re-derive what CI already said; we do want a runnable tree** | Those are different things, and an earlier draft conflated them. `checksState` / `ciSection` are already in the run context, so re-running the suite for a red/green verdict is pure duplication of a matrix build we cannot match. What execution buys is a **probe**, and that needs an install, not a test run. Hence `prepare` (cheap, the affordance) is split from `suite` (expensive, gated on `mutants` alone). See [04-probe-oracle.md](04-probe-oracle.md) |
 | 12 | **Internal recall and user attention are separate budgets** | A candidate is never deleted for being noisy — but not every survivor earns an inline comment. Three tiers: **inline** (capped by `maxInlineComments`), **body** (posted, unbounded), **internal** (recorded to `review_findings`, never posted, auditable). *"Does AI Code Review Lead to Code Changes?"* (22k+ comments): concise hunk-level actionable findings are substantially likelier to cause a change. Twenty inline comments is not twenty times the signal of eight. See [06-adjudicate.md](06-adjudicate.md) |
 | 13 | **Eight cases from one private repo cannot support a general claim** | They are an architecture-development instrument — and really **four PRs**, since rounds of the same PR are correlated, with a three-case blind split. External validation is a **mandatory** round, reported unpooled because the private set risks selection bias and the public sets risk contamination. See [09-external-validation.md](09-external-validation.md) |
+| 14 | **TypeScript-first: prove the pipeline helps on TypeScript before buying polyglot** | **Added 2026-08-21, on a day of measurement.** WP3's and WP4's gates are read on the `skillspro` eval set, which is TypeScript, where the facts already work — TS/JS evidence coverage is **46.2%** against **2.7%** on the corpus's non-TS half. Grammars move the **Martian** corpus (40 of 50 cases non-TS), so they raise the **generality claim**, not the shipping path, and the deployment's managed repos are predominantly TypeScript. **Stage 2 grammars therefore become a [WP9](09-external-validation.md) dependency, not a [WP3](03-seed-and-survey.md) blocker.** See [01b](01b-code-facts-hardening.md) for the measurement and [09](09-external-validation.md) → WP1c for the scoped prescription |
 
 ## The target pipeline
 
@@ -141,30 +146,76 @@ do — is [HANDOFF.md](HANDOFF.md).
 > `suite` are cut; and "fail loud" must never fail the run, because the 30-minute
 > review sweep re-dispatches anything that did not succeed.
 
+> **Amended again 2026-08-21, after a day of measurement.** WP8, WP0 and WP1
+> landed, and then **WP1b** — hardening `code-facts` against itself — found
+> seven bugs, six of them the same species: *a wrong or absent answer that
+> looked like a clean result.* Read
+> [01b-code-facts-hardening.md](01b-code-facts-hardening.md). Headlines: the
+> diff range must be the **merge base**, not the base branch tip (a production
+> shape, not a dataset artefact); one `Project` **per tsconfig**, because the
+> tier is not the coverage; there is a new **deterministic, zero-spend
+> evidence-coverage gate** ([08-evals.md](08-evals.md) §7) that bounds WP3
+> *upstream* of the mechanism metrics; the `coverage` extractor is **inert until
+> WP4**; `patterns` is **spent as a discovery route**; and locked decision 14
+> makes the plan explicitly **TypeScript-first**, moving Stage 2 grammars from a
+> WP3 blocker to a WP9 dependency.
+
 | WP | File | Delivers | Depends on |
 |---|---|---|---|
 | — | [00-evidence.md](00-evidence.md) | What we measured, what is falsified, calibration against the field | — |
 | — | [10-design-review.md](10-design-review.md) | The thirteen pre-implementation decisions + four corrections | — |
 | 0 | [10-design-review.md](10-design-review.md) §D7 | The `spec` axis + split verdict + the PR-body/linked-issue plumbing | — |
 | 1 | [01-code-facts.md](01-code-facts.md) | `packages/code-facts` — the deterministic fact extractors | — |
+| 1b | [01b-code-facts-hardening.md](01b-code-facts-hardening.md) | The independent oracle, the sensitivity proofs, the 50-PR corpus, the anchor labels — **the record of what measurement found** | 1 |
+| 1c | [09-external-validation.md](09-external-validation.md) → WP1c | Stage 2 tree-sitter grammars, **scoped to module-level declarations** | 1b |
 | 2 | [02-sandbox-image.md](02-sandbox-image.md) | The pinned toolchain vendored into the sandbox image | 1 |
-| 3 | [03-seed-and-survey.md](03-seed-and-survey.md) | `obligations.json`, the `survey` phase, the append-only union | 1, 2 |
-| 4 | [04-probe-oracle.md](04-probe-oracle.md) | `probes` + `falsify` — the executable oracle | 3 |
+| 3 | [03-seed-and-survey.md](03-seed-and-survey.md) | `obligations.json`, the `survey` phase, the append-only union | 1 |
+| 4 | [04-probe-oracle.md](04-probe-oracle.md) | `prepare` (incl. the coverage artifact) + `falsify` — the executable oracle | 3 |
 | 5 | [05-parallel-phases.md](05-parallel-phases.md) | Bounded-concurrency scheduler (Track B) | — |
 | 6 | [06-adjudicate.md](06-adjudicate.md) | Adjudicator, evidence packet, split verdict, per-check calibration | 3, 4 |
 | 7 | [07-review-memory.md](07-review-memory.md) | Review-memory tables, the `record` phase, the mining cron | 6 |
-| 8 | [08-evals.md](08-evals.md) | Micro-recall, SNR, utility metrics; the measurement protocol | — |
-| 9 | [09-external-validation.md](09-external-validation.md) | **Mandatory** external-validation round before any general claim | 6 |
+| 8 | [08-evals.md](08-evals.md) | Micro-recall, SNR, utility metrics, **evidence coverage**; the measurement protocol | — |
+| 9 | [09-external-validation.md](09-external-validation.md) | **Mandatory** external-validation round before any general claim | 6, 1c |
 
-WP5 and WP8 are independent of the chain. **WP8 goes first** — it is the
+WP3's dependency on WP2 was dropped by §D1 — `code-facts` ships in the CLI, so
+the image is no longer what makes the tools exist.
+
+### The revised order
+
+```
+WP3 → WP4 → WP6 → [ship-capable on TypeScript]
+  → WP1c Stage 2 grammars (scoped) → WP9 → [R] release → WP7c
+  ;  WP2 parallel  ;  WP5 PARKED
+```
+
+> **Corrected 2026-08-21.** This line began `memory decision (2 GB cap) →`. That
+> decision is **settled by measurement rather than taken** — peak RSS is
+> dominated by `node_modules`, not by `--max-files`, and a changed-file-scoped
+> module allow-list fits the 2 GB cap losslessly. Nothing blocks WP3 now. See
+> [01b-code-facts-hardening.md](01b-code-facts-hardening.md) → "Where the memory
+> actually goes", and [HANDOFF.md](HANDOFF.md) sign-off item 9.
+
+The re-ordering is locked decision 14, and it is a **claim about which gate each
+piece of work moves** rather than an estimate of effort: everything left of
+"ship-capable" is read on `skillspro`, which is TypeScript; everything to the
+right of it is read on Martian, which is 80% not.
+
+WP5 and WP8 are independent of the chain. **WP8 went first** — it is the
 instrument every other gate is read on, it costs no model spend, and its first
-task is to back-fill the new metrics onto the baseline we already have. WP5 can
+task was to back-fill the new metrics onto the baseline we already had. WP5 can
 run at any time but must not jump ahead of WP4.
 
 **There is no measurement run before code.** The comparator is the shipped
 `pr-review`, already measured at micro-recall 0.040, and the new metrics
-recompute from its stored scorecard offline. The first model spend in this plan
-is WP3's gate. See [HANDOFF.md](HANDOFF.md).
+recompute from its stored scorecard offline. The first **model spend** in this
+plan is still WP3's gate.
+
+That is not the same as no measurement. WP1b added three deterministic
+instruments that cost nothing and run over 50 real PRs — `facts-corpus.ts`,
+`facts-evidence.ts` and `pnpm selfcheck` — and every number in
+[01b](01b-code-facts-hardening.md) came from them. **Spend nothing before you
+have read the free instrument**; it is the cheapest way to discover that a
+family could not have converted. See [HANDOFF.md](HANDOFF.md).
 
 ## What this is not
 
@@ -176,6 +227,10 @@ is WP3's gate. See [HANDOFF.md](HANDOFF.md).
 - **Not a model upgrade.** The Opus probe is dead twice over: Haiku 4.5 beats
   Sonnet 4.6 on review recall on two independent evals (41.2% vs 22.1% on
   Martian), and Martian shows a ~28-point *scaffolding* gap at fixed model class.
-- **Not multi-language yet.** TypeScript/JavaScript is first-class; everything
-  else degrades to the language-agnostic subset **and says so in the obligations
-  file** rather than emitting nothing.
+- **Not multi-language yet — and that is now a locked decision, not a
+  concession** (#14). TypeScript/JavaScript is first-class; everything else
+  degrades to the language-agnostic subset **and says so in the obligations
+  file** rather than emitting nothing. Measured: evidence coverage 46.2% on
+  TS/JS against 2.7% on the corpus's non-TS half, where both of the two hits are
+  `.tsx` files mislabelled by Martian's PR-level language field. Grammars are
+  scoped and deferred to [WP1c](09-external-validation.md), not abandoned.

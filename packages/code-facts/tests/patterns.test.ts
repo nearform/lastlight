@@ -11,7 +11,8 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { rmSync } from "node:fs";
-import { makeConstantFixture, makeFakeTool, type Fixture } from "./helpers.js";
+import { join } from "node:path";
+import { makeConstantFixture, makeFakeTool, makeFixture, type Fixture } from "./helpers.js";
 import { runExtractor } from "../src/run.js";
 import { fingerprint, normaliseGitleaks, normaliseOpengrep } from "../src/patterns.js";
 import type { PatternsDocument } from "../src/schema.js";
@@ -152,6 +153,147 @@ describe("patterns — with the binaries present", () => {
     } finally {
       rmSync(drifted.dir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * The scanner-side failure modes, each with a real script on disk.
+ *
+ * `exit 1` is opengrep SAYING IT FOUND SOMETHING and `exit 2` is opengrep
+ * failing — treating the two the same in either direction is how a scan that
+ * could not load its rules comes back as `findings: []`, which is the
+ * dependency-cruiser shape with a different binary in it.
+ */
+const OPENGREP_FINDINGS_EXIT_1 = `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "1.27.1"; exit 0; fi
+cat <<'JSON'
+{"results":[{"check_id":"lastlight-hardcoded-secret","path":"src/config.ts","start":{"line":1},"extra":{"message":"Hard-coded secret.","severity":"WARNING"}}],"errors":[]}
+JSON
+exit 1
+`;
+
+const OPENGREP_EXIT_2 = `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "1.27.1"; exit 0; fi
+echo "opengrep: fatal error: could not load the ruleset" >&2
+exit 2
+`;
+
+/**
+ * gitleaks renamed `detect` to `git` in 8.19. The stub in this file answers
+ * BOTH, which is faithful to 8.21.2 — and means the fallback branch has never
+ * executed. This one refuses `detect` the way a future release would.
+ */
+const GITLEAKS_NO_DETECT = `#!/bin/sh
+if [ "$1" = "version" ]; then echo "8.21.2"; exit 0; fi
+if [ "$1" = "detect" ]; then echo 'unknown command "detect" for "gitleaks"' >&2; exit 1; fi
+out=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--report-path" ]; then out="$2"; fi
+  shift
+done
+printf '%s' '[{"RuleID":"aws-access-token","File":"src/config.ts","StartLine":1,"Description":"AWS Access Token detected"}]' > "$out"
+exit 0
+`;
+
+describe("patterns — the scanner failure modes", () => {
+  let fixture: Fixture;
+  const tools: { dir: string; bin: string }[] = [];
+
+  beforeAll(() => {
+    fixture = makeConstantFixture();
+  });
+  afterAll(() => {
+    fixture.cleanup();
+    for (const tool of tools) rmSync(tool.dir, { recursive: true, force: true });
+  });
+
+  function fake(name: string, script: string): string {
+    const tool = makeFakeTool(name, script);
+    tools.push(tool);
+    return tool.bin;
+  }
+
+  function scan(
+    env: Record<string, string>,
+    repo: Fixture = fixture,
+    rulesPath?: string,
+  ): PatternsDocument {
+    return runExtractor({
+      extractor: "patterns",
+      repo: repo.dir,
+      base: repo.base,
+      head: repo.head,
+      rulesPath,
+      env: { PATH: "", ...env },
+    }).document as unknown as PatternsDocument;
+  }
+
+  it("treats `exit 1` as FINDINGS, not as failure", () => {
+    const document = scan({ LASTLIGHT_OPENGREP_BIN: fake("opengrep", OPENGREP_FINDINGS_EXIT_1) });
+    const finding = document.findings.find((f) => f.tool === "opengrep");
+    expect(finding?.rule).toBe("lastlight-hardcoded-secret");
+    expect(finding?.severity).toBe("p2-medium");
+    expect(
+      document.degraded.some((d) => /opengrep exited/.test(d.reason)),
+      "exit 1 is how opengrep reports a hit",
+    ).toBe(false);
+  });
+
+  it("treats `exit 2` as a failed scan and quotes the scanner's own stderr", () => {
+    const document = scan({ LASTLIGHT_OPENGREP_BIN: fake("opengrep", OPENGREP_EXIT_2) });
+    const entry = document.degraded.find((d) => /opengrep exited 2/.test(d.reason));
+    expect(entry, "a scanner that failed must not contribute an empty finding list").toBeDefined();
+    expect(entry?.reason).toMatch(/could not load the ruleset/);
+    expect(document.findings.filter((f) => f.tool === "opengrep")).toEqual([]);
+    expect(document.coverage).toBe("degraded");
+  });
+
+  it("names a ruleset that does not exist rather than scanning with the registry", () => {
+    const missing = join(fixture.dir, "rules", "absent.yaml");
+    const document = scan(
+      { LASTLIGHT_OPENGREP_BIN: fake("opengrep", OPENGREP_FINDINGS_EXIT_1) },
+      fixture,
+      missing,
+    );
+    const entry = document.degraded.find((d) => d.reason.includes(missing));
+    expect(entry?.reason).toMatch(/does not exist/);
+    // Locked decision 7: the Semgrep registry is deliberately not a fallback.
+    expect(entry?.reason).toMatch(/registry is deliberately not used/);
+    expect(document.findings.filter((f) => f.tool === "opengrep")).toEqual([]);
+  });
+
+  it("says so when the diff leaves NOTHING at head to scan", () => {
+    // Every changed path is a deletion, so there is no file to hand opengrep —
+    // which is not the same as scanning and finding nothing.
+    const deletionOnly = makeFixture(
+      "deletion-only",
+      { message: "base", files: { "src/a.ts": "export const A = 1;\n", "README.md": "# x\n" } },
+      { message: "head", files: { "src/a.ts": null } },
+    );
+    try {
+      const document = scan(
+        { LASTLIGHT_OPENGREP_BIN: fake("opengrep", OPENGREP_FINDINGS_EXIT_1) },
+        deletionOnly,
+      );
+      expect(
+        document.degraded.some((d) => /no changed file exists at head to scan/.test(d.reason)),
+      ).toBe(true);
+      expect(document.findings.filter((f) => f.tool === "opengrep")).toEqual([]);
+    } finally {
+      deletionOnly.cleanup();
+    }
+  });
+
+  it("falls back from `detect` to `git` when the subcommand was renamed", () => {
+    const document = scan({ LASTLIGHT_GITLEAKS_BIN: fake("gitleaks", GITLEAKS_NO_DETECT) });
+    const secret = document.findings.find((f) => f.tool === "gitleaks");
+    expect(secret?.rule, "the fallback subcommand must produce the same report").toBe(
+      "aws-access-token",
+    );
+    expect(secret?.severity).toBe("p1-high");
+    // A bump that silently changed the subcommand would otherwise present as
+    // "no secrets found", so the fallback succeeding must leave no failure note.
+    expect(document.degraded.some((d) => /gitleaks exited/.test(d.reason))).toBe(false);
   });
 });
 

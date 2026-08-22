@@ -42,6 +42,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && pnpm run lint:boundaries",
     "test": "vitest run",
     "facts": "tsx src/cli.ts",
+    "selfcheck": "tsx scripts/selfcheck.ts --repo ../..",
+    "name-match-gate": "tsx scripts/name-match-gate.ts --repo ../..",
     "lint:boundaries": "node ../../scripts/lint-import-boundaries.mjs code-facts"
   },
   "dependencies": {

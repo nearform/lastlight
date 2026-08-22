@@ -94,7 +94,12 @@ describe("lastlight facts — wiring", () => {
         constants: { constant: string }[];
       };
       expect(document.coverage).toBe("full");
-      expect(document.toolchain.manifest).toBe(1);
+      // The toolchain manifest's SCHEMA version — `2` since `source` became a
+      // per-platform `sources` map (WS6 stage 0). Pinned as a literal on both
+      // sides of the CLI boundary on purpose: this test's job is to prove the
+      // delegation reaches the real package, and a value read back out of that
+      // package would prove nothing.
+      expect(document.toolchain.manifest).toBe(2);
       expect(document.constants.map((c) => c.constant)).toContain("LIMIT");
     } finally {
       rmSync(repo, { recursive: true, force: true });

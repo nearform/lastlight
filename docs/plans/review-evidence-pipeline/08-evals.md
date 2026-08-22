@@ -170,6 +170,90 @@ scoring entirely, at the cost of only grading behaviourally-observable defects.
 Worth importing **after** [WP4](04-probe-oracle.md), since the probe transcripts
 are most of the machinery. Not a WP8 requirement.
 
+### 7. Evidence coverage — a deterministic gate the plan did not have
+
+**Added 2026-08-21, on landing [WP1b](01b-code-facts-hardening.md).** Every
+metric above is downstream of a model. This one is not: it costs **no model
+spend**, it is repeatable, and it bounds [WP3](03-seed-and-survey.md)
+**upstream** of the mechanism metrics. The question it answers is prior to every
+question §0b poses:
+
+> **Does the deterministic envelope even NAME the thing the human talked
+> about?**
+
+If it does not, no seeder can produce an obligation about that identifier *from
+facts*, whatever the prompt says. So the naming rate is a **ceiling on the
+recall attributable to `code-facts` as a seeder** — and a ceiling is exactly
+what §D6 says this instrument is short of.
+
+`apps/evals/scripts/facts-evidence.ts` scores a `facts-corpus` run against
+`datasets/pr-review/anchors.json` — frozen, versioned deterministic anchor
+labels (tokenizer `v1`) built by `scripts/facts-anchors.ts` with no model
+anywhere. The artifact stamps its tokenizer, so a better tokenizer ships as `v2`
+rather than silently rewriting past numbers.
+
+#### Three numbers, three denominators. Never quote one alone
+
+| | | on the 50-PR Martian corpus |
+|---|---|---|
+| **anchor rate** | anchored / **all** gold — a property of the gold **text**, not of `code-facts` | 99/137 = **72.3%** |
+| **discovery ceiling** (EC-loose) | EC-loose / **all** gold — what any identifier-level layer could point at | 15/137 = **10.9%** |
+| **evidence coverage** (EC-strict) | EC-strict / **anchored** — conditional on the finding being anchorable at all | 14/99 = **14.1%** |
+
+EC-strict is a match on an *entity* the envelope has something to say about — a
+`facts.symbols[].name` (or its last dotted segment), a `contracts[].symbol`, a
+`constants[].constant` or `[].value`, a `deps.changes[].name`. EC-loose adds
+file-level pointing: the basename of a changed file, a `patterns` hit, or a
+`coverage` file with uncovered changed lines. The envelope names the *place* but
+not the thing.
+
+#### Split TS/JS from non-TS. Never pool them
+
+A pooled score measures the **corpus's language mix**, not the extractors — 40
+of the 50 cases are a language the ts-morph extractors structurally cannot see.
+
+| | cases | anchor rate | EC-loose | **EC-strict** | pool | density |
+|---|---|---|---|---|---|---|
+| TS/JS | 10 | 26/31 | 13/31 | **12/26 = 46.2%** | 214 | **5.61** / 100 names |
+| non-TS | 40 | 73/106 | 2/106 | **2/73 = 2.7%** | 177 | **1.13** / 100 names |
+
+#### Carry every caveat in the text, not in a footnote
+
+Each of these is load-bearing, and each was measured rather than assumed:
+
+- **Score at ENTITY or FILE level, never line level.** `anchors.json` carries
+  `anchoredLines` and it is tempting to treat them as per-line ground truth.
+  They are not sound as such: only **32 of the 99** anchored findings match a
+  single file, **34 span more than three**, and **2 of the 20** hand-audited are
+  `localized: "diffuse"` — the right entity is named but the matched line is
+  never the site the human meant. A line-level score would hand out credit for
+  facts about the wrong code.
+- **Quote the audit as "≤~14% false-match, 0 observed in 20"**, never 0%. The
+  hand audit read 20 uniformly-sampled anchored findings and found zero
+  spurious; the honest statement is the **95% upper bound on 0/20**, and it is
+  the metric's error bar.
+- **Martian's `derived.language` is PR-level, not file-level**, so the non-TS
+  2.7% is not even real: both of its two hits are in **`.tsx` files**
+  (`grafana-106778` is labelled Go). Per-language cells are approximate and the
+  TS/JS vs non-TS split inherits the same slack.
+- **Always print the candidate pool beside coverage, and the hit-density
+  diagnostic.** An envelope that names *everything* scores 1.0 trivially —
+  exactly the way an F1 is gamed by over-posting. On the WP1b run, corpus-wide
+  coverage went **×2.00** (7 → 14) while the pool went **×2.09** (187 → 391), so
+  hit density **FELL, 3.74 → 3.58 per 100 names**. The gain was *more names, not
+  better names*, and catching that is precisely what the denominator is for.
+
+#### What it proves, and what it does not
+
+It proves an **upper bound** on the recall attributable to `code-facts` as a
+seeder. It is **not recall, not precision**, and naming is **necessary but not
+sufficient** — an envelope that names `parseTimeout` has not noticed that
+`parseTimeout` returns milliseconds where the caller wants seconds. It has only
+put the word on the table.
+
+Read it before spending on a WP3 arm: a family whose identifiers the envelope
+never names cannot convert, and that is knowable for free.
+
 ## The measurement protocol
 
 The harness runs **the real production workflow** against a **real repo working
@@ -271,6 +355,10 @@ rung 1 itself.
 5. Re-grading the existing baseline scorecard reproduces its published F1
    exactly. **If it does not, the metric change has altered history and must be
    versioned rather than applied in place.**
+6. **Added 2026-08-21.** Evidence coverage reports all three numbers with all
+   three denominators, **split** TS/JS from non-TS, with the candidate pool and
+   hit density beside every coverage cell. A run that prints a pooled coverage
+   figure alone fails this criterion.
 
 ## Non-goals
 

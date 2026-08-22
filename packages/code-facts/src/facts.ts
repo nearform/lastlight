@@ -17,9 +17,10 @@
  * highest-leverage single change available.
  */
 import type { ClassDeclaration, Node, SourceFile } from "ts-morph";
-import { Node as TsNode, Project, SyntaxKind } from "ts-morph";
+import { Node as TsNode, SyntaxKind } from "ts-morph";
 import type { FactsPayload, SymbolFact } from "./schema.js";
-import { isTestPath, locationOf, repoRelative } from "./project.js";
+import type { Programs } from "./project.js";
+import { isTestPath, locationOf, repoRelative, sourceFileAt } from "./project.js";
 import type { FileHunks } from "./git.js";
 import type { ChangedPath } from "./git.js";
 import { hasAnalysableExtension } from "./project.js";
@@ -203,7 +204,12 @@ function calleesOf(body: Node): string[] {
 
 export interface ExtractFactsOptions {
   repo: string;
-  project: Project;
+  /**
+   * ONE PROGRAM PER TSCONFIG the diff touches, not one for the diff. A changed
+   * file is looked up in each in turn; reference queries then run inside the
+   * program that owns the file, which is the only place they could resolve.
+   */
+  project: Programs;
   hunks: FileHunks[];
   changed: ChangedPath[];
   /** Cap on reference sites recorded per symbol. `0` = unbounded. */
@@ -213,7 +219,7 @@ export interface ExtractFactsOptions {
 export const DEFAULT_MAX_REFERENCES = 200;
 
 export function extractFacts(options: ExtractFactsOptions): FactsPayload {
-  const { repo, project } = options;
+  const { repo } = options;
   const index = indexHunks(options.hunks);
   const maxReferences = options.maxReferences ?? DEFAULT_MAX_REFERENCES;
 
@@ -230,8 +236,7 @@ export function extractFacts(options: ExtractFactsOptions): FactsPayload {
     const source =
       changed.status === "deleted" || !hasAnalysableExtension(changed.path)
         ? undefined
-        : project.getSourceFile(`${repo}/${changed.path}`) ??
-          project.getSourceFile((f) => repoRelative(repo, f.getFilePath()) === changed.path);
+        : sourceFileAt(options.project, repo, changed.path);
 
     files.push({
       path: changed.path,
@@ -286,6 +291,15 @@ export function extractFacts(options: ExtractFactsOptions): FactsPayload {
         tests: [...testFiles].sort(),
         referenceCount,
         referencesInDiff,
+        // The compiler resolved every site above. `syntactic.ts` is the other
+        // engine and it says `name-match`; the two produce the same JSON shape
+        // and only this field tells them apart.
+        resolution: "type-aware",
+        // `null` = nobody looked, and nobody did. `nameAmbiguity` costs a
+        // repo-wide parse, which a type-resolved run has no other use for —
+        // and the question it answers ("could this name mean something else?")
+        // is one the compiler has already answered here.
+        nameAmbiguity: null,
       });
     }
   }
@@ -329,14 +343,20 @@ function asImplementationGetable(node: Node): ImplementationGetable | null {
  * Implementations / overrides of a changed interface or abstract member. Only
  * asked for the kinds where it means something — on a plain function the
  * language service returns the declaration itself, which is noise.
+ *
+ * **`null` means nobody asked; `[]` means the query ran and found none.** Every
+ * one of these three early exits used to return `[]`, so "this is a function,
+ * the question does not apply" and "this exported interface has no implementers
+ * anywhere" were the same JSON — and only the second is a fact worth an
+ * obligation.
  */
-function implementationsOf(repo: string, candidate: Candidate): string[] {
+function implementationsOf(repo: string, candidate: Candidate): string[] | null {
   if (!["interface", "interface-method", "abstract-method", "class"].includes(candidate.kind)) {
-    return [];
+    return null;
   }
   try {
     const getable = asImplementationGetable(candidate.nameNode);
-    if (!getable) return [];
+    if (!getable) return null;
     const out = new Set<string>();
     for (const implementation of getable.getImplementations()) {
       const node = implementation.getNode();
@@ -349,6 +369,8 @@ function implementationsOf(repo: string, candidate: Candidate): string[] {
     }
     return [...out].sort();
   } catch {
-    return [];
+    // The query threw, so this is "looked and could not see", not "looked and
+    // there are none".
+    return null;
   }
 }

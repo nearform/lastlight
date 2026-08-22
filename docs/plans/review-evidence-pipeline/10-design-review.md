@@ -1,9 +1,11 @@
 # Design review — 2026-08-21
 
-Twelve decisions taken in a structured review of this plan before implementation
-started. Each one is recorded here rather than folded silently into the work
-packages, because several **change the shape of the plan** and two of them
-overturn something a work package asserts as fact.
+**Thirteen** decisions taken in a structured review of this plan before
+implementation started. Each one is recorded here rather than folded silently
+into the work packages, because several **change the shape of the plan** and two
+of them overturn something a work package asserts as fact. (This line said
+*"Twelve"* while listing D1–D13; corrected 2026-08-21 — [README.md](README.md)
+and [HANDOFF.md](HANDOFF.md) both already said thirteen.)
 
 Where a decision contradicts a WP, **this file wins** and the WP has been
 corrected in place.
@@ -171,6 +173,16 @@ required changes:
 Martian tier-1 (50 PRs, wired today, one command to import) was considered as the
 gate instrument and rejected on cost (~$35–120/arm vs $6–19). It remains
 [WP9](09-external-validation.md)'s job.
+
+> **The cost half of that is stale as of 2026-08-21, the decision is not.** The
+> **deterministic** half of a tier-1 arm is now free and repeatable —
+> `apps/evals/scripts/facts-corpus.ts` runs all 50 PRs off bare mirrors, p50
+> 3.3 s and max 26.9 s per case, no model anywhere. Only the generative and
+> adjudication rungs cost money. The decision stands on the **other** grounds it
+> was also taken on — tier 1 is 40 non-TypeScript cases out of 50, where
+> evidence coverage is **2.7%** ([08-evals.md](08-evals.md) §7), so it cannot be
+> the instrument a TypeScript-first plan is gated on (locked decision 14).
+> **Re-derive the $35–120 before quoting it again.**
 
 ### D7 — The `spec` axis is pulled forward as WP0
 
@@ -393,7 +405,61 @@ deferred rather than rejected.
 Ablation rung **2b is removed**. `review.analysis.mutants` and
 `suiteTimeoutSeconds` do not ship.
 
+> **Amended 2026-08-21 ([01b](01b-code-facts-hardening.md)): the substitution is
+> right and it is INERT.** The `coverage` extractor shipped with WP1 and
+> **reads** a report; it never runs a suite. Across all **50** corpus cases it
+> found **zero artifacts** — one `degraded[]` entry per case, every run of the
+> day. So the `tests` family cannot convert until [WP4](04-probe-oracle.md)'s
+> `prepare` produces one, and *producing one is now part of `prepare`'s scope*
+> rather than an assumed side effect of installing dependencies. Recorded there
+> as a hard ordering constraint. Until then, per-family attribution must show
+> `tests` as **not measured**, per §D2's rule for the absent scanners: "the
+> family did not convert" and "the family had no input" are the same row in a
+> table and opposite conclusions.
+
+### Not D14 — the resolution default is an implementation detail
+
+**Considered and declined, 2026-08-21.** Making `--resolution changed` the
+default for `code-facts` is a big enough change to peak memory that it was worth
+asking whether it belongs in this file's numbering, or in
+[README.md](README.md)'s locked-decision table. It does not, and the reasoning
+is worth a paragraph so nobody re-asks.
+
+The locked list has an entry criterion: decisions taken **against** the obvious
+answer, or that contradict advice we would otherwise follow, and that a later
+agent could quietly re-decide at real cost. Four of the fourteen are there
+because they invert an instinct. This one **goes with** the obvious answer once
+the numbers exist — pick the cheapest tier that loses nothing — and it is
+reversible on one command line, with `full` retained and reproducing today's
+document exactly. Nothing outside `packages/code-facts` depends on the tier
+being `changed`; what the other work packages depend on is the *envelope fitting
+the 2 GB cap*, and that dependency is recorded where it bites, in
+[WP4](04-probe-oracle.md) and [WP3](03-seed-and-survey.md). Locking the tier
+would also freeze a per-repo judgement: a repository where `changed` still OOMs
+should drop to `none` and say so in `degraded[]`, and a locked decision naming
+`changed` reads as forbidding exactly that.
+
+**What is decision-grade is one rung down, and it is already recorded:** the
+allow-list must be the **union of base and head, applied identically to both
+programs**. The cheaper, more obvious implementation is per-side — compute each
+program's allow-list from its own tree — and it silently rebuilds the asymmetry
+behind WP1's **227 contract deltas of which one was real** (cause 1: an
+asymmetric `tsconfig` between the two programs). That invariant is pinned by
+tests and written up in
+[01b-code-facts-hardening.md](01b-code-facts-hardening.md); it needs a test and
+a paragraph, which it has, not a number in a table it would be the only
+implementation-level entry in.
+
 ## Revised order
+
+> **Superseded 2026-08-21 by locked decision 14** — see
+> [HANDOFF.md](HANDOFF.md) for the current order and
+> [01b-code-facts-hardening.md](01b-code-facts-hardening.md) for the
+> measurement behind it. The block below is what this review decided; the
+> changes since are the WP1b hardening pass, a **human decision on the 2 GB
+> agent cap** ahead of WP3, and **WP1c (Stage 2 grammars) moving from a WP1
+> follow-on to a WP9 dependency** — it raises the generality claim, not the
+> shipping path.
 
 ```
   WP8  the instrument                    offline, no spend
@@ -417,3 +483,17 @@ Ablation rung **2b is removed**. `review.analysis.mutants` and
   WP2  sandbox image                     parallel; before the Release
   WP5  parallel phases                   PARKED (S2, S3 land now regardless)
 ```
+
+The current order (locked decision 14):
+
+```
+WP3 → WP4 → WP6 → [ship-capable on TypeScript]
+  → WP1c Stage 2 grammars (scoped) → WP9 → [R] release → WP7c
+  ;  WP2 parallel  ;  WP5 PARKED
+```
+
+> **Corrected 2026-08-21:** the leading `memory decision (2 GB cap) →` is gone.
+> It was settled by measurement rather than taken — see
+> [01b-code-facts-hardening.md](01b-code-facts-hardening.md) → "Where the memory
+> actually goes". The paragraph above still describes it as a pending human
+> decision because that is what this review decided; it is no longer true.

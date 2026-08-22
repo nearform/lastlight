@@ -42,6 +42,38 @@ export function defaultRulesPath(): string {
 }
 
 /**
+ * THE opengrep invocation — one definition, used by production and by
+ * `tests/rules.test.ts`. A test that spawns the scanner with different flags
+ * from the code under test is measuring a different program.
+ *
+ * `--no-rewrite-rule-ids` is the load-bearing flag. Without it opengrep
+ * prefixes every `check_id` with the CONFIG FILE'S OWN ABSOLUTE PATH, so a
+ * production hit comes back as
+ * `Users.clifton.work.lastlight.packages.code-facts.rules.lastlight-sql-from-interpolation-ruby`.
+ * That is wrong twice:
+ *
+ *  - the document is read into a model prompt, and it would carry the host's
+ *    filesystem layout into it;
+ *  - `fingerprint()` HASHES the rule id, so the same hit on the same line of
+ *    the same file fingerprints differently in a dev checkout and in
+ *    `/opt/lastlight/`. A fingerprint is meant to be stable identity — dedup
+ *    and suppression are keyed on it — so a path-dependent one breaks both
+ *    across environments, silently and with no error anywhere.
+ */
+export function opengrepArgs(rulesPath: string, targets: string[]): string[] {
+  return [
+    "scan",
+    "--json",
+    "--quiet",
+    "--no-rewrite-rule-ids",
+    "--config",
+    rulesPath,
+    "--",
+    ...targets,
+  ];
+}
+
+/**
  * `sha1(tool + ":" + rule + ":" + file + ":" + 3-line-context)`, lowercase hex
  * — the recipe `skills/security-review/SKILL.md` §4 already defines. Reused
  * rather than reinvented, so a finding keeps one identity across both surfaces.
@@ -204,11 +236,12 @@ export function extractPatterns(options: ExtractPatternsOptions): ExtractPattern
         reason: `the opengrep ruleset ${rules} does not exist — the Semgrep registry is deliberately not used (locked decision 7), so pass --rules`,
       });
     } else {
-      const result = spawnSync(
-        opengrep,
-        ["scan", "--json", "--quiet", "--config", rules, "--", ...scannable],
-        { cwd: options.repo, encoding: "utf8", timeout, maxBuffer: 64 * 1024 * 1024 },
-      );
+      const result = spawnSync(opengrep, opengrepArgs(rules, scannable), {
+        cwd: options.repo,
+        encoding: "utf8",
+        timeout,
+        maxBuffer: 64 * 1024 * 1024,
+      });
       // opengrep exits 1 when it FINDS something — that is success, not failure.
       if (result.error || (result.status !== 0 && result.status !== 1)) {
         degraded.push({

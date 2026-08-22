@@ -50,6 +50,40 @@ Each case's shape (`src/schema.ts`):
 > a real issue the annotators missed scores as a false positive. That understates
 > precision, which is why the default is F1 rather than the precision-weighted F0.5.
 
+## `anchors.json` — the deterministic anchor labels
+
+`anchors.json` **is** committed (unlike `instances.json`) and is the frozen input to the
+code-facts *evidence-coverage* metric. Martian's gold set carries only
+`{severity, description}` — no file, no line — so there is no deterministic join from a gold
+finding to a place in the diff. `scripts/facts-anchors.ts` builds one: it pulls code-shaped
+tokens out of the gold prose (tokenizer `v1`, documented rule-by-rule in the script) and marks a
+finding **anchored** when one of them matches, on a word boundary, an added-or-removed line of the
+three-dot (`base...head`, merge-base) diff. No model is involved — an LLM in the denominator would
+make every coverage number downstream unfalsifiable.
+
+```bash
+npx tsx scripts/facts-anchors.ts              # regenerate + print the report
+npx tsx scripts/facts-anchors.ts --dry-run --audit       # the hand-audit sheet
+npx tsx scripts/facts-anchors.ts --dry-run --unanchored  # what could not be anchored
+```
+
+Three things about it are load-bearing:
+
+- **Freeze the labels, not the tokenizer.** The metric's denominator IS the tokenizer's output, so
+  the artifact is committed and stamps `tokenizer: "v1"`. A better tokenizer ships as `v2` in a new
+  file; it never rewrites what past numbers meant.
+- **It carries its own error bar.** The `audit` block records a seeded random sample of 20 anchored
+  findings, each read by hand, with per-finding verdicts. Quote the anchor rate with that rate
+  attached, and don't tune the tokenizer to improve it.
+- **No gold text.** Only derived labels (anchors, `path:line`, severity, Martian's `bug_type` /
+  `requires_context` / `language`). Join back to your local `instances.json` on
+  `instanceId` + `goldIndex` to read a description.
+
+The headline: **99/137 anchored (72.3%)**. That is a property of the *gold text*, not of
+code-facts — it is the ceiling on what any identifier-level evidence layer could ever be scored
+against. The 38 unanchored are mostly prose with nothing code-shaped in it (20 of them name no
+identifier at all), plus a stylesheet/i18n cluster where the finding is a value, not a name.
+
 ---
 
 **Attribution.** Cases derive from Martian's

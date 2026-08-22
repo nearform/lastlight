@@ -26,16 +26,33 @@
     "package.json at run time — see `src/toolchain.ts`.",
     "",
     "BUMPING A VERSION invalidates comparability with every measurement taken",
-    "before it. Record the bump in the eval run notes."
+    "before it. Record the bump in the eval run notes.",
+    "",
+    "`sources` IS PER-PLATFORM, and that is a bug fix, not a generalisation. It",
+    "was one hardcoded linux/x86 URL per tool — in the file whose third consumer",
+    "`refuses on a mismatch, printing the commands to fix it`. On darwin it",
+    "printed a command that cannot work, on a package that exists precisely so a",
+    "Mac running the eval harness at `--sandbox none` can be measured. Both",
+    "release streams DO publish darwin builds at the pinned versions (verified",
+    "against the GitHub releases, not guessed), so the limit was the manifest.",
+    "The keys are `${platform}-${arch}` as `src/toolchain.ts` derives them from",
+    "`process.platform`/`process.arch`; a tool whose install is genuinely",
+    "platform-independent (semgrep via pipx, uv via its own install.sh) repeats",
+    "the same string, so every entry answers the question for every host."
   ],
-  "version": 1,
+  "version": 2,
   "binaries": {
     "opengrep": {
       "version": "1.27.1",
       "tier": "required-for-patterns",
       "usedBy": ["patterns"],
       "probe": ["--version"],
-      "source": "https://github.com/opengrep/opengrep/releases/download/v${version}/opengrep_manylinux_x86",
+      "sources": {
+        "linux-x64": "https://github.com/opengrep/opengrep/releases/download/v${version}/opengrep_manylinux_x86",
+        "linux-arm64": "https://github.com/opengrep/opengrep/releases/download/v${version}/opengrep_manylinux_aarch64",
+        "darwin-arm64": "https://github.com/opengrep/opengrep/releases/download/v${version}/opengrep_osx_arm64",
+        "darwin-x64": "https://github.com/opengrep/opengrep/releases/download/v${version}/opengrep_osx_x86"
+      },
       "note": "The engine slot for the review path — NOT Semgrep, whose registry rules moved to a licence that plausibly excludes a review product (locked decision 7). Not installable from npm: the `opengrep` npm name is a 145-byte empty stub held by Aikido."
     },
     "gitleaks": {
@@ -43,15 +60,25 @@
       "tier": "required-for-patterns",
       "usedBy": ["patterns"],
       "probe": ["version"],
-      "source": "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz",
-      "note": "Already pinned at exactly this version in sandbox-base.Dockerfile — recorded here so WP2's change is a refactor, not a bump. The `gitleaks` npm name is an unrelated third-party package."
+      "sources": {
+        "linux-x64": "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz",
+        "linux-arm64": "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_arm64.tar.gz",
+        "darwin-arm64": "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_darwin_arm64.tar.gz",
+        "darwin-x64": "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_darwin_x64.tar.gz"
+      },
+      "note": "Already pinned at exactly this version in sandbox-base.Dockerfile — recorded here so WP2's change is a refactor, not a bump. The `gitleaks` npm name is an unrelated third-party package. The Dockerfile now selects the linux asset by TARGETARCH, which is also what unbreaks an arm64 image build."
     },
     "ast-grep": {
       "version": "0.45.1",
       "tier": "optional",
       "usedBy": [],
       "probe": ["--version"],
-      "source": "https://github.com/ast-grep/ast-grep/releases/tag/${version}",
+      "sources": {
+        "linux-x64": "https://github.com/ast-grep/ast-grep/releases/download/${version}/app-x86_64-unknown-linux-gnu.zip",
+        "linux-arm64": "https://github.com/ast-grep/ast-grep/releases/download/${version}/app-aarch64-unknown-linux-gnu.zip",
+        "darwin-arm64": "https://github.com/ast-grep/ast-grep/releases/download/${version}/app-aarch64-apple-darwin.zip",
+        "darwin-x64": "https://github.com/ast-grep/ast-grep/releases/download/${version}/app-x86_64-apple-darwin.zip"
+      },
       "note": "The CLI, for interactive use inside the sandbox. `code-facts` itself uses the in-process @ast-grep/napi binding at the SAME version, so keep the two in step when bumping either."
     },
     "semgrep": {
@@ -59,7 +86,12 @@
       "tier": "unrelated",
       "usedBy": [],
       "probe": ["--version"],
-      "source": "pipx install semgrep==${version}",
+      "sources": {
+        "linux-x64": "pipx install semgrep==${version}",
+        "linux-arm64": "pipx install semgrep==${version}",
+        "darwin-arm64": "pipx install semgrep==${version}",
+        "darwin-x64": "pipx install semgrep==${version}"
+      },
       "note": "FLOATS today (`pipx install semgrep`). Belongs to the separate `security-review` workflow, which this plan does not touch — pinned here only so the image stops drifting (§D3/§E4)."
     },
     "uv": {
@@ -67,7 +99,12 @@
       "tier": "unrelated",
       "usedBy": [],
       "probe": ["--version"],
-      "source": "https://astral.sh/uv/${version}/install.sh",
+      "sources": {
+        "linux-x64": "https://astral.sh/uv/${version}/install.sh",
+        "linux-arm64": "https://astral.sh/uv/${version}/install.sh",
+        "darwin-arm64": "https://astral.sh/uv/${version}/install.sh",
+        "darwin-x64": "https://astral.sh/uv/${version}/install.sh"
+      },
       "note": "FLOATS today. Runs `type: script` (runtime: python) phases; pinned here for the same reason as semgrep."
     }
   }

@@ -10,6 +10,53 @@ export { runExtractor, runWrapped, writeDocument, buildEnvelope, emptyDocumentFo
 export type { RunOptions, RunResult } from "./run.js";
 
 export { extractFacts, indexHunks } from "./facts.js";
+
+export {
+  buildSyntacticIndex,
+  extractFactsByName,
+  isIndexablePath,
+  nameAmbiguityOf,
+  scanChangedFiles,
+  scanImportSpecifiers,
+  scanSource,
+  unquote,
+  DEFAULT_MAX_SITES_PER_NAME,
+} from "./syntactic.js";
+export type {
+  BuildIndexOptions,
+  ChangedScan,
+  DeclSite,
+  ExtractFactsByNameOptions,
+  ExtractFactsByNameResult,
+  LitSite,
+  RefSite,
+  ScanSink,
+  SyntacticIndex,
+  ValueKind,
+} from "./syntactic.js";
+
+export {
+  ancestorOfKind,
+  asSyntaxNode,
+  descriptorById,
+  descriptorForPath,
+  interestingKinds,
+  literalKindOf,
+  registeredExtensions,
+  supportedKinds,
+  JAVASCRIPT_DESCRIPTOR,
+  LANGUAGE_DESCRIPTORS,
+  TSJS_DESCRIPTORS,
+  TSX_DESCRIPTOR,
+  TYPESCRIPT_DESCRIPTOR,
+} from "./langs/index.js";
+export type {
+  ConstantRule,
+  DeclarationRule,
+  LanguageDescriptor,
+  LiteralKinds,
+  SyntaxNode,
+} from "./langs/index.js";
 export { extractContracts, shapeOf } from "./contracts.js";
 export {
   extractConstants,
@@ -18,7 +65,29 @@ export {
   parseSides,
   DEFAULT_SIDES,
 } from "./constants.js";
-export { extractDeps, isToolingPackage, packageNameOf, scanImports, lockedVersion } from "./deps.js";
+export {
+  extractDeps,
+  discoverManifests,
+  isToolingPackage,
+  packageNameOf,
+  scanImports,
+  lockedVersion,
+} from "./deps.js";
+export {
+  ecosystemOf,
+  parseManifest,
+  parseNpm,
+  parseGoMod,
+  parsePom,
+  parseGradle,
+  parseGemfile,
+  parseGemfileLock,
+  parsePyproject,
+  parseRequirement,
+  parseRequirements,
+  ROOT_MANIFEST_NAMES,
+} from "./manifests.js";
+export type { Declared, DeclaredMap } from "./manifests.js";
 export {
   extractPatterns,
   fingerprint,
@@ -26,10 +95,54 @@ export {
   normaliseOpengrep,
   defaultRulesPath,
 } from "./patterns.js";
-export { extractCoverage, parseIstanbul, parseLcov } from "./coverage.js";
+export {
+  extractCoverage,
+  formatOf,
+  parseCobertura,
+  parseGoCoverProfile,
+  parseIstanbul,
+  parseJaCoCo,
+  parseLcov,
+  parseSimpleCov,
+  resolveReportKey,
+  DEFAULT_REPORT_CANDIDATES,
+} from "./coverage.js";
 
-export { loadProject, compilerInfo, isTestPath, repoRelative } from "./project.js";
-export type { LoadedProject, LoadProjectOptions } from "./project.js";
+export {
+  loadProject,
+  compilerInfo,
+  isIgnoredPath,
+  isScannablePath,
+  isTestPath,
+  languageBreakdown,
+  languageIdOf,
+  looksMinified,
+  repoRelative,
+  sourceFileAt,
+  toProjects,
+  JS_EXTENSIONS,
+  TS_EXTENSIONS,
+  ANALYSABLE_EXTENSIONS,
+  DEFAULT_MAX_FILES,
+  DEFAULT_MAX_PROJECTS,
+} from "./project.js";
+export type { LoadedProject, LoadProjectOptions, Programs, ProjectGroup } from "./project.js";
+
+/**
+ * SELECTIVE RESOLUTION — a prototype behind `--resolution`, default `"full"`.
+ * Exported so a measurement harness can drive the tiers without a subprocess.
+ */
+export {
+  computeResolutionPolicy,
+  isResolutionTier,
+  isUnderNodeModules,
+  resolutionHostFor,
+  specifierPackage,
+  DEFAULT_RESOLUTION_TIER,
+  FULL_RESOLUTION,
+  RESOLUTION_TIERS,
+} from "./resolution.js";
+export type { ComputedPolicy, ResolutionPolicy, ResolutionTier } from "./resolution.js";
 
 export {
   BAKED_BIN_DIR,
@@ -38,14 +151,33 @@ export {
   loadManifest,
   packageRoot,
   parseVersion,
+  platformKey,
   resolveFactsBin,
   resolveToolBin,
+  sourceFor,
   stampTool,
   toolchainStamp,
+  PLATFORM_KEYS,
 } from "./toolchain.js";
-export type { ToolManifest, ToolManifestEntry } from "./toolchain.js";
+export type { PlatformKey, ToolManifest, ToolManifestEntry } from "./toolchain.js";
 
-export { changedPaths, diffHunks, repoSlug, resolveSha, showFile, withWorktree } from "./git.js";
+export {
+  changedPaths,
+  diffHunks,
+  isGitRepo,
+  listFiles,
+  mergeBase,
+  readListedFiles,
+  repoSlug,
+  resolveDiffBase,
+  resolveSha,
+  showFile,
+  withWorktree,
+} from "./git.js";
+export type { DiffBase, FileListing, ListedFile, ListFilesOptions, ListingSource } from "./git.js";
+
+export { checkAll } from "./selfcheck.js";
+export type { CheckAllOptions, Violation } from "./selfcheck.js";
 
 export {
   EXIT_OK,

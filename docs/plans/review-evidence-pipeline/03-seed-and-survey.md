@@ -3,7 +3,35 @@
 **Goal.** Turn the WP1 facts into **mechanism-complete obligations**, and run a
 generative pass that discharges them into an append-only hypothesis union.
 
-**Depends on:** [WP1](01-code-facts.md), [WP2](02-sandbox-image.md).
+**Depends on:** [WP1](01-code-facts.md) and
+[WP1b](01b-code-facts-hardening.md). **Not** [WP2](02-sandbox-image.md) —
+*corrected 2026-08-21 (§D1)*: `code-facts` ships inside the `lastlight` CLI, so
+the image is no longer what makes the tools exist and WP2 left the critical
+path.
+
+> **Corrected 2026-08-21: the 2 GB agent cap no longer blocks this WP.** This
+> paragraph used to end *"it also depends on a human decision about the 2 GB
+> agent cap ([HANDOFF.md](HANDOFF.md) sign-off item 9)"*, because this is the WP
+> that wires `lastlight-facts all` into a phase. That decision is settled by
+> measurement rather than taken — see
+> [01b-code-facts-hardening.md](01b-code-facts-hardening.md) → "Where the memory
+> actually goes". Peak RSS is dominated by `node_modules`, not by `--max-files`,
+> and a `resolutionHost` with an allow-list computed from the changed files'
+> imports (`--resolution changed`) fits the cap at **zero type-fidelity cost
+> across 499 contract entries**. None of the three levers a human was being
+> asked to choose between is needed.
+>
+> **What this WP must not do is assume a bare workspace.** Every memory number
+> quoted anywhere in this plan before today was measured on a workspace with no
+> `node_modules`, which is what `pr-review.yaml` produces today only because it
+> has no install phase — an accident, not an invariant.
+> [WP4](04-probe-oracle.md)'s `prepare` ends it permanently (`git clean -fdx -e
+> node_modules` keeps the install across runs), and at the old `--resolution
+> full` default the same commits cost **3699–4430 MB, one of them an OOM**. So
+> the `facts` phase must be measured on an *installed* workspace, not only the
+> bare one, and must **name its resolution tier explicitly** rather than
+> inheriting whatever the default is that week — or WP3 ships a memory profile
+> that WP4 silently invalidates.
 
 This is the work package that most directly targets the measured bottleneck.
 Everything before it is plumbing; everything after it is filtering.
@@ -68,8 +96,35 @@ Field notes:
 | `enforcement` | `constants` | a value is defined/validated on one side; who checks it on the other? |
 | `security` | `patterns` + `facts` | attacker-controlled input reaching a changed sink; auth/authz checks moved |
 | `state` | `facts` (impact cone) | cache invalidation, lifecycle, ordering, concurrency on a changed symbol |
-| `tests` | `mutants` | the PR changed this expression and no test distinguishes it from a mutation |
+| `tests` | ~~`mutants`~~ → `coverage` | this changed line is executed by zero tests. **Inert until [WP4](04-probe-oracle.md)** — see below |
 | `spec` | PR body, linked issue, changed tests | **does the change do what was asked?** |
+
+> **Two rows corrected 2026-08-21, on landing
+> [WP1b](01b-code-facts-hardening.md).** Both were falsified by measurement, and
+> both change what the seeder should do rather than merely how a row reads.
+>
+> **`tests` is seeded from `coverage`, not `mutants`** (§D13 cut mutation
+> seeding), **and the `coverage` extractor is structurally dead today**: **0
+> artifacts across all 50 corpus cases**, because it *reads* an existing report
+> and nothing in the pipeline produces one. The `tests` family therefore cannot
+> convert at all until [WP4](04-probe-oracle.md)'s `prepare` lands. That is a
+> **hard ordering constraint**, not a preference — a WP3 gate read on six
+> families is really a gate read on five, and a per-family attribution table
+> that shows `tests` at zero would be measuring an absent artifact, not an
+> unproductive family. Label it **"not measured"**, per §D2's rule for the
+> scanners.
+>
+> **`patterns` is spent as a DISCOVERY route, and the counterfactual proves
+> it.** With both binaries installed and the YAML fixed, the corpus produces
+> **13 real findings and +0 EC-loose** — not one of them points at a place any
+> gold finding is about. The `security` family's scanner half is **evidence
+> *for* questions, not a mechanism for *finding* them**, which is the
+> distinction [WP1](01-code-facts.md) already draws about `patterns`
+> ("evidence, not findings") applied one level up: it is also not a *seed*.
+> **WP3's family design should stop treating scanners as a discovery axis.**
+> That does not delete the `security` family — `facts` still supplies the sink
+> half — but the family's both-ends shape has to be built from the impact cone,
+> with a scanner hit as corroboration when one happens to exist.
 
 ### The `spec` family is issue #271's fix 6
 
@@ -105,6 +160,28 @@ mechanical and cheap), then by `referencesInDiff / referenceCount` — a symbol
 whose consumers are mostly *outside* the diff is the cross-file bug that is
 invisible file-by-file. Record what was dropped and why in the file; a silently
 truncated list repeats the failure locked decision 6 exists to prevent.
+
+### Read evidence coverage BEFORE spending on an arm
+
+**Added 2026-08-21 ([WP1b](01b-code-facts-hardening.md)).** [WP8](08-evals.md)
+§7 is a free, deterministic upper bound on what facts-seeding could ever
+contribute: *does the envelope even name the identifier the human talked about?*
+If it does not, no obligation about that identifier can be produced **from
+facts**, whatever this WP's prompts say.
+
+On the WP1b corpus that bound is **12/26 = 46.2% on TS/JS and 2/73 = 2.7% on
+non-TS** — and both non-TS hits are `.tsx` files, so the honest non-TS figure is
+lower still. That is not a reason to delay WP3; the gates are read on
+`skillspro`, which is TypeScript. It is a reason to **run the instrument first
+and read it per family**: a family whose identifiers the envelope never names
+cannot convert, and finding that out costs nothing where finding it out on an
+arm costs $6–19.
+
+Adopt it as a **precondition**, not a gate: a WP3 arm that reports a family
+converting at zero must say whether evidence coverage for that family was ever
+above zero, so "did not convert" and "was never nameable" stay distinguishable.
+That is locked decision 6's requirement, applied to the seeder instead of the
+extractor.
 
 ## The survey phase
 
@@ -263,10 +340,23 @@ models map.
    opens another's.
 4. `coverage: "degraded"` propagates from facts → obligations → the prompt, so
    the model is told what was not analysed.
-5. **Measurement gate:** on the train split, micro-recall exceeds the **shipped
-   baseline's 0.040**, and the `1641` empty-gold canary holds at 1.00. This is
-   the plan's first model spend. The comparator is `2026-08-20_074355`, not
-   candidate v3 — see [08-evals.md](08-evals.md) → "the ablation ladder".
+5. **Measurement gate:** the **mechanism** metrics of §D6 — obligations
+   generated and well-formed, discharge rate, the per-family funnel obligations
+   → hypotheses → posted → matched, and whether `1587-r2`'s O6 → Critical
+   conversion reproduces mechanically. Micro-recall is **reported** beside the
+   shipped baseline's 0.040 with its paired McNemar p, and the `1641` empty-gold
+   canary holds at 1.00, but neither is gated on: one extra finding is p = 0.50.
+   This is the plan's first model spend. The comparator is `2026-08-20_074355`,
+   not candidate v3 — see [08-evals.md](08-evals.md) → "the ablation ladder".
+
+   > **Corrected 2026-08-21 ([10-design-review.md](10-design-review.md) §D6).**
+   > As originally written — *"micro-recall exceeds the shipped baseline's
+   > 0.040"* — this gate is satisfied by **one** extra finding, at p = 0.50. §D6
+   > re-expressed WP3's and WP4's gates as mechanism gates for exactly that
+   > reason and the criterion had not been updated to match.
+6. **Added 2026-08-21.** Evidence coverage ([08-evals.md](08-evals.md) §7) is
+   read and recorded **per family** before the arm is run, so a family
+   converting at zero is never confused with a family that was never nameable.
 
 ## Non-goals
 

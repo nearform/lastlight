@@ -23,19 +23,13 @@ import { spawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { DepChange, DepsPayload } from "./schema.js";
+import type { DegradedEntry, DepChange, DepsPayload, Ecosystem, ManifestRef } from "./schema.js";
 import { showFile } from "./git.js";
 import type { ChangedFileIndex } from "./facts.js";
+import type { DeclaredMap } from "./manifests.js";
+import { ecosystemOf, parseManifest, ROOT_MANIFEST_NAMES } from "./manifests.js";
 import type { LoggerPort } from "./log.js";
 import { noopLogger } from "./log.js";
-
-const SCOPES = [
-  "dependencies",
-  "devDependencies",
-  "peerDependencies",
-  "optionalDependencies",
-] as const;
-type Scope = (typeof SCOPES)[number];
 
 /**
  * Build/lint/format packages, by EXACT NAME. Never a prefix — see the header.
@@ -75,22 +69,6 @@ const TOOLING_PACKAGES = new Set([
 
 export function isToolingPackage(name: string): boolean {
   return TOOLING_PACKAGES.has(name);
-}
-
-interface Manifest {
-  dependencies?: Record<string, string>;
-  devDependencies?: Record<string, string>;
-  peerDependencies?: Record<string, string>;
-  optionalDependencies?: Record<string, string>;
-}
-
-function parseManifest(raw: string | null): Manifest | null {
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as Manifest;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -182,6 +160,7 @@ export interface ExtractDepsOptions {
   base: string;
   head: string;
   hunkIndex: Map<string, ChangedFileIndex>;
+  /** Force ONE manifest instead of discovering them. */
   manifestPath?: string;
   /** Run `npm pack` and unpack the changed runtime deps. NETWORK. Opt-in. */
   stage?: boolean;
@@ -191,29 +170,73 @@ export interface ExtractDepsOptions {
 
 export interface ExtractDepsResult {
   payload: DepsPayload;
-  degraded: { extractor: string; reason: string }[];
+  degraded: DegradedEntry[];
 }
 
 export const DEFAULT_STAGE_DIR = ".lastlight/pr-review/deps";
 
+/**
+ * Which manifests this run reads: **the ones the diff touched, plus the root.**
+ *
+ * Not "every manifest in the repo" — cal.com has 140 `package.json` files, and
+ * a delta computed across all of them is a delta about the monorepo rather than
+ * about the PR. Not "the root" alone either, which is what it used to be:
+ * grafana changes `package.json` and `go.mod` in a single PR, and a scan pinned
+ * to one file reports half of it as though that were all of it.
+ *
+ * The root is always included even when untouched, because it is where a
+ * single-module repo declares everything, and because its ABSENCE is how we
+ * learn a repo is not npm at all.
+ */
+export function discoverManifests(
+  repo: string,
+  base: string,
+  head: string,
+  changedPaths: Iterable<string>,
+): ManifestRef[] {
+  const found = new Map<string, Ecosystem>();
+  for (const path of changedPaths) {
+    const ecosystem = ecosystemOf(path);
+    if (ecosystem) found.set(path, ecosystem);
+  }
+  for (const name of ROOT_MANIFEST_NAMES) {
+    if (found.has(name)) continue;
+    const ecosystem = ecosystemOf(name);
+    if (!ecosystem) continue;
+    if (showFile(repo, head, name) !== null || showFile(repo, base, name) !== null) {
+      found.set(name, ecosystem);
+    }
+  }
+  return [...found.entries()]
+    .map(([path, ecosystem]) => ({ path, ecosystem }))
+    .sort((a, b) => a.path.localeCompare(b.path));
+}
+
 export function extractDeps(options: ExtractDepsOptions): ExtractDepsResult {
   const log = options.log ?? noopLogger;
-  const manifestPath = options.manifestPath ?? "package.json";
-  const degraded: { extractor: string; reason: string }[] = [];
+  const degraded: DegradedEntry[] = [];
 
-  const before = parseManifest(showFile(options.repo, options.base, manifestPath));
-  const after = parseManifest(showFile(options.repo, options.head, manifestPath));
+  const manifests = options.manifestPath
+    ? [
+        {
+          path: options.manifestPath,
+          ecosystem: ecosystemOf(options.manifestPath) ?? ("npm" as const),
+        },
+      ]
+    : discoverManifests(options.repo, options.base, options.head, options.hunkIndex.keys());
 
-  if (!after && !before) {
+  if (manifests.length === 0) {
     degraded.push({
       extractor: "deps",
-      reason: `no ${manifestPath} at base or head — the dependency delta was not computed`,
+      reason: `no dependency manifest at base or head — looked for ${ROOT_MANIFEST_NAMES.join(", ")} at the repository root and for any manifest the diff touched. The dependency delta was NOT computed, so an empty change list here means unknown, not unchanged`,
     });
-    return { payload: { manifest: manifestPath, changes: [] }, degraded };
+    return { payload: { manifests: [], changes: [] }, degraded };
   }
 
   // Imports across the whole changed set, so a dependency added to the manifest
-  // can be tied to the line that uses it.
+  // can be tied to the line that uses it. JS/TS specifiers only — a Java
+  // `import org.foo.Bar` names a package, not an artifact, and guessing the
+  // artifact from it would tie a dependency to a line that does not load it.
   const importsByPackage = new Map<string, string[]>();
   for (const path of options.hunkIndex.keys()) {
     const source = showFile(options.repo, options.head, path);
@@ -226,46 +249,111 @@ export function extractDeps(options: ExtractDepsOptions): ExtractDepsResult {
   }
 
   const changes: DepChange[] = [];
-  for (const scope of SCOPES) {
-    const beforeScope = before?.[scope] ?? {};
-    const afterScope = after?.[scope] ?? {};
-    const names = new Set([...Object.keys(beforeScope), ...Object.keys(afterScope)]);
-    for (const name of names) {
-      const from = beforeScope[name] ?? null;
-      const to = afterScope[name] ?? null;
-      if (from === to) continue;
-      changes.push({
-        name,
-        scope,
-        change: from === null ? "added" : to === null ? "removed" : "bumped",
-        before: from,
-        after: to,
-        tooling: isToolingPackage(name),
-        importedAt: (importsByPackage.get(name) ?? []).sort(),
-        stagedAt: null,
+  const read: ManifestRef[] = [];
+
+  for (const manifest of manifests) {
+    const before = parseManifest(
+      manifest.ecosystem,
+      showFile(options.repo, options.base, manifest.path),
+      manifest.path,
+    );
+    const after = parseManifest(
+      manifest.ecosystem,
+      showFile(options.repo, options.head, manifest.path),
+      manifest.path,
+    );
+    if (!before && !after) {
+      degraded.push({
+        extractor: "deps",
+        reason: `${manifest.path} could not be read as ${manifest.ecosystem} at either base or head — its dependency delta is UNKNOWN, not empty`,
       });
+      continue;
+    }
+    read.push(manifest);
+    changes.push(...diffDeclared(manifest, before, after, importsByPackage));
+  }
+
+  changes.sort(
+    (a, b) =>
+      a.manifest.localeCompare(b.manifest) ||
+      a.name.localeCompare(b.name) ||
+      a.scope.localeCompare(b.scope),
+  );
+
+  if (options.stage) stage(options, changes, degraded, log);
+
+  return { payload: { manifests: read, changes }, degraded };
+}
+
+function diffDeclared(
+  manifest: ManifestRef,
+  before: DeclaredMap | null,
+  after: DeclaredMap | null,
+  importsByPackage: Map<string, string[]>,
+): DepChange[] {
+  const out: DepChange[] = [];
+  const names = new Set([...(before?.keys() ?? []), ...(after?.keys() ?? [])]);
+  for (const name of names) {
+    const from = before?.get(name) ?? null;
+    const to = after?.get(name) ?? null;
+    if (from && to && from.version === to.version && from.scope === to.scope) continue;
+    out.push({
+      name,
+      scope: (to ?? from)!.scope,
+      change: !from ? "added" : !to ? "removed" : "bumped",
+      before: from?.version ?? null,
+      after: to?.version ?? null,
+      manifest: manifest.path,
+      ecosystem: manifest.ecosystem,
+      tooling: isToolingPackage(name),
+      importedAt: (importsByPackage.get(name) ?? []).sort(),
+      stagedAt: null,
+    });
+  }
+  return out;
+}
+
+/**
+ * `--stage` is **npm-only**, and every other ecosystem says so out loud.
+ *
+ * There is no `npm pack` for Maven or Bundler here: fetching a jar or a gem
+ * needs that ecosystem's client, its credentials and its own egress allowlist
+ * entry, none of which this package has. The affordance being missing is a
+ * documented fact — one entry per ecosystem, not one per package, because a
+ * degraded list with sixty identical lines in it is a list nobody reads.
+ */
+function stage(
+  options: ExtractDepsOptions,
+  changes: DepChange[],
+  degraded: DegradedEntry[],
+  log: LoggerPort,
+): void {
+  const stageDir = options.stageDir ?? join(options.repo, DEFAULT_STAGE_DIR);
+  const unstageable = new Set<Ecosystem>();
+
+  for (const change of changes) {
+    if (change.scope !== "dependencies" || change.change === "removed") continue;
+    if (change.ecosystem !== "npm") {
+      unstageable.add(change.ecosystem);
+      continue;
+    }
+    const version = lockedVersion(options.repo, change.name, change.after);
+    if (!version) continue;
+    const staged = stagePackage(stageDir, change.name, version);
+    if (staged.path) {
+      change.stagedAt = staged.path;
+      log.debug("code-facts staged dependency", { name: change.name, version });
+    } else if (staged.reason) {
+      degraded.push({ extractor: "deps", reason: staged.reason });
     }
   }
 
-  changes.sort((a, b) => a.name.localeCompare(b.name) || a.scope.localeCompare(b.scope));
-
-  if (options.stage) {
-    const stageDir = options.stageDir ?? join(options.repo, DEFAULT_STAGE_DIR);
-    for (const change of changes) {
-      if (change.scope !== "dependencies" || change.change === "removed") continue;
-      const version = lockedVersion(options.repo, change.name, change.after);
-      if (!version) continue;
-      const staged = stagePackage(stageDir, change.name, version);
-      if (staged.path) {
-        change.stagedAt = staged.path;
-        log.debug("code-facts staged dependency", { name: change.name, version });
-      } else if (staged.reason) {
-        degraded.push({ extractor: "deps", reason: staged.reason });
-      }
-    }
+  for (const ecosystem of [...unstageable].sort()) {
+    degraded.push({
+      extractor: "deps",
+      reason: `--stage is npm-only: ${ecosystem} dependencies were NOT staged (stagedAt: null), so "open the library source" is still structurally impossible for them in the review workspace`,
+    });
   }
-
-  return { payload: { manifest: manifestPath, changes }, degraded };
 }
 
 /**

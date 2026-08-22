@@ -3,24 +3,40 @@
 How to run this plan as a series of sub-agent tasks. One work package per agent,
 one at a time unless the dependency graph says otherwise.
 
+> **Resuming after a break? [RESTART.md](RESTART.md) first** — it carries the
+> tree state, the three commands that prove it is sane, the environment the
+> measurements assume, and the sub-agent lessons (including the one mistake that
+> cost a 50-case corpus run). This file is the protocol; that one is the entry
+> point.
+
 ## Order
 
-**Revised 2026-08-21** — see [10-design-review.md](10-design-review.md), which
-every agent must read alongside their WP. Where it contradicts a WP, it wins.
+**Revised again 2026-08-21**, after WP1b — see
+[10-design-review.md](10-design-review.md) and
+[01b-code-facts-hardening.md](01b-code-facts-hardening.md), which every agent
+must read alongside their WP. Where either contradicts a WP, it wins.
 
 ```
-  WP8  the instrument                   offline, no spend; write the DETECTION FLOOR down
+  ✅ WP8  the instrument                LANDED. offline; the DETECTION FLOOR is written down
    │
-  WP0  spec axis + split verdict        ← NEW (§D7). rung 0.5, no infrastructure
-   │                                      first model spend
-  WP1  code-facts (ships in the CLI)    + coverage in place of mutants (§D13)
+  ✅ WP0  spec axis + split verdict     LANDED (§D7). rung 0.5, no infrastructure
    │
+  ✅ WP1  code-facts (in the CLI)       LANDED. + coverage in place of mutants (§D13)
+   │
+  ✅ WP1b code-facts hardening          LANDED. 7 bugs; the corpus + the free instruments
+   │
+  ✅ memory decision — the 2 GB cap     SETTLED by measurement, not taken
+   │                                      first model spend below this line
   WP3  seed + SIX survey phases         gate: MECHANISM metrics, not recall (§D6)
-   │
+   │                                    read EVIDENCE COVERAGE first — it is free
   WP4  prepare + falsify                gate: mechanism metrics + the latency number
-   │
+   │                                    `prepare` MUST emit a coverage artifact
   WP6  adjudicate  +  7a/7b record      gate: recall flat-or-up, SNR reported
    │                 (ungated, §D10)
+      ─── ship-capable on TypeScript (locked decision 14) ───
+   │
+  WP1c Stage 2 grammars, SCOPED         module-level declarations ONLY
+   │                                    raises the GENERALITY claim, not the ship path
   WP9  external validation              MANDATORY before any general claim
    │                                    (freeze the architecture; do not tune on it)
   [R] release + overlay enable          ← human decision required
@@ -32,6 +48,13 @@ every agent must read alongside their WP. Where it contradicts a WP, it wins.
 ```
 
 **Cut:** `mutants`, `suite`, ablation rung 2b (§D13).
+
+**Why WP1c moved right.** It reads as a WP1 follow-on and it is not on the
+shipping path. WP3's and WP4's gates are read on `skillspro`, which is
+TypeScript, where the facts already work; grammars move the **Martian** corpus,
+which is 40 non-TypeScript cases out of 50. So they buy the *generality claim* —
+[WP9](09-external-validation.md)'s job — and the deployment's managed repos are
+predominantly TypeScript anyway. Locked decision 14.
 
 **WP5 is not on the critical path.** It buys latency and observability, not
 recall. Its sub-package 5a contains two real bug fixes under today's run-level
@@ -244,6 +267,49 @@ Each of these has already cost someone a debugging session.
   process cannot be the guarantee. The default 6000-file ceiling degrades
   gracefully and is what keeps this off the normal path; do not raise it without
   the shell-level catch in place.
+- **Every diff is against the MERGE BASE, never the base branch's tip.**
+  `base...head`, which is what GitHub's "Files changed" tab shows. Two-dot
+  additionally contains every commit that landed on the base *branch* since the
+  PR forked, and the author wrote none of it. **This is a production shape, not
+  a dataset artefact** — the workflow reads `pull_request.base.sha`, the tip at
+  event time. The codebase was already **inconsistent with itself**:
+  `post-review.ts:415-455` did three-dot with an unshallow retry while
+  `code-facts` did two-dot. Measured, `sentry-greptile-1` is **6125 files
+  two-dot against 3 at the merge base** — one case that was simultaneously the
+  50-PR corpus's entire over-90 s count (157.9 s), its 2.7 GB RSS ceiling, 68 of
+  its 72 constants and 96 of its 102 dependency changes. **Before adding any new
+  git-range consumer, grep for the other ones and make them agree.**
+- **A green suite proves nothing about an argument list no shipped code ever
+  passes.** `tests/rules.test.ts` invoked opengrep with `--no-rewrite-rule-ids`
+  by hand; production never did. The suite was green against a configuration
+  that did not exist anywhere else, while the shipped path had **never parsed
+  the ruleset at all**. When a test constructs the tool's arguments, assert that
+  the *production* argument builder is the thing under test — or the test is
+  measuring a machine nobody runs.
+- **A measurement must never overlap a rebuild of what it measures.**
+  *Generalised 2026-08-21 — it has now happened to two different instruments.*
+  An earlier run of `facts-corpus.ts` was invalidated exactly that way: `pnpm
+  build` landed a new `dist/cli.js` mid-run, so early cases measured one binary
+  and late cases another, and nothing in the artifact said so. The guard is to
+  `stat` `dist/cli.js` **before and after** and confirm every artifact's mtime
+  falls inside that window; the simpler rule is to sequence them, and never to
+  run a measuring agent concurrently with an agent that rebuilds. Same principle
+  as `meta.core` on an eval scorecard — provenance is recorded, not remembered.
+  **Contention counts as overlap, too:** the resolution-tier sweep in
+  [01b](01b-code-facts-hardening.md) ran beside a full test gate and its peak-RSS
+  numbers survived while its wall-clock numbers did not — one `bare/none` run
+  that should take seconds recorded **1933 s**. Say which half of a contaminated
+  measurement you are standing on, or re-run it clean.
+- **A sub-agent that blocks on a long measurement gets killed by the stream
+  watchdog.** *Added 2026-08-21 — two agents died this way in one day.* No output
+  for **600 s** ends the agent, and a 50-run memory sweep produces nothing to say
+  for far longer than that. Waiting is not the unit of work an agent is good for.
+  Put the sweep in a **script that emits one line of progress per step**, start it
+  detached (`nohup`), and drive it from the main loop — polling a foreground run
+  from inside an agent burns cycles restarting and still dies. This is the same
+  lesson as [RESTART.md](RESTART.md) §3's "start long measurements detached",
+  arrived at from the other direction: the agent is the wrong place for the
+  *waiting*, not just the wrong place for the *running*.
 - **Evals:** `bootstrapAssets()` must run before any `getWorkflow`/`runWorkflow`,
   and `drainSessions()` before `collectMetrics()` — otherwise cost silently
   reports 0.
@@ -279,6 +345,30 @@ Never done by a sub-agent unprompted:
    it that single package 404s and takes the Release with it. This is the first
    new published package since the monorepo consolidation, so nothing else in the
    pipeline has ever exercised the path.
+9. ~~**The 2 GB agent-cap decision**~~ — **DISCHARGED 2026-08-21, the same day it
+   was added.** It asked a human to choose between three levers: lower
+   `--max-files` (`sentry-greptile-5` is **2.14 GB with identical output at
+   `--max-files 3000`**), raise the cap, or accept the OOM path. Measurement
+   found a fourth that dominates all three, so there is nothing left to choose.
+   `--max-files` bounds **ts-morph's** source-file count — 637 on a three-file
+   diff of this repo — while the `ts.Program` binds **9,647** files, **8,947 of
+   them under `node_modules`**; peak RSS follows the second number. A
+   `resolutionHost` with an allow-list of the specifiers the changed files import
+   (`--resolution changed`) fits the cap at **zero type-fidelity cost across 499
+   contract entries**, and is being made the default. See
+   [01b-code-facts-hardening.md](01b-code-facts-hardening.md) → "Where the memory
+   actually goes". **What still stands is `tests/oom.test.ts`'s point**: whatever
+   the tier, an OOM exits 134 with no envelope and the wrapper cannot save you,
+   so §D12's shell-level catch stays the guarantee.
+10. **Installing `opengrep` and `gitleaks` on any measuring host** — *added
+    2026-08-21.* Neither is installable from npm (§D2: the `opengrep` npm name is
+    a 145-byte empty stub, the `gitleaks` name is an unrelated package), so a
+    machine without them measures the `security` family with its `patterns` half
+    missing, and [WP8](08-evals.md) must label that **"not measured"** and never
+    "did not convert". `lastlight-facts toolchain` prints the per-platform
+    install commands from `toolchain.json`. This is not optional busywork: the
+    ruleset had **never been valid YAML** and nobody found out for a release,
+    precisely because no machine that ran the suite had the binary.
 
 ## Definition of done, per work package
 
@@ -296,3 +386,43 @@ A WP is done when:
 mistake candidate v1 made — four changes shipped as one, train Δ ≈ 0.000, and a
 `diff-runs` verdict that turned out to be wrong because an incomplete run had
 silently changed the split denominator.
+
+## Open questions — the honest backlog
+
+**Added 2026-08-21, after [WP1b](01b-code-facts-hardening.md).** These are known
+and unclosed. Each is written down rather than fixed because closing it costs
+more than leaving it visible does — which is only true while it stays visible.
+
+- ~~**The 2 GB agent cap.**~~ **Closed 2026-08-21** — see sign-off item 9 above
+  and [01b](01b-code-facts-hardening.md) → "Where the memory actually goes". The
+  bound was never `--max-files`; it was the **8,947 `node_modules` files the
+  `ts.Program` binds** behind a 637-file ts-morph budget. `--resolution changed`
+  fits the cap losslessly. **The residue worth carrying forward is that the
+  measurement it invalidated was invalidated silently:** every memory number in
+  this plan before that day assumed a workspace with no `node_modules`, which is
+  true today only because `pr-review.yaml` has no install phase, and
+  [WP4](04-probe-oracle.md)'s `prepare` ends that permanently.
+- **Fingerprint collisions silently drop findings.** `patterns` emits
+  `fingerprint = sha1(tool:rule:file:3-line-context)`, reusing
+  `skills/security-review/SKILL.md`'s vocabulary. On the corpus, **13 findings
+  collapse to 11 distinct fingerprints** — two same-line matches at
+  `topic.rb:382` that a three-line context window cannot separate. Any consumer
+  that dedups on the fingerprint therefore **silently drops one of them**, which
+  is the shape locked decision 6 exists to prevent, one layer down. Widening the
+  window or adding a column ordinal both work; neither has been chosen.
+- **`patterns` scopes to changed FILES, not changed HUNKS.** So a scanner hit
+  anywhere in a touched file is reported as if it were part of the change. It is
+  the conservative direction — a missed hit is worse than an off-hunk one — but
+  it is also why the family's 13 findings buy **+0 EC-loose**, and a seeder that
+  treats them as diff-scoped would be wrong.
+- **`facts` and `contracts` still read HEAD off the filesystem** while their
+  changed set comes from git. On a workspace that is not at `headSha` they
+  analyse one tree and cite another — and `pr-review` workspaces are
+  deliberately **reused** across runs, so this is reachable rather than
+  theoretical. Closing it means materialising a head worktree as well as the
+  base one, at **2× the worktree cost**. A deferral with a trigger, not an
+  oversight.
+- **Three tests are load-sensitive** — they measure wall clock or peak RSS, so a
+  busy machine can redden them. They are kept because a bound with no floor is
+  not a guard (`tests/noise-floor.test.ts`), but a CI failure in one of the three
+  should be reproduced on an idle machine before it is believed.

@@ -56,10 +56,20 @@ describe("exit codes — the contract a human or a test reads", () => {
       const document = result.document as unknown as FactsDocument;
       expect(result.exitCode).toBe(EXIT_DEGRADED);
       expect(document.coverage).toBe("degraded");
-      expect(document.symbols).toEqual([]);
-      // AC2: it never exits 0 with an empty symbol list.
+      expect(document.tier).toBe(2);
+      // AC2: it never exits 0 with an empty symbol list. Tier 2 now PRODUCES a
+      // symbol list — the syntactic engine matches names without a compiler —
+      // so the assertion that carries AC2 is no longer "the list is empty". It
+      // is that the list says what it is: every symbol here is a hypothesis,
+      // and a consumer must be able to tell that from the document alone.
+      expect(document.symbols.length).toBeGreaterThan(0);
+      expect(document.symbols.every((s) => s.resolution === "name-match")).toBe(true);
+      expect(document.symbols.every((s) => s.nameAmbiguity !== null)).toBe(true);
+      // …and an implementations query is a TYPE query, so it stays `null` here
+      // rather than becoming an "this interface has no implementers" claim.
+      expect(document.symbols.every((s) => s.implementations === null)).toBe(true);
       expect(document.degraded.length).toBeGreaterThan(0);
-      expect(document.degraded.some((d) => /means UNKNOWN, not clean/.test(d.reason))).toBe(true);
+      expect(document.degraded.some((d) => /NAME MATCHING/.test(d.reason))).toBe(true);
     } finally {
       broken.cleanup();
     }
@@ -119,7 +129,15 @@ describe("§D12 — the phase wrapper never fails the run", () => {
       // Still a valid document — a consumer needs no second code path.
       expect(document.version).toBe(1);
       expect(document.symbols).toEqual([]);
-      expect(document.toolchain.manifest).toBe(1);
+      // `2` since `source` became per-platform `sources` — the manifest schema
+      // version, pinned as a literal on purpose so a change to the shape has to
+      // be a deliberate edit here rather than something the stamp follows
+      // silently. It is also what the eval preflight compares against.
+      expect(document.toolchain.manifest).toBe(2);
+      // The envelope now says which parser ran, and on a repo that is not a git
+      // repo at all the only honest answer is "none, and no languages seen".
+      expect(document.engine).toBe("none");
+      expect(document.languages).toEqual([]);
     } finally {
       rmSync(notARepo, { recursive: true, force: true });
     }

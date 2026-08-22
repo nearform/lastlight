@@ -38,6 +38,13 @@ export const ToolStampSchema = z.object({
   expected: z.string().nullable(),
   resolved: z.string().nullable(),
   path: z.string().nullable(),
+  /**
+   * `${platform}-${arch}` — WHICH BUILD this host wants (`darwin-arm64`, …), or
+   * `null` on a platform the manifest has no source for. A scorecard measured
+   * on a Mac and one measured in the linux image are different measurements,
+   * and until now nothing in the document said which one you were reading.
+   */
+  platform: z.string().nullable(),
   status: z.enum(["ok", "mismatch", "missing", "unprobed"]),
 });
 export type ToolStamp = z.infer<typeof ToolStampSchema>;
@@ -66,6 +73,35 @@ export type ToolchainStamp = z.infer<typeof ToolchainStampSchema>;
 export const TierSchema = z.union([z.literal(1), z.literal(2), z.literal(3)]);
 export type Tier = z.infer<typeof TierSchema>;
 
+/** Which parser actually produced this document's syntax trees, if any. */
+export const EngineSchema = z.enum(["ts-morph", "ast-grep", "none"]);
+export type Engine = z.infer<typeof EngineSchema>;
+
+/**
+ * One row per language in the diff — THE DIRECT ANSWER TO "silence is the
+ * failure mode we are engineering against".
+ *
+ * A Java PR used to produce an envelope with eight degraded reasons and zero
+ * facts, which is a shape a *clean* TypeScript run could in principle also
+ * take. It now additionally says
+ * `[{ id: "java", changedFiles: 48, parsedFiles: 0, engine: "none" }]`, and no
+ * clean run can ever look like that: a language was recognised, forty-eight
+ * files of it changed, and nothing parsed one of them.
+ *
+ * `changedFiles` excludes deletions — a file that does not exist at head cannot
+ * be parsed, and counting it as unparsed would manufacture the very signal this
+ * field exists to make trustworthy.
+ */
+export const LanguageStatSchema = z.object({
+  /** From the extension: `typescript`, `java`, `go`, … See `languageIdOf`. */
+  id: z.string(),
+  changedFiles: z.number().int(),
+  /** Files this run actually obtained a syntax tree for. */
+  parsedFiles: z.number().int(),
+  engine: EngineSchema,
+});
+export type LanguageStat = z.infer<typeof LanguageStatSchema>;
+
 export const EnvelopeSchema = z.object({
   version: z.literal(1),
   generatedAt: z.iso.datetime(),
@@ -75,6 +111,27 @@ export const EnvelopeSchema = z.object({
   baseSha: z.string(),
   headSha: z.string(),
   tier: TierSchema,
+  /** The parser that ran. `"none"` beside a populated `languages` is the tell. */
+  engine: EngineSchema,
+  languages: z.array(LanguageStatSchema),
+  /**
+   * How much of `node_modules` the type-checker was allowed to follow, and how
+   * many packages that came to.
+   *
+   * **Stamped here rather than pushed into `degraded[]`, deliberately.** The
+   * default (`changed`) is measurably lossless — across 499 contract entries on
+   * the two largest commits of this repo it produced the same entry count, the
+   * identical key set, and zero entries that gained an `any` — so reporting it
+   * as a degradation would assert we failed to see something when we saw
+   * everything the contract surface can name. `degraded[]` that is populated on
+   * every single run is `degraded[]` that has stopped carrying signal, which is
+   * the failure this package exists to avoid, arrived at from the polite end.
+   *
+   * `none` DOES lose fidelity and still degrades. So does a run whose
+   * allow-list could not be computed. The rule is: degrade when fidelity was
+   * actually lost, not when a policy applied cleanly.
+   */
+  resolution: z.object({ tier: z.string(), allowed: z.number().int().nullable() }),
   coverage: z.enum(["full", "degraded", "none"]),
   degraded: z.array(DegradedEntrySchema),
   toolchain: ToolchainStampSchema,
@@ -92,6 +149,23 @@ export const ReferenceSchema = z.object({
   isTest: z.boolean(),
 });
 
+/**
+ * HOW the reference set was obtained — the epistemic status of everything else
+ * in the `SymbolFact`.
+ *
+ * `type-aware` — a type-checker resolved it. `references` is THE reference set:
+ *   two sites are in it because the compiler says they bind the same symbol.
+ * `name-match` — a parser matched an identifier STRING (`syntactic.ts`). Every
+ *   site is a HYPOTHESIS, and the number that says how good a hypothesis is
+ *   `nameAmbiguity`.
+ *
+ * The field exists because the two are the same JSON otherwise, and a consumer
+ * that read a name-matched set as a type-resolved one would be making exactly
+ * the over-claim this package refuses to make about absence.
+ */
+export const ResolutionSchema = z.enum(["type-aware", "name-match"]);
+export type Resolution = z.infer<typeof ResolutionSchema>;
+
 export const SymbolFactSchema = z.object({
   name: z.string(),
   kind: z.string(),
@@ -99,7 +173,16 @@ export const SymbolFactSchema = z.object({
   declaredAt: z.string(),
   changedHunks: z.array(z.string()),
   references: z.array(ReferenceSchema),
-  implementations: z.array(z.string()),
+  /**
+   * `null` = NOBODY LOOKED; `[]` = looked, found none.
+   *
+   * The distinction this package is founded on, and it was being collapsed:
+   * implementations are only meaningful for an interface / abstract member, and
+   * every other kind — plus every query the language service threw on — used to
+   * report `[]`, i.e. "this interface has no implementers". Under tier 2 that
+   * reading is wrong for ~80% of the corpus.
+   */
+  implementations: z.array(z.string()).nullable(),
   callees: z.array(z.string()),
   tests: z.array(z.string()),
   referenceCount: z.number().int(),
@@ -110,6 +193,23 @@ export const SymbolFactSchema = z.object({
    * invisible in the diff because each file reads correctly alone.
    */
   referencesInDiff: z.number().int(),
+  /** How `references` was obtained. See `ResolutionSchema`. */
+  resolution: ResolutionSchema,
+  /**
+   * How many distinct declaration sites in the repository bind this same NAME.
+   *
+   * **Data, never a filter.** This layer generates hypotheses and the seeder
+   * ranks them; deleting a reference set here because its name is common would
+   * throw away evidence nothing downstream could recover. `1` is the case where
+   * a name match is very nearly a symbol match; a large number is the case
+   * where it is barely evidence at all.
+   *
+   * `null` = NOBODY LOOKED, and on tier 1 nobody does: building it means a
+   * repo-wide parse, which a type-resolved run has no other use for and should
+   * not pay for. The question is moot there anyway — the reference set does not
+   * come from the name.
+   */
+  nameAmbiguity: z.number().int().nullable(),
 });
 export type SymbolFact = z.infer<typeof SymbolFactSchema>;
 
@@ -167,8 +267,17 @@ export const ConstantFactSchema = z.object({
   declaredAt: z.string(),
   value: z.string(),
   valueKind: z.enum(["string", "number", "boolean"]),
-  /** A — every reference to the identifier (ts-morph). */
-  references: z.array(z.string()),
+  /**
+   * A — every reference to the identifier (ts-morph). **Nullable, and the
+   * nullability is the point**: `null` means there is no set A because tier 2
+   * had no compiler to ask, and `[]` means the compiler looked and found none.
+   *
+   * `constants` is the extractor that makes ABSENCE claims — "referenced only
+   * client-side, zero server references" is the one gold finding this whole
+   * investigation ever converted — so an empty array standing in for a missing
+   * query is the most expensive lie in the document.
+   */
+  references: z.array(z.string()).nullable(),
   /**
    * B \ A — every occurrence of the literal VALUE that does NOT go through the
    * constant (ast-grep). The subtraction is the insight.
@@ -178,8 +287,19 @@ export const ConstantFactSchema = z.object({
    * A heuristic path-prefix partition of `references`. A constant defined in
    * config, read by the client and never compared server-side is exactly the
    * `1587-r2` Critical. It is A HINT FOR THE SEEDER, never a finding on its own.
+   *
+   * **Nullable for the same reason `references` is, and it is the same bug**:
+   * this is a partition OF `references`, so with no set A there is nothing to
+   * partition. It used to emit an all-zeros record on tier 2 — `{server: 0}`
+   * derived from a reference set that does not exist is indistinguishable from
+   * `{server: 0}` measured, and "zero server-side references" is precisely the
+   * shape of the one gold finding this investigation ever converted. A false one
+   * is expensive.
+   *
+   * `sideDefinitions` ships either way, so the partition stays auditable even
+   * when this is `null`.
    */
-  sides: z.record(z.string(), z.number().int()),
+  sides: z.record(z.string(), z.number().int()).nullable(),
 });
 export type ConstantFact = z.infer<typeof ConstantFactSchema>;
 
@@ -194,12 +314,42 @@ export type ConstantsDocument = z.infer<typeof ConstantsDocumentSchema>;
 
 // ── `deps` — manifest delta + staged source ──────────────────────────────────
 
+/**
+ * The ecosystems `deps` can read a DECLARED DIRECT dependency out of.
+ *
+ * Measured, and the reason this list is not just `npm`: keycloak's root manifest
+ * is Maven and discourse's is a Gemfile — **neither repo has a root
+ * `package.json`** — so `deps` degraded outright on ~19 of the 50 corpus cases,
+ * and on the mixed repos (grafana: npm + go.mod; sentry: npm + pyproject.toml)
+ * it silently covered only the JS half.
+ */
+export const EcosystemSchema = z.enum(["npm", "go", "maven", "gradle", "bundler", "pypi"]);
+export type Ecosystem = z.infer<typeof EcosystemSchema>;
+
+export const ManifestRefSchema = z.object({
+  path: z.string(),
+  ecosystem: EcosystemSchema,
+});
+export type ManifestRef = z.infer<typeof ManifestRefSchema>;
+
 export const DepChangeSchema = z.object({
   name: z.string(),
+  /**
+   * Every ecosystem's own vocabulary mapped onto npm's four, so the field is
+   * comparable across a PR that touches `package.json` AND `go.mod` (grafana
+   * does exactly that). Maven `test`/`provided` and Gradle `test*` → dev;
+   * Bundler's `:development`/`:test` groups → dev; a python extra →
+   * optional. The un-mapped raw scope is not preserved: "is this a build-time
+   * dependency" is the question, and the raw string answers it differently in
+   * every ecosystem.
+   */
   scope: z.enum(["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]),
   change: z.enum(["added", "removed", "bumped"]),
   before: z.string().nullable(),
   after: z.string().nullable(),
+  /** Which manifest this change was read out of — a PR can touch several. */
+  manifest: z.string(),
+  ecosystem: EcosystemSchema,
   /** Tooling packages are noise UNLESS the config IS the diff — see `deps.ts`. */
   tooling: z.boolean(),
   /** Import sites in the changed files, including `createRequire(...)("pkg")`. */
@@ -210,7 +360,12 @@ export const DepChangeSchema = z.object({
 export type DepChange = z.infer<typeof DepChangeSchema>;
 
 export const DepsPayloadSchema = z.object({
-  manifest: z.string(),
+  /**
+   * Every manifest this run READ, not just the one it defaulted to. Was a
+   * single `manifest: string` hardcoded to `package.json`; cal.com has 140 of
+   * them and grafana changes `package.json` and `go.mod` in one PR.
+   */
+  manifests: z.array(ManifestRefSchema),
   changes: z.array(DepChangeSchema),
 });
 export type DepsPayload = z.infer<typeof DepsPayloadSchema>;
@@ -249,6 +404,16 @@ export type PatternsDocument = z.infer<typeof PatternsDocumentSchema>;
 
 // ── `coverage` — changed lines executed by zero tests ────────────────────────
 
+export const CoverageFormatSchema = z.enum([
+  "istanbul",
+  "lcov",
+  "jacoco",
+  "cobertura",
+  "go-coverprofile",
+  "simplecov",
+]);
+export type CoverageFormat = z.infer<typeof CoverageFormatSchema>;
+
 export const CoveredFileSchema = z.object({
   path: z.string(),
   changedLines: z.array(z.number().int()),
@@ -261,7 +426,13 @@ export const CoveredFileSchema = z.object({
 export const CoveragePayloadSchema = z.object({
   /** Which artifact was read. `null` when none was found — see `degraded[]`. */
   report: z.string().nullable(),
-  reportFormat: z.enum(["istanbul", "lcov"]).nullable(),
+  /**
+   * istanbul + lcov were the only two, and **none of the corpus's four
+   * non-JS ecosystems emits either** — so `coverage` was structurally unable to
+   * answer its own question on a Java, Go, Python or Ruby PR, and answered it
+   * with an empty file list, which reads as "well tested".
+   */
+  reportFormat: CoverageFormatSchema.nullable(),
   files: z.array(CoveredFileSchema),
   totals: z.object({
     changedLines: z.number().int(),

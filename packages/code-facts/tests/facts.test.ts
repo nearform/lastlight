@@ -13,6 +13,7 @@ import {
   makeBarrelFixture,
   makeConstantFixture,
   makeContractFixture,
+  makeSymbolKindsFixture,
   type Fixture,
 } from "./helpers.js";
 import { runExtractor } from "../src/run.js";
@@ -98,5 +99,133 @@ describe("facts — the impact cone", () => {
       "src/config.ts",
       "src/legacy/auth.ts",
     ]);
+  });
+});
+
+/**
+ * M6 — `implementations` is nullable, and the nullability IS the fact.
+ *
+ * `null` = nobody looked; `[]` = looked, found none. Every kind for which the
+ * question does not apply (a function, a variable) and every query the language
+ * service threw on used to report `[]`, so "this is not an interface" and "this
+ * exported interface has no implementers anywhere" were the same JSON — and
+ * only the second is worth an obligation.
+ */
+describe("facts — implementations distinguishes `nobody looked` from `none`", () => {
+  it("is null for a kind the question does not apply to, and an array for one it does", () => {
+    const fixture = makeContractFixture();
+    try {
+      const document = facts(fixture);
+      const getUser = document.symbols.find((s) => s.name === "getUser");
+      expect(getUser?.kind).toBe("function");
+      expect(getUser?.implementations, "a plain function was never asked").toBeNull();
+
+      const asked = document.symbols.filter((s) =>
+        ["interface", "interface-method", "abstract-method", "class"].includes(s.kind),
+      );
+      expect(asked.length, "the fixture must contain a kind that IS asked").toBeGreaterThan(0);
+      for (const symbol of asked) {
+        expect(Array.isArray(symbol.implementations), symbol.name).toBe(true);
+      }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+});
+
+/**
+ * THE THIRD STATE. `implementations` has three of them — `null` (nobody asked),
+ * `[]` (asked, none) and a populated array — and the third had **never been
+ * non-empty in any test**, because no fixture ever implemented an interface.
+ * A field whose only tested values are "absent" and "empty" is a field whose
+ * happy path is unexercised, in the extractor that exists to find the consumers
+ * a reviewer will not see.
+ *
+ * The rest of the kind table lives here too: `enum`, `type`, `property`,
+ * `abstract-method` and `method` were all unreached, as were a DELETED file's
+ * `analysed: false` and a RENAMED file's new path.
+ */
+describe("facts — the whole kind table, on one commit", () => {
+  let fixture: Fixture;
+  let document: FactsDocument;
+
+  beforeAll(() => {
+    fixture = makeSymbolKindsFixture();
+    document = facts(fixture);
+  });
+  afterAll(() => fixture.cleanup());
+
+  const symbol = (name: string) => document.symbols.find((s) => s.name === name);
+
+  it("names both implementers of a changed interface, and neither is the interface itself", () => {
+    const store = symbol("Store");
+    expect(store?.kind).toBe("interface");
+    expect(store?.implementations).toEqual(["src/db.ts:3", "src/mem.ts:3"]);
+    // Both implementers are OUTSIDE the diff — which is the point of the field.
+    expect(document.files.map((f) => f.path)).not.toContain("src/mem.ts");
+  });
+
+  it("resolves implementations of an interface METHOD down to the method line", () => {
+    expect(symbol("Store.get")?.kind).toBe("interface-method");
+    expect(symbol("Store.get")?.implementations).toEqual(["src/db.ts:4", "src/mem.ts:4"]);
+  });
+
+  it("keeps `[]` meaning `looked and found none` beside those populated arrays", () => {
+    // `Base` is an exported abstract class nothing extends. That is a FACT worth
+    // an obligation, and it is only legible next to the populated case above.
+    expect(symbol("Base")?.kind).toBe("class");
+    expect(symbol("Base")?.implementations).toEqual([]);
+    expect(symbol("Base.run")?.kind).toBe("abstract-method");
+    expect(symbol("Base.run")?.implementations).toEqual([]);
+  });
+
+  it("emits every declaration kind the diff touched", () => {
+    expect(
+      document.symbols
+        .map((s) => s.kind)
+        .filter((kind, index, all) => all.indexOf(kind) === index)
+        .sort(),
+    ).toEqual([
+      "abstract-method",
+      "class",
+      "enum",
+      "function",
+      "interface",
+      "interface-method",
+      "method",
+      "property",
+      "type",
+    ]);
+    expect(symbol("Mode")?.kind).toBe("enum");
+    expect(symbol("Label")?.kind).toBe("type");
+    expect(symbol("Base.limit")?.kind).toBe("property");
+    expect(symbol("Service.run")?.kind).toBe("method");
+    // `facts` records a private method — it is a unit a reviewer reasons about.
+    // (`contracts` excludes it; the two extractors answer different questions.)
+    expect(symbol("Service.secret")?.kind).toBe("method");
+  });
+
+  it("records a NON-EMPTY callee list — the outward edge of a changed function", () => {
+    // Only ever asserted as `[]` before, which passes on an extractor that
+    // never populates it at all.
+    expect(symbol("boot")?.callees).toEqual(["start"]);
+    expect(symbol("Mode")?.callees).toEqual([]);
+  });
+
+  it("marks a DELETED file `analysed: false` rather than dropping it", () => {
+    const gone = document.files.find((f) => f.path === "src/gone.ts");
+    expect(gone?.status).toBe("deleted");
+    // There is nothing at head to parse, and saying so is what stops "no
+    // symbols here" reading as "this file is fine".
+    expect(gone?.analysed).toBe(false);
+    expect(document.symbols.some((s) => s.declaredAt.startsWith("src/gone.ts"))).toBe(false);
+  });
+
+  it("lists a RENAMED file under its new path, analysed", () => {
+    const renamed = document.files.find((f) => f.status === "renamed");
+    expect(renamed?.path).toBe("src/new-name.ts");
+    expect(renamed?.analysed).toBe(true);
+    // The old path exists at neither head nor in the change set.
+    expect(document.files.map((f) => f.path)).not.toContain("src/old-name.ts");
   });
 });

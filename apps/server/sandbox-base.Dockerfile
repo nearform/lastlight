@@ -91,10 +91,22 @@ ENV BASH_ENV=/etc/bash.bashrc.fnm
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable
 
+# gitleaks is fetched per-ARCH. It was hardcoded to the linux_x64 asset, which
+# made an arm64 build of this image either fail outright or bake an x86 binary
+# that cannot exec — and gitleaks publishes linux_arm64 at this exact version
+# (as does opengrep, and as do both for darwin; see
+# `packages/code-facts/toolchain.json`, whose `sources` map is the source of
+# truth for all of them). `TARGETARCH` is set for us by BuildKit.
+ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip pipx \
     && PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install semgrep \
-    && curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz \
+    && case "${TARGETARCH:-amd64}" in \
+         arm64) GITLEAKS_ARCH=arm64 ;; \
+         amd64|"") GITLEAKS_ARCH=x64 ;; \
+         *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+       esac \
+    && curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_${GITLEAKS_ARCH}.tar.gz" \
        | tar -xz -C /usr/local/bin gitleaks \
     && apt-get purge -y python3-pip \
     # Drop the pip/pipx download + build caches semgrep's install leaves behind

@@ -36,12 +36,33 @@ const require_ = createRequire(import.meta.url);
 /** The directory the sandbox image bakes the toolchain into (WP2). */
 export const BAKED_BIN_DIR = "/opt/lastlight/bin";
 
+/**
+ * The four hosts this toolchain is ever asked to run on, spelled the way
+ * `process.platform`/`process.arch` spell them.
+ *
+ * Both are load-bearing for THIS package specifically: the eval harness runs
+ * `--sandbox none` on a Mac (see the header of `project.ts` and §D1), so
+ * `darwin-arm64` is not a courtesy row — it is the row most measurements are
+ * actually taken on.
+ */
+export const PLATFORM_KEYS = ["linux-x64", "linux-arm64", "darwin-arm64", "darwin-x64"] as const;
+export type PlatformKey = (typeof PLATFORM_KEYS)[number];
+
 export interface ToolManifestEntry {
   version: string;
   tier: string;
   usedBy: string[];
   probe: string[];
-  source: string;
+  /**
+   * Where this exact version comes from, PER PLATFORM.
+   *
+   * It was a single string, hardcoded to linux/x86 — in a file whose third
+   * consumer "refuses on a mismatch, printing the commands to fix it". On
+   * darwin it printed a command that could not work, and every one of these
+   * tools does publish a darwin build at the pinned version. The manifest was
+   * the limit, not the platform.
+   */
+  sources: Record<string, string>;
   note?: string;
 }
 
@@ -66,6 +87,38 @@ export function loadManifest(): ToolManifest {
     manifestCache = JSON.parse(raw) as ToolManifest;
   }
   return manifestCache;
+}
+
+/**
+ * `${process.platform}-${process.arch}` reduced to the four keys the manifest
+ * carries, or `null` on anything else.
+ *
+ * `null` rather than a linux default on purpose: a wrong install command is
+ * worse than an absent one, because the operator runs it and it half-works.
+ */
+export function platformKey(
+  platform: NodeJS.Platform | string = process.platform,
+  arch: string = process.arch,
+): PlatformKey | null {
+  const os = platform === "darwin" ? "darwin" : platform === "linux" ? "linux" : null;
+  const cpu = arch === "x64" ? "x64" : arch === "arm64" ? "arm64" : null;
+  if (!os || !cpu) return null;
+  const key = `${os}-${cpu}`;
+  return (PLATFORM_KEYS as readonly string[]).includes(key) ? (key as PlatformKey) : null;
+}
+
+/**
+ * The install source for one tool on one platform, with `${version}` expanded.
+ *
+ * `null` means "this manifest cannot tell you how to get this tool here" — the
+ * honest answer for a platform nobody publishes a build for, and the one the
+ * preflight should print instead of a linux command.
+ */
+export function sourceFor(tool: string, platform: PlatformKey | null = platformKey()): string | null {
+  const entry = loadManifest().binaries[tool];
+  if (!entry || !platform) return null;
+  const template = entry.sources?.[platform];
+  return template ? template.replaceAll("${version}", entry.version) : null;
 }
 
 function isExecutable(path: string): boolean {
@@ -157,14 +210,19 @@ function probeVersion(bin: string, args: string[]): string | null {
 export function stampTool(tool: string, env: NodeJS.ProcessEnv = process.env): ToolStamp {
   const entry = loadManifest().binaries[tool];
   const expected = entry?.version ?? null;
+  // The HOST's key, not the resolved binary's: nothing here inspects a Mach-O
+  // header, and "which build of this tool should be here" is the question a
+  // scorecard needs answered months later.
+  const platform = platformKey();
   const bin = resolveToolBin(tool, env);
-  if (!bin) return { expected, resolved: null, path: null, status: "missing" };
+  if (!bin) return { expected, resolved: null, path: null, platform, status: "missing" };
   const resolved = probeVersion(bin, entry?.probe ?? ["--version"]);
-  if (!resolved) return { expected, resolved: null, path: bin, status: "missing" };
+  if (!resolved) return { expected, resolved: null, path: bin, platform, status: "missing" };
   return {
     expected,
     resolved,
     path: bin,
+    platform,
     status: expected && resolved !== expected ? "mismatch" : "ok",
   };
 }
@@ -207,11 +265,12 @@ export function toolchainStamp(
   env: NodeJS.ProcessEnv = process.env,
 ): ToolchainStamp {
   const manifest = loadManifest();
+  const platform = platformKey();
   const binaries: Record<string, ToolStamp> = {};
   for (const [name, entry] of Object.entries(manifest.binaries)) {
     binaries[name] = tools.includes(name)
       ? stampTool(name, env)
-      : { expected: entry.version, resolved: null, path: null, status: "unprobed" };
+      : { expected: entry.version, resolved: null, path: null, platform, status: "unprobed" };
   }
   return { manifest: manifest.version, bundled: bundledVersions(), binaries };
 }
