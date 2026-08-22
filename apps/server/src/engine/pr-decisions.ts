@@ -1416,6 +1416,54 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      * the projection, not a convenience.
      */
     analysisEnabled: "true",
+    /**
+     * WP4's gate, and a SEPARATE one — `skip_if: "probesEnabled != true"`.
+     *
+     * Present only when the operator asked for both, so the absence rule above
+     * holds twice over: a deployment with the pipeline on and probes off gets
+     * WP3's phases and none of WP4's, and a typo anywhere still fails towards
+     * "the probe phases skip". It is its own key rather than a richer
+     * `analysis` object because `evalSkipIf` compares scalars, and because the
+     * decision it encodes — install a pull request author's dependencies into
+     * the workspace — is not the same decision as "run the surveys".
+     */
+    ...(review.analysis.probes ? { probesEnabled: "true" } : {}),
+    /**
+     * The three sub-switches, projected only when probes are on at all.
+     *
+     * They are strings for the same reason `analysisEnabled` is: the render
+     * context is projected to strings and `coerceBool` reads `"true"` either
+     * way. `prepare`'s command reads them to build its own flags, so a phase
+     * never has to know the config shape — and an absent one degrades to "do
+     * the cheap thing", which is the direction every default here points.
+     */
+    ...(review.analysis.probes
+      ? {
+          probeLifecycleScripts: review.analysis.probeLifecycleScripts ? "true" : "false",
+          probeTypecheck: review.analysis.probeTypecheck ? "true" : "false",
+          probeCoverage: review.analysis.probeCoverage ? "true" : "false",
+          prepareTimeoutSeconds: String(review.analysis.prepareTimeoutSeconds),
+          coverageTimeoutSeconds: String(review.analysis.coverageTimeoutSeconds),
+          probeRounds: String(review.analysis.probeRounds),
+          /**
+           * The PHASE's ceiling, which is not any one step's.
+           *
+           * `prepare` runs up to three timed steps and the engine's
+           * `timeout_seconds` bounds the whole phase, so handing it the install
+           * budget would kill the process part-way through a coverage run — and
+           * a killed process writes no `env.json` at all, which is the one
+           * outcome the whole design is against. Summed here rather than in
+           * YAML because `templated-number` reads a context value and cannot do
+           * arithmetic. The 30 s of slack covers the CLI's own startup.
+           */
+          probePhaseTimeoutSeconds: String(
+            review.analysis.prepareTimeoutSeconds +
+              (review.analysis.probeTypecheck ? review.analysis.prepareTimeoutSeconds : 0) +
+              (review.analysis.probeCoverage ? review.analysis.coverageTimeoutSeconds : 0) +
+              30,
+          ),
+        }
+      : {}),
     // The PR's own description — what the AUTHOR says they did.
     prBody: state.body,
     // The issues it closes — what was ASKED, fenced as reference material by

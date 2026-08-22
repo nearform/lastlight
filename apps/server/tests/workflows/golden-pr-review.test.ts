@@ -55,6 +55,7 @@ import {
  */
 
 const DECLARED = [
+  "prepare",
   "facts",
   "seed",
   "survey_contract",
@@ -63,12 +64,23 @@ const DECLARED = [
   "survey_state",
   "survey_tests",
   "survey_spec",
+  "falsify",
   "review",
   "post-review",
 ];
 
-/** The eight phases WP3 added — every one of them must vanish when the flag is off. */
-const ANALYSIS_PHASES = DECLARED.slice(0, 8);
+/** Every phase the evidence pipeline added — all ten vanish when it is off. */
+const ANALYSIS_PHASES = DECLARED.slice(0, 10);
+
+/**
+ * WP4's two phases are gated SEPARATELY, on `probesEnabled`, so they skip even
+ * on a deployment that turned the pipeline on. Their own key because the
+ * decision they encode — install a pull request author's dependencies into the
+ * workspace, then execute things in it — is not the same decision as "run the
+ * surveys".
+ */
+const WP4_PHASES = ["prepare", "falsify"];
+const WP3_PHASES = DECLARED.slice(1, 9);
 
 /** The two phases that existed before WP3 and must still EXECUTE when it is off. */
 const LEGACY_PHASES = ["review", "post-review"];
@@ -144,7 +156,7 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
 
     const dag = buildDag(def.phases, { chainIfNoDeps: true });
     // Exactly one root, and it is the first declared phase.
-    expect(dag.filter((n) => n.depends_on.length === 0).map((n) => n.name)).toEqual(["facts"]);
+    expect(dag.filter((n) => n.depends_on.length === 0).map((n) => n.name)).toEqual(["prepare"]);
     // …and every other node depends on precisely its predecessor.
     for (let i = 1; i < dag.length; i++) {
       expect(dag[i].depends_on).toEqual([DECLARED[i - 1]]);
@@ -157,7 +169,7 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
     // inert configuration would post no review at all. `all_done` is the rule
     // the schema names for exactly this.
     const byName = new Map(def.phases.map((p) => [p.name, p]));
-    for (const name of DECLARED.slice(1, 9)) {
+    for (const name of DECLARED.slice(1, 11)) {
       expect(byName.get(name)?.trigger_rule, `${name}.trigger_rule`).toBe("all_done");
     }
     // post-review is deliberately the other way: a FAILED review must not post.
@@ -165,11 +177,24 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
     expect(byName.get("post-review")?.depends_on).toEqual(["review"]);
   });
 
-  it("guards all eight new phases on `analysisEnabled != true`, and neither legacy phase", () => {
+  it("guards WP3's eight phases on `analysisEnabled`, WP4's on `probesEnabled`, and neither legacy phase", () => {
     const byName = new Map(def.phases.map((p) => [p.name, p]));
-    for (const name of ANALYSIS_PHASES) {
+    for (const name of WP3_PHASES) {
       expect(phaseSkipIfExpressions(byName.get(name)!), `${name}.skip_if`).toEqual([
         "analysisEnabled != true",
+      ]);
+    }
+    // Two switches, not one. `prepare` is the phase that puts a `node_modules`
+    // in the review workspace — it costs the operator disk and memory in a
+    // LATER phase, and it runs a pull request author's dependency tree — so a
+    // deployment that opted into the surveys has not thereby opted into it.
+    // `falsify` then EXECUTES things in that tree. Both carry BOTH expressions,
+    // so probes cannot run without the pipeline even if the projection that
+    // pairs them is ever changed.
+    for (const name of WP4_PHASES) {
+      expect(phaseSkipIfExpressions(byName.get(name)!), `${name}.skip_if`).toEqual([
+        "analysisEnabled != true",
+        "probesEnabled != true",
       ]);
     }
     for (const name of LEGACY_PHASES) {
@@ -181,7 +206,7 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
 describe("golden — with review.analysis off, pr-review resolves to review → post-review", () => {
   const def = getWorkflow("pr-review");
 
-  it("skips all eight analysis phases and still runs BOTH legacy phases", () => {
+  it("skips all ten analysis phases and still runs BOTH legacy phases", () => {
     // The inert context: `specContext()` returned `{}`, so `analysisEnabled` is
     // absent — not `false`, ABSENT. That is the real production shape and it is
     // the one the gate has to handle.
@@ -196,10 +221,23 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
     }
   });
 
-  it("runs all ten in declaration order once the flag is on", () => {
+  it("runs WP3's phases with probes still off — the two switches are independent", () => {
+    // The shipping shape of WP4: the pipeline on, probes off. `prepare` skips
+    // and everything downstream still runs, because `facts` takes `all_done`.
     const { ran, skipped } = simulate(def.phases, { analysisEnabled: "true" });
+    expect(ran).toEqual(DECLARED.filter((n) => !WP4_PHASES.includes(n)));
+    expect(skipped.map((s) => s.name)).toEqual(WP4_PHASES);
+  });
+
+  it("runs all twelve in declaration order once both flags are on", () => {
+    const { ran, skipped } = simulate(def.phases, { analysisEnabled: "true", probesEnabled: "true" });
     expect(ran).toEqual(DECLARED);
     expect(skipped).toEqual([]);
+  });
+
+  it("never runs WP4 on probes alone — an install with nothing to feed is pure cost", () => {
+    const { ran } = simulate(def.phases, { probesEnabled: "true" });
+    expect(ran).toEqual([...LEGACY_PHASES]);
   });
 
   it("still skips when the key is present but not the literal string `true`", () => {
@@ -211,10 +249,21 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
       const { ran } = simulate(def.phases, { analysisEnabled: value });
       expect(ran, `analysisEnabled=${JSON.stringify(value)}`).toEqual(LEGACY_PHASES);
     }
-    // …and the two spellings that legitimately mean yes do enable it.
+    // …and the two spellings that legitimately mean yes do enable it. Both keys
+    // together, because `prepare` requires both and the sweep below pins that
+    // `probesEnabled` reads through the same coercion.
     for (const value of ["true", "TRUE", "1", true]) {
-      const { ran } = simulate(def.phases, { analysisEnabled: value });
-      expect(ran, `analysisEnabled=${JSON.stringify(value)}`).toEqual(DECLARED);
+      const { ran } = simulate(def.phases, { analysisEnabled: value, probesEnabled: value });
+      expect(ran, `both=${JSON.stringify(value)}`).toEqual(DECLARED);
+    }
+  });
+
+  it("applies the same coercion to `probesEnabled`, with the pipeline already on", () => {
+    for (const value of ["false", "", "0", "no", "TRUE-ish"]) {
+      const { ran } = simulate(def.phases, { analysisEnabled: "true", probesEnabled: value });
+      expect(ran, `probesEnabled=${JSON.stringify(value)}`).toEqual(
+        DECLARED.filter((n) => !WP4_PHASES.includes(n)),
+      );
     }
   });
 });
@@ -292,15 +341,15 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
     expect(result.success).toBe(true);
     expect((await store.runs.getRun(RUN_ID))?.status).toBe("succeeded");
 
-    // ONE model call — the `review` phase. Not nine. The two bash phases never
-    // ran either, so `runCommand` was never reached.
+    // ONE model call — the `review` phase. Not eleven. The three bash phases
+    // never ran either, so `runCommand` was never reached.
     expect(agent.calls.filter((c) => c.kind === "agent")).toHaveLength(1);
     expect(agent.calls.filter((c) => c.kind === "command")).toHaveLength(0);
     // …and the review really was posted.
     expect(postReview.calls).toEqual(["post-review"]);
   });
 
-  it("records all ten phases — eight skipped, two done — so the dashboard is not silent", async () => {
+  it("records all twelve phases — ten skipped, two done — so the dashboard is not silent", async () => {
     const { result, reporter } = await runPrReview({ owner: "acme", repo: "widgets", prNumber: 7 });
 
     expect(result.phases.map((p) => p.phase)).toEqual(DECLARED);
@@ -318,19 +367,21 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
     expect(skippedSteps).toEqual(ANALYSIS_PHASES);
   });
 
-  it("runs every phase once the flag is on — the pipeline is wired, not decorative", async () => {
+  it("runs every phase once both flags are on — the pipeline is wired, not decorative", async () => {
     const { result, agent, postReview } = await runPrReview({
       owner: "acme",
       repo: "widgets",
       prNumber: 7,
       analysisEnabled: "true",
+      probesEnabled: "true",
     });
 
     // A generic-loop node reports under its ITERATION label
     // (`survey_contract_iter_1`), never its own name — so the six surveys are
-    // present as iterations, and the four non-loop phases under their own names.
+    // present as iterations, and the five non-loop phases under their own names.
     const seen = result.phases.map((p) => p.phase);
     expect(seen.filter((n) => DECLARED.includes(n))).toEqual([
+      "prepare",
       "facts",
       "seed",
       "review",
@@ -339,12 +390,14 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
     for (const family of FAMILIES) {
       expect(seen, family).toContain(`survey_${family}_iter_1`);
     }
+    // `falsify` is a generic_loop too, so it reports under its iteration label.
+    expect(seen).toContain("falsify_iter_1");
     expect(result.phases.every((p) => p.success)).toBe(true);
 
-    // Two deterministic bash phases + six generic-loop `until_bash` gates.
-    expect(agent.calls.filter((c) => c.kind === "command").length).toBeGreaterThanOrEqual(2);
-    // Six survey passes + the review itself.
-    expect(agent.calls.filter((c) => c.kind === "agent")).toHaveLength(7);
+    // Three deterministic bash phases + seven generic-loop `until_bash` gates.
+    expect(agent.calls.filter((c) => c.kind === "command").length).toBeGreaterThanOrEqual(3);
+    // Six survey passes + the oracle + the review itself.
+    expect(agent.calls.filter((c) => c.kind === "agent")).toHaveLength(8);
     expect(postReview.calls).toEqual(["post-review"]);
   });
 });
@@ -380,7 +433,7 @@ describe("golden — the `review` phase's rendered prompt is unchanged", () => {
 
   it("adds only the two scheduling keys to the review phase, and nothing else", () => {
     const { depends_on, trigger_rule, ...rest } = review as Record<string, unknown>;
-    expect(depends_on).toEqual(["survey_spec"]);
+    expect(depends_on).toEqual(["falsify"]);
     expect(trigger_rule).toBe("all_done");
     // Everything a prompt is built from is untouched: no `prompt:`, no
     // `skip_if:`, the same two skills, the same model/variant templates.

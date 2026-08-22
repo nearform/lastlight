@@ -409,6 +409,16 @@ review:
   analysis:
     enabled: false             # the review evidence pipeline — off, and inert
     maxSpecObligations: 6      # per-PR budget for the `spec` obligation family
+    maxObligations: 40         # …and for the five facts-derived families pooled
+    surveyPasses: 6            # how many of the six survey families actually run
+    probes: false              # install deps so a probe can be RUN. Its own switch
+    probeLifecycleScripts: false  # let the PR's own postinstall run. Off: it is the
+                               # author's code, on your machine
+    probeTypecheck: false      # the repo's own tsc --noEmit, for per-line diagnostics
+    probeCoverage: false       # the one step that runs a test suite
+    prepareTimeoutSeconds: 300
+    coverageTimeoutSeconds: 900
+    probeRounds: 2
 
 fix:                           # every PR-fixing workflow: pr-fix, dependabot-ci-fix
   maxAttempts: 3               # attempts ACROSS runs for one PR, then a human is asked
@@ -515,6 +525,30 @@ dependencies:
 		lets the review carry a verdict <em>per axis</em>: a change that is clean by
 		every standards check but doesn't do what the issue asked can no longer be
 		approved on the strength of the half that passed.
+	</p>
+
+	<p>
+		<code>probes</code> is a <strong>second switch</strong> under the same
+		block, and it is separate because it buys something different: a review
+		workspace with a <code>node_modules</code> in it. That one fact is what lets
+		a <code>tsconfig</code> that extends a package resolve — without it the
+		analysis quietly drops a tier and the contract checks find nothing — and it
+		is the only route to a coverage report, without which "no untested changed
+		lines" means <em>nobody measured</em> rather than <em>well tested</em>. The
+		three sub-switches under it are priced separately on purpose:
+		<code>probeTypecheck</code> is seconds and gives per-line diagnostics (it is
+		not a CI re-run — Last Light already reads your CI result);
+		<code>probeCoverage</code> is the one step that runs your test suite, and it
+		never guesses a command, only one your <code>package.json</code> already
+		names.
+	</p>
+
+	<p>
+		<code>probeLifecycleScripts</code> is off as a <strong>security</strong>
+		default rather than a performance one. The install happens at a pull request
+		head, so a <code>postinstall</code> there is code the PR author wrote,
+		running on your infrastructure — and nothing <code>probes</code> exists for
+		needs it.
 	</p>
 
 	<p>

@@ -344,6 +344,52 @@ review:
     # match — could have been among them.
     surveyPasses: 6
 
+    # ── WP4: `prepare` (the affordance) + `falsify` (the oracle) ──────────────
+    #
+    # A SECOND switch under an already-gated block, and deliberately so. What
+    # `probes: true` buys is a review workspace with a `node_modules` in it, and
+    # that one fact changes three things at once:
+    #
+    #   - `contract` can seed at all on a normal monorepo. A tsconfig that
+    #     `extends` a bare package specifier (`@calcom/tsconfig/react-library`)
+    #     does not resolve on a bare checkout, tsgo excludes the project, and the
+    #     case drops to tier 2 with `contracts` emitting nothing. Measured over
+    #     the 50-PR corpus: tier-1 cases 21 -> 5, contract deltas 73 -> 19.
+    #   - `tests` can seed at all. The `coverage` extractor READS a report and
+    #     never runs a suite; it found ZERO artifacts across all 50 corpus cases
+    #     and all 8 gate cases. Until `probeCoverage` produces one, that family
+    #     is NOT MEASURED — a different row from "did not convert".
+    #   - the `facts` phase inherits an installed tree, on every re-review too
+    #     (the cross-run refresh is `git clean -fdx -e node_modules`). Peak RSS
+    #     there is UNMEASURED on the current engine.
+    #
+    # Default posture: OFF in production, ON in the eval overlay — whether it
+    # ships on is an ablation number, not a judgement call.
+    probes: false
+    # Let the install run the tree's own postinstall. OFF, as a SECURITY default:
+    # `prepare` installs at a PULL REQUEST HEAD, so a lifecycle script there is
+    # code the PR author wrote running on this machine — and `pr-review`'s
+    # workspace has never installed anything, which makes this the first thing in
+    # the workflow that could. Making an `extends` resolve needs the files, not
+    # their scripts.
+    probeLifecycleScripts: false
+    # The repo's own `tsc --noEmit`, for per-file/per-line diagnostics a
+    # hypothesis can be anchored to. NOT a CI re-run: CI already reports
+    # pass/fail over a matrix and `{{ciSection}}` is already in the context.
+    probeTypecheck: false
+    # The ONE step in this pipeline that runs a test suite — the wall-clock item
+    # the design review deleted along with `mutants`. Its own switch because it
+    # is its own price: everything else in `prepare` is seconds, this is minutes.
+    # It never guesses a command, only one the repo itself named (a `coverage` /
+    # `test:coverage` script).
+    probeCoverage: false
+    prepareTimeoutSeconds: 300
+    coverageTimeoutSeconds: 900
+    # Rounds `falsify` gets to write and run probes. Two: the loop's exit is a
+    # five-line existence gate, not a validator — v2's full quote validator was
+    # overkill and cost 2.4x for a worse result.
+    probeRounds: 2
+
 # Retry policy for every PR_FIX_SHAPED workflow — pr-fix and dependabot-ci-fix
 # (issue #251). The loop diagnoses a CI failure before it retries, and these are
 # the budgets that bound it.

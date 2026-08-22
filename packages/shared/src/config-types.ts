@@ -267,6 +267,73 @@ export interface ReviewAnalysisConfig {
    * order and the run says so in its artifact.
    */
   surveyPasses: number;
+  /**
+   * WP4 — the `prepare` + `falsify` pair: install dependencies so a probe can be
+   * **run**, then write probes and run them.
+   *
+   * A second switch under an already-gated block, deliberately. `prepare` is the
+   * phase that decides whether the review workspace has a `node_modules`, and
+   * that one fact changes three things at once: it is what makes a
+   * package-extending `tsconfig` resolve (so `contract` can seed at all on a
+   * normal monorepo), it is the only route to a coverage artifact (so `tests`
+   * can), and it re-arms the memory profile of a *different* phase. Bundling it
+   * into `enabled` would have made "run the surveys" and "install the PR
+   * author's dependencies" the same decision.
+   *
+   * `false` reproduces WP3 exactly. Default posture is **off in production, on
+   * in the eval overlay** — the ablation rung is what decides whether it ships
+   * on, and that is a number, not a judgement call.
+   */
+  probes: boolean;
+  /**
+   * Let `prepare`'s install run the tree's own lifecycle scripts.
+   *
+   * **Off, and it is a security default rather than a performance one.** The
+   * install runs against a PULL REQUEST HEAD, so a `postinstall` there is code
+   * the PR author wrote executing on the operator's infrastructure — and
+   * `pr-review`'s workspace has never installed anything, which makes `prepare`
+   * the first thing in the workflow that could. What `prepare` is FOR (making an
+   * `extends` resolve, putting library source on disk to be read) needs the
+   * files, not their scripts.
+   *
+   * Turning it on is legitimate for a repo whose install genuinely does not work
+   * without them; it is not the default for the same reason `probes` is not.
+   */
+  probeLifecycleScripts: boolean;
+  /**
+   * Run the repo's own `tsc --noEmit` in `prepare` and record the diagnostics.
+   *
+   * Cheap, independent of the other two, and **not** a CI re-run: CI reports a
+   * pass/fail summary over a matrix, this reports a per-file, per-line
+   * diagnostic that can be attached to a specific hypothesis (locked decision
+   * 11 — we never re-derive what `checksState` already said).
+   */
+  probeTypecheck: boolean;
+  /**
+   * Run a coverage command in `prepare` so the `tests` obligation family has an
+   * input for the first time.
+   *
+   * **The one step in this pipeline that runs a test suite**, which is the
+   * wall-clock item §D13 deleted along with `mutants` and `suite`. It is a
+   * separate switch because it is a separate price: everything else in `prepare`
+   * is seconds and this is minutes. It never guesses a command — only one the
+   * repo itself named (a `coverage` / `test:coverage` script) — because a
+   * guessed fifteen-minute run that produced nothing makes "no command" and "no
+   * artifact" the same row in the funnel.
+   */
+  probeCoverage: boolean;
+  /** Ceiling on `prepare`'s dependency install, in seconds. */
+  prepareTimeoutSeconds: number;
+  /** Ceiling on `prepare`'s coverage run, in seconds. Minutes, not seconds. */
+  coverageTimeoutSeconds: number;
+  /**
+   * How many rounds `falsify` gets to write and run probes.
+   *
+   * Two. v3's lesson 3 is the sizing argument: the loop's exit condition is a
+   * five-line existence gate, not a validator — v2's full quote validator was
+   * overkill and cost 2.4× for a worse result.
+   */
+  probeRounds: number;
 }
 
 /**
@@ -367,6 +434,18 @@ export function defaultReviewConfig(): ReviewConfig {
       "*.generated.*",
       "**/__generated__/**",
     ],
-    analysis: { enabled: false, maxSpecObligations: 6, maxObligations: 40, surveyPasses: 6 },
+    analysis: {
+      enabled: false,
+      maxSpecObligations: 6,
+      maxObligations: 40,
+      surveyPasses: 6,
+      probes: false,
+      probeLifecycleScripts: false,
+      probeTypecheck: false,
+      probeCoverage: false,
+      prepareTimeoutSeconds: 300,
+      coverageTimeoutSeconds: 900,
+      probeRounds: 2,
+    },
   };
 }

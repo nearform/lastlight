@@ -995,6 +995,20 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
         nonNegativeNumber(analysisRaw.maxSpecObligations) ?? reviewDefaults.analysis.maxSpecObligations,
       maxObligations: nonNegativeNumber(analysisRaw.maxObligations) ?? reviewDefaults.analysis.maxObligations,
       surveyPasses: nonNegativeNumber(analysisRaw.surveyPasses) ?? reviewDefaults.analysis.surveyPasses,
+      // WP4. Every one of these four reads `=== true` for the same reason
+      // `enabled` does: each buys the operator's compute, and two of them —
+      // `probes` (which installs a PR author's dependencies) and
+      // `probeLifecycleScripts` (which runs that author's postinstall) — are
+      // decisions a truthy-ish string in an overlay must never make by accident.
+      probes: analysisRaw.probes === true,
+      probeLifecycleScripts: analysisRaw.probeLifecycleScripts === true,
+      probeTypecheck: analysisRaw.probeTypecheck === true,
+      probeCoverage: analysisRaw.probeCoverage === true,
+      prepareTimeoutSeconds:
+        nonNegativeNumber(analysisRaw.prepareTimeoutSeconds) ?? reviewDefaults.analysis.prepareTimeoutSeconds,
+      coverageTimeoutSeconds:
+        nonNegativeNumber(analysisRaw.coverageTimeoutSeconds) ?? reviewDefaults.analysis.coverageTimeoutSeconds,
+      probeRounds: nonNegativeNumber(analysisRaw.probeRounds) ?? reviewDefaults.analysis.probeRounds,
     },
   };
 

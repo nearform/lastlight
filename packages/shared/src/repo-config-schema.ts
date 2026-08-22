@@ -1552,6 +1552,13 @@ function shapeReviewAnalysis(raw: unknown, d: ReviewAnalysisConfig): ReviewAnaly
     maxSpecObligations: num(node.maxSpecObligations, d.maxSpecObligations),
     maxObligations: num(node.maxObligations, d.maxObligations),
     surveyPasses: num(node.surveyPasses, d.surveyPasses),
+    probes: node.probes === true,
+    probeLifecycleScripts: node.probeLifecycleScripts === true,
+    probeTypecheck: node.probeTypecheck === true,
+    probeCoverage: node.probeCoverage === true,
+    prepareTimeoutSeconds: num(node.prepareTimeoutSeconds, d.prepareTimeoutSeconds),
+    coverageTimeoutSeconds: num(node.coverageTimeoutSeconds, d.coverageTimeoutSeconds),
+    probeRounds: num(node.probeRounds, d.probeRounds),
   };
 }
 
