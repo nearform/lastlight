@@ -4,7 +4,27 @@
 `findings.json` — ranked, tiered, with a split verdict and a per-finding evidence
 packet — without reintroducing the suppressor that killed candidate v2.
 
-**Depends on:** [WP3](03-seed-and-survey.md), [WP4](04-probe-oracle.md).
+**Depends on:** [WP3](03-seed-and-survey.md), [WP4](04-probe-oracle.md). **Both
+are built and gate-green as of 2026-08-22**, so nothing blocks this — but see
+[RESTART §2d](RESTART.md) for the two measured facts that change what you should
+build, and the ordering that follows from them.
+
+> **Three prerequisites verified against the tree 2026-08-22, because each is
+> assumed below and none of them exists yet.**
+>
+> - **`existingCode` is not a finding field.** It appears only in the hypothesis
+>   contract `lastlight-facts seed` renders (`seed-render.ts`); nothing in
+>   `apps/server` knows it. `findings-schema.md` still makes `line` **required**
+>   and model-produced. §"The model must stop emitting line numbers" is therefore
+>   a real schema change, not a tightening.
+> - **`maxInlineComments` does not exist anywhere.** §D11 already says so;
+>   confirmed. `splitFindings` partitions on anchorability alone.
+> - **`review_findings` does not exist** (`src/state/schema/sqlite.ts`). It is
+>   [WP7](07-review-memory.md)'s table and WP7 depends on THIS work package, so
+>   **AC1b's "written to `review_findings` with its reason" cannot be met as
+>   written.** Decide deliberately: scope `internal` to `findings.json` and say
+>   so, or pull that one table forward — remembering a schema change means BOTH
+>   dialects regenerated (`src/state/CLAUDE.md`). Do not let it go quietly unmet.
 
 ## The constraint that shapes everything here
 
@@ -390,6 +410,15 @@ read on our own eval.
 2. An `unprobed` hypothesis ([WP4](04-probe-oracle.md)) reaches the review; only
    a transcript-refuted one is dropped. **This is the v2 regression and the most
    important test in the work package.**
+
+   > **Note 2026-08-22: probe-backed deletion is the only sanctioned deletion,
+   > and `falsify` has never run.** WP4 shipped it inert and no model has been
+   > against it, so nothing has yet produced a transcript. If it turns out to
+   > produce few or none on real cases, this adjudicator's delete power is
+   > **inert by construction** — which is the safe direction, and it means WP6
+   > lands as *connect the exit, rank and tier*. Expect that rather than
+   > discovering it, and do not compensate by allowing deletion on any other
+   > ground: the measured AACR result below is what happens when you do.
 3. `verdict: { spec: "fail", standards: "pass" }` yields a non-`APPROVE` event.
 4. Absent `verdict`, behaviour is identical to today.
 5. Duplicate findings from two families collapse to one comment with merged

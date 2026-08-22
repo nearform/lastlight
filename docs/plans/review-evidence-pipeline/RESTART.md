@@ -17,14 +17,12 @@ git -C ~/work/lastlight log --oneline -1
 git -C ~/work/lastlight status --porcelain | wc -l
 ```
 
-**As of 2026-08-22 everything through WP3 is committed**, ending at `2563ca41`.
-If `HEAD` is that and the tree is clean, skip to §1.
+**As of 2026-08-22 everything through WP4 is committed** — WP3 ending at
+`2563ca41`, then WP4 in four commits ending `a964e3c7`. If `HEAD` is one of
+those and the tree is clean, skip to §1.
 
-**WP4 may not be.** If `HEAD` is `2563ca41` and the status count is large, the
-uncommitted tree is WP4 — `prepare`, `falsify`, the `probes` gate, the seven
-config switches, `--keep-workspace`, the corpus `--install` arm, and the doc
-updates in this folder. It is gate-green (24/24, 3612 core tests, 486 in
-code-facts); §2c says what it measured.
+If `HEAD` is older, the git log of this branch names the units; nothing in this
+folder describes work that is not committed.
 
 ## 1. Prove the tree is sane — three commands, ~2 minutes
 
@@ -75,7 +73,11 @@ corpus, so they raise the generality claim rather than the shipping path.
 ✅ WP4a's free gate, n=1    — cal-com-10600: tier 2→1, contracts 0→3. §2c
              the same gate at n=50   ← hours of compute, no money
              WP4b's arm             ← model spend, and NO CONSUMER until WP6
-             WP6  adjudicate + 7a/7b          ← the only rung that can move RECALL
+   ── WP6 IS NEXT, and it is four pieces, not one — see §2d ──
+             WP6a anchor cascade    ← model-free; improves the SHIPPED reviewer
+             WP6b attention boundary ← maxInlineComments + family thresholds
+             WP6c adjudicate        ← the conservation gate. THE rung for RECALL
+             WP6d where `internal` lives ← review_findings is WP7's and absent
    ── ship-capable on TypeScript here ──
              WP1c Stage 2 grammars (scoped)   ← generality, not shipping
              WP9  external validation         ← deterministic half is now free
@@ -283,10 +285,10 @@ concurrently** (§3).
 > had never fired because no model had ever run the pipeline. Fixed; the test now
 > asserts the key's LOCATION, not just its value.
 
-### The ordering question — WP4 or WP6? DECIDED: WP4 (2026-08-22)
+### The ordering question — WP4 or WP6? DECIDED and SPENT: WP4 (2026-08-22)
 
-Kept because the argument is still live for what comes *after* WP4b, and because
-the reasoning on both sides was measured rather than assumed.
+Kept for the record. Both sides were measured rather than assumed, and the
+losing argument is the one §2d now inherits.
 
 **For WP4 (`prepare` + `falsify`) first.** `prepare` turned out to gate **two**
 families, not one. It was always what makes `coverage` — and therefore `tests` —
@@ -305,12 +307,10 @@ gold. **No rung before WP6 can move recall, including WP4** — a probe verdict
 lands in the same unread place a hypothesis does. If the question being asked is
 "does any of this improve the review", WP6 is the only rung that can answer it.
 
-The honest summary: **WP4 widens the funnel's mouth; WP6 is the only thing that
-opens its exit.** WP4 is cheaper and unblocks two families; WP6 is what makes
-every number since WP1 mean something. A defensible third option is the smallest
-possible slice of WP6 — a phase that reads the hypothesis files and writes
-`findings.json` with no ranking, no tiering and no deletion — purely to connect
-the exit, measured before either full work package.
+The honest summary: **WP4 widened the funnel's mouth; WP6 is the only thing that
+opens its exit.** That is still true, and it is now the whole of what is left
+before this pipeline can be said to work or not. The "smallest possible slice"
+third option named here is no longer a compromise — §2d makes it the plan.
 
 **AC2 is not covered and should not be faked.** `apps/server` has no dependency
 edge to `lastlight-code-facts`, so the seeder is unreachable from a core test;
@@ -329,6 +329,110 @@ reaches the model), but it means `dropped[]` currently has no consumer. WP6's
 > `apps/server/tests/workflows/pr-review-probes.test.ts`), each naming the other,
 > because `pr-review.yaml`'s shell fallback hand-writes that document and is only
 > ever reached when something has already gone wrong.
+
+## 2d. WP6 — READY, with two things to know before writing any code
+
+**Are we ready?** Structurally, yes: WP6's declared dependencies are
+[WP3](03-seed-and-survey.md) and [WP4](04-probe-oracle.md) and both are built and
+gate-green. The seams it needs already exist — `splitFindings` and `resolveEvent`
+in `src/engine/github/review-poster.ts`, `post-review`'s anchoring fallback
+chain, and `findings.json` as the file the `review` phase already writes.
+
+But **WP6 is not one work package**, and two of its four pieces are model-free
+and belong first. Read [06-adjudicate.md](06-adjudicate.md) in full; what a
+starting reader needs from here is this.
+
+### The two things that change what you build
+
+**1. The obvious adjudicator has ALREADY been measured, and it loses.**
+`apps/evals/scripts/aacr-adjudicate.ts` scored two models against AACR-Bench's
+1,505 valid / 640 invalid comments. The floor is the **null adjudicator** —
+keep everything, which is exactly what production does today — at **F1 0.825**,
+and neither model beat it:
+
+| arm | retention (valid) | interception (invalid) | F1 |
+|---|---|---|---|
+| `keep-all` (today) | **100.0%** | 0.0% | **0.825** |
+| Haiku 4.5 | 91.3% | 15.4% | 0.803 |
+| GLM-5p2-fast | 76.3% | 33.0% | 0.745 |
+
+Read the confusion matrices, not the rates: Haiku destroys **131 valid comments
+to catch 98**, GLM **356 to catch 211**. Precision barely moves (70.2 → 71.7 →
+72.8) because both drop valid and invalid at nearly the same rate — the signature
+of a filter that is not discriminating, only shrinking. And the threshold sweep
+closes it: F1 sits at 0.825 from t=0.0 to t=0.7 and then collapses, so **there is
+no operating point to tune toward** and per-family calibration cannot rescue it.
+
+> So the prohibition is a measured bound, not a principle: **`adjudicate` earns
+> its cost through RANKING and TIERING into inline/body/internal, and through
+> PROBE-BACKED DELETION. It may not earn it by judging plausibility.**
+
+**2. Probe-backed deletion is the only sanctioned deletion, and `falsify` has
+never run.** Nothing produces a transcript yet. If `falsify` turns out to produce
+few or none on real cases, `adjudicate`'s delete power is **inert by
+construction** — which is safe, and it means WP6 lands as *connect the exit,
+rank and tier*, with deletion arriving later. Expect that, rather than
+discovering it.
+
+### The four pieces, in the order they should land
+
+**6a — the anchor cascade. Model-free, and worth shipping alone.**
+[06](06-adjudicate.md) §"The model must stop emitting line numbers" says so
+itself. Today `findings-schema.md` makes `line` **required** and model-produced,
+and `post-review` **demotes** anything outside the commentable line set — so a
+finding whose analysis is perfect and whose line number is off by two pays the
+full price of a wrong answer for an arithmetic slip. Models quote code well and
+count lines badly: make `existingCode` required, `line` advisory, and derive the
+anchor (hunk match → full-file scan → **cross-file relocation on a unique string
+hit** → model regeneration as a last resort → demote). **Step 3 before step 4 is
+the whole insight** — handing a model the wrong file's diff and demanding a
+snippet back produces a comment that *looks located while pointing at unrelated
+code*, and a declaration/implementation split is the normal shape of a finding
+from a contract delta. This improves the **shipped** reviewer, pipeline or no
+pipeline. Verified 2026-08-22: `existingCode` exists only in the code-facts
+hypothesis contract; nothing in `apps/server` knows the field.
+
+**6b — the attention boundary. Mostly plumbing.** `maxInlineComments` (default 8)
+and the per-family thresholds are **new machinery, not a reuse** (§D11):
+`splitFindings` partitions on *anchorability* and there is no inline cap today.
+Note the trap the design review already flagged — after this, "Additional
+findings" would mean three different things (off-diff, below threshold,
+overflowed the cap), and three causes under one heading is a worse review to
+read. Split the heading or annotate each line.
+
+**6c — `adjudicate` itself.** The phase, `prompts/review-adjudicate.md`,
+`fresh_context: true`, and the **conservation gate**: every hypothesis id across
+`hypotheses/*.jsonl` must appear in `findings.json` with exactly one disposition,
+and a `dropped` one must carry `refutedBy` naming a transcript that exists on
+disk. Existence-plus-schema was explicitly judged not enough — an adjudicator
+reading 30 hypotheses and writing 6 findings would pass every other gate in this
+plan, and that is v2. Per §D12 the gate needs a **floor**: unable to pass within
+its iterations, write every unresolved hypothesis at `internal` tier and
+continue. It must never take the run down.
+
+**6d — where `internal` is persisted. A REAL ordering problem, decide it
+deliberately.** AC1b asks that every `internal`-tier finding be written to
+`review_findings` with its reason — and **that table does not exist**
+(verified 2026-08-22: no `review_findings` in `src/state/schema/sqlite.ts`). It
+is [WP7](07-review-memory.md)'s, and WP7 depends on WP6. Two honest options:
+scope `internal` to `findings.json` only for now and say so, or pull that one
+table forward — remembering that a schema change means **both dialects
+regenerated** (`src/state/CLAUDE.md`). Do not let AC1b quietly go unmet.
+
+### What to measure, and against what
+
+The comparator is `2026-08-22_092611` (Haiku, pipeline OFF, 8 cases, $1.91,
+avgF1 **0.229**) — and only that one; every pr-review number from before
+2026-08-22 sits on a different template context. Two free instruments run first:
+`aacr-adjudicate.ts --arm keep-all --all` reproduces the floor with no model
+calls, and the conservation gate is a unit test rather than a spend. **Read every
+free denominator to exhaustion before buying a model one** — WP4 found two silent
+bugs that way before spending a dollar, and WP3's gate was read at n = 135 for
+nothing.
+
+The measurement gate itself (AC6) is **recall does not fall** against the WP4
+arm, with SNR reported. Precision alone is not a gate; [00-evidence
+§5](00-evidence.md) is the argument, and locked decision 2 is the short version.
 
 ## 3. Driving sub-agents on this work
 
