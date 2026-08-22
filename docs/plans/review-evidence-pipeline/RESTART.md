@@ -374,6 +374,38 @@ with SNR reported. **No model has run against WP6.** The comparator is
 only that one — every pr-review number before 2026-08-22 sits on a different
 template context.
 
+> **RUNNING THE ARM: the globally-installed `lastlight-evals` SILENTLY RUNS THE
+> BASELINE.** Measured 2026-08-22, after it cost two arms. The `arm.review`
+> threading — the seam that carries an overlay's `review.analysis.enabled` into
+> the run — landed the same day, and the global npm build predates it while
+> carrying **the same version number** (`0.10.0`). So
+> `lastlight-evals run pr-review --overlay overlays/wp3` completes happily, at
+> baseline cost, with every analysis phase skipped, and reports it as the wp3
+> arm. One agent call per case and ~$0.21 is the tell; eight is what a
+> pipeline-ON case costs.
+>
+> Run the harness **from source, with cwd in the eval workspace** so its `.env`
+> is found:
+>
+> ```bash
+> cd ~/work/nearform-evals
+> LASTLIGHT_FACTS_BIN=~/work/lastlight/packages/code-facts/dist/cli.js \
+>   ~/work/lastlight/apps/evals/node_modules/.bin/tsx \
+>   ~/work/lastlight/apps/evals/src/run.ts run pr-review \
+>   --overlay overlays/wp3 --model anthropic/claude-haiku-4-5-20251001 --keep-workspace
+> ```
+>
+> It prints `core → 0.27.0-dev (working tree)` when it is reading local source.
+> Two other traps on the same path: `LASTLIGHT_CORE_DIR` must point at
+> **`apps/server`**, not the monorepo root (the root has no `workflows/`), and
+> running the harness with cwd inside `apps/evals` finds no provider key.
+>
+> **Verify the arm before trusting it**, rather than reading the label: the
+> `--keep-workspace` path should hold a `facts.json`, a populated
+> `obligations.json` and per-family blocks under `obligations/` within the first
+> minute. That check is free and it is the only thing that distinguishes a
+> pipeline-ON run from a mislabelled baseline.
+
 Two free instruments were read to exhaustion first, per the house rule:
 `aacr-adjudicate.ts --arm keep-all --all` reproduces the floor exactly (2,145
 rows, retention 100%, precision 70.2%, **F1 0.825**, `elapsed 0.0s`, zero model
