@@ -66,6 +66,8 @@ corpus, so they raise the generality claim rather than the shipping path.
 ```
 ✅ the 2 GB agent-cap decision — RETIRED. cap raised to 8g, not engineered around
 ✅ the FACT ENGINE          — ts-morph replaced by the TS 7 API (docs/plans/fact-engine/)
+✅ WP3 BUILT (9536be3b)     — seeder, six survey phases, prompts, skills; inert,
+                              gate green. The ARM is what remains — see §5.
              WP3  seed + six surveys          ← YOU ARE HERE. first model spend
              WP4  prepare + falsify           ← also the only thing that makes `coverage` live
              WP6  adjudicate + 7a/7b
@@ -140,6 +142,39 @@ model spend, so use them *before* burning budget on a rung:
   the identifier, no seeder can produce an obligation about it. Always read it
   with all three denominators and the candidate pool beside it; see
   [08-evals.md](08-evals.md).
+
+## 2b. WP3 is BUILT and UNMEASURED — what the arm still needs
+
+Landed 2026-08-22 in `9536be3b`, inert (`review.analysis.enabled: false`), full
+gate green. What is built: `lastlight-facts seed`, the six survey phases in
+`pr-review.yaml`, six prompts, the two skill rebalances, and 46 tests.
+**No model has run against it.** Three things a reader needs before starting:
+
+1. **The comparator is dead.** `apps/evals/src/run-instance.ts` excluded
+   `pr-review` from `prContextPatch` — deliberately, so enriching its context
+   would not silently move historical judge-scored numbers. The cost of that
+   exclusion is that `renderContext` never runs for the tier, so `analysisEnabled`
+   is never set and **all eight WP3 phases skip**; WP0's `{{specObligations}}`
+   was equally unmeasurable there and nobody had noticed. Lifting it is what makes
+   the arm possible, and it means **every pr-review number from before 2026-08-22
+   sits on a different context**. `2026-08-20_074355` is no longer a valid
+   baseline — re-run it rather than diffing across that boundary.
+2. **Both arms run on Haiku 4.5** (operator decision, 2026-08-22). Not a cost
+   compromise: Haiku beats Sonnet 4.6 on review recall on two independent evals
+   (41.2% vs 22.1%), and it is what `models.review-survey` names. Baseline
+   $5.65/8 cases on Sonnet with one phase; WP3 adds eight, so ~7× the agent work.
+3. **`LASTLIGHT_FACTS_BIN` must be set** to the built `packages/code-facts/dist/cli.js`.
+   The eval runs `--sandbox none` on the host and `lastlight-facts` is not on
+   `PATH` there. It is **not in the sandbox image either** — that is WP2, and
+   until it lands the pipeline cannot be switched on in production, only measured.
+
+**AC2 is not covered and should not be faked.** `apps/server` has no dependency
+edge to `lastlight-code-facts`, so the seeder is unreachable from a core test;
+and more to the point, a one-ended drop is counted in `obligations.json` and
+**read by nobody** — `renderFamilyBlock` surfaces only the budget truncation.
+That is arguably correct (the whole point is that a one-ended obligation never
+reaches the model), but it means `dropped[]` currently has no consumer. WP6's
+`adjudicate` is the natural one.
 
 ## 3. Driving sub-agents on this work
 
@@ -236,10 +271,26 @@ Still open:
   own work-in-progress compares old blobs to new files and is meaningless — run
   it against a clean clone or a `git stash create` snapshot.**
 - **Load-sensitive tests fail under CPU contention**, in two packages. In
-  `code-facts` it was three (`constants` ×2, `fail-loud` ×1). In `lastlight-core`
-  it is unidentified: `lastlight-core#test` failed under `turbo` twice on
-  2026-08-22, both times immediately after parallel sub-agent load, and passed
-  standalone on re-run both times — the failing name was not captured because a
-  passing re-run overwrites `.turbo/turbo-test.log`. **If you hit it, capture the
-  log before re-running.** Do not blanket-raise timeouts — that hides real
-  slowdowns, which is the opposite of what this suite is for.
+  `code-facts` it was three (`constants` ×2, `fail-loud` ×1).
+
+  **The `lastlight-core` one is IDENTIFIED as of 2026-08-22**, by copying
+  `.turbo/turbo-test.log` aside before the re-run, which is the step the previous
+  two sightings skipped:
+
+  > `tests/cron/handler-crons.test.ts:143` — *"withLedger — a handler cron is
+  > countable › records a row per invocation, keyed by the CRON name"*.
+  > **`Error: Test timed out in 5000ms`**, having run **6963 ms**. Passes
+  > standalone in 3.4 s (16/16).
+
+  It is a **timeout, not an assertion failure**, and the body is
+  `await import("#src/cron/handlers.js")` followed by `makeTestDb()` — a dynamic
+  ESM import plus a database build inside a default 5 s budget. Under parallel
+  sub-agent load the import alone can exceed it. Nothing about it is related to
+  whatever change happens to be in flight when it fires, which is why it has
+  twice looked like a mystery.
+
+  It is left **unfixed on purpose**: raising this one test's timeout is probably
+  right, but it is a change to somebody else's subsystem and it belongs in its own
+  commit with its own reasoning, not smuggled into a review-pipeline one. Do not
+  blanket-raise timeouts — that hides real slowdowns, which is the opposite of
+  what this suite is for.

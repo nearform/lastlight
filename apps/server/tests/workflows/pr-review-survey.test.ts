@@ -356,25 +356,24 @@ describe("AC4 — the `spec` family's degraded state propagates all the way to t
 });
 
 /**
- * BUG, found writing these tests — `survey-spec.md` uses `{{#unless …}}`, which
- * the template engine does not implement.
+ * Regression guard for a bug these tests caught: `survey-spec.md` shipped its
+ * fallback branch as `{{#unless specObligations}}…{{/unless}}`, and the template
+ * engine does not implement `{{#unless}}`.
  *
- * `renderTemplate` handles `{{#if x}}…{{/if}}` and bare `{{x}}` only
- * (`packages/workflow-engine/src/core/templates.ts`). `{{#unless x}}` matches
- * neither: the `#`/`/` characters are outside the `[\w-]` key class, so BOTH
- * markers survive verbatim into the prompt AND the body between them is emitted
- * unconditionally. The model is therefore told "No spec obligations were built
- * for this PR … That is **not** a pass on this axis" *immediately underneath a
- * fully-populated obligation block*, which is the exact inversion of AC4: it is
- * told that nothing was analysed when something was.
+ * `renderTemplate` handles `{{#if x}}…{{/if}}` (with a `!` negation) and bare
+ * `{{x}}` only — `packages/workflow-engine/src/core/templates.ts`. `{{#unless}}`
+ * matches neither production: `#` and `/` are outside the `[\w-]` key class, so
+ * BOTH markers survived verbatim into the prompt AND the body between them was
+ * emitted unconditionally. The model was therefore told "No spec obligations
+ * were built for this PR … That is **not** a pass on this axis" *immediately
+ * underneath a fully-populated obligation block* — the exact inversion of AC4,
+ * telling the model nothing was analysed when something was.
  *
- * Nothing catches it upstream — `validateAssets` checks that a prompt file
- * RESOLVES, not that it renders, and the post-render `{{`-leftover guard applies
- * only to `type: bash` commands (`validateShellCommand`).
- *
- * The fix belongs in `workflows/prompts/survey-spec.md` (invert to
- * `{{#if !specObligations}}`, which the engine does support) or in the engine.
- * This test is deliberately left RED until one of them lands.
+ * Nothing catches it upstream. `validateAssets` checks that a prompt file
+ * RESOLVES, not that it renders; the post-render `{{`-leftover guard
+ * (`validateShellCommand`) applies only to `type: bash` commands. So the
+ * general assertion — no survey prompt leaves an unrendered marker — is the
+ * guard, not a spot-check of the one branch that was wrong.
  */
 describe("AC4 — regression: the `spec` prompt must not contradict its own block", () => {
   it("does not emit the no-obligations fallback when obligations WERE built", () => {
