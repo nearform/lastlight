@@ -118,6 +118,18 @@ export interface BuiltReview {
   demotedCount: number;
   /** Below the floor: recorded, never posted. Always 0 without an {@link AttentionBoundary}. */
   internalCount: number;
+  /**
+   * The tiering this review was built from, present only when an
+   * {@link AttentionBoundary} was supplied.
+   *
+   * Returned rather than recomputed by the caller so that the review that gets
+   * POSTED and the disposition record that gets AUDITED are the same object.
+   * Two calls to a pure function on identical arguments cannot disagree today —
+   * but the audit trail claiming something the post did not do is precisely the
+   * failure the `internal` tier's auditability exists to rule out, and one edit
+   * to either branch is all it would take.
+   */
+  tiered?: TieredFindings;
 }
 
 const FENCE = "```";
@@ -761,6 +773,7 @@ export function buildReview(
     inlineCount: tiered.inline.length,
     demotedCount: tiered.body.length,
     internalCount: tiered.internal.length,
+    tiered,
   };
 }
 

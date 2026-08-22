@@ -9,22 +9,113 @@ are built and gate-green as of 2026-08-22**, so nothing blocks this — but see
 [RESTART §2d](RESTART.md) for the two measured facts that change what you should
 build, and the ordering that follows from them.
 
-> **Three prerequisites verified against the tree 2026-08-22, because each is
-> assumed below and none of them exists yet.**
+## BUILT — 2026-08-22. What landed, and the three things a reader needs
+
+All four pieces are in the tree and gate-green. Inert: every one of them is
+behind `review.analysis.enabled`, which ships `false`.
+
+| Piece | What shipped | Gate |
+|---|---|---|
+| **6a** anchor cascade | `parseDiffFiles` + `resolveAnchor` + `anchorFindings` (`review-poster.ts`), wired into `post-review`. `existingCode` required, `line` advisory | 21 tests |
+| **6b** attention boundary | `tierFindings` + `renderDemotedGrouped`, `maxInlineComments`/`thresholds`/`internalFloor` config, `disposition.json` | 16 tests |
+| **6c** adjudicate | the `adjudicate` phase + `reconcile` floor + `prompts/review-adjudicate.md` + `lastlight-facts findings` | 22 + golden |
+| **6d** where `internal` lives | **decided: `findings.json` + `disposition.json`, not `review_findings`** | — |
+
+**1. `adjudicate` is a SIBLING of `post-review`, not a link in its chain.** This
+is the one structural decision in the work package and it is load-bearing.
+`trigger_rule` is per NODE and applies to every dependency uniformly, so
+`post-review: depends_on [review, adjudicate]` could not be `all_success` with
+respect to `review` and `all_done` with respect to `adjudicate` — it would have
+had to relax the whole node and lose the invariant that **a failed review must
+not post**. That is a worse bug than the one it fixes. So both hang off `review`,
+`adjudicate` is declared first (the scheduler is sequential and takes `ready[0]`
+in declaration order), and a failing adjudicator is simply not in the question
+`post-review` asks.
+
+That matters as money, not tidiness. `assessedHeadShaByWorkflow` is populated
+from **succeeded** runs only, so a red run leaves no trace there; and
+`botReviewAtHead` — the other per-head dedup, and the one `resolveReviewTrigger`
+checks *first* — is only populated by a review that actually posted. If a failing
+`adjudicate` could stop the post, **both** dedups would be blank and
+`cron-review.yaml`'s thirty-minute sweep would re-dispatch the same SHA and pay
+for the whole pipeline, including the strong-model review, every half hour. The
+scheduler continues past a failed node, so the review still posts and the next
+dispatch skips on `already-reviewed`. Pinned by
+*"posts the review even when the ADJUDICATOR hard-fails"* in
+`golden-pr-review.test.ts`.
+
+**2. The conservation gate has a deterministic floor, because the gate alone
+could not guarantee anything.** Reaching `max_iterations` without the
+`until_bash` condition is **not** a phase failure in this engine
+(`phase-executor.ts` says so in as many words), so an adjudicator that never
+satisfied conservation would have left hypotheses silently unaccounted for —
+exactly the outcome the gate exists to prevent. Hence `reconcile`: a model-free
+`type: bash` phase, `all_done` on `adjudicate` so it runs *especially* when the
+adjudicator was cut short, that runs `lastlight-facts findings --repair`. It
+writes every uncovered hypothesis into `findings.json` at `internal` tier and
+**promotes any `dropped` entry whose transcript does not exist back to
+`internal`** — an unjustified deletion becomes a recorded non-deletion, which is
+this document's whole asymmetry expressed as code. It is idempotent, so on a run
+where the model did satisfy the gate it is a no-op, and it exits 0 on every path.
+
+**3. Step 4 of the anchor cascade is deliberately NOT built**, and §"The model
+must stop emitting line numbers" already contains the reason. `post-review` is a
+deterministic phase-type handler with no model binding, so step 4 is new
+machinery — and Open Code Review's source records what that machinery does when
+it fires: handed the wrong file's diff and a prompt demanding a code block back,
+the model answers with whatever token looks closest and the comment ends up
+**looking located while pointing at unrelated code**. Step 3 (unique-hit
+cross-file relocation) covers the motivating case — the declaration/implementation
+split — with no model at all, and step 5 is the honest floor. Ambiguity declines
+rather than guesses.
+
+### 6d — decided, and recorded rather than quietly unmet
+
+AC1b asks that every `internal`-tier finding be written to `review_findings`
+with its reason. **That table is [WP7](07-review-memory.md)'s and WP7 depends on
+this work package**, so it does not exist. The decision taken (operator,
+2026-08-22) is to **scope the record to the run's workspace**: `post-review`
+writes `.lastlight/pr-review/disposition.json` — every finding, its tier, and
+its reason — rather than pulling a schema change forward for a consumer that has
+not been written, on a table whose shape would be a guess.
+
+What that buys today is the property that actually separates an attention
+boundary from v2's suppressor: *"what did we know and not say?"* is answerable.
+What it does not buy is a **query** across runs, which is what WP7 is for. When
+WP7 lands, `review_findings` becomes the durable sink and `disposition.json`
+becomes the per-run artifact feeding it. **This is a deferral with a named
+successor, not an unmet criterion.**
+
+### What is measured, and what is not
+
+- **AC1, AC1a, AC1b, AC2, AC3, AC4, AC5 are unit-gated** — the demotion path,
+  the wrong-line/right-excerpt anchor, 20-findings-8-inline with 12 in the body,
+  `unprobed` surviving, the split verdict, backward compatibility, and
+  cross-family dedup (the gate's rule 3).
+- **The external floor reproduces**: `aacr-adjudicate.ts --arm keep-all --all`,
+  2,145 rows, **retention 100%, precision 70.2%, F1 0.825**, zero model calls,
+  `elapsed 0.0s`. Unchanged from the figure below, which is the point — it is the
+  bar any adjudicator arm has to clear.
+- **AC6 is NOT measured.** It needs a model arm against `2026-08-22_092611`
+  (Haiku, pipeline OFF, 8 cases, $1.91, avgF1 **0.229**), and no model has run
+  against WP6. Everything above is mechanism.
+
+> **Three prerequisites verified against the tree 2026-08-22 — all three have
+> now been ADDRESSED by the work above, and are kept because each explains why a
+> piece is shaped the way it is.**
 >
-> - **`existingCode` is not a finding field.** It appears only in the hypothesis
->   contract `lastlight-facts seed` renders (`seed-render.ts`); nothing in
->   `apps/server` knows it. `findings-schema.md` still makes `line` **required**
->   and model-produced. §"The model must stop emitting line numbers" is therefore
->   a real schema change, not a tightening.
-> - **`maxInlineComments` does not exist anywhere.** §D11 already says so;
->   confirmed. `splitFindings` partitions on anchorability alone.
-> - **`review_findings` does not exist** (`src/state/schema/sqlite.ts`). It is
->   [WP7](07-review-memory.md)'s table and WP7 depends on THIS work package, so
->   **AC1b's "written to `review_findings` with its reason" cannot be met as
->   written.** Decide deliberately: scope `internal` to `findings.json` and say
->   so, or pull that one table forward — remembering a schema change means BOTH
->   dialects regenerated (`src/state/CLAUDE.md`). Do not let it go quietly unmet.
+> - **`existingCode` was not a finding field.** It appeared only in the
+>   hypothesis contract `lastlight-facts seed` renders (`seed-render.ts`);
+>   nothing in `apps/server` knew it, and `findings-schema.md` made `line`
+>   **required** and model-produced. 6a is therefore a real schema change, not a
+>   tightening — and the enabling half was unglamorous: `parseDiff` mapped a
+>   unified diff to line NUMBERS and threw the text away, so matching an excerpt
+>   against "every in-memory file diff" was structurally impossible until
+>   `parseDiffFiles` kept it.
+> - **`maxInlineComments` did not exist anywhere.** §D11 said so; confirmed.
+>   `splitFindings` partitioned on anchorability alone, so 6b is new machinery.
+> - **`review_findings` does not exist** (`src/state/schema/sqlite.ts`). See
+>   §6d above for the decision taken.
 
 ## The constraint that shapes everything here
 

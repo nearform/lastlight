@@ -73,11 +73,12 @@ corpus, so they raise the generality claim rather than the shipping path.
 ✅ WP4a's free gate, n=1    — cal-com-10600: tier 2→1, contracts 0→3. §2c
              the same gate at n=50   ← hours of compute, no money
              WP4b's arm             ← model spend, and NO CONSUMER until WP6
-   ── WP6 IS NEXT, and it is four pieces, not one — see §2d ──
-             WP6a anchor cascade    ← model-free; improves the SHIPPED reviewer
-             WP6b attention boundary ← maxInlineComments + family thresholds
-             WP6c adjudicate        ← the conservation gate. THE rung for RECALL
-             WP6d where `internal` lives ← review_findings is WP7's and absent
+✅ WP6 BUILT — all four pieces, inert, gate green. §2e
+   ✅ WP6a anchor cascade      — `existingCode` derives the line. SHIPPED reviewer
+   ✅ WP6b attention boundary  — maxInlineComments 8 + family thresholds + floor
+   ✅ WP6c adjudicate          — the phase, the conservation gate, and its FLOOR
+   ✅ WP6d where `internal` lives — DECIDED: disposition.json, not review_findings
+             WP6's arm              ← model spend. THE rung for RECALL, unmeasured
    ── ship-capable on TypeScript here ──
              WP1c Stage 2 grammars (scoped)   ← generality, not shipping
              WP9  external validation         ← deterministic half is now free
@@ -330,109 +331,67 @@ reaches the model), but it means `dropped[]` currently has no consumer. WP6's
 > because `pr-review.yaml`'s shell fallback hand-writes that document and is only
 > ever reached when something has already gone wrong.
 
-## 2d. WP6 — READY, with two things to know before writing any code
+## 2d. WP6 is BUILT — what it is, and the one thing it still owes
 
-**Are we ready?** Structurally, yes: WP6's declared dependencies are
-[WP3](03-seed-and-survey.md) and [WP4](04-probe-oracle.md) and both are built and
-gate-green. The seams it needs already exist — `splitFindings` and `resolveEvent`
-in `src/engine/github/review-poster.ts`, `post-review`'s anchoring fallback
-chain, and `findings.json` as the file the `review` phase already writes.
+All four pieces landed 2026-08-22, inert (`review.analysis.enabled: false`),
+full gate green (3674 core tests, 22 new adjudicate + 21 anchor + 16 boundary).
+The design and the measured bounds are in
+[06-adjudicate.md](06-adjudicate.md) §"BUILT"; what a restarting reader needs:
 
-But **WP6 is not one work package**, and two of its four pieces are model-free
-and belong first. Read [06-adjudicate.md](06-adjudicate.md) in full; what a
-starting reader needs from here is this.
+**What it does.** `adjudicate` is the first phase that READS
+`hypotheses/*.jsonl` and `probes/verdicts.jsonl`. Until it existed, every
+hypothesis the six surveys wrote was appended to a file **nobody read** — on a
+real case, 40 KB of obligations and 18+ hypotheses ended in an `APPROVE` with
+zero posted findings against five gold. That hole is now closed.
 
-### The two things that change what you build
+**Three structural facts, each of which cost something to learn:**
 
-**1. The obvious adjudicator has ALREADY been measured, and it loses.**
-`apps/evals/scripts/aacr-adjudicate.ts` scored two models against AACR-Bench's
-1,505 valid / 640 invalid comments. The floor is the **null adjudicator** —
-keep everything, which is exactly what production does today — at **F1 0.825**,
-and neither model beat it:
+1. **`adjudicate` is a SIBLING of `post-review`, not a link in its chain.**
+   `trigger_rule` is per NODE, so putting it in `post-review`'s dep set would
+   have forced that node to `all_done` and lost *"a failed review must not
+   post"*. Both hang off `review`; declaration order sequences them. This is
+   money, not tidiness: if a failing adjudicator could stop the post, **both**
+   per-head dedups would be blank (`assessedHeadShaByWorkflow` is succeeded-runs-
+   only, `botReviewAtHead` needs a posted review) and the 30-minute sweep would
+   re-pay for the whole pipeline forever. Pinned by a test that fails the
+   adjudicator and asserts the review still posts.
+2. **The conservation gate needed a deterministic floor.** Reaching
+   `max_iterations` without the `until_bash` condition is **not** a phase
+   failure in this engine, so the gate alone guaranteed nothing. `reconcile` —
+   model-free, `all_done`, `lastlight-facts findings --repair` — writes every
+   uncovered hypothesis at `internal` tier and **promotes any `dropped` entry
+   whose transcript does not exist back to `internal`**. An unjustified deletion
+   becomes a recorded non-deletion. Idempotent; exits 0 on every path.
+3. **Anchor-cascade step 4 (model regeneration) is deliberately not built.**
+   `post-review` has no model binding, and Open Code Review's source records
+   that the step produces a comment *looking located while pointing at unrelated
+   code*. Step 3's unique-hit relocation covers the motivating case
+   (declaration/implementation split) with no model; ambiguity declines.
 
-| arm | retention (valid) | interception (invalid) | F1 |
-|---|---|---|---|
-| `keep-all` (today) | **100.0%** | 0.0% | **0.825** |
-| Haiku 4.5 | 91.3% | 15.4% | 0.803 |
-| GLM-5p2-fast | 76.3% | 33.0% | 0.745 |
+**What it owes: AC6, and only AC6.** Recall must not fall against the WP4 arm,
+with SNR reported. **No model has run against WP6.** The comparator is
+`2026-08-22_092611` (Haiku, pipeline OFF, 8 cases, $1.91, avgF1 **0.229**) and
+only that one — every pr-review number before 2026-08-22 sits on a different
+template context.
 
-Read the confusion matrices, not the rates: Haiku destroys **131 valid comments
-to catch 98**, GLM **356 to catch 211**. Precision barely moves (70.2 → 71.7 →
-72.8) because both drop valid and invalid at nearly the same rate — the signature
-of a filter that is not discriminating, only shrinking. And the threshold sweep
-closes it: F1 sits at 0.825 from t=0.0 to t=0.7 and then collapses, so **there is
-no operating point to tune toward** and per-family calibration cannot rescue it.
+Two free instruments were read to exhaustion first, per the house rule:
+`aacr-adjudicate.ts --arm keep-all --all` reproduces the floor exactly (2,145
+rows, retention 100%, precision 70.2%, **F1 0.825**, `elapsed 0.0s`, zero model
+calls), and the conservation gate is a unit test rather than a spend.
 
-> So the prohibition is a measured bound, not a principle: **`adjudicate` earns
-> its cost through RANKING and TIERING into inline/body/internal, and through
-> PROBE-BACKED DELETION. It may not earn it by judging plausibility.**
+> **The prohibition the arm must not quietly relax.** `adjudicate` earns its
+> cost through RANKING and TIERING and through PROBE-BACKED DELETION. It may not
+> earn it by judging plausibility: two models scored against those same 2,145
+> labelled comments and **neither beat keeping everything** (0.803 and 0.745
+> against 0.825). One destroyed 131 valid comments to catch 98. The threshold
+> sweep is flat from t=0.0 to t=0.7 then collapses, so there is no operating
+> point to tune toward. If a WP6 arm shows precision up and recall down, that is
+> the fifth reproduction of locked decision #1, not a tuning opportunity.
 
-**2. Probe-backed deletion is the only sanctioned deletion, and `falsify` has
-never run.** Nothing produces a transcript yet. If `falsify` turns out to produce
-few or none on real cases, `adjudicate`'s delete power is **inert by
-construction** — which is safe, and it means WP6 lands as *connect the exit,
-rank and tier*, with deletion arriving later. Expect that, rather than
-discovering it.
-
-### The four pieces, in the order they should land
-
-**6a — the anchor cascade. Model-free, and worth shipping alone.**
-[06](06-adjudicate.md) §"The model must stop emitting line numbers" says so
-itself. Today `findings-schema.md` makes `line` **required** and model-produced,
-and `post-review` **demotes** anything outside the commentable line set — so a
-finding whose analysis is perfect and whose line number is off by two pays the
-full price of a wrong answer for an arithmetic slip. Models quote code well and
-count lines badly: make `existingCode` required, `line` advisory, and derive the
-anchor (hunk match → full-file scan → **cross-file relocation on a unique string
-hit** → model regeneration as a last resort → demote). **Step 3 before step 4 is
-the whole insight** — handing a model the wrong file's diff and demanding a
-snippet back produces a comment that *looks located while pointing at unrelated
-code*, and a declaration/implementation split is the normal shape of a finding
-from a contract delta. This improves the **shipped** reviewer, pipeline or no
-pipeline. Verified 2026-08-22: `existingCode` exists only in the code-facts
-hypothesis contract; nothing in `apps/server` knows the field.
-
-**6b — the attention boundary. Mostly plumbing.** `maxInlineComments` (default 8)
-and the per-family thresholds are **new machinery, not a reuse** (§D11):
-`splitFindings` partitions on *anchorability* and there is no inline cap today.
-Note the trap the design review already flagged — after this, "Additional
-findings" would mean three different things (off-diff, below threshold,
-overflowed the cap), and three causes under one heading is a worse review to
-read. Split the heading or annotate each line.
-
-**6c — `adjudicate` itself.** The phase, `prompts/review-adjudicate.md`,
-`fresh_context: true`, and the **conservation gate**: every hypothesis id across
-`hypotheses/*.jsonl` must appear in `findings.json` with exactly one disposition,
-and a `dropped` one must carry `refutedBy` naming a transcript that exists on
-disk. Existence-plus-schema was explicitly judged not enough — an adjudicator
-reading 30 hypotheses and writing 6 findings would pass every other gate in this
-plan, and that is v2. Per §D12 the gate needs a **floor**: unable to pass within
-its iterations, write every unresolved hypothesis at `internal` tier and
-continue. It must never take the run down.
-
-**6d — where `internal` is persisted. A REAL ordering problem, decide it
-deliberately.** AC1b asks that every `internal`-tier finding be written to
-`review_findings` with its reason — and **that table does not exist**
-(verified 2026-08-22: no `review_findings` in `src/state/schema/sqlite.ts`). It
-is [WP7](07-review-memory.md)'s, and WP7 depends on WP6. Two honest options:
-scope `internal` to `findings.json` only for now and say so, or pull that one
-table forward — remembering that a schema change means **both dialects
-regenerated** (`src/state/CLAUDE.md`). Do not let AC1b quietly go unmet.
-
-### What to measure, and against what
-
-The comparator is `2026-08-22_092611` (Haiku, pipeline OFF, 8 cases, $1.91,
-avgF1 **0.229**) — and only that one; every pr-review number from before
-2026-08-22 sits on a different template context. Two free instruments run first:
-`aacr-adjudicate.ts --arm keep-all --all` reproduces the floor with no model
-calls, and the conservation gate is a unit test rather than a spend. **Read every
-free denominator to exhaustion before buying a model one** — WP4 found two silent
-bugs that way before spending a dollar, and WP3's gate was read at n = 135 for
-nothing.
-
-The measurement gate itself (AC6) is **recall does not fall** against the WP4
-arm, with SNR reported. Precision alone is not a gate; [00-evidence
-§5](00-evidence.md) is the argument, and locked decision 2 is the short version.
+**And expect probe-backed deletion to be inert.** `falsify` has still never run,
+so nothing has produced a transcript. With no transcripts the adjudicator's
+delete power cannot fire at all — which is the safe direction, and means WP6's
+first arm measures *connect the exit, rank and tier*.
 
 ## 3. Driving sub-agents on this work
 

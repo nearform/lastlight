@@ -413,6 +413,102 @@ phases:
     model: "{{models.review}}"
     variant: "{{variants.review}}"
 
+  # WP6c — the exit of the funnel. Everything before this phase APPENDS to
+  # `hypotheses/<family>.jsonl` and `probes/verdicts.jsonl`, and until now
+  # NOTHING READ EITHER: verified on a real case, 40 KB of obligations and 18+
+  # hypotheses ended in an APPROVE with zero posted findings against five gold.
+  # This is the only rung in the plan that can move recall.
+  #
+  # A SIBLING of `post-review`, not a link in its chain, and that placement is
+  # load-bearing. `trigger_rule` is per-node and applies to every dep, so
+  # `post-review: depends_on [review, adjudicate]` could not say "all_success
+  # w.r.t. review, all_done w.r.t. adjudicate" — it would have to relax to
+  # `all_done` and lose the invariant that a FAILED REVIEW MUST NOT POST, which
+  # is a worse bug than the one it would fix. Declared above `post-review`, so
+  # the sequential scheduler (ready[0], in declaration order) still runs it
+  # first; unreachable from `post-review`'s dep set, so it can never stop a
+  # review from being posted.
+  #
+  # WHAT IT MAY AND MAY NOT DO. It re-ranks, re-tiers, and demotes into the
+  # review body. It deletes ONLY when a probe transcript refutes the claim.
+  # That asymmetry is measured, not principled: `aacr-adjudicate.ts` scored two
+  # models against AACR-Bench's 1,505 valid / 640 invalid comments and NEITHER
+  # BEAT KEEPING EVERYTHING (F1 0.825 → 0.803 Haiku → 0.745 GLM). Haiku
+  # destroyed 131 valid comments to catch 98; precision barely moved, which is
+  # the signature of a filter that is not discriminating, only shrinking. The
+  # threshold sweep closes it — F1 is flat from t=0.0 to t=0.7 then collapses,
+  # so there is no operating point to tune toward. A cheap model asked "is this
+  # comment valid" is worse than useless here.
+  - name: adjudicate
+    label: Adjudicate
+    skills: [pr-review, code-review]
+    prompt: prompts/review-adjudicate.md
+    # The STRONG model, and the only phase in the pipeline that gets it besides
+    # `review` itself. The surveys over-produce on a cheap model precisely so
+    # that one strong pass can rank what they found.
+    model: "{{models.review}}"
+    variant: "{{variants.review}}"
+    skip_if: "analysisEnabled != true"
+    depends_on: [review]
+    generic_loop:
+      # INSIDE the loop, where the schema reads it. At phase level zod strips
+      # the key and the policy silently reverts to `{retries: 0, then: fail}` —
+      # all six survey phases had it in the wrong place until 2026-08-22.
+      on_soft_failure: { retries: 1, then: complete }
+      max_iterations: 2
+      # The fresh-context adjudication AnyPoC recommends: it reads the
+      # hypothesis RECORDS, the quotes and the transcripts — not the survey's
+      # reasoning, which is what makes rejecting a false report possible at all
+      # (baseline agents fail to reject 96% of false reports when they can see
+      # the reasoning that produced them).
+      fresh_context: true
+      # The CONSERVATION gate. "Existence-plus-schema" was explicitly judged not
+      # enough: an adjudicator reading 30 hypotheses and writing 6 findings
+      # would have passed every other gate in this plan, and that is exactly v2
+      # — which "worked mechanically" and cost recall anyway. Every hypothesis
+      # id must appear with exactly one disposition, and a `dropped` one must
+      # name a transcript that EXISTS. Silent omission becomes impossible by
+      # construction rather than by instruction.
+      #
+      # Literal shell, no template markers: `validateShellCommand` rejects any
+      # command containing `{{` outright.
+      until_bash: |
+        FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+        "$FACTS" findings --dir .lastlight/pr-review
+
+  # §D12's FLOOR, and the reason the gate above is a mechanism rather than a
+  # request. Reaching `max_iterations` without the condition is NOT a phase
+  # failure in this engine (phase-executor.ts) — the loop simply ends — so an
+  # adjudicator that never satisfied conservation would otherwise leave
+  # hypotheses silently unaccounted for, which is the one outcome the gate
+  # exists to prevent.
+  #
+  # `--repair` writes every uncovered hypothesis into findings.json at
+  # `internal` tier, and PROMOTES any `dropped` entry whose transcript does not
+  # exist back to `internal` — an unjustified deletion becomes a recorded
+  # non-deletion. It is idempotent, so on a run where the model DID satisfy the
+  # gate this phase is a no-op.
+  #
+  # Deterministic, model-free, and it exits 0 on every path: a phase that fails
+  # hard records no `assessedHeadShaByWorkflow` and hands `cron-review.yaml`
+  # something to re-dispatch every thirty minutes, forever.
+  - name: reconcile
+    label: Reconcile · the conservation floor
+    type: bash
+    skip_if: "analysisEnabled != true"
+    depends_on: [adjudicate]
+    # `all_done`: the floor must apply even when the adjudicator failed or was
+    # cut short — that is precisely when there is something to repair.
+    trigger_rule: all_done
+    timeout_seconds: 120
+    command: |
+      set -u
+      FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+      if ! "$FACTS" findings --dir .lastlight/pr-review --repair; then
+        echo "reconcile: could not repair findings.json; it stands as the review phase wrote it"
+      fi
+      exit 0
+
   # First-class, in-process submission (type: post-review → PhaseExecutor.
   # runPostReview). Reads the agent's findings.json for the review *content*
   # (skip? / summary / event / findings[]) and supplies everything else from

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createServer, type Server } from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -503,6 +503,88 @@ describe("post-review action (runPostReview)", () => {
         // …and says so in the ledger row, or "event=COMMENT" on a doc that says
         // APPROVE reads as a bug rather than as the axis floor doing its job.
         expect(outcome.results[0]!.output).toContain("downgraded from APPROVE");
+      });
+    });
+
+    /**
+     * WP6b's attention boundary, at the deployment level.
+     *
+     * The unit tests pin `tierFindings`; what this owns is the two things only
+     * the handler can get wrong — that the boundary is built from config at all,
+     * and that it is NOT built when the pipeline is off. The second is the one
+     * that matters: a cap silently applied to a deployment that never opted in
+     * would change what its reviewer posts, which is precisely what locked
+     * decision 8 forbids.
+     */
+    describe("the attention boundary — opt-in, and audited when it applies", () => {
+      // PR_DIFF makes exactly RIGHT:7..10 commentable, so the budget is
+      // exercised with a cap of 2 rather than the shipped 8. The 20-findings /
+      // 8-inline / 12-in-the-body shape AC1b names is unit-covered in
+      // `attention-boundary.test.ts`; what only this layer can prove is that
+      // the boundary is BUILT FROM CONFIG at all, and that it is not built when
+      // the pipeline is off.
+      const findings = () => [
+        { path: "src/foo.ts", line: 7, severity: "Critical", title: "on-diff A", body: "b" },
+        { path: "src/foo.ts", line: 8, severity: "Critical", title: "on-diff B", body: "b" },
+        { path: "src/foo.ts", line: 9, severity: "Important", title: "on-diff C", body: "b" },
+        { path: "src/foo.ts", line: 10, severity: "Minor", title: "on-diff D", body: "b" },
+        { path: "src/other.ts", line: 99, severity: "Important", title: "off-diff E", body: "b" },
+      ];
+
+      const dispositionPath = (taskId: string) =>
+        join(stateDir, "sandboxes", taskId, "widget", ".lastlight", "pr-review", "disposition.json");
+
+      it("does NOT cap, and writes no disposition, when the pipeline is off", async () => {
+        withReviewConfig({
+          trigger: "on-request",
+          analysis: { ...defaultReviewConfig().analysis, enabled: false, maxInlineComments: 2 },
+        });
+        const taskId = "widget-42-boundary-off";
+        seedFindings(taskId, "widget", { summary: "ok", event: "COMMENT", findings: findings() });
+
+        const { executor } = makeExecutor(taskId);
+        expect((await executor.execute(NODE, {})).status).toBe("succeeded");
+        const posted = reviews[0]!.body as { comments: unknown[] };
+        // All four anchorable findings post inline: the cap is configured and
+        // deliberately ignored, because the deployment did not opt in.
+        expect(posted.comments).toHaveLength(4);
+        expect(existsSync(dispositionPath(taskId))).toBe(false);
+      });
+
+      it("caps inline, keeps the rest in the BODY, and records every disposition", async () => {
+        withReviewConfig({
+          trigger: "on-request",
+          analysis: { ...defaultReviewConfig().analysis, enabled: true, maxInlineComments: 2 },
+        });
+        const taskId = "widget-42-boundary-on";
+        seedFindings(taskId, "widget", { summary: "ok", event: "COMMENT", findings: findings() });
+
+        const { executor } = makeExecutor(taskId);
+        expect((await executor.execute(NODE, {})).status).toBe("succeeded");
+        const posted = reviews[0]!.body as { comments: { line: number }[]; body: string };
+
+        // Ranked by severity: the two Criticals take the budget.
+        expect(posted.comments.map((c) => c.line)).toEqual([7, 8]);
+        // AC1b: the other three are in the body, not nowhere.
+        expect(posted.body).toContain("### Additional findings");
+        for (const t of ["on-diff C", "on-diff D", "off-diff E"]) expect(posted.body, t).toContain(t);
+        // …and the two causes are not pooled under one heading.
+        expect(posted.body).toContain("Outside this PR's diff");
+        expect(posted.body).toContain("Beyond the inline comment budget");
+
+        // "What did we know and not say?" is answerable on disk.
+        const record = JSON.parse(readFileSync(dispositionPath(taskId), "utf8")) as {
+          findings: { tier: string; reason: string | null; finding: { title: string } }[];
+        };
+        expect(record.findings).toHaveLength(5);
+        expect(record.findings.filter((r) => r.tier === "inline")).toHaveLength(2);
+        expect(
+          record.findings.filter((r) => r.tier === "body").map((r) => [r.finding.title, r.reason]),
+        ).toEqual([
+          ["off-diff E", "off-diff"],
+          ["on-diff C", "overflow"],
+          ["on-diff D", "overflow"],
+        ]);
       });
     });
   });

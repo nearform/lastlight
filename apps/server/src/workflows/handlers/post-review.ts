@@ -8,11 +8,11 @@ import {
   buildBodyOnlyReview,
   commentableOf,
   parseDiffFiles,
-  tierFindings,
   worstAxis,
   type AttentionBoundary,
   type DiffFile,
   type ReviewFindingsDoc,
+  type TieredFindings,
 } from "../../engine/github/review-poster.js";
 import { getRuntimeConfig } from "../../config/config.js";
 import { hasMaterialChange } from "../../engine/pr-decisions.js";
@@ -256,8 +256,8 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     // `internal` tier, whatever a findings.json happens to carry.
     const boundary = this.attentionBoundary();
     const review = buildReview(doc, commentable, boundary);
-    if (boundary) {
-      this.recordDisposition(hostRepoDir, doc, commentable, boundary);
+    if (boundary && review.tiered) {
+      this.recordDisposition(hostRepoDir, boundary, review.tiered);
     }
 
     const repeat = this.repeatOfLastReview(history.latest, review);
@@ -446,16 +446,10 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
    */
   private recordDisposition(
     repoDir: string,
-    doc: ReviewFindingsDoc,
-    commentable: Map<string, Set<string>> | null,
     boundary: AttentionBoundary,
+    tiered: TieredFindings,
   ): void {
     try {
-      const tiered = tierFindings(
-        Array.isArray(doc.findings) ? doc.findings : [],
-        commentable,
-        boundary,
-      );
       const rows = [
         ...tiered.inline.map((f) => ({ tier: "inline" as const, reason: null, finding: f })),
         ...tiered.body.map((d) => ({ tier: "body" as const, reason: d.reason, finding: d.finding })),

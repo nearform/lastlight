@@ -66,11 +66,20 @@ const DECLARED = [
   "survey_spec",
   "falsify",
   "review",
+  "adjudicate",
+  "reconcile",
   "post-review",
 ];
 
-/** Every phase the evidence pipeline added — all ten vanish when it is off. */
-const ANALYSIS_PHASES = DECLARED.slice(0, 10);
+/**
+ * Every phase the evidence pipeline added — all twelve vanish when it is off.
+ *
+ * Not a `slice` any more: WP6's two phases sit AFTER `review` rather than before
+ * it, because `adjudicate` consumes what the review pass wrote. So the pipeline
+ * phases are no longer a contiguous prefix and spelling them as one would be a
+ * quietly wrong assertion.
+ */
+const ANALYSIS_PHASES = DECLARED.filter((n) => n !== "review" && n !== "post-review");
 
 /**
  * WP4's two phases are gated SEPARATELY, on `probesEnabled`, so they skip even
@@ -81,6 +90,15 @@ const ANALYSIS_PHASES = DECLARED.slice(0, 10);
  */
 const WP4_PHASES = ["prepare", "falsify"];
 const WP3_PHASES = DECLARED.slice(1, 9);
+
+/**
+ * WP6's two. `adjudicate` is the model pass; `reconcile` is its deterministic
+ * §D12 FLOOR — reaching `max_iterations` without the conservation condition is
+ * not a phase failure in this engine, so without `reconcile` an adjudicator that
+ * never satisfied the gate would silently drop hypotheses, which is the one
+ * outcome the gate exists to prevent.
+ */
+const WP6_PHASES = ["adjudicate", "reconcile"];
 
 /** The two phases that existed before WP3 and must still EXECUTE when it is off. */
 const LEGACY_PHASES = ["review", "post-review"];
@@ -142,25 +160,46 @@ function simulate(phases: PhaseDefinition[], ctx: Record<string, unknown>) {
 describe("golden — pr-review.yaml is an explicit chain, and the chain is unbroken", () => {
   const def = getWorkflow("pr-review");
 
-  it("declares the ten phases in the pinned order", () => {
+  it("declares the fourteen phases in the pinned order", () => {
     expect(def.phases.map((p) => p.name)).toEqual(DECLARED);
   });
 
   it("declares EVERY edge by hand — chain synthesis is off for this workflow", () => {
     // The trap: `buildDag` synthesizes a linear chain only when NO phase
     // declares `depends_on`. One declared edge anywhere turns synthesis off for
-    // all ten nodes, so any phase that forgot its own edge silently becomes a
-    // root and runs first, in parallel with everything else.
+    // every node, so any phase that forgot its own edge silently becomes a root
+    // and runs first, in parallel with everything else.
+    //
+    // The graph stopped being a straight line at WP6: `adjudicate` and
+    // `post-review` BOTH hang off `review`. That fan-out is deliberate and is
+    // the whole reason a failing adjudicator cannot stop a review posting —
+    // `trigger_rule` is per NODE, not per edge, so putting `adjudicate` in
+    // `post-review`'s dep set would have forced it to `all_done` and lost the
+    // invariant that a failed review must not post. Pinning the edges by name
+    // rather than by index is what keeps that readable.
+    const expected: Record<string, string[]> = {
+      prepare: [],
+      facts: ["prepare"],
+      seed: ["facts"],
+      survey_contract: ["seed"],
+      survey_enforcement: ["survey_contract"],
+      survey_security: ["survey_enforcement"],
+      survey_state: ["survey_security"],
+      survey_tests: ["survey_state"],
+      survey_spec: ["survey_tests"],
+      falsify: ["survey_spec"],
+      review: ["falsify"],
+      adjudicate: ["review"],
+      reconcile: ["adjudicate"],
+      "post-review": ["review"],
+    };
     const declaredEdges = def.phases.filter((p) => p.depends_on?.length);
     expect(declaredEdges).toHaveLength(DECLARED.length - 1);
 
     const dag = buildDag(def.phases, { chainIfNoDeps: true });
     // Exactly one root, and it is the first declared phase.
     expect(dag.filter((n) => n.depends_on.length === 0).map((n) => n.name)).toEqual(["prepare"]);
-    // …and every other node depends on precisely its predecessor.
-    for (let i = 1; i < dag.length; i++) {
-      expect(dag[i].depends_on).toEqual([DECLARED[i - 1]]);
-    }
+    expect(Object.fromEntries(dag.map((n) => [n.name, n.depends_on]))).toEqual(expected);
   });
 
   it("gives every phase downstream of a skippable one `all_done`, and post-review `all_success`", () => {
@@ -169,12 +208,19 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
     // inert configuration would post no review at all. `all_done` is the rule
     // the schema names for exactly this.
     const byName = new Map(def.phases.map((p) => [p.name, p]));
-    for (const name of DECLARED.slice(1, 11)) {
+    const allDone = [...DECLARED.slice(1, 11), "reconcile"];
+    for (const name of allDone) {
       expect(byName.get(name)?.trigger_rule, `${name}.trigger_rule`).toBe("all_done");
     }
     // post-review is deliberately the other way: a FAILED review must not post.
     expect(byName.get("post-review")?.trigger_rule).toBeUndefined();
     expect(byName.get("post-review")?.depends_on).toEqual(["review"]);
+    // `adjudicate` too, and for the mirror-image reason: there is nothing worth
+    // adjudicating about a review that failed.
+    expect(byName.get("adjudicate")?.trigger_rule).toBeUndefined();
+    // …but `reconcile` is `all_done`, because a cut-short adjudicator is
+    // exactly when the conservation floor has work to do.
+    expect(byName.get("reconcile")?.trigger_rule).toBe("all_done");
   });
 
   it("guards WP3's eight phases on `analysisEnabled`, WP4's on `probesEnabled`, and neither legacy phase", () => {
@@ -197,6 +243,13 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
         "probesEnabled != true",
       ]);
     }
+    // WP6's two ride the pipeline switch alone: they neither install anything
+    // nor execute anything from the PR, so `probesEnabled` is not their gate.
+    for (const name of WP6_PHASES) {
+      expect(phaseSkipIfExpressions(byName.get(name)!), `${name}.skip_if`).toEqual([
+        "analysisEnabled != true",
+      ]);
+    }
     for (const name of LEGACY_PHASES) {
       expect(phaseSkipIfExpressions(byName.get(name)!), `${name}.skip_if`).toEqual([]);
     }
@@ -206,7 +259,7 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
 describe("golden — with review.analysis off, pr-review resolves to review → post-review", () => {
   const def = getWorkflow("pr-review");
 
-  it("skips all ten analysis phases and still runs BOTH legacy phases", () => {
+  it("skips all twelve analysis phases and still runs BOTH legacy phases", () => {
     // The inert context: `specContext()` returned `{}`, so `analysisEnabled` is
     // absent — not `false`, ABSENT. That is the real production shape and it is
     // the one the gate has to handle.
@@ -229,7 +282,7 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
     expect(skipped.map((s) => s.name)).toEqual(WP4_PHASES);
   });
 
-  it("runs all twelve in declaration order once both flags are on", () => {
+  it("runs all fourteen in declaration order once both flags are on", () => {
     const { ran, skipped } = simulate(def.phases, { analysisEnabled: "true", probesEnabled: "true" });
     expect(ran).toEqual(DECLARED);
     expect(skipped).toEqual([]);
@@ -291,11 +344,33 @@ class RecordingPostReview implements PhaseTypeHandler {
   }
 }
 
-async function runPrReview(ctx: Record<string, unknown>) {
+/**
+ * An agent port that hard-fails exactly one phase's prompt and succeeds at
+ * everything else. `FakeAgentPort.script()` is a single FIFO queue shared by
+ * agent AND command calls, so it cannot target one phase in a run with eight
+ * `until_bash` gates interleaved through it.
+ */
+class FailOnePromptAgent extends FakeAgentPort {
+  constructor(private readonly needle: string) {
+    super({ success: true, output: "reviewed", turns: 1, durationMs: 0 });
+  }
+  override async runAgent(prompt: string, config: never, opts: never) {
+    const res = await super.runAgent(prompt, config, opts);
+    if (prompt.includes(this.needle)) {
+      // `error_fatal` is a HARD outcome — `on_soft_failure` does not catch it,
+      // which is the case worth pinning.
+      return { success: false, output: "", turns: 1, durationMs: 0, stopReason: "error_fatal", error: "boom" };
+    }
+    return res;
+  }
+}
+
+async function runPrReview(ctx: Record<string, unknown>, agentPort?: FakeAgentPort) {
   const def = getWorkflow("pr-review");
   const store = new InMemoryStateStore(RUN_ID);
   const reporter = new RecordingReporter();
-  const agent = new FakeAgentPort({ success: true, output: "reviewed", turns: 1, durationMs: 0 });
+  const agent =
+    agentPort ?? new FakeAgentPort({ success: true, output: "reviewed", turns: 1, durationMs: 0 });
   const postReview = new RecordingPostReview();
 
   const runScope: PhaseRunContext = {
@@ -341,7 +416,7 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
     expect(result.success).toBe(true);
     expect((await store.runs.getRun(RUN_ID))?.status).toBe("succeeded");
 
-    // ONE model call — the `review` phase. Not eleven. The three bash phases
+    // ONE model call — the `review` phase. Not thirteen. The four bash phases
     // never ran either, so `runCommand` was never reached.
     expect(agent.calls.filter((c) => c.kind === "agent")).toHaveLength(1);
     expect(agent.calls.filter((c) => c.kind === "command")).toHaveLength(0);
@@ -349,7 +424,7 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
     expect(postReview.calls).toEqual(["post-review"]);
   });
 
-  it("records all twelve phases — ten skipped, two done — so the dashboard is not silent", async () => {
+  it("records all fourteen phases — twelve skipped, two done — so the dashboard is not silent", async () => {
     const { result, reporter } = await runPrReview({ owner: "acme", repo: "widgets", prNumber: 7 });
 
     expect(result.phases.map((p) => p.phase)).toEqual(DECLARED);
@@ -385,8 +460,12 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
       "facts",
       "seed",
       "review",
+      "reconcile",
       "post-review",
     ]);
+    // `adjudicate` is a generic_loop, so like the surveys it reports under its
+    // iteration label rather than its own name.
+    expect(seen).toContain("adjudicate_iter_1");
     for (const family of FAMILIES) {
       expect(seen, family).toContain(`survey_${family}_iter_1`);
     }
@@ -394,10 +473,48 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
     expect(seen).toContain("falsify_iter_1");
     expect(result.phases.every((p) => p.success)).toBe(true);
 
-    // Three deterministic bash phases + seven generic-loop `until_bash` gates.
-    expect(agent.calls.filter((c) => c.kind === "command").length).toBeGreaterThanOrEqual(3);
-    // Six survey passes + the oracle + the review itself.
-    expect(agent.calls.filter((c) => c.kind === "agent")).toHaveLength(8);
+    // Four deterministic bash phases + eight generic-loop `until_bash` gates.
+    expect(agent.calls.filter((c) => c.kind === "command").length).toBeGreaterThanOrEqual(4);
+    // Six survey passes + the oracle + the review + the adjudicator.
+    expect(agent.calls.filter((c) => c.kind === "agent")).toHaveLength(9);
+  });
+
+  it("posts the review even when the ADJUDICATOR hard-fails — the money property", async () => {
+    // The failure mode this placement exists to prevent, and it is a spend
+    // loop rather than a cosmetic one. `assessedHeadShaByWorkflow` is populated
+    // from SUCCEEDED runs only, so a red run leaves no trace — and if a failing
+    // `adjudicate` could stop `post-review`, nothing would be posted either, so
+    // `botReviewAtHead` would stay null too. With BOTH per-head dedups blank,
+    // `cron-review.yaml`'s thirty-minute sweep re-dispatches the same SHA and
+    // pays for the whole pipeline — including the strong-model review — every
+    // half hour, forever. That exact shape cost real money once already.
+    //
+    // Because `post-review` hangs off `review` and not off `adjudicate`, and
+    // because the scheduler CONTINUES past a failed node rather than aborting,
+    // the review is still posted. The run goes red; the PR is still reviewed;
+    // the next dispatch skips on `already-reviewed`.
+    const { result, postReview } = await runPrReview(
+      { owner: "acme", repo: "widgets", prNumber: 7, analysisEnabled: "true", probesEnabled: "true" },
+      new FailOnePromptAgent("review-adjudicate.md"),
+    );
+
+    expect(postReview.calls).toEqual(["post-review"]);
+    // …and it is honestly reported as a failed RUN, not quietly swallowed.
+    expect(result.success).toBe(false);
+    const adjudicateResults = result.phases.filter((p) => p.phase.startsWith("adjudicate"));
+    expect(adjudicateResults.some((p) => !p.success)).toBe(true);
+  });
+
+  it("still runs the conservation floor after a failed adjudicator", async () => {
+    // `reconcile` is `all_done` precisely so that a cut-short adjudicator is
+    // repaired rather than left with hypotheses unaccounted for.
+    const { result, postReview } = await runPrReview(
+      { owner: "acme", repo: "widgets", prNumber: 7, analysisEnabled: "true", probesEnabled: "true" },
+      new FailOnePromptAgent("review-adjudicate.md"),
+    );
+    expect(result.phases.map((p) => p.phase)).toContain("reconcile");
+    // …and the floor runs BEFORE the post, so what gets posted is the repaired
+    // document rather than whatever the failed adjudicator left behind.
     expect(postReview.calls).toEqual(["post-review"]);
   });
 });
