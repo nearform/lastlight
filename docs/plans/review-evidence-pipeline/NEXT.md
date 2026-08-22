@@ -1,7 +1,7 @@
 # NEXT — start a clean session here
 
 Written 2026-08-22 at the end of the re-baseline day. This is the short,
-self-contained entry point: what we know, what the artifacts say, and four small
+self-contained entry point: what we know, what the artifacts say, and five small
 experiments that are worth running before anything ambitious.
 
 [RESTART.md](RESTART.md) remains the operational reference — tree state, the
@@ -12,16 +12,18 @@ there for the measured numbers. This file is what to *do*.
 
 - The pipeline works end to end and is **off by default**; `false` reproduces the
   shipped review byte-for-byte.
-- It finds gold the shipped reviewer never finds — **10 of 50 gold-instances
-  pooled across two runs, against the baseline's 0 of 25** — and has never lost a
-  baseline hit.
-- **How much it finds on any given run is wildly unstable**: 0.320 and 0.080 from
-  an identical configuration.
+- It finds gold the shipped reviewer never finds — **15 of 75 gold-instances
+  pooled across three runs, against the baseline's 0 of 25** — and has never lost
+  a baseline hit.
+- **How much it finds on any given run is wildly unstable**: 0.320, 0.080 and
+  0.200 from an identical configuration. The mean is 0.200.
+- **The seed layer is deterministic** — obligations are byte-identical across
+  runs. All the variance is in the survey models.
 - Everything is committed. Both repos clean.
 - Nothing here has been validated outside eight `skillspro` cases. Any external
   claim is still [WP9](09-external-validation.md)'s, unmade.
 
-## The three runs — KEEP THESE IDS
+## The four runs — KEEP THESE IDS
 
 All in `~/work/nearform-evals/eval-results/pr-review/`.
 
@@ -30,23 +32,35 @@ All in `~/work/nearform-evals/eval-results/pr-review/`.
 | `2026-08-22_183835-00cc469` | **baseline** | 0 of 25, 1 posted, $2.28 |
 | `2026-08-22_184650-00cc469` | **wp3 run 1** | 8 of 25 (μrec 0.320), 47 posted, $15.65 |
 | `2026-08-22_194234-00cc469` | **wp3 run 2** | 2 of 25 (μrec 0.080), 23 posted, $17.55 |
+| `2026-08-22_201607-64862d5` | **wp3 run 3** | 5 of 25 (μrec 0.200), 44 posted |
 
-Run 1 kept its workspaces, and `TMPDIR` is purged periodically, so its pipeline
-artifacts are **copied out** to:
+`TMPDIR` is purged periodically, so the kept workspaces are **copied out** to:
 
 ```
-~/lastlight-run-artifacts/2026-08-22_184650-wp3-run1/<instance_id>/pr-review/
-  facts.json  obligations.json  obligations/*.md  hypotheses/*.jsonl
-  findings.json  disposition.json
+~/lastlight-run-artifacts/2026-08-22_184650-00cc469-wp3-run1/    (run 1)
+~/lastlight-run-artifacts/2026-08-22_201607-64862d5-wp3-run3/    (run 3)
+  └── <instance_id>/pr-review/
+        facts.json  obligations.json  obligations/*.md
+        hypotheses/*.jsonl  findings.json  disposition.json
 ```
 
-Run 2 was run without `--keep-workspace` — **a mistake worth not repeating.** The
-one run we most want to diff against run 1 is the one whose evidence we did not
-keep. Always pass it.
+Run 2 was run without `--keep-workspace` — **a mistake worth not repeating.**
+Always pass it.
 
-## What the deep scan of run 1 found
+### Three runs, and the shape of the noise
 
-Read off the preserved artifacts and both scorecards. No model spend.
+| | run 1 | run 2 | run 3 | mean |
+|---|---|---|---|---|
+| arm | 0.320 | 0.080 | 0.200 | **0.200** |
+| train (13 gold) | 0.462 | 0.000 | 0.154 | 0.205 |
+| blind (12 gold) | 0.167 | 0.167 | 0.250 | 0.194 |
+
+**Pooled: 15 of 75 gold-instances, against the baseline's 0 of 25.** Never a
+baseline hit lost, in any run.
+
+## What the deep scan of runs 1 and 3 found
+
+Read off the two preserved workspaces and the four scorecards. No model spend.
 
 **1. `prepare` and `falsify` were skipped 8/8 — in both runs.** The probe oracle
 has *still* never been executed by a model, so the adjudicator's delete power is
@@ -60,86 +74,129 @@ lines are UNKNOWN rather than none — nothing produces one until WP4's prepare"
 One of six families contributes nothing because the phase that would feed it is
 skipped. The envelope is honest about it; nobody had read the envelope.
 
-**3. Obligation supply collapses on exactly the cases we do worst on.**
+**3. The seed layer is DETERMINISTIC, and all the variance is downstream of it.**
+*Established by run 3, and it retires the leading hypothesis of an hour earlier.*
 
-| Case | Split | Obligations | Gold | Matched (run 1) |
-|---|---|---|---|---|
-| `1587-r3` | train | **40** | 4 | 1 |
-| `1587-r2` | train | **33** | 5 | 3 |
-| `1587-r1` | train | **31** | 3 | 1 |
-| `1641` / `1641-r2` | train | 11 / 11 | 0 / 1 | — / 1 |
-| `1667` | blind | 7 | 5 | **0** |
-| `1680-r1` | blind | **1** | 4 | 1 |
-| `1680-r2` | blind | **1** | 3 | 1 |
+Comparing run 1 and run 3 obligation-for-obligation: **byte-identical on all
+eight cases** — same ids, same families, same mechanisms, same counts. `facts`
+and `seed` do exactly what they are supposed to do.
 
-The three blind cases draw **1, 1 and 7** obligations against the train cases'
-31–40. Blind micro-recall was 0.167 in *both* runs while train swung 0.462 →
-0.000. The deterministic layer is nearly silent on precisely the PRs we are
-worst at, which makes "the blind split is harder" and "the blind split is
-under-seeded" indistinguishable on present evidence. **Distinguishing them is the
-single most valuable thing to do next**, and it costs no model spend to start.
+The same eight cases then produced **wildly different hypothesis volumes from
+that identical brief**:
 
-**4. Identical effort, wildly different yield.** Per-phase totals across the two
+| Case | Obligations (both runs) | Hypotheses r1 → r3 |
+|---|---|---|
+| `1587-r1` | 31 | 18 → **43** |
+| `1667` | 7 | 10 → **23** |
+| `1680-r1` | 1 | 10 → **19** |
+| `1587-r3` | 40 | 45 → 45 |
+| `1587-r2` | 33 | 42 → 39 |
+
+**So the variance is entirely in what the survey models do with a fixed input** —
+up to 2.4× the hypothesis volume from the same obligations. That is a much
+sharper target than "the pipeline is noisy", and it points every remaining lever
+at the survey stage rather than at the deterministic layer.
+
+**4. Obligation supply does NOT predict recall — the under-seeding theory is
+dead.** Written after run 1, it looked compelling: the blind cases drew 1, 1 and
+7 obligations against the train cases' 31–40. Three runs kill it.
+
+- `1680-r1` has **one** obligation and matches **1/2/1** across the three runs.
+- `1667` has **seven** and matches **0/0/0** — it has never been cracked.
+- `1587-r3` has **forty** and matches **1/0/0**.
+
+And the split means are **train 0.205, blind 0.194** — statistically the same.
+The "blind is worse" reading was itself noise from a single run; blind is in fact
+the *more stable* half (0.167 / 0.167 / 0.250 against train's 0.462 / 0.000 /
+0.154). Do not build on it.
+
+**The one durable per-case signal is `1667`: 5 gold, zero matched in all three
+runs, and 3/0/4 posted.** That is not noise, and it is the only case where a
+consistent story can be read off three data points.
+
+**5. Identical effort, wildly different yield.** Per-phase totals across the two
 runs are within ~10–20% everywhere (`survey_branch_contract` 1399 s vs 1382 s;
 `adjudicate` 1551 s vs 1872 s; total $15.65 vs $17.55). The runs worked equally
 hard and concluded differently. **The variance is in what the surveys decided,
 not in how much they did** — which rules out "it ran out of budget" as the story.
 
-**5. The funnel barely narrows.** Hypotheses → findings is close to lossless
+**6. The funnel barely narrows.** Hypotheses → findings is close to lossless
 (`1641`: 32 → 32; `1641-r2`: 30 → 25; `1587-r2`: 42 → 37). Almost all the
 selection happens in the attention boundary's tiering, not in adjudication. On
 `1641` — the zero-gold case — all 32 findings landed `internal` in run 1 and
 nothing posted, which is the boundary working exactly as designed.
 
-**6. `coverage: degraded` on all 8 cases**, every one a `tsgo` complaint that
+**7. `coverage: degraded` on all 8 cases**, every one a `tsgo` complaint that
 some base-view files are covered by no `tsconfig` and were analysed in an
 inferred project. Unquantified. It may be nothing; it is also the kind of thing
 that silently costs an extractor its precision.
 
-**7. The spec axis is genuinely live** — its hypotheses cite `S-1`/`S-2`
+**8. The spec axis is genuinely live** — its hypotheses cite `S-1`/`S-2`
 obligations with `QUOTE` claims. Note that spec obligations do **not** appear in
 `obligations.json` or `obligations/`: they are built harness-side by
 `review-spec.ts`, and `obligations.json` explicitly records why. Counting
 families out of that file alone will make the spec axis look dead when it is not.
 It looked exactly like [RESTART.md](RESTART.md) §4 trap 4 for about ten minutes.
 
-## Four experiments, cheapest first
+## Five experiments, cheapest first
 
-Deliberately small. Each answers one question, and the first two spend nothing.
+Deliberately small. Each answers one question, and **the first two spend nothing** —
+do those before authorising any arm.
 
-### E1 — Why do the blind cases draw one obligation? ($0)
+### E1 — Why has `1667` never been cracked? ($0)
 
-Read `facts.json` for `1680-r1` and `1680-r2` in the preserved artifacts against
-`1587-r2`'s. All the inputs are on disk. The question is narrow: is the diff
-genuinely thin, or is an extractor bailing? `coverage: degraded` and the
-`no tsconfig` complaint are the first suspects, and `1680`'s changed files
-include `packages/backend/strip-public-photo-permissions.ts` — a **root-level
-script**, precisely the kind of file a `tsconfig`-driven project layout misses.
+**The replacement for the dead under-seeding question, and still free.** `1667`
+is 5 gold, `0/0/0` matched, 7 obligations, and it posted 3/0/4 — so the surveys
+*are* producing output, it is simply never the right output. Two workspaces hold
+its full evidence chain.
 
-**If that is it, it is the highest-leverage bug in the plan**: 12 of 25 gold sit
-behind it, and no amount of prompt work reaches a file the fact layer never
-analysed.
+Read, in order: its five gold findings; its seven obligations; then
+`hypotheses/*.jsonl` in both runs. The question is which link breaks —
 
-### E2 — Put an error bar on the band (~$17 per repeat)
+- **no obligation names the right code** → a seeding gap, and the fix is in
+  `code-facts`;
+- **an obligation names it but no hypothesis forms** → the discovery failure
+  [TLDR.md](TLDR.md) is about, and the fix is in the survey briefs;
+- **a hypothesis forms but is not posted** → a tiering/adjudication problem,
+  and `disposition.json` will say so outright.
 
-Three to five more wp3 repeats, unchanged, **with `--keep-workspace`**. Nothing
-below is interpretable until the spread is known — every lever in
-[RESTART.md](RESTART.md) §3b is plausibly a smaller effect than the noise we
-just measured. Run them detached and sequential; do not overlap them with a
-build (§4 trap 6).
+Its gold is the auth-ordering and rate-limit material (auth running *after* body
+validation; a rate-limit "fix" that removes 429 retry while raising concurrency
+fivefold) — cross-cutting reasoning rather than anything a single-file fact names.
+That is a prediction worth checking rather than assuming.
 
-The cheap version if that is too much spend: repeat **one** case 5× rather than
-8 cases 3×. Same question, a quarter of the money, and `1587-r2` (5 gold, the
-most matched) is the natural subject.
+### E2 — Why does one brief produce 18 hypotheses once and 43 the next? ($0 first)
 
-### E3 — Turn `prepare` on ($ ~1 arm)
+Finding 3 is the sharpest lead in this file, and the first pass costs nothing:
+`1587-r1` has identical obligations in both runs and 18 → 43 hypotheses. Diff the
+two `hypotheses/*.jsonl` sets and the two survey transcripts. Is the extra volume
+*more of the same* (dilution), or genuinely different questions (in which case
+running the surveys twice and unioning is a legitimate, if expensive, recall
+lever)?
+
+**If unioning helps, that is measurable before it is built** — the union of run 1
+and run 3's matched gold per case is already computable from the three
+scorecards, and it is a ceiling on what any sampling strategy could buy.
+
+### E3 — Put an error bar on the band (~$17 per repeat)
+
+Three runs give 0.320 / 0.080 / 0.200 — a mean of 0.200 and a range that
+straddles the ≈0.24 detection floor. Two more would make the mean meaningful;
+until then no lever below a large effect is measurable. Always
+`--keep-workspace`. Sequential, never overlapping a build ([RESTART.md](RESTART.md)
+§4 trap 6).
+
+Cheap variant: repeat **one** case 5× instead of 8 cases 3×. `1587-r2` (5 gold,
+the best-performing case at 3/0/2) is the natural subject.
+
+### E4 — Turn `prepare` on ($ ~1 arm)
 
 It is skipped 8/8 today, which means the probe oracle is inert *and* the `tests`
 family is dead. Turning it on is the only change that could plausibly move a
 family from "structurally silent" to "contributing". Measure it as its own arm,
 one variable.
 
-### E4 — Reshape `review` when the pipeline is on (~1 arm)
+### E5 — Reshape `review` when the pipeline is on (~1 arm)
 
 [RESTART.md](RESTART.md) §3b lever f4, still unbuilt and still the most obviously
 wasteful thing in the DAG: `review` runs a full independent review costing ~$2.30
@@ -147,7 +204,7 @@ per arm while 40+ hypotheses sit unread beside it. It cannot simply be skipped �
 `post-review` depends on it with `all_success` — so change its brief under
 `{{#if analysisEnabled}}`.
 
-**Do E4 after E2.** It is the one most likely to be swamped by variance.
+**Do E5 after E3.** It is the one most likely to be swamped by variance.
 
 ## The guardrails that still apply
 

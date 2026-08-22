@@ -1,8 +1,8 @@
 # RESTART — pick this plan up in a new session
 
 > **Starting fresh on 2026-08-23 or later? Read [NEXT.md](NEXT.md) first.** It is
-> two pages: the three run ids that are now the comparators, what a no-spend deep
-> scan of the artifacts found, and four small experiments in cost order. This
+> two pages: the four run ids that are now the comparators, what a no-spend deep
+> scan of the artifacts found, and five small experiments in cost order. This
 > file stays the operational reference — tree state, the commands, and §4's ten
 > traps — and §2b below carries the measured numbers.
 
@@ -80,7 +80,7 @@ prepare → facts → seed → survey (6 branches, CONCURRENT) → falsify
 |---|---|
 | WP0 spec axis, WP1/1b code-facts, WP8 the eval instrument | landed earlier |
 | WP3 seed + six surveys · WP4 prepare + falsify · WP6 adjudicate | landed earlier |
-| **WP11 speed + the correctness defects it uncovered** | **landed 2026-08-22, uncommitted** — [11-speed.md](11-speed.md) |
+| **WP11 speed + the correctness defects it uncovered** | landed 2026-08-22, committed `1cbc1f9d` — [11-speed.md](11-speed.md) |
 | WP2 sandbox image | not started — **blocks production, not measurement** |
 | WP5 parallel phases | **PARKED**, and its carve-out was taken — [05-parallel-phases.md](05-parallel-phases.md) |
 | WP7 review memory · WP1c grammars · WP9 external validation | not started |
@@ -132,26 +132,32 @@ gold set; a single gold moving is McNemar **p = 0.50**.
 the same evening (§4 traps 9 and 10). These are the comparators. Everything
 before them is void.**
 
-**The wp3 arm was run TWICE, identically. Read both columns or you will
+**The wp3 arm was run THREE times, identically. Read every column or you will
 misreport this.**
 
-| | baseline `183835` | wp3 run 1 `184650` | wp3 run 2 `194234` |
-|---|---|---|---|
-| **micro-recall, arm** | 0.000 | **0.320** | **0.080** |
-| train (13 gold) | 0.000 | 0.462 | **0.000** |
-| blind (12 gold) | 0.000 | 0.167 | 0.167 |
-| matched | 0 of 25 | 8 of 25 | **2 of 25** |
-| posted | 1 | 47 | 23 |
-| SNR | — | 0.205 | 0.095 |
-| cost | $2.28 | $15.65 | $17.55 |
+| | baseline `183835` | run 1 `184650` | run 2 `194234` | run 3 `201607` | mean |
+|---|---|---|---|---|---|
+| **micro-recall, arm** | 0.000 | **0.320** | **0.080** | **0.200** | **0.200** |
+| train (13 gold) | 0.000 | 0.462 | 0.000 | 0.154 | 0.205 |
+| blind (12 gold) | 0.000 | 0.167 | 0.167 | 0.250 | 0.194 |
+| matched | 0 of 25 | 8 | 2 | 5 | — |
+| posted | 1 | 47 | 23 | 44 | — |
+| SNR | — | 0.205 | 0.095 | 0.128 | — |
+| cost | $2.28 | $15.65 | $17.55 | ~$17 | — |
 
-Same code, same fixtures, same model, same command. **Matched gold went 8 → 2 and
-posted volume 47 → 23.** All eight workflows succeeded in both. `diff-runs`
-returns **KEEP** on run 1 and **REVERT** on run 2 — from the same configuration.
+**Train and blind are the same to within noise (0.205 vs 0.194).** The run-1
+reading that blind was the weaker half did not survive two more runs; blind is
+actually the *steadier* half. See [NEXT.md](NEXT.md) for the artifact-level
+scan, including the finding that **obligations are byte-identical across runs**,
+so every bit of this spread is downstream of `seed`.
 
-**So the honest claim is a band, not a point.** Pooled across both runs the
-pipeline matched **10 of 50** gold-instances (0.200) against the baseline's
-**0 of 25**, and it has never lost a baseline hit (`−0 lost` in both runs).
+Same code, same fixtures, same model, same command every time. **Matched gold
+went 8 → 2 → 5.** All eight workflows succeeded in all three. `diff-runs` returns
+**KEEP** on run 1 and **REVERT** on runs 2 and 3 — from one configuration.
+
+**So the honest claim is a band, not a point.** Pooled across all three runs the
+pipeline matched **15 of 75** gold-instances (0.200) against the baseline's
+**0 of 25**, and it has never lost a baseline hit (`−0 lost` in every run).
 *That* is the result: **the pipeline finds gold the shipped reviewer never
 finds, and how much it finds on any given run is wildly unstable.** Neither
 0.320 nor 0.080 is "the" number, and 0.320 was a favourable draw — it is the one
@@ -173,9 +179,10 @@ for.
    [WP9](09-external-validation.md)'s unmade claim.
 2. **6.9–7.7× the cost**, 23–47 posted against 25 gold. SNR 0.095–0.205: between
    one true finding per four false and one per ten.
-3. **n = 2 is still small** for a spread this wide. The next honest step is more
-   repeats, not another lever — you cannot detect a lever's effect inside this
-   much noise.
+3. **n = 3 is still small** for a spread this wide, and the mean (0.200) sits
+   *below* the ≈0.24 floor while one draw sat above it. The next honest step is
+   more repeats, not another lever — you cannot detect a lever's effect inside
+   this much noise.
 
 The baseline half is its own result: **the shipped reviewer posted one finding
 across eight PRs carrying 25 real defects**, on clean fixtures, and matched none
