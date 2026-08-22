@@ -10,6 +10,7 @@ import {
   phaseSkipIfExpressions,
   runWorkflowCore,
   AgentWorkflowSchema,
+  PhaseRef,
 } from "lastlight-workflow-engine";
 import type {
   DagNode,
@@ -58,12 +59,9 @@ const DECLARED = [
   "prepare",
   "facts",
   "seed",
-  "survey_contract",
-  "survey_enforcement",
-  "survey_security",
-  "survey_state",
-  "survey_tests",
-  "survey_spec",
+  // WP11c — the six chained `survey_<family>` phases are ONE `type: fanout`
+  // node now. The families did not change; the node count did.
+  "survey",
   "falsify",
   "review",
   "adjudicate",
@@ -72,7 +70,7 @@ const DECLARED = [
 ];
 
 /**
- * Every phase the evidence pipeline added — all twelve vanish when it is off.
+ * Every phase the evidence pipeline added — all seven vanish when it is off.
  *
  * Not a `slice` any more: WP6's two phases sit AFTER `review` rather than before
  * it, because `adjudicate` consumes what the review pass wrote. So the pipeline
@@ -89,7 +87,9 @@ const ANALYSIS_PHASES = DECLARED.filter((n) => n !== "review" && n !== "post-rev
  * surveys".
  */
 const WP4_PHASES = ["prepare", "falsify"];
-const WP3_PHASES = DECLARED.slice(1, 9);
+// WP3's three. `falsify` is WP4's and carries BOTH gates, so it is asserted
+// under WP4_PHASES rather than here.
+const WP3_PHASES = ["facts", "seed", "survey"];
 
 /**
  * WP6's two. `adjudicate` is the model pass; `reconcile` is its deterministic
@@ -160,7 +160,7 @@ function simulate(phases: PhaseDefinition[], ctx: Record<string, unknown>) {
 describe("golden — pr-review.yaml is an explicit chain, and the chain is unbroken", () => {
   const def = getWorkflow("pr-review");
 
-  it("declares the fourteen phases in the pinned order", () => {
+  it("declares the nine phases in the pinned order", () => {
     expect(def.phases.map((p) => p.name)).toEqual(DECLARED);
   });
 
@@ -181,13 +181,8 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
       prepare: [],
       facts: ["prepare"],
       seed: ["facts"],
-      survey_contract: ["seed"],
-      survey_enforcement: ["survey_contract"],
-      survey_security: ["survey_enforcement"],
-      survey_state: ["survey_security"],
-      survey_tests: ["survey_state"],
-      survey_spec: ["survey_tests"],
-      falsify: ["survey_spec"],
+      survey: ["seed"],
+      falsify: ["survey"],
       review: ["falsify"],
       adjudicate: ["review"],
       reconcile: ["adjudicate"],
@@ -208,7 +203,7 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
     // inert configuration would post no review at all. `all_done` is the rule
     // the schema names for exactly this.
     const byName = new Map(def.phases.map((p) => [p.name, p]));
-    const allDone = [...DECLARED.slice(1, 11), "reconcile"];
+    const allDone = ["facts", "seed", "survey", "falsify", "review", "reconcile"];
     for (const name of allDone) {
       expect(byName.get(name)?.trigger_rule, `${name}.trigger_rule`).toBe("all_done");
     }
@@ -223,7 +218,7 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
     expect(byName.get("reconcile")?.trigger_rule).toBe("all_done");
   });
 
-  it("guards WP3's eight phases on `analysisEnabled`, WP4's on `probesEnabled`, and neither legacy phase", () => {
+  it("guards WP3's phases on `analysisEnabled`, WP4's on `probesEnabled`, and neither legacy phase", () => {
     const byName = new Map(def.phases.map((p) => [p.name, p]));
     for (const name of WP3_PHASES) {
       expect(phaseSkipIfExpressions(byName.get(name)!), `${name}.skip_if`).toEqual([
@@ -259,7 +254,7 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
 describe("golden — with review.analysis off, pr-review resolves to review → post-review", () => {
   const def = getWorkflow("pr-review");
 
-  it("skips all twelve analysis phases and still runs BOTH legacy phases", () => {
+  it("skips every analysis phase and still runs BOTH legacy phases", () => {
     // The inert context: `specContext()` returned `{}`, so `analysisEnabled` is
     // absent — not `false`, ABSENT. That is the real production shape and it is
     // the one the gate has to handle.
@@ -282,7 +277,7 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
     expect(skipped.map((s) => s.name)).toEqual(WP4_PHASES);
   });
 
-  it("runs all fourteen in declaration order once both flags are on", () => {
+  it("runs all nine in declaration order once both flags are on", () => {
     const { ran, skipped } = simulate(def.phases, { analysisEnabled: "true", probesEnabled: "true" });
     expect(ran).toEqual(DECLARED);
     expect(skipped).toEqual([]);
@@ -345,6 +340,41 @@ class RecordingPostReview implements PhaseTypeHandler {
 }
 
 /**
+ * Stands in for the app-registered `fanout` handler.
+ *
+ * The real one (`src/workflows/handlers/fanout.ts`) needs a provisioned
+ * sandbox, which this layer deliberately does not have — `fanout.test.ts`
+ * exercises it against a `FakeSandbox` and pins the one-provision / N-turns /
+ * one-dispose property. What this double has to be faithful about is only what
+ * the SCHEDULER sees: one agent call and one gate command per branch, reported
+ * under `<phase>_branch_<name>` labels. That is what keeps the call-count
+ * assertions below meaningful across the WP11c change instead of quietly
+ * dropping six model calls off the tally.
+ */
+class RecordingFanout implements PhaseTypeHandler {
+  constructor(private readonly agent: FakeAgentPort) {}
+  async execute(phase: PhaseDefinition): Promise<PhaseOutcome> {
+    const results = [];
+    for (const branch of phase.branches ?? []) {
+      const label = PhaseRef.branch(phase.name, branch.name).format();
+      const r = await this.agent.runAgent(
+        `PROMPT:${branch.prompt}`,
+        {} as never,
+        { taskId: "task-1" } as never,
+      );
+      if (branch.until_bash) {
+        await this.agent.runCommand({ kind: "bash", command: branch.until_bash }, {} as never, {
+          taskId: "task-1",
+        } as never);
+      }
+      results.push({ phase: label, success: r.success, output: r.output ?? "", error: r.error });
+    }
+    const anySucceeded = results.some((r) => r.success);
+    return { results, status: anySucceeded ? "succeeded" : "failed" };
+  }
+}
+
+/**
  * An agent port that hard-fails exactly one phase's prompt and succeeds at
  * everything else. `FakeAgentPort.script()` is a single FIFO queue shared by
  * agent AND command calls, so it cannot target one phase in a run with eight
@@ -372,6 +402,7 @@ async function runPrReview(ctx: Record<string, unknown>, agentPort?: FakeAgentPo
   const agent =
     agentPort ?? new FakeAgentPort({ success: true, output: "reviewed", turns: 1, durationMs: 0 });
   const postReview = new RecordingPostReview();
+  const fanout = new RecordingFanout(agent);
 
   const runScope: PhaseRunContext = {
     definition: def,
@@ -394,7 +425,10 @@ async function runPrReview(ctx: Record<string, unknown>, agentPort?: FakeAgentPo
       assets: new StubAssetLoader(),
       liveness: noopLiveness,
       observability: noopObservability,
-      handlers: new Map([["post-review", postReview]]),
+      handlers: new Map<string, PhaseTypeHandler>([
+        ["post-review", postReview],
+        ["fanout", fanout],
+      ]),
     },
     store,
     reporterActive: false,
@@ -402,7 +436,7 @@ async function runPrReview(ctx: Record<string, unknown>, agentPort?: FakeAgentPo
   };
 
   const result = await runWorkflowCore(runScope, deps);
-  return { result, reporter, agent, store, postReview };
+  return { result, reporter, agent, store, postReview, fanout };
 }
 
 describe("golden — the real scheduler, driven with review.analysis off", () => {
@@ -463,12 +497,17 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
       "reconcile",
       "post-review",
     ]);
-    // `adjudicate` is a generic_loop, so like the surveys it reports under its
-    // iteration label rather than its own name.
+    // `adjudicate` is a generic_loop, so it reports under its iteration label
+    // rather than its own name.
     expect(seen).toContain("adjudicate_iter_1");
+    // The six families are BRANCHES of one node now (WP11c), so they report
+    // under `<phase>_branch_<name>` — the same "a node with sub-units reports
+    // under the sub-unit's label" rule the loops follow, which is what keeps the
+    // dashboard's longest-prefix grouping nesting them under `survey`.
     for (const family of FAMILIES) {
-      expect(seen, family).toContain(`survey_${family}_iter_1`);
+      expect(seen, family).toContain(`survey_branch_${family}`);
     }
+    expect(seen).not.toContain("survey");
     // `falsify` is a generic_loop too, so it reports under its iteration label.
     expect(seen).toContain("falsify_iter_1");
     expect(result.phases.every((p) => p.success)).toBe(true);

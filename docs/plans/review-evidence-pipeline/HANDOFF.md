@@ -9,89 +9,51 @@ one at a time unless the dependency graph says otherwise.
 > cost a 50-case corpus run). This file is the protocol; that one is the entry
 > point.
 
-## Order
+## Order and status
 
-**Revised again 2026-08-21**, after WP1b — see
-[10-design-review.md](10-design-review.md) and
-[01b-code-facts-hardening.md](01b-code-facts-hardening.md), which every agent
-must read alongside their WP. Where either contradicts a WP, it wins.
+**Moved to [RESTART.md](RESTART.md) §2–3, 2026-08-22**, so there is one source of
+truth for what is built. This file is the *protocol* — how to run an agent, what
+it must never do, and what needs a human. It carries no status.
 
-```
-  ✅ WP8  the instrument                LANDED. offline; the DETECTION FLOOR is written down
-   │
-  ✅ WP0  spec axis + split verdict     LANDED (§D7). rung 0.5, no infrastructure
-   │
-  ✅ WP1  code-facts (in the CLI)       LANDED. + coverage in place of mutants (§D13)
-   │
-  ✅ WP1b code-facts hardening          LANDED. 7 bugs; the corpus + the free instruments
-   │
-  ✅ memory decision — the 2 GB cap     RETIRED. cap raised to 8g; --resolution changed kept on merit
-   │                                      first model spend below this line
-  WP3  seed + SIX survey phases         gate: MECHANISM metrics, not recall (§D6)
-   │                                    read EVIDENCE COVERAGE first — it is free
-  WP4  prepare + falsify                gate: mechanism metrics + the latency number
-   │                                    `prepare` MUST emit a coverage artifact
-  WP6  adjudicate  +  7a/7b record      gate: recall flat-or-up, SNR reported
-   │                 (ungated, §D10)
-      ─── ship-capable on TypeScript (locked decision 14) ───
-   │
-  WP1c Stage 2 grammars, SCOPED         module-level declarations ONLY
-   │                                    raises the GENERALITY claim, not the ship path
-  WP9  external validation              MANDATORY before any general claim
-   │                                    (freeze the architecture; do not tune on it)
-  [R] release + overlay enable          ← human decision required
-   │
-  WP7c review-memory mining             needs the history 7a/7b accumulated
+Two things from the old order block that are still policy, not status:
 
-  WP2  sandbox image                    parallel; any time before the Release (§D1)
-  WP5  parallel phases                  PARKED (§D5) — S2 and S3 land now regardless
-```
+- **WP1c (Stage 2 grammars) is deliberately right of "ship-capable".** WP3's and
+  WP4's gates are read on `skillspro`, which is TypeScript, where the facts
+  already work. Grammars move the **Martian** corpus — 40 non-TypeScript cases of
+  50 — so they buy the *generality claim*, which is
+  [WP9](09-external-validation.md)'s job. Locked decision 14.
+- **Cut, and staying cut:** `mutants`, `suite`, ablation rung 2b (§D13).
 
-**Cut:** `mutants`, `suite`, ablation rung 2b (§D13).
+Every agent reads [10-design-review.md](10-design-review.md) and
+[01b-code-facts-hardening.md](01b-code-facts-hardening.md) alongside their WP.
+Where either contradicts a WP, it wins.
 
-**Why WP1c moved right.** It reads as a WP1 follow-on and it is not on the
-shipping path. WP3's and WP4's gates are read on `skillspro`, which is
-TypeScript, where the facts already work; grammars move the **Martian** corpus,
-which is 40 non-TypeScript cases out of 50. So they buy the *generality claim* —
-[WP9](09-external-validation.md)'s job — and the deployment's managed repos are
-predominantly TypeScript anyway. Locked decision 14.
+## Comparators — the old baseline is DEAD
 
-**WP5 is not on the critical path.** It buys latency and observability, not
-recall. Its sub-package 5a contains two real bug fixes under today's run-level
-concurrency and can land at any time.
+**Rewritten 2026-08-22.** This section used to name
+`2026-08-20_074355-8049410` (8/8 graded, $5.65, micro-recall 0.040) as the
+comparator for every gate. **Do not use it, or anything else from before
+2026-08-22.** Four independent changes moved what a run measures:
 
-## The baseline already exists — no measurement run before code
+1. the conservation gate was passing falsely (colliding hypothesis ids);
+2. the spec family was emitting contract-shaped hypotheses off-axis;
+3. `post-review`'s attention boundary was inert on the `123348` run;
+4. the `pr-review` skill was severing its own merge base.
 
-The comparator for every gate in this plan is the **shipped `pr-review`**, and it
-has already been measured: `~/work/nearform-evals/eval-results/pr-review/2026-08-20_074355-8049410/`
-— 8/8 graded, $5.65. Its scorecard stores `posted` / `gold` / `matched` per case,
-which recompute to exactly the published headline:
+[RESTART.md](RESTART.md) §4 has each in full. **The next arm is a
+re-baseline, not a delta** — run `overlays/baseline` and `overlays/wp3` fresh,
+8 cases each, and treat those as the new comparators.
 
-```
-TOTAL posted=2  gold=25  matched=1   →  micro-recall 0.040
-```
-
-So [WP8](08-evals.md)'s new metrics — micro-recall, SNR, per-family attribution —
-**back-fill onto the existing baseline offline, with zero model spend**. That is
-WP8's first task, and it is why WP8 runs first.
-
-**We are deliberately not re-measuring candidates v1/v2/v3.** They are dead ends:
-v1 moved train Δ ≈ 0.000, v2 was reverted and its machinery deleted, and v3 is a
-regex prototype of the mechanism [WP1](01-code-facts.md) + [WP3](03-seed-and-survey.md)
-build properly. An arm number for v3 would describe a machine we are deleting,
-and it would cost ~$15–19 to learn it. Every gate here compares the **new
-implementation against the shipped baseline** — a cleaner comparison than
-prototype-vs-new anyway.
-
-What v3 remains is **evidence for a design choice** ([00-evidence §3](00-evidence.md)),
-not a rung we stand on. Its hypothesis — mechanical seeding at question
-granularity — is validated at arm scale by WP3's own gate, using the real
-implementation.
-
-**The first model spend in this plan is the WP3 gate.** Everything before it is
-offline.
+**We are still deliberately not re-measuring candidates v1/v2/v3.** They are dead
+ends — v1 moved train Δ ≈ 0.000, v2 was reverted and its machinery deleted, v3
+was a regex prototype of what WP1 + WP3 build properly. What v3 remains is
+**evidence for a design choice** ([00-evidence §3](00-evidence.md)), not a rung we
+stand on.
 
 ## How to actually run a gate — do not use the global CLI
+
+> **The command itself is [RESTART.md](RESTART.md) §5.** This section is the
+> *why* — read it once, then use that command.
 
 **Established 2026-08-21, while wiring up [WP8](08-evals.md).** Every gate in
 this plan measures **unpublished** engine code, and the obvious way to run the
@@ -225,7 +187,10 @@ optional.
 
 ## Known traps
 
-Each of these has already cost someone a debugging session.
+Each of these has already cost someone a debugging session. **These are the
+code-level ones.** The traps that waste *money* — silently measuring the wrong
+thing — are [RESTART.md](RESTART.md) §4, and an agent about to run or read an
+eval must read that instead of this.
 
 - **A tool that exits 0 on a parse failure is worse than no tool.**
   dependency-cruiser refused to parse TS≥7 and exited 0 anyway, so the
@@ -290,20 +255,12 @@ Each of these has already cost someone a debugging session.
   the ruleset at all**. When a test constructs the tool's arguments, assert that
   the *production* argument builder is the thing under test — or the test is
   measuring a machine nobody runs.
-- **A measurement must never overlap a rebuild of what it measures.**
-  *Generalised 2026-08-21 — it has now happened to two different instruments.*
-  An earlier run of `facts-corpus.ts` was invalidated exactly that way: `pnpm
-  build` landed a new `dist/cli.js` mid-run, so early cases measured one binary
-  and late cases another, and nothing in the artifact said so. The guard is to
-  `stat` `dist/cli.js` **before and after** and confirm every artifact's mtime
-  falls inside that window; the simpler rule is to sequence them, and never to
-  run a measuring agent concurrently with an agent that rebuilds. Same principle
-  as `meta.core` on an eval scorecard — provenance is recorded, not remembered.
-  **Contention counts as overlap, too:** the resolution-tier sweep in
-  [01b](01b-code-facts-hardening.md) ran beside a full test gate and its peak-RSS
-  numbers survived while its wall-clock numbers did not — one `bare/none` run
-  that should take seconds recorded **1933 s**. Say which half of a contaminated
-  measurement you are standing on, or re-run it clean.
+- **A measurement must never overlap a rebuild of what it measures**, and
+  **contention counts as overlap**. Full statement in
+  [RESTART.md](RESTART.md) §4 trap 6. The code-level guard, if you must run them
+  together: `stat` `dist/cli.js` before and after and confirm every artifact's
+  mtime falls inside that window. Same principle as `meta.core` on an eval
+  scorecard — provenance is recorded, not remembered.
 - **A sub-agent that blocks on a long measurement gets killed by the stream
   watchdog.** *Added 2026-08-21 — two agents died this way in one day.* No output
   for **600 s** ends the agent, and a 50-run memory sweep produces nothing to say
@@ -320,8 +277,16 @@ Each of these has already cost someone a debugging session.
 - **Evals:** do not measure against `./instance` in `~/work/nearform-evals`. It
   is the wrong deployment (gpt-5.1, forked skills). Use `overlays/baseline`.
 - **`appendPhase` and `mergeScratch` are unguarded read-modify-write today** and
-  bypass the op serializer. Relevant to [WP5](05-parallel-phases.md), and a
-  latent bug under the run-level concurrency we already ship.
+  bypass the op serializer. [WP5](05-parallel-phases.md)'s **S2**, and a latent
+  bug under the run-level concurrency we already ship. Still outstanding — the
+  fan-out did not touch it. Its sibling **S3** is also still live:
+  `serviceContainerName(taskId, name)` has no phase component, so one phase's
+  `dispose()` kills another's service containers.
+- **A fan-out phase is one node with many sessions, and consumers must not
+  assume otherwise.** *Added 2026-08-22.* Rows sharing a `<phase>_branch_<name>`
+  parent ran **concurrently**: their durations must be combined with `max`, not
+  `sum`. Six branches sum to ~708s across ~234s of real time — a ~3×
+  overstatement for anything that adds them.
 
 ## What needs human sign-off
 
@@ -331,6 +296,21 @@ Never done by a sub-agent unprompted:
 2. **Editing the gold answers** in `~/work/nearform-evals/evals/datasets/`. The
    eval-loop skill requires human sign-off here and it is the one defence against
    writing a skill to the answer.
+
+   **That file is also uncommitted and one keystroke from erasure.** On
+   2026-08-22 an agent ran `git checkout` on `instances.json` to undo a
+   formatting mistake, without checking it for uncommitted work, and destroyed
+   **5 of 8 cases — 25 gold findings down to 8**. It survived only because
+   `scripts/build-skillspro-cases.mjs` happened to exist. **No agent runs
+   `git checkout` / `restore` / `stash` / `reset` on a file it has not checked,
+   ever — and least of all in a repo other than the one it was asked to work
+   in.** Checksum for that dataset: gold per case `3,5,0,4,3,5,4,1` = **25**
+   across 8 cases; verify it after anything that regenerates fixtures. Backup at
+   `~/lastlight-prod-snapshots/instances-25gold-*.json`.
+
+   Corollary: **fixture data belongs in the generator, not hand-written into
+   `instances.json`.** The linked-issue fixtures were lost once precisely because
+   a regeneration silently dropped hand-written data.
 3. **Reading the held-out split** while iterating. Consume it once per round, at
    the gate.
 4. **Cutting a Release** or enabling `review.analysis` on a live deployment.
@@ -399,42 +379,9 @@ silently changed the split denominator.
 
 ## Open questions — the honest backlog
 
-**Added 2026-08-21, after [WP1b](01b-code-facts-hardening.md).** These are known
-and unclosed. Each is written down rather than fixed because closing it costs
-more than leaving it visible does — which is only true while it stays visible.
-
-- ~~**The 2 GB agent cap.**~~ **Retired 2026-08-22** — the cap was RAISED to
-  **8g**, see sign-off item 9 above and [01b](01b-code-facts-hardening.md) →
-  "Where the memory actually goes". Two things were true at once: the bound was
-  never `--max-files` (it was the **8,947 `node_modules` files the `ts.Program`
-  binds** behind a 637-file ts-morph budget, which `--resolution changed` fits
-  losslessly), *and* two corpus PRs exceed 2 GB on a bare tree where there is no
-  `node_modules` to refuse. **The residue worth carrying forward is that the
-  measurement it invalidated was invalidated silently:** every memory number in
-  this plan before that day assumed a workspace with no `node_modules`, which is
-  true today only because `pr-review.yaml` has no install phase, and
-  [WP4](04-probe-oracle.md)'s `prepare` ends that permanently.
-- **Fingerprint collisions silently drop findings.** `patterns` emits
-  `fingerprint = sha1(tool:rule:file:3-line-context)`, reusing
-  `skills/security-review/SKILL.md`'s vocabulary. On the corpus, **13 findings
-  collapse to 11 distinct fingerprints** — two same-line matches at
-  `topic.rb:382` that a three-line context window cannot separate. Any consumer
-  that dedups on the fingerprint therefore **silently drops one of them**, which
-  is the shape locked decision 6 exists to prevent, one layer down. Widening the
-  window or adding a column ordinal both work; neither has been chosen.
-- **`patterns` scopes to changed FILES, not changed HUNKS.** So a scanner hit
-  anywhere in a touched file is reported as if it were part of the change. It is
-  the conservative direction — a missed hit is worse than an off-hunk one — but
-  it is also why the family's 13 findings buy **+0 EC-loose**, and a seeder that
-  treats them as diff-scoped would be wrong.
-- **`facts` and `contracts` still read HEAD off the filesystem** while their
-  changed set comes from git. On a workspace that is not at `headSha` they
-  analyse one tree and cite another — and `pr-review` workspaces are
-  deliberately **reused** across runs, so this is reachable rather than
-  theoretical. Closing it means materialising a head worktree as well as the
-  base one, at **2× the worktree cost**. A deferral with a trigger, not an
-  oversight.
-- **Three tests are load-sensitive** — they measure wall clock or peak RSS, so a
-  busy machine can redden them. They are kept because a bound with no floor is
-  not a guard (`tests/noise-floor.test.ts`), but a CI failure in one of the three
-  should be reproduced on an idle machine before it is believed.
+**Moved to [RESTART.md](RESTART.md) §3d, 2026-08-22.** It is status, and status
+lives in one place. The 2 GB agent-cap item that used to head this section is
+**retired** — the operator raised `SANDBOX_MEMORY_LIMIT` to 8g, and every memory
+number that motivated it was `ts-morph`'s, an engine this plan no longer uses.
+Do not re-open it from a stale reading; the current engine's memory is
+**unmeasured**, because the compiler is a child process.

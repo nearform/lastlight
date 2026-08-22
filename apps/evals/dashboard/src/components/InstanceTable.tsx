@@ -62,7 +62,13 @@ export function InstanceTable({
     setOpenDiff({ title: `${titleFor(r.instance_id, r.model)} · changed files`, url: sessionUrl(r.modelPatchFile!) });
   // Finished case → browse per-trial / per-phase logs.
   const openResult = (r: InstanceResult) =>
-    setOpenLog({ kind: "trials", title: titleFor(r.instance_id, r.model), sessions: r.sessions ?? [], baseUrl: scorecardUrl ?? "" });
+    setOpenLog({
+      kind: "trials",
+      title: titleFor(r.instance_id, r.model),
+      sessions: r.sessions ?? [],
+      baseUrl: scorecardUrl ?? "",
+      metrics: r.phases,
+    });
   // Code-fix case → the held-out test breakdown + captured test output.
   const openTests = (r: InstanceResult) =>
     setOpenLog({

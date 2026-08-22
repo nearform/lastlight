@@ -256,6 +256,29 @@ never names cannot convert, and that is knowable for free.
 
 ## The measurement protocol
 
+> **Added 2026-08-22 by [WP11](11-speed.md) — a per-phase latency and cost
+> instrument.** `PhaseMetric` now carries `durationMs` (the measured phase
+> window), `agentMs` (summed result envelopes) and `costUsd`, so a run is
+> readable off `scorecard.json` instead of by hand out of transcripts. Three
+> properties worth knowing before reading one:
+>
+> - **Absent `durationMs` means the phase never started** (it was skipped), not
+>   that it was instant. But `scripts/rescore.ts` can only back-fill `agentMs`,
+>   so on a **back-filled** run every row lacks `durationMs` and a phase that ran
+>   is indistinguishable from one that skipped (task #21).
+> - **Attribution is by a `phase` stamp on the session envelope**, not by the
+>   clock. The old rule — the last phase whose window opened at or before this
+>   session's first line — is a point lookup and cannot express concurrency; six
+>   fan-out branches opening within 35ms all resolved to whichever opened last.
+>   Unstamped (pre-2026-08-22) sessions still take the window rule, so archived
+>   runs reproduce their published numbers exactly.
+> - **Rows sharing a `<phase>_branch_<name>` parent ran concurrently** and must be
+>   combined with `max`, not `sum`. Six branches sum to ~708s across ~234s of real
+>   time (task #20).
+>
+> The harness also gained **`--concurrency N`** (default 1, a no-op by
+> construction), which is what makes an 8-case arm an hour rather than four.
+
 The harness runs **the real production workflow** against a **real repo working
 tree** — `seedWorkspacePrReview` (`apps/evals/src/seed.ts`) bare-clones the real
 repo, checks out the PR head, and creates a **local bare `origin`** carrying both
@@ -315,7 +338,7 @@ the movement:
 
 | Rung | Arm | Cost |
 |---|---|---|
-| 0 | **the shipped `pr-review`** (`2026-08-20_074355`) — already measured | **£0, exists** |
+| 0 | **the shipped `pr-review`** — ~~`2026-08-20_074355`, already measured~~ **must be RE-RUN, 2026-08-22.** Four changes moved what a run measures; every pre-2026-08-22 number sits on a different machine ([RESTART.md](RESTART.md) §4) | one baseline arm |
 | 1 | + `facts`/`contracts`/`constants` obligations ([WP3](03-seed-and-survey.md)) | first spend |
 | 0.5 | + the `spec` axis and split verdict (**WP0**, §D7) | first spend; no infrastructure |
 | 2 | + `prepare` + `falsify` ([WP4](04-probe-oracle.md)) | ★ expected step change |

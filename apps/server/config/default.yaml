@@ -331,9 +331,21 @@ review:
   # envelope and the survey phases say so — it never fails the run.
   analysis:
     enabled: false
-    # A budget, not a target: the extractor ranks, truncates, and records how
-    # many it dropped in the block it renders.
-    maxSpecObligations: 6
+    # A SAFETY BOUND, not a budget — it should never bind on a real PR. The
+    # extractor still ranks, truncates and records what it dropped, but this
+    # number exists only to stop a pathological PR blowing the prompt.
+    #
+    # It was 6, and while the spec axis produced nothing that was inert. The
+    # moment the axis started working it became the binding constraint on FIVE
+    # of the six linked cases in the gate set — 11 criteria extracted and 6 kept
+    # on the three `1587` cases, 10 and 6 on the two `1641` ones. What it was
+    # discarding is the acceptance-criteria checklist a human wrote on the
+    # issue, which is the most direct statement of intent this pipeline ever
+    # gets. Capping GENERATION also inverts locked decision 2: we deliberately
+    # over-generate and let the probe oracle and WP6b's attention boundary
+    # (maxInlineComments + the family thresholds) do the narrowing. Truncating
+    # obligations truncates DISCOVERY, and discovery is the measured ceiling.
+    maxSpecObligations: 40
     # The same, for the five facts-derived families pooled. Ranked by mechanism
     # class (`enforcement` and `contract` are the two that have ever converted)
     # then by how much of the impact cone lies outside the diff.
@@ -343,6 +355,24 @@ review:
     # never executed and `enforcement` — the only family that has produced a gold
     # match — could have been among them.
     surveyPasses: 6
+
+    # How many of those families run AT ONCE (WP11c).
+    #
+    # A CEILING the run clamps again per backend, never the effective value. On
+    # the shipped default backend (gondolin) each agent session is a QEMU
+    # micro-VM inside the harness process, so it pins to 1 and this key changes
+    # nothing at all until that is measured; `none` and `docker` take it as
+    # written.
+    #
+    # Six because the six families write six disjoint, append-only
+    # `hypotheses/<family>.jsonl` and never read each other's — there was never
+    # an ordering constraint between them, only a scheduler that ran one DAG
+    # node at a time. Chained, they were 851s of a 29-minute review (49% of the
+    # wall clock); concurrent, they cost the slowest single family.
+    #
+    # Lower it to bound provider rate-limit pressure or memory, NOT to bound
+    # spend: six passes cost the same in tokens either way.
+    surveyConcurrency: 6
 
     # ── WP4: `prepare` (the affordance) + `falsify` (the oracle) ──────────────
     #

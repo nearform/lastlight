@@ -131,13 +131,17 @@ and a later phase reads it rather than your description of it.
 `.lastlight/pr-review/probes/verdicts.jsonl`:
 
 ```
-{ "hypothesis": "H-001", "verdict": "reproduced|refuted|unprobed",
-  "transcript": ".lastlight/pr-review/probes/H-001.txt" | null,
+{ "hypothesis": "contract-001", "verdict": "reproduced|refuted|unprobed",
+  "transcript": ".lastlight/pr-review/probes/contract-001.txt" | null,
   "command": "the command you ran" | null,
   "differential": true|false,
   "reason": "one line — for `unprobed`, WHICH constraint stopped you",
   "confidenceDelta": -1.0 to 1.0 }
 ```
+
+`hypothesis` is the id as the hypothesis record carries it — `<family>-NNN`,
+namespaced because six passes write six files and a bare `H-001` from one family
+collides with another's. A verdict naming a colliding id answers neither.
 
 Every hypothesis you were asked to probe needs a line here, including the ones
 you could not run — that is what makes *"probed and found nothing"* and *"never

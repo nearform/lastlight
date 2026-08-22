@@ -621,6 +621,41 @@ figures in the plan transfer. The shell-level catch is not optional.
 closes the loop** and non-zero means iterate again — the same contract as
 `probes`, and for the same reason it is not wrapped by `--never-fail`.
 
+#### Identity is assigned at ingest, not minted by the model
+
+`src/hypotheses.ts` is the one reader `findings`, `--ledger` and `probes` all go
+through, so no two gates can disagree about which claims exist. Every row gets
+**`<family>-NNN`** — the family from the FILENAME, the ordinal from its position
+in an append-only file. Both halves were bought with a measurement on the first
+real run (`prreview__skillspro-1587-r1`, 30 hypotheses, six families):
+
+- **Collision.** `contract.jsonl` minted `H-001..H-005` and `security.jsonl`
+  independently minted `H-001..H-003`. The old reader keyed a flat map on the
+  string with first-write-wins, so the three security claims were **discarded on
+  read**, and the gate reported `5/5 accounted for` and exited 0 while three
+  hypotheses had never been adjudicated. **A gate that passes falsely is worse
+  than no gate** — it converts an omission into a green light.
+- **Absence.** Only **8 of 30** rows carried an `id` at all; the rest were
+  free-form (`{claim, obligations}`, `{claim, producer_side, consumer_side}`, …).
+  Conservation saw only the compliant subset, so **22 of 30 real claims were
+  structurally invisible** — including every hypothesis about a gold finding that
+  run missed. `probes` had the same hole from the other side: it gated on
+  `typeof row.id === "string"`, which silently excused a free-form row from ever
+  needing a probe, Criticals included.
+
+Compliance was 27% on that run and reportedly 100% on the one before, which is
+the tell: **an instruction is not a mechanism**, the same lesson §D11 records
+about conservation itself. A model-minted id is still honoured, as an **alias** —
+but only when unambiguous. An id two families minted resolves to NEITHER and is
+reported as `ambiguous`, naming both claimants, because crediting whichever file
+sorted first is precisely the silent mis-attribution above. Canonical ids always
+beat aliases, so a row declaring `contract-001` from third position cannot
+capture citations meant for the real first row.
+
+Replayed against that run's kept workspace: `5/5 accounted for, exit 0` became
+`2/30, exit 3` with the three collisions named — and `--repair` conserves all 30
+across all six families.
+
 It enforces one property: **every hypothesis id across `hypotheses/*.jsonl`
 appears in `findings.json` with exactly one disposition** — carried by a finding
 (`findings[].hypotheses[]`) or deleted by a `dropped[]` entry whose `refutedBy`
@@ -679,6 +714,41 @@ Output is capped at 20 named ids plus a `+N more`, on both the gap list and the
 repair list. It goes into an agent's context, and *"3 hypotheses unaccounted
 for"* without the ids cannot be acted on by the next iteration — being acted on
 is the entire point.
+
+#### `--ledger` — the same reading, the other audience
+
+`checkFindings` answers the HARNESS ("may the loop stop?") with an exit code.
+`buildFindingsLedger` answers the ADJUDICATOR ("what must I account for, and
+what have I not?") with a list: every declared id by family, with its obligation,
+severity and path, marked `[x]`/`[ ]`, plus an outstanding set. Both read through
+the same `inspect`, so the checklist and the verdict cannot disagree about which
+ids exist — which is the reason it lives here rather than in the prompt as an
+instruction to go and count.
+
+It is what makes the gate satisfiable on the FIRST attempt. Measured on
+`prreview__skillspro-1587-r1`: attempt 1 spent **426 s and $0.52** reconstructing
+the id set from six `.jsonl` files, missed some, and bought a second **274 s /
+$0.43** attempt — 40% of the case's wall clock and 38% of its cost, for a set
+that is mechanically derivable.
+
+Three properties that are decisions:
+
+- **It ALWAYS exits 0**, unlike the two gate modes beside it. Its caller is the
+  agent's own bash tool, where the gate's non-zero *"iterate again"* would read
+  as a tool failure. Two audiences, two exit contracts; conflating them is how
+  the checklist would come to be treated as the gate.
+- **Nothing is capped.** `renderFindingsCheck` stops at 20 ids because it is a
+  log line; a checklist that elided entries would reproduce the exact omission it
+  exists to prevent. The bound is on each claim (`titleFrom`, one sentence) and
+  the outstanding list WRAPS rather than truncating.
+- **An unreadable `findings.json` means every id is outstanding**, not zero.
+  `inspect` early-returns with no gaps in that case — correct for the gate, which
+  fails on the document error alone, and a lie of omission for a checklist.
+
+`fresh_context: true` on the `adjudicate` loop is what makes re-running it the
+whole retry mechanism: iteration 2 carries no prior transcript
+(`phase-executor.ts` passes `previousOutput: ""`), so the ledger is how a retry
+learns what is left — freshly, rather than from stale plumbing.
 
 What it deliberately does **not** do: read a transcript, judge a verdict,
 validate a quote, or check anything about `summary` / `event` / `verdict`. Quote

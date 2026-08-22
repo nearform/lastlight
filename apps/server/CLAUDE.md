@@ -265,9 +265,20 @@ src/
                         fallback routes it. `lastlight fork classifier` forks
                         the base prompt. (issue #164)
   workflows/            See src/workflows/CLAUDE.md for the full runner
-                        story. Loads YAML definitions, executes phases
-                        (linear or DAG), manages resume, approval gates,
-                        loop iterations.
+                        story. Loads YAML definitions and executes them as
+                        a DAG (a workflow declaring no `depends_on` gets a
+                        synthesized chain), manages resume, approval gates,
+                        loop iterations. The scheduler runs ONE node at a
+                        time; the only concurrency is inside a `type:
+                        fanout` node.
+    handlers/           App-registered phase types, injected on
+                        `EnginePorts.handlers` so the runtime-agnostic
+                        engine needs no knowledge of GitHub or sandboxes:
+                        `post-review.ts` (in-process review submission) and
+                        `fanout.ts` (N concurrent agent sessions in ONE
+                        provisioned workspace). NOT to be confused with
+                        `src/cron/fanout.ts`, which fans a cron out over
+                        repos.
   sandbox/              Isolation backends for agent runs. One container/VM/
                         worktree per task, hardened path checks (gitdir mounts
                         validated against sandbox root, taskId traversal
@@ -384,6 +395,9 @@ src/
     fanout.ts           One dispatch per repo (`context.repos`) — and the
                         shared engine behind the per-PR dependency-merge
                         fan-out. Narrows the repo list via repo-crons first.
+                        A CRON fan-out (one run per repo); the unrelated
+                        `src/workflows/handlers/fanout.ts` is a PHASE
+                        fan-out (many agents in one run).
     repo-crons.ts       Per-repo cron participation (issue #180):
                         resolveCronRepos / repoCronPrefs / cronVote /
                         repoLayerMayVote / operatorCrons, plus the

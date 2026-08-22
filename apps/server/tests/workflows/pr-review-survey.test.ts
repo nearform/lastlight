@@ -48,14 +48,28 @@ const BLOCK_FAMILIES = FAMILIES.filter((f) => f !== "spec");
 const def = getWorkflow("pr-review");
 const byName = new Map(def.phases.map((p) => [p.name, p]));
 
-const surveyPhase = (family: Family): PhaseDefinition => {
-  const phase = byName.get(`survey_${family}`);
-  if (!phase) throw new Error(`pr-review.yaml has no survey_${family} phase`);
+/**
+ * WP11c moved the six families from six chained PHASES to six BRANCHES of one
+ * `type: fanout` phase. Everything AC3 pins is unchanged by that — the six
+ * prompts, the six literal gates, the six disjoint paths — so the assertions
+ * below read a branch where they used to read a phase, and nothing else moved.
+ * That is the property the change is claiming: a latency change, not a
+ * behaviour change.
+ */
+const surveyPhase = (): PhaseDefinition => {
+  const phase = byName.get("survey");
+  if (!phase) throw new Error("pr-review.yaml has no `survey` fanout phase");
+  if (phase.type !== "fanout") throw new Error("pr-review.yaml's `survey` phase is not `type: fanout`");
   return phase;
 };
 
-const promptText = (family: Family): string =>
-  loadPromptTemplate(surveyPhase(family).prompt!);
+const surveyBranch = (family: Family) => {
+  const branch = surveyPhase().branches?.find((b) => b.name === family);
+  if (!branch) throw new Error(`the survey fan-out has no \`${family}\` branch`);
+  return branch;
+};
+
+const promptText = (family: Family): string => loadPromptTemplate(surveyBranch(family).prompt!);
 
 /**
  * Every family-scoped path a prompt mentions, as the set of families it reaches
@@ -71,32 +85,45 @@ function familiesReferenced(text: string): Set<string> {
 
 // ── AC3 ──────────────────────────────────────────────────────────────────────
 
-describe("AC3 — six survey phases, six disjoint families", () => {
-  it("declares exactly one phase per family, in the seeder's family order", () => {
-    const surveys = def.phases.filter((p) => p.name.startsWith("survey_")).map((p) => p.name);
-    expect(surveys).toEqual(FAMILIES.map((f) => `survey_${f}`));
+describe("AC3 — six survey branches, six disjoint families", () => {
+  it("declares exactly one branch per family, in the seeder's family order", () => {
+    expect(surveyPhase().branches?.map((b) => b.name)).toEqual([...FAMILIES]);
+    // …and the six phases they replaced are gone, so nothing can run twice.
+    expect(def.phases.filter((p) => p.name.startsWith("survey_"))).toEqual([]);
   });
 
-  it("points each phase at its own prompt file, and the six are distinct", () => {
-    const prompts = FAMILIES.map((f) => surveyPhase(f).prompt);
+  it("points each branch at its own prompt file, and the six are distinct", () => {
+    const prompts = FAMILIES.map((f) => surveyBranch(f).prompt);
     expect(prompts).toEqual(FAMILIES.map((f) => `prompts/survey-${f}.md`));
     expect(new Set(prompts).size).toBe(FAMILIES.length);
   });
 
-  it("gates each phase on ITS OWN hypothesis file, and the six gates are pairwise distinct", () => {
+  it("gates each branch on ITS OWN hypothesis file, and the six gates are pairwise distinct", () => {
     // This is the literal-gate property §D4 was rewritten for: the previous
     // `generic_loop` design templated `$LL_FAMILY` into the gate, `until_bash`
     // rejects template markers, and the gate silently tested
     // `hypotheses/.jsonl` — a condition that could never be true — while the
-    // loop burned every iteration. A literal path per phase is what makes the
+    // loop burned every iteration. A literal path per branch is what makes the
     // gate real rather than decorative.
-    const gates = FAMILIES.map((f) => surveyPhase(f).generic_loop?.until_bash?.trim());
+    const gates = FAMILIES.map((f) => surveyBranch(f).until_bash?.trim());
     expect(gates).toEqual(
       FAMILIES.map((f) => `test -s .lastlight/pr-review/hypotheses/${f}.jsonl`),
     );
     expect(new Set(gates).size).toBe(FAMILIES.length);
     // No templating anywhere in a gate — the failure mode above, pinned.
     for (const g of gates) expect(g).not.toContain("{{");
+  });
+
+  it("keeps the `security` skill set on the branch that needs it, and only there", () => {
+    // Five families inherit the phase's two skills; `security` adds a third.
+    // A fan-out that flattened the six onto one skill catalogue would hand
+    // `security-review` to every family — cheap-looking, and a change to what
+    // five of the six models see.
+    expect(surveyPhase().skills).toEqual(["pr-review", "code-review"]);
+    expect(surveyBranch("security").skills).toEqual(["pr-review", "code-review", "security-review"]);
+    for (const f of FAMILIES.filter((x) => x !== "security")) {
+      expect(surveyBranch(f).skills, f).toBeUndefined();
+    }
   });
 
   it("names only its own family's files in its prompt — no pass opens another's", () => {

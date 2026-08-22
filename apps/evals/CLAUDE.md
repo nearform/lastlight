@@ -470,11 +470,33 @@ When pointing the harness at a new real workflow, check:
   workflow itself must be resolvable by core's `getWorkflow` (a built-in, or an
   overlay workflow under `<overlay>/workflows/`).
 
-## Parallelism (across provider families)
+## Parallelism (two axes)
 
-`run.ts` runs provider families (OpenAI / Anthropic / Fireworks — keyed by each
-model's `envKey`) **concurrently**, serial within a family (so one provider's
-rate limit is never hammered). Per-run workspaces were always isolated (a fresh
+**Across provider families** — `run.ts` runs provider families (OpenAI /
+Anthropic / Fireworks — keyed by each model's `envKey`) **concurrently**.
+
+**Within one arm** — `--concurrency N` (default `1`) runs N of that arm's cases
+at once, via the shared order-preserving `mapPool` in `src/pool.ts` (also used by
+`scripts/aacr-adjudicate.ts`). Serialism within a family was only ever a
+rate-limit choice, never a correctness constraint — every case is already
+isolated (see the list below). This is what makes an 8-case `pr-review` arm
+affordable: serial it is hours, because a pipeline-on case is ~30 minutes.
+
+Two hard limits, both enforced in code:
+
+- **Arms never overlap.** The workflow asset root is a process global
+  (`docs/adr/0001-asset-root-is-process-global.md`), so the concurrent branch
+  opens and closes the pool *inside* each arm's `activate()` /
+  `releaseOverlayGuard()` window, and asserts every pooled item belongs to that
+  arm. Two overlays live at once would either throw or — worse — measure one
+  arm's cases against another arm's prompts.
+- **`--sandbox gondolin` clamps to 1** (a QEMU micro-VM per case).
+
+`--runs N` trials stay serial within a case. With no `--concurrency` flag the
+runner takes the original serial branch unchanged, so the default is a no-op by
+construction rather than by argument.
+
+Per-run workspaces were always isolated (a fresh
 `mkdtemp` stateDir + a private fake-GitHub port each), so the *only* blocker to
 in-process concurrency was shared `process.env`. The fix:
 
@@ -495,8 +517,56 @@ in-process concurrency was shared `process.env`. The fix:
   event-loop turn, so concurrent family loops never interleave a write (and the
   temp-file+rename keeps a polling dashboard from reading a half-written file).
 
-Force serial with `--serial`; single-family runs (e.g. the default single
-model) are serial anyway and keep the per-run spinner + captured logs.
+Force serial with `--serial`; a single-family run at the default
+`--concurrency 1` keeps the per-run spinner + captured logs.
+
+## Metrics gotcha (per-phase)
+
+**`PhaseMetric.durationMs` / `agentMs` / `costUsd` are the latency instrument.**
+Without them a scorecard says a case took 30 minutes and nothing about where they
+went, which is why the review pipeline's breakdown had to be read by hand out of
+transcripts. Two different quantities, deliberately not merged:
+
+- **`durationMs`** — the measured phase window (`onPhaseEnd` − `onPhaseStart`),
+  so it includes workspace provisioning, skill staging and the `until_bash` gate.
+  **Absent means the phase never started** (it was skipped), not that it was
+  instant.
+- **`agentMs`** — summed `duration_ms` over that phase's own `result` envelopes,
+  i.e. agent + gate time only. Narrower, but derivable from artifacts a run
+  already wrote — which is what lets `scripts/rescore.ts` back-fill a per-phase
+  split onto runs measured before any of this existed, with no re-run and no
+  spend.
+
+Attribution is one function, `bucketSessionsByPhase` (`src/metrics.ts`) — the
+per-phase cost roll-up and the archived `NN-<phase>.jsonl` split read that one
+implementation, so they cannot disagree about which phase owned a session. It
+applies **two rules, in order**:
+
+1. **The stamp.** The event shim writes a `phase` field onto each session's
+   opening and closing envelopes (`apps/server/src/engine/event-shim.ts`), and a
+   fan-out branch is stamped with its own branch label (`survey_branch_contract`),
+   not its parent's. Present ⇒ that is the answer.
+2. **The window**, only when a session carries no stamp: the last phase started
+   at/before the file's first line.
+
+**The window rule is a fallback, not a peer.** It is a point lookup, so it cannot
+express concurrency *at all* — a `fanout` phase opens six windows within 35 ms and
+every one of its sessions resolves to whichever branch opened last. On a measured
+run that put $1.23 of a $2.01 case onto one branch, or onto no row at all where
+the bucket key was the parent and the `PhaseMetric` rows were the branches.
+Widening the slack cannot help: the branches are genuinely simultaneous. It also
+mis-files *sequential* phases whose session is written late — `writeCommandSession`
+writes a command's session after the command finishes, so `facts`' session landed
+at roughly `seed`'s start and billed a model-free bash phase for agent time.
+
+The fallback exists because every run archived before 2026-08-22 lacks the stamp,
+and those runs must keep bucketing exactly as they did.
+
+**Summing a fan-out's branch durations does not give wall clock.** Six branches of
+16/64/93/101/192/242 s sum to ~708 s across ~242 s of real time. A consumer tells
+concurrent siblings from sequential phases by their labels — `PhaseRef` emits
+`<parent>_branch_<name>` (`packages/workflow-engine/src/core/phase-ref.ts`), so
+rows sharing a `_branch_` parent overlap and want max, not sum.
 
 ## Known sharp edges
 

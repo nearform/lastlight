@@ -90,7 +90,7 @@ describe("what has to be probed", () => {
     const { dir } = workspace({
       hypotheses: { contract: [critical, neither], security: [asked] },
     });
-    expect(checkProbes({ dir }).required).toEqual(["H-001", "H-002"]);
+    expect(checkProbes({ dir }).required).toEqual(["contract-001", "security-001"]);
   });
 });
 
@@ -120,7 +120,7 @@ describe("the gate is satisfiable — honestly, in one pass", () => {
     const { dir } = workspace({ hypotheses: { contract: [critical, asked] }, verdicts: [] });
     const result = checkProbes({ dir });
     expect(result.satisfied).toBe(false);
-    expect(result.gaps.map((g) => g.hypothesis)).toEqual(["H-001", "H-002"]);
+    expect(result.gaps.map((g) => g.hypothesis)).toEqual(["contract-001", "contract-002"]);
     expect(result.gaps.every((g) => g.kind === "no-verdict")).toBe(true);
   });
 
@@ -236,7 +236,7 @@ describe("malformed input is counted, never silently skipped", () => {
     expect(result.malformed).toBe(1);
     expect(result.notes.join(" ")).toMatch(/1 unparseable JSONL line/);
     // …and the good line still counted.
-    expect(result.required).toEqual(["H-001"]);
+    expect(result.required).toEqual(["contract-001"]);
   });
 });
 
@@ -249,6 +249,6 @@ describe("the summary a phase log actually shows", () => {
     const text = renderProbeCheck(checkProbes({ dir }));
     expect(text).toContain("1/2 required hypotheses answered");
     expect(text).toContain("unprobed=1");
-    expect(text).toContain("H-001");
+    expect(text).toContain("contract-001");
   });
 });

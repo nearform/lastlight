@@ -375,6 +375,22 @@ deepened until they share a merge-base (depth 50 → 500 → `--unshallow`), so
 post-review anchor against — resolves. `ensure_base` runs on **every** path:
 the fresh clone, the different-run refresh, *and* the same-run preserve.
 
+> **Nothing inside the checkout may run `git fetch --depth N`.** A
+> depth-limited fetch writes `.git/shallow` **even into an already-complete
+> clone**, re-cutting history N commits back from the base tip — which severs
+> the merge base on any PR that forked further back, and silently undoes the
+> ladder above. This is not hypothetical: the packaged `pr-review` skill
+> instructed exactly that (`git fetch origin <baseRef> --depth 50`, a leftover
+> from before `ensureBaseAvailable` existed), and it ran in six of seven agent
+> phases per review. The agent's three-dot diff then died with *"no merge
+> base"* and it fell back to two-dot — which contains every commit the base
+> picked up since the PR forked, none of which the author wrote. Measured over
+> 50 real PRs, 9 diverge from their base, one at 6125 files against 3.
+> A phase that needs to repair the base must check first
+> (`git merge-base origin/<base> HEAD`) and then deepen **both** sides — see
+> `post-review.ts`, which records that unshallowing the base alone leaves HEAD
+> with no reachable ancestor and the three-dot retry still fails.
+
 That last one is not redundant. Without it `origin/<base>` is frozen at whatever
 the run's *first* phase fetched, so a fix phase merging it tens of minutes later
 lands a base that is already superseded — which leaves the PR `dirty`, and GitHub

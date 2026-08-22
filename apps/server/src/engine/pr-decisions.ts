@@ -1417,6 +1417,16 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      */
     analysisEnabled: "true",
     /**
+     * WP11c — the `survey` fan-out's concurrency CEILING, read by
+     * `max_concurrent: { from: surveyConcurrency, default: 6 }`.
+     *
+     * Projected unconditionally alongside `analysisEnabled` (not under the
+     * probes branch) because the fan-out is the surveys themselves, not a probe
+     * affordance. The run clamps it again per backend — gondolin pins to 1 — so
+     * this is the operator's ask, never the effective value.
+     */
+    surveyConcurrency: String(review.analysis.surveyConcurrency),
+    /**
      * WP4's gate, and a SEPARATE one — `skip_if: "probesEnabled != true"`.
      *
      * Present only when the operator asked for both, so the absence rule above

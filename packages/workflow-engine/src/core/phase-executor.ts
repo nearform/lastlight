@@ -83,8 +83,12 @@ export interface PhaseRunContext {
 /**
  * Reject shell commands containing mustache template markers to prevent
  * accidental template injection into until_bash values.
+ *
+ * Exported so app-registered {@link PhaseTypeHandler}s that run their own gates
+ * (the `fanout` handler's per-branch `until_bash`) enforce the identical rule
+ * rather than a second copy of it that drifts.
  */
-function validateShellCommand(cmd: string): void {
+export function validateShellCommand(cmd: string): void {
   if (cmd.includes("{{")) {
     throw new Error(`until_bash command rejected: contains template marker '{{'. Render templates before passing to shell.`);
   }
@@ -225,13 +229,22 @@ function issueNumberFromTrigger(triggerId: string): number | undefined {
  * The seams the dedup ledger needs: the runs+executions store, the agent
  * runtime, container liveness, and telemetry. Threaded from the
  * {@link PhaseExecutor}'s injected {@link EnginePorts}.
+ *
+ * `agent` is optional because {@link runLedgeredPhase} never calls it — the
+ * caller's `run` callback does the work. It is required by {@link runPhase} /
+ * {@link runCommandPhase}, which dispatch through it.
  */
-interface LedgerDeps {
+export interface LedgerDeps {
   store?: WorkflowStateStore;
-  agent: AgentPort;
+  agent?: AgentPort;
   liveness: LivenessPort;
   observability: ObservabilityPort;
   logger?: LoggerPort;
+}
+
+/** {@link LedgerDeps} for the two entry points that DO dispatch through the port. */
+interface AgentLedgerDeps extends LedgerDeps {
+  agent: AgentPort;
 }
 
 /** Check if a sandbox container is actually running for a given taskId prefix. */
@@ -258,7 +271,7 @@ export function telemetryRepo(access: GitSandboxAccess | undefined): string | un
   return access.owner ? `${access.owner}/${access.repo}` : access.repo;
 }
 
-type RunPhaseResult =
+export type RunPhaseResult =
   | { result: ExecutionResult; executionId: string; skipped: false }
   | { result: ExecutionResult; skipped: false }
   | { skipped: true; reason: "running" | "done" };
@@ -274,8 +287,15 @@ type RunPhaseResult =
  * does the actual work and receives a session-id sink so the executions row can
  * be linked to its session jsonl mid-run. `shouldRunPhase` is the single source
  * of truth for resume — re-running from the top skips completed phases here.
+ *
+ * **Exported** so an app-registered {@link PhaseTypeHandler} can put its own
+ * units of work on the same ledger. That is what a `type: fanout` phase needs:
+ * it bypasses {@link AgentPort} (it drives one already-provisioned sandbox
+ * directly) but each of its branches must still get an `executions` row, or the
+ * fan-out silently loses resume, dedup and per-branch cost attribution — the
+ * exact price `05-parallel-phases.md` warned an in-agent fan-out would pay.
  */
-async function runPhaseLedger(
+export async function runLedgeredPhase(
   attrs: Record<string, unknown>,
   meta: {
     dedupKey: string;
@@ -392,7 +412,7 @@ export async function runPhase(
   triggerId: string,
   prompt: string,
   config: ExecutorConfig,
-  deps: LedgerDeps,
+  deps: AgentLedgerDeps,
   modelOverride?: string,
   workflowRunId?: string,
   githubAccess?: GitSandboxAccess,
@@ -417,7 +437,7 @@ export async function runPhase(
     ...phaseConfigBase,
     telemetry: { workflowName, phaseName, triggerId, workflowRunId },
   };
-  return runPhaseLedger(attrs, { dedupKey, phaseName, taskId, triggerId, repo: githubAccess?.repo, owner: githubAccess?.owner, workflowRunId }, deps, (onSessionId) =>
+  return runLedgeredPhase(attrs, { dedupKey, phaseName, taskId, triggerId, repo: githubAccess?.repo, owner: githubAccess?.owner, workflowRunId }, deps, (onSessionId) =>
     deps.agent.runAgent(prompt, phaseConfig, { taskId, githubAccess, onSessionId }),
   );
 }
@@ -434,7 +454,7 @@ export async function runCommandPhase(
   triggerId: string,
   spec: CommandSpec,
   config: ExecutorConfig,
-  deps: LedgerDeps,
+  deps: AgentLedgerDeps,
   workflowRunId?: string,
   githubAccess?: GitSandboxAccess,
   timeoutSeconds?: number,
@@ -454,7 +474,7 @@ export async function runCommandPhase(
     [OPENINFERENCE_SPAN_KIND]: OPENINFERENCE_CHAIN,
   };
   const phaseConfig: ExecutorConfig = { ...config, telemetry: { workflowName, phaseName, triggerId, workflowRunId } };
-  return runPhaseLedger(attrs, { dedupKey, phaseName, taskId, triggerId, repo: githubAccess?.repo, owner: githubAccess?.owner, workflowRunId }, deps, (onSessionId) =>
+  return runLedgeredPhase(attrs, { dedupKey, phaseName, taskId, triggerId, repo: githubAccess?.repo, owner: githubAccess?.owner, workflowRunId }, deps, (onSessionId) =>
     deps.agent.runCommand(spec, phaseConfig, { taskId, githubAccess, onSessionId, timeoutSeconds, sandboxEnv }),
   );
 }
@@ -473,7 +493,7 @@ export class PhaseExecutor {
   ) {}
 
   /** The dedup-ledger seams, bundled from the injected ports + run store. */
-  private get ledgerDeps(): LedgerDeps {
+  private get ledgerDeps(): AgentLedgerDeps {
     return {
       store: this.run.store,
       agent: this.ports.agent,
@@ -806,7 +826,7 @@ export class PhaseExecutor {
    * and the same renderers already know how to draw it.
    *
    * Two deliberate choices in the row:
-   *  - It bypasses `runPhaseLedger` (and so `shouldRunPhase`). A condition must
+   *  - It bypasses `runLedgeredPhase` (and so `shouldRunPhase`). A condition must
    *    be re-evaluated every time it is asked; a dedup hit that replayed a
    *    stale verdict against a workspace that has since changed is precisely
    *    the bug this row exists to expose.

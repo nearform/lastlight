@@ -37,8 +37,10 @@
  * 54.5 → 67.1 and cut recall 45.5 → 39.8 in the measurement this whole pipeline
  * is a reaction to.
  */
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+
+import { readHypothesisSet, resolveHypothesis } from "./hypotheses.js";
 
 /** A hypothesis line, as far as this gate cares. Everything else is ignored. */
 interface HypothesisLine {
@@ -117,29 +119,29 @@ export interface CheckProbesOptions {
   /**
    * What a `transcript` path is relative to. Defaults to the cwd, which is the
    * repo root in every phase this runs in — the prompt asks for a repo-relative
-   * path (`.lastlight/pr-review/probes/H-001.txt`) and a model that writes a
-   * `dir`-relative one (`probes/H-001.txt`) is being helpful rather than wrong,
+   * path (`.lastlight/pr-review/probes/contract-001.txt`) and a model that writes a
+   * `dir`-relative one (`probes/contract-001.txt`) is being helpful rather than wrong,
    * so both resolve.
    */
   repo?: string;
 }
 
 export function checkProbes(options: CheckProbesOptions): CheckProbesResult {
-  const hypothesesDir = join(options.dir, "hypotheses");
   const probesDir = join(options.dir, "probes");
   const notes: string[] = [];
   let malformed = 0;
 
+  // Identity comes from `hypotheses.ts`, the same reader `findings` uses, so the
+  // two gates can never disagree about which claims exist. This used to gate on
+  // `typeof row.id === "string"`, which silently excused every free-form row
+  // from ever needing a probe — 22 of 30 on the first real run, including a
+  // Critical. A hypothesis with no id of its own is still a hypothesis.
+  const set = readHypothesisSet(options.dir);
+  malformed += set.malformed;
+  const families = set.families;
   const required = new Set<string>();
-  const families = existsSync(hypothesesDir)
-    ? readdirSync(hypothesesDir).filter((f) => f.endsWith(".jsonl"))
-    : [];
-  for (const file of families) {
-    const { rows, malformed: bad } = readJsonl<HypothesisLine>(join(hypothesesDir, file));
-    malformed += bad;
-    for (const row of rows) {
-      if (typeof row.id === "string" && requiresProbe(row)) required.add(row.id);
-    }
+  for (const record of set.records) {
+    if (requiresProbe(record.row as HypothesisLine)) required.add(record.id);
   }
 
   const { rows: verdicts, malformed: badVerdicts } = readJsonl<VerdictLine>(
@@ -151,9 +153,15 @@ export function checkProbes(options: CheckProbesOptions): CheckProbesResult {
   const answered = new Map<string, VerdictLine>();
   for (const row of verdicts) {
     if (typeof row.hypothesis !== "string") continue;
+    // Resolved to the CANONICAL id, so a verdict written against a model-minted
+    // `H-001` still answers `contract-001`. An ambiguous citation resolves to
+    // nothing and the hypothesis stays unanswered — which is the honest reading:
+    // a verdict naming an id two families minted does not say which it probed.
+    const resolution = resolveHypothesis(set, row.hypothesis);
+    if (resolution.kind !== "resolved") continue;
     // LAST write wins: the file is append-only, so a second round revising a
     // verdict appends rather than edits, and the newest line is the answer.
-    answered.set(row.hypothesis, row);
+    answered.set(resolution.id, row);
   }
   for (const row of answered.values()) {
     const verdict = typeof row.verdict === "string" ? row.verdict : "(missing)";

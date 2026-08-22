@@ -16,7 +16,12 @@
  *     --repo <dir> --base <ref> --head <ref> [--out <file>] [--never-fail]
  */
 import { EXIT_DEGRADED, EXIT_UNAVAILABLE, EXIT_OK } from "./errors.js";
-import { checkFindings, renderFindingsCheck } from "./findings.js";
+import {
+  buildFindingsLedger,
+  checkFindings,
+  renderFindingsCheck,
+  renderFindingsLedger,
+} from "./findings.js";
 import { prepareTree } from "./prepare.js";
 import { checkProbes, renderProbeCheck } from "./probes.js";
 import { runExtractor, runWrapped, writeDocument } from "./run.js";
@@ -70,6 +75,11 @@ Commands:
                       rewrite findings.json and exit 0. Idempotent, and it never
                       deletes: an unjustified deletion becomes a recorded
                       non-deletion. Run it on the LAST iteration.
+  --ledger            print the CHECKLIST instead of grading: every declared id
+                      by family, which already carry a disposition, and which do
+                      not. For the ADJUDICATOR to run, so it discharges an
+                      explicit list rather than reconstructing one from six
+                      .jsonl files. Reports; never grades — ALWAYS exits 0.
   Exit 0 = the loop may stop. Non-zero = a hypothesis is unaccounted for, a
   deletion has nothing to show for it, or there is no readable findings.json.
 
@@ -280,6 +290,24 @@ export function runCli(
   }
 
   if (command === "findings") {
+    const dir = stringFlag(flags.dir) ?? ".lastlight/pr-review";
+
+    // `--ledger` is the CHECKLIST mode, and its caller is the ADJUDICATOR
+    // ITSELF rather than the harness — so it **always exits 0**. The two other
+    // modes below are a loop condition, where non-zero means "iterate again";
+    // an agent running that inside its own bash tool would read the same exit
+    // as a tool failure. Same reading of the same files, two audiences, two
+    // exit contracts, and conflating them is how the checklist would come to
+    // be treated as the gate.
+    if (flags.ledger === true) {
+      io.out(
+        renderFindingsLedger(
+          buildFindingsLedger({ dir, repo: stringFlag(flags.repo), log }),
+        ),
+      );
+      return EXIT_OK;
+    }
+
     // The `adjudicate` loop's `until_bash`, and the same contract as `probes`:
     // its non-zero exit is the LOOP condition, not a failure, so it is not
     // wrapped by `--never-fail`. `--repair` is the §D12 floor — it always

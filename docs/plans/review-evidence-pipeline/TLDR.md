@@ -121,22 +121,32 @@ Naming is necessary, not sufficient. 46.2% is a ceiling, not a forecast.
 
 ## The honest gaps
 
-1. **Nothing consumes the facts yet.** `lastlight facts` runs and is measured,
-   but there are **zero call sites in `apps/server`**. Wiring it into a phase is
-   [WP3](03-seed-and-survey.md), and it is the plan's first model spend.
+*Updated 2026-08-22. Gaps 1 and 4 as originally written are closed; what
+replaced them is more interesting than what they said.*
+
+1. **The whole pipeline is built and runs end to end** — facts → seed → six
+   concurrent surveys → falsify → review → adjudicate → reconcile → post-review.
+   It is **off by default** and **not yet in the sandbox image**, so it can be
+   measured (the eval runs `--sandbox none` on the host) but not switched on in
+   production. That is [WP2](02-sandbox-image.md).
 2. **Some defects cannot be read, only run.** One case had the model standing at
    the defect site with the dependency source open, judging a buggy Proxy shim
    correct. The human settled the same question by *running ESLint with a probe
    file*. That is [WP4](04-probe-oracle.md), and it is what makes deliberate
-   over-generation affordable.
+   over-generation affordable. **`falsify` has still never been run by a model**,
+   so the adjudicator's delete power remains inert by construction.
 3. **Improvements below ~0.24 micro-recall are not distinguishable from chance**
-   on a 25-finding gold set. That is why WP3's and WP4's gates are expressed as
-   mechanism metrics, not as recall. See [08-evals.md](08-evals.md).
-4. **The engine is heavier than it needs to be.** `ts-morph` vendors the
-   JavaScript TypeScript compiler; peak RSS runs 1.0–4.4 GB against a 2 GB agent
-   cap, and an OOM exits 134 with no envelope. That is a production-path safety
-   problem rather than a quality one — a failing phase is re-dispatched every 30
-   minutes forever. Being addressed separately.
+   on a 25-finding gold set. Gates are therefore expressed as mechanism metrics,
+   not recall. See [08-evals.md](08-evals.md).
+4. **Generation variance is large, and now measured.** Across three runs of one
+   identical case the union of matched gold was 3/3 and **no gold was ever found
+   twice**. Any single-case reading — including a favourable one — says almost
+   nothing.
+5. **Discovery is still the ceiling, and we now have it on tape.** Traced
+   end to end, both missed gold in one run were discovery failures, not
+   suppression: nothing was demoted, tiered away or dropped. For one of them the
+   agent **read the code containing the exact asymmetry** and never formed the
+   question. That is this page's thesis, at close range.
 
 ## In one sentence
 

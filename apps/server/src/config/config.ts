@@ -995,6 +995,11 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
         nonNegativeNumber(analysisRaw.maxSpecObligations) ?? reviewDefaults.analysis.maxSpecObligations,
       maxObligations: nonNegativeNumber(analysisRaw.maxObligations) ?? reviewDefaults.analysis.maxObligations,
       surveyPasses: nonNegativeNumber(analysisRaw.surveyPasses) ?? reviewDefaults.analysis.surveyPasses,
+      // WP11c. A CEILING the run clamps again per backend, so an overlay that
+      // asks for six on gondolin still gets one — the operator's ask is not the
+      // effective value and the run logs when the host overrides it.
+      surveyConcurrency:
+        nonNegativeNumber(analysisRaw.surveyConcurrency) ?? reviewDefaults.analysis.surveyConcurrency,
       // WP4. Every one of these four reads `=== true` for the same reason
       // `enabled` does: each buys the operator's compute, and two of them —
       // `probes` (which installs a PR author's dependencies) and

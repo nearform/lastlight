@@ -7,7 +7,10 @@ Those live behind **ports** the server implements.
 
 **Dependency invariant:** this is the base of the workspace graph. It depends only
 on `zod` — **no edge back to `lastlight-shared` or `lastlight-core`** (enforced by
-the dep-cruiser gate in `typecheck` → `.dependency-cruiser.cjs`). Everything else
+`scripts/lint-import-boundaries.mjs`, run from this package's `typecheck`).
+That script replaced dependency-cruiser when the workspace moved to TypeScript 7
+— dep-cruiser refuses to parse TS ≥ 7 and *exits 0 anyway*, so the old gate went
+green while seeing nothing. Everything else
 depends on it.
 
 ## Seams (`src/`)
@@ -15,10 +18,23 @@ depends on it.
 ```
 core/
   scheduler.ts       The one scheduler — every workflow is a DAG. Drives phase
-                     order, readiness, and loop iteration.
-  dag.ts             DAG construction + topological readiness.
-  phase-executor.ts  Executes a single phase against the injected ports.
-  phase-ref.ts       Phase identity/reference resolution (incl. loop-iteration names).
+                     order, readiness, and loop iteration. Runs ONE ready node
+                     at a time, in declaration order; concurrency across nodes
+                     is parked (see the review-evidence-pipeline plan).
+  dag.ts             DAG construction + topological readiness. `getReadyNodes`
+                     and `topoSort` are concurrency-correct and return every
+                     ready node — the scheduler is what takes `ready[0]`.
+  phase-executor.ts  Executes a single phase against the injected ports. Owns
+                     the generic kinds (context / agent / bash / script / the
+                     two loop shapes) and dispatches anything else through
+                     `EnginePorts.handlers` — the seam an app registers
+                     `post-review` and `fanout` on, so the engine core needs no
+                     knowledge of GitHub or sandboxes to support them.
+  phase-ref.ts       THE authority for generated ledger labels — loop iterations
+                     (`_fix_`/`_recheck_`/`_iter_`) and fan-out branches
+                     (`_branch_<name>`, `_retry`, `_check`) — and for parsing
+                     them back. Anything that formats such a label by hand will
+                     drift from `parse()`.
   loop-eval.ts       Loop condition evaluation (max_cycles, on_request_changes, …).
   templates.ts       The `{{…}}` template engine used for prompts/models/variants.
                      `lookupContextKey` is the one dotted-path walk over a run
@@ -54,5 +70,5 @@ loop iteration naming, approval gates, resume, taskId scoping — see
 
 ```bash
 pnpm --filter lastlight-workflow-engine build
-pnpm --filter lastlight-workflow-engine typecheck   # tsc + dep-cruiser boundary gate
+pnpm --filter lastlight-workflow-engine typecheck   # tsc + the import-boundary gate
 ```

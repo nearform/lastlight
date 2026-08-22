@@ -8,6 +8,16 @@ export function fmtTokens(n: number): string {
   return `${k >= 10 ? Math.round(k) : k.toFixed(1)}k`;
 }
 
+/** Exact milliseconds, grouped — `242,013ms`.
+ *
+ * Distinct from {@link fmtMs}, which rounds to whole seconds above 1s. Used for
+ * a session's own duration, where the point is to compare concurrent branches
+ * against each other and a rounded `4m02` hides the difference between two
+ * lanes that finished seconds apart. */
+export function fmtMsExact(ms: number): string {
+  return `${Math.max(0, Math.round(ms)).toLocaleString("en-US")}ms`;
+}
+
 export function fmtMs(ms: number): string {
   if (!ms) return "—";
   if (ms < 1000) return `${ms}ms`;

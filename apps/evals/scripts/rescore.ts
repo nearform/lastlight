@@ -28,6 +28,7 @@ import { dirname, join, resolve } from "node:path";
 import type { Scorecard } from "../src/schema.js";
 import { fmtRatio, summarizeModels } from "../src/report.js";
 import { DETECTION_FLOOR_MICRO_RECALL } from "../src/review-metrics.js";
+import { collectMetricsFromFiles } from "../src/metrics.js";
 
 /** Floating-point slack for "the recomputed mean equals the stored mean". The
  * arithmetic is identical, so anything above this is a real change in meaning. */
@@ -60,6 +61,49 @@ function writeCard(path: string, card: Scorecard): void {
   renameSync(tmp, path);
 }
 
+/**
+ * Back-fill the per-phase latency/cost split onto a run measured before
+ * `PhaseMetric.durationMs` was populated — with no re-run and no model spend.
+ *
+ * The evidence is already on disk: every archived `NN-<phase>.jsonl` carries the
+ * `result` envelopes for that phase, and each one reports its own `duration_ms`.
+ * Summing them reproduces the per-agent-call breakdown that previously had to be
+ * read out of transcripts by hand.
+ *
+ * It fills {@link PhaseMetric.agentMs}, never `durationMs`: the wall-clock phase
+ * window (which also covers provisioning and skill staging) was never recorded
+ * for these runs, and writing a narrower number into the wider field would make
+ * an old run silently incomparable with a new one.
+ *
+ * Returns how many phases it touched.
+ */
+function backfillPhaseTiming(card: Scorecard, scorecardPath: string): number {
+  const runDir = dirname(scorecardPath);
+  let filled = 0;
+  for (const r of card.results ?? []) {
+    if (!r.phases?.length) continue;
+    const trial = r.sessionTrial ?? r.sessions?.[0];
+    if (!trial?.phases?.length) continue;
+    const logByPhase = new Map(trial.phases.map((p) => [p.phase, p.log]));
+    for (const pm of r.phases) {
+      if (pm.agentMs != null) continue; // already measured — never overwrite
+      const rel = logByPhase.get(pm.phase);
+      if (!rel) continue;
+      const m = collectMetricsFromFiles([join(runDir, rel)]);
+      if (m.agentMs <= 0) continue;
+      pm.agentMs = m.agentMs;
+      // Cost/tokens too when the run never recorded them per phase. The case-level
+      // totals are untouched, so the history check above still governs.
+      if (pm.costUsd == null) pm.costUsd = m.costUsd;
+      if (pm.inputTokens == null) pm.inputTokens = m.inputTokens;
+      if (pm.cachedTokens == null) pm.cachedTokens = m.cachedTokens;
+      if (pm.outputTokens == null) pm.outputTokens = m.outputTokens;
+      filled++;
+    }
+  }
+  return filled;
+}
+
 function main(): void {
   const args = process.argv.slice(2);
   const paths = args.filter((a) => !a.startsWith("--")).map((p) => resolve(p));
@@ -72,6 +116,7 @@ function main(): void {
   for (const path of paths) {
     const card = loadCard(path);
     const rescored = summarizeModels(card.results ?? []);
+    const phasesFilled = backfillPhaseTiming(card, path);
 
     // ── The history check (AC5) ────────────────────────────────────────────
     // Every pre-existing field must come back bit-identical. A metric addition
@@ -98,6 +143,7 @@ function main(): void {
       console.log(`\n${path}`);
       const meta = card.meta;
       if (meta) console.log(`  run ${meta.runId}  tiers=${(meta.tiers ?? []).join("+")}  ${meta.generatedAt ?? ""}`);
+      if (phasesFilled) console.log(`  + per-phase timing back-filled for ${phasesFilled} phase(s) from the archived transcripts`);
       for (const m of rescored) {
         const mi = m.micro;
         if (!mi) {
@@ -131,6 +177,7 @@ function main(): void {
     }
 
     if (write && !drift) {
+      // `card` already carries the back-filled `results[]` (mutated in place).
       writeCard(path, { ...card, models: rescored });
       console.log(`  ✓ written`);
     }

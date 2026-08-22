@@ -45,6 +45,34 @@ deciding a claim feels weak.
 still visible; it is simply not an inline comment. That is the tool to reach for
 whenever you are tempted to drop something.
 
+## Start here: get your checklist
+
+**First command, before you read anything:**
+
+```sh
+FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+"$FACTS" findings --dir .lastlight/pr-review --ledger
+```
+
+That first line is not decoration — the tool is reached three different ways
+depending on where this runs, and a bare `lastlight-facts` is not on `PATH`
+everywhere. Keep it.
+
+That prints every hypothesis id the surveys declared, grouped by family, with the
+obligation, severity and file each came from — and marks which already carry a
+disposition. **It is the same code as the gate below**, so it cannot disagree
+with what you will be graded on. Work from that list. Do not reconstruct it by
+reading the six `.jsonl` files and keeping count in your head: that is what the
+previous attempt did, and it missed ids.
+
+It only ever reports — it always exits 0 and writes nothing.
+
+**If the ledger already shows ids marked `[x]`, you are on a retry.** A previous
+attempt wrote `findings.json` and the gate rejected it for the ids still marked
+`[ ]`. **Do not start over.** Keep every finding that is already there and add a
+disposition for each outstanding id — that is the whole remaining job, and it is
+a small one.
+
 ## What to read
 
 | File | What it is |
@@ -117,16 +145,16 @@ Rewrite `.lastlight/pr-review/findings.json` **in full**. You own this file now.
       "family": "contract",
       "obligation": "O-014",
       "confidence": 0.82,
-      "hypotheses": ["H-003", "H-017"],
+      "hypotheses": ["contract-003", "enforcement-017"],
       "mechanism": "value set on one side of a boundary, never checked on the other",
       "evidence": [
         { "type": "reference", "detail": "MAX_TOKEN_AGE: 1 reference, client-side only" },
-        { "type": "transcript", "ref": "probes/H-003.txt", "result": "reproduced" }
+        { "type": "transcript", "ref": "probes/contract-003.txt", "result": "reproduced" }
       ]
     }
   ],
   "dropped": [
-    { "hypothesis": "H-021", "refutedBy": "probes/H-021.txt" }
+    { "hypothesis": "security-021", "refutedBy": "probes/security-021.txt" }
   ]
 }
 ```
@@ -143,11 +171,28 @@ either in some finding's `hypotheses` array, or in `dropped` with a `refutedBy`
 transcript that exists on disk. An id in neither fails the gate; an id in both
 fails it.
 
+**Cite the ids the ledger prints — `contract-001`, `security-003`.** They are
+namespaced by family and assigned deterministically, so they exist for every
+hypothesis and cannot collide. A survey may also have written an `id` of its own;
+if two families minted the same one, citing it credits NEITHER and the gate says
+so by name. The ledger's id is always the safe one.
+
 This is checked mechanically after you write, and it is checked because an
 adjudicator that read thirty hypotheses and wrote six findings would otherwise
 pass every other gate in this pipeline while silently discarding twenty-four
 claims. If a hypothesis does not deserve a comment, that is what `internal` is
 for — **write it down at `internal` tier**. Silence is not a disposition.
+
+**Check yourself before you finish.** Re-run the ledger:
+
+```sh
+"$FACTS" findings --dir .lastlight/pr-review --ledger
+```
+
+Every line must read `[x]` and it must end with *"Conservation holds"*. If
+anything is still outstanding, add its disposition now — you have the file open
+and the claim in front of you. Discovering it here costs you one command;
+discovering it after you stop costs a whole second pass over the same evidence.
 
 Keeping the findings the review pass already wrote is expected: they carry no
 `hypotheses` array and the gate does not ask them to.

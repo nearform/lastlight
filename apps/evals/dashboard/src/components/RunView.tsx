@@ -154,6 +154,8 @@ export function RunView({ run }: { run: IndexRun }) {
 
           {isConfig && <PhaseModelPanel results={tierResults} labels={labels} />}
 
+          <PhaseTimingPanel results={tierResults} labels={labels} concurrency={card?.meta?.concurrency} />
+
           <h2 className="mb-3.5 mt-8 text-lg font-semibold text-base-content">Per-instance results</h2>
           <InstanceTable tier={tier} results={tierResults} pending={tierPending} labels={labels} scorecardUrl={run.scorecard} />
 
@@ -209,6 +211,98 @@ function PhaseModelPanel({ results, labels }: { results: InstanceResult[]; label
             </div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Where the wall clock went, per phase — the latency instrument.
+ *
+ * A case-level `durationMs` says a review took 30 minutes and nothing about
+ * which phase spent them, so the pipeline's cost breakdown had to be read by
+ * hand out of session transcripts. Phases are summed across the arm's cases and
+ * sorted by total time, because the question this answers is always "what is the
+ * biggest thing to attack", and share-of-total is what makes an answer
+ * actionable. Loop iterations carry their own labels (`adjudicate_iter_1`), so a
+ * gate that fails and retries shows up as two rows rather than one average.
+ *
+ * Renders nothing for runs measured before per-phase timing existed.
+ */
+function PhaseTimingPanel({
+  results,
+  labels,
+  concurrency,
+}: {
+  results: InstanceResult[];
+  labels: Record<string, string>;
+  concurrency?: number;
+}) {
+  // arm → phase → { ms, cost, n }. Only phases that actually reported a window.
+  const byArm = new Map<string, Map<string, { ms: number; cost: number; n: number }>>();
+  for (const r of results) {
+    for (const p of r.phases ?? []) {
+      if (p.durationMs == null) continue;
+      let phases = byArm.get(r.model);
+      if (!phases) byArm.set(r.model, (phases = new Map()));
+      const cur = phases.get(p.phase) ?? { ms: 0, cost: 0, n: 0 };
+      cur.ms += p.durationMs;
+      cur.cost += p.costUsd ?? 0;
+      cur.n += 1;
+      phases.set(p.phase, cur);
+    }
+  }
+  const arms = [...byArm].filter(([, phases]) => phases.size);
+  if (!arms.length) return null;
+
+  const fmt = (ms: number) => (ms >= 60_000 ? `${Math.floor(ms / 60_000)}m${String(Math.round((ms % 60_000) / 1000)).padStart(2, "0")}` : `${(ms / 1000).toFixed(1)}s`);
+
+  return (
+    <div className="mt-8">
+      <h3 className="mb-1 text-lg font-semibold text-base-content">Where the time went</h3>
+      <p className="mb-3 max-w-2xl text-2xs leading-5 text-base-content/50">
+        Measured phase windows summed across this arm's cases, sorted by total wall clock.
+        {concurrency && concurrency > 1 ? (
+          <>
+            {" "}
+            This run used <span className="font-mono text-base-content/70">--concurrency {concurrency}</span>, so the
+            arm's elapsed time is <em>not</em> the sum of these — per-phase and per-case numbers still are.
+          </>
+        ) : null}
+      </p>
+      <div className="flex flex-col gap-3">
+        {arms.map(([arm, phases]) => {
+          const rows = [...phases].sort((a, b) => b[1].ms - a[1].ms);
+          const totalMs = rows.reduce((s, [, v]) => s + v.ms, 0) || 1;
+          return (
+            <div key={arm} className="rounded-xl border border-base-300 bg-base-200 px-4 py-3">
+              <div className="mb-2 flex items-baseline gap-2">
+                <span className="font-mono text-xs font-semibold text-base-content">{modelLabel(labels, arm)}</span>
+                <span className="font-mono text-2xs text-base-content/40">{fmt(totalMs)} of model + gate time</span>
+              </div>
+              <div className="flex flex-col gap-1">
+                {rows.map(([phase, v]) => {
+                  const share = v.ms / totalMs;
+                  return (
+                    <div key={phase} className="flex items-center gap-2 font-mono text-2xs">
+                      <span className="w-44 shrink-0 truncate text-base-content/60" title={phase}>
+                        {phase}
+                      </span>
+                      <div className="h-1.5 flex-1 overflow-hidden rounded bg-base-300">
+                        <div className="h-full rounded bg-info/70" style={{ width: `${Math.max(share * 100, 0.5)}%` }} />
+                      </div>
+                      <span className="w-14 shrink-0 text-right text-base-content/70">{fmt(v.ms)}</span>
+                      <span className="w-10 shrink-0 text-right text-base-content/40">{(share * 100).toFixed(0)}%</span>
+                      <span className="w-16 shrink-0 text-right text-base-content/40">
+                        {v.cost > 0 ? `$${v.cost.toFixed(2)}` : ""}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

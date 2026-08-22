@@ -59,6 +59,28 @@ export { invalidateRepoLayer } from "./config/repo-config.js";
 export { renderContext, mayMerge } from "./engine/pr-decisions.js";
 export type { PrState } from "./engine/pr-state.js";
 export type { CiFailureReport, CiJobFailure } from "./engine/github/github.js";
+
+// The `spec` axis's two ends, and the client that reads them.
+//
+// `renderContext` above projects a snapshot the harness FABRICATES. That is the
+// right shape for `{{ciSection}}` and friends — there is no real PR — but it is
+// the wrong shape for `PrState.closes` / `.changedFiles`, because those are not
+// facts a case declares: they are facts GitHub COMPUTES. `closes` in particular
+// is `closingIssuesReferences`, which resolves both the body's closing keywords
+// and issues linked by hand through the Development sidebar. A harness that
+// seeds them re-implements that resolution, and a harness that seeds only one of
+// them silences the whole family — `buildSpecObligations` refuses a one-ended
+// seed, because IRIS measured a half mechanism at −3, WORSE than no seed at all.
+//
+// Both failures happened, one end at a time. So the enrichment step itself is
+// exported: the harness points a real `GitHubClient` at its fake GitHub and
+// core's own `resolveSpecContext` does both reads, exactly as `dispatchWorkflow`
+// does at the choke point. The fake grows the GraphQL route rather than the
+// harness growing a copy of the resolver — its stated convention, and the same
+// call it already made for `enablePullRequestAutoMerge`.
+export { resolveSpecContext } from "./engine/pr-state.js";
+export { resolveReviewGitHubClient } from "./workflows/handlers/post-review.js";
+export type { GitHubClient } from "./engine/github/github.js";
 export {
   parseAttemptMarkers,
   parseDiagnosisMarker,

@@ -29,6 +29,7 @@ import chalk from "chalk";
 import { loadDotEnv, hasProviderKey, evalModels, compareModels, modelLabels, resolveModel, setModelsPath } from "./env.js";
 import { runInstance, applyEvalEnv, slug } from "./run-instance.js";
 import { modelsArm, configArm, releaseOverlayGuard, type Arm } from "./arm.js";
+import { mapPool } from "./pool.js";
 import {
   summarize,
   writeArtifacts,
@@ -210,7 +211,7 @@ function strFlagAll(name: string): string[] {
 }
 
 /** CLI flags that take a following value (so it isn't read as a tier name). */
-const VALUE_FLAGS = new Set(["--runs", "--model", "--models", "--mode", "--overlay", "--datasets", "--models-file", "--instance", "--limit", "--f-beta", "--sandbox"]);
+const VALUE_FLAGS = new Set(["--runs", "--model", "--models", "--mode", "--overlay", "--datasets", "--models-file", "--instance", "--limit", "--f-beta", "--sandbox", "--concurrency"]);
 
 async function runEval(): Promise<number> {
   loadDotEnv();
@@ -507,6 +508,28 @@ async function runEval(): Promise<number> {
     }
   }
 
+  // `--concurrency N`: how many CASES of ONE arm run at once. Default 1, so an
+  // invocation without the flag takes the exact serial path it always did.
+  //
+  // Within-arm serialism was never a correctness constraint — it is the
+  // rate-limit choice recorded above `byFamily` below. Everything that makes
+  // in-process concurrency safe is already true per case: a fresh `mkdtemp`
+  // stateDir, its own fake-GitHub port, a threaded per-run `cwd` with no
+  // `process.chdir`, and the eval env hoisted once for the whole batch. What is
+  // NOT safe is two ARMS at once — see the overlay note where the pool is driven.
+  const concurrencyRaw = strFlag("concurrency");
+  let concurrency = concurrencyRaw !== undefined ? Number(concurrencyRaw) : 1;
+  if (!Number.isFinite(concurrency) || !Number.isInteger(concurrency) || concurrency < 1) {
+    p.log.error(`--concurrency must be a positive integer, got "${concurrencyRaw}".`);
+    return 1;
+  }
+  // gondolin boots a QEMU micro-VM per case. Clamp rather than error: the flag is
+  // about throughput and the right answer on this backend is "one", not "refuse".
+  if (sandbox === "gondolin" && concurrency > 1) {
+    p.log.warn(`--concurrency ${concurrency} ignored: --sandbox gondolin runs a QEMU micro-VM per case. Using 1.`);
+    concurrency = 1;
+  }
+
   // Instances per tier, resolved ONCE — the case set is identical across arms
   // (arms vary only the model selection / assets, never the cases).
   const tierInstances = new Map<string, SweBenchInstance[]>();
@@ -673,6 +696,7 @@ async function runEval(): Promise<number> {
     tiers: [tier],
     models: armLabels,
     runs,
+    concurrency,
     gitSha,
     labels,
     core: describeCore(builtInRoot),
@@ -887,7 +911,11 @@ async function runEval(): Promise<number> {
       try {
         await Promise.all(
           [...byFamily].map(async ([f, items]) => {
-            for (const w of items) {
+            // Within a family, `--concurrency` bounds how many of its cases are
+            // in flight. `models` arms never switch overlays (`activate()` is a
+            // no-op for them), which is why this branch needs no arm grouping —
+            // see the `config`/overlay note in the serial branch below.
+            await mapPool(items, concurrency, async (w) => {
               const k = caseKey(w.tierName, w.arm.label, w.inst.instance_id);
               running.add(k);
               refresh();
@@ -902,9 +930,73 @@ async function runEval(): Promise<number> {
               const mark = result.error ? chalk.red("✗") : result.blocked ? chalk.yellow("■") : chalk.green("✓");
               verdicts.push(`${mark} ${chalk.dim(familyLabel(f))}  ${verdictLine(w.tierName, w.inst, result)}`);
               refresh();
-            }
+            });
           }),
         );
+      } finally {
+        restoreConsole();
+      }
+      s.stop(`${chalk.dim(`${completed}/${total}`)} ${chalk.green("done")}`);
+      p.log.message(verdicts.join("\n"));
+    } else if (concurrency > 1) {
+      // Concurrent WITHIN one arm, strictly serial ACROSS arms.
+      //
+      // The asset root core resolves workflows/skills/prompts from is a module
+      // GLOBAL (ADR 0001), so two overlays can never be live at once — which is
+      // what `activateOverlay`/`releaseOverlayGuard` enforce by throwing. Running
+      // arms concurrently would therefore either throw or, worse, measure one
+      // arm's cases against another arm's prompts. So the pool is opened and
+      // closed inside each arm's overlay window, never across it.
+      //
+      // Cases within one arm have nothing global between them: per-run `mkdtemp`
+      // stateDir, per-run fake-GitHub port, a threaded `cwd` (never
+      // `process.chdir`), and the static-token env installed once for the batch.
+      const groups: { arm: Arm; items: WorkItem[] }[] = [];
+      for (const w of work) {
+        const tail = groups[groups.length - 1];
+        if (tail && tail.arm === w.arm) tail.items.push(w);
+        else groups.push({ arm: w.arm, items: [w] });
+      }
+
+      const s = makeSpinner();
+      const status = () => `${chalk.dim(`${completed}/${total}`)}  ${chalk.dim(`×${concurrency}`)}`;
+      s.start(status());
+      // The per-case `quiet()` swap saves/restores `console` and is NOT
+      // re-entrant, so concurrency drops console for the batch instead — the
+      // same trade the family-parallel branch makes.
+      const restoreConsole = silenceConsole();
+      const verdicts: string[] = [];
+      try {
+        for (const g of groups) {
+          g.arm.activate();
+          try {
+            await mapPool(g.items, concurrency, async (w) => {
+              // The invariant this whole branch is built on, asserted rather
+              // than assumed: one overlay is live and it is this arm's.
+              if (w.arm !== g.arm) throw new Error(`concurrency crossed an arm boundary: ${w.arm.label} in ${g.arm.label}`);
+              const k = caseKey(w.tierName, w.arm.label, w.inst.instance_id);
+              running.add(k);
+              refresh();
+              const result = await runItem(w, () => {
+                s.message(status());
+                refresh();
+              });
+              running.delete(k);
+              all.push(result);
+              if (result.error) harnessErrors++;
+              const mark = result.error ? chalk.red("✗") : result.blocked ? chalk.yellow("■") : chalk.green("✓");
+              verdicts.push(
+                `${mark} ${chalk.dim(labels[w.arm.label] ?? w.arm.label)}  ${verdictLine(w.tierName, w.inst, result)}`,
+              );
+              s.message(status());
+              refresh();
+            });
+          } finally {
+            // Release before the next arm activates, or the guard reads the
+            // switch as a second concurrent overlay and throws.
+            releaseOverlayGuard();
+          }
+        }
       } finally {
         restoreConsole();
       }
@@ -1103,6 +1195,11 @@ Run options:
                        pipeline's artifacts (.lastlight/pr-review/facts.json,
                        obligations/, hypotheses/, probes/) readable after the run;
                        the path lands on each result as workspaceDir. Costs disk.
+  --concurrency <n>    Run n cases of the SAME arm at once (default 1 = serial).
+                       Arms always stay serial (one overlay at a time, ADR 0001);
+                       --runs trials within a case stay serial too. Bounded by the
+                       provider's rate limit, not by correctness. Forced to 1 on
+                       --sandbox gondolin (a QEMU micro-VM per case).
   --serial             Force serial execution across provider families
   --datasets <dir>     Extra datasets root to discover tiers from
   --models-file <f>    Use an explicit models.json

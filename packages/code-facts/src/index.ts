@@ -226,15 +226,30 @@ export {
 } from "./prepare.js";
 export type { ExecFn, ExecResult, PackageManagerId, PrepareOptions } from "./prepare.js";
 
+export { hypothesisId, readHypothesisSet, resolveHypothesis } from "./hypotheses.js";
+export type {
+  HypothesisRecord,
+  HypothesisResolution,
+  HypothesisRow,
+  HypothesisSet,
+} from "./hypotheses.js";
 export { checkProbes, readJsonl, renderProbeCheck, requiresProbe } from "./probes.js";
 export type { CheckProbesOptions, CheckProbesResult, ProbeGapKind } from "./probes.js";
 
-export { checkFindings, renderFindingsCheck, titleFrom } from "./findings.js";
+export {
+  buildFindingsLedger,
+  checkFindings,
+  renderFindingsCheck,
+  renderFindingsLedger,
+  titleFrom,
+} from "./findings.js";
 export type {
   CheckFindingsOptions,
   CheckFindingsResult,
   FindingsGap,
   FindingsGapKind,
+  FindingsLedger,
+  LedgerEntry,
   RepairAction,
 } from "./findings.js";
 

@@ -57,6 +57,7 @@ import {
   defaultFixConfig,
   defaultReviewConfig,
   renderContext,
+  resolveSpecContext,
   type CiFailureReport,
   type CiJobFailure,
   type DependenciesConfig,
@@ -64,6 +65,24 @@ import {
   type PrState,
   type ReviewConfig,
 } from "lastlight-core/evals";
+
+/**
+ * The two reads `resolveSpecContext` makes. Declared structurally so the fake
+ * only has to satisfy what is actually called — the same reasoning that lets a
+ * `FakeGitHub` stand in as a `GitHubClient` for `fetchRepoConfigTree`.
+ */
+export interface SpecGitHub {
+  listPullRequestClosingIssues: (
+    owner: string,
+    repo: string,
+    pullNumber: number,
+  ) => Promise<{ number: number; title: string; body: string; url?: string; state?: string }[]>;
+  listPullRequestFilePaths: (
+    owner: string,
+    repo: string,
+    pullNumber: number,
+  ) => Promise<string[] | null>;
+}
 
 /** One failing CI job, as a case writes it. */
 export interface CiJobSeed {
@@ -177,6 +196,8 @@ export function buildPrState(args: {
   body: string;
   branch: string;
   seed?: PrStateSeed;
+  /** Harness-derived changed paths; the case's own seed beats it. See {@link prContextPatch}. */
+  changedFiles?: string[];
 }): PrState {
   const s = args.seed ?? {};
   const at = new Date().toISOString();
@@ -217,7 +238,11 @@ export function buildPrState(args: {
       ...(c.state ? { state: c.state } : {}),
       ...(c.url ? { url: c.url } : {}),
     })),
-    changedFiles: s.changed_files ?? null,
+    // `??`, not `||`: a case seeding `[]` is asserting "this PR changes no
+    // files", which is a different fact from "we could not read the list" and
+    // yields a different degraded message. Only a genuinely absent seed falls
+    // through to the harness-derived set.
+    changedFiles: s.changed_files ?? args.changedFiles ?? null,
     attempt: s.attempt ?? 1,
     flakyDeferrals: s.flaky_deferrals ?? 0,
     escalatedAtSha: null,
@@ -309,7 +334,7 @@ export function prPolicy(
  * exactly what the seam contributes — and so a workflow that is not PR-scoped
  * gets nothing at all.
  */
-export function prContextPatch(args: {
+export async function prContextPatch(args: {
   repo: string;
   prNumber: number;
   title: string;
@@ -317,14 +342,65 @@ export function prContextPatch(args: {
   branch: string;
   seed?: PrStateSeed;
   /**
+   * A `GitHubClient` pointed at the fake — the seam that makes the `spec` axis
+   * production-shaped.
+   *
+   * `closes` and `changedFiles` are the only two fields on the snapshot that are
+   * not facts a case *declares* but facts GitHub *computes*, and both went
+   * missing here, one at a time, precisely because the harness was seeding them.
+   * Given a client, core's own `resolveSpecContext` does both reads against the
+   * fake exactly as `dispatchWorkflow` does against real GitHub — one GraphQL
+   * (`closingIssuesReferences`) and one REST (`GET /pulls/:n/files`). No copy of
+   * the resolution lives here.
+   *
+   * Omit it and the snapshot keeps whatever the case seeded, which is what every
+   * non-pr-review tier does.
+   */
+  github?: SpecGitHub;
+  /**
    * The ARM's `review:` policy (its overlay `config.yaml` block). This is how
    * `review.analysis.enabled` reaches a run — and therefore how core's
    * `specContext` comes to project `analysisEnabled`, the one key the review
    * evidence pipeline's phases gate on. See {@link prPolicy} for the precedence.
    */
   review?: ReviewOverride;
-}): Record<string, unknown> {
+  /**
+   * The PR's changed paths as the HARNESS derived them from the seeded checkout
+   * — the fallback for the spec axis's second end.
+   *
+   * Production reads this from `listPullRequestFilePaths` inside
+   * `resolveSpecContext`; the eval builds its own snapshot and so never calls
+   * that. Without this the field stays `null`, which
+   * `buildSpecObligations` correctly treats as "could not read" and refuses to
+   * emit a one-ended seed for — silencing the entire `spec` family.
+   *
+   * A case's own `pr_state.changed_files` still wins, so a case can deliberately
+   * measure the degraded path.
+   */
+  changedFiles?: string[];
+}): Promise<Record<string, unknown>> {
   const state = buildPrState(args);
+
+  // Production order, then the case's overrides. `resolveSpecContext` fills both
+  // ends unconditionally and never throws (a failed read lands in `readErrors`
+  // and leaves the field at the value that cannot cause a wrong claim), so the
+  // seeds are re-applied AFTER it — otherwise a case that deliberately seeds
+  // `changed_files: []` to measure the degraded path would have the resolver
+  // quietly answer its question for it.
+  if (args.github) {
+    await resolveSpecContext(state, { github: args.github as never });
+    if (args.seed?.closes) {
+      state.closes = args.seed.closes.map((c) => ({
+        number: c.number,
+        title: c.title,
+        body: c.body,
+        ...(c.state ? { state: c.state } : {}),
+        ...(c.url ? { url: c.url } : {}),
+      }));
+    }
+    if (args.seed?.changed_files) state.changedFiles = args.seed.changed_files;
+  }
+
   const { fix, dependencies, review } = prPolicy(args.seed, args.review);
   return {
     // `review` is passed but deliberately NOT seeded top-level the way `fix` and

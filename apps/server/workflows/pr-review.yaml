@@ -186,7 +186,7 @@ phases:
         --blocks .lastlight/pr-review/obligations || true
       echo "seed: $(ls .lastlight/pr-review/obligations 2>/dev/null | wc -l) family block(s)"
 
-  # ── The six surveys. One phase per family, chained. ────────────────────────
+  # ── The six surveys. ONE phase, six branches, run CONCURRENTLY. ────────────
   #
   # NOT a `generic_loop` over a `families` list, and the reason is measured:
   # `until_bash` rejects template markers and the only env a phase receives is
@@ -196,149 +196,87 @@ phases:
   # Worse, `surveyPasses` defaulted to 3 against six families and nothing
   # recorded which three ran.
   #
-  # Six phases buy LITERAL gates (no templating, so the gate is real), all six
-  # families, per-family timeouts, individual ledger rows and retryability, and
-  # a dashboard node each. Separate phases never share a transcript, so the
-  # context isolation comes free.
+  # WP11c — this WAS six chained phases, and chained is what made the review
+  # unshippable. Measured on `prreview__skillspro-1587-r1`: the six surveys are
+  # 851s of a 29-minute case, 49% of the wall clock, and they were sequential
+  # only because the scheduler runs one DAG node at a time
+  # (`packages/workflow-engine/src/core/scheduler.ts` — `const node = ready[0]`).
+  # The families are pairwise disjoint by construction (six append-only
+  # `hypotheses/<family>.jsonl`, no pass opening another's), so there was never
+  # an ordering constraint to respect — only an engine that could not express
+  # the absence of one.
+  #
+  # `type: fanout` is ONE node running the six sessions in one provisioned
+  # workspace, which is the carve-out `05-parallel-phases.md` names in its own
+  # words: *"every hard blocker exists BECAUSE each phase provisions its own
+  # sandbox against a shared workspace. A fan-out inside one agent has none of
+  # them."* Six branches, one clone, one AGENTS.md, one artifact harvest, one
+  # dispose — and still one `executions` row per branch, so per-family cost,
+  # resume and the dashboard column survive the change.
+  #
+  # WHAT DID NOT CHANGE, deliberately: the six prompts, the six literal gates,
+  # the model, the skills, and the soft-failure policy. This is a latency change
+  # and it has to be readable as one — if a fan-out arm moves recall, that is a
+  # bug in this phase, not a result.
+  #
+  # `max_concurrent` is a CEILING the run clamps further per backend: gondolin
+  # boots a QEMU micro-VM per session and pins to 1 (so production is unchanged
+  # until that is measured), while `none` — the eval harness — takes all six.
   #
   # PROMPT ORDER IS FIXED HERE AND IS EXPENSIVE TO RETROFIT: the shared prefix
   # (skills, AGENTS.md, diff summary) goes FIRST and the family's obligations
   # LAST, because provider-side prompt caching is keyed on the request prefix.
-  # Six passes then share one cached prefix.
-  - name: survey_contract
-    label: Survey · contract
+  # Six passes then share one cached prefix — which is worth MORE under a
+  # fan-out, not less, since the six now hit the provider inside one window.
+  - name: survey
+    label: Survey · six families
+    type: fanout
     skills: [pr-review, code-review]
-    prompt: prompts/survey-contract.md
     model: "{{models.review-survey}}"
     skip_if: "analysisEnabled != true"
     depends_on: [seed]
     trigger_rule: all_done
-    generic_loop:
-      max_iterations: 1
-      # INSIDE the loop, which is where the schema puts it. At phase
-      # level — where all six of these were until 2026-08-22 — zod
-      # strips it, the policy silently reverts to `{retries: 0, then:
-      # fail}`, and one degenerate turn HARD-FAILS the whole review.
-      # That is the §D12 shape exactly: a failed run records no
-      # `assessedHeadShaByWorkflow` and cron-review.yaml re-dispatches
-      # it every thirty minutes, forever.
-      on_soft_failure: { retries: 1, then: complete }
-      until_bash: |
-        test -s .lastlight/pr-review/hypotheses/contract.jsonl
-
-  - name: survey_enforcement
-    label: Survey · enforcement
-    skills: [pr-review, code-review]
-    prompt: prompts/survey-enforcement.md
-    model: "{{models.review-survey}}"
-    skip_if: "analysisEnabled != true"
-    depends_on: [survey_contract]
-    trigger_rule: all_done
-    generic_loop:
-      max_iterations: 1
-      # INSIDE the loop, which is where the schema puts it. At phase
-      # level — where all six of these were until 2026-08-22 — zod
-      # strips it, the policy silently reverts to `{retries: 0, then:
-      # fail}`, and one degenerate turn HARD-FAILS the whole review.
-      # That is the §D12 shape exactly: a failed run records no
-      # `assessedHeadShaByWorkflow` and cron-review.yaml re-dispatches
-      # it every thirty minutes, forever.
-      on_soft_failure: { retries: 1, then: complete }
-      until_bash: |
-        test -s .lastlight/pr-review/hypotheses/enforcement.jsonl
-
-  - name: survey_security
-    label: Survey · security
-    skills: [pr-review, code-review, security-review]
-    prompt: prompts/survey-security.md
-    model: "{{models.review-survey}}"
-    skip_if: "analysisEnabled != true"
-    depends_on: [survey_enforcement]
-    trigger_rule: all_done
-    generic_loop:
-      max_iterations: 1
-      # INSIDE the loop, which is where the schema puts it. At phase
-      # level — where all six of these were until 2026-08-22 — zod
-      # strips it, the policy silently reverts to `{retries: 0, then:
-      # fail}`, and one degenerate turn HARD-FAILS the whole review.
-      # That is the §D12 shape exactly: a failed run records no
-      # `assessedHeadShaByWorkflow` and cron-review.yaml re-dispatches
-      # it every thirty minutes, forever.
-      on_soft_failure: { retries: 1, then: complete }
-      until_bash: |
-        test -s .lastlight/pr-review/hypotheses/security.jsonl
-
-  - name: survey_state
-    label: Survey · state
-    skills: [pr-review, code-review]
-    prompt: prompts/survey-state.md
-    model: "{{models.review-survey}}"
-    skip_if: "analysisEnabled != true"
-    depends_on: [survey_security]
-    trigger_rule: all_done
-    generic_loop:
-      max_iterations: 1
-      # INSIDE the loop, which is where the schema puts it. At phase
-      # level — where all six of these were until 2026-08-22 — zod
-      # strips it, the policy silently reverts to `{retries: 0, then:
-      # fail}`, and one degenerate turn HARD-FAILS the whole review.
-      # That is the §D12 shape exactly: a failed run records no
-      # `assessedHeadShaByWorkflow` and cron-review.yaml re-dispatches
-      # it every thirty minutes, forever.
-      on_soft_failure: { retries: 1, then: complete }
-      until_bash: |
-        test -s .lastlight/pr-review/hypotheses/state.jsonl
-
-  # `tests` is seeded from `coverage`, which READS a report nothing in the
-  # pipeline produces until WP4's `prepare`. Measured: 0 artifacts across 50
-  # corpus cases AND all 8 gate cases. The phase ships so the wiring is exercised
-  # and so its funnel row exists; the block it reads says NOT MEASURED in those
-  # words, and a `notMeasured` family must never be reported as "did not convert".
-  - name: survey_tests
-    label: Survey · tests
-    skills: [pr-review, code-review]
-    prompt: prompts/survey-tests.md
-    model: "{{models.review-survey}}"
-    skip_if: "analysisEnabled != true"
-    depends_on: [survey_state]
-    trigger_rule: all_done
-    generic_loop:
-      max_iterations: 1
-      # INSIDE the loop, which is where the schema puts it. At phase
-      # level — where all six of these were until 2026-08-22 — zod
-      # strips it, the policy silently reverts to `{retries: 0, then:
-      # fail}`, and one degenerate turn HARD-FAILS the whole review.
-      # That is the §D12 shape exactly: a failed run records no
-      # `assessedHeadShaByWorkflow` and cron-review.yaml re-dispatches
-      # it every thirty minutes, forever.
-      on_soft_failure: { retries: 1, then: complete }
-      until_bash: |
-        test -s .lastlight/pr-review/hypotheses/tests.jsonl
-
-  # `spec` is WP0's and is built HARNESS-side from the PR body and linked issues
-  # (review-spec.ts), so it reads `{{specObligations}}` from the context rather
-  # than a block on disk. It is the only untried axis and it is orthogonal to
-  # everything the investigation has tried.
-  - name: survey_spec
-    label: Survey · spec
-    skills: [pr-review, code-review]
-    prompt: prompts/survey-spec.md
-    model: "{{models.review-survey}}"
-    skip_if: "analysisEnabled != true"
-    depends_on: [survey_tests]
-    trigger_rule: all_done
-    generic_loop:
-      max_iterations: 1
-      # INSIDE the loop, which is where the schema puts it. At phase
-      # level — where all six of these were until 2026-08-22 — zod
-      # strips it, the policy silently reverts to `{retries: 0, then:
-      # fail}`, and one degenerate turn HARD-FAILS the whole review.
-      # That is the §D12 shape exactly: a failed run records no
-      # `assessedHeadShaByWorkflow` and cron-review.yaml re-dispatches
-      # it every thirty minutes, forever.
-      on_soft_failure: { retries: 1, then: complete }
-      until_bash: |
-        test -s .lastlight/pr-review/hypotheses/spec.jsonl
+    max_concurrent: { from: surveyConcurrency, default: 6 }
+    # The fan-out's own key, NOT `on_soft_failure` — that name belongs to
+    # `generic_loop`, and at phase level zod strips it silently. All six surveys
+    # carried it in the wrong place until 2026-08-22 and therefore ran with
+    # `{retries: 0, then: fail}`: one degenerate turn HARD-FAILED the whole
+    # review, which records no `assessedHeadShaByWorkflow` and hands
+    # cron-review.yaml something to re-dispatch every thirty minutes, forever.
+    # A distinct key cannot be confused with it; `fanout-policy.test.ts` pins
+    # the EFFECTIVE value read off this file rather than the key's presence.
+    on_branch_soft_failure: { retries: 1, then: complete }
+    branches:
+      - name: contract
+        prompt: prompts/survey-contract.md
+        until_bash: test -s .lastlight/pr-review/hypotheses/contract.jsonl
+      - name: enforcement
+        prompt: prompts/survey-enforcement.md
+        until_bash: test -s .lastlight/pr-review/hypotheses/enforcement.jsonl
+      - name: security
+        prompt: prompts/survey-security.md
+        # The one branch with a third skill — the others inherit the phase's two.
+        skills: [pr-review, code-review, security-review]
+        until_bash: test -s .lastlight/pr-review/hypotheses/security.jsonl
+      - name: state
+        prompt: prompts/survey-state.md
+        until_bash: test -s .lastlight/pr-review/hypotheses/state.jsonl
+      # `tests` is seeded from `coverage`, which READS a report nothing in the
+      # pipeline produces until WP4's `prepare`. Measured: 0 artifacts across 50
+      # corpus cases AND all 8 gate cases. The branch ships so the wiring is
+      # exercised and so its funnel row exists; the block it reads says NOT
+      # MEASURED in those words, and a `notMeasured` family must never be
+      # reported as "did not convert".
+      - name: tests
+        prompt: prompts/survey-tests.md
+        until_bash: test -s .lastlight/pr-review/hypotheses/tests.jsonl
+      # `spec` is WP0's and is built HARNESS-side from the PR body and linked
+      # issues (review-spec.ts), so it reads `{{specObligations}}` from the
+      # context rather than a block on disk. It is the only untried axis and it
+      # is orthogonal to everything the investigation has tried.
+      - name: spec
+        prompt: prompts/survey-spec.md
+        until_bash: test -s .lastlight/pr-review/hypotheses/spec.jsonl
 
   # ── WP4's oracle. The only phase that RUNS anything. ───────────────────────
   #
@@ -365,10 +303,10 @@ phases:
     skip_if:
       - "analysisEnabled != true"
       - "probesEnabled != true"
-    depends_on: [survey_spec]
+    depends_on: [survey]
     trigger_rule: all_done
     generic_loop:
-      # `on_soft_failure` lives INSIDE the loop — see the six surveys above for
+      # `on_soft_failure` lives INSIDE the loop — see the fan-out above for
       # what it costs when it does not.
       on_soft_failure: { retries: 1, then: complete }
       # Two rounds. v3's lesson 3 is the sizing argument and it was measured: a

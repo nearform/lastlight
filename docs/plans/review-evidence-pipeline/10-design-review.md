@@ -209,6 +209,33 @@ limiting — check that"* will degrade the arm and be misread as "the spec axis
 doesn't work". The second end must come from the changed-file list, not from
 prose.
 
+> **That risk materialised, in the one shape this paragraph did not anticipate —
+> 2026-08-22.** `buildSpecObligations` **correctly refused** to emit a one-ended
+> seed, exactly as specified. But the missing end was the **changed-file list**,
+> not the criteria: the eval built its own `PrState` instead of calling core's
+> `resolveSpecContext`, so `changedFiles` was `null` and the whole family fell
+> silent. It was then **misread as "the spec axis doesn't work"** for weeks, which
+> is the sentence above, come true by a different route.
+>
+> Worse than silent: with no obligations the branch did not no-op — it fell back
+> to generic analysis and emitted **7 hypotheses in the *contract* family's
+> shape**, counted as coverage while duplicating another axis. So the "six
+> families" figure was really five, and the only untried axis had still never been
+> tried.
+>
+> Fixed by [WP11](11-speed.md): both ends now come from core's own resolver
+> against the fake (the fake grew the GraphQL `closingIssuesReferences` route
+> rather than the harness growing a second resolver), with real linked-issue
+> bodies in the fixtures. First run with it live: **12 discharges — 6 QUOTE,
+> 1 PARTIAL, 1 ABSENT, 3 N/A.** The ABSENT is a criterion a human wrote on the
+> issue that the PR did not implement — a class of finding that was structurally
+> unreachable before.
+>
+> **The general lesson**, which is the third instance of it in this plan: a
+> refusal to emit a bad seed is correct, and it is *not* a signal. Something has
+> to say *why* it refused, loudly, or a correct refusal is indistinguishable from
+> an axis that has nothing to say.
+
 ### D8 — Cost and latency are measured, not budgeted in advance
 
 No ceiling is set. The pipeline is built, run, and the numbers read from

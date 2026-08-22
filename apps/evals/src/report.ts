@@ -56,6 +56,16 @@ export interface RunMeta {
   models: string[];
   /** Trials per case (`--runs N`). */
   runs: number;
+  /**
+   * Cases of one arm run at once (`--concurrency N`; 1 = serial, and absent on
+   * runs measured before the flag existed).
+   *
+   * Stamped because it changes how the run's numbers may be READ, not what they
+   * are: each case's `durationMs` stays honest, but the arm's wall clock is no
+   * longer the sum of them, so a serial run and a concurrent one are not
+   * comparable on elapsed time. Per-case and per-phase timings still are.
+   */
+  concurrency?: number;
   /** Short git SHA of the code/workflows under test, when in a repo. */
   gitSha?: string;
   /** Which `lastlight-core` produced this run — a working tree or the published

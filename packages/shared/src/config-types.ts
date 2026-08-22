@@ -237,10 +237,19 @@ export interface ReviewAnalysisConfig {
   /**
    * How many `spec` obligations one PR may carry.
    *
-   * A **budget**, not a target: the extractor ranks and truncates, and records
-   * in the rendered block how many it dropped — a silently truncated list is
-   * the failure locked decision 6 exists to prevent. Seven-ish per family is
-   * the shape of the 40-per-PR budget in §D8.
+   * A **safety bound**, not a budget — it should never bind on a real PR. The
+   * extractor still ranks, truncates, and records in the rendered block how
+   * many it dropped (a silently truncated list is the failure locked decision 6
+   * exists to prevent); this number exists only to stop a pathological PR
+   * blowing the prompt.
+   *
+   * It shipped at 6, which was inert while the spec axis produced nothing. The
+   * moment the axis started working it bound on FIVE of the six linked cases in
+   * the gate set, discarding acceptance criteria a human wrote on the issue —
+   * the most direct statement of intent this pipeline ever gets. Capping
+   * GENERATION also inverts locked decision 2: we over-generate deliberately and
+   * let the probe oracle and WP6b's attention boundary narrow. Truncating
+   * obligations truncates DISCOVERY, which is the measured ceiling.
    */
   maxSpecObligations: number;
   /**
@@ -267,6 +276,25 @@ export interface ReviewAnalysisConfig {
    * order and the run says so in its artifact.
    */
   surveyPasses: number;
+  /**
+   * How many survey families run CONCURRENTLY (WP11c).
+   *
+   * A CEILING, not a guarantee: the run clamps it to what the active sandbox
+   * backend can actually hold. `none` and `docker` take the declared value;
+   * `gondolin` boots a QEMU micro-VM per agent session inside the harness
+   * process and pins to 1, as do `smol` and `kubernetes` until measured. So on
+   * a stock deployment (gondolin) this key changes nothing at all today.
+   *
+   * Six by default because six is what the fan-out exists for. The six families
+   * write six disjoint append-only files and never read each other's, so there
+   * was never an ordering constraint between them — only a scheduler that ran
+   * one DAG node at a time. Chained, they were 851s of a 29-minute review (49%
+   * of the wall clock); concurrent, they are the slowest single family.
+   *
+   * Lower it to bound provider rate-limit pressure or memory, not to bound
+   * spend: the six passes cost the same in tokens either way.
+   */
+  surveyConcurrency: number;
   /**
    * WP4 — the `prepare` + `falsify` pair: install dependencies so a probe can be
    * **run**, then write probes and run them.
@@ -472,9 +500,13 @@ export function defaultReviewConfig(): ReviewConfig {
     ],
     analysis: {
       enabled: false,
-      maxSpecObligations: 6,
+      // A safety bound, not a budget — see config/default.yaml for why this is
+      // 40 rather than the 6 it shipped with. It must not bind on a real PR:
+      // capping generation truncates discovery, which is the measured ceiling.
+      maxSpecObligations: 40,
       maxObligations: 40,
       surveyPasses: 6,
+      surveyConcurrency: 6,
       probes: false,
       probeLifecycleScripts: false,
       probeTypecheck: false,

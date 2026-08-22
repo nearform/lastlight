@@ -72,6 +72,20 @@ export interface PullSeed {
    * `github_get_pull_request_diff` returns.
    */
   files?: PullFile[];
+  /**
+   * The issues this PR closes, with their bodies — the FIRST end of every `spec`
+   * obligation (`docs/plans/review-evidence-pipeline/` §D7).
+   *
+   * Content only. The LINKAGE is derived by the fake from the body's closing
+   * keywords, exactly as GitHub's `closingIssuesReferences` does, so a case
+   * states each fact once: `Closes #1586` in the body, issue 1586's text here.
+   * Seeding an issue nothing links to is inert rather than wrong.
+   *
+   * These are real issues fetched with `gh` when the case is authored (the same
+   * source `add-case` uses) — never written by hand, because the spec axis is
+   * graded on whether the agent discharged what was actually asked.
+   */
+  linked_issues?: IssueSeed[];
   /** Prior PR discussion the skill reads (advance, don't restart). */
   reviews?: ReviewSeed[];
   review_comments?: ReviewCommentSeed[];
@@ -279,9 +293,32 @@ export interface PhaseMetric {
    * assigned (the payoff signal that surfaces the per-phase model map). */
   model?: string;
   inputTokens?: number;
+  /** Cached prompt tokens (cache read + creation), split out for the same reason
+   * the case-level roll-up splits them: Anthropic bills most of a review's prompt
+   * as cached, so folding it into `inputTokens` hides where the spend went. */
+  cachedTokens?: number;
   outputTokens?: number;
   costUsd?: number;
+  /**
+   * Wall clock for this phase — `onPhaseEnd` minus `onPhaseStart`, so it includes
+   * the phase's `until_bash` gate and any in-phase retry, and loop iterations
+   * appear as their own labelled entries (`adjudicate_iter_1`).
+   *
+   * **Absent means not measured, not zero.** A phase the scheduler skipped
+   * (`skip_if`, an unsatisfied trigger rule) never starts, so it has no window —
+   * and reporting `0` there would read as "instant" rather than "did not run".
+   */
   durationMs?: number;
+  /**
+   * Agent + gate time this phase's own transcript reports (summed `duration_ms`
+   * over its `result` envelopes). Narrower than {@link durationMs}, which also
+   * carries workspace provisioning and skill staging.
+   *
+   * Recorded separately because it is derivable from artifacts a run already
+   * wrote, so `scripts/rescore.ts` can back-fill it onto runs measured before
+   * per-phase timing existed — with no re-run and no model spend.
+   */
+  agentMs?: number;
 }
 
 /** One workflow phase's archived agent session, for the dashboard log viewer. */

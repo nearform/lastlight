@@ -27,7 +27,10 @@ heldout  1680-r1  1680-r2  1667
 
 **Never diagnose on the held-out ids.**
 
-Baseline (`2026-08-20_074355`, `claude-sonnet-4-6`, prod-faithful overlay, $5.65):
+Baseline (`2026-08-20_074355`, `claude-sonnet-4-6`, prod-faithful overlay, $5.65)
+— **history, not a comparator.** It is retired as of 2026-08-22 (see
+[HANDOFF.md](HANDOFF.md) → "Comparators"); the numbers below stand as the record
+of what the shipped reviewer did, which is what this file is for:
 
 | | P | R | F1 |
 |---|---|---|---|

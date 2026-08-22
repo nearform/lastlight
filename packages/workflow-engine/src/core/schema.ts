@@ -123,6 +123,56 @@ const GenericLoopSchema = z
     message: "generic_loop requires at least one of: until, until_bash",
   });
 
+// ── Fan-out branches (`type: fanout`) ─────────────────────────────────
+
+/**
+ * One branch of a `type: fanout` phase — a single agent session run
+ * CONCURRENTLY with its siblings inside the phase's one provisioned workspace.
+ *
+ * `name` is deliberately restricted to `[A-Za-z0-9-]` (no underscores). Every
+ * branch gets its own `executions` row keyed `<phase>_branch_<name>`, plus
+ * `_retry` / `_check` variants, and {@link PhaseRef.parse} has to split those
+ * back apart against a BASE phase name that may itself contain underscores
+ * (`survey_contract`). Forbidding `_` in the branch half is what makes the split
+ * unambiguous rather than heuristic.
+ */
+const FanoutBranchSchema = z
+  .object({
+    /** Branch identity — the ledger key, the skill-bundle key, and the label. */
+    name: z
+      .string()
+      .regex(
+        /^[A-Za-z0-9][A-Za-z0-9-]*$/,
+        "a fanout branch name must be alphanumeric with hyphens (no underscores — see PhaseRef)",
+      )
+      .refine((n) => !/-(retry|check)$/.test(n), {
+        message: "a fanout branch name may not end in `-retry` or `-check` (reserved ledger suffixes)",
+      }),
+    /** Prompt template for this branch. Falls back to the phase's own `prompt`. */
+    prompt: z.string().optional(),
+    /** Skill override for this branch. Falls back to the phase's `skill`/`skills`. */
+    skill: z.string().optional(),
+    skills: z.array(z.string()).min(1).optional(),
+    /** Model / reasoning-effort override. Falls back to the phase's. */
+    model: z.string().optional(),
+    variant: z.string().optional(),
+    /**
+     * Post-branch condition, run in the SAME workspace after every branch has
+     * joined. Observational, exactly like a `generic_loop.until_bash` on a loop
+     * with `max_iterations: 1`: it records a `<phase>_branch_<name>_check`
+     * ledger row with `condition_met` / `condition_not_met` and can never fail
+     * the phase. Literal shell only — `{{` is rejected, same as everywhere else.
+     */
+    until_bash: z.string().optional(),
+    /** Per-branch timeout for `until_bash` (seconds). */
+    timeout_seconds: TemplatedNumberSchema.optional(),
+  })
+  .refine((b) => !(b.skill && b.skills), {
+    message: "a fanout branch cannot specify both `skill` and `skills`",
+  });
+
+export type FanoutBranch = z.infer<typeof FanoutBranchSchema>;
+
 // ── Phase definition ──────────────────────────────────────────────────
 
 const PhaseDefinitionSchema = z
@@ -150,14 +200,28 @@ const PhaseDefinitionSchema = z
      *   `GitHubClient`. Runs on the harness (no sandbox); a genuine failure
      *   fails the phase, a legitimate `skip` succeeds without posting. See
      *   `PhaseExecutor.runPostReview`.
+     * - `fanout`: run N agent sessions CONCURRENTLY inside ONE provisioned
+     *   workspace. Requires `branches:`. See {@link FanoutBranchSchema} and the
+     *   note below.
      *
      * `bash`/`script` phases run in the SAME sandbox/workspace as agent
      * phases (the host workDir persists across phases keyed by taskId), honour
      * `unrestricted_egress`/`sandbox_image`/`timeout_seconds`, and expose
      * their stdout downstream exactly like an agent phase (`output_var` →
      * `{{phaseOutputs.<name>.output}}`). A non-zero exit fails the phase.
+     *
+     * **Why `fanout` is one node rather than N parallel phases.** Real DAG
+     * concurrency is parked (`docs/plans/review-evidence-pipeline/05-parallel-phases.md`)
+     * behind four hard blockers and seven design changes, and that doc records
+     * why: *"every hard blocker exists because each phase provisions its own
+     * sandbox against a shared workspace"*. A fan-out INSIDE one phase has none
+     * of them — one node, one provision, one `current_phase`, one artifact
+     * harvest, one dispose. What it gives up is a DAG node per branch; what it
+     * keeps (because each branch still goes through the dedup ledger under its
+     * own `<phase>_branch_<name>` key) is resume, dedup, per-branch cost
+     * attribution and the dashboard's longest-prefix grouping.
      */
-    type: z.enum(["context", "agent", "bash", "script", "post-review"]).default("agent"),
+    type: z.enum(["context", "agent", "bash", "script", "post-review", "fanout"]).default("agent"),
     /**
      * Shell command for `type: bash`. Rendered through the template engine
      * first (so it may reference `{{phaseOutputs.*}}`, `{{branch}}`, etc.),
@@ -365,6 +429,48 @@ const PhaseDefinitionSchema = z
     loop: PhaseLoopSchema.optional(),
     /** Generic loop configuration — expression/bash-based completion conditions */
     generic_loop: GenericLoopSchema.optional(),
+    /**
+     * The branches of a `type: fanout` phase. Required for that type, rejected
+     * on every other. Order is declaration order and is what the results are
+     * reported in; it does NOT constrain execution order.
+     */
+    branches: z.array(FanoutBranchSchema).min(1).optional(),
+    /**
+     * How many fan-out branches may be in flight at once. Accepts the
+     * `{ from: <ctx path>, default: N }` form so an operator dials it from
+     * config without forking the workflow.
+     *
+     * **This is a ceiling the run then clamps further, per backend.** The host
+     * has the last word: `gondolin` boots a QEMU micro-VM per agent session in
+     * the harness process (WP5's D7 — the nearform host has no swap and has
+     * wedged under memory pressure), and `smol`/`kubernetes` are unverified, so
+     * all three clamp to 1 and run the branches sequentially. `none` and
+     * `docker` take the declared value. A clamp to 1 is byte-identical to
+     * running the branches as a chain, which is what makes this safe to ship
+     * before the backends are measured.
+     */
+    max_concurrent: TemplatedNumberSchema.optional(),
+    /**
+     * What a SOFT branch outcome costs — a clean exit that produced no usable
+     * output (`stopReason` `unknown` / `error_truncated`), as opposed to a real
+     * crash. Mirrors `generic_loop.on_soft_failure`, and exists as its own
+     * phase-level key rather than reusing that name for a reason worth stating:
+     * `on_soft_failure` at PHASE level is stripped by zod (it belongs to
+     * `generic_loop`), which is exactly how all six survey phases silently ran
+     * with `{retries: 0, then: fail}` until 2026-08-22. A distinct key cannot be
+     * confused with it, and `fanout-policy.test.ts` pins the EFFECTIVE resolved
+     * value off the shipped YAML rather than the key's presence.
+     *
+     * Absent ⇒ `{ retries: 0, then: "complete" }`. Note the default `then`
+     * differs from `generic_loop`'s: a fan-out exists to gather independent
+     * evidence, so one degenerate branch must not discard the other five.
+     */
+    on_branch_soft_failure: z
+      .object({
+        retries: z.number().int().min(0).default(0),
+        then: z.enum(["fail", "complete"]).default("complete"),
+      })
+      .optional(),
     /** Rules applied to agent output */
     on_output: PhaseOnOutputSchema.optional(),
     /** Actions taken on successful completion */
@@ -400,7 +506,7 @@ const PhaseDefinitionSchema = z
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: "`command:` is only valid on type `bash`" });
       }
     } else {
-      // context / agent
+      // context / agent / post-review / fanout
       if (p.command !== undefined) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: "`command:` is only valid on type `bash`" });
       }
@@ -409,6 +515,48 @@ const PhaseDefinitionSchema = z
       }
       if (p.runtime !== undefined) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: "`runtime:` is only valid on type `script`" });
+      }
+    }
+
+    // ── Fan-out ──────────────────────────────────────────────────────────────
+    if (type === "fanout") {
+      if (!p.branches?.length) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "phase type `fanout` requires a non-empty `branches:`" });
+      }
+      // A fan-out cannot pause. `pauseForApproval` persists the run as `paused`
+      // and RETURNS — under N in-flight sessions there is nothing to return to,
+      // and a sibling finishing afterwards would flip the run to `succeeded`
+      // over the top of `paused` and orphan the approval row. That is WP5's B2,
+      // the one item its own doc calls "silent corruption — the worst in this
+      // list", and refusing the combination is how a fan-out never meets it.
+      for (const key of ["approval_gate", "approval_artifact", "approval_gate_message"] as const) {
+        if (p[key] !== undefined) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: `\`${key}:\` is not supported on type \`fanout\` (a fan-out cannot pause mid-flight)` });
+        }
+      }
+      // The branches ARE the iteration shape; a second one on top of them would
+      // multiply concurrent sessions by the loop count with nothing bounding it.
+      if (p.loop !== undefined || p.generic_loop !== undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "`loop:`/`generic_loop:` are not supported on type `fanout` — use `branches[].until_bash`" });
+      }
+      const names = p.branches?.map((b) => b.name) ?? [];
+      if (new Set(names).size !== names.length) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "fanout branch names must be unique (they are ledger keys)" });
+      }
+      // Every branch must be able to build a prompt — `buildPhasePrompt` throws
+      // otherwise, and it would throw INSIDE the fan-out where the failure reads
+      // as a branch crash rather than as a malformed workflow.
+      for (const b of p.branches ?? []) {
+        const hasSkills = !!(b.skill || b.skills?.length || p.skill || p.skills?.length);
+        if (!b.prompt && !p.prompt && !hasSkills) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: `fanout branch \`${b.name}\` has neither \`prompt:\` nor \`skills:\` (and the phase supplies neither)` });
+        }
+      }
+    } else {
+      for (const key of ["branches", "max_concurrent", "on_branch_soft_failure"] as const) {
+        if (p[key] !== undefined) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: `\`${key}:\` is only valid on type \`fanout\`` });
+        }
       }
     }
   });

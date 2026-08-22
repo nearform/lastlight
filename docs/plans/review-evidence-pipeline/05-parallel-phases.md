@@ -6,28 +6,46 @@ individually-retryable phase.
 
 **Depends on:** nothing. **Nothing in this plan depends on it.**
 
-> **PARKED, 2026-08-21 ([10-design-review.md](10-design-review.md) §D5.)** The
-> review pipeline ships fully sequentially as **six declared phases**
-> ([WP3](03-seed-and-survey.md) — not the `generic_loop` this file used to
-> assume, which did not work). WP5 buys **latency and observability, not
-> recall**, and no gate in this plan reads either.
+> **STILL PARKED — and its carve-out was TAKEN, 2026-08-22.** Read this box
+> before anything below it: the survey fan-out this file was written to enable
+> **already ships**, by the cheaper route this box named, and none of the
+> blockers in the tables below were solved to get it.
 >
-> The decisive point: **the workflow YAML is identical sequential or parallel.**
-> Enabling concurrency later is `maxPhasesPerRun` plus a scheduler change, with
-> no prompt, obligation or measurement rework. So this is purely an ordering
-> question, and the ordering follows the gates. [WP4](04-probe-oracle.md) AC6
-> produces the latency number that would justify unparking it.
+> **[WP11](11-speed.md) built `type: fanout`**: one DAG node, one `withSandbox`,
+> N concurrent agent sessions, one dispose — registered through the existing
+> `PhaseTypeHandler` seam. `scheduler.ts`'s `ready[0]` line is **untouched**.
+> The six surveys went from 851s chained to a 234–242s span, measured.
 >
-> **Two carve-outs.** **S2 and S3 land now, independently** — they are
-> correctness bugs under the run-level concurrency already shipping. And record
-> the cheaper alternative: **in-agent fan-out**. Every hard blocker below — B1,
-> D1, D2, D7 — exists *because each phase provisions its own sandbox against a
-> shared workspace*. A fan-out inside one agent has none of them. `agentic-pi`
-> has no subagent primitive and that is deliberate (`README.md` §1: one-shot,
-> one turn, *"the orchestrator spawns a new process"*), so it means a new
-> extension — but plausibly a smaller project than 5a+5b+D1+D2+D7, and far safer
-> on the nearform host's memory profile. It costs per-family ledger rows,
-> retryability and cost attribution.
+> That is exactly the alternative recorded here: *"every hard blocker below — B1,
+> D1, D2, D7 — exists **because each phase provisions its own sandbox against a
+> shared workspace**. A fan-out inside one agent has none of them."* It proved
+> correct. **B1–B4, D1–D3, D5 and D7 are inapplicable by construction** to a
+> fan-out — there is only ever one node, one provision, one `current_phase`, one
+> harvest, one dispose.
+>
+> Two things this box predicted wrong, both cheaper than feared:
+> - **It does not need an `agentic-pi` extension.** agentic-pi still has no
+>   subagent primitive and still does not need one — the concurrency lives in the
+>   orchestrator, which calls `runAgentIn` N times against one provisioned
+>   sandbox.
+> - **It does not cost per-family ledger rows, retryability or cost
+>   attribution.** Each branch writes its own `executions` row under
+>   `<phase>_branch_<name>` through the existing ledger, so all three come free.
+>
+> **What WP5 would still buy** is per-family *DAG nodes* — individual retry from
+> the dashboard, and true concurrency across phases that are not siblings of one
+> fan-out. No gate in this plan reads either. **It stays parked.**
+>
+> **S2 and S3 are still live and still land independently** — they are
+> correctness bugs under the run-level concurrency already shipping, and the
+> fan-out did not touch them. S3 in particular was verified still outstanding on
+> 2026-08-22: `serviceContainerName(taskId, name)` has no phase component, so one
+> phase's `dispose()` kills another's service containers.
+>
+> **S7 is a documentation bug that is now wrong in two ways**:
+> `apps/server/spec/06-workflow-engine.md` still claims *"concurrent phases run
+> via `Promise.allSettled()`"* — code that does not exist — and says nothing about
+> `type: fanout`, which does.
 
 ## This is a restoration, not an invention
 

@@ -44,6 +44,20 @@ dispatch skips on `already-reviewed`. Pinned by
 *"posts the review even when the ADJUDICATOR hard-fails"* in
 `golden-pr-review.test.ts`.
 
+> **The gate was passing FALSELY until 2026-08-22, and every conservation result
+> from before then is void.** Hypothesis ids collided across families —
+> `contract.jsonl` and `security.jsonl` both minted `H-001..` — so a
+> `findings.json` covering five *strings* "accounted for" eight hypotheses and the
+> gate reported **0 uncovered, exit 0** while three security hypotheses were never
+> adjudicated at all. Worse, only **8 of 30** hypotheses carried an `id` at all
+> (27% compliance), leaving 22 structurally invisible. Both closed by
+> [WP11](11-speed.md): identity is now `<family>-NNN`, assigned **deterministically
+> at ingest** from filename + position rather than requested of the model, with
+> model-minted ids kept as unambiguous aliases. Replaying the same artifacts:
+> **5/5 accounted, exit 0 → 2/30, exit 3.** WP11 also added
+> `lastlight-facts findings --ledger`, the checklist the adjudicator runs for
+> itself — which is what lets it satisfy a 30-id gate in one attempt.
+
 **2. The conservation gate has a deterministic floor, because the gate alone
 could not guarantee anything.** Reaching `max_iterations` without the
 `until_bash` condition is **not** a phase failure in this engine

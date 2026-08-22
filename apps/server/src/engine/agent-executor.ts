@@ -23,8 +23,10 @@ import {
 import {
   runSandboxedAgent,
   runSandboxedCommand,
+  withSandboxSession,
   type CommandSpec,
   type SandboxRunContext,
+  type SandboxSession,
 } from "./executors/orchestrator.js";
 import { logger } from "../logging/logger.js";
 
@@ -431,6 +433,58 @@ export async function executeAgent(
     sandboxFactory: opts?.sandboxFactory,
   };
   return withSpan("lastlight.agent.execute", spanAttrs, (span) => runSandboxedAgent(prompt, ctx, span));
+}
+
+/**
+ * Open ONE sandbox and run many turns in it — the multi-turn peer of
+ * {@link executeAgent}, and the only entry point a `type: fanout` phase uses.
+ *
+ * Everything {@link executeAgent} does before the sandbox exists happens here
+ * exactly ONCE for the whole fan-out: `prepareRun` (which mints the run's scoped
+ * GitHub token — six branches must not mean six mints), the workspace
+ * provision, the `AGENTS.md` write and the build-asset stage/harvest.
+ *
+ * The per-branch AGENT spans are opened by the CALLER around each
+ * `session.runAgent`, not here, so a fan-out renders as one phase span with N
+ * agent children rather than N flat siblings.
+ *
+ * Note `config` here is the PHASE-level config: it decides the backend, the
+ * task, the egress policy and — via `config.model` — which OAuth provider (if
+ * any) is resolved for the whole session. A branch may still override the model
+ * per turn; on an OAuth-backed provider the phase-level model is what determined
+ * the credential, which is why the fan-out keeps one model per phase in practice.
+ */
+export async function withAgentSession<T>(
+  config: ExecutorConfig,
+  opts: {
+    taskId?: string;
+    githubAccess?: GitSandboxAccess;
+    sandboxFactory?: SandboxFactory;
+  },
+  fn: (session: SandboxSession) => Promise<T>,
+): Promise<T> {
+  const { taskId, stateDir, backend, ghEnv, prePopulate, mintError, mintErrorKind } =
+    await prepareRun(config, opts);
+  const access = opts.githubAccess;
+
+  // Fail fast, exactly as executeAgent does — except here the cost of not doing
+  // so is N toolless sessions rather than one.
+  if (mintError) {
+    const failure = mintFailureResult(access, mintError, mintErrorKind);
+    throw new Error(failure.error);
+  }
+
+  const ctx: SandboxRunContext = {
+    config,
+    taskId,
+    stateDir,
+    backend,
+    env: ghEnv,
+    prePopulate,
+    access,
+    sandboxFactory: opts.sandboxFactory,
+  };
+  return withSandboxSession(ctx, fn);
 }
 
 // ── Deterministic command path (type: bash / type: script) ───────────

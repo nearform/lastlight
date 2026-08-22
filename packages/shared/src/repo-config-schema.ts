@@ -1552,6 +1552,7 @@ function shapeReviewAnalysis(raw: unknown, d: ReviewAnalysisConfig): ReviewAnaly
     maxSpecObligations: num(node.maxSpecObligations, d.maxSpecObligations),
     maxObligations: num(node.maxObligations, d.maxObligations),
     surveyPasses: num(node.surveyPasses, d.surveyPasses),
+    surveyConcurrency: num(node.surveyConcurrency, d.surveyConcurrency),
     probes: node.probes === true,
     probeLifecycleScripts: node.probeLifecycleScripts === true,
     probeTypecheck: node.probeTypecheck === true,

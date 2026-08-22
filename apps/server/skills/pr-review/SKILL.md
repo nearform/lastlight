@@ -1,7 +1,7 @@
 ---
 name: pr-review
 description: Review a GitHub pull request and post one formal review — advance the existing discussion and give precision-first, high-signal feedback. Judgement on the diff, not a build gate — CI validates that it builds, and a targeted probe is allowed as evidence. Use when asked to review a PR or on a cron PR scan.
-version: 7.3.0
+version: 7.4.0
 tags: [github, review, code-quality]
 chat: true
 ---
@@ -49,8 +49,9 @@ the precision bar and what-to-check rubric.
 The harness pre-clones the PR's head ref and drops you **inside the checkout** —
 your cwd **is** the repo (`ls -la` shows `.git/` directly; `AGENTS.md` is the
 sibling one level up at `../`). Use `git`/`read`/`grep` from here. To refresh:
-`git fetch origin <branch> --depth 50 && git reset --hard FETCH_HEAD`. If the
-checkout is somehow missing, `git clone https://github.com/{{owner}}/{{repo}}.git .`.
+`git fetch origin <branch> && git reset --hard FETCH_HEAD` — **no `--depth`**,
+for the reason in §3. If the checkout is somehow missing,
+`git clone https://github.com/{{owner}}/{{repo}}.git .`.
 
 **Read code from this local checkout, never the API.** Use `git`/`read`/`grep`
 on disk for the diff and file contents. Do **not** call
@@ -126,10 +127,36 @@ contains a problem you raised, the correct `event` is still
 
 From inside `<repo>/`:
 ```
-git fetch origin <baseRef> --depth 50      # base isn't in the head-only clone
+# The harness already materialized origin/<baseRef>, deepening base AND head
+# until they share a merge base. Verify that — do NOT re-fetch with --depth.
+# Repair only if it's actually missing: deepen BOTH sides, because unshallowing
+# the base alone leaves HEAD with no reachable ancestor and merge-base still fails.
+git merge-base origin/<baseRef> HEAD >/dev/null 2>&1 || {
+  git fetch origin --unshallow || true
+  git fetch origin "+refs/heads/<baseRef>:refs/remotes/origin/<baseRef>" --unshallow || true
+}
+
 git diff --stat origin/<baseRef>...HEAD    # churn
 git diff origin/<baseRef>...HEAD           # the patch
 ```
+
+**Never `git fetch --depth N` in this checkout.** A depth-limited fetch writes
+`.git/shallow` even into an already-complete clone, re-cutting history N commits
+back from the base tip — which severs the merge base on any PR that forked
+further back than that, and undoes the deepening the harness already paid for.
+
+**Three dots, always.** `origin/<baseRef>...HEAD` is the merge-base diff and
+matches GitHub's own PR diff. Two-dot (`git diff origin/<baseRef> HEAD`)
+additionally contains every commit the base branch picked up since the PR
+forked, and the author wrote none of it — measured across 50 real PRs, 9
+diverge, one of them 6125 files against 3.
+
+**If `merge-base` still fails after the repair**, the diff range could not be
+established and you have nothing to review. Do not quietly fall back to two-dot
+and review that instead. Write `event: "COMMENT"` — never `APPROVE` — with
+`findings: []` and a `summary` saying the base and head share no reachable
+history, then stop. Reviewing the wrong range and reporting success is the exact
+failure this instruction exists to prevent.
 
 ### 4. Read what CI said
 

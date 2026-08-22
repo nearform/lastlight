@@ -317,7 +317,17 @@ n = 135 for nothing and n = 8 for $18.
 
 ## The survey phase
 
-### Shape — six declared phases
+### Shape — six branches of one `fanout` phase
+
+> **Superseded 2026-08-22 by [WP11](11-speed.md).** The six phases described
+> below **shipped exactly as specified** and then became **six branches of a
+> single `type: fanout` node**, running concurrently in one sandbox. Everything
+> this section argues for is preserved — literal gates, all six families,
+> per-family ledger rows (now `survey_branch_<family>`), per-branch retryability,
+> context isolation, and the prompt-cache prefix order. What changed is that the
+> six run at once: **851s chained → a 234–242s span**, measured. The YAML is in
+> [11-speed.md](11-speed.md); the reasoning below is why there are six of them at
+> all, and it still stands.
 
 > **Rewritten 2026-08-21 ([10-design-review.md](10-design-review.md) §D4).** The
 > `generic_loop` form this section used to specify **did not work**. `until_bash`
@@ -540,8 +550,13 @@ models map.
    conversion reproduces mechanically. Micro-recall is **reported** beside the
    shipped baseline's 0.040 with its paired McNemar p, and the `1641` empty-gold
    canary holds at 1.00, but neither is gated on: one extra finding is p = 0.50.
-   This is the plan's first model spend. The comparator is `2026-08-20_074355`,
-   not candidate v3 — see [08-evals.md](08-evals.md) → "the ablation ladder".
+   This is the plan's first model spend. ~~The comparator is
+   `2026-08-20_074355`~~ — **that comparator is dead, 2026-08-22.** Four
+   independent changes have since moved what a run measures (a conservation gate
+   that passed falsely, an off-axis spec family, an inert attention boundary, and
+   a skill instruction that severed its own merge base). **The next arm is a
+   re-baseline, not a delta** — see [RESTART.md](RESTART.md) §4 and
+   [HANDOFF.md](HANDOFF.md) → "Comparators".
 
    > **Corrected 2026-08-21 ([10-design-review.md](10-design-review.md) §D6).**
    > As originally written — *"micro-recall exceeds the shipped baseline's

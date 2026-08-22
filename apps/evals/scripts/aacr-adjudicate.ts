@@ -138,6 +138,7 @@ import { dirname, join, resolve } from "node:path";
 
 import { defaultJudgeModel, judge, parseJudgeJson } from "../src/judge.js";
 import { gitShortSha, makeRunId, resultsRoot } from "../src/paths.js";
+import { mapPool } from "../src/pool.js";
 
 const DATASET_URL = "https://huggingface.co/datasets/Alibaba-Aone/aacr-bench/resolve/main/dataset.json";
 
@@ -754,25 +755,6 @@ function renderMarkdown(r: Report): string {
 }
 
 // ── Execution ───────────────────────────────────────────────────────────────
-
-/**
- * Bounded-concurrency map that preserves input order. Errors never escape here —
- * `decide` returns them as an `error` field so one bad row cannot take the run
- * down (and so the row is UNGRADED rather than silently decided).
- */
-async function mapPool<T, R>(items: T[], limit: number, fn: (item: T, i: number) => Promise<R>): Promise<R[]> {
-  const out = new Array<R>(items.length);
-  let next = 0;
-  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
-    for (;;) {
-      const i = next++;
-      if (i >= items.length) return;
-      out[i] = await fn(items[i], i);
-    }
-  });
-  await Promise.all(workers);
-  return out;
-}
 
 /**
  * Rough USD per million tokens, for sizing a spend decision only. Prices as of

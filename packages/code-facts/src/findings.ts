@@ -47,28 +47,17 @@
  * match; v2's full quote validator was overkill and is what made it expensive.
  * Quote *resolution* stays checked upstream; quote *semantics* stays unchecked.
  */
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
+import {
+  readHypothesisSet,
+  resolveHypothesis,
+  type HypothesisRecord,
+  type HypothesisRow,
+} from "./hypotheses.js";
 import { noopLogger, type LoggerPort } from "./log.js";
-import { readJsonl } from "./probes.js";
 import { FindingsDocumentSchema } from "./schema.js";
-
-/**
- * A hypothesis line, as far as THIS gate cares — the fields it has to carry
- * forward when the floor records one. Everything else is ignored.
- */
-interface HypothesisRow {
-  id?: unknown;
-  family?: unknown;
-  obligation?: unknown;
-  claim?: unknown;
-  existingCode?: unknown;
-  severity?: unknown;
-  confidence?: unknown;
-  path?: unknown;
-  bothEnds?: unknown;
-}
 
 export type FindingsGapKind =
   /** In no `findings[].hypotheses` and no `dropped[]`. Silent omission. */
@@ -78,7 +67,14 @@ export type FindingsGapKind =
   /** Deleted with no transcript, or naming one that is not on disk. */
   | "unbacked-drop"
   /** An id no `hypotheses/*.jsonl` ever declared. */
-  | "fabricated";
+  | "fabricated"
+  /**
+   * A citation naming an id that TWO OR MORE hypotheses declared, so it credits
+   * none of them. This is the collision that used to pass the gate silently —
+   * `contract.jsonl` and `security.jsonl` both minting `H-001` — surfaced by
+   * name instead of resolved by sort order.
+   */
+  | "ambiguous";
 
 export interface FindingsGap {
   kind: FindingsGapKind;
@@ -129,8 +125,8 @@ export interface CheckFindingsOptions {
    * What a `refutedBy` path is relative to when it is not `dir`-relative.
    * Defaults to the cwd, which is the repo root in the phase this runs in — the
    * `falsify` prompt asks for a repo-relative transcript path
-   * (`.lastlight/pr-review/probes/H-001.txt`) and an adjudicator that copies a
-   * `dir`-relative one (`probes/H-001.txt`) is being helpful rather than wrong,
+   * (`.lastlight/pr-review/probes/contract-001.txt`) and an adjudicator that copies a
+   * `dir`-relative one (`probes/contract-001.txt`) is being helpful rather than wrong,
    * so both resolve. Same forgiveness as the `probes` gate, for the same reason.
    */
   repo?: string;
@@ -144,6 +140,15 @@ export interface CheckFindingsOptions {
 
 /** How many offending ids the summary names before it starts counting. */
 const MAX_LISTED = 20;
+
+/**
+ * Line width for the ledger's outstanding list. Wrapping, never truncation.
+ *
+ * By WIDTH rather than a fixed id count, because ids are `<family>-NNN` and a
+ * family name is as long as it is — `enforcement-001` is three times `H-001`,
+ * and twelve per line silently ran to 157 characters.
+ */
+const IDS_LINE_WIDTH = 100;
 
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
@@ -181,14 +186,17 @@ export function titleFrom(claim: string): string {
  */
 function internalFinding(
   id: string,
-  row: HypothesisRow | undefined,
+  record: HypothesisRecord | undefined,
   fallbackBody: string,
 ): Record<string, unknown> {
+  const row: HypothesisRow | undefined = record?.row;
   const claim = row ? asString(row.claim) : null;
   const path = row ? pathOf(row) : null;
   const existingCode = row ? asString(row.existingCode) : null;
   const severity = (row ? asString(row.severity) : null) ?? "Important";
-  const family = row ? asString(row.family) : null;
+  // The FILENAME's family, not the row's self-report — the survey branch owns
+  // its file, and a free-form row carries no `family` field at all.
+  const family = record?.family ?? (row ? asString(row.family) : null);
   const obligation = row ? asString(row.obligation) : null;
   const confidence = row && typeof row.confidence === "number" ? row.confidence : null;
 
@@ -206,34 +214,6 @@ function internalFinding(
   return finding;
 }
 
-/** Every hypothesis id the surveys wrote, in the order the files declare them. */
-function readHypotheses(dir: string): {
-  rows: Map<string, HypothesisRow>;
-  families: string[];
-  malformed: number;
-} {
-  const hypothesesDir = join(dir, "hypotheses");
-  const families = existsSync(hypothesesDir)
-    ? readdirSync(hypothesesDir)
-        .filter((f) => f.endsWith(".jsonl"))
-        .sort()
-    : [];
-  const rows = new Map<string, HypothesisRow>();
-  let malformed = 0;
-  for (const file of families) {
-    const parsed = readJsonl<HypothesisRow>(join(hypothesesDir, file));
-    malformed += parsed.malformed;
-    for (const row of parsed.rows) {
-      const id = asString(row.id);
-      // FIRST write wins. The file is append-only and six passes write six
-      // different files, so a repeated id is a re-statement rather than a
-      // revision — and either way the id has to be conserved exactly once.
-      if (id && !rows.has(id)) rows.set(id, row);
-    }
-  }
-  return { rows, families, malformed };
-}
-
 /** Does `refutedBy` name a file that is actually there? THE rule, mechanised. */
 function transcriptExists(ref: string | null, dir: string, repo: string): boolean {
   if (!ref) return false;
@@ -246,9 +226,9 @@ function inspect(options: CheckFindingsOptions): CheckFindingsResult & {
   document: Record<string, unknown> | null;
   /** Findings that carry no transcript, with their index in `dropped[]`. */
   unbacked: { index: number; id: string; ref: string | null }[];
-  /** Every id any finding cites, valid or not. */
+  /** Every CANONICAL id any finding cites, after resolution. */
   claimedByFinding: Set<string>;
-  rows: Map<string, HypothesisRow>;
+  rows: Map<string, HypothesisRecord>;
 } {
   const repo = options.repo ?? process.cwd();
   const findingsPath = join(options.dir, "findings.json");
@@ -256,7 +236,8 @@ function inspect(options: CheckFindingsOptions): CheckFindingsResult & {
   const gaps: FindingsGap[] = [];
   const repaired: RepairAction[] = [];
 
-  const { rows: hypotheses, families, malformed } = readHypotheses(options.dir);
+  const set = readHypothesisSet(options.dir);
+  const { byId: hypotheses, families, malformed } = set;
 
   // ── `findings.json` — read before anything, because its absence is its own
   // failure and not a conservation one. A loop that has not written one yet
@@ -310,7 +291,37 @@ function inspect(options: CheckFindingsOptions): CheckFindingsResult & {
   const byTier: Record<string, number> = {};
   const coveredBy = new Map<string, string[]>();
   const claimedByFinding = new Set<string>();
+  /** Citations that named nothing resolvable, and why. Rule 5 reports them. */
+  const unresolved = new Map<string, { kind: "ambiguous" | "unknown"; claimedBy: string[] }>();
   let ownFindings = 0;
+  let viaAlias = 0;
+
+  /**
+   * A citation → the canonical id it credits, or nothing.
+   *
+   * Every disposition goes through here, so a `findings[]` entry and a
+   * `dropped[]` entry citing the same string always agree, and an ambiguous
+   * citation credits neither claimant instead of whichever file sorted first.
+   */
+  const creditTo = (cited: string, where: string, byFinding: boolean): string | null => {
+    const resolution = resolveHypothesis(set, cited);
+    if (resolution.kind === "resolved") {
+      if (resolution.viaAlias) viaAlias += 1;
+      coveredBy.set(resolution.id, [...(coveredBy.get(resolution.id) ?? []), where]);
+      // ONLY a finding claims a hypothesis. The floor asks "does a finding
+      // already carry this?" to choose between withdrawing a bad drop and
+      // promoting it back — counting the drop itself would answer yes to its
+      // own question and silently withdraw every unbacked deletion instead of
+      // restoring it. That is the one move this gate exists to prevent.
+      if (byFinding) claimedByFinding.add(resolution.id);
+      return resolution.id;
+    }
+    unresolved.set(cited, {
+      kind: resolution.kind,
+      claimedBy: resolution.kind === "ambiguous" ? resolution.claimedBy : [],
+    });
+    return null;
+  };
 
   findings.forEach((finding, index) => {
     const tier = asString(finding.tier) ?? "(untiered)";
@@ -326,16 +337,15 @@ function inspect(options: CheckFindingsOptions): CheckFindingsResult & {
     for (const id of ids) {
       const text = asString(id);
       if (!text) continue;
-      claimedByFinding.add(text);
-      coveredBy.set(text, [...(coveredBy.get(text) ?? []), `findings[${index}]`]);
+      creditTo(text, `findings[${index}]`, true);
     }
   });
 
   // ── Rule 4. Deletion is the one move that has to show its working.
   const unbacked: { index: number; id: string; ref: string | null }[] = [];
   dropped.forEach((entry, index) => {
-    const id = asString(entry.hypothesis);
-    if (!id) {
+    const cited = asString(entry.hypothesis);
+    if (!cited) {
       gaps.push({
         kind: "unbacked-drop",
         hypothesis: `dropped[${index}]`,
@@ -343,13 +353,17 @@ function inspect(options: CheckFindingsOptions): CheckFindingsResult & {
       });
       return;
     }
-    coveredBy.set(id, [...(coveredBy.get(id) ?? []), `dropped[${index}]`]);
+    const id = creditTo(cited, `dropped[${index}]`, false);
     const ref = asString(entry.refutedBy);
     if (transcriptExists(ref, options.dir, repo)) return;
-    unbacked.push({ index, id, ref });
+    // Even an unresolvable citation is un-deleted. The floor's job is that a
+    // deletion never silently costs a claim, and a drop naming an id nothing
+    // declared is still a subject somebody meant to remove — recording it at
+    // `internal` keeps it auditable, while rule 5 reports the id as fabricated.
+    unbacked.push({ index, id: id ?? cited, ref });
     gaps.push({
       kind: "unbacked-drop",
-      hypothesis: id,
+      hypothesis: id ?? cited,
       detail: `dropped naming ${ref ?? "no refutedBy"}, which does not exist on disk — only a probe transcript may delete`,
     });
   });
@@ -378,25 +392,43 @@ function inspect(options: CheckFindingsOptions): CheckFindingsResult & {
     covered.push(id);
   }
 
-  // ── Rule 5. An id nothing declared. Distinct from `uncovered`, and it reads
-  // the opposite way: the adjudicator invented provenance rather than dropped
-  // it, so no amount of recording fixes it.
-  for (const id of [...claimedByFinding].sort()) {
-    if (hypotheses.has(id)) continue;
-    gaps.push({
-      kind: "fabricated",
-      hypothesis: id,
-      detail: "no hypotheses/*.jsonl declares this id — a finding cites provenance that does not exist",
-    });
+  // ── Rule 5. A citation that credits nothing, split by WHY — the two read in
+  // opposite directions and want different fixes.
+  //
+  // `fabricated`: the adjudicator invented provenance, and no amount of
+  // recording fixes it. `ambiguous`: the id is real but two hypotheses declared
+  // it, so crediting either would mark the other adjudicated when nobody looked
+  // at it. The second is the collision that used to pass this gate in silence.
+  for (const cited of [...unresolved.keys()].sort()) {
+    const { kind, claimedBy } = unresolved.get(cited)!;
+    gaps.push(
+      kind === "ambiguous"
+        ? {
+            kind: "ambiguous",
+            hypothesis: cited,
+            detail: `${claimedBy.length} hypotheses declared this id (${claimedBy.join(", ")}) — cite the canonical id instead, so exactly one is credited`,
+          }
+        : {
+            kind: "fabricated",
+            hypothesis: cited,
+            detail:
+              "no hypotheses/*.jsonl declares this id — a disposition cites provenance that does not exist",
+          },
+    );
   }
-  for (const entry of dropped) {
-    const id = asString(entry.hypothesis);
-    if (!id || hypotheses.has(id) || claimedByFinding.has(id)) continue;
-    gaps.push({
-      kind: "fabricated",
-      hypothesis: id,
-      detail: "no hypotheses/*.jsonl declares this id — a drop cites provenance that does not exist",
-    });
+
+  if (set.ambiguous.size > 0) {
+    notes.push(
+      `${set.ambiguous.size} declared id(s) were minted by more than one family and credit nothing — every hypothesis is still reachable by its canonical \`<family>-NNN\` id`,
+    );
+  }
+  if (set.records.length > set.declared) {
+    notes.push(
+      `${set.declared}/${set.records.length} hypotheses carried an id of their own; identity for the rest is the deterministic \`<family>-NNN\``,
+    );
+  }
+  if (viaAlias > 0) {
+    notes.push(`${viaAlias} disposition(s) cited a model-minted id that resolved unambiguously`);
   }
 
   if (ownFindings > 0) {
@@ -533,6 +565,184 @@ export function checkFindings(options: CheckFindingsOptions): CheckFindingsResul
   // repair — a duplicate, a fabricated id — is REPORTED and the gate closes.
   const second = inspect({ ...options, repair: false });
   return { ...strip(second), repaired, satisfied: true };
+}
+
+/**
+ * One hypothesis, as the adjudicator needs to see it while it works.
+ *
+ * Deliberately the fields that let a claim be DISPOSED of — where it is, how
+ * severe it was thought to be, which obligation produced it — and not the
+ * evidence, quotes or transcripts. Those stay in the `.jsonl`, because the
+ * adjudicator has to read the record to judge it and a ledger that inlined
+ * everything would be the six files again with extra steps.
+ */
+export interface LedgerEntry {
+  id: string;
+  /** The FILENAME's family — present for every hypothesis, never self-reported. */
+  family: string;
+  obligation: string | null;
+  path: string | null;
+  severity: string | null;
+  confidence: number | null;
+  /** The claim's first sentence, bounded — a label to recognise it by. */
+  title: string;
+  /** Does it already carry exactly one disposition in `findings.json`? */
+  accounted: boolean;
+}
+
+export interface FindingsLedger {
+  /** Every declared id, grouped-by-family order preserved in `families`. */
+  entries: LedgerEntry[];
+  /** The subset with no disposition yet — the todo list. */
+  uncovered: LedgerEntry[];
+  /** The other three ways the gate fails, so the ledger is not a partial view. */
+  duplicates: FindingsGap[];
+  fabricated: FindingsGap[];
+  unbackedDrops: FindingsGap[];
+  families: string[];
+  documentError: string | null;
+  /** True ⇒ writing nothing further would pass the gate. */
+  satisfied: boolean;
+}
+
+/**
+ * The CHECKLIST half of conservation — same reading, opposite audience.
+ *
+ * `checkFindings` answers the harness's question ("may the loop stop?") with an
+ * exit code. This answers the adjudicator's ("what must I account for, and what
+ * have I not?") with a list, and it is what makes the gate satisfiable on the
+ * FIRST attempt: measured, attempt 1 spent 426 s and $0.52 reconstructing the id
+ * set by reading six `.jsonl` files, missed some, and bought a second 274 s /
+ * $0.43 attempt — 40% of the case's wall clock and 38% of its cost, for a set
+ * that is mechanically derivable.
+ *
+ * It reads through the same `inspect` the gate does, so the checklist and the
+ * verdict can never disagree about which ids exist. That is the whole reason it
+ * lives here rather than in the prompt as an instruction to go and count.
+ */
+export function buildFindingsLedger(options: CheckFindingsOptions): FindingsLedger {
+  const result = inspect({ ...options, repair: false });
+  const covered = new Set(result.covered);
+  // An unreadable `findings.json` makes `inspect` return early with NO gaps —
+  // correct for the gate, which fails on the document error alone and wants the
+  // next iteration to write one. For a checklist it would be a lie of omission:
+  // nothing has a disposition when there is no document to hold one, so every
+  // declared id is outstanding.
+  const uncoveredIds =
+    result.documentError !== null
+      ? new Set(result.rows.keys())
+      : new Set(result.gaps.filter((g) => g.kind === "uncovered").map((g) => g.hypothesis));
+
+  const families: string[] = [];
+  const entries: LedgerEntry[] = [];
+  for (const [id, record] of result.rows) {
+    const { row, family } = record;
+    if (!families.includes(family)) families.push(family);
+    const claim = asString(row.claim);
+    entries.push({
+      id,
+      family,
+      obligation: asString(row.obligation),
+      path: pathOf(row),
+      severity: asString(row.severity),
+      confidence: typeof row.confidence === "number" ? row.confidence : null,
+      title: claim ? titleFrom(claim) : `(no claim recorded on ${id})`,
+      accounted: covered.has(id),
+    });
+  }
+  // Declaration order — `<family>-NNN` sorts that way already, and the files are
+  // read sorted, so the checklist reads in the order the surveys wrote it.
+  entries.sort((a, b) => a.family.localeCompare(b.family) || a.id.localeCompare(b.id));
+
+  return {
+    entries,
+    uncovered: entries.filter((e) => uncoveredIds.has(e.id)),
+    duplicates: result.gaps.filter((g) => g.kind === "duplicate"),
+    fabricated: result.gaps.filter((g) => g.kind === "fabricated"),
+    unbackedDrops: result.gaps.filter((g) => g.kind === "unbacked-drop"),
+    families: families.sort(),
+    documentError: result.documentError,
+    satisfied: result.satisfied,
+  };
+}
+
+/**
+ * Render the ledger for an agent's context.
+ *
+ * **Nothing here is capped, and that is deliberate** — `renderFindingsCheck`
+ * stops naming ids at 20 because it is a log line, but a checklist that elided
+ * entries would reproduce the exact omission it exists to prevent. The bound is
+ * on each claim (one sentence, ~100 chars via `titleFrom`), never on the count.
+ */
+export function renderFindingsLedger(ledger: FindingsLedger): string {
+  const lines: string[] = [];
+  const total = ledger.entries.length;
+
+  if (total === 0) {
+    return [
+      "conservation ledger: no hypotheses were declared.",
+      "  The surveys wrote no hypotheses/*.jsonl, so there is nothing to account for",
+      "  and the gate will pass on that basis. This is NOT evidence that the review",
+      "  is complete — write your findings from the diff as usual.",
+    ].join("\n");
+  }
+
+  const done = ledger.entries.filter((e) => e.accounted).length;
+  lines.push(
+    `conservation ledger: ${done}/${total} hypotheses accounted for, across ${ledger.families.length} famil${ledger.families.length === 1 ? "y" : "ies"}.`,
+    "Every id below must appear EXACTLY ONCE in findings.json — in some finding's",
+    '`hypotheses` array (any tier; `internal` is a valid answer) or in `dropped`',
+    "with a `refutedBy` transcript that exists on disk.",
+    "",
+  );
+
+  if (ledger.documentError !== null) {
+    lines.push(
+      "findings.json is not readable yet, so every id below is outstanding:",
+      `  ${ledger.documentError}`,
+      "",
+    );
+  }
+
+  let family: string | undefined;
+  for (const e of ledger.entries) {
+    if (e.family !== family) {
+      family = e.family;
+      lines.push(`── ${family} ──`);
+    }
+    const mark = e.accounted ? "[x]" : "[ ]";
+    const meta = [e.obligation, e.severity, e.path].filter(Boolean).join(" · ");
+    lines.push(`  ${mark} ${e.id}${meta ? `  (${meta})` : ""}`);
+    lines.push(`        ${e.title}`);
+  }
+
+  if (ledger.uncovered.length > 0) {
+    lines.push(
+      "",
+      `OUTSTANDING — ${ledger.uncovered.length} of ${total} still have no disposition:`,
+    );
+    // Wrapped rather than one long line: this is the list the next attempt
+    // works from, and every id has to stay legible however many there are.
+    let row: string[] = [];
+    let width = 0;
+    for (const id of ledger.uncovered.map((e) => e.id)) {
+      if (row.length > 0 && width + 1 + id.length > IDS_LINE_WIDTH) {
+        lines.push(`  ${row.join(" ")}`);
+        row = [];
+        width = 0;
+      }
+      width += (row.length > 0 ? 1 : 0) + id.length;
+      row.push(id);
+    }
+    if (row.length > 0) lines.push(`  ${row.join(" ")}`);
+  }
+  for (const gap of [...ledger.duplicates, ...ledger.unbackedDrops, ...ledger.fabricated]) {
+    lines.push(`  ✗ ${gap.hypothesis} [${gap.kind}]: ${gap.detail}`);
+  }
+  if (ledger.satisfied) {
+    lines.push("", "Conservation holds. Every id has exactly one disposition.");
+  }
+  return lines.join("\n");
 }
 
 /** A one-screen summary for the phase log — the gate's whole stdout. */

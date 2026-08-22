@@ -55,9 +55,15 @@ export interface PhaseMetric {
   success: boolean;
   model?: string;
   inputTokens?: number;
+  cachedTokens?: number;
   outputTokens?: number;
   costUsd?: number;
+  /** Measured phase window. Absent = never started (skipped), NOT zero. */
   durationMs?: number;
+  /** Agent + gate time only (summed over the phase's `result` envelopes).
+   * Narrower than {@link durationMs}, which also covers provisioning and skill
+   * staging. This is the one to compare across phases. */
+  agentMs?: number;
 }
 
 /** The judge's inspectable working for one pr-review grade. `matchedGold` /
@@ -149,6 +155,9 @@ export interface RunMeta {
   tiers: string[];
   models: string[];
   runs: number;
+  /** Cases of one arm run at once (`--concurrency N`). >1 ⇒ the arm's elapsed
+   * time is not the sum of its cases; per-case/per-phase timings still are. */
+  concurrency?: number;
   gitSha?: string;
   labels?: Record<string, string>;
   live?: boolean;

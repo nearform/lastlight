@@ -70,7 +70,7 @@ answer, and two contradict standard advice we would otherwise have followed.
 | 7 | **CodeQL is never in the product path** | Its CLI licence forbids non-open-source codebases without paid GHAS. Legal in the eval harness over public gold PRs; **illegal against `nearform/skillspro`**. The engine slot is **Opengrep**, not Semgrep — Semgrep's registry rules moved to a licence that plausibly excludes a review product |
 | 8 | **The whole pipeline is off by default** (`review.analysis.enabled: false`) | `false` reproduces today's two-phase review byte-for-byte. Every phase lands dark and is switched on per deployment once it has been measured |
 | 9 | **Specialists are separated by *question*, not by tool access** | There is no per-phase tool allow/deny in `PhaseDefinitionSchema`, and that gap already killed one proposed architecture (a "cold review" phase denied the GitHub tools). It is not needed: obligation family + prompt is the axis that matters. Adding tool gating stays an optional, separate enabler |
-| 10 | **Parallel phases are restored, not invented** | Issue #7 built a `Promise.allSettled` DAG fan-out; issue #94 **deliberately removed it** to collapse two forked schedulers into one, because no production workflow used `depends_on`. #7's own build-it criterion was *"users are creating multi-reviewer workflows"* — which is now the case. See [05-parallel-phases.md](05-parallel-phases.md) |
+| 10 | **Parallel phases are restored, not invented** | Issue #7 built a `Promise.allSettled` DAG fan-out; issue #94 **deliberately removed it**. **Superseded 2026-08-22 in the direction that mattered**: the survey fan-out ships as `type: fanout` — one DAG node, N concurrent sessions in one sandbox — so the scheduler was never touched and none of WP5's blockers had to be solved. WP5 stays parked; what it would still buy is per-family *DAG nodes*. See [11-speed.md](11-speed.md) |
 | 11 | **We never re-derive what CI already said; we do want a runnable tree** | Those are different things, and an earlier draft conflated them. `checksState` / `ciSection` are already in the run context, so re-running the suite for a red/green verdict is pure duplication of a matrix build we cannot match. What execution buys is a **probe**, and that needs an install, not a test run. Hence `prepare` (cheap, the affordance) is split from `suite` (expensive, gated on `mutants` alone). See [04-probe-oracle.md](04-probe-oracle.md) |
 | 12 | **Internal recall and user attention are separate budgets** | A candidate is never deleted for being noisy — but not every survivor earns an inline comment. Three tiers: **inline** (capped by `maxInlineComments`), **body** (posted, unbounded), **internal** (recorded to `review_findings`, never posted, auditable). *"Does AI Code Review Lead to Code Changes?"* (22k+ comments): concise hunk-level actionable findings are substantially likelier to cause a change. Twenty inline comments is not twenty times the signal of eight. See [06-adjudicate.md](06-adjudicate.md) |
 | 13 | **Eight cases from one private repo cannot support a general claim** | They are an architecture-development instrument — and really **four PRs**, since rounds of the same PR are correlated, with a three-case blind split. External validation is a **mandatory** round, reported unpooled because the private set risks selection bias and the public sets risk contamination. See [09-external-validation.md](09-external-validation.md) |
@@ -180,6 +180,7 @@ do — is [HANDOFF.md](HANDOFF.md).
 | 7 | [07-review-memory.md](07-review-memory.md) | Review-memory tables, the `record` phase, the mining cron | 6 |
 | 8 | [08-evals.md](08-evals.md) | Micro-recall, SNR, utility metrics, **evidence coverage**; the measurement protocol | — |
 | 9 | [09-external-validation.md](09-external-validation.md) | **Mandatory** external-validation round before any general claim | 6, 1c |
+| 11 | [11-speed.md](11-speed.md) | `type: fanout`, the per-phase instrument, eval concurrency, the conservation ledger — **and the four silent defects they uncovered** | 3, 4, 6 |
 
 WP3's dependency on WP2 was dropped by §D1 — `code-facts` ships in the CLI, so
 the image is no longer what makes the tools exist.
@@ -187,10 +188,18 @@ the image is no longer what makes the tools exist.
 ### The revised order
 
 ```
-WP3 → WP4 → WP6 → [ship-capable on TypeScript]
+✅ WP3 → ✅ WP4 → ✅ WP6 → ✅ WP11 → [ship-capable on TypeScript]
   → WP1c Stage 2 grammars (scoped) → WP9 → [R] release → WP7c
-  ;  WP2 parallel  ;  WP5 PARKED
+  ;  WP2 parallel  ;  WP5 PARKED (its carve-out taken by WP11)
 ```
+
+> **Updated 2026-08-22.** WP3, WP4 and WP6 are built. **WP11** was not in the
+> original plan: the pipeline worked but took 29 minutes per PR, which made arms
+> unaffordable and stalled every remaining gate. It bought ~2.4× and, in the
+> process, found four silent defects — one of them production-affecting — that
+> invalidate several numbers recorded elsewhere in this folder. Read
+> [11-speed.md](11-speed.md) and [RESTART.md](RESTART.md) §4 before trusting any
+> pre-2026-08-22 measurement.
 
 > **Corrected 2026-08-21.** This line began `memory decision (2 GB cap) →`. That
 > decision is **settled by measurement rather than taken** — peak RSS is
