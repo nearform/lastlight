@@ -508,4 +508,22 @@ export interface InstanceResult {
     warnings?: string[];
     refused?: string;
   };
+  /**
+   * Absolute path of the trial's workspace, recorded ONLY when `--keep-workspace`
+   * suppressed the teardown.
+   *
+   * Every artifact the evidence pipeline writes — `facts.json`,
+   * `obligations/`, `hypotheses/*.jsonl`, `probes/env.json` and WP4's probe
+   * transcripts — lives under `<workspace>/sandboxes/<taskId>/.lastlight/pr-review/`
+   * and is deleted with the temp dir at the end of every ordinary run. Sampling
+   * them while the run is live was the only way to see them, which is a poor
+   * instrument for a work package whose whole output is artifacts.
+   *
+   * Absent on a normal run, and that absence is the point: an eval batch that
+   * kept 50 installed checkouts would be tens of gigabytes.
+   *
+   * On a `--runs N` aggregate this is **trial 1's** workspace, like every other
+   * field `aggregateTrials` carries through; the runner prints all N paths.
+   */
+  workspaceDir?: string;
 }

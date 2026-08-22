@@ -472,6 +472,14 @@ async function runEval(): Promise<number> {
   // `EVAL_INJECT_CONTEXT=0`) forces a clean control run for an A/B.
   const injectContext = !process.argv.includes("--no-inject-context") && process.env.EVAL_INJECT_CONTEXT !== "0";
 
+  // Keep each trial's workspace instead of deleting it (`runInstance`'s
+  // `finally`). The evidence pipeline's deliverable is files —
+  // `.lastlight/pr-review/{facts.json,obligations/,hypotheses/,probes/}` — and
+  // without this flag the only way to read one was to catch a live run
+  // mid-flight, which is not an instrument. OFF by default: a kept workspace is
+  // a full checkout, plus `node_modules` once `prepare` installs.
+  const keepWorkspace = process.argv.includes("--keep-workspace");
+
   // Execution sandbox backend (or EVAL_SANDBOX). Default `none` (in-process, no
   // QEMU dependency — the fast/CI path). `gondolin` isolates the agent's tools
   // in a QEMU micro-VM so it can't read host gold data, while keeping the fake
@@ -805,11 +813,16 @@ async function runEval(): Promise<number> {
     }
   };
 
+  const keptWorkspaces: { id: string; trial: number; path: string }[] = [];
+
   // Run one case `runs` times and fold the trials into a single result
   // (worst-case verdict, mean metrics). `onTrial` ticks per model call.
   const runItem = async (w: WorkItem, onTrial: () => void): Promise<InstanceResult> => {
     const k = caseKey(w.tierName, w.arm.label, w.inst.instance_id);
     const trials: InstanceResult[] = [];
+    // Collected per TRIAL, not off the aggregate: `aggregateTrials` carries
+    // trial 1's fields through, so with `--runs 3` the other two workspaces
+    // would still be on disk and named nowhere.
     for (let t = 1; t <= runs; t++) {
       trialOf.set(k, t); // so the live "follow" link targets this trial
       const trialRel = trialRelFor(w.inst.instance_id, w.arm.label, t);
@@ -831,8 +844,10 @@ async function runEval(): Promise<number> {
         trial: t,
         judge,
         sandbox,
+        keepWorkspace,
       });
       r.tier = w.tierName;
+      if (r.workspaceDir) keptWorkspaces.push({ id: w.inst.instance_id, trial: t, path: r.workspaceDir });
       trials.push(r);
       completed++;
       onTrial();
@@ -957,6 +972,19 @@ async function runEval(): Promise<number> {
     `Artifacts → ${chalk.cyan(tiers.map((t) => resultsDirFor(t)).join("\n             "))}\n             /{scorecard.json,predictions.jsonl,sessions/}`,
   );
 
+  // `--keep-workspace` is only useful if you can find what it kept. The paths
+  // are on every result too (`workspaceDir`); this is the line that stops a
+  // kept batch from being N anonymous temp dirs, and the reminder that nothing
+  // else will ever delete them.
+  if (keptWorkspaces.length) {
+    p.log.warn(
+      `Kept ${keptWorkspaces.length} workspace${keptWorkspaces.length === 1 ? "" : "s"} (--keep-workspace) — nothing else will remove them:\n` +
+        keptWorkspaces
+          .map((w) => `  ${w.id}${runs > 1 ? ` (trial ${w.trial})` : ""} · ${chalk.cyan(w.path)}`)
+          .join("\n"),
+    );
+  }
+
   const ran = runs > 1 ? `${completed} runs (${all.length} cases × ${runs})` : `${all.length} runs`;
 
   // Keep the dashboard server alive so the just-finished run stays viewable —
@@ -1071,6 +1099,10 @@ Run options:
                        in-process (fast, CI). gondolin isolates the agent's tools
                        in a QEMU micro-VM so it can't read host gold data (needs
                        QEMU natively — brew install qemu). Or EVAL_SANDBOX.
+  --keep-workspace     Don't delete each trial's workspace. Keeps the evidence
+                       pipeline's artifacts (.lastlight/pr-review/facts.json,
+                       obligations/, hypotheses/, probes/) readable after the run;
+                       the path lands on each result as workspaceDir. Costs disk.
   --serial             Force serial execution across provider families
   --datasets <dir>     Extra datasets root to discover tiers from
   --models-file <f>    Use an explicit models.json

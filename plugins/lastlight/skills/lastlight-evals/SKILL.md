@@ -126,6 +126,7 @@ lastlight-evals run pr-review --f-beta 0.5      # pr-review F-beta β (default 1
 lastlight-evals run pr-review --judge-with-diff # feed the PR diff to the judge (higher fidelity; off by default)
 lastlight-evals run pr-review --no-inject-context # DON'T inject synthetic repo-context into the checkout (clean A/B control)
 lastlight-evals run pr-review --sandbox gondolin # isolate the agent's tools in a QEMU micro-VM (anti-spoil). Or EVAL_SANDBOX
+lastlight-evals run pr-review --keep-workspace  # don't delete each trial's workspace (inspect .lastlight/ artifacts afterwards). Costs disk
 lastlight-evals run triage --no-open            # don't open the report
 # Plain layout: add --overlay .   (e.g. lastlight-evals run triage --overlay .)
 

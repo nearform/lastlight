@@ -68,6 +68,18 @@ export interface RunInstanceOptions {
   injectContext?: boolean;
   /** Default workflow when the instance doesn't name one. */
   defaultWorkflow?: string;
+  /**
+   * Keep the trial's workspace instead of deleting it, and record its path on
+   * the result as {@link InstanceResult.workspaceDir}.
+   *
+   * The evidence pipeline's whole output is files under
+   * `<stateDir>/sandboxes/<taskId>/.lastlight/pr-review/` — `facts.json`, the
+   * rendered obligation blocks, `hypotheses/<family>.jsonl`, `probes/env.json`
+   * and WP4's probe transcripts. The `finally` below removed all of it, so the
+   * only way to read an artifact was to catch a live run mid-flight. Off by
+   * default because a kept workspace is a full checkout (plus `node_modules`
+   * once `prepare` runs), which across a 50-case batch is tens of gigabytes.
+   */
   keepWorkspace?: boolean;
   /**
    * Absolute dir for THIS trial's archived session logs (e.g.
@@ -720,6 +732,11 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     restoreEvalEnv();
     if (!opts.keepWorkspace && !opts.stateDir) {
       rmSync(stateDir, { recursive: true, force: true });
+    } else if (opts.keepWorkspace) {
+      // Recorded rather than merely printed: the path has to survive into
+      // `scorecard.json` or a batch of 8 kept workspaces is 8 temp dirs with
+      // machine-generated names and no mapping back to a case.
+      result.workspaceDir = stateDir;
     }
   }
 

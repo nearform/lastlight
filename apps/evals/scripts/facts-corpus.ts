@@ -12,13 +12,18 @@
  * Usage:
  *   npx tsx scripts/facts-corpus.ts [--profile smoke|full] [--only id,id]
  *       [--dataset <instances.json|datasetsDir>] [--cache <.eval-cache>]
- *       [--timeout <ms>] [--keep] [--out <dir>]
+ *       [--timeout <ms>] [--keep] [--install] [--out <dir>]
  *       [--compare <runId> [--against <runId>]]
  *
  *   --profile smoke   8 cases: one per repo + the two largest diffs (default: full)
  *   --only            exact instance_ids, comma separated (overrides --profile)
  *   --timeout         per-case wall clock ceiling, default 300000 ms
  *   --keep            keep the worktrees (and print where) instead of removing them
+ *   --install         WP4's arm: run `lastlight-facts prepare` in each worktree
+ *                     BEFORE `all`, so the analysis sees an installed tree.
+ *                     Costs the network, gigabytes of node_modules and minutes
+ *                     per case. Compare a `--install` run against a bare one
+ *                     with `--compare`; do not mix them in one table.
  *   --compare <old>   after the run, diff it against an earlier run's report.json
  *   --against <new>   with --compare: diff two STORED runs and measure nothing
  *
@@ -48,6 +53,14 @@
  * The worktrees have **no `node_modules`** — and that is production's exact
  * shape (the review workspace has none), so it is the right measurement, not a
  * defect to paper over. It is recorded per case as `nodeModules: false`.
+ *
+ * **`--install` is the exception, and it is a second population rather than a
+ * better one.** WP4's `prepare` phase changes that shape deliberately: on a bare
+ * tree a `tsconfig` that `extends` a bare package specifier does not resolve,
+ * tsgo excludes the project, and the case drops to tier 2 with `contracts`
+ * emitting nothing. This flag is how that claim gets read instead of argued —
+ * the two arms differ in exactly one variable, and `meta.install` marks which is
+ * which so a report can never be mistaken for the other.
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
@@ -103,9 +116,29 @@ interface CaseRecord {
    * carrying 40 `.properties` files is labelled `.properties`, and that is the
    * honest answer to "what does this diff mostly consist of". */
   primaryLanguage: string;
-  /** Always false here. Production's review workspace has none either — see the
-   * file header. Recorded so nobody has to re-derive why symbols are missing. */
+  /** Whether `node_modules` existed at the moment `all` ran.
+   *
+   * False on every ordinary run, and that is production's exact shape: the
+   * review workspace is a bare pre-clone. `--install` is what makes it true —
+   * see {@link CaseRecord.prepare} and the header. Recorded so nobody has to
+   * re-derive why symbols are missing. */
   nodeModules: boolean;
+  /**
+   * `lastlight-facts prepare`'s own answer, when `--install` asked for one.
+   *
+   * `null` on the bare arm. This is the WP4 measurement: `prepare` claims that
+   * installing dependencies is what lets a `tsconfig` that `extends` a bare
+   * package specifier resolve, and therefore what lets `contracts` emit
+   * anything at all on a normal monorepo. That claim is deterministic and costs
+   * no model spend, so it is read here rather than argued.
+   */
+  prepare: {
+    packageManager: string | null;
+    install: string;
+    installed: boolean;
+    durationMs: number;
+    degradedReasons: string[];
+  } | null;
   run: {
     exitCode: number | null;
     signal: string | null;
@@ -146,6 +179,10 @@ interface Report {
     timeoutMs: number;
     concurrency: 1;
     neverFail: false;
+    /** `--install`: dependencies were installed before `all` ran. THE arm
+     * marker — a report with this true is not comparable, case for case, to one
+     * with it false except as the comparison it exists to make. */
+    install: boolean;
     cases: number;
   };
   rollup: Rollup;
@@ -172,6 +209,20 @@ interface Rollup {
   wallClockMs: { p50: number; p90: number; max: number; over90s: number };
   peakRssMb: { p50: number; p90: number; max: number };
   topDegradedReasons: { reason: string; count: number; cases: number }[];
+  /**
+   * `--install` only. What `prepare` actually did, per case — because "the
+   * contract deltas did not move" and "nothing installed" are the same table
+   * with opposite conclusions, and only this section can tell them apart.
+   */
+  prepare: {
+    attempted: number;
+    installed: number;
+    byOutcome: Record<string, number>;
+    byPackageManager: Record<string, number>;
+    wallClockMs: { p50: number; p90: number; max: number };
+    /** Cases where `prepare` ran and `node_modules` still does not exist. */
+    failures: { instanceId: string; install: string; reason: string }[];
+  } | null;
   byLanguage: {
     language: string;
     cases: number;
@@ -338,7 +389,75 @@ function shas(inst: SweBenchInstance): { base: string; head: string } | null {
   return base && head ? { base, head } : null;
 }
 
-function runOne(sel: Selected, opts: { factsCli: string; caseDir: string; wtRoot: string; timeoutMs: number; keep: boolean }): CaseRecord {
+/**
+ * Run `lastlight-facts prepare` in the worktree and return what it recorded.
+ *
+ * Spawned exactly like `all` below — a separate process, no `--never-fail`, so
+ * an exit code still means something to the human reading the report. Its
+ * lifecycle scripts stay OFF (the CLI's default), which matters more here than
+ * in production: this installs six real third-party repositories on somebody's
+ * laptop.
+ */
+function runPrepare(
+  wt: string,
+  factsCli: string,
+  timeoutMs: number,
+): CaseRecord["prepare"] {
+  const envPath = join(wt, ".lastlight", "pr-review", "probes", "env.json");
+  const started = Date.now();
+  const r = spawnSync(
+    process.execPath,
+    [factsCli, "prepare", "--repo", wt, "--out", envPath],
+    {
+      encoding: "utf8",
+      timeout: timeoutMs,
+      killSignal: "SIGKILL",
+      maxBuffer: 64 * 1024 * 1024,
+      env: { ...process.env, GIT_CONFIG_PARAMETERS: "'safe.directory=*'" },
+    },
+  );
+  const elapsed = Date.now() - started;
+  if (r.error && (r.error as NodeJS.ErrnoException).code === "ETIMEDOUT") {
+    spawnSync("pkill", ["-9", "-f", wt], { stdio: "ignore" });
+  }
+
+  if (!existsSync(envPath)) {
+    // A prepare that wrote nothing is the §D12 shape, and it must not read as
+    // "nothing needed installing".
+    return {
+      packageManager: null,
+      install: "no-envelope",
+      installed: existsSync(join(wt, "node_modules")),
+      durationMs: elapsed,
+      degradedReasons: [`prepare wrote no env.json (exit ${r.status ?? "none"}): ${(r.stderr ?? "").slice(-400)}`],
+    };
+  }
+  try {
+    const env = JSON.parse(readFileSync(envPath, "utf8")) as Record<string, any>;
+    return {
+      packageManager: env.packageManager ?? null,
+      install: String(env.install),
+      installed: env.installed === true,
+      durationMs: elapsed,
+      degradedReasons: ((env.degraded ?? []) as { extractor: string; reason: string }[]).map(
+        (d) => `${d.extractor}: ${d.reason}`,
+      ),
+    };
+  } catch (err) {
+    return {
+      packageManager: null,
+      install: "unparseable",
+      installed: existsSync(join(wt, "node_modules")),
+      durationMs: elapsed,
+      degradedReasons: [`env.json is not parseable: ${(err as Error).message}`],
+    };
+  }
+}
+
+function runOne(
+  sel: Selected,
+  opts: { factsCli: string; caseDir: string; wtRoot: string; timeoutMs: number; keep: boolean; install: boolean },
+): CaseRecord {
   const id = sel.inst.instance_id;
   const wt = join(opts.wtRoot, id);
   const outPath = join(opts.caseDir, `${id}.json`);
@@ -353,6 +472,7 @@ function runOne(sel: Selected, opts: { factsCli: string; caseDir: string; wtRoot
     languageMix: histogram(sel.files),
     primaryLanguage: modal(histogram(sel.files)),
     nodeModules: false,
+    prepare: null,
     run: { exitCode: null, signal: null, wallClockMs: 0, peakRssMb: null, envelopeWritten: false, stderrTail: "" },
     envelope: { tier: null, coverage: null, degradedCount: 0, degradedByExtractor: {}, degradedReasons: [] },
     payloadCounts: { facts: null, contracts: null, constants: null, deps: null, patterns: null, coverage: null },
@@ -360,6 +480,17 @@ function runOne(sel: Selected, opts: { factsCli: string; caseDir: string; wtRoot
 
   try {
     git(sel.mirror, ["worktree", "add", "--detach", wt, sel.headSha]);
+
+    // WP4's arm. BEFORE `all`, and that ordering is the measurement: an install
+    // that arrives after the analysis cannot make an unresolvable `extends`
+    // resolve. Its wall clock is recorded separately so it never contaminates
+    // the `all` figure this harness exists to report.
+    if (opts.install) {
+      rec.prepare = runPrepare(wt, opts.factsCli, opts.timeoutMs);
+    }
+    // Asked of the filesystem, not of `prepare` — a failed install can still
+    // leave a partial tree, and what the compiler sees is what is there.
+    rec.nodeModules = existsSync(join(wt, "node_modules"));
 
     const argv = ["all", "--repo", wt, "--base", sel.baseSha, "--head", sel.headSha, "--out", outPath];
     const bin = timeSupported ? TIME_BIN : process.execPath;
@@ -500,6 +631,34 @@ function tally<T extends string | number>(values: T[]): Record<string, number> {
   return out;
 }
 
+/**
+ * The `--install` arm's own summary. `null` when no case was prepared, which is
+ * how a bare report stays exactly the document it always was.
+ */
+function prepareRollup(cases: CaseRecord[]): Rollup["prepare"] {
+  const prepared = cases.filter((c) => c.prepare !== null);
+  if (prepared.length === 0) return null;
+  const wall = prepared.map((c) => c.prepare!.durationMs).sort((a, b) => a - b);
+  return {
+    attempted: prepared.length,
+    installed: prepared.filter((c) => c.prepare!.installed).length,
+    byOutcome: tally(prepared.map((c) => c.prepare!.install)),
+    byPackageManager: tally(prepared.map((c) => c.prepare!.packageManager ?? "none")),
+    wallClockMs: { p50: pct(wall, 50), p90: pct(wall, 90), max: wall.at(-1) ?? 0 },
+    failures: prepared
+      .filter((c) => !c.prepare!.installed)
+      .map((c) => ({
+        instanceId: c.instanceId,
+        install: c.prepare!.install,
+        // The LAST reason, not the first. `prepare` records the strict→loose
+        // downgrade before it records the failure, so `[0]` on a failed case is
+        // a note about the lockfile and `.at(-1)` is what actually went wrong —
+        // measured, on the first case this ever ran against.
+        reason: c.prepare!.degradedReasons.at(-1) ?? "(no reason recorded)",
+      })),
+  };
+}
+
 function rollup(cases: CaseRecord[]): Rollup {
   const wall = cases.map((c) => c.run.wallClockMs).sort((a, b) => a - b);
   const rss = cases.map((c) => c.run.peakRssMb).filter((n): n is number => n != null).sort((a, b) => a - b);
@@ -589,6 +748,7 @@ function rollup(cases: CaseRecord[]): Rollup {
       over90s: cases.filter((c) => c.run.wallClockMs > 90_000).length,
     },
     peakRssMb: { p50: round(pct(rss, 50)), p90: round(pct(rss, 90)), max: round(rss.at(-1) ?? 0) },
+    prepare: prepareRollup(cases),
     topDegradedReasons: [...reasonCounts.entries()]
       .map(([reason, e]) => ({ reason, count: e.count, cases: e.cases.size }))
       .sort((a, b) => b.count - a.count || b.cases - a.cases)
@@ -629,7 +789,11 @@ function renderMarkdown(report: Report): string {
   L.push(`- dataset: \`${meta.dataset}\``);
   L.push(`- mirrors: \`${meta.cache}/repos\` (bare, \`git worktree add --detach\` — never cloned)`);
   L.push(`- CLI: \`${meta.factsCli}\` (lastlight-code-facts ${meta.factsVersion ?? "?"}), node ${meta.node}, ${meta.platform}`);
-  L.push(`- worktrees carry **no node_modules** — that is production's shape, not a defect.`);
+  L.push(
+    meta.install
+      ? `- **\`--install\` ARM**: \`lastlight-facts prepare\` ran in each worktree before \`all\`, so the analysis saw an INSTALLED tree. This is not production's shape (the review workspace is a bare pre-clone) — it is the shape WP4's \`prepare\` phase creates. Compare it only against a bare run of the same cases.`
+      : `- worktrees carry **no node_modules** — that is production's shape, not a defect.`,
+  );
   L.push("");
 
   L.push(`## Roll-up`);
@@ -644,6 +808,31 @@ function renderMarkdown(report: Report): string {
   L.push(`| peak RSS | p50 ${r.peakRssMb.p50} MB · p90 ${r.peakRssMb.p90} MB · max ${r.peakRssMb.max} MB |`);
   L.push(`| empty envelopes | ${r.totals.emptyEnvelopes} case(s) produced an envelope with zero facts of any kind |`);
   L.push("");
+
+  if (r.prepare) {
+    const p = r.prepare;
+    L.push(`### \`prepare\` — what the install actually did`);
+    L.push("");
+    L.push(
+      `Read this table BEFORE the tier and contract numbers above. "The contract deltas did not move" and "nothing installed" are the same roll-up with opposite conclusions, and this is the only section that separates them.`,
+    );
+    L.push("");
+    L.push(`| | |`);
+    L.push(`|---|---|`);
+    L.push(`| node_modules present after prepare | **${p.installed} / ${p.attempted}** |`);
+    L.push(`| by outcome | ${kv(p.byOutcome)} |`);
+    L.push(`| by package manager | ${kv(p.byPackageManager)} |`);
+    L.push(`| prepare wall clock | p50 ${p.wallClockMs.p50} ms · p90 ${p.wallClockMs.p90} ms · max ${p.wallClockMs.max} ms |`);
+    L.push("");
+    if (p.failures.length) {
+      L.push(`Cases where \`prepare\` ran and left no \`node_modules\` — for these the arm measured **nothing**, and their rows below are a bare-tree result wearing an install-arm label:`);
+      L.push("");
+      L.push(`| instance | install | why |`);
+      L.push(`|---|---|---|`);
+      for (const f of p.failures) L.push(`| ${f.instanceId} | ${f.install} | ${f.reason.replace(/\|/g, "\\|").slice(0, 300)} |`);
+      L.push("");
+    }
+  }
 
   L.push(`### Blind spots — a tier label is not coverage`);
   L.push("");
@@ -840,6 +1029,11 @@ function main(): void {
   const datasetPath = resolveDataset(cache);
   const timeoutMs = Number(flag("timeout") ?? 300_000);
   const keep = has("keep");
+  // WP4's arm. It INSTALLS DEPENDENCIES for every selected case, in a real
+  // third-party repository, over the network — gigabytes of `node_modules` and
+  // minutes per case, against seconds for the analysis itself. Off by default
+  // for that reason, and because the bare tree is production's exact shape.
+  const install = has("install");
   const profile = list("only").length ? "only" : (flag("profile") ?? "full");
   if (!["smoke", "full", "only"].includes(profile)) die(`--profile must be smoke or full (got ${profile})`);
 
@@ -923,6 +1117,13 @@ function main(): void {
   console.log(`  cli      ${factsCli} (lastlight-code-facts ${factsVersion ?? "?"})`);
   console.log(`  profile  ${profile} — ${selected.length} case(s), concurrency 1, timeout ${timeoutMs} ms, no --never-fail`);
   console.log(`  out      ${runDir}`);
+  if (install) {
+    console.log(
+      `  --install: WP4's arm — \`prepare\` runs in each worktree first. This DOWNLOADS AND WRITES\n` +
+        `             node_modules into ${selected.length} real third-party checkout(s); expect minutes and\n` +
+        `             gigabytes. Lifecycle scripts stay OFF (the CLI's default).`,
+    );
+  }
   if (!timeSupported) console.log(`  ⚠ no ${TIME_BIN} on ${process.platform} — peakRssMb will be null`);
   console.log("");
 
@@ -931,7 +1132,7 @@ function main(): void {
   for (const sel of selected) {
     n += 1;
     process.stdout.write(`  [${String(n).padStart(2)}/${selected.length}] ${sel.inst.instance_id.padEnd(34)} `);
-    const rec = runOne(sel, { factsCli, caseDir, wtRoot, timeoutMs, keep });
+    const rec = runOne(sel, { factsCli, caseDir, wtRoot, timeoutMs, keep, install });
     cases.push(rec);
     const bad = !rec.run.envelopeWritten ? "  ✗ NO ENVELOPE" : "";
     console.log(
@@ -957,6 +1158,7 @@ function main(): void {
       timeoutMs,
       concurrency: 1,
       neverFail: false,
+      install,
       cases: cases.length,
     },
     rollup: rollup(cases),
