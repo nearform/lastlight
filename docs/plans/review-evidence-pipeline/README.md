@@ -4,6 +4,10 @@
 > state, the three commands that prove it is sane, what is next, and how to
 > drive sub-agents on it. This file is the *why*; that one is the *how*.
 
+> **Want the short version first?** [TLDR.md](TLDR.md) — the problem, the
+> three falsified theories, what `code-facts` computes, and why it should move
+> review quality. One page.
+
 Turn `pr-review` from **one agent turn over a diff** into a pipeline where
 deterministic program analysis constructs the world the model reasons in, and an
 executable oracle decides which of its hypotheses survive.
@@ -61,7 +65,7 @@ answer, and two contradict standard advice we would otherwise have followed.
 | 2 | **We deliberately over-generate, and precision is not the guardrail** | Frontier precision on this task is **3–5%** (CR-Bench GPT-5.2: 27.0% recall / 3.6% precision). We post ~2 findings per 8 PRs. Our instinct to protect precision is the opposite of what the field does. The guardrail becomes CR-Bench's **signal-to-noise ratio**, which is what degrades when a recall intervention goes wrong |
 | 3 | **Every obligation names BOTH ends of the defect mechanism** | IRIS's ablation: CodeQL sources + LLM sinks = +9; **LLM sources + CodeQL sinks = −3, actively worse than no seed**; both ends = ~2× recall. A half-mechanism seed is not a weak seed, it is a harmful one |
 | 4 | **Code facts are recomputed per run, not indexed** | We already have the checkout, and `pr-review` is in `PER_TARGET_REUSE_WORKFLOWS` so `node_modules` stays warm per PR. A persistent cross-repo symbol index buys invalidation, storage and multi-tenant scoping against *private customer repos* for a benefit we have not yet measured a need for. SCIP stays on the shelf as the escape hatch |
-| 5 | **The analysis toolchain is pre-baked and pinned in the sandbox image, and never resolves `typescript` from the repo under review** | **TypeScript 7 has no programmatic compiler API** (`tsgo` is CLI+LSP only). `ts-morph@28` vendors its own compiler and has no `typescript` dependency. A toolchain that resolved the target repo's TS would break on every TS-7 repo, which is now most of them |
+| 5 | **The analysis toolchain is pre-baked and pinned in the sandbox image, and never resolves `typescript` from the repo under review** | ~~**TypeScript 7 has no programmatic compiler API**~~ (**its rationale expired 2026-08-22 — see [`docs/plans/fact-engine/`](../fact-engine/README.md); the DECISION stands, the reason changed**). `ts-morph@28` vendors its own compiler and has no `typescript` dependency. A toolchain that resolved the target repo's TS would break on every TS-7 repo, which is now most of them |
 | 6 | **Every tool fails loud; an empty result is an error, never a pass** | We have already been burned by exactly this: dependency-cruiser refused to parse TS≥7 and **exited 0 anyway**, so the import-boundary gate went green while seeing nothing (root `CLAUDE.md`). A silently-empty obligation list is that bug with a green pipeline |
 | 7 | **CodeQL is never in the product path** | Its CLI licence forbids non-open-source codebases without paid GHAS. Legal in the eval harness over public gold PRs; **illegal against `nearform/skillspro`**. The engine slot is **Opengrep**, not Semgrep — Semgrep's registry rules moved to a licence that plausibly excludes a review product |
 | 8 | **The whole pipeline is off by default** (`review.analysis.enabled: false`) | `false` reproduces today's two-phase review byte-for-byte. Every phase lands dark and is switched on per deployment once it has been measured |

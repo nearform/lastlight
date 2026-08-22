@@ -1,6 +1,11 @@
 /**
  * ts-morph `Project` construction — READ THE TS 7 LANDMINE BEFORE EDITING.
  *
+ * **SUPERSEDED 2026-08-22 — see `docs/plans/fact-engine/`.** The premise below
+ * expired: `typescript@7.0.2` ships a programmatic API at
+ * `typescript/unstable/sync`, and it is already in this workspace. Rule 2 is
+ * the one that survives unchanged.
+ *
  * **TypeScript 7 has no programmatic compiler API.** `tsgo` ships a CLI and an
  * LSP server; the API is explicitly "not ready". This workspace is on TS 7 and
  * so are the target repos. Three rules follow, and they are not negotiable:

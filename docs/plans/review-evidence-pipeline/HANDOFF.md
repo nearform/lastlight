@@ -231,8 +231,12 @@ Each of these has already cost someone a debugging session.
   dependency-cruiser refused to parse TS≥7 and exited 0 anyway, so the
   import-boundary gate was green while seeing nothing. Every extractor in
   [WP1](01-code-facts.md) must fail loud.
-- **TypeScript 7 has no programmatic compiler API.** `ts-morph@28` vendors its
-  own; never resolve `typescript` from the repo under review.
+- ~~**TypeScript 7 has no programmatic compiler API.**~~ **Expired 2026-08-22 —
+  superseded by [`docs/plans/fact-engine/`](../fact-engine/README.md).**
+  `typescript@7.0.2` ships `exports["./unstable/sync"]`, and it is already in
+  this workspace. The second half of the trap still stands: **never resolve
+  `typescript` from the repo under review** — the engine must be pinned by this
+  package, whichever engine it is.
 - **A phase skipped on resume contributes nothing to `outputs`.** Hand large
   context between phases through **workspace files**, never
   `{{phaseOutputs.X.output}}` across a resume boundary

@@ -79,13 +79,26 @@ const RULE_SETS = {
           "code-facts is a leaf package — it must not depend on any other workspace package",
       },
       {
-        // ts-morph vendors its own compiler and has NO `typescript` dependency.
-        // Resolving `typescript` — from anywhere, but especially from the repo
-        // under review — breaks on every TS-7 target, which is now most of them.
+        // NARROWED 2026-08-22 (`docs/plans/fact-engine/`). The rule used to ban
+        // `typescript` outright, on the premise that TS 7 had no programmatic
+        // API. It has one — `typescript/unstable/*` — and code-facts is
+        // migrating onto it, so a blanket ban now bans the engine itself.
+        //
+        // What the rule was really protecting is UNCHANGED and is the reason
+        // the narrow form still exists: the compiler must come from THIS
+        // package's pinned dependency, never from the repo under review. That
+        // half is enforced structurally by `tests/compiler-isolation.test.ts`
+        // (no `require.resolve("typescript", { paths: [repoDir] })`), and this
+        // rule keeps the stable public entry points out — importing plain
+        // `typescript` would pull the classic API surface the package does not
+        // use and must not start depending on.
         name: "code-facts-no-typescript",
-        test: (spec) => spec === "typescript" || spec.startsWith("typescript/"),
+        test: (spec) =>
+          spec === "typescript" ||
+          (spec.startsWith("typescript/") && !spec.startsWith("typescript/unstable/")),
         message:
-          "never resolve `typescript` — ts-morph vendors its own compiler, and TS 7 has no programmatic API",
+          "only `typescript/unstable/*` (the tsgo API) may be imported — never the classic " +
+          "surface, and never `typescript` resolved from the repo under review",
       },
       {
         name: "code-facts-self-contained",

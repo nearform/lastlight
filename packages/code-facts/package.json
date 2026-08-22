@@ -1,7 +1,7 @@
 {
   "name": "lastlight-code-facts",
   "version": "0.1.0",
-  "description": "Deterministic program-analysis facts about a pull request — impact cone, contract delta, constants-minus-literals, dependency delta, scanner patterns and changed-line coverage. The substrate the Last Light reviewer reasons over.",
+  "description": "Deterministic program-analysis facts about a pull request \u2014 impact cone, contract delta, constants-minus-literals, dependency delta, scanner patterns and changed-line coverage. The substrate the Last Light reviewer reasons over.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -49,12 +49,12 @@
   "dependencies": {
     "@ast-grep/napi": "^0.45.1",
     "ts-morph": "^28.0.0",
+    "typescript": "7.0.2",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
     "tsx": "^4.23.12",
-    "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }
 }

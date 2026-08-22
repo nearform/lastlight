@@ -42,9 +42,11 @@ export interface SandboxConfig {
    * is no longer the peak: a type-aware `lastlight facts` pass allocates
    * against the whole `ts.Program`, and the measurements are not close to the
    * old cap. On a BARE tree (no `node_modules`) two of the fifty corpus PRs
-   * peak at **2449 and 3024 MB** — and the 2449 MB case changes fourteen
-   * files, so the driver is REPO size through the `--max-files` budget, not
-   * diff size. On an INSTALLED tree — which is what WP4's `prepare` leaves
+   * peak at **2449 MB (`grafana-106778`) and 2988 MB (`sentry-greptile-5`)** —
+   * and the 2449 MB case changes fourteen files, so the driver is REPO size
+   * through the `--max-files` budget, not diff size. (`sentry-greptile-5`
+   * re-measured at 3024 MB on an 8-case re-run the next day; quote the 2988
+   * figure, which belongs to the fifty-case population the sentence is about.) On an INSTALLED tree — which is what WP4's `prepare` leaves
    * behind, since its coverage report means running a suite — `--resolution
    * full` measured 3481–4430 MB with an OOM at 4347.
    *

@@ -107,10 +107,37 @@ describe("compiler isolation (WP1 AC4)", () => {
     }
   });
 
-  it("declares no `typescript` runtime dependency of its own", () => {
+  /**
+   * REWRITTEN 2026-08-22 (`docs/plans/fact-engine/`), and the inversion is the
+   * point.
+   *
+   * This case used to assert `dependencies` does NOT contain `typescript`. That
+   * was a proxy for the real invariant — *the compiler must not come from the
+   * repo under review* — and the proxy held only while ts-morph vendored its
+   * own compiler. `tsgo` IS `typescript`, so the package must now ship it, and
+   * keeping the old assertion would have forced the engine into a devDependency
+   * that is absent for every npm consumer: `ERR_MODULE_NOT_FOUND` at runtime,
+   * for a package whose entire purpose is to not fail silently.
+   *
+   * The invariant itself is unchanged and is enforced by the three cases above,
+   * structurally: `compilerInfo().modulePath` must not sit inside the fixture
+   * repo, even when that repo pins a decoy `typescript`. What this case adds is
+   * the other half — the shipped pin must be EXACT. A range would let a
+   * consumer's install float the compiler underneath us, and a different
+   * compiler is a different type printer, which is the phantom-delta class
+   * (`01b-code-facts-hardening.md`, bug 1 and bug 2).
+   */
+  it("ships `typescript` as an EXACT-pinned runtime dependency", () => {
     const pkg = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8")) as {
       dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
     };
-    expect(Object.keys(pkg.dependencies ?? {})).not.toContain("typescript");
+    const pinned = pkg.dependencies?.typescript;
+    expect(pinned).toBeDefined();
+    // No `^`, `~`, `>=`, `*` or `x` — a bare version and nothing else.
+    expect(pinned).toMatch(/^\d+\.\d+\.\d+$/);
+    // And it must not ALSO be a devDependency, where a range would shadow the
+    // pin in this workspace and hide a drift that only bites npm consumers.
+    expect(Object.keys(pkg.devDependencies ?? {})).not.toContain("typescript");
   });
 });
