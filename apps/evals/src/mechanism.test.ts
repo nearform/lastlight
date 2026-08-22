@@ -730,6 +730,30 @@ describe("Arm seam — model-selection adapters (arm.ts)", () => {
     it("activate() is a no-op (no overlay to switch)", () => {
       expect(() => modelsArm("m", "f").activate()).not.toThrow();
     });
+
+    // A forced model is not the whole arm: the overlay's `review:` policy is a
+    // deployment fact `--model` says nothing about, and `review.analysis.enabled`
+    // is what switches the review evidence pipeline on. A `models` run with an
+    // overlay must carry it, or `--model X --overlay wp3` silently runs baseline.
+    it("carries the overlay's review policy; no overlay ⇒ undefined", () => {
+      const { root, overlay } = makeRoots();
+      try {
+        // The overlay `makeRoots` writes has no `review:` — absent, not empty.
+        expect(modelsArm("m", "f", overlay).review).toBeUndefined();
+        expect(modelsArm("m", "f").review).toBeUndefined();
+
+        writeFileSync(
+          join(overlay, "config.yaml"),
+          "models:\n  default: openai/gpt-5.4-mini\nreview:\n  postsCheck: true\n  analysis:\n    enabled: true\n    surveyPasses: 6\n",
+        );
+        const arm = modelsArm("m", "f", overlay);
+        expect(arm.review).toEqual({ postsCheck: true, analysis: { enabled: true, surveyPasses: 6 } });
+        // Config arms read the same block from the same file.
+        expect(configArm(root, overlay).review).toEqual(arm.review);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("configArm — a deployment's per-step config drives selection", () => {
@@ -1137,6 +1161,38 @@ describe("PR context — core's own projection, not a copy", () => {
     expect(ctx.attempt).toBe(1);
     expect(ctx.ciSection).toBe("");
     expect(ctx.prNumber).toBe(412);
+  });
+
+  // The review evidence pipeline's ONE switch. `analysisEnabled` is what every
+  // WP3 phase in `pr-review.yaml` gates on (`skip_if: "analysisEnabled != true"`),
+  // and it comes from the ARM's overlay `config.yaml`, never from gold — so this
+  // pair of assertions IS the two-arm comparison in miniature.
+  it("the arm's review policy switches the evidence pipeline on, and its absence leaves it off", () => {
+    // baseline/config.yaml: a `review:` block with no `analysis` — the pipeline
+    // stays off, with no per-case special-casing.
+    const off = prContextPatch({ ...args, review: { postsCheck: true } });
+    expect(off.analysisEnabled).toBeUndefined();
+    expect(off.prBody).toBeUndefined();
+
+    // wp3/config.yaml: the same block plus `analysis.enabled`.
+    const on = prContextPatch({
+      ...args,
+      review: { postsCheck: true, analysis: { enabled: true, maxObligations: 40, surveyPasses: 6 } },
+    });
+    expect(on.analysisEnabled).toBe("true");
+    expect(on.prBody).toBe(args.body);
+
+    // No arm policy at all is byte-identical to a policy that names no analysis.
+    expect(prContextPatch(args).analysisEnabled).toBeUndefined();
+  });
+
+  it("the arm wins over a case's own review seed — gold can never flip an arm", () => {
+    const ctx = prContextPatch({
+      ...args,
+      seed: { review: { analysis: { enabled: true } as never } },
+      review: { analysis: { enabled: false } },
+    });
+    expect(ctx.analysisEnabled).toBeUndefined();
   });
 });
 

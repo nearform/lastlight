@@ -248,8 +248,33 @@ export function buildPrState(args: {
   };
 }
 
-/** The effective policy blocks for a case: shipped defaults under its overrides. */
-export function prPolicy(seed?: PrStateSeed): {
+/**
+ * A `review:` override as an ARM declares it — an overlay's `config.yaml` block,
+ * which names only the keys it changes (and, inside `analysis`, only the leaves
+ * it changes). `Partial<ReviewConfig>` is shallow, so `analysis` is widened here
+ * rather than requiring a whole `ReviewAnalysisConfig`.
+ */
+export type ReviewOverride = Partial<Omit<ReviewConfig, "analysis">> & {
+  analysis?: Partial<ReviewConfig["analysis"]>;
+};
+
+/**
+ * The effective policy blocks for a case: shipped defaults under its overrides.
+ *
+ * Two override layers for `review`, applied in that order:
+ *   1. the case's `pr_state.review` (gold), then
+ *   2. the ARM's `review:` (its overlay `config.yaml`), which wins on the keys
+ *      it names.
+ *
+ * The arm goes last because it is the axis under measurement: an overlay that
+ * says `analysis.enabled: true` must produce a pipeline-on run for every case in
+ * the tier, and a baseline overlay that says nothing about `analysis` must leave
+ * whatever the case declared alone. A gold file can therefore never flip an arm.
+ */
+export function prPolicy(
+  seed?: PrStateSeed,
+  armReview?: ReviewOverride,
+): {
   fix: FixConfig;
   dependencies: DependenciesConfig;
   review: ReviewConfig;
@@ -261,10 +286,15 @@ export function prPolicy(seed?: PrStateSeed): {
     review: {
       ...reviewDefaults,
       ...(seed?.review ?? {}),
+      ...(armReview ?? {}),
       // A one-level spread would drop `maxSpecObligations` the moment a case
       // seeded `{ analysis: { enabled: true } }`, so the nested block merges
       // leaf-by-leaf.
-      analysis: { ...reviewDefaults.analysis, ...(seed?.review?.analysis ?? {}) },
+      analysis: {
+        ...reviewDefaults.analysis,
+        ...(seed?.review?.analysis ?? {}),
+        ...(armReview?.analysis ?? {}),
+      },
     },
   };
 }
@@ -286,9 +316,16 @@ export function prContextPatch(args: {
   body: string;
   branch: string;
   seed?: PrStateSeed;
+  /**
+   * The ARM's `review:` policy (its overlay `config.yaml` block). This is how
+   * `review.analysis.enabled` reaches a run — and therefore how core's
+   * `specContext` comes to project `analysisEnabled`, the one key the review
+   * evidence pipeline's phases gate on. See {@link prPolicy} for the precedence.
+   */
+  review?: ReviewOverride;
 }): Record<string, unknown> {
   const state = buildPrState(args);
-  const { fix, dependencies, review } = prPolicy(args.seed);
+  const { fix, dependencies, review } = prPolicy(args.seed, args.review);
   return {
     // `review` is passed but deliberately NOT seeded top-level the way `fix` and
     // `dependencies` are: `build.yaml` already emits `output_var: review`, and a

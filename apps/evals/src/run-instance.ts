@@ -40,7 +40,7 @@ import { seedWorkspace, seedWorkspaceFromGit, seedWorkspacePrReview, prFilesFrom
 import { collectMetrics, drainSessions, readSessionLog, listSessionFiles, concatJsonl } from "./metrics.js";
 import { modelCost } from "./env.js";
 import { gradeBehavioral, gradeExecution, gradeTriage, gradeReview, gradeMarkers } from "./grade.js";
-import { prContextPatch } from "./pr-context.js";
+import { prContextPatch, type ReviewOverride } from "./pr-context.js";
 
 export interface RunInstanceOptions {
   /**
@@ -352,13 +352,26 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     // list here — the same fact core derives `prScopedWorkflows()` from, so an
     // overlay's forked fix workflow is covered without a change to this file.
     //
-    // `pr-review` is deliberately EXCLUDED. It is a shipped, judge-scored tier
-    // whose numbers are compared across runs and against Martian's leaderboard;
-    // enriching its context is a real improvement to make, but making it as a
-    // side effect here would silently move every historical score. Tracked as a
-    // follow-up, not smuggled in.
-    const wantsPrContext =
-      !isPrReview && ((def as { pr_scoped?: boolean }).pr_scoped === true || !!inst.pr_state);
+    // `pr-review` USED TO BE excluded here, and the exclusion was about scores,
+    // not about correctness: pr-review is judge-scored and its numbers are
+    // compared across runs and against Martian's leaderboard, so enriching its
+    // context would move every historical figure as a side effect of a change
+    // that was not about them.
+    //
+    // The exclusion was LIFTED DELIBERATELY on 2026-08-22. It had made the
+    // review evidence pipeline unmeasurable on the only tier its gates are read
+    // on: with no `prContextPatch`, core's `renderContext` never runs, the
+    // context never gets `analysisEnabled`, and every WP3 phase in
+    // `pr-review.yaml` matches `skip_if: "analysisEnabled != true"` and skips.
+    // WP0's `{{specObligations}}` was unmeasurable there for the same reason.
+    // The choice was between a pipeline that cannot be measured and a baseline
+    // that has to be re-run; the baseline is being re-run.
+    //
+    // THEREFORE: every pr-review number produced BEFORE 2026-08-22 was measured
+    // on a different template context and must NOT be compared across that
+    // boundary — not in `diff-runs.ts`, not against `2026-08-20_074355`, not
+    // against the leaderboard entry that run backed. Re-baseline instead.
+    const wantsPrContext = (def as { pr_scoped?: boolean }).pr_scoped === true || !!inst.pr_state;
     if (wantsPrContext) {
       Object.assign(
         ctx,
@@ -369,6 +382,11 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
           body: inst.pr?.body ?? inst.issue?.body ?? inst.problem_statement,
           branch,
           seed: inst.pr_state,
+          // The arm's own `review:` policy — the overlay's, never gold's. This
+          // is the seam that turns the evidence pipeline on for the `wp3` arm
+          // and leaves it off for `baseline`, with no per-case special-casing:
+          // `baseline/config.yaml` simply declares no `analysis` block.
+          review: opts.arm.review as ReviewOverride | undefined,
         }),
       );
     }

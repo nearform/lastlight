@@ -407,7 +407,11 @@ async function runEval(): Promise<number> {
       : compare
         ? compareModels().map((m) => ({ id: m.id, family: m.envKey ?? m.provider ?? "default" }))
         : evalModels().map((id) => ({ id, family: "default" }));
-    arms = entries.map((e) => modelsArm(e.id, e.family));
+    // The overlay goes in even though the model is forced: it also carries the
+    // arm's `review:` policy (`review.analysis.enabled` — the review evidence
+    // pipeline switch), which is a deployment fact a `--model` flag says nothing
+    // about. Same overlay `bootstrapAssets` already wired above.
+    arms = entries.map((e) => modelsArm(e.id, e.family, overlayDir));
   }
   if (!arms.length) {
     p.log.error(

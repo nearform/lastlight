@@ -86,6 +86,34 @@ export function loadMergedConfig(builtInRoot: string, overlayDir?: string): Merg
   return { models, variants };
 }
 
+/**
+ * The overlay's `review:` block — the arm's REVIEW POLICY, not its model map.
+ *
+ * `review.analysis.enabled` is what turns the review evidence pipeline on
+ * (core's `specContext` projects it to `analysisEnabled`, which every WP3 phase
+ * in `pr-review.yaml` gates on with `skip_if: "analysisEnabled != true"`). It
+ * therefore belongs to the ARM — the deployment config under test — exactly
+ * like `models`/`variants`, and NOT to the gold dataset: `instances.json` is the
+ * human-signed-off answer key, and a policy switch living there would make the
+ * two arms differ by an edit to gold rather than by an overlay.
+ *
+ * Only the overlay is read, deliberately — core's `config/default.yaml` is NOT
+ * merged in here the way {@link loadMergedConfig} merges it, because the base
+ * this override lands on is core's own `defaultReviewConfig()` (see
+ * `pr-context.ts`), which is the same set of defaults `default.yaml` documents.
+ * Reading both would be two copies of one default, and the YAML copy would win.
+ *
+ * @returns the raw block (shape-checked only as "a mapping"), or undefined when
+ *   the overlay declares none — which must stay indistinguishable from having no
+ *   overlay at all, so the baseline arm runs the shipped two-phase review.
+ */
+export function loadOverlayReview(overlayDir?: string): Record<string, unknown> | undefined {
+  if (!overlayDir) return undefined;
+  const raw = readYamlMap(join(overlayDir, "config.yaml"));
+  const review = raw["review"];
+  return isPlainObject(review) && Object.keys(review).length ? review : undefined;
+}
+
 /** Walk a dotted key (e.g. `models.guardrails`) over a context object. */
 function walkKey(ctx: Record<string, unknown>, key: string): unknown {
   let cur: unknown = ctx;
