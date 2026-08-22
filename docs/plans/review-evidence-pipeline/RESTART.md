@@ -14,19 +14,18 @@ and the human sign-off list, [HANDOFF.md](HANDOFF.md).
 
 ## 0. Tree state — READ THIS FIRST
 
-**Nothing is committed.** Branch `feat/review-evidence-pipeline`, HEAD
-`1e06e24f`, **56 modified/untracked files** spanning five distinct pieces of
-work. They want to be separate commits, and the `pr-review` SKILL.md fix in
-particular deserves its own — it is a **production correctness fix** that has
-nothing to do with the speed work it arrived beside.
+**Everything through WP11 is committed.** Branch `feat/review-evidence-pipeline`,
+HEAD `1cbc1f9d`, working tree **clean**.
 
 ```bash
-git -C ~/work/lastlight status --porcelain | wc -l   # expect 56
-git -C ~/work/lastlight log --oneline -1             # expect 1e06e24f
+git -C ~/work/lastlight status --porcelain | wc -l   # expect 0
+git -C ~/work/lastlight log --oneline -1             # expect 1cbc1f9d
 ```
 
-If that count is 0, someone committed since; read the log instead of this
-section.
+If the tree is dirty, someone has worked since; read the log and `git status`
+instead of this section. Note that `facts`/`contracts` read head off the
+**filesystem** while the changed set comes from git, so a dirty tree silently
+invalidates §1's `selfcheck`.
 
 ## 1. Prove the tree is sane
 
@@ -41,6 +40,21 @@ deliberately **not** in CI — `actions/checkout` defaults to `fetch-depth: 1`, 
 `HEAD~1` does not exist on a runner. **Run it against a clean tree**:
 `facts`/`contracts` read head off the filesystem, so on a dirty tree the default
 `HEAD~1..HEAD` invocation compares old blobs to new files and is meaningless.
+
+**At `1cbc1f9d` the bare invocation FAILS, and it is not a defect.** WP11 is a
+large commit; it lands **48 contract deltas** against `MAX_CONTRACTS = 40`. That
+ceiling is calibrated on an ordinary commit (WP1 landed 19) and is an alarm on
+*extraction* going wrong, not a budget on commit size — the census is all added
+exports in `apps/evals/dashboard/src/lib/session.ts`, `format.ts` and
+`src/metrics.ts`, which is what that commit did. The two conditions that would
+mean something — a **phantom removal** and the **90 s wall clock** — both passed.
+Read the census before believing either verdict, and confirm against a
+normal-sized commit:
+
+```bash
+cd ~/work/lastlight/packages/code-facts
+npx tsx scripts/selfcheck.ts --repo ../.. --base 87bf7f13~1 --head 87bf7f13  # OK
+```
 
 **Environment the measurements assume.** `opengrep` 1.27.1 and `gitleaks` 8.21.2
 on `PATH`, or the whole `patterns` family is stamped `missing` and silently
@@ -106,6 +120,49 @@ result here that is solid.
 configuration. The detection floor is ≈0.24–0.28 micro-recall on a 25-finding
 gold set; a single gold moving is McNemar **p = 0.50**.
 
+## 2b. THE RE-BASELINE — the first result that clears the floor
+
+**Run 2026-08-22, 8 cases each, Haiku, `--concurrency 4`, on fixtures repaired
+the same evening (§4 traps 9 and 10). These are the comparators. Everything
+before them is void.**
+
+| | baseline `183835` | wp3 `184650` | Δ |
+|---|---|---|---|
+| **micro-recall, arm** | 0.000 | **0.320** | +0.320 |
+| train (5 cases, 13 gold) | 0.000 | **0.462** | +0.462 |
+| blind (3 cases, 12 gold) | 0.000 | **0.167** | +0.167 |
+| matched | 0 of 25 | **8 of 25** | **+8 new, −0 lost** |
+| posted | 1 | 47 | |
+| SNR | — | 0.205 | |
+| cost | $2.28 | $15.65 | **6.9×** |
+
+`diff-runs.ts` verdict: **KEEP** — train ↑ and held-out held. Arm-level McNemar
+**p = 0.008 two-sided**, and **0.320 is above the ≈0.24 detection floor** — the
+first time any rung of this plan has cleared it. Six of eight cases improved,
+none regressed.
+
+**`−0 lost` is the load-bearing number.** Locked decision 1's failure mode is
+precision up / recall down, reproduced four times (v2, BitsAI-CR, AACR, IRIS).
+It did not happen: every baseline hit survived and eight were added.
+
+**Three things this does NOT establish.**
+
+1. **The blind split is not significant on its own** — +2 of 12, McNemar
+   **p = 0.500**, a coin flip, and 0.167 is *below* the floor. The arm-level
+   significance is carried by train. The generality claim is still
+   [WP9](09-external-validation.md)'s and remains unmade.
+2. **n = 1 per arm.** Generation variance on this tier is *known to be large*:
+   across three runs of one case the union of matched gold was 3/3 and **no gold
+   was ever found twice**. A repeat could plausibly land anywhere near this.
+3. **6.9× the cost**, and 47 posted findings against 25 gold — an attention bill
+   nobody has yet decided is acceptable. SNR 0.205 is roughly one true finding
+   per four false ones.
+
+The baseline half is its own result: **the shipped reviewer posted one finding
+across eight PRs carrying 25 real defects**, on clean fixtures, and matched none
+of them. That is lower than the dead 0.040 comparator, and it is the honest floor
+this plan is measured against.
+
 ## 3. What to do next
 
 Ordered by what each buys, not by effort.
@@ -116,12 +173,10 @@ The instrument and the concurrency flag exist precisely so these are affordable
 now. An 8-case arm was ~4 hours serial; at `--concurrency 4` it is well under
 one, and per-case ~12 minutes rather than ~30.
 
-1. **Re-baseline both arms.** Too much changed today for any pre-2026-08-22
-   number to be a comparator — the conservation gate was passing falsely, the
-   spec axis was off-axis, `post-review`'s attention boundary was inert in run A,
-   and the diff-range instruction was corrupting the checkout. Run
-   `overlays/baseline` and `overlays/wp3`, 8 cases each. ~$4, well under an hour
-   for both. **This is the highest-value spend available.**
+1. ~~**Re-baseline both arms.**~~ **DONE 2026-08-22 — §2b.** The successor to it,
+   and now the highest-value spend available: **repeat the wp3 arm unchanged.**
+   One arm is not a measurement of an effect this size when the tier's variance
+   is what it is, and every decision below wants a stable denominator.
 2. **Repeat one case 3× unchanged** to size generation variance now that the
    funnel is honest. Across runs A/B/C the union of matched gold was 3/3 and **no
    gold was ever found twice** — variance is large and it is the thing that makes
@@ -269,6 +324,64 @@ first checking it for uncommitted work — and be deliberate about which repo yo
 are in.** Fixture data belongs in the **generator**, not hand-written into
 `instances.json`: the linked-issue work was lost the first time precisely because
 a regeneration silently dropped it.
+
+**9. The fixtures seeded the bot's own prior review, and it suppressed the
+review being measured.** *Found 2026-08-22, mid-arm.* `build-skillspro-*.mjs`
+deliberately seeded every review before ours — bot ones included, with the login
+remapped to `last-light[bot]` so that *"the skill's self-recognition behaves as in
+prod"*. It behaved exactly as designed and that was the defect: handed its own
+`CHANGES_REQUESTED` on `1680-r1`, the reviewer replied **"Review Complete: PR
+#1680 — Skipped … A `last-light[bot]` review already exists on this PR"**,
+restated the two `app.ts` findings it had been given, and posted nothing of its
+own. **The arm graded 0 posted across all 7 cases.** The bodies are worse than
+inert — `1680-r1`'s opens *"…all correct. The one problem is the `app.ts`
+change"*, asserting the correctness of the backfill script and the TTL change,
+which is where **3 of that case's 4 gold findings live**. An anti-hint.
+
+The shipped `add-case` never had this bug — `add-case.ts:397` states the rule
+(*"Anti-spoil: the review goes ONLY into `review_gold`. We never populate
+`pr.reviews`/`pr.review_comments` — the fake GitHub would serve those to the
+agent, handing it the answer"*). The bespoke generators overrode it. They now
+strip bot-authored reviews and comments and **assert it on the artifact before
+writing**, which also covers the cases a run preserves verbatim rather than
+rebuilds. Human prior review context is kept: a real reviewer sees it, and the
+multi-round cases need it.
+
+**The one sanctioned exception is `prreview__skillspro-1641`**, whose gold is
+empty and whose entire question — does a re-review account for the review it
+already posted? — is unaskable without the prior review. So the rule is not
+*never seed a bot review*, it is **never seed one over gold**.
+
+**The general form of the rule is a clock, not an author.** A fixture replays
+**the moment before we reviewed that head**, and everything after it is the
+future — most sharply the gold review itself, which by this tier's premise lands
+*after* ours. Two holes were closed on the way: the cutoff fell back to
+`Infinity` when the bot's review could not be located, which would have seeded
+every review on the PR *including the answer key*, and it now throws instead;
+and the inline comments were filtered by **review-id membership**, which is not a
+proxy for time — a threaded reply posted days later carries its own review id.
+Both generators now filter on `created_at` as well. **Verified against the live
+API**: all 32 seeded human reviews/comments across the three human-bearing cases
+predate their case's moment, so the strip did not need a regeneration.
+
+Residual, unfixed: `pr.body` and the `linked_issues` bodies are fetched **as they
+are today**, not as of the review moment. If a description was edited afterwards
+to describe the fix, that is hindsight the fixture hands over.
+
+**10. Four of eight cases told the agent the PR was closed.** Same session, same
+fixtures, independent cause. The generator mirrored the PR's state *today*
+(`view.state === "MERGED" ? "closed" : "open"`), so the four since-merged cases
+said `closed` — with no `merged` flag beside it, which reads as **abandoned**.
+`1680-r1`'s *first* stated reason for skipping was *"This PR is closed and was not
+merged, so it falls outside the scope of open PR reviews."* That gate sat in
+front of **13 of the tier's 25 gold findings**. A fixture replays **the moment
+the review happened**, and at that moment every one of these PRs was open; the
+two sibling generators had always hardcoded `open`. Now all three do, and the
+pre-write assertion covers it.
+
+> **Both of these produced a clean, green, fully-graded run.** `workflowSucceeded:
+> true`, `post-review` succeeded, a scorecard written. Nothing errored. The only
+> visible symptom was a number — 0 posted — that looks like a model result.
 
 ## 5. Running an arm
 

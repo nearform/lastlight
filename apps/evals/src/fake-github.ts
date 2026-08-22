@@ -347,6 +347,13 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
         user: { login: r.user },
         body: r.body,
         state: r.state ?? "COMMENTED",
+        // `serializeReview` has always emitted `commit_id`; this map was the one
+        // place that never populated it, so every seeded review went out SHA-less
+        // while every SUBMITTED one carried `b.commit_id ?? pr.head.sha`. A prior
+        // APPROVE with no SHA reads as an approval of the current head — see
+        // `ReviewSeed.commit_id`. Undefined stays undefined: inventing the head
+        // here is the bug, not the fix.
+        commit_id: r.commit_id,
         submitted_at: NOW,
         comments: [],
       })),

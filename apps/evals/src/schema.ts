@@ -39,6 +39,20 @@ export interface ReviewSeed {
   body: string;
   /** APPROVED / CHANGES_REQUESTED / COMMENTED. */
   state?: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED";
+  /**
+   * The commit this review was submitted against. **Set it whenever the review
+   * predates the PR's head** — without it the review reads as covering the head,
+   * which for a prior APPROVE means "I already approved exactly this tree".
+   *
+   * Measured 2026-08-22: the seed path dropped `commit_id` while the submit path
+   * set it, so every seeded review was served with `commit_id: undefined`.
+   * `prreview__skillspro-1641` seeds our APPROVE of the PREVIOUS head; served
+   * SHA-less, the agent concluded it had already approved this one and submitted
+   * **no review at all** — the case measures re-review behaviour and could not
+   * observe any. Left `undefined` when absent rather than defaulting to the head,
+   * because defaulting to the head is precisely the false claim.
+   */
+  commit_id?: string;
 }
 
 /** A prior inline review comment to seed (path + line + body). */
