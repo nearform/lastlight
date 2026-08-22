@@ -128,8 +128,13 @@ describe("the manifest (§D3)", () => {
 
   it("does NOT duplicate the npm-resolved engines — the lockfile is the stronger pin", () => {
     const raw = readFileSync(join(packageRoot(), "toolchain.json"), "utf8");
-    expect(raw).not.toMatch(/"ts-morph"\s*:/);
+    expect(raw).not.toMatch(/"typescript"\s*:/);
     expect(raw).not.toMatch(/"@ast-grep\/napi"\s*:/);
+    // Nor the per-platform compiler sidecar. It arrives as an npm
+    // `optionalDependency` resolved from the installed `typescript`, not from a
+    // release URL, so by this file's own rule it belongs in `bundledVersions()`
+    // + `compilerInfo()` and NOT in `binaries` with a fabricated `sources`.
+    expect(raw).not.toMatch(/@typescript\/typescript-/);
   });
 
   it("stamps the bundled engine versions read off the INSTALLED packages", () => {
@@ -138,7 +143,11 @@ describe("the manifest (§D3)", () => {
       version: string;
       dependencies: Record<string, string>;
     };
-    expect(bundled["ts-morph"]).toMatch(/^\d+\.\d+\.\d+/);
+    expect(bundled["typescript"]).toMatch(/^\d+\.\d+\.\d+/);
+    // EXACT, and the stamp must equal the pin: a range would let a consumer's
+    // install float the compiler underneath us, and a different compiler is a
+    // different type printer.
+    expect(bundled["typescript"]).toBe(pkg.dependencies.typescript);
     expect(bundled["@ast-grep/napi"]).toMatch(/^\d+\.\d+\.\d+/);
     expect(bundled["lastlight-code-facts"]).toBe(pkg.version);
   });

@@ -3,7 +3,7 @@
  *
  * **This exists so the tier-2 path runs through the SAME code a second language
  * would.** TS/JS is the only tier where a type-resolved reference set is also
- * available (ts-morph, tier 1), which makes it the only place a name-matched
+ * available (the tsgo checker, tier 1), which makes it the only place a name-matched
  * reference set can be *measured* rather than argued about: build both over the
  * same symbols and diff them. `scripts/name-match-gate.ts` is that measurement,
  * and it is the reason this file was written before any new grammar was added —

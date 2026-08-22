@@ -3,7 +3,7 @@
  *
  * **The subtraction is the insight.** For each changed constant:
  *
- *   A = every reference to the IDENTIFIER            (ts-morph)
+ *   A = every reference to the IDENTIFIER            (the tsgo checker)
  *   B = every occurrence of the literal VALUE        (ast-grep)
  *   report A, and report `B \ A` as HARD-CODED DUPLICATES — sites that use the
  *   value without going through the constant.
@@ -21,13 +21,19 @@
  * matches prose produces obligations about nothing, and an obligation about
  * nothing gets honestly discharged (00-evidence §3, v3 iteration 2).
  */
-import { Node as TsNode } from "ts-morph";
+import { NodeFlags, isIdentifier, isVariableStatement } from "typescript/unstable/ast";
+import type { Node, VariableStatement } from "typescript/unstable/ast";
 import type { ConstantFact, ConstantsPayload, DegradedEntry } from "./schema.js";
-import type { Programs } from "./project.js";
-import { DEFAULT_MAX_FILES, repoRelative, sourceFileAt, toProjects } from "./project.js";
 import type { ListingSource } from "./git.js";
-import { buildSyntacticIndex, scanChangedFiles, unquote } from "./syntactic.js";
+import {
+  buildSyntacticIndex,
+  scanChangedFiles,
+  unquote,
+  DEFAULT_MAX_SCANNED_FILES,
+} from "./syntactic.js";
 import type { ChangedFileIndex } from "./facts.js";
+import { lineOf, referenceNodes, repoRelativeOf } from "./tsgo-extractors.js";
+import type { EngineSnapshot } from "./tsgo.js";
 
 /**
  * The default `sides` partition. Deliberately boring and overridable
@@ -164,45 +170,56 @@ interface ConstantDeclaration {
   references: string[] | null;
 }
 
-/** Tier 1: declarations and references from the compiled project(s). */
-function declarationsFromProject(
-  repo: string,
-  project: Programs,
+/**
+ * Tier 1: declarations and set A from the compiled snapshot.
+ *
+ * The reference query runs in the program that OWNS the declaration
+ * (`EngineSnapshot.lookup` hands back the owner), which is the only program it
+ * could resolve in — and is what keeps `references` an under-claim rather than
+ * an over-claim in the extractor whose whole output is an absence claim.
+ *
+ * `const` is read off `declarationList.flags`, not off the text: `NodeFlags`
+ * carries `Let`/`Const`/`Using` on the LIST rather than on each declarator, and
+ * a `let` whose initializer happens to be a literal is not a constant.
+ */
+function declarationsFromSnapshot(
+  snapshot: EngineSnapshot,
   hunkIndex: Map<string, ChangedFileIndex>,
 ): ConstantDeclaration[] {
   const out: ConstantDeclaration[] = [];
   for (const [path, entry] of hunkIndex) {
-    const file = sourceFileAt(project, repo, path);
-    if (!file) continue;
-    for (const statement of file.getVariableStatements()) {
-      if (statement.getDeclarationKind() !== "const") continue;
-      for (const declaration of statement.getDeclarations()) {
-        const nameNode = declaration.getNameNode();
-        if (!TsNode.isIdentifier(nameNode)) continue;
-        const initializer = declaration.getInitializer();
+    const found = snapshot.lookup(path);
+    if (!found) continue;
+    const source = found.sourceFile;
+    const project = found.owner.project;
+    for (const statement of source.statements as unknown as Node[]) {
+      if (!isVariableStatement(statement)) continue;
+      const list = (statement as VariableStatement).declarationList;
+      if ((list.flags & NodeFlags.Const) === 0) continue;
+      for (const declaration of list.declarations) {
+        const nameNode = declaration.name as unknown as Node;
+        if (!isIdentifier(nameNode)) continue;
+        const initializer = (declaration as { initializer?: Node }).initializer;
         if (!initializer) continue;
         const literal = literalOf(initializer.getText());
         if (!literal) continue;
-        const line = declaration.getStartLineNumber();
-        if (!intersects(entry, declaration.getStartLineNumber(), declaration.getEndLineNumber())) {
-          continue;
-        }
+        const node = declaration as unknown as Node;
+        const line = lineOf(source, node.getStart());
+        if (!intersects(entry, line, lineOf(source, node.getEnd()))) continue;
+
         const references: string[] = [];
-        try {
-          if (TsNode.isReferenceFindable(nameNode)) {
-            for (const node of nameNode.findReferencesAsNodes()) {
-              const referencePath = repoRelative(repo, node.getSourceFile().getFilePath());
-              const referenceLine = node.getStartLineNumber();
-              if (referencePath === path && referenceLine === line) continue;
-              references.push(`${referencePath}:${referenceLine}`);
-            }
-          }
-        } catch {
-          // Same reasoning as `facts.findReferences` — one unkeyable node must
-          // not take the extractor down.
+        // `referenceNodes` already degrades one unkeyable declaration to an
+        // empty list rather than taking the extractor down.
+        for (const reference of referenceNodes(project, nameNode)) {
+          const file = reference.getSourceFile();
+          const referencePath = repoRelativeOf(snapshot.repo, file.fileName);
+          const referenceLine = lineOf(file, reference.getStart());
+          // The declaration's own name node is not a reference to itself.
+          if (referencePath === path && referenceLine === line) continue;
+          references.push(`${referencePath}:${referenceLine}`);
         }
         out.push({
-          name: declaration.getName(),
+          name: nameNode.getText(),
           path,
           line,
           value: literal.value,
@@ -279,11 +296,11 @@ export function literalOf(
 export interface ExtractConstantsOptions {
   repo: string;
   /**
-   * `null`/`[]` on tier 2 — ast-grep only, no reference set. On tier 1 it is
-   * ONE PROGRAM PER TSCONFIG the diff touches, and a declaration is read out of
-   * whichever program contains its file.
+   * `null` on tier 2 — ast-grep only, and therefore NO set A. On tier 1 it is
+   * the head snapshot, holding every tsconfig the diff touches, and a
+   * declaration is read out of whichever program owns its file.
    */
-  project: Programs;
+  snapshot: EngineSnapshot | null;
   hunkIndex: Map<string, ChangedFileIndex>;
   sides?: Record<string, string[]>;
   maxFiles?: number;
@@ -304,10 +321,9 @@ export interface ExtractConstantsResult {
 export function extractConstants(options: ExtractConstantsOptions): ExtractConstantsResult {
   const sides = options.sides ?? DEFAULT_SIDES;
   const degraded: DegradedEntry[] = [];
-  const declarations =
-    toProjects(options.project).length > 0
-      ? declarationsFromProject(options.repo, options.project, options.hunkIndex)
-      : declarationsFromAstGrep(options.repo, options.headSha ?? null, options.hunkIndex);
+  const declarations = options.snapshot
+    ? declarationsFromSnapshot(options.snapshot, options.hunkIndex)
+    : declarationsFromAstGrep(options.repo, options.headSha ?? null, options.hunkIndex);
 
   const values = new Map<string, "string" | "number" | "boolean">();
   for (const declaration of declarations) values.set(declaration.value, declaration.valueKind);
@@ -346,7 +362,7 @@ export function extractConstants(options: ExtractConstantsOptions): ExtractConst
     // arbitrary prefix of the repository is not a weak claim, it is an unsound
     // one. Before this entry existed the document looked identical to a
     // complete scan.
-    const ceiling = options.maxFiles ?? DEFAULT_MAX_FILES;
+    const ceiling = options.maxFiles ?? DEFAULT_MAX_SCANNED_FILES;
     degraded.push({
       extractor: "constants",
       reason: `the literal scan stopped at the ${ceiling}-file ceiling (--max-files): ${scan.filesEligible} file(s) were eligible and ${scan.filesScanned} were read — set B covers a PREFIX of the repository, not the repository, so \`hardCodedDuplicates\` is incomplete and no "the value appears nowhere else" reading is available from this document`,

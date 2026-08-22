@@ -82,14 +82,27 @@ describe("the informational commands", () => {
     expect(runCli(["--version"], io)).toBe(EXIT_OK);
     const printed = JSON.parse(out.join("\n")) as {
       "lastlight-code-facts": string;
-      compiler: { version: string; modulePath: string };
+      compiler: {
+        version: string;
+        modulePath: string;
+        platformPackage: string | null;
+        executable: string | null;
+      };
       toolchain: { manifest: number; binaries: Record<string, unknown> };
     };
     expect(printed["lastlight-code-facts"]).toMatch(/^\d+\.\d+\.\d+/);
     expect(printed.compiler.version).toMatch(/^\d+\.\d+/);
     // The path is the load-bearing half: the compiler must come from THIS
     // package's tree, never from the repo under review (`compiler-isolation`).
-    expect(printed.compiler.modulePath).toMatch(/ts-morph|@ts-morph[/\\]common/);
+    expect(printed.compiler.modulePath).toMatch(/node_modules[/\\]typescript[/\\]package\.json$/);
+    // And the per-platform sidecar, because only the matching one installs: a
+    // `typescript` that imports with no executable behind it is the shape a
+    // wrong-platform image produces, and "which compiler produced this?" has to
+    // stay answerable from the stamp alone.
+    expect(printed.compiler.platformPackage).toMatch(
+      new RegExp(`typescript-${process.platform}-${process.arch}$`),
+    );
+    expect(printed.compiler.executable).toMatch(/[/\\](?:tsc|tsgo)(?:\.exe)?$/);
     expect(printed.toolchain.manifest).toBe(2);
     expect(Object.keys(printed.toolchain.binaries).length).toBeGreaterThan(0);
   });

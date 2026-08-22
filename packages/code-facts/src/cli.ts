@@ -20,12 +20,10 @@ import { runExtractor, runWrapped, writeDocument } from "./run.js";
 import { DOCUMENT_SCHEMAS, type ExtractorName } from "./schema.js";
 import { loadManifest, resolveFactsBin, toolchainStamp } from "./toolchain.js";
 import { compilerInfo } from "./project.js";
-import { DEFAULT_RESOLUTION_TIER, isResolutionTier, RESOLUTION_TIERS } from "./resolution.js";
 import { packageRoot } from "./toolchain.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { LoggerPort } from "./log.js";
-import type { ResolutionTier } from "./resolution.js";
 
 const EXTRACTORS = Object.keys(DOCUMENT_SCHEMAS) as ExtractorName[];
 
@@ -49,21 +47,16 @@ Options:
   --base <ref>        base ref                           (required)
   --head <ref>        head ref                           (default: HEAD)
   --out <file>        write JSON here                    (default: stdout)
-  --tsconfig <file>   force a tsconfig instead of discovering one
-  --max-files <n>     total program-size budget before groups are narrowed
-  --max-projects <n>  how many programs one diff may open (see loadProject)
+  --tsconfig <file>   force ONE tsconfig for the whole diff. It also disables
+                      the orphan fallback — a caller that named a program did
+                      not ask for a second to be opened around it.
+  --max-files <n>     ceiling on how many files a repository-wide SCAN reads:
+                      set B's literal sweep and the tier-2 name index. NOT a
+                      compiler budget — the tsgo snapshot holds every tsconfig
+                      the diff touches and has none. Hitting it is always named
+                      in degraded[], because an absence claim over a truncated
+                      file set is unsound rather than merely weak.
   --max-references <n>  cap reference sites recorded per symbol (0 = unbounded)
-  --resolution <tier>   how much of node_modules the type-checker may follow.
-                        "changed" is the DEFAULT: only the packages the changed
-                        files import, unioned across base and head. Measured at
-                        1.0-2.2GB against "full"'s 3.5-4.4GB on an installed
-                        tree, for ZERO fidelity loss across 499 contract
-                        entries — lossless by construction, since a contract
-                        signature can only name types its own file imports.
-                        "full" is the escape hatch (every specifier resolves);
-                        "none" the emergency brake, which DOES cost fidelity —
-                        an unresolved type renders "any" on BOTH sides, which
-                        suppresses a phantom delta and MASKS a real one.
   --sides <spec>      constants side partition, e.g. client=web/,server=api/
   --rules <file>      opengrep ruleset (default: the local one in rules/)
   --report <file>     coverage artifact instead of the usual candidates
@@ -124,18 +117,6 @@ function stringFlag(value: string | boolean | undefined): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-/**
- * An unknown tier is REFUSED, never silently folded back to the default.
- * `--resolution non` quietly meaning `full` would report today's memory profile
- * under a flag the operator believes changed it — the same class of lie as a
- * gate that exits 0 while seeing nothing.
- */
-function resolutionFlag(value: string | boolean | undefined): ResolutionTier | null {
-  const raw = stringFlag(value);
-  if (raw === undefined) return DEFAULT_RESOLUTION_TIER;
-  return isResolutionTier(raw) ? raw : null;
-}
-
 function selfVersion(): string {
   try {
     const pkg = JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")) as {
@@ -165,7 +146,7 @@ export function runCli(
       JSON.stringify(
         {
           "lastlight-code-facts": selfVersion(),
-          compiler: { version: compiler.version, modulePath: compiler.modulePath },
+          compiler,
           toolchain: toolchainStamp(Object.keys(loadManifest().binaries)),
           factsBin: resolveFactsBin(),
         },
@@ -203,12 +184,6 @@ export function runCli(
     return EXIT_UNAVAILABLE;
   }
 
-  const resolution = resolutionFlag(flags.resolution);
-  if (resolution === null) {
-    io.err(`--resolution must be one of: ${RESOLUTION_TIERS.join(", ")}`);
-    return EXIT_UNAVAILABLE;
-  }
-
   const options = {
     extractor: command as ExtractorName,
     repo: stringFlag(flags.repo) ?? process.cwd(),
@@ -216,9 +191,7 @@ export function runCli(
     head: stringFlag(flags.head) ?? "HEAD",
     tsConfigPath: stringFlag(flags.tsconfig),
     maxFiles: numberFlag(flags["max-files"]),
-    maxProjects: numberFlag(flags["max-projects"]),
     maxReferences: numberFlag(flags["max-references"]),
-    resolution,
     sides: stringFlag(flags.sides),
     rulesPath: stringFlag(flags.rules),
     reportPath: stringFlag(flags.report),

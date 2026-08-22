@@ -10,9 +10,13 @@
  * branch's tip — see `mergeBase`. That is the range GitHub's own "Files
  * changed" tab shows, and it is the only one that describes the PR.
  *
- * The base tree comes from `git worktree add --detach` into a temp dir. WP1 is
- * explicit that the agent's checkout must not be mutated — a `git checkout` in
- * the review workspace would race the agent's own reads, and the workspace is
+ * **`withWorktree` no longer has a runtime caller on the TS/JS path.**
+ * `contracts` was the only one; its base side is a virtual-filesystem overlay
+ * over the same tree now (`tsgo.openSnapshot`). The function stays — it is
+ * public API, four test files exercise it, and it is still the only mechanism
+ * here for materialising an arbitrary commit. WP1's rule stands whoever calls
+ * it: the agent's checkout must never be mutated, because a `git checkout` in
+ * the review workspace would race the agent's own reads and the workspace is
  * reused across runs (`PER_TARGET_REUSE_WORKFLOWS`).
  *
  * **Git also enumerates the files this package scans** — see `listFiles`. That
@@ -335,8 +339,9 @@ export interface ListFilesOptions {
   /**
    * The commit whose tree IS the file set, or `null` to list the working tree
    * (`git ls-files`, tracked plus untracked-but-not-ignored). A working-tree
-   * listing is what a consumer that then reads files OFF DISK wants — the
-   * ts-morph glob fallback is the only one.
+   * listing is what a consumer that then reads files OFF DISK wants. Nothing
+   * on the TS/JS path is one any more — the compiler reads the working tree
+   * itself — so every caller here passes a commit.
    */
   ref: string | null;
   /** Path filter: the extension test plus the residual denylist. */
@@ -605,9 +610,12 @@ export interface WorktreeOptions {
    * to true** — see `mirrorNodeModules` for why a comparison without it is not
    * a comparison.
    *
-   * `false` exists so the mirror's value can be a NUMBER in a test rather than
-   * a paragraph in a comment: `tests/noise-floor.test.ts` runs one commit both
-   * ways and asserts the un-mirrored side is worse by a lower bound.
+   * `false` existed so the mirror's value could be a NUMBER rather than a
+   * paragraph: `tests/noise-floor.test.ts` ran one commit both ways and pinned
+   * the un-mirrored side at 17 phantom deltas against the mirrored side's 1.
+   * That measurement is no longer reachable — `contracts` has one tree and one
+   * `node_modules` — and the case was re-pointed at the overlay instead. The
+   * option stays for `tests/git.test.ts`, which tests the mirror itself.
    */
   mirrorNodeModules?: boolean;
 }
@@ -618,6 +626,17 @@ export interface WorktreeOptions {
  * `--detach` keeps it off any branch, and `worktree remove --force` in the
  * `finally` keeps the target repo's `.git/worktrees` from accumulating stale
  * entries across the ~40 workspaces the review sweep keeps warm.
+ *
+ * **NO RUNTIME CALLER ON THE TS/JS PATH since the TS 7 migration**
+ * (`docs/plans/fact-engine/02-migration.md`). `contracts` was the only one: its
+ * base side is now a virtual-filesystem OVERLAY over the same tree
+ * (`tsgo.openSnapshot`), which is faster, cannot disagree with head about the
+ * project layout, and cannot disagree with it about `node_modules` — two of the
+ * three causes of WP1's 227 phantom deltas, removed by construction.
+ *
+ * Kept rather than deleted because it is public API, it is the only mechanism
+ * here for materialising an arbitrary commit, and four test files exercise it
+ * and `mirrorNodeModules` directly. Re-decide it if the last caller goes.
  */
 export function withWorktree<T>(
   repo: string,
@@ -658,12 +677,18 @@ export function withWorktree<T>(
  * an unresolved module actually shows: `toExt(id)` is `Ext` when the module
  * resolves and `any` when it does not.
  *
- * Still load-bearing at that smaller surface, and `tests/noise-floor.test.ts`
- * is where it becomes a number: on `makeMonorepoFixture()` the un-mirrored run
- * yields 17 deltas against the mirrored run's 1, and the phantom's `before` is
- * literally `any`. Phantom deltas are not merely noisy — IRIS measured a
- * half-mechanism seed as ACTIVELY HARMFUL (−3, worse than no seed), and *"this
- * PR removed the export `foo`"* when it did nothing of the kind is that shape.
+ * It WAS load-bearing at that smaller surface: on `makeMonorepoFixture()` the
+ * un-mirrored run yielded 17 deltas against the mirrored run's 1, with the
+ * phantom's `before` literally `any`. Phantom deltas are not merely noisy —
+ * IRIS measured a half-mechanism seed as ACTIVELY HARMFUL (−3, worse than no
+ * seed), and *"this PR removed the export `foo`"* when it did nothing of the
+ * kind is that shape.
+ *
+ * **It is no longer on any runtime path.** `contracts` compares two views of
+ * ONE tree, so there is a single `node_modules` and the two sides cannot
+ * disagree about it — the cause is gone rather than mitigated. Kept because
+ * `withWorktree` is public API and `tests/git.test.ts` covers this option
+ * directly.
  *
  * Symlinks, not copies: a pnpm workspace's `node_modules` is hundreds of MB and
  * the base tree is read-only to us. A PR that changes dependencies makes the

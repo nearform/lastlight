@@ -110,9 +110,35 @@ describe("facts — the impact cone", () => {
  * service threw on used to report `[]`, so "this is not an interface" and "this
  * exported interface has no implementers anywhere" were the same JSON — and
  * only the second is worth an obligation.
+ *
+ * ── REWRITTEN 2026-08-22, AND THE REWRITE IS THE RECORD OF A CAPABILITY LOSS ──
+ *
+ * The TS 7 compiler API has **no implementations query at all**
+ * (`docs/plans/fact-engine/`). ts-morph's `getImplementations()` was a language
+ * -service call with no counterpart on `Checker`, and nothing in this migration
+ * replaced it: closing the gap needs an LSP `textDocument/implementation` round
+ * trip per symbol, which has not been built.
+ *
+ * So the third state — a POPULATED array — is currently unreachable, and these
+ * cases assert what is actually true rather than being deleted:
+ *
+ *   - it is `null` on the kinds the question applies to, **never `[]`**. That is
+ *     the whole point of the distinction and the one thing that must not slip:
+ *     `[]` here would assert "this exported interface has no implementers
+ *     anywhere", an absence claim nobody verified, from the extractor whose
+ *     output is absence claims;
+ *   - it is `null` on the kinds it does not apply to, exactly as before;
+ *   - and the loss is NAMED in `degraded[]`, scoped to the runs where there was
+ *     something to answer — a diff of plain functions was answered `null` by
+ *     both engines and must not degrade for it.
+ *
+ * When an implementations provider lands, the `toBeNull()`s below become the
+ * populated/empty pair the old fixture pinned (`makeSymbolKindsFixture` still
+ * carries two implementers of `Store` and an abstract `Base` nothing extends,
+ * for exactly that day).
  */
 describe("facts — implementations distinguishes `nobody looked` from `none`", () => {
-  it("is null for a kind the question does not apply to, and an array for one it does", () => {
+  it("is null for a kind the question does not apply to — and STILL null, never [], for one it does", () => {
     const fixture = makeContractFixture();
     try {
       const document = facts(fixture);
@@ -125,10 +151,40 @@ describe("facts — implementations distinguishes `nobody looked` from `none`", 
       );
       expect(asked.length, "the fixture must contain a kind that IS asked").toBeGreaterThan(0);
       for (const symbol of asked) {
-        expect(Array.isArray(symbol.implementations), symbol.name).toBe(true);
+        expect(
+          symbol.implementations,
+          `${symbol.name}: no engine looked, so \`[]\` would be a fabricated absence claim`,
+        ).toBeNull();
       }
     } finally {
       fixture.cleanup();
+    }
+  });
+
+  it("names the missing query in degraded[] — and does NOT on a diff with nothing to answer", () => {
+    const withKinds = makeContractFixture();
+    try {
+      const document = facts(withKinds);
+      const entry = document.degraded.find((d) => /no implementations query/.test(d.reason));
+      expect(entry, "a capability this engine does not have must not be silent").toBeDefined();
+      expect(entry?.extractor).toBe("facts");
+      expect(entry?.reason).toMatch(/capability LOSS/);
+    } finally {
+      withKinds.cleanup();
+    }
+
+    // The pin without which the assertion above is vacuous: an entry populated
+    // on EVERY run has stopped carrying signal. `makeConstantFixture` has no
+    // interface, class or abstract member in the diff — the previous engine
+    // answered `null` there too, so there is nothing lost and nothing to say.
+    const plain = makeConstantFixture();
+    try {
+      const document = facts(plain);
+      expect(document.symbols.length).toBeGreaterThan(0);
+      expect(document.degraded.filter((d) => /no implementations query/.test(d.reason))).toEqual([]);
+      expect(document.coverage).toBe("full");
+    } finally {
+      plain.cleanup();
     }
   });
 });
@@ -157,26 +213,39 @@ describe("facts — the whole kind table, on one commit", () => {
 
   const symbol = (name: string) => document.symbols.find((s) => s.name === name);
 
-  it("names both implementers of a changed interface, and neither is the interface itself", () => {
+  /**
+   * The fixture still carries the shape — `Store` implemented in `src/db.ts:3`
+   * and `src/mem.ts:3`, `Store.get` at `:4` in both, and an abstract `Base`
+   * nothing extends — and the answer is `null` for all four, because the TS 7
+   * API has no implementations query.
+   *
+   * KEPT rather than deleted, with the expected answer written down beside the
+   * actual one: this is the case that will go green again the day an LSP
+   * `textDocument/implementation` provider lands, and deleting it would delete
+   * the only executable statement of what "correct" looks like.
+   */
+  it("does NOT answer implementations — the query does not exist on this engine", () => {
     const store = symbol("Store");
     expect(store?.kind).toBe("interface");
-    expect(store?.implementations).toEqual(["src/db.ts:3", "src/mem.ts:3"]);
-    // Both implementers are OUTSIDE the diff — which is the point of the field.
+    // With a provider: ["src/db.ts:3", "src/mem.ts:3"] — both OUTSIDE the diff,
+    // which is the point of the field.
+    expect(store?.implementations).toBeNull();
     expect(document.files.map((f) => f.path)).not.toContain("src/mem.ts");
-  });
 
-  it("resolves implementations of an interface METHOD down to the method line", () => {
     expect(symbol("Store.get")?.kind).toBe("interface-method");
-    expect(symbol("Store.get")?.implementations).toEqual(["src/db.ts:4", "src/mem.ts:4"]);
+    // With a provider: ["src/db.ts:4", "src/mem.ts:4"].
+    expect(symbol("Store.get")?.implementations).toBeNull();
   });
 
-  it("keeps `[]` meaning `looked and found none` beside those populated arrays", () => {
-    // `Base` is an exported abstract class nothing extends. That is a FACT worth
-    // an obligation, and it is only legible next to the populated case above.
+  it("keeps `null` and never `[]` for an abstract class nothing extends", () => {
+    // `Base` is an exported abstract class nothing extends. Under an engine that
+    // LOOKED that is `[]` and a fact worth an obligation; under this one it is
+    // indistinguishable from every other unasked symbol, and saying `[]` would
+    // manufacture the fact rather than find it.
     expect(symbol("Base")?.kind).toBe("class");
-    expect(symbol("Base")?.implementations).toEqual([]);
+    expect(symbol("Base")?.implementations).toBeNull();
     expect(symbol("Base.run")?.kind).toBe("abstract-method");
-    expect(symbol("Base.run")?.implementations).toEqual([]);
+    expect(symbol("Base.run")?.implementations).toBeNull();
   });
 
   it("emits every declaration kind the diff touched", () => {

@@ -5,12 +5,15 @@ API, behind `--engine tsgo`, and run it against the frozen baseline. Nothing
 else changes; nothing is deleted; `ts-morph` remains the default for the
 duration.
 
-> **Tree state, 2026-08-22.** The seam itself has landed:
-> `packages/code-facts/src/tsgo.ts`, 619 lines, **untracked**. What does *not*
-> exist yet: `tests/tsgo.test.ts` (referenced from that file's header), the
-> `--engine tsgo` flag in `src/cli.ts`, and any extractor rewired to use
-> `openSnapshot`. So the spike below starts at "wire `facts` and `contracts`
-> through the existing seam", not at zero.
+> **Tree state, 2026-08-22 — revised later the same day.** Everything the first
+> draft of this block listed as missing now exists: `src/tsgo.ts` is committed
+> (711 lines, `7602ef47`), `tests/tsgo.test.ts` and `tests/tsgo-port.test.ts`
+> are written, `--engine tsgo` is in `src/cli.ts` (default `ts-morph`), and
+> `facts` + `contracts` run through `openSnapshot` via `src/tsgo-extractors.ts`
+> (1,231 lines, untracked). So the spike starts at **"read the gates"**, not at
+> "wire the seam". One head-to-head has been run and is recorded in
+> [README.md](README.md) → "End to end, on the real extractors"; the gates below
+> are otherwise unread.
 
 **Why `facts` + `contracts` and nothing else.** They are the two extractors that
 need a checker at all. `constants` needs only reference set A (which is
@@ -73,7 +76,7 @@ to exist on 2026-08-22; the command shown is the one to run.
 | **G1** | **no entity loss** | `apps/evals/scripts/facts-corpus.ts` — run it, then `--compare <new> --against 2026-08-21_140115-c8530b83` | the `facts.symbols` / `contracts` / `constants` **entity sets do not shrink**. Read the sets, not just the totals |
 | **G2** | **no phantom deltas** | `pnpm --filter lastlight-code-facts selfcheck` | **exit 0**, and the phantom-capable delta count no higher than today's. This is the gate that matters most |
 | **G3** | **the sensitivity floors still mean something** | `packages/code-facts/tests/noise-floor.test.ts` | all six assertions green — **and a recorded decision on cause 2**, which this change may make vacuous. See below |
-| **G4** | **memory** | corpus peak RSS, from the new run's `rollup.peakRssMb` | **max < 500 MB** (baseline max **2987.8 MB**, p90 1152.1, p50 264.4). Report all three percentiles, not just the max |
+| ~~**G4**~~ | ~~**memory**~~ — **WITHDRAWN as a gate 2026-08-22** | corpus peak RSS, still worth REPORTING (`rollup.peakRssMb`, all three percentiles) | **Not a pass/fail condition.** The operator raised `SANDBOX_MEMORY_LIMIT` to **8g** the same day, so there is no longer a ceiling for this to be measured against. Recording it as a gate would let a memory win stand in for a fidelity win, which is the wrong trade for this package: the reason to make the swap is that it deletes mechanisms and is 3-10x faster, not that it is smaller |
 | **G5** | **evidence coverage does not fall** | `apps/evals/scripts/facts-evidence.ts --run <new> --baseline 2026-08-21_140115-c8530b83` | **EC-strict does not fall.** Baseline: 14/99 = **14.1%** overall, 12/26 = **46.2%** on the TS/JS half; EC-loose 15/137 = 10.9%. Expected to *rise*, since monorepo tsconfig blindness is gone |
 | **G-impl** | **the `getImplementations` question, answered either way** | a standalone probe; `API.fromLSPConnection` + `textDocument/implementation` | **either** a working implementations query over a shared snapshot, **or** a written "no" plus `implementations: null` + a `degraded[]` entry. A measured *no* passes this gate |
 
@@ -124,6 +127,15 @@ It exits non-zero on a `removed` delta with no deletion or rename in the diff,
 on more than 40 contract deltas **that could be phantom**, or past 90 s. Expect
 ~30 of 31 analysable changed files analysed today.
 
+**Partial evidence, not the gate.** `scripts/engine-ab.mts` recomputes those
+three exit conditions in-script on `HEAD~1..HEAD` and both engines come back OK
+(13 contracts, 0 could-be-phantom, 0 removed). That is one commit and a
+reimplementation of the check — `pnpm --filter lastlight-code-facts selfcheck`
+itself, on `all`, is still unrun. **And it must be run on a CLEAN tree**: the
+same A/B showed the two engines' base views diverging on a dirty one (README's
+risks table), so a dirty-tree selfcheck measures the checkout as much as the
+engine.
+
 **Not in CI, deliberately** — `actions/checkout` defaults to `fetch-depth: 1`,
 so `HEAD~1` does not exist on a runner.
 
@@ -162,8 +174,19 @@ regression that brings it back.
 ### G4 — measure on **bare** trees, and say so
 
 The corpus runs on bare-mirror worktrees (`git worktree add --detach`, never a
-clone) with **no `node_modules`**, which is production's shape. The 500 MB
-target is against the baseline's bare 2987.8 MB max.
+clone) with **no `node_modules`**, which is production's shape. The baseline's
+bare max is 2987.8 MB. There is no target — this is a reported number.
+
+**Measure the CHILD, or measure nothing.** The tsgo compiler is a separate
+process, so `process.memoryUsage.rss()` — what `scripts/engine-bench.mjs`
+prints, and the source of the `79 MB` figure — counts the node client and none
+of the compiler. The instrument has to be `/usr/bin/time -l` (or an equivalent
+that includes children) around a real extractor run. The only child-inclusive
+numbers on record are the in-code ones in `src/run.ts` /
+`src/tsgo-extractors.ts`: **~600 MB per open snapshot plus ~200 MB of node**, on
+this repo, which is why `contracts` disposes the base view before opening the
+head one. Reporting a node-only figure as a peak would make this gate report the
+opposite of the truth.
 
 **An installed-tree number is a separate measurement and is currently
 unknown.** `--resolution changed` exists because the JS checker followed bare

@@ -41,7 +41,25 @@ import { join } from "node:path";
 import { parse } from "@ast-grep/napi";
 import { listFiles, readListedFiles, showFile, type ListingSource } from "./git.js";
 import type { ChangedPath, FileHunks } from "./git.js";
-import { isIgnoredPath, looksMinified, MAX_SCANNED_FILE_BYTES, DEFAULT_MAX_FILES } from "./project.js";
+import { isIgnoredPath, looksMinified, MAX_SCANNED_FILE_BYTES } from "./project.js";
+
+/**
+ * The ceiling on how many FILES a repository-wide scan will read — set B's
+ * literal sweep (`constants`) and this module's name index.
+ *
+ * It used to be `project.ts`'s `DEFAULT_MAX_FILES`, where it doubled as the
+ * ts-morph program budget. It is here now under a name that says which
+ * population it bounds, because the two were never the same number: the program
+ * budget bounded a compiler's heap and died with it
+ * (`docs/plans/fact-engine/02-migration.md`), while this one bounds blob reads
+ * and ast-grep parses, which the new engine does not touch at all.
+ *
+ * It is still exposed as `--max-files` and it is still the thing that makes an
+ * absence claim UNSOUND when it bites, which is why hitting it is a
+ * `degraded[]` entry naming the ceiling, the eligible count and the read count
+ * rather than a silent prefix.
+ */
+export const DEFAULT_MAX_SCANNED_FILES = 6000;
 import {
   asSyntaxNode,
   interestingKinds,
@@ -583,7 +601,7 @@ export function buildSyntacticIndex(options: BuildIndexOptions): SyntacticIndex 
     // `git ls-tree -l` hands us the size, so a 4 MB bundle is rejected without
     // being read at all — let alone charged against a slot real source needs.
     maxBytes: MAX_SCANNED_FILE_BYTES,
-    limit: options.maxFiles ?? DEFAULT_MAX_FILES,
+    limit: options.maxFiles ?? DEFAULT_MAX_SCANNED_FILES,
   });
 
   const wantedValues = [...(options.values?.keys() ?? [])];
@@ -810,7 +828,7 @@ export function extractFactsByName(
   if (index.truncated) {
     degraded.push({
       extractor: "facts",
-      reason: `the name index stopped at the ${options.maxFiles ?? DEFAULT_MAX_FILES}-file ceiling (--max-files): ${index.filesEligible} file(s) were eligible and ${index.filesScanned} were read, so every referenceCount below is a LOWER BOUND over a prefix of the repository`,
+      reason: `the name index stopped at the ${options.maxFiles ?? DEFAULT_MAX_SCANNED_FILES}-file ceiling (--max-files): ${index.filesEligible} file(s) were eligible and ${index.filesScanned} were read, so every referenceCount below is a LOWER BOUND over a prefix of the repository`,
     });
   }
   if (index.filesUnread + index.filesUnparsed > 0) {

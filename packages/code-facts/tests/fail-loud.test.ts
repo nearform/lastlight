@@ -127,7 +127,7 @@ describe("§D12 — the phase wrapper never fails the run", () => {
       expect(document.degraded[0].reason).toMatch(/analysis could not run/);
       expect(document.degraded[0].reason).toMatch(/it is not a clean result/);
       // Still a valid document — a consumer needs no second code path.
-      expect(document.version).toBe(1);
+      expect(document.version).toBe(2);
       expect(document.symbols).toEqual([]);
       // `2` since `source` became per-platform `sources` — the manifest schema
       // version, pinned as a literal on purpose so a change to the shape has to

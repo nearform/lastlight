@@ -72,9 +72,9 @@
  */
 import { relative, resolve } from "node:path";
 import { changedPaths, diffHunks, resolveDiffBase, resolveSha, withWorktree } from "../src/git.js";
-import { extractFacts } from "../src/facts.js";
 import { buildSyntacticIndex, extractFactsByName } from "../src/syntactic.js";
-import { loadProject, repoRelative } from "../src/project.js";
+import { extractFactsTsgo, tsgoViews } from "../src/tsgo-extractors.js";
+import { repoRelative } from "../src/project.js";
 import { noopLogger } from "../src/log.js";
 import type { SymbolFact } from "../src/schema.js";
 
@@ -347,46 +347,61 @@ function measure(repo: string, args: Args): Report | null {
   const hunks = diffHunks(repo, diffBase.sha, headSha);
 
   // ── engine A: the ground truth ───────────────────────────────────────────
-  const loaded = loadProject({
-    repo,
-    changedPaths: changed.map((c) => c.path),
-    maxFiles: args.maxFiles,
-    log: noopLogger,
-  });
-  if (loaded.tier !== 1 || loaded.projects.length === 0) {
+  const snapshot = tsgoViews({ repo, baseSha: diffBase.sha, changed, log: noopLogger }).open("head");
+  try {
+    return measureAgainst(repo, args, { snapshot, changed, hunks, headSha, baseSha: diffBase.sha });
+  } finally {
+    snapshot.dispose();
+  }
+}
+
+function measureAgainst(
+  repo: string,
+  args: Args,
+  ctx: {
+    snapshot: ReturnType<ReturnType<typeof tsgoViews>["open"]>;
+    changed: ReturnType<typeof changedPaths>;
+    hunks: ReturnType<typeof diffHunks>;
+    headSha: string;
+    baseSha: string;
+  },
+): Report | null {
+  const { snapshot, changed, hunks, headSha, baseSha } = ctx;
+  if (snapshot.projects.length === 0) {
     console.error(
-      `name-match-gate: ${repo} loaded at tier ${loaded.tier}, so there is NO type-resolved reference set to measure against. ` +
+      `name-match-gate: ${repo} produced no compiled program, so there is NO type-resolved reference set to measure against. ` +
         `This gate needs ground truth; a tier-2 repo is the thing being measured, not the measurement.\n` +
-        loaded.degraded.map((d) => `  [${d.extractor}] ${d.reason}`).join("\n"),
+        snapshot.degraded.map((d) => `  [${d.extractor}] ${d.reason}`).join("\n"),
     );
     return null;
   }
   const programFiles = new Set<string>();
-  // Per GROUP, not merged: a symbol's reference query only ever ran inside the
+  // Per PROGRAM, not merged: a symbol's reference query only ever ran inside the
   // one program that holds its declaration, so that program's file set is the
   // only fair denominator for it.
   const groupFiles: Set<string>[] = [];
-  for (const project of loaded.projects) {
+  for (const project of snapshot.projects) {
     const files = new Set<string>();
-    for (const file of project.getSourceFiles()) {
-      const path = repoRelative(repo, file.getFilePath());
+    for (const absolute of project.project.program.getSourceFileNames()) {
+      const path = repoRelative(repo, absolute);
+      if (path.startsWith("..")) continue;
       files.add(path);
       programFiles.add(path);
     }
     groupFiles.push(files);
   }
-  /** The file set of the FIRST program holding this file — `sourceFileAt`'s rule. */
+  /** The file set of the FIRST program holding this file — `lookup`'s rule. */
   const ownProgramOf = (path: string): Set<string> =>
     groupFiles.find((files) => files.has(path)) ?? new Set<string>();
-  const typedFacts = extractFacts({
+  const typedFacts = extractFactsTsgo({
     repo,
-    project: loaded.projects,
+    snapshot,
     hunks,
     changed,
     // Unbounded on BOTH sides: comparing two differently-truncated sets would
     // measure the truncation.
     maxReferences: 0,
-  });
+  }).payload;
 
   // ── engine B: the candidate ──────────────────────────────────────────────
   const named = extractFactsByName({
@@ -488,10 +503,11 @@ function measure(repo: string, args: Args): Report | null {
   return {
     label: args.label,
     repo: relative(process.cwd(), repo) || ".",
-    baseSha: diffBase.sha,
+    baseSha,
     headSha,
     changedPaths: changed.length,
-    tier: loaded.tier,
+    // Tier 1 by construction: the early return above refuses anything else.
+    tier: 1,
     programFiles: programFiles.size,
     indexedFiles: indexedFiles.size,
     comparableFiles: comparableFiles.size,

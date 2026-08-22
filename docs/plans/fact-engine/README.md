@@ -6,10 +6,15 @@
 > built, and [02-migration.md](02-migration.md) describes the end state module
 > by module.
 >
-> **Tree state, 2026-08-22.** The engine seam itself has landed in parallel:
-> `packages/code-facts/src/tsgo.ts` (619 lines, untracked). No extractor uses it
-> yet, there is no `--engine` flag, and `ts-morph` is still the only engine that
-> runs. Nothing in the gates below has been read.
+> **Tree state, 2026-08-22 — revised later the same day.** The seam is now
+> committed (`packages/code-facts/src/tsgo.ts`, 711 lines, at `7602ef47`) and
+> `facts` + `contracts` are ported onto it in `src/tsgo-extractors.ts` (1,231
+> lines, untracked) behind **`--engine tsgo`**, a measurement flag whose default
+> is still `ts-morph`. `tests/tsgo.test.ts` and `tests/tsgo-port.test.ts` both
+> exist. **Nothing is deleted** — the shared file budget, `--max-projects`,
+> `--resolution` and `withWorktree` all still ship and still run on the default
+> path. Of the gates in [01-spike.md](01-spike.md), only the head-to-head under
+> "The measurements" below has been run; G1, G3, G4, G5 and G-impl are unread.
 
 This is a standalone companion to
 [`docs/plans/review-evidence-pipeline/`](../review-evidence-pipeline/README.md).
@@ -96,16 +101,24 @@ going blind**: the only lever that reached the corpus's worst cases was cutting
 monorepo blindness — trading a measured number for an unmeasurable one. Lever
 two (raise the cap) was the honest answer and it was taken.
 
-**So this work is not about fitting a cap.** Going from ~1–3 GB to ~100 MB is
-about two other things:
+**So this work is not about fitting a cap**, and — per honesty note 4 under "The
+measurements" — the memory win is **not the measured two orders of magnitude an
+earlier draft claimed**, because the tsgo figure omits the compiler child.
+Strike memory from the case entirely and two things are left:
 
-- **The §D12 OOM loop.** An OOM exits 134 with no envelope, the phase fails, the
-  run fails, `assessedHeadShaByWorkflow` is written from SUCCEEDED runs only,
-  and `cron-review.yaml` re-dispatches every thirty minutes forever — the
-  documented 1,260-execution / $1.30-per-hour shape. A shell-level catch
-  *contains* that. An engine that peaks two orders of magnitude below the cap
-  *removes the reachable path to it*. The catch stays either way.
-- **Speed**, which is what makes fan-out affordable at all downstream.
+- **Deleted mechanisms.** Roughly 900 lines of budget, cap, pre-sizing and
+  worktree machinery stop having anything to bound. That is the argument.
+- **Speed** — 3–10x on this repo, measured end to end (below), which is what
+  makes fan-out affordable downstream.
+
+The §D12 OOM loop is a *consequence*, not a third reason, and it is now stated
+carefully: an OOM exits 134 with no envelope, the phase fails,
+`assessedHeadShaByWorkflow` is written from SUCCEEDED runs only, and
+`cron-review.yaml` re-dispatches every thirty minutes forever — the documented
+1,260-execution / $1.30-per-hour shape. A shell-level catch *contains* that, and
+**the catch stays regardless**: the new engine narrows the reachable path (a
+`spawn()` with no `'error'` listener is a NEW one) but no measurement in hand
+shows it removed.
 
 ### 2. `--resolution` has THREE tiers, not five
 
@@ -156,16 +169,23 @@ accompanies this directory.
 ## The measurements
 
 **Taken 2026-08-22 in this checkout, on darwin-arm64, sequentially, with nothing
-else running.** Both scripts exist and are short; read them before quoting them.
-`scripts/engine-bench.mjs` **hard-codes `ROOT = /Users/clifton/work/lastlight`**
-— fix that before running it anywhere else, or it will silently benchmark
-nothing.
+else running.**
+
+> **`scripts/engine-bench.mjs` NO LONGER EXISTS, and that is deliberate.** It
+> compared the two engines, so it died with `ts-morph`: an A/B harness cannot run
+> against an engine that is gone, and keeping a script that silently benchmarks
+> one side against itself is worse than not having it. **To reproduce the table
+> below, check out `7602ef47`** — the last commit where both engines were
+> present — and run it there. The rows are a historical record from that commit,
+> not a live gate; no decision now depends on re-running them, and the decision
+> they informed was taken on the fidelity and wall-clock evidence, not on these.
 
 ```bash
+git checkout 7602ef47                         # both engines present
 cd packages/code-facts
 node scripts/engine-bench.mjs ts-morph        # defaults to apps/server/tsconfig.json
 node scripts/engine-bench.mjs tsgo            # same default
-node scripts/engine-overlay-probe.mjs
+node scripts/engine-overlay-probe.mjs         # still present at HEAD
 ```
 
 ### One project — `apps/server/tsconfig.json`
@@ -178,7 +198,8 @@ node scripts/engine-overlay-probe.mjs
 | **peak process RSS** | **1087 MB** | **79 MB** |
 | files reported (see caveat) | 196 | 3926 |
 
-**Three honesty notes, none of them optional.**
+**Four honesty notes, none of them optional. The fourth is a correction to the
+third, made 2026-08-22 after reading the script.**
 
 1. **The "files reported" row compares two different populations and is not a
    win.** 196 is ts-morph's `getSourceFiles()` — the source-file list
@@ -194,9 +215,26 @@ node scripts/engine-overlay-probe.mjs
    `getSourceFiles()` — and they are different 200 files, producing **1822**
    symbols (tsgo) against **2199** (ts-morph). Read the row as "same shape of
    work, ~6× apart", not as a ratio to two significant figures.
-3. **The RSS and build-time rows ARE comparable.** Same tsconfig, same machine,
-   one engine per process, process-wide RSS. Those are the two rows the argument
-   rests on.
+3. ~~**The RSS and build-time rows ARE comparable.** Same tsconfig, same
+   machine, one engine per process, process-wide RSS.~~ **Half withdrawn — see
+   note 4.** The build-time row stands. The RSS row does not.
+4. **The RSS row is NOT comparable, and the reason is structural.**
+   `engine-bench.mjs` reports `process.memoryUsage.rss()`, which is the RSS of
+   **the node process it runs in**. ts-morph's compiler lives in that process, so
+   its 1087 MB counts everything. tsgo's compiler is a **child process over a
+   pipe**, and the 79 MB counts none of it. The number that includes the child is
+   recorded in `packages/code-facts/src/run.ts` and
+   `src/tsgo-extractors.ts` — **~600 MB per open snapshot plus ~200 MB of node**,
+   measured on this repo, which is why `contracts` drains the base view to plain
+   strings and disposes it before opening the head one rather than holding two
+   (1.4 GB, *worse* than the ts-morph path's ~1.0 GB). Nothing about the
+   *argument* changes, because
+   [correction 1](#1-the-2-gb-agent-cap-is-retired-not-closed--2026-08-22)
+   already withdrew memory as the case for the swap. What changes is that
+   **"~1–3 GB to ~100 MB" must not be repeated**: no measurement in this document
+   supports it. A like-for-like peak needs `/usr/bin/time -l` (or an
+   equivalent that sums the child) around a real extractor run, and that has not
+   been done.
 
 ### Every workspace tsconfig in ONE snapshot
 
@@ -218,8 +256,9 @@ argv. (An earlier draft of this argument quoted "11 tsconfigs, 11,512 files,
 below rather than silently replaced.)
 
 Whichever eight they were, the shape is the point: **one snapshot, symbols
-shared across projects, ~100 MB.** `--max-projects`, the shared file budget and
-`selectNeighbourhood` have nothing left to bound.
+shared across projects, 320 ms.** `--max-projects`, the shared file budget and
+`selectNeighbourhood` have nothing left to bound. The 98 MB is the node client
+only (honesty note 4) and is not the peak.
 
 ### The base side, without a second worktree
 
@@ -255,8 +294,39 @@ compared to it.
 | all-tsconfig snapshot | 11 projects, 11,512 files, 669 ms, 69 MB | 8 projects, 10,078 files, 320 ms, 98 MB |
 | base-side overlay | 40 ms | 24 ms |
 
-The two sets agree on every conclusion and on no digit. Treat the ranges, not
-the values, as the finding: **build ~5–8×, RSS ~14–20×.**
+The two sets agree on every conclusion and on no digit. Treat the range, not the
+values, as the finding: **build ~5–8×**. Both RSS rows are node-client-only on
+the tsgo side (honesty note 4), so the "~14–20×" an earlier draft read off them
+is withdrawn rather than re-quoted.
+
+### End to end, on the real extractors — `scripts/engine-ab.mts`
+
+The bench above compares two compilers. This compares two **documents**, which
+is what actually has to hold. `packages/code-facts/scripts/engine-ab.mts` runs
+`facts` and `contracts` on this repo at `HEAD~1..HEAD` through `runExtractor`
+itself, once per engine, and diffs the outputs as **SETS** rather than counts —
+a run that loses eight symbols and gains eight reads as flat on a total.
+
+| | `ts-morph` | `tsgo` |
+|---|---|---|
+| `facts` symbol set / reference sites | 44 / 138 | **44 / 138**, nothing on either side only |
+| `contracts` keys / `consumersOutsideDiff` | 13 / 32 | **13 / 32**, identical |
+| `facts` wall clock | 2034 ms | **642 ms** (3.2×) |
+| `contracts` wall clock | 3661 ms | **1405 ms** (2.6×) |
+| the same two at `--resolution full` | 5704 / 10485 ms | 594 / 1523 ms (**9.6×** / **6.9×**) |
+| `selfcheck`'s three exit conditions, recomputed in-script | OK | OK |
+
+It is **one commit of one repo**, so it is evidence toward G1/G2 and not a
+substitute for either — the corpus run and `pnpm selfcheck` itself are still
+unread. Two things it did surface:
+
+- **The printers disagree about union member ORDER.** `TsgoFailureReason` prints
+  its five members in a different sequence on each engine, which is why the
+  `printed SIGNATURES` set diverges by one entry while the contract KEY set does
+  not. Harmless while both sides of a comparison come from the same engine;
+  fatal to any attempt to diff a stored ts-morph `before` against a fresh tsgo
+  `after`. This is **cause 3**, the one this migration does not remove.
+- **The two base views are not the same base view** — see the risks table.
 
 ## The engine contract
 
@@ -568,7 +638,8 @@ Each of these was decided with reasoning that this work does not change.
 | **A tsconfig that does not exist is dropped silently** | It simply does not appear in `getProjects()`, and a shorter `getProjects()` looks like nothing at all. This is locked decision 6's exact shape — an empty result indistinguishable from an unavailable analyser | `failures[]` carries `tsconfig-absent`. The count of projects asked for must be compared against the count returned, every run |
 | **The client `spawn()` has no `'error'` listener** | **Verified by reading `dist/api/syncChannel.js:99,126`** — both `spawn()` calls attach no `'error'` handler. A binary that cannot be executed emits an unhandled `'error'` on the next tick and **kills the node process outright**. That is the `tests/oom.test.ts` shape: `--never-fail` provably cannot cover it | `resolveTsgoBinary()` pre-flights the executable (`accessSync(X_OK)`) and passes the resolved path back in as `tsserverPath`, so the path checked is the path spawned. **A narrowing, not a guarantee** — a binary that passes `X_OK` and dies during exec still takes the process down, so the shell-level catch stays mandatory |
 | **The inferred project carries DEFAULT compiler options** | A file opened via `openFiles` under no tsconfig gets a checker — but with no `paths`, no `strict`, nothing the repository configured. It fixes WP1b bug 4's blindness; it does not produce the same answer the repo's own config would | Named in `degraded[]`. *Analysed is better than skipped, but it is not the same answer* — the same rule as glob-tier output not being tsconfig-tier output |
-| **`facts`/`contracts` still read HEAD off the filesystem** | Pre-existing, unchanged by this work, and listed in the plan's open backlog | The overlay makes it *cheaper* to fix (serve head blobs too, no worktree) — a follow-on, not a claim |
+| **`facts`/`contracts` still read HEAD off the filesystem** | Pre-existing, listed in the plan's open backlog — but this work **widens** it, see the row below | The overlay makes it *cheaper* to fix (serve head blobs too, no worktree) — a follow-on, not a claim |
+| **The overlay's base view is not the worktree's, and a DIRTY TREE makes them disagree** | `withWorktree` materialises base blobs for **every** file. `buildBaseOverlay` serves base blobs for the **changed** files and falls through to the real filesystem — the **working tree** — for everything else. Identical when the checkout is clean at head; divergent otherwise, silently. **Measured 2026-08-22**: with `src/schema.ts` edited in the working tree but absent from the `HEAD~1..HEAD` changed set, ts-morph reported a `changed` delta on `project.ts#languageBreakdown` (its return type names the `engine` enum `schema.ts` declares) and tsgo did not — 14 deltas against 13, `--resolution full` arm of `engine-ab.mts`. Neither engine is wrong about the tree it was shown | **Nothing yet — it is an open item, not a fixed one.** It wants a loud `degraded[]` entry when the tree is dirty: the document claims to be about `baseSha..headSha`, and a dirty tree makes it partly a claim about somebody's uncommitted edits. No such check exists in `src/` (verified 2026-08-22). Serving head blobs through the same overlay closes the other half. Written up in `packages/code-facts/CLAUDE.md` → "The overlay's base view is NOT the worktree's" |
 
 ## What this does not buy
 

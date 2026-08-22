@@ -73,8 +73,19 @@ export type ToolchainStamp = z.infer<typeof ToolchainStampSchema>;
 export const TierSchema = z.union([z.literal(1), z.literal(2), z.literal(3)]);
 export type Tier = z.infer<typeof TierSchema>;
 
-/** Which parser actually produced this document's syntax trees, if any. */
-export const EngineSchema = z.enum(["ts-morph", "ast-grep", "none"]);
+/**
+ * Which parser actually produced this document's syntax trees, if any.
+ *
+ * `tsgo` is the TypeScript 7 compiler API (`src/tsgo.ts`) and the only
+ * type-aware engine there is; `ast-grep` is the tier-2 name-match engine
+ * (`src/syntactic.ts`). `"ts-morph"` was removed with the engine it named — the
+ * document must never be able to claim a compiler this package cannot run.
+ *
+ * The document says WHICH compiler printed it because a compiler is a type
+ * printer and `contracts` compares type TEXT: a stamp is how a delta produced
+ * by an engine swap stays distinguishable from a delta produced by a PR.
+ */
+export const EngineSchema = z.enum(["tsgo", "ast-grep", "none"]);
 export type Engine = z.infer<typeof EngineSchema>;
 
 /**
@@ -103,7 +114,14 @@ export const LanguageStatSchema = z.object({
 export type LanguageStat = z.infer<typeof LanguageStatSchema>;
 
 export const EnvelopeSchema = z.object({
-  version: z.literal(1),
+  /**
+   * **2** since the TS 7 migration (`docs/plans/fact-engine/`): `engine` lost
+   * `"ts-morph"` and the envelope lost `resolution`, which described a ts-morph
+   * `resolutionHost` that no longer exists. Bumped rather than tolerated
+   * because a v1 reader handed a v2 document would find the field missing and
+   * have no way to tell that from a run that never computed it.
+   */
+  version: z.literal(2),
   generatedAt: z.iso.datetime(),
   extractor: z.string(),
   /** `owner/name` when derivable from the remote, else the directory name. */
@@ -114,24 +132,12 @@ export const EnvelopeSchema = z.object({
   /** The parser that ran. `"none"` beside a populated `languages` is the tell. */
   engine: EngineSchema,
   languages: z.array(LanguageStatSchema),
-  /**
-   * How much of `node_modules` the type-checker was allowed to follow, and how
-   * many packages that came to.
-   *
-   * **Stamped here rather than pushed into `degraded[]`, deliberately.** The
-   * default (`changed`) is measurably lossless — across 499 contract entries on
-   * the two largest commits of this repo it produced the same entry count, the
-   * identical key set, and zero entries that gained an `any` — so reporting it
-   * as a degradation would assert we failed to see something when we saw
-   * everything the contract surface can name. `degraded[]` that is populated on
-   * every single run is `degraded[]` that has stopped carrying signal, which is
-   * the failure this package exists to avoid, arrived at from the polite end.
-   *
-   * `none` DOES lose fidelity and still degrades. So does a run whose
-   * allow-list could not be computed. The rule is: degrade when fidelity was
-   * actually lost, not when a policy applied cleanly.
-   */
-  resolution: z.object({ tier: z.string(), allowed: z.number().int().nullable() }),
+  // `resolution: { tier, allowed }` was here until envelope v2. It described how
+  // much of `node_modules` a ts-morph `resolutionHost` was allowed to follow —
+  // the memory axis `--max-files` could not reach. tsgo resolves every specifier
+  // and the closure lives in the Go child rather than in the node heap, so there
+  // is no policy to stamp; a field that always read `{ tier: "full" }` would be
+  // an answer to a question nobody asks any more.
   coverage: z.enum(["full", "degraded", "none"]),
   degraded: z.array(DegradedEntrySchema),
   toolchain: ToolchainStampSchema,
@@ -268,7 +274,7 @@ export const ConstantFactSchema = z.object({
   value: z.string(),
   valueKind: z.enum(["string", "number", "boolean"]),
   /**
-   * A — every reference to the identifier (ts-morph). **Nullable, and the
+   * A — every reference to the identifier (the tsgo checker). **Nullable, and the
    * nullability is the point**: `null` means there is no set A because tier 2
    * had no compiler to ask, and `[]` means the compiler looked and found none.
    *

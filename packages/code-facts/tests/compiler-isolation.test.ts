@@ -1,15 +1,25 @@
 /**
  * WP1 acceptance criterion 4 — the TS 7 landmine, pinned.
  *
- * **TypeScript 7 has no programmatic compiler API.** `tsgo` is CLI + LSP only.
- * `ts-morph@28` vendors its own compiler and carries no `typescript`
- * dependency, so a toolchain that resolved the target repo's TypeScript would
- * break on every TS-7 repo — which is now most of them.
+ * The premise that made the rule expired and the RULE did not. `ts-morph@28`
+ * vendored its own compiler and carried no `typescript` dependency; this package
+ * now ships `typescript@7.0.2` itself and spawns its Go compiler. So the old
+ * proxy — *"`typescript` must not be a dependency"* — is dead, and the invariant
+ * it stood for is unchanged and sharper:
  *
- * The rule is therefore: NEVER resolve `typescript` from the repo under review.
+ *   **NEVER resolve `typescript` from the repo under review, and the copy that
+ *   DOES resolve must be the exact-pinned one in this package's own tree.**
+ *
+ * Both halves matter. A toolchain that resolved the target repo's TypeScript
+ * breaks on every repo whose own compiler is a different major; a toolchain
+ * whose compiler can float breaks something quieter — a different compiler is a
+ * different TYPE PRINTER, and `contracts` compares type text, which is the
+ * phantom-delta class (`01b-code-facts-hardening.md`, bugs 1 and 2).
+ *
  * A rule stated in a comment is a rule that lasts until the next refactor, so
- * this file is the gate — modelled on `apps/server/tests/state/driver-isolation.test.ts`,
- * which pins an equivalent invariant for the Postgres drivers.
+ * this file is the gate — modelled on
+ * `apps/server/tests/state/driver-isolation.test.ts`, which pins an equivalent
+ * invariant for the Postgres drivers.
  */
 import { describe, expect, it } from "vitest";
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
@@ -47,8 +57,10 @@ describe("compiler isolation (WP1 AC4)", () => {
     const offenders: string[] = [];
     for (const file of sourceFiles(SRC)) {
       const source = stripComments(readFileSync(file, "utf8"));
-      // Any form of reaching for the compiler by name. `ts-morph` re-exports
-      // its own `ts` namespace, which is the ONLY sanctioned route.
+      // Any form of reaching for the compiler by NAME from a caller-supplied
+      // path. The sanctioned route is a bare `typescript/unstable/*` subpath
+      // import, which node resolves from this module's own tree; the shapes
+      // below are the ones that can be pointed somewhere else.
       const patterns = [
         /require\.resolve\(\s*["']typescript["']/,
         /from\s+["']typescript["']/,
@@ -65,13 +77,31 @@ describe("compiler isolation (WP1 AC4)", () => {
   });
 
   it("the compiler in use lives in THIS package's dependency tree, not the target repo's", () => {
-    const { modulePath, version } = compilerInfo();
+    const { modulePath, version, platformPackage, executable } = compilerInfo();
     expect(version).toMatch(/^\d+\.\d+/);
-    expect(modulePath).toMatch(/@ts-morph[/+]common/);
+    expect(modulePath).toMatch(/node_modules[/\\]typescript[/\\]package\.json$/);
     // Never anywhere under a repo being analysed. The fixture below proves the
     // dynamic half; this proves the static one.
     expect(modulePath.startsWith("/tmp/")).toBe(false);
     expect(modulePath.startsWith("/var/folders/")).toBe(false);
+
+    // STRENGTHENED: the copy that resolved must be the one this package PINNED.
+    // `version` alone would pass on a hoisted stranger of the same version.
+    const pkg = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8")) as {
+      dependencies?: Record<string, string>;
+    };
+    expect(version).toBe(pkg.dependencies?.typescript);
+    const installed = JSON.parse(readFileSync(modulePath, "utf8")) as { version?: string };
+    expect(installed.version).toBe(version);
+
+    // …and the thing that is actually SPAWNED is the platform sidecar under
+    // that same package, not a `tsgo` on PATH. `resolveTsgoBinary` has no PATH
+    // step on purpose: a `tsgo` on PATH is an arbitrary version.
+    expect(platformPackage).toMatch(
+      new RegExp(`typescript-${process.platform}-${process.arch}$`),
+    );
+    expect(executable).toMatch(/[/\\](?:tsc|tsgo)(?:\.exe)?$/);
+    expect(executable?.startsWith(platformPackage as string)).toBe(true);
   });
 
   it("ignores a `typescript` installed in the repo under review", () => {
@@ -87,6 +117,20 @@ describe("compiler isolation (WP1 AC4)", () => {
       );
       writeFileSync(join(decoy, "index.js"), `throw new Error("the decoy compiler was loaded");`);
 
+      // A second decoy, in the place `getExePath()` would look if it consulted
+      // `cwd` — VERIFIED that it does not (it resolves against the installed
+      // package's own `__dirname`), and asserted anyway, because that is what
+      // this file is for.
+      const decoyPlatform = join(
+        fixture.dir,
+        "node_modules",
+        "@typescript",
+        `typescript-${process.platform}-${process.arch}`,
+        "lib",
+      );
+      mkdirSync(decoyPlatform, { recursive: true });
+      writeFileSync(join(decoyPlatform, "tsgo"), "#!/bin/sh\nexit 3\n", { mode: 0o755 });
+
       const before = compilerInfo();
       const result = runExtractor({
         extractor: "facts",
@@ -96,10 +140,12 @@ describe("compiler isolation (WP1 AC4)", () => {
       });
       const after = compilerInfo();
 
-      // Same compiler before and after, and it is not the decoy.
+      // Same compiler before and after, and it is not either decoy.
       expect(after).toEqual(before);
       expect(after.version).not.toBe("0.0.0-decoy");
       expect(after.modulePath.startsWith(fixture.dir)).toBe(false);
+      expect(after.platformPackage?.startsWith(fixture.dir)).toBe(false);
+      expect(after.executable?.startsWith(fixture.dir)).toBe(false);
       // And the analysis still worked, which is the point of vendoring it.
       expect((result.document as unknown as FactsDocument).symbols.length).toBeGreaterThan(0);
     } finally {

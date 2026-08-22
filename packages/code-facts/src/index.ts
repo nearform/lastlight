@@ -1,15 +1,69 @@
 /**
  * `lastlight-code-facts` — the deterministic layer of the PR-review pipeline.
  *
- * The barrel the `lastlight` CLI imports (lazily — ts-morph is ~14 MB and must
- * not be on the startup path of `lastlight login`). Everything here is
- * pino-free and takes an injected `LoggerPort`, because the CLI depends on it.
+ * The barrel the `lastlight` CLI imports (lazily — the compiler spawns a child
+ * process and must not be on the startup path of `lastlight login`).
+ * Everything here is pino-free and takes an injected `LoggerPort`, because the
+ * CLI depends on it.
  */
 export { runCli, parseArgv } from "./cli.js";
-export { runExtractor, runWrapped, writeDocument, buildEnvelope, emptyDocumentFor } from "./run.js";
+export {
+  runExtractor,
+  runWrapped,
+  writeDocument,
+  buildEnvelope,
+  emptyDocumentFor,
+} from "./run.js";
 export type { RunOptions, RunResult } from "./run.js";
 
-export { extractFacts, indexHunks } from "./facts.js";
+export { hunksTouching, indexHunks, DEFAULT_MAX_REFERENCES } from "./facts.js";
+export type { ChangedFileIndex } from "./facts.js";
+
+/** The type-aware extractors — `facts`, `contracts`, and `constants`' set A. */
+export {
+  abandonedByBrokenTsConfig,
+  buildBaseOverlay,
+  collectBaseContracts,
+  discoverTsgoTargets,
+  exportedDeclarations,
+  extractContractsTsgo,
+  extractFactsTsgo,
+  lineOf,
+  referenceNodes,
+  refusing,
+  repoRelativeOf,
+  shapeOfTsgo,
+  tsgoViews,
+} from "./tsgo-extractors.js";
+export type {
+  BaseContractView,
+  ExtractContractsTsgoOptions,
+  ExtractContractsTsgoResult,
+  ExtractFactsTsgoOptions,
+  ExtractFactsTsgoResult,
+  NamedDeclaration,
+  TsgoTargets,
+  TsgoViewOptions,
+  TsgoViews,
+} from "./tsgo-extractors.js";
+export {
+  compilerPaths,
+  compilerVersion,
+  openSnapshot,
+  resolveTsgoBinary,
+  TsgoError,
+  TSGO_BIN_ENV,
+} from "./tsgo.js";
+export type {
+  CompilerPaths,
+  EngineFile,
+  EngineProject,
+  EngineSnapshot,
+  OpenSnapshotOptions,
+  Overlay,
+  TsgoFailureReason,
+  TsgoProjectFailure,
+} from "./tsgo.js";
 
 export {
   buildSyntacticIndex,
@@ -20,6 +74,7 @@ export {
   scanImportSpecifiers,
   scanSource,
   unquote,
+  DEFAULT_MAX_SCANNED_FILES,
   DEFAULT_MAX_SITES_PER_NAME,
 } from "./syntactic.js";
 export type {
@@ -57,7 +112,8 @@ export type {
   LiteralKinds,
   SyntaxNode,
 } from "./langs/index.js";
-export { extractContracts, shapeOf } from "./contracts.js";
+export { canonicalType, finaliseShape, sameShape } from "./contracts.js";
+export type { Shape } from "./contracts.js";
 export {
   extractConstants,
   findLiteralOccurrences,
@@ -109,8 +165,9 @@ export {
 } from "./coverage.js";
 
 export {
-  loadProject,
+  astGrepLangFor,
   compilerInfo,
+  hasAnalysableExtension,
   isIgnoredPath,
   isScannablePath,
   isTestPath,
@@ -118,31 +175,12 @@ export {
   languageIdOf,
   looksMinified,
   repoRelative,
-  sourceFileAt,
-  toProjects,
   JS_EXTENSIONS,
   TS_EXTENSIONS,
   ANALYSABLE_EXTENSIONS,
-  DEFAULT_MAX_FILES,
-  DEFAULT_MAX_PROJECTS,
+  MAX_SCANNED_FILE_BYTES,
 } from "./project.js";
-export type { LoadedProject, LoadProjectOptions, Programs, ProjectGroup } from "./project.js";
-
-/**
- * SELECTIVE RESOLUTION — `--resolution`, default `"changed"` (`resolution.ts`).
- * Exported so a measurement harness can drive the tiers without a subprocess.
- */
-export {
-  computeResolutionPolicy,
-  isResolutionTier,
-  isUnderNodeModules,
-  resolutionHostFor,
-  specifierPackage,
-  DEFAULT_RESOLUTION_TIER,
-  FULL_RESOLUTION,
-  RESOLUTION_TIERS,
-} from "./resolution.js";
-export type { ComputedPolicy, ResolutionPolicy, ResolutionTier } from "./resolution.js";
+export type { LanguageBreakdownOptions } from "./project.js";
 
 export {
   BAKED_BIN_DIR,

@@ -3,7 +3,7 @@
  *
  * TWO TIERS, and which tier a tool is in is not a detail:
  *
- *   - **Bundled (pure JS).** ts-morph and `@ast-grep/napi` are npm dependencies
+ *   - **Bundled (npm).** `typescript` and `@ast-grep/napi` are npm dependencies
  *     of this package, so `facts` / `contracts` / `constants` / `deps` work
  *     everywhere the CLI is installed — including a Mac running the eval
  *     harness at `--sandbox none`, which cannot see `/opt/lastlight/` at all.
@@ -231,10 +231,19 @@ export function stampTool(tool: string, env: NodeJS.ProcessEnv = process.env): T
  * The npm-resolved engines, read off the INSTALLED package.json rather than
  * copied into `toolchain.json`. The lockfile is the stronger pin, and a second
  * hand-maintained copy is exactly the drift the manifest exists to prevent.
+ *
+ * `typescript` is the tsgo compiler and it belongs HERE rather than in
+ * `toolchain.json.binaries`, by that file's own rule: `binaries` is for things
+ * downloaded from a release URL with per-platform `sources`, and the tsgo
+ * executable arrives as an npm `optionalDependency`
+ * (`@typescript/typescript-<platform>-<arch>`). Which platform package actually
+ * resolved is stamped separately by `compilerInfo()` — only the matching one
+ * installs, so a wrong-platform image has a `typescript` version here and no
+ * compiler behind it.
  */
 export function bundledVersions(): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const name of ["ts-morph", "@ast-grep/napi"]) {
+  for (const name of ["typescript", "@ast-grep/napi"]) {
     try {
       const pkgPath = require_.resolve(`${name}/package.json`);
       const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string };

@@ -1,27 +1,37 @@
 /**
- * `contracts` — the semantic delta, base vs head.
+ * `contracts` — the CANONICALISER, and why it is a module of its own.
  *
- * Two `Project`s over the same checkout: one at `base` (materialised with
- * `git worktree add --detach` into a temp dir — the agent's working tree is
- * never mutated), one at `head`. For each changed EXPORTED symbol, the
- * before/after of signature, parameter types, return shape, nullability and
- * thrown types.
+ * The extractor itself (`extractContractsTsgo`) lives in `tsgo-extractors.ts`
+ * with the compiler it needs. What lives here is the half that does not touch a
+ * compiler at all: the `Shape` a declaration's observable contract is reduced
+ * to, and the normalisation that decides whether two shapes are the SAME
+ * contract printed differently.
  *
- * This is the `getUser() -> User | null` becoming `getUser() -> User` +
- * `throws NotFoundError` class of regression, made mechanical — and
- * `consumersOutsideDiff` is the half that makes it an obligation rather than a
- * curiosity, because those are the call sites the PR did not touch and the
- * reviewer will not see.
+ * That split is the whole defence against this package's worst bug class. WP1
+ * ran `contracts` against a real commit and got **227 deltas of which ONE was
+ * real**, and every unit test passed throughout. Two of the three causes are
+ * gone by construction now that both sides come from one snapshot over one tree
+ * (an asymmetric tsconfig; a missing base-side `node_modules`). **The third —
+ * reordered or re-printed type TEXT — is not**, and it is the one a change of
+ * printer can make worse. So the canonicaliser has exactly one home, one set of
+ * callers, and `tests/noise-floor.test.ts` measuring what each of its fixes is
+ * worth.
+ *
+ * What `contracts` is FOR: the `getUser() -> User | null` becoming
+ * `getUser() -> User` + `throws NotFoundError` class of regression, made
+ * mechanical — and `consumersOutsideDiff` is the half that makes it an
+ * obligation rather than a curiosity, because those are the call sites the PR
+ * did not touch and the reviewer will not see.
  */
-import type { JSDocTag, Node, SourceFile } from "ts-morph";
-import { Node as TsNode, SyntaxKind } from "ts-morph";
-import type { ContractDelta, ContractsPayload } from "./schema.js";
-import type { Programs } from "./project.js";
-import { isTestPath, repoRelative, sourceFileAt } from "./project.js";
-import type { ChangedFileIndex } from "./facts.js";
-import type { ChangedPath } from "./git.js";
 
-interface Shape {
+/**
+ * The declaration's observable contract, as a value.
+ *
+ * Type TEXT rather than a structural type comparison: it is stable, readable in
+ * an obligation, and — the part that matters here — it does not depend on the
+ * repo's own `typescript`, which we must never resolve.
+ */
+export interface Shape {
   kind: string;
   signature: string;
   parameters: { name: string; type: string; optional: boolean }[];
@@ -30,147 +40,17 @@ interface Shape {
   throws: string[];
 }
 
-interface NamedDeclaration {
-  name: string;
-  node: Node;
-  nameNode: Node;
-  exported: boolean;
-}
-
-/** Exported, module-level, named. Class methods are keyed `Class.method`. */
-function exportedDeclarations(file: SourceFile): NamedDeclaration[] {
-  const out: NamedDeclaration[] = [];
-  for (const [name, declarations] of file.getExportedDeclarations()) {
-    for (const declaration of declarations) {
-      // `getExportedDeclarations()` follows re-exports, so a barrel would
-      // otherwise attribute another file's symbol to this one.
-      if (declaration.getSourceFile() !== file) continue;
-      const nameNode =
-        (TsNode.hasName(declaration) ? declaration.getNameNode() : undefined) ?? declaration;
-      out.push({ name, node: declaration, nameNode, exported: true });
-      if (TsNode.isClassDeclaration(declaration)) {
-        for (const method of declaration.getMethods()) {
-          if (method.hasModifier(SyntaxKind.PrivateKeyword)) continue;
-          out.push({
-            name: `${name}.${method.getName()}`,
-            node: method,
-            nameNode: method.getNameNode(),
-            exported: true,
-          });
-        }
-      }
-      if (TsNode.isInterfaceDeclaration(declaration)) {
-        for (const method of declaration.getMethods()) {
-          out.push({
-            name: `${name}.${method.getName()}`,
-            node: method,
-            nameNode: method.getNameNode(),
-            exported: true,
-          });
-        }
-      }
-    }
-  }
-  return out;
-}
-
-/** `throw new NotFoundError(...)` in the body, plus any JSDoc `@throws`. */
-function thrownTypes(node: Node): string[] {
-  const out = new Set<string>();
-  for (const statement of node.getDescendantsOfKind(SyntaxKind.ThrowStatement)) {
-    const expression = statement.getExpression();
-    if (expression && TsNode.isNewExpression(expression)) {
-      out.add(expression.getExpression().getText());
-    } else if (expression) {
-      out.add(expression.getType().getText(expression));
-    }
-  }
-  if (TsNode.isJSDocable(node)) {
-    for (const doc of node.getJsDocs()) {
-      for (const tag of doc.getTags()) {
-        if (tag.getTagName() !== "throws" && tag.getTagName() !== "throw") continue;
-        const thrown = jsDocThrownType(tag);
-        if (thrown) out.add(thrown);
-      }
-    }
-  }
-  return [...out].sort();
-}
-
 /**
- * The type named by one `@throws` tag — **from the tag's TYPE EXPRESSION first,
- * and only then from its comment text.**
+ * Strip absolute import paths out of every type-text field, in the EMITTED
+ * document as well as in what `sameShape` compares.
  *
- * TypeScript parses `@throws` as a `JSDocThrowsTag` and lifts the braces into a
- * separate `typeExpression`, so `getCommentText()` returns the DESCRIPTION and
- * nothing else:
- *
- *   `@throws {ValidationError} when the id is empty`  → comment `"when the id is empty"`
- *   `@throws {ValidationError}`                       → comment `undefined`
- *
- * Reading the type off the comment therefore recorded `"when"` as the thrown
- * type in the first case and NOTHING in the second — and `{Type}` is the
- * dominant JSDoc spelling, so that was the common case, not the edge one. Both
- * halves cost: `throws` is compared raw in `sameShape`, so editing the prose
- * after a `@throws` moved the "thrown type" and produced a `changed` delta that
- * did not happen, and a bare `@throws {TypeError}` was an absence claim about a
- * documented throw that is right there in the source.
- *
- * The comment fallback keeps the un-braced spelling (`@throws Foo when …`)
- * working, which is what a `JSDocUnknownTag` for `@throw` also lands on.
+ * The base side is an overlay over the same tree now, so an absolute prefix no
+ * longer differs run to run — but it still differs between a repository root
+ * and its `realpath` (every `$TMPDIR` fixture on macOS), and an unstripped
+ * `import("/private/var/folders/…")` is unreadable in an obligation whatever it
+ * compares equal to.
  */
-function jsDocThrownType(tag: JSDocTag): string | null {
-  // Duck-typed rather than cast: `getTypeExpression` is mixed into the tag
-  // types that have one, and ts-morph exports no guard for the mixin — the same
-  // shape `facts.asImplementationGetable` is narrowed with.
-  const typed = tag as unknown as {
-    getTypeExpression?: () => { getTypeNode?: () => { getText(): string } | undefined } | undefined;
-  };
-  const named =
-    typeof typed.getTypeExpression === "function"
-      ? typed.getTypeExpression()?.getTypeNode?.()?.getText().trim()
-      : undefined;
-  if (named) return named;
-
-  const text = tag.getCommentText()?.trim();
-  if (!text) return null;
-  return text.replace(/^\{(.+?)\}.*$/, "$1").split(/\s+/)[0] || null;
-}
-
-function functionLike(node: Node): Node | null {
-  if (
-    TsNode.isFunctionDeclaration(node) ||
-    TsNode.isMethodDeclaration(node) ||
-    TsNode.isMethodSignature(node) ||
-    TsNode.isArrowFunction(node) ||
-    TsNode.isFunctionExpression(node)
-  ) {
-    return node;
-  }
-  if (TsNode.isVariableDeclaration(node)) {
-    const initializer = node.getInitializer();
-    if (
-      initializer &&
-      (TsNode.isArrowFunction(initializer) || TsNode.isFunctionExpression(initializer))
-    ) {
-      return initializer;
-    }
-  }
-  return null;
-}
-
-/**
- * The declaration's observable contract.
- *
- * Type TEXT rather than a structural type comparison: it is stable, readable in
- * an obligation, and — the part that matters here — it does not depend on the
- * repo's own `typescript`, which we must never resolve.
- */
-export function shapeOf(node: Node): Shape {
-  const shape = rawShapeOf(node);
-  // The absolute-path form is stripped from what we EMIT as well as from what
-  // we compare: `import("/private/var/folders/…/src/user").User` is unreadable
-  // in an obligation and names a temp directory that will not exist tomorrow.
+export function finaliseShape(shape: Shape): Shape {
   return {
     ...shape,
     signature: stripImportPaths(shape.signature),
@@ -179,52 +59,11 @@ export function shapeOf(node: Node): Shape {
       ...parameter,
       type: stripImportPaths(parameter.type),
     })),
-    // `throws` is a type-text surface too — `thrownTypes` falls back to
-    // `getType().getText()` for anything that is not a `new` expression — and
-    // `sameShape` compares it RAW, with no `canonicalType` pass. An unstripped
-    // path here is therefore a delta on every single run, because the base tree
-    // lives in a temp worktree whose path is different every time.
+    // `throws` is a type-text surface too — `thrownTypes` falls back to the
+    // printer for anything that is not a `new` expression — and `sameShape`
+    // compares it RAW, with no `canonicalType` pass, so an unstripped path here
+    // is a delta about a directory rather than about the PR.
     throws: shape.throws.map(stripImportPaths),
-  };
-}
-
-function rawShapeOf(node: Node): Shape {
-  const fn = functionLike(node);
-  if (fn) {
-    const parameters =
-      TsNode.isFunctionDeclaration(fn) ||
-      TsNode.isMethodDeclaration(fn) ||
-      TsNode.isMethodSignature(fn) ||
-      TsNode.isArrowFunction(fn) ||
-      TsNode.isFunctionExpression(fn)
-        ? fn.getParameters().map((parameter) => ({
-            name: parameter.getName(),
-            type: parameter.getType().getText(parameter),
-            optional: parameter.isOptional(),
-          }))
-        : [];
-    const returns = fn.getType().getCallSignatures()[0]?.getReturnType();
-    const returnText = returns ? returns.getText(fn) : null;
-    return {
-      kind: "function",
-      signature: `(${parameters
-        .map((p) => `${p.name}${p.optional ? "?" : ""}: ${p.type}`)
-        .join(", ")}) => ${returnText ?? "unknown"}`,
-      parameters,
-      returns: returnText,
-      nullableReturn: returnText !== null && /\b(?:null|undefined)\b/.test(returnText),
-      throws: thrownTypes(fn),
-    };
-  }
-
-  const typeText = node.getType().getText(node);
-  return {
-    kind: node.getKindName(),
-    signature: typeText,
-    parameters: [],
-    returns: typeText,
-    nullableReturn: /\b(?:null|undefined)\b/.test(typeText),
-    throws: [],
   };
 }
 
@@ -236,8 +75,10 @@ function rawShapeOf(node: Node): Shape {
 // seed at all), and a contract delta that did not happen is exactly that.
 //
 //  1. **Absolute paths.** An unnamed type prints as
-//     `import("/abs/path/to/mod").Foo`, and the base tree lives in a temp
-//     worktree, so every such type differs by its own location.
+//     `import("/abs/path/to/mod").Foo`. The base tree is an overlay over the
+//     head tree now, so the two sides agree on the prefix — but a repository
+//     root and its `realpath` do not (`/var` vs `/private/var` on darwin), and
+//     an absolute path is unreadable in an obligation either way.
 //  2. **Union member order.** TypeScript does not guarantee it across programs;
 //     `"fail" | "complete"` and `"complete" | "fail"` are the same type.
 //
@@ -260,9 +101,9 @@ function rawShapeOf(node: Node): Shape {
  * That is the same defect as the dotted case in both of its halves: the text is
  * unreadable in an obligation (the comment above promises `../../..` is gone),
  * and an ABSOLUTE specifier — which is what a type outside the tsconfig's root
- * prints as — differs between the head tree and the temp base worktree, so the
- * symbol reads as `changed` on every run. Phantom deltas are not noise; IRIS
- * measured a half-mechanism seed at −3, worse than no seed at all.
+ * prints as — names a machine rather than a repository, so the symbol reads as
+ * `changed` for a reason that is not in the PR. Phantom deltas are not noise;
+ * IRIS measured a half-mechanism seed at −3, worse than no seed at all.
  *
  * Collapsing the module to its basename loses the ability to distinguish
  * `import("./a/mod")` from `import("./b/mod")` — exactly the trade the dotted
@@ -455,145 +296,15 @@ export function canonicalType(text: string): string {
   return canonicalise(stripImportPaths(text));
 }
 
-function sameShape(a: Shape, b: Shape): boolean {
+/**
+ * `changed` vs unchanged, decided in ONE place — a second copy of this
+ * comparison is a second place a phantom delta can be born.
+ */
+export function sameShape(a: Shape, b: Shape): boolean {
   return (
     canonicalType(a.signature) === canonicalType(b.signature) &&
     a.kind === b.kind &&
     a.throws.join("|") === b.throws.join("|") &&
     a.nullableReturn === b.nullableReturn
   );
-}
-
-export interface ExtractContractsOptions {
-  repo: string;
-  /** One program per tsconfig the diff touches — see `loadProject`. */
-  headProject: Programs;
-  /**
-   * `null` when the base tree could not be materialised — degrade, never lie.
-   *
-   * The two sides discover their own groups. That is not sloppiness: a PR that
-   * ADDS a package tsconfig has one on the head side and none on the base side,
-   * and forcing the head layout onto the base tree would compile a tsconfig
-   * that does not exist there. What must match is the FILE SET, and the
-   * one-sided guard below is what enforces that per file.
-   */
-  baseProject: Programs;
-  baseDir: string | null;
-  changed: ChangedPath[];
-  hunkIndex: Map<string, ChangedFileIndex>;
-}
-
-export interface ExtractContractsResult {
-  payload: ContractsPayload;
-  degraded: { extractor: string; reason: string }[];
-}
-
-export function extractContracts(options: ExtractContractsOptions): ExtractContractsResult {
-  const { repo, headProject, baseProject, baseDir } = options;
-  const contracts: ContractDelta[] = [];
-  const oneSided: string[] = [];
-
-  for (const change of options.changed) {
-    const path = change.path;
-    const headFile = sourceFileAt(headProject, repo, path);
-    const baseFile = baseDir ? sourceFileAt(baseProject, baseDir, path) : undefined;
-    if (!headFile && !baseFile) continue;
-
-    /**
-     * A file the diff MODIFIED must be in both programs, or the comparison is
-     * not a comparison. If it is only in one, every export reads as `added` or
-     * `removed` — 65 phantom removals on the first real repo this was run
-     * against, from one tsconfig resolving differently on the two sides.
-     *
-     * That is not a cosmetic bug. IRIS measured a half-mechanism seed as
-     * ACTIVELY HARMFUL (−3, worse than no seed at all), and "this PR deleted
-     * the export `foo`" when it did nothing of the kind is exactly that. So the
-     * file is skipped and the omission is recorded, rather than guessed at.
-     */
-    const expectsBoth = change.status === "modified" || change.status === "renamed";
-    if (expectsBoth && (!headFile || !baseFile)) {
-      oneSided.push(`${path} (${headFile ? "base" : "head"} side not analysed)`);
-      continue;
-    }
-
-    const headDeclarations = headFile ? exportedDeclarations(headFile) : [];
-    const baseDeclarations = baseFile ? exportedDeclarations(baseFile) : [];
-    const baseByName = new Map(baseDeclarations.map((d) => [d.name, d]));
-    const headByName = new Map(headDeclarations.map((d) => [d.name, d]));
-
-    for (const head of headDeclarations) {
-      const base = baseByName.get(head.name);
-      const after = shapeOf(head.node);
-      const before = base ? shapeOf(base.node) : null;
-      if (before && sameShape(before, after)) continue;
-      contracts.push({
-        symbol: head.name,
-        file: path,
-        change: before ? "changed" : "added",
-        before,
-        after,
-        consumersOutsideDiff: consumersOutsideDiff(repo, head.nameNode, options.hunkIndex),
-      });
-    }
-
-    for (const base of baseDeclarations) {
-      if (headByName.has(base.name)) continue;
-      contracts.push({
-        symbol: base.name,
-        file: path,
-        change: "removed",
-        before: shapeOf(base.node),
-        after: null,
-        // A removed symbol's remaining consumers are the interesting ones, and
-        // they are found at HEAD by name — the declaration is gone, so there is
-        // no node to query. The seeder gets the removal; `facts` carries the
-        // reference map that was true before it.
-        consumersOutsideDiff: [],
-      });
-    }
-  }
-
-  contracts.sort((a, b) => a.file.localeCompare(b.file) || a.symbol.localeCompare(b.symbol));
-  return {
-    payload: { contracts },
-    degraded:
-      oneSided.length > 0
-        ? [
-            {
-              extractor: "contracts",
-              reason: `${oneSided.length} changed file(s) are in only one of the two programs, so no contract delta was computed for them — an added/removed export here would be phantom: ${oneSided
-                .slice(0, 10)
-                .join(", ")}`,
-            },
-          ]
-        : [],
-  };
-}
-
-/**
- * Reference sites the diff did NOT touch. Test files are kept — a test that
- * still asserts the old contract is precisely the signal — but flagged nowhere,
- * so the seeder can tell them apart by path.
- */
-function consumersOutsideDiff(
-  repo: string,
-  nameNode: Node,
-  hunkIndex: Map<string, ChangedFileIndex>,
-): string[] {
-  try {
-    if (!TsNode.isReferenceFindable(nameNode)) return [];
-    const declarationPath = repoRelative(repo, nameNode.getSourceFile().getFilePath());
-    const declarationLine = nameNode.getStartLineNumber();
-    const out = new Set<string>();
-    for (const node of nameNode.findReferencesAsNodes()) {
-      const path = repoRelative(repo, node.getSourceFile().getFilePath());
-      const line = node.getStartLineNumber();
-      if (path === declarationPath && line === declarationLine) continue;
-      if (hunkIndex.get(path)?.changedLines.has(line)) continue;
-      out.add(`${path}:${line}${isTestPath(path) ? " (test)" : ""}`);
-    }
-    return [...out].sort();
-  } catch {
-    return [];
-  }
 }

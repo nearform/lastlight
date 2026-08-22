@@ -1464,76 +1464,20 @@ export function makeFakeTool(name: string, script: string): { dir: string; bin: 
   return { dir, bin };
 }
 
-// ── the starvation fixture ───────────────────────────────────────────────────
+// ── DELETED 2026-08-22: `makeStarvedProjectsFixture` and its STARVED_* budget ─
 //
-// THREE packages, one tsconfig each, a diff touching all three — and a file
-// budget the three of them do not fit inside together. It exists because a
-// SHARED, first-come-first-served budget produces a specific and measured bug:
-// the first project loads, spends the pool, and every later project is refused
-// WHOLESALE — including one holding a single changed file that would have cost
-// a handful of files to serve.
+// A three-package repo calibrated so that `big` fits a 12-file ceiling and
+// `big + mid` and `big + small` do not — the exact condition a first-come,
+// first-served file budget starves on. It pinned the fix for a MEASURED bug:
+// `prreview__sentry-greptile-5`, where one 7,230-file tsconfig over a 6,000
+// ceiling meant **0 of 69 changed `.tsx` files analysed** because the group was
+// refused wholesale rather than narrowed.
 //
-// Caught on `prreview__grafana-106778` — "the glob over . holds 7473 source
-// files and 5399 were already loaded for this diff, above the 6000 ceiling —
-// it was NOT analysed" — and MEASURED on `prreview__sentry-greptile-5`, where
-// one 7,230-file tsconfig over a 6,000 ceiling meant **0 of 69 changed `.tsx`
-// files analysed**, at tier 2, in the largest genuinely-large PR in the corpus.
-// The shape is scale-independent — it bites any monorepo whose diff spans
-// several packages — so it is pinned here at a size a test can assert exactly.
+// There is no file budget any more (`docs/plans/fact-engine/02-migration.md`).
+// One tsgo snapshot holds every tsconfig the diff touches — all eight workspace
+// tsconfigs together are 10,078 program files, 320 ms and 98 MB — because the
+// closure lives in the Go child rather than in V8. A fixture calibrated against
+// a ceiling that no longer exists cannot exhibit anything, and
+// `tests/multi-project.test.ts` records the same decision for the cases that
+// used it.
 
-/** The three packages' file counts, so the test can do the budget arithmetic. */
-export const STARVED_PACKAGE_FILES = { big: 10, mid: 4, small: 4 };
-
-/**
- * The ceiling the fixture is calibrated against: `big` fits, `big + mid` does
- * not, and `big + small` does not either. Under a first-come budget that is
- * exactly one project analysed and two refused.
- */
-export const STARVED_MAX_FILES = 12;
-
-/** Every file `makeStarvedProjectsFixture`'s head commit changes. */
-export const STARVED_CHANGED = [
-  "packages/big/src/mod0.ts",
-  "packages/big/src/mod1.ts",
-  "packages/mid/src/mod0.ts",
-  "packages/small/src/mod0.ts",
-];
-
-export function makeStarvedProjectsFixture(): Fixture {
-  const tsconfig = JSON.stringify(
-    { compilerOptions: { strict: true, noEmit: true }, include: ["src/**/*"] },
-    null,
-    2,
-  );
-  const base: Record<string, string> = {
-    "package.json": JSON.stringify({ name: "fixture-starved", private: true }, null, 2),
-  };
-  for (const [pkg, count] of Object.entries(STARVED_PACKAGE_FILES)) {
-    base[`packages/${pkg}/tsconfig.json`] = tsconfig;
-    base[`packages/${pkg}/package.json`] = JSON.stringify({ name: `@fixture/${pkg}` }, null, 2);
-    for (let n = 0; n < count; n++) {
-      base[`packages/${pkg}/src/mod${n}.ts`] =
-        `export const ${pkg.toUpperCase()}_LIMIT_${n} = ${n * 10};\n\n` +
-        `export function ${pkg}${n}(id: string): string {\n  return \`${pkg}-\${id}\`;\n}\n`;
-    }
-  }
-
-  // One changed export per package, each a REAL contract delta (an added
-  // parameter), so "was this project analysed at all?" has an observable answer
-  // in `contracts` and not only in the loader's own bookkeeping.
-  const changedFile = (pkg: string, n: number): string =>
-    `export const ${pkg.toUpperCase()}_LIMIT_${n} = ${n * 10 + 5};\n\n` +
-    `export function ${pkg}${n}(id: string, retry?: boolean): string {\n  return \`${pkg}-\${id}\`;\n}\n`;
-
-  const head: Record<string, string> = {};
-  for (const path of STARVED_CHANGED) {
-    const [, pkg, , file] = path.split("/");
-    head[path] = changedFile(pkg, Number(file.replace(/\D/g, "")));
-  }
-
-  return makeFixture(
-    "starved",
-    { message: "base", files: base },
-    { message: "head", files: head },
-  );
-}

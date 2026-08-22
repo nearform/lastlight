@@ -23,7 +23,8 @@ number wherever the two disagree.
 ```
 before                                    after
 ──────                                    ─────
-src/project.ts        1247 lines          src/tsgo.ts          619   the only compiler touch (EXISTS)
+src/project.ts        1252 lines          src/tsgo.ts          711   the only compiler touch (EXISTS)
+                                          src/tsgo-extractors.ts     facts + contracts, ported (EXISTS)
 src/resolution.ts      325                src/project.ts       ~350  paths, languages, tiers
 src/git.ts             706 (withWorktree)   src/git.ts         ~600  worktree gone from the TS/JS path
 ts-morph@28            ~13.4 MB vendored  typescript@7.0.2 (exact) + one platform binary
@@ -34,10 +35,13 @@ is the point of the work; it is also why it must not start before the gates.
 
 ## `src/tsgo.ts` — the seam, and it already exists
 
-**Landed 2026-08-22, untracked at the time of writing: 619 lines.** An earlier
-draft called for a new `src/engine/tsgo.ts`; the module that exists is
-`src/tsgo.ts`, and its surface is described in
-[README.md](README.md) → "The seam, as built". Do not create a second one.
+**Committed 2026-08-22 at `7602ef47`: 711 lines.** An earlier draft called for a
+new `src/engine/tsgo.ts`; the module that exists is `src/tsgo.ts`, and its
+surface is described in [README.md](README.md) → "The seam, as built". Do not
+create a second one. The extractors that ride on it live in
+`src/tsgo-extractors.ts` (1,231 lines), reached from `runOnTsgo` in
+`src/run.ts` behind `--engine tsgo`; deleting the flag after the migration is
+`git rm` plus one branch.
 
 | Responsibility | Detail |
 |---|---|
@@ -138,7 +142,11 @@ layer below the API `--max-files` was expressed in — 8,947 of 9,647 program
 files on a three-file diff. Whether the Go compiler behaves the same way on an
 **installed** tree has **not been measured** ([01-spike.md](01-spike.md) → G4,
 second half). If it does, the tier survives in some form and this row does not
-apply. If peak RSS on an installed tree stays near 100 MB, the whole file goes.
+apply; if it does not, the whole file goes. That measurement must count the
+**compiler child process**, not just node's RSS — the only child-inclusive
+figure on record is ~600 MB per snapshot on this (installed) monorepo, which is
+nowhere near the node-only 79/98 MB the bench prints and is not yet a
+like-for-like comparison with anything.
 
 Two facts to carry forward whichever way it lands:
 
@@ -180,6 +188,13 @@ tree, one `node_modules`, so the two sides cannot disagree about what is on
 disk. That is a real win *and* it makes a sensitivity proof vacuous; see
 [01-spike.md](01-spike.md) → G3, which requires a written decision rather than a
 silent deletion.
+
+**One tree also means a different base view, and that is not a free swap.** The
+worktree served base blobs for **every** file; the overlay serves them for the
+**changed** files and falls through to the working tree for the rest. Equal on a
+clean checkout, divergent on a dirty one — measured, and recorded as an open item
+in [README.md](README.md)'s risks table. Whatever else the migration does, it
+does not get to call this one closed.
 
 ## `src/facts.ts` — three changes, one of them a trap
 

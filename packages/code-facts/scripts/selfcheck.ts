@@ -30,16 +30,10 @@
  *
  * Usage:
  *   npx tsx scripts/selfcheck.ts [--repo <dir>] [--base <ref>] [--head <ref>]
- *                               [--tsconfig <file>] [--resolution <tier>] [--json]
+ *                               [--tsconfig <file>] [--json]
  */
 import { relative, resolve } from "node:path";
 import { runExtractor } from "../src/run.js";
-import {
-  isResolutionTier,
-  DEFAULT_RESOLUTION_TIER,
-  RESOLUTION_TIERS,
-  type ResolutionTier,
-} from "../src/resolution.js";
 import { changedPaths } from "../src/git.js";
 import { noopLogger } from "../src/log.js";
 import type { AllDocument, ContractDelta } from "../src/schema.js";
@@ -64,7 +58,6 @@ interface Args {
   base: string;
   head: string;
   tsConfigPath?: string;
-  resolution: ResolutionTier;
   json: boolean;
 }
 
@@ -89,30 +82,15 @@ function parseArgs(argv: string[]): Args {
     // "the last commit". Both are useful; this is the one you want by default.
     base: flags.get("base") ?? "HEAD~1",
     head: flags.get("head") ?? "HEAD",
-    // An ESCAPE HATCH, and no longer the routine workaround: the loader opens
-    // one program per tsconfig the diff touches, so this monorepo's diff is
-    // covered without help. Passing the flag FORCES a single program — which is
-    // exactly what the loader used to do, and what took the "analysed" line
-    // below from 30 of 31 down to 1 of 31 — and disables the glob fallback with
-    // it.
+    // An ESCAPE HATCH, and no longer the routine workaround: one snapshot holds
+    // every tsconfig the diff touches, so this monorepo's diff is covered
+    // without help. Passing the flag FORCES a single program — which is exactly
+    // what the single-project loader used to do, and what took the "analysed"
+    // line below from 30 of 31 down to 1 of 31 — and disables the orphan
+    // fallback with it.
     tsConfigPath: flags.get("tsconfig") ? resolve(flags.get("tsconfig")!) : undefined,
-    // PROTOTYPE. Defaults to `full`, so the census a human reads by habit is
-    // still the census of what production does. Pass a tier to measure the
-    // trade — the peak-RSS line below is the number the sandbox cap cares
-    // about, and the `contracts` count is what it costs.
-    resolution: resolutionOf(flags.get("resolution")),
     json,
   };
-}
-
-function resolutionOf(raw: string | undefined): ResolutionTier {
-  if (raw === undefined) return DEFAULT_RESOLUTION_TIER;
-  if (!isResolutionTier(raw)) {
-    // A typo must not read as the default — the whole point of running this is
-    // to see a number change.
-    throw new Error(`--resolution must be one of: ${RESOLUTION_TIERS.join(", ")} (got "${raw}")`);
-  }
-  return raw;
 }
 
 function tally<T>(items: T[], key: (item: T) => string): [string, number][] {
@@ -139,7 +117,6 @@ function main(): number {
     base: args.base,
     head: args.head,
     tsConfigPath: args.tsConfigPath,
-    resolution: args.resolution,
     log: {
       ...noopLogger,
       debug(message: string, fields?: Record<string, unknown>) {

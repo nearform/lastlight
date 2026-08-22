@@ -25,9 +25,15 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { join } from "node:path";
 import { makeMonorepoFixture, UNSTABLE_TYPE_FILES, type Fixture } from "./helpers.js";
 import { runExtractor } from "../src/run.js";
-import { canonicalType, extractContracts, shapeOf } from "../src/contracts.js";
-import { changedPaths, withWorktree, type ChangedPath } from "../src/git.js";
-import { loadProject, repoRelative } from "../src/project.js";
+import { canonicalType } from "../src/contracts.js";
+import { changedPaths, type ChangedPath } from "../src/git.js";
+import {
+  collectBaseContracts,
+  exportedDeclarations,
+  extractContractsTsgo,
+  shapeOfTsgo,
+  tsgoViews,
+} from "../src/tsgo-extractors.js";
 import type { ContractsDocument } from "../src/schema.js";
 
 let fixture: Fixture;
@@ -110,17 +116,18 @@ describe("the phantom-delta noise floor", () => {
   });
 
   it("analyses every changed file in both packages", () => {
-    const loaded = loadProject({
-      repo: fixture.dir,
-      changedPaths: changedPaths(fixture.dir, fixture.base, fixture.head).map((c) => c.path),
-    });
-    expect(loaded.groups.length).toBe(2);
-    // 34 source files across two packages — every one of them in a program.
-    expect(loaded.analysedCount).toBe(
-      changedPaths(fixture.dir, fixture.base, fixture.head).filter((c) => c.path.endsWith(".ts"))
-        .length,
-    );
-    expect(loaded.degraded).toEqual([]);
+    const changed = changedPaths(fixture.dir, fixture.base, fixture.head);
+    const views = tsgoViews({ repo: fixture.dir, baseSha: fixture.base, changed });
+    expect(views.targets.tsConfigPaths.length).toBe(2);
+    const snapshot = views.open("head");
+    try {
+      // 34 source files across two packages — every one of them in a program.
+      const wanted = changed.filter((c) => c.path.endsWith(".ts"));
+      expect(wanted.filter((c) => snapshot.lookup(c.path) !== null).length).toBe(wanted.length);
+      expect(snapshot.degraded).toEqual([]);
+    } finally {
+      snapshot.dispose();
+    }
   });
 });
 
@@ -134,114 +141,182 @@ describe("the fixture is SENSITIVE — each fix is load-bearing", () => {
   /** Exports whose printed signature differs between the two programs. */
   let rawTextDiffers: number;
   let canonicalAgrees: number;
+  /** Every export pair compared — the denominator `canonicalAgrees` must reach. */
+  let comparedPairs: number;
 
   beforeAll(() => {
     changed = changedPaths(fixture.dir, fixture.base, fixture.head);
-    const paths = changed.map((c) => c.path);
+    const views = tsgoViews({ repo: fixture.dir, baseSha: fixture.base, changed });
+
     /**
-     * FORCED to one tsconfig, which is what makes this a measurement.
+     * THE HEAD VIEW, DELIBERATELY NARROWED — which is what makes this a
+     * measurement rather than a comment.
      *
-     * The default loader now opens one program per tsconfig, so on this fixture
-     * both packages are in the head program and the asymmetry the guard exists
-     * for is gone. `--tsconfig` reproduces it exactly — one program for the
-     * whole diff, which is what the loader did before and what a caller that
-     * passes the flag still gets — so the guard's contribution stays a number
-     * rather than a comment. The real-world shape is unchanged: a modified file
-     * in exactly one of the two programs.
+     * The default path opens ONE snapshot shape for both sides, so on this
+     * fixture the asymmetry the guard exists for cannot arise at all: base and
+     * head hold the same files by construction (`tsgoViews`, the symmetry
+     * invariant). Forcing the head side to `packages/a/tsconfig.json` while the
+     * base view discovers both packages reproduces the real-world shape exactly
+     * — every modified file in `packages/b` present on the BASE side only,
+     * which is the 65-phantom-removals shape from the real commit. It stays
+     * reachable in the field through `--tsconfig`, through a tsconfig that will
+     * not parse, and through a base blob git cannot serve.
      */
-    const head = loadProject({
+    const baseSnapshot = views.open("base");
+    let base;
+    try {
+      base = collectBaseContracts(baseSnapshot, changed);
+    } finally {
+      baseSnapshot.dispose();
+    }
+
+    const narrowed = tsgoViews({
       repo: fixture.dir,
-      changedPaths: paths,
+      baseSha: fixture.base,
+      changed,
       tsConfigPath: join(fixture.dir, "packages/a/tsconfig.json"),
     });
-    expect(head.project, "the head project must load, or none of this measures anything").toBeTruthy();
+    const head = narrowed.open("head");
+    try {
+      const common = { repo: fixture.dir, head, base, hunkIndex: new Map() };
 
-    withWorktree(fixture.dir, fixture.base, (baseDir) => {
-      const base = loadProject({ repo: baseDir, changedPaths: paths });
-      expect(base.project).toBeTruthy();
-
-      const common = {
-        repo: fixture.dir,
-        headProject: head.projects,
-        baseProject: base.projects,
-        baseDir,
-        hunkIndex: new Map(),
-      };
-
-      const withGuard = extractContracts({ ...common, changed });
+      const withGuard = extractContractsTsgo({ ...common, changed });
       guarded = withGuard.payload.contracts.length;
       guardedReason = withGuard.degraded[0]?.reason ?? "";
       oneSidedFiles = Number(/^(\d+) changed file/.exec(guardedReason)?.[1]);
 
       /**
        * The guard covers `modified` and `renamed` — the two statuses for which
-       * a file MUST be in both programs. Relabelling every change as `added`
-       * runs the identical comparison down the branch the guard does not cover,
+       * a file MUST be in both views. Relabelling every change as `added` runs
+       * the identical comparison down the branch the guard does not cover,
        * which is precisely the code path that emitted 65 phantom removals on
-       * the real commit. Same projects, same files: the only variable removed
-       * is the guard.
+       * the real commit. Same views, same files: the only variable removed is
+       * the guard.
        */
-      const withoutGuard = extractContracts({
+      const withoutGuard = extractContractsTsgo({
         ...common,
         changed: changed.map((c) => ({ ...c, status: "added" as const })),
       });
       unguardedRemovals = withoutGuard.payload.contracts.filter(
         (c) => c.change === "removed",
       ).length;
+    } finally {
+      head.dispose();
+    }
 
-      // Cause 3, measured on the same two programs.
+    // Cause 3, measured on the two views of the SAME tree.
+    const baseForText = views.open("base");
+    const headForText = views.open("head");
+    try {
       let differs = 0;
       let agrees = 0;
+      let pairs = 0;
       for (const path of UNSTABLE_TYPE_FILES) {
-        const headFile = head.project?.getSourceFile(
-          (f) => repoRelative(fixture.dir, f.getFilePath()) === path,
-        );
-        const baseFile = base.project?.getSourceFile(
-          (f) => repoRelative(baseDir, f.getFilePath()) === path,
-        );
-        expect(headFile && baseFile, `${path} must be in BOTH programs`).toBeTruthy();
+        const headFile = headForText.lookup(path);
+        const baseFile = baseForText.lookup(path);
+        expect(headFile && baseFile, `${path} must be in BOTH views`).toBeTruthy();
         const byName = new Map(
-          [...baseFile!.getExportedDeclarations()].map(([name, decls]) => [name, decls[0]]),
+          exportedDeclarations(baseFile!.sourceFile, baseFile!.owner.project).map((d) => [
+            d.name,
+            d,
+          ]),
         );
-        for (const [name, decls] of headFile!.getExportedDeclarations()) {
-          const before = shapeOf(byName.get(name)!).signature;
-          const after = shapeOf(decls[0]).signature;
+        for (const declaration of exportedDeclarations(
+          headFile!.sourceFile,
+          headFile!.owner.project,
+        )) {
+          const other = byName.get(declaration.name);
+          if (!other) continue;
+          pairs++;
+          const before = shapeOfTsgo(other.node, baseFile!.owner.project).signature;
+          const after = shapeOfTsgo(declaration.node, headFile!.owner.project).signature;
           if (before !== after) differs++;
           if (canonicalType(before) === canonicalType(after)) agrees++;
         }
       }
       rawTextDiffers = differs;
       canonicalAgrees = agrees;
-    });
+      comparedPairs = pairs;
+    } finally {
+      headForText.dispose();
+      baseForText.dispose();
+    }
   });
 
   /**
-   * `mirrorNodeModules` symlinks the head tree's `node_modules` into the base
-   * worktree, so both sides resolve `@fixture/ext`. Without it the base side
-   * INFERS `any` everywhere the external type reaches, and every one of those
-   * exports reads as changed.
+   * ── CAUSE 2, RE-POINTED 2026-08-22 — AND WHAT IT USED TO MEASURE ───────────
    *
-   * Note what the fixture had to do to exhibit this, because it is a trap: an
-   * ANNOTATED `function f(x: Ext): Ext` prints as `(x: Ext) => Ext` on BOTH
-   * sides even when the module does not resolve — the printer falls back to the
-   * written name. Only INFERRED types move. A fixture full of annotations would
-   * have "proved" the mirror buys nothing.
+   * This case used to run the same commit with `mirrorNodeModules: false` and
+   * assert the un-mirrored run was worse by a lower bound. Measured, it was 17
+   * phantom deltas against the mirrored run's 1, with the phantom's `before`
+   * literally `any`: `withWorktree` materialised the base tree in `$TMPDIR`,
+   * that tree had no `node_modules`, `@fixture/ext` did not resolve there, and
+   * every INFERRED external type collapsed to `any` on one side only. (Only
+   * inferred types moved — an ANNOTATED `f(x: Ext): Ext` prints the written
+   * name on both sides even unresolved, which is why the fixture had to infer.)
+   *
+   * **It stopped being measurable, and the mechanism it measured is gone.** The
+   * base side is an OVERLAY over the head tree now, so there is exactly one
+   * `node_modules` and the two sides cannot disagree about it — no second
+   * worktree, nothing to mirror into, and `mirrorNodeModules: false` is not a
+   * state a `contracts` run can be put in. Setting the ceiling beside a floor
+   * that can no longer be reached would be a guard that cannot fail, which is
+   * worse than no guard.
+   *
+   * So it is replaced by the sensitivity proof for the mechanism that took its
+   * place: **without the overlay the base view IS the head view**, the one real
+   * delta vanishes, and the run reports a clean PR that changed nothing. That
+   * is the same failure class from the other direction — the earlier one
+   * manufactured deltas, this one MASKS them — and it is the one a bug in
+   * `buildBaseOverlay` or in `overlayFileSystem`'s two-spellings index would
+   * actually produce.
    */
-  it("cause 2: WITHOUT the node_modules mirror the same commit yields >10 deltas", () => {
-    const unmirrored = runExtractor({
-      extractor: "contracts",
-      repo: fixture.dir,
-      base: fixture.base,
-      head: fixture.head,
-      mirrorNodeModules: false,
-    }).document as unknown as ContractsDocument;
+  it("cause 2: WITHOUT the base overlay the two views are identical and the real delta disappears", () => {
+    const views = tsgoViews({ repo: fixture.dir, baseSha: fixture.base, changed });
+    // `open("head")` twice: the same argument list, no overlay on either side —
+    // which is precisely what an overlay that fails to serve its blobs degrades
+    // to, silently.
+    const pretendBase = views.open("head");
+    let base;
+    try {
+      base = collectBaseContracts(pretendBase, changed);
+    } finally {
+      pretendBase.dispose();
+    }
+    const head = views.open("head");
+    try {
+      const blind = extractContractsTsgo({
+        repo: fixture.dir,
+        head,
+        base,
+        changed,
+        hunkIndex: new Map(),
+      });
+      // The floor: the overlay is the ONLY thing making this a comparison.
+      expect(blind.payload.contracts).toEqual([]);
+      expect(document.contracts.length).toBeGreaterThan(0);
+      expect(document.contracts.some((c) => c.symbol === "resolveSession")).toBe(true);
+    } finally {
+      head.dispose();
+    }
+  });
 
-    expect(unmirrored.contracts.length).toBeGreaterThan(10);
-    expect(unmirrored.contracts.length).toBeGreaterThan(document.contracts.length);
-    // …and they are phantoms, not findings: the same export, `any` on one side.
-    const phantom = unmirrored.contracts.find((c) => c.symbol.startsWith("makeA"));
-    expect(phantom?.before?.returns).toBe("any");
-    expect(phantom?.after?.returns).toBe("Ext");
+  /**
+   * The other half, and the reason the case above is not just "an overlay does
+   * something": with the overlay the external type resolves on BOTH sides, so
+   * the 16 exports whose types are INFERRED from `@fixture/ext` are compared
+   * resolved-against-resolved and contribute nothing.
+   *
+   * Under the previous engine this was the expensive half — an un-mirrored base
+   * worktree printed `any` for every one of them — and it is now free, because
+   * one tree has one `node_modules`.
+   */
+  it("cause 2: the external type resolves on BOTH sides, so no `any` reaches a delta", () => {
+    for (const delta of document.contracts) {
+      expect(delta.before?.returns, `${delta.symbol}`).not.toBe("any");
+      expect(delta.after?.returns, `${delta.symbol}`).not.toBe("any");
+    }
+    expect(document.contracts.some((c) => c.symbol.startsWith("makeA"))).toBe(false);
   });
 
   /**
@@ -257,8 +332,15 @@ describe("the fixture is SENSITIVE — each fix is load-bearing", () => {
    * deltas, on a commit whose only real change is one added parameter.
    */
   it("cause 3: canonicalType collapses the fixture's unions; raw text does not", () => {
+    // WITHOUT `canonicalType` at least ten of these pairs read as changed;
+    // WITH it, EVERY pair collapses. Stated as "agrees covers the whole
+    // denominator" rather than as `agrees === differs`, because the two are only
+    // equal while every single pair differs raw — which was true of the previous
+    // printer and is not of this one (18 of 24 here). Tying the assertion to
+    // that coincidence would make it a snapshot of a printer.
     expect(rawTextDiffers).toBeGreaterThan(10);
-    expect(canonicalAgrees).toBe(rawTextDiffers);
+    expect(comparedPairs).toBeGreaterThan(rawTextDiffers);
+    expect(canonicalAgrees).toBe(comparedPairs);
     expect(document.contracts.some((c) => c.file.startsWith("packages/a/src/plan/"))).toBe(false);
 
     // The arrow-precedence half, stated directly: `(…) => A | B` is

@@ -18,7 +18,7 @@
     "Opengrep 1.27, ship an image with 1.0, and production generates a different",
     "obligation set from the one every gate was read on. Nothing would error.",
     "",
-    "WHAT IS DELIBERATELY *NOT* HERE: the npm-resolved engines (ts-morph,",
+    "WHAT IS DELIBERATELY *NOT* HERE: the npm-resolved engines (typescript,",
     "@ast-grep/napi, zod). They are pinned by `package.json` + `pnpm-lock.yaml`,",
     "which is a stronger pin than a hand-maintained copy, and duplicating them",
     "here would create exactly the drift this file exists to prevent. The",

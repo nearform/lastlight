@@ -74,12 +74,23 @@ directory that is not a git repo. It cannot cover a process that dies.
 
 ```
 not a git repo, --never-fail   → exit 0,   coverage:"none" envelope written   ✓
-OOM (--max-files raised),  "   → exit 134, NO envelope                        ✗
+process death,  --never-fail   → exit 134, NO envelope                        ✗
 ```
 
-Reachable two ways: raising `--max-files` past what the heap can hold (the
-default 6000 ceiling degrades gracefully instead, which is the whole reason it
-exists), and any segfault in the `@ast-grep/napi` native binary.
+Three ways to reach the second row, and the newest arrived with the new engine:
+an OOM (raising `--max-files` past what the heap can hold; the default ceiling
+degrades gracefully instead, which is why it exists), a segfault in the
+`@ast-grep/napi` native binary, and — **verified by reading `typescript`'s
+`dist/api/syncChannel.js`** — a `spawn()` with **no `'error'` listener**, so a
+`tsgo` executable that cannot be run emits an unhandled `'error'` on the next
+tick and kills the node process outright. `resolveTsgoBinary()` pre-flights it
+(`accessSync(X_OK)`) and passes the resolved path back in as `tsserverPath`, so
+the path checked is the path spawned — **a narrowing, not a guarantee**: a binary
+that passes `X_OK` and dies during exec still takes the process down. That
+executable arrives as an npm `optionalDependency`
+(`@typescript/typescript-<platform>-<arch>`; 20 declared, one installed), so an
+image that does not install its own gets a `typescript` that imports fine and a
+`tsgo` that does not exist.
 
 **So the caller must own the fallback.** The workflow phase catches at the shell
 — `lastlight-facts all … || <write a fallback envelope>` — because a wrapper
@@ -95,22 +106,143 @@ exists so nobody closes the hole into a *false* guarantee — an
 were always written, and the shell-level catch that is the actual guarantee
 would quietly get dropped.
 
-## The TS 7 landmine
+## The compiler — the TS 7 premise expired, and the rule that survived it
 
-**TypeScript 7 has no programmatic compiler API** — `tsgo` is CLI + LSP only.
+**TypeScript 7 does have a programmatic compiler API.** `typescript@7.0.2`
+exports `./unstable/sync`; the engine behind it is the Go compiler, spawned as a
+**child process** over a synchronous pipe, with the JS side as a client. WP1's
+locked decision — *"`tsgo` is CLI + LSP only"* — was true when it was written
+(2026-08-20) and is false now. The argument, the measurements, the gates and the
+end state live in [`docs/plans/fact-engine/`](../../docs/plans/fact-engine/README.md).
+
+**Where the tree was at `7602ef47`, and where it is going.** The seam
+(`src/tsgo.ts`) is committed and `facts` + `contracts` are ported onto it in
+`src/tsgo-extractors.ts` behind **`--engine tsgo`**, a measurement flag whose
+default was still `ts-morph` at that commit. The end state — `ts-morph` gone, and
+with it the shared file budget, `--max-projects`, `--resolution` and the base
+worktree — is specified in
+[`02-migration.md`](../../docs/plans/fact-engine/02-migration.md) and was
+**landing while this was written**, so treat every mechanism named below as
+scheduled for deletion and **read the tree, not this file, for what is still
+there**. What survives the swap is not the machinery, it is the epistemics:
+`null` ≠ `[]`, a tier is not a coverage, an empty result is never a pass.
+
 Three rules, not negotiable:
 
-1. **`ts-morph@28` is the engine.** It vendors its own compiler (currently TS
-   6.0.2) and carries **no `typescript` dependency**.
-2. **Never resolve `typescript` from the repo under review.** A
-   `require.resolve("typescript", { paths: [repoDir] })` anywhere here is a bug
-   that breaks every TS-7 target, which is now most of them.
-   `tests/compiler-isolation.test.ts` enforces it, with comments stripped first
-   so the doc comments that *name* the forbidden shape do not trip it.
-3. **The `tsgo --lsp --stdio` fallback is a seam, not a build.** `loadProject`
-   returns a tier plus a reason instead of throwing, which is where an
-   LSP-backed reference provider would plug in. Build it when a tier-2 repo
-   actually blocks a measurement — not before.
+1. **`src/tsgo.ts` is the only module that may import `typescript/unstable/*`.**
+   It owns the compiler LIFECYCLE and no policy — no file budget, no project
+   cap, no tier. `project.ts` decides *which* tsconfigs and *which* orphan files
+   are worth opening; the seam is told and obeys.
+2. **Never resolve `typescript` from the repo under review.** Unchanged from
+   WP1, and now the *more* important half, because the engine **is**
+   `typescript`: a resolve that walked into the target repo would run an
+   arbitrary compiler pinned by an arbitrary lockfile against the code it is
+   supposed to be auditing. Hence the **exact** pin (`"typescript": "7.0.2"`, a
+   real dependency, not a caret — the API is namespaced `unstable/` and a caret
+   is an unpinned compiler in a package whose job is reproducible documents).
+   Verified 2026-08-22: `typescript/lib/getExePath.js` resolves the platform
+   executable from its own `import.meta.url` and never consults `cwd`, so
+   `new API({ cwd: repo })` cannot pull a compiler out of the target. Assert it
+   anyway — `tests/compiler-isolation.test.ts` is the gate, with comments
+   stripped first so the doc comments that *name* the forbidden shape do not
+   trip it.
+3. **This engine's silences are louder than its failures.** A tsconfig that will
+   not parse does **not** throw: `updateSnapshot` hands back a project built from
+   a *recovered* configuration and demotes the parse failure to
+   `getConfigFileParsingDiagnostics()`. A tsconfig that does not exist is simply
+   absent from `getProjects()`, and a shorter list looks like nothing at all.
+   Both are locked decision 6's exact shape. `src/tsgo.ts` detects both,
+   **excludes** the project rather than degrading it, and records
+   `tsconfig-unparsable` / `tsconfig-absent` in `failures[]` beside the
+   `degraded[]` prose. Compare projects asked for against projects returned,
+   every run.
+
+The **`tsgo --lsp --stdio` fallback tier** that used to be rule 3 is not what
+shipped and is not planned. A file under no tsconfig gets a real checker from
+`openFiles` → tsgo's **inferred project** (default compiler options — no
+`paths`, no `strict`, nothing the repository configured — so it is named in
+`degraded[]`: analysed is better than skipped, and it is not the same answer).
+The one query with no API equivalent is `getImplementations`; an LSP session
+sharing the snapshot is the plausible route and is an **open** spike item
+(G-impl). Until it is answered, `SymbolFact.implementations` is **`null` plus a
+`degraded[]` entry naming the engine** — never `[]`, which would assert that an
+exported interface has no implementers anywhere.
+
+### Measured: the two engines agree, and one is 3–10x faster
+
+`scripts/engine-ab.mts`, this repo at `HEAD~1..HEAD`, one engine per run,
+compared as **sets** rather than counts — a run that loses eight symbols and
+gains eight reads as flat:
+
+| | `ts-morph` | `tsgo` |
+|---|---|---|
+| `facts` symbol set / reference sites | 44 / 138 | **44 / 138**, nothing on either side only |
+| `contracts` keys / `consumersOutsideDiff` | 13 / 32 | **13 / 32**, identical |
+| `facts` wall clock | 2034 ms | **642 ms** (3.2x) |
+| `contracts` wall clock | 3661 ms | **1405 ms** (2.6x) |
+| the same two at `--resolution full` | 5704 / 10485 ms | 594 / 1523 ms (**9.6x** / **6.9x**) |
+| `selfcheck`'s three exit conditions, recomputed in-script | OK | OK |
+
+One commit of one repo, and the last row is a reimplementation of the check
+rather than `pnpm selfcheck` itself — evidence toward the spike's G1/G2, not a
+substitute for either.
+
+**Two things that table does not say, and one of them is a correction.**
+
+- **It is not a memory result, and this swap must never be sold as one.**
+  `SANDBOX_MEMORY_LIMIT` went to **8g** on 2026-08-22, so there is no ceiling
+  left to fit, and `01-spike.md`'s G4 was withdrawn from a gate to a reported
+  number the same day. The **79 MB** figure `scripts/engine-bench.mjs` prints
+  for tsgo is `process.memoryUsage.rss()` of the **node client**, and the
+  compiler is a child process it does not count; the ts-morph column is
+  in-process and counts everything. The number that includes the child is
+  recorded in `src/run.ts`: **~600 MB per open snapshot plus ~200 MB of node**,
+  on this repo — which is why `contracts` drains the base view to plain strings
+  and disposes it *before* opening the head one, rather than holding two. The
+  case for the swap is that it deletes mechanisms and is faster.
+- **The two printers are not identical.** `TsgoFailureReason` prints its union
+  members in a different ORDER on each engine, which is why the `printed
+  SIGNATURES` set diverges by one entry while the contract KEY set does not.
+  Harmless while both sides of a `contracts` comparison come from the same
+  engine — and a standing reason never to compare a stored ts-morph `before`
+  against a fresh tsgo `after`. Cause 3 of WP1's *227 deltas of which one was
+  real* (`canonicalType` over re-printed type text) is the one cause the new
+  engine does **not** remove.
+
+### The overlay's base view is NOT the worktree's, and a dirty tree makes them disagree
+
+Its own heading because it generalises, and because it is a silent-wrongness
+shape rather than a crash.
+
+- `withWorktree` (the ts-morph path) materialises **base blobs for every file**.
+- `buildBaseOverlay` (the tsgo path) serves **base blobs for the CHANGED files**
+  and returns `undefined` for everything else, which the engine's three-valued
+  `readFile` means *fall through to the real filesystem* — the **working tree**.
+  That is the point: one tree, one `node_modules`, ~24 ms instead of a second
+  checkout, and the ranking skew a temp worktree introduces cannot arise.
+
+**They agree exactly when the checkout is clean at head, and only then.**
+Measured on this repo while `src/schema.ts` was modified in the working tree but
+absent from the `HEAD~1..HEAD` changed set: ts-morph reported a `changed` delta
+on `project.ts#languageBreakdown` — whose return type names the `engine` enum
+`schema.ts` declares — and tsgo did not, 14 deltas against 13, in the
+`--resolution full` arm of `scripts/engine-ab.mts`. The overlay never overrode
+`schema.ts`, so the base view read the *edited* bytes and both sides matched.
+Neither engine is wrong about the tree it was shown; they were shown different
+trees.
+
+This **inherits and widens** the backlog item in
+[`RESTART.md`](../../docs/plans/review-evidence-pipeline/RESTART.md) —
+*"`facts`/`contracts` read head from the filesystem while the changed set comes
+from git"*. That caveat was about head; the overlay makes it true of the **base**
+view as well, for every file the diff did not touch.
+
+**Open, not fixed.** What it wants is a loud `degraded[]` entry whenever the
+working tree is dirty: the document claims to be about `baseSha..headSha`, and a
+dirty tree makes it partly a claim about somebody's uncommitted edits. No such
+check exists in `src/` today (verified 2026-08-22). Serving head blobs through
+the same overlay closes the other half and is cheap for the first time — it was
+a second worktree before.
 
 ## Language tiers
 
@@ -180,250 +312,98 @@ byte and to the megabyte — A/B'd on this repo, 7,992 hits both ways, 406 MB bo
 ways — because `interestingKinds` asks the parser only for the node kinds the
 caller's sink can use, and the literal sweep's sink asks for four.
 
-## ONE PROGRAM PER TSCONFIG — the tier is not the coverage
+## ONE PROGRAM PER TSCONFIG, the shared budget, the memory — why they exist
 
-`loadProject` returns **a group per tsconfig the diff touches**, not one project
-for the diff. It used to return one, and the corpus measured what that cost: over
-50 real PRs, **58 of 8,514 changed files were analysed — 0.7%**, with
-`grafana-90939` reporting **tier 1** on 1 file of 142 and `cal-com-22532`
-reporting **tier 1** on 0 of 17. Every one of those runs carried the shortfall in
-`degraded[]`, so this was never a loudness bug: the package was honest, and
-blind. Nearest-first picks one tsconfig, and a monorepo diff (cal.com: 26
-tsconfigs, 140 `package.json` files; grafana: 29) is covered by none of them.
+**Everything in this section is cost management for a JavaScript type-checker,
+and [`02-migration.md`](../../docs/plans/fact-engine/02-migration.md) deletes it.**
+The measurement record is kept compressed rather than dropped, because each
+mechanism was bought with a bug and the *reasoning* outlives the mechanism.
 
-Measured on this repo's own WP1 commit, `pnpm selfcheck`: **1 of 31 analysable
-changed files → 30 of 31**, across 4 programs. On the corpus spot-checks:
-cal-com-22532 `0/12 → 12/12`, cal-com-11059 `1/38 → 38/38`, cal-com-10967
-`4/22 → 22/22`. grafana-106778 was already `12/12` and stayed there — where one
-tsconfig genuinely covered the diff, nothing changes.
+**The rule that outlives all of it: the tier is not the coverage.** A program
+that loads is not a diff that was analysed. `loadProject` returns **a group per
+tsconfig the diff touches**, not one project for the diff, because when it
+returned one the corpus measured what that cost: over 50 real PRs, **58 of 8,514
+changed files were analysed — 0.7%**, with `grafana-90939` reporting **tier 1**
+on 1 file of 142. Every run carried the shortfall in `degraded[]`, so this was
+never a loudness bug: the package was honest, and blind. Measured on this repo's
+WP1 commit, `pnpm selfcheck`: **1 of 31 analysable changed files → 30 of 31**,
+across 4 programs; `cal-com-22532` went `0/12 → 12/12`. Whatever the engine,
+**the per-file answer must survive** — `EngineSnapshot.lookup()` returning
+`null`, or `LoadedProject.narrowed`, is how a consumer can still tell which
+changed files a program actually held. **Reference queries stay inside their own
+program**, which is correct rather than a limitation: over-claiming a reference
+set would be worse than under-claiming it in the two extractors (`constants`,
+`contracts`) whose output is an ABSENCE claim. Both engines produce the same set
+today — 138 reference sites either way on this repo at `HEAD~1..HEAD`.
 
-Four things hold it together, and each is load-bearing:
+Three mechanisms, compressed, each with what removes it:
 
-- **`maxFiles` is a TOTAL across groups, and the total is ALLOCATED rather than
-  spent.** See "the budget is shared out" below — this is the one thing here
-  that was rebuilt after the multi-project loader shipped.
-- **Every group's size is known BEFORE anything is parsed** — the glob from
-  `git ls-files` (`globCandidates`), the tsconfig from
-  `ts.getParsedCommandLineOfConfigFile` (`tsConfigCandidates`). Letting ts-morph
-  glob the repo root and checking the count afterwards took `pnpm selfcheck`
-  from 774 MB to **4.5 GB** of peak RSS — for a program rejected on the next
-  line for being over the ceiling. The tsconfig half had exactly the same bug
-  and kept it a release longer: measured on sentry's root tsconfig, **112 ms and
-  211 MB to LIST 7,230 files against 3.6 s and 1.29 GB to compile them**, and
-  the loader compiled them, counted them, found them over budget and threw the
-  whole program away. `globCandidates` honours `.gitignore` for free, which on
-  this monorepo is the difference between 9,399 files and **731**.
-- **A file under no tsconfig still gets analysed**, by globbing its nearest
-  `package.json` directory (not the repo — that is the memory trap above, and the
-  glob excludes every directory a tsconfig group already holds). It is **named in
-  `degraded[]`**: glob-tier output is not tsconfig-tier output, and a consumer
-  that read it as one would be over-trusting it.
-- **A tsconfig that will not PARSE is different from one that is absent.** Its
-  files are abandoned, not globbed around — a repo whose build config is broken
-  must not be silently promoted to tier 1. That is what keeps
-  `makeBrokenTsConfigFixture` at tier 2.
+- **The file budget, ALLOCATED rather than spent** (`maxFiles` as a TOTAL,
+  `unserved`, `allowanceFor`, `selectNeighbourhood`). One shared ceiling across N
+  programs shipped first-come-first-served, which starves any monorepo diff
+  spanning several packages: on `prreview__sentry-greptile-5` a single 7,230-file
+  tsconfig over the 6,000 ceiling meant **0 of 69 changed `.tsx` files analysed**.
+  The fix RESERVES every changed file before any group spends, and admits an
+  over-allowance group **partially** — its changed files plus as much
+  neighbourhood as fits — instead of refusing it wholesale. sentry went from
+  producing nothing to a full tier-1 document (69 of 69, 112 symbols, 20
+  contracts), and to **identical output at `--max-files 3000`**, because what
+  buys the coverage is the reserve, not the ceiling. Two consequences were the
+  whole point and both are epistemic rather than budgetary: **a narrowed
+  program's reference sets are a LOWER BOUND**, said in those words in
+  `degraded[]` — no *"appears nowhere else"* reading is available from a narrowed
+  group, which matters most to `constants` — and **a file the diff DELETED gets
+  its own reason, not a coverage-gap one**, because it is absent at head and no
+  program can hold it. *Removed by:* one snapshot holding every project, so there
+  is no per-group glob to size and nothing to narrow.
+- **Pre-sizing every group BEFORE anything is parsed** (`globCandidates` from
+  `git ls-files`, `tsConfigCandidates` from `getParsedCommandLineOfConfigFile`).
+  Letting ts-morph glob the repo root and checking the count afterwards took
+  `pnpm selfcheck` from 774 MB to **4.5 GB** of peak RSS — for a program rejected
+  on the next line for being over the ceiling. The tsconfig half had the same bug
+  and kept it a release longer: **112 ms and 211 MB to LIST** sentry's 7,230
+  files against **3.6 s and 1.29 GB to compile them**, count them, find them over
+  budget and throw the whole program away. *Removed by:* there being nothing left
+  to size.
+- **`--resolution` and the `node_modules` closure.** `--max-files` bounds the
+  ROOT list, and the checker follows bare specifiers one layer below it: measured
+  on a **3-file** diff of this repo, ts-morph held 637 source files while the
+  underlying `ts.Program` held **9,647 — 8,947 of them from `node_modules`**,
+  7,374 `.d.ts`. Neither `skipFileDependencyResolution` nor `types: []` stops it,
+  so the same commits cost 0.9–1.3 GB on a bare tree and ~3.5 GB installed, with
+  one ordinary 31-file PR **OOMing at 4.3 GB — exit 134, no document, and a
+  leaked `git worktree` in `$TMPDIR` because the `finally` never ran**. That is
+  the whole reason `--resolution` exists (`full` · `changed` · `none`, default
+  `changed`; `workspace` and `hop` were built, measured and cut as dominated).
+  It is not free, and the cost lands in `contracts`: with resolution blocked an
+  externally-typed signature renders `any` (`z.infer<typeof S>` → `z.infer<any>`)
+  on **61 of 168** entries, so a delta between two external types that both print
+  `any` would be MASKED. *Removed by:* the tsgo path resolving every specifier,
+  which makes the tier inapplicable rather than answered — **whether the Go
+  compiler's `node_modules` cost behaves the same way has not been measured on
+  any tree** ([`01-spike.md`](../../docs/plans/fact-engine/01-spike.md)'s G4,
+  second half). `src/resolution.ts`'s deletion was conditioned on that
+  measurement; if the file is gone from the tree and no installed-tree number is
+  written down, the condition was skipped rather than met, and that is worth
+  knowing before the next OOM.
 
-**Reference queries stay inside their own program.** That is correct rather than
-a limitation: a cross-project reference is not resolvable without project
-references anyway, and over-claiming a reference set would be worse than
-under-claiming it in the two extractors (`constants`, `contracts`) whose output
-is an ABSENCE claim.
+Three readings of the retired per-extractor memory table survive it, because
+they are about shape rather than about ts-morph. **`all` peaks at the MAX of its
+parts, not their sum** — the extractors share the one head program `contracts`
+needs anyway, so *"run them sequentially and release between them"* is the same
+peak plus a second program build. **`contracts` is the whole cost**, because it
+is the only extractor that materialises a second tree; the overlay is exactly the
+removal of that tree, and what it changes about the *answer* is the dirty-tree
+section above. And **peak tracks REPO size, not diff size** — `grafana-106778`
+peaks at **2449 MB off a fourteen-file diff**, which is why no diff-scoped lever
+ever reached it.
 
-### The budget is SHARED OUT, and a group that does not fit is NARROWED
-
-One program per tsconfig shipped with a first-come-first-served budget: groups
-loaded largest-diff-share first and each was refused **wholesale** once the
-running total passed `maxFiles`. That is a starvation shape, and it is
-scale-independent — it bites any monorepo whose diff spans several packages.
-Caught on `prreview__grafana-106778` (*"the glob over . holds 7473 source files
-and 5399 were already loaded for this diff, above the 6000 ceiling — it was NOT
-analysed"*) and measured on `prreview__sentry-greptile-5`, where one 7,230-file
-tsconfig over the 6,000 ceiling meant **0 of 69 changed `.tsx` files analysed**
-in the largest genuinely-large PR in the corpus. **A project holding one changed
-file must never be refused because an unrelated project already spent the shared
-budget.**
-
-Be precise about grafana, because the honest number is not the dramatic one: its
-single "uncovered" file turns out to be a **deletion**, so the refused group
-could not have analysed it either — the envelope was blaming the budget for a
-deleted file. That case's fix is the two bullets at the end of this list; the
-budget redesign is what sentry needed.
-
-Three fixes were on the table and two were rejected:
-
-- **A budget per project** — the obvious one — multiplies the memory bound by
-  `maxProjects`: 12 × 6,000 files is ~5 GB. It was rejected against the 2 GB
-  sandbox cap of the day; the cap is **8g** now, and the rejection stands
-  anyway, because a bound that scales with how many packages a diff happens to
-  touch is not a bound. The observed peak would depend on the shape of the PR.
-- **Counting QUERIED files instead of loaded files** is the honest proxy for
-  reference-query time, but it cannot bound memory and it is not knowable before
-  the program exists. Not this fix.
-- **What ships**: `maxFiles` stays a total — so peak RSS is unchanged — but it
-  is allocated. Before any group spends anything, every changed file not yet in
-  a program is RESERVED (`unserved` in `loadProject`), and a group's allowance is
-  whatever is left *after* the other groups' reserves. A group over its allowance
-  is admitted **partially**: it keeps every changed file it covers plus as much
-  of their neighbourhood as fits (`selectNeighbourhood`, deepest shared directory
-  first), instead of being refused.
-
-Consequences that are load-bearing:
-
-- **A narrowed program's reference sets are a LOWER BOUND**, and that is said in
-  those words in `degraded[]` along with the counts, plus
-  `LoadedProject.narrowed` as the machine-checkable half. An omitted file is a
-  file a reference could have lived in, so no *"appears nowhere else"* reading is
-  available from a narrowed group — which matters most to `constants`, whose
-  whole output is an absence claim.
-- **The reserve can push past `maxFiles`, deliberately.** The diff is not
-  optional work: `facts` and `contracts` read every changed file whatever the
-  loader decides, so declining to compile one saves nothing and costs the whole
-  answer for it. The hard bound is `maxFiles + min(analysable diff, maxFiles)`,
-  and a diff bigger than the budget outright gets ONE named reason instead of a
-  pile of per-group ones.
-- **`--max-projects` is the one refusal that stays wholesale**, because half a
-  compiler is not a thing. Named separately, with its own count.
-- **`selectNeighbourhood` ranks on REPO-RELATIVE paths.** `contracts` compares a
-  head program against a base program in a temp worktree; ranking on absolute
-  paths would make the two sides narrow to different file sets for no reason,
-  which is the recipe for a phantom delta.
-- **A group holding NONE of the changed files it was opened for is skipped.** It
-  can never own a declaration under review, so no reference query will ever run
-  in it — it is all cost and no answer. Measured on `grafana-106778`, where the
-  one "uncovered" changed file turns out to be a **deletion**: compiling the glob
-  group's share of the budget for it cost 600 files and 319 MB to analyse
-  nothing.
-- **A file the diff DELETED gets its own reason, not a coverage-gap one.** It is
-  absent at head, so no program can hold it and none should be blamed — the same
-  argument `languages[].changedFiles` already makes about deletions. That one
-  line was the whole of `grafana-106778`'s remaining `degraded[]` entry, and it
-  had been reading as a budget failure.
-
-Measured, one line per case:
-
-| case | before | after |
-|---|---|---|
-| `sentry-greptile-5` | tier **2**, 0 of 69 changed `.tsx`, 0 symbols, 0 contracts, **8** degraded, 1.33 GB, 6.5 s | tier **1**, **69 of 69**, 112 symbols, 20 contracts, **5** degraded, 2.95 GB, 23.6 s |
-| `grafana-106778` | 12 analysed, 11 contracts, 5 degraded, 2.43 GB | 12 analysed, 11 contracts, **4** degraded, **2.36 GB** |
-| `cal-com-22532` | 1.82 GB | **1.49 GB** |
-| this repo, `all` | 2.66 GB | 2.61 GB |
-| `pnpm selfcheck` | 30 of 31, 4 programs | unchanged (every group fits) |
-
-sentry-greptile-5 is the honest cost line: it went from producing **nothing** to
-producing a full tier-1 document, and a 6,000-file program on a repo that size
-has always cost about 2.9 GB — grafana pays 2.36 GB for 5,399. The old loader
-never cashed that promise because it refused the group instead. Nothing here
-raised the ceiling.
-
-`--max-files` is the lever, and narrowing is what makes it a *useful* one for
-the first time. The same sentry case at **`--max-files 3000`** is **2.14 GB and
-identical output** — 69 of 69, 112 symbols, 20 contracts — because what buys the
-coverage is the reserve plus the neighbourhood, not the ceiling. Under the old
-wholesale rule, lowering the ceiling could only ever refuse *more*. A host that
-cannot afford 2.9 GB should turn this down rather than turn the analysis off.
-
-The cost, measured: roughly **2x wall clock and 2.3x peak RSS** for 30x the
-coverage (`facts` on this repo: 1.6 s / 572 MB → 3.4 s / 1.17 GB). Worst observed
-on the corpus is 15 s, against AC6's 90 s budget. `constants`'s repo-wide literal
-scan used to dominate `all` (2.3 GB of 3.4 GB); enumerating from the git tree
-took `all` to 2.34 GB and `constants` alone from 2.24 GB to 0.82 GB. `all`'s wall
-clock went slightly *up* (18.9 s → 21.4 s) because the repo-root glob group now
-fits under the file ceiling and is actually compiled instead of being dropped.
-
-### WHERE THE MEMORY GOES — it is `node_modules`, not the file budget
-
-A phase that runs this inside the review sandbox has a memory cap —
-`SANDBOX_MEMORY_LIMIT`, **8g** by default since 2026-08-22, and **2 GB** when
-every number below was measured. A process that exceeds it dies as `exit 134`
-with **no envelope** — `--never-fail` is an in-process `try`/`catch` and
-provably cannot catch it (`tests/oom.test.ts`) — and the review cron then
-re-dispatches the failed run every thirty minutes. So the peak has to be a
-number somebody has measured, whatever the cap is.
-
-**Do not read the table below as a safety margin.** It is five commits of THIS
-repo, and it does not generalise: on the 50-PR corpus, on **bare** trees,
-`grafana-106778` peaks at **2449 MB off a fourteen-file diff** and
-`sentry-greptile-5` at **2988 MB**. Peak RSS tracks *repo* size through
-`--max-files`, so a small diff in a large repo is the expensive case, not the
-cheap one. It is, per extractor, on
-five real commits of THIS repo (darwin-arm64, `/usr/bin/time -l`, `node dist/cli.js`):
-
-| commit (analysable diff) | `facts` | `contracts` | `constants` | `deps` | `patterns` | `coverage` | **`all`** |
-|---|---|---|---|---|---|---|---|
-| `a63200ff` (3 files) | 544 | 810 | 405 | 164 | 264 | 163 | **815 MB / 5.5 s** |
-| `30ebc63c` (22) | 602 | 903 | 543 | 171 | 264 | 163 | **921 MB / 6.7 s** |
-| `3b880cce` (22) | 713 | 1147 | 663 | 172 | 300 | 163 | **1325 MB / 8.1 s** |
-| `df645b6f` (158) | — | — | — | — | — | — | **1297 MB / 12.0 s** |
-
-Read three things off it:
-
-- **`all` peaks at the MAX of its parts, not their sum** (815 against
-  `contracts`' 810). The extractors share the one head program `contracts` needs
-  anyway, so *"run them sequentially and release between them"* is not a fix —
-  it is the same peak plus a second program build.
-- **`contracts` is the whole cost**, because it is the only extractor that
-  materialises a second tree. Dropping it roughly halves the peak.
-- **A 160 MB floor** is node plus the vendored compiler's `lib.*.d.ts`
-  (`deps`/`coverage` load no project at all).
-
-Those are the numbers **without an install**. With the repo's `node_modules` on
-disk the SAME commits cost 3.5 GB, and `3b880cce` — an ordinary 31-file PR —
-**OOMs at 4.3 GB, exit 134, no document, and a leaked `git worktree` in
-`$TMPDIR` because the `finally` never ran**:
-
-| commit | no `node_modules` | installed | installed, resolution blocked |
-|---|---|---|---|
-| `1c090b3c` | 948 MB | 3713 MB | 926 MB |
-| `30ebc63c` | 942 MB | 3756 MB | 930 MB |
-| `3b880cce` | 1324 MB | **OOM (4322 MB)** | 1370 MB |
-| `c8530b83` | 1210 MB | 3452 MB | 1227 MB |
-
-The mechanism, measured on `a63200ff` (a **3-file** diff): ts-morph holds **637**
-source files and the underlying `ts.Program` holds **9,647** — **8,947 of them
-from `node_modules`**, 7,374 `.d.ts`, 78 MB of declaration text. Neither
-`skipFileDependencyResolution` nor `types: []` stops the checker following a
-bare specifier; they only stop ts-morph *adding* files and the compiler
-*auto-including* `@types`. So:
-
-- **`--max-files` bounds the wrong number.** It is a ceiling on the ROOT list.
-  The same case at `--max-files 200` still peaks at 3.27 GB against 3.68 GB at
-  the 6000 default — a 3% saving for a 30x smaller budget — because the 15x
-  closure is untouched. On this repo the budget is not even binding: the whole
-  diff loads 637–757 files against a 6000 ceiling. **Lowering the default would
-  buy nothing and cost the narrowing win.**
-- **`maxFiles` being a TOTAL does not make N programs cost one program.** Each
-  group builds its own `ts.Program` with its own copy of the closure: **~110 MB
-  per extra program with no install, ~350–500 MB with one**. That is the axis
-  `--max-projects` bounds, and it costs coverage directly — `3b880cce` analyses
-  22 of 31 changed files at 12 programs and **8 of 31** at one.
-- **An RSS-based budget is not the answer either.** It cannot be known before
-  the program is built (`loadProject` is lazy: the 637-file load reads 446 MB and
-  only touching the checker takes it to 1.66 GB), and a ceiling that depends on
-  how much memory the host happened to have makes the document
-  non-reproducible — `tests/invariants.test.ts` asserts the opposite.
-
-**What this means for a workflow phase.** Today's review workspace is a
-pre-clone with no install, which is why `all` fits: 0.8–1.3 GB on a
-representative PR, and 1.3 GB on the largest real PR this repo has (158 files).
-Nothing in this package enforces that, and **a `prepare` step that installs
-dependencies — to produce the coverage artifact `coverage` reads, say — is what
-re-arms the OOM.** The shell-level catch is not optional (see `--never-fail`
-above); neither is keeping the install out of the tree `lastlight-facts` is
-pointed at.
-
-The one lever that closes the gap without touching coverage of the *diff* is a
-ts-morph `resolutionHost` that refuses to resolve into `node_modules` — the
-third column above, prototyped and measured. It is **not** free and was not
-taken: 375 of 376 tests pass under it, and the one that fails is
-`noise-floor`'s *"WITHOUT the node_modules mirror the same commit yields >10
-deltas"*, which drops from **17 phantom deltas to 1** — the cause is genuinely
-gone, because both sides become symmetrically unresolved, which is also what
-makes `mirrorNodeModules` redundant. The cost is real and lands in `contracts`:
-an externally-typed signature renders `any` (`z.infer<typeof S>` → `z.infer<any>`,
-`Node<ts.Node>` → `Node`) on **61 of 168** entries at `c8530b83`, with the delta
-COUNT unchanged on every commit measured — so a delta between two external types
-that both print `any` would be MASKED. Deciding that is a `contracts` design
-call, not a memory one.
+**What this means for a workflow phase, and none of it has changed.** The review
+workspace is a pre-clone with **no install**, which is why `all` fits. Nothing in
+this package enforces that, and **a `prepare` step that installs dependencies —
+to produce the coverage artifact `coverage` reads, say — is what re-arms the
+OOM.** The shell-level catch is not optional (see `--never-fail` above); neither
+is keeping the install out of the tree `lastlight-facts` is pointed at.
 
 ### `engine` + `languages[]` — silence, made machine-checkable
 
@@ -456,8 +436,8 @@ parsed one of them. Measured on the real corpus — keycloak `37429` reads
 | Command | What it answers |
 |---|---|
 | `facts` | which hunks changed each symbol, every reference site, implementations, callees, which tests touch it. `referencesInDiff` vs `referenceCount` is the most productive field: a symbol whose shape changed and whose references are mostly OUTSIDE the diff is the cross-file contract bug, invisible because each file reads correctly alone |
-| `contracts` | signature / parameter / return / nullability / thrown-type delta for every changed export, base vs head, plus `consumersOutsideDiff`. The base tree is a `git worktree add --detach` into a temp dir — **never** mutate the agent's working tree, which is reused across runs and read concurrently |
-| `constants` | **references MINUS literals.** A = references to the identifier (ts-morph); B = occurrences of the literal value (ast-grep); report A, and `B \ A` as hard-coded duplicates. `sides` is a heuristic path partition and a hint for the seeder, never a finding. This is the `1587-r2` shape — the one gold finding the whole investigation converted |
+| `contracts` | signature / parameter / return / nullability / thrown-type delta for every changed export, base vs head, plus `consumersOutsideDiff`. The base tree is a `git worktree add --detach` into a temp dir on the ts-morph path and a virtual-FS **overlay on the same tree** on the tsgo one (see above — they are not the same base view) — **never** mutate the agent's working tree, which is reused across runs and read concurrently |
+| `constants` | **references MINUS literals.** A = references to the identifier (the type-aware engine); B = occurrences of the literal value (ast-grep, and it stays there); report A, and `B \ A` as hard-coded duplicates. `sides` is a heuristic path partition and a hint for the seeder, never a finding. This is the `1587-r2` shape — the one gold finding the whole investigation converted |
 | `deps` | manifest delta, import sites, and (with `--stage`) `npm pack` of changed runtime deps into `.lastlight/pr-review/deps/`. **The staging is the affordance fix, not a nicety** — the review workspace has no `node_modules`, so "open the library source" was structurally impossible. **Six ecosystems**, not one — see below |
 | `patterns` | opengrep + gitleaks, scoped to the diff, normalised into `skills/security-review/SKILL.md`'s finding shape. **Evidence, not findings** — never posted directly |
 | `coverage` | changed lines executed by zero tests, read from an **existing** report. It never runs a suite. istanbul · lcov · JaCoCo · Cobertura · Go coverprofile · SimpleCov |
@@ -477,7 +457,14 @@ Three fixes must not regress. Two are carried forward from v3 and live in
   leaving the **first word of the prose**: `@throws {ValidationError} when the
   id is empty` recorded `["when"]`. Read `getTypeExpression()?.getTypeNode()`
   first; the comment-text path stays as the fallback for the un-braced spelling
-  (`@throws Foo when …`), which is the only case it was ever right for.
+  (`@throws Foo when …`), which is the only case it was ever right for. **The
+  obvious tsgo mapping re-creates this bug**: `Checker.getJsDocTagsOfSymbol`
+  returns `{ name, text? }` — a flat rendered string with no separate type
+  expression, which is the exact shape that produced `["when"]`. The route that
+  preserves the fix is the AST (`Node.jsDoc` + `isJSDocThrowsTag` +
+  `JSDocThrowsTag.typeExpression`); if it turns out the wire protocol does not
+  populate `jsDoc` on a resolved handle, `throws` degrades to `null` plus a
+  `degraded[]` entry, never to `[]`.
 - It matters twice, and the second half is the expensive one. `throws` is
   compared **raw** in `sameShape`, with no `canonicalType` pass — so editing the
   prose after a `@throws` moved the recorded "thrown type" and manufactured a
@@ -587,7 +574,14 @@ every envelope, and the eval preflight refuses on a mismatch.
 The npm-resolved engines are deliberately **not** in it: `package.json` +
 `pnpm-lock.yaml` are the stronger pin, and a second hand-maintained copy is the
 drift the file exists to prevent. Their resolved versions are stamped from the
-installed packages instead.
+installed packages instead. **That covers the `tsgo` executable too** — it is an
+npm `optionalDependency` resolved by `getExePath()` relative to the installed
+`typescript` package, not a binary downloaded from a release URL, so it belongs
+in the bundled-version stamp and not in `binaries` with a fabricated `sources`
+entry. What it does need is the same guard WP1c wrote for the native grammars:
+**probe that the executable exists and fail loud at probe time**, because the
+platform package is the one thing about this compiler that a `pnpm install` on
+another OS can silently omit.
 
 Binaries resolve `LASTLIGHT_<TOOL>_BIN` → `PATH` → `/opt/lastlight/bin/<tool>`
 (§D1). `resolveFactsBin()` applies the same order to this CLI, under the name
@@ -713,9 +707,9 @@ unbreaks an arm64 image build.
      under a name no denylist would ever have carried. (The 2,663 figure that
      motivated the stage-0 denylist widening was one constant of the ten; it is
      now 319.) Peak RSS 2.24 GB → 0.82 GB, wall clock 12.6 s → 3.3 s.
-  4. **The ceiling means something again.** The repo-root glob held 9,399 files —
-     over the 6000 ceiling, so the whole group was *dropped* and its changed
-     files went unanalysed. It now holds 731 and loads.
+  4. **The ceiling meant something again** — the repo-root glob went from 9,399
+     files, over the 6000 ceiling and therefore *dropped* whole, to 731 and
+     loading. (That half dies with the ceiling; the first three do not.)
   `isIgnoredPath` survives as a **residual** denylist, not the mechanism: the
   committed `dist/`, the vendored `third_party/`, a checked-in `*.min.js`. It is
   also the only filter the walk fallback has. Paired with a 512 KB size ceiling
@@ -731,11 +725,15 @@ unbreaks an arm64 image build.
   tier 1.
 - **Known, not fixed: `facts` and `contracts` still read HEAD off the
   filesystem** while their changed set comes from git. On a workspace that is not
-  at `headSha` they analyse one tree and cite another. Closing it means
-  materialising a head worktree as well as the base one — 2x the worktree cost —
-  so it is a deferral with a trigger, not an oversight.
-- **The CLI's import of this package must stay dynamic.** ts-morph is ~14 MB of
-  vendored compiler and must never be on `lastlight login`'s startup path.
+  at `headSha` they analyse one tree and cite another. On the tsgo path this is
+  **wider**, because the overlay's base view falls through to the working tree
+  for every file the diff did not touch — see the dirty-tree section above, which
+  is where the `degraded[]` entry this wants is written up. A deferral with a
+  trigger, not an oversight.
+- **The CLI's import of this package must stay dynamic.** A vendored compiler
+  (ts-morph, ~14 MB) or a spawned one (`typescript` + its ~26 MB platform binary)
+  must never be on `lastlight login`'s startup path. The second is worse than the
+  first, not better.
 
 ## `pnpm selfcheck` — the census against a real commit
 
@@ -745,6 +743,12 @@ which programs**, counts by change type, the top 20 symbols by
 `consumersOutsideDiff`, the tier, every `degraded[]` reason, and the wall clock.
 It exits non-zero on a `removed` delta with no deletion or rename in the diff, on
 more than 40 contract deltas **that could be phantom**, or past 90 s (AC6).
+
+**It cross-checks against git — `git show`, `git diff --name-status`, `git diff
+-U0` — never against a compiler**, which is what makes it a valid referee for an
+engine swap. An oracle built from the same machinery as the thing under test
+cannot see a plausible-and-wrong answer, because both halves are wrong in the
+same direction.
 
 That qualifier is not a relaxation. The ceiling was calibrated when the loader
 compiled one tsconfig for the whole diff and therefore analysed 1 of this repo's

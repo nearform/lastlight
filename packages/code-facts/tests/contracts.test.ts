@@ -14,11 +14,68 @@ import {
   type Fixture,
 } from "./helpers.js";
 import { runExtractor } from "../src/run.js";
-import { canonicalType, extractContracts, shapeOf } from "../src/contracts.js";
-import { Project } from "ts-morph";
-import { existsSync, readdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { canonicalType, type Shape } from "../src/contracts.js";
+import {
+  exportedDeclarations,
+  extractContractsTsgo,
+  shapeOfTsgo,
+  type BaseContractView,
+} from "../src/tsgo-extractors.js";
+import { openSnapshot, type EngineSnapshot } from "../src/tsgo.js";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import type { ContractsDocument } from "../src/schema.js";
+
+/**
+ * A throwaway on-disk project, opened through the real compiler.
+ *
+ * The three cases below used to build `new Project({ useInMemoryFileSystem })`.
+ * There is no in-memory equivalent on this engine — `tsgo` is a child process
+ * reading a real filesystem — and that is a feature rather than an obstacle:
+ * `tests/helpers.ts`'s rule is that fixtures are real trees, because every claim
+ * this package makes is a claim about what a type-checker says, and mocking the
+ * checker would let the claim be wrong while the test passed.
+ */
+function withProject<T>(files: Record<string, string>, fn: (ctx: { snapshot: EngineSnapshot; dir: string }) => T): T {
+  const dir = mkdtempSync(join(tmpdir(), "ll-facts-contracts-"));
+  try {
+    writeFileSync(
+      join(dir, "tsconfig.json"),
+      JSON.stringify({
+        compilerOptions: { target: "es2022", module: "nodenext", moduleResolution: "nodenext", strict: true },
+        include: ["src"],
+      }),
+      "utf8",
+    );
+    for (const [path, source] of Object.entries(files)) {
+      mkdirSync(join(dir, dirname(path)), { recursive: true });
+      writeFileSync(join(dir, path), source, "utf8");
+    }
+    const snapshot = openSnapshot({ repo: dir, tsConfigPaths: [join(dir, "tsconfig.json")] });
+    try {
+      return fn({ snapshot, dir });
+    } finally {
+      snapshot.dispose();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** The `Shape` of one named export, straight off the checker. */
+function shapeOfExport(snapshot: EngineSnapshot, path: string, name: string): Shape {
+  const file = snapshot.lookup(path);
+  if (!file) throw new Error(`${path} is in no compiled program`);
+  const declaration = exportedDeclarations(file.sourceFile, file.owner.project).find(
+    (d) => d.name === name,
+  );
+  if (!declaration) throw new Error(`${path} does not export ${name}`);
+  return shapeOfTsgo(declaration.node, file.owner.project);
+}
+
+/** A base view holding nothing — what a file absent from the base program is. */
+const EMPTY_BASE: BaseContractView = { shapes: new Map(), presentPaths: new Set() };
 
 describe("contracts — the semantic delta", () => {
   let fixture: Fixture;
@@ -92,43 +149,38 @@ describe("contracts — the semantic delta", () => {
    * present in only one of the two programs is skipped and RECORDED.
    */
   it("never invents added/removed for a modified file only one program contains", () => {
-    const head = new Project({ useInMemoryFileSystem: true });
-    head.createSourceFile("/repo/src/user.ts", "export function getUser(): string { return ''; }\n");
-    // The base program simply does not contain the file — which is what a
-    // tsconfig resolving differently on the two sides produces.
-    const base = new Project({ useInMemoryFileSystem: true });
+    withProject({ "src/user.ts": "export function getUser(): string { return ''; }\n" }, ({ snapshot, dir }) => {
+      const result = extractContractsTsgo({
+        repo: dir,
+        head: snapshot,
+        // The base view simply does not hold the file — which is what an
+        // unparsable tsconfig, a forced `--tsconfig`, or a base overlay that
+        // could not serve the blob produces.
+        base: EMPTY_BASE,
+        changed: [{ path: "src/user.ts", status: "modified" }],
+        hunkIndex: new Map(),
+      });
 
-    const result = extractContracts({
-      repo: "/repo",
-      headProject: head,
-      baseProject: base,
-      baseDir: "/repo",
-      changed: [{ path: "src/user.ts", status: "modified" }],
-      hunkIndex: new Map(),
+      expect(result.payload.contracts).toEqual([]);
+      expect(result.degraded).toHaveLength(1);
+      expect(result.degraded[0].reason).toMatch(/would be phantom/);
+      expect(result.degraded[0].reason).toMatch(/base side not analysed/);
     });
-
-    expect(result.payload.contracts).toEqual([]);
-    expect(result.degraded).toHaveLength(1);
-    expect(result.degraded[0].reason).toMatch(/would be phantom/);
-    expect(result.degraded[0].reason).toMatch(/base side not analysed/);
   });
 
   it("still reports a genuinely ADDED file, where one side is legitimately absent", () => {
-    const head = new Project({ useInMemoryFileSystem: true });
-    head.createSourceFile("/repo/src/new.ts", "export const FRESH = 1;\n");
-    const base = new Project({ useInMemoryFileSystem: true });
+    withProject({ "src/new.ts": "export const FRESH = 1;\n" }, ({ snapshot, dir }) => {
+      const result = extractContractsTsgo({
+        repo: dir,
+        head: snapshot,
+        base: EMPTY_BASE,
+        changed: [{ path: "src/new.ts", status: "added" }],
+        hunkIndex: new Map(),
+      });
 
-    const result = extractContracts({
-      repo: "/repo",
-      headProject: head,
-      baseProject: base,
-      baseDir: "/repo",
-      changed: [{ path: "src/new.ts", status: "added" }],
-      hunkIndex: new Map(),
+      expect(result.degraded).toEqual([]);
+      expect(result.payload.contracts.map((c) => [c.symbol, c.change])).toEqual([["FRESH", "added"]]);
     });
-
-    expect(result.degraded).toEqual([]);
-    expect(result.payload.contracts.map((c) => [c.symbol, c.change])).toEqual([["FRESH", "added"]]);
   });
 
   it("reports a changed file missing from BOTH programs through the project tier, not silently", () => {
@@ -148,7 +200,7 @@ describe("contracts — the semantic delta", () => {
       expect(document.contracts.some((c) => c.file === "src/legacy/auth.ts")).toBe(false);
       expect(document.coverage).toBe("degraded");
       expect(
-        document.degraded.some((d) => /not in the compiled project/.test(d.reason)),
+        document.degraded.some((d) => /not in any compiled program/.test(d.reason)),
         "a changed file nobody analysed must be named",
       ).toBe(true);
     } finally {
@@ -245,41 +297,49 @@ describe("contracts — members, deletions and documented throws", () => {
  */
 describe("contracts — `@throws`, all three spellings", () => {
   it("takes the type from the tag's type expression, with or without a description", () => {
-    const project = new Project({ useInMemoryFileSystem: true });
-    const file = project.createSourceFile(
-      "/repo/src/throws.ts",
-      [
-        "/**\n * @throws {ValidationError} when the id is empty\n */",
-        "export function braced(id: string): string { return id; }",
-        "/**\n * @throws {TypeError}\n */",
-        "export function bracedOnly(id: string): string { return id; }",
-        "/**\n * @throws PlainError with a description\n */",
-        "export function bare(id: string): string { return id; }",
-        "export function undocumented(id: string): string { return id; }",
-      ].join("\n"),
-    );
-    const throwsOf = (name: string): string[] =>
-      shapeOf(file.getFunctionOrThrow(name)).throws;
+    withProject(
+      {
+        "src/throws.ts": [
+          "/**\n * @throws {ValidationError} when the id is empty\n */",
+          "export function braced(id: string): string { return id; }",
+          "/**\n * @throws {TypeError}\n */",
+          "export function bracedOnly(id: string): string { return id; }",
+          "/**\n * @throws PlainError with a description\n */",
+          "export function bare(id: string): string { return id; }",
+          "export function undocumented(id: string): string { return id; }",
+        ].join("\n"),
+      },
+      ({ snapshot }) => {
+        const throwsOf = (name: string): string[] =>
+          shapeOfExport(snapshot, "src/throws.ts", name).throws;
 
-    // Before the fix these read ["when"], [] and ["PlainError"] — two of the
-    // three wrong, and the wrong ones are the common spelling.
-    expect(throwsOf("braced")).toEqual(["ValidationError"]);
-    expect(throwsOf("bracedOnly")).toEqual(["TypeError"]);
-    expect(throwsOf("bare")).toEqual(["PlainError"]);
-    // …and nothing is invented for a function that documents no throw.
-    expect(throwsOf("undocumented")).toEqual([]);
+        // Before the fix these read ["when"], [] and ["PlainError"] — two of the
+        // three wrong, and the wrong ones are the common spelling. The braced
+        // type comes off `JSDocThrowsTag.typeExpression`, which this engine DOES
+        // populate over the wire; `Checker.getJsDocTagsOfSymbol` would re-create
+        // the bug, because its `text` is the braces already folded into prose.
+        expect(throwsOf("braced")).toEqual(["ValidationError"]);
+        expect(throwsOf("bracedOnly")).toEqual(["TypeError"]);
+        expect(throwsOf("bare")).toEqual(["PlainError"]);
+        // …and nothing is invented for a function that documents no throw.
+        expect(throwsOf("undocumented")).toEqual([]);
+      },
+    );
   });
 
   it("strips the import path out of a documented cross-module throw", () => {
-    const project = new Project({ useInMemoryFileSystem: true });
-    const file = project.createSourceFile(
-      "/repo/src/x.ts",
-      '/**\n * @throws {import("./errors.js").HttpError}\n */\nexport function f(): void {}\n',
+    withProject(
+      {
+        "src/errors.ts": "export class HttpError extends Error {}\n",
+        "src/x.ts": '/**\n * @throws {import("./errors.js").HttpError}\n */\nexport function f(): void {}\n',
+      },
+      ({ snapshot }) => {
+        // `throws` is compared RAW by `sameShape`, so an unstripped specifier
+        // here is a delta about a directory rather than about the PR — and on a
+        // `$TMPDIR` fixture the two spellings of the root differ by `/private`.
+        expect(shapeOfExport(snapshot, "src/x.ts", "f").throws).toEqual(["HttpError"]);
+      },
     );
-    // `throws` is compared RAW by `sameShape`, and the base tree lives in a temp
-    // worktree whose path differs every run — an unstripped specifier here is a
-    // phantom delta on every single run.
-    expect(shapeOf(file.getFunctionOrThrow("f")).throws).toEqual(["HttpError"]);
   });
 });
 

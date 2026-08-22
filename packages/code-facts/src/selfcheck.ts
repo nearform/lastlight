@@ -1,5 +1,5 @@
 /**
- * `selfcheck` — the SECOND oracle, and it does not ask ts-morph anything.
+ * `selfcheck` — the SECOND oracle, and it does not ask the compiler anything.
  *
  * Every other test in this package asserts *what the extractor said*. The bug
  * this package actually shipped with was the extractor saying something

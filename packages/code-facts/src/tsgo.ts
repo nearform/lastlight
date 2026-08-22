@@ -1,7 +1,7 @@
 /**
- * THE TSGO SEAM — the ONLY module in this package that touches a compiler API.
+ * THE TSGO SEAM — the compiler LIFECYCLE, and the only module that spawns one.
  *
- * Everything type-aware in `code-facts` currently runs on `ts-morph@28`, which
+ * Everything type-aware in `code-facts` used to run on `ts-morph@28`, which
  * vendors the JavaScript TypeScript compiler. TypeScript 7 ships a real
  * programmatic API (`typescript/unstable/sync`) driven by the `tsgo` Go binary
  * over a synchronous pipe, and the difference is not a refinement — measured in
@@ -20,11 +20,12 @@
  * Two capabilities matter more than the speed:
  *
  *  - **A VIRTUAL FS gives a genuine base-side program with no second worktree.**
- *    `contracts` today runs `git worktree add --detach` into `$TMPDIR`, which is
- *    the single most expensive thing this package does and the reason `all`
- *    peaks where it does. An overlay serving base blobs for the changed files
+ *    `contracts` used to run `git worktree add --detach` into `$TMPDIR`, which
+ *    was the single most expensive thing this package did and the reason `all`
+ *    peaked where it did. An overlay serving base blobs for the changed files
  *    produces a real, fully type-resolved base program in ~30 ms against the
- *    SAME tree. See `openSnapshot`'s `overlay`.
+ *    SAME tree. See `openSnapshot`'s `overlay`. `withWorktree` survives in
+ *    `git.ts` with no runtime caller on the TS/JS path.
  *  - **A file under NO tsconfig still gets a working checker**, via
  *    `openFiles` → tsgo's inferred project. That is the claimed fix for the
  *    package's bug 4 — "1 of 31 analysable changed files; the package was
@@ -35,8 +36,9 @@
  * It owns the compiler LIFECYCLE: resolve the binary, spawn the API, open the
  * projects, index the files, hand back a checker, and tear the child process
  * down. It owns no POLICY — no file budget, no project cap, no neighbourhood
- * selection, no tier. Those live in `project.ts`, which decides WHICH tsconfigs
- * and WHICH orphan files are worth opening; this module is told and obeys.
+ * selection, no tier. `tsgo-extractors.discoverTsgoTargets` decides WHICH
+ * tsconfigs and WHICH files are worth opening and `run.ts` decides the tier;
+ * this module is told and obeys.
  *
  * ## The symmetry invariant
  *
@@ -88,7 +90,14 @@
  * binary that passes `X_OK` and dies during exec still kills the process, and
  * the shell-level catch the CLAUDE.md describes stays mandatory.
  */
-import { accessSync, constants as fsConstants, existsSync, realpathSync } from "node:fs";
+import {
+  accessSync,
+  constants as fsConstants,
+  existsSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { FileSystem } from "typescript/unstable/fs";
@@ -253,10 +262,25 @@ export interface EngineSnapshot {
 
 // ── binary resolution ────────────────────────────────────────────────────────
 
+/**
+ * `X_OK` **and** a regular file, and the second half is not pedantry.
+ *
+ * `access(dir, X_OK)` succeeds for a DIRECTORY — that bit means "traversable"
+ * — so a `$LASTLIGHT_TSGO_BIN` pointed at a directory passes a bare `X_OK`
+ * check, reaches `spawn()`, and lands in the one hole this module cannot cover:
+ * `EACCES` arrives as an UNHANDLED `'error'` event on the next tick and kills
+ * the process (see the header, and `tests/oom.test.ts`). Rejecting it here turns
+ * that into a named, catchable `TsgoError`.
+ *
+ * It is a narrowing and not a fix. A regular file that passes `X_OK` and still
+ * cannot be exec'd — a wrong-architecture binary, a wrapper script whose
+ * interpreter is missing — is measured to take the process down the same way,
+ * and `tests/oom.test.ts` pins exactly that shape.
+ */
 function isExecutableFile(path: string): boolean {
   try {
     accessSync(path, fsConstants.X_OK);
-    return true;
+    return statSync(path).isFile();
   } catch {
     return false;
   }
@@ -300,8 +324,27 @@ export function resolveTsgoBinary(explicit?: string): string | null {
   return bundledTsgoBinary();
 }
 
+/** Where the compiler actually is, in three parts. See `CompilerPaths`. */
+export interface CompilerPaths {
+  /**
+   * `typescript/package.json`, resolved relative to THIS module. `null` only on
+   * a broken install — and never a path inside the repository under review.
+   */
+  modulePath: string | null;
+  /**
+   * The `@typescript/typescript-<platform>-<arch>` package root, or `null` when
+   * this platform's optional dependency was not installed. **`null` here with a
+   * non-null `modulePath` is the shape a wrong-platform image produces**: the
+   * API imports fine and there is no compiler behind it.
+   */
+  platformPackage: string | null;
+  /** The executable that will be spawned, or `null` to let the API resolve one. */
+  executable: string | null;
+}
+
 /**
- * The platform binary in this package's own tree.
+ * The platform binary in this package's own tree, and the two packages it came
+ * from.
  *
  * `typescript` ships the API as JavaScript and the compiler as a per-platform
  * sidecar package (`@typescript/typescript-darwin-arm64` and friends), whose
@@ -311,23 +354,57 @@ export function resolveTsgoBinary(explicit?: string): string | null {
  * "let the API resolve it" instead of to a wrong path.
  *
  * Resolution starts from `typescript/package.json` located relative to THIS
- * module, never relative to the repository under review.
+ * module, never relative to the repository under review. That is the surviving
+ * half of the old TS 7 landmine and `tests/compiler-isolation.test.ts` is its
+ * gate — `getExePath()` resolves against the installed package's `__dirname`
+ * and does not consult `cwd`, so `new API({ cwd: repo })` cannot reach a
+ * compiler inside the repo; this function must not either.
  */
-function bundledTsgoBinary(): string | null {
+export function compilerPaths(): CompilerPaths {
+  let modulePath: string | null = null;
   try {
-    const here = createRequire(import.meta.url);
-    const tsPackageJson = here.resolve("typescript/package.json");
-    const fromTypescript = createRequire(tsPackageJson);
-    const platformPackage = `@typescript/typescript-${process.platform}-${process.arch}/package.json`;
-    const lib = join(dirname(fromTypescript.resolve(platformPackage)), "lib");
-    for (const name of ["tsc", "tsgo", "tsc.exe", "tsgo.exe"]) {
-      const candidate = join(lib, name);
-      if (existsSync(candidate) && isExecutableFile(candidate)) return candidate;
-    }
-    return null;
+    modulePath = createRequire(import.meta.url).resolve("typescript/package.json");
   } catch {
-    return null;
+    return { modulePath: null, platformPackage: null, executable: null };
   }
+  let platformPackage: string | null = null;
+  try {
+    const fromTypescript = createRequire(modulePath);
+    platformPackage = dirname(
+      fromTypescript.resolve(
+        `@typescript/typescript-${process.platform}-${process.arch}/package.json`,
+      ),
+    );
+  } catch {
+    return { modulePath, platformPackage: null, executable: null };
+  }
+  const lib = join(platformPackage, "lib");
+  for (const name of ["tsc", "tsgo", "tsc.exe", "tsgo.exe"]) {
+    const candidate = join(lib, name);
+    if (existsSync(candidate) && isExecutableFile(candidate)) {
+      return { modulePath, platformPackage, executable: candidate };
+    }
+  }
+  return { modulePath, platformPackage, executable: null };
+}
+
+/**
+ * The `typescript` package's own version — the compiler that printed every type
+ * in the document, stamped so the answer survives the run.
+ */
+export function compilerVersion(): string {
+  const { modulePath } = compilerPaths();
+  if (!modulePath) return "unknown";
+  try {
+    const pkg = JSON.parse(readFileSync(modulePath, "utf8")) as { version?: string };
+    return pkg.version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function bundledTsgoBinary(): string | null {
+  return compilerPaths().executable;
 }
 
 // ── the overlay ──────────────────────────────────────────────────────────────
@@ -446,11 +523,23 @@ export function openSnapshot(options: OpenSnapshotOptions): EngineSnapshot {
   );
 
   const exe = resolveTsgoBinary(options.tsgoPath);
-  const api = new API({
-    cwd: repo,
-    ...(exe ? { tsserverPath: exe } : {}),
-    ...(overlaid ? { fs: overlayFileSystem(buildOverlayIndex(repo, realRepo, overlay)) } : {}),
-  });
+  let api: API;
+  try {
+    api = new API({
+      cwd: repo,
+      ...(exe ? { tsserverPath: exe } : {}),
+      ...(overlaid ? { fs: overlayFileSystem(buildOverlayIndex(repo, realRepo, overlay)) } : {}),
+    });
+  } catch (err) {
+    // Only the platform package matching the host installs, so a linux image
+    // that did not install its own gets a `typescript` that imports fine and a
+    // compiler that does not exist. `getExePath()` throws for that; without this
+    // it would surface as a bare error rather than as a named engine failure.
+    throw new TsgoError(
+      "binary-unresolvable",
+      `no tsgo executable is available for ${process.platform}-${process.arch}: ${reasonOf(err)}. The compiler ships as the optional dependency \`@typescript/typescript-${process.platform}-${process.arch}\`, and only the matching one installs — nothing type-aware can run without it`,
+    );
+  }
 
   let disposed = false;
   const dispose = (): void => {

@@ -70,13 +70,13 @@ describe("the envelope names the engine and every language in the diff", () => {
     }
   });
 
-  it("a healthy TypeScript PR says ts-morph, with parsedFiles equal to changedFiles", () => {
+  it("a healthy TypeScript PR says tsgo, with parsedFiles equal to changedFiles", () => {
     const fixture = makeConstantFixture();
     try {
       const document = all(fixture);
-      expect(document.engine).toBe("ts-morph");
+      expect(document.engine).toBe("tsgo");
       const ts = document.languages.find((l) => l.id === "typescript");
-      expect(ts?.engine).toBe("ts-morph");
+      expect(ts?.engine).toBe("tsgo");
       expect(ts?.parsedFiles).toBe(ts?.changedFiles);
       expect(ts?.parsedFiles).toBeGreaterThan(0);
     } finally {
@@ -102,6 +102,24 @@ describe("the envelope names the engine and every language in the diff", () => {
     }
   });
 
+  /**
+   * `.es6` KILLS THE TSGO CHILD — measured on `typescript@7.0.2` in this
+   * checkout, and the reason this case changed shape rather than being deleted.
+   *
+   * Handing tsgo an `.es6` path through `openFiles` panics the Go process
+   * (*"ScriptKind must be specified when parsing source file"*) and the panic
+   * takes the WHOLE snapshot with it — every project, every other file, and an
+   * `Unexpected EOF while reading from child process` on the node side. Probed
+   * across all nine analysable extensions: the other eight open cleanly and are
+   * held by a program; `.es6` alone throws. The previous engine parsed it.
+   *
+   * So the extension stays ANALYSABLE and is simply never handed to the
+   * compiler (`isCompilerParsable`). What that costs is the type-aware tier for
+   * these files; what it buys is a document at all. The payoff the case was
+   * written for is unchanged — Discourse's 20 Ember files are still visible and
+   * the constant inside one is still found — it just comes from ast-grep now,
+   * and the envelope says which.
+   */
   it("gives `.es6` to javascript and parses it — 20 Discourse Ember files", () => {
     const fixture = makeRubyFixture();
     try {
@@ -109,8 +127,16 @@ describe("the envelope names the engine and every language in the diff", () => {
       const js = document.languages.find((l) => l.id === "javascript");
       expect(js, "`.es6` used to be invisible to the whole package").toBeDefined();
       expect(js?.parsedFiles).toBeGreaterThan(0);
-      expect(document.engine).toBe("ts-morph");
-      // And the constant inside it is now reachable, which is the actual payoff.
+      // NOT tsgo: the compiler cannot be handed this extension at all.
+      expect(document.engine).toBe("ast-grep");
+      expect(js?.engine).toBe("ast-grep");
+      // And it is NAMED — a file the compiler never saw must not read as one it
+      // saw and found nothing in.
+      expect(
+        document.degraded.some((d) => /panics the child process/.test(d.reason)),
+        "a whole extension excluded from the compiler must never be silent",
+      ).toBe(true);
+      // The payoff, unchanged: the constant inside the `.es6` file is reachable.
       const constant = document.extractors.constants?.constants.find(
         (c) => c.constant === "MAX_TOKEN_AGE",
       );

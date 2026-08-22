@@ -73,7 +73,7 @@ describe("`all` — one envelope, every payload", () => {
     // `patterns` and `coverage` both degraded, so the run as a whole did.
     expect(document.coverage).toBe("degraded");
     expect(document.tier).toBe(1);
-    expect(document.engine).toBe("ts-morph");
+    expect(document.engine).toBe("tsgo");
     expect(document.degraded.map((d) => d.extractor).sort()).toEqual([
       "coverage",
       "patterns",
@@ -271,6 +271,6 @@ describe("buildEnvelope", () => {
     const envelope = envelopeWith({ PATH: "" });
     expect(envelope.engine).toBe("none");
     expect(envelope.languages).toEqual([]);
-    expect(envelope.version).toBe(1);
+    expect(envelope.version).toBe(2);
   });
 });
