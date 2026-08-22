@@ -733,7 +733,15 @@ export function emptyDocumentFor(
   return { ...envelope, ...empty[extractor] };
 }
 
-export function writeDocument(out: string, document: unknown): void {
+export function writeDocument(
+  out: string,
+  document: unknown,
+  opts: { raw?: boolean } = {},
+): void {
   mkdirSync(dirname(out), { recursive: true });
-  writeFileSync(out, `${JSON.stringify(document, null, 2)}\n`, "utf8");
+  // `raw` is for the rendered obligation BLOCKS, which are markdown a model
+  // reads rather than JSON a consumer parses. Same atomic-ish write, same
+  // mkdir, so a block and a document cannot end up in different directories.
+  const body = opts.raw ? String(document) : `${JSON.stringify(document, null, 2)}`;
+  writeFileSync(out, `${body}\n`, "utf8");
 }

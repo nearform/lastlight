@@ -1336,6 +1336,13 @@ describe("renderContext — the spec axis", () => {
     expect(off.prBody).toBeUndefined();
     expect(off.linkedIssues).toBeUndefined();
     expect(off.specObligations).toBeUndefined();
+    // WP3's gate key. ABSENT, not `false` — `evalUntilExpression` coerces a
+    // missing variable to false, so `analysisEnabled != true` matches and all
+    // eight evidence-pipeline phases skip. Present-but-empty would also be a
+    // prompt change, because `buildPhasePrompt`'s skills branch dumps the whole
+    // context (see `golden-pr-review.test.ts`).
+    expect(off.analysisEnabled).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(off, "analysisEnabled")).toBe(false);
 
     // …and the whole projection is key-for-key what a pre-WP0 caller got. This
     // is the byte-for-byte guarantee, asserted rather than asserted-about.
@@ -1348,6 +1355,15 @@ describe("renderContext — the spec axis", () => {
     const ctx = renderContext(reviewable(), fix);
     expect(ctx.prBody).toBeUndefined();
     expect(ctx.specObligations).toBeUndefined();
+  });
+
+  it("projects `analysisEnabled` — the one key WP3's eight phases gate on", () => {
+    const ctx = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOn);
+    // A STRING, because the render context is projected to strings for template
+    // use; `coerceBool` reads `"true"` correctly either way. Pinned as the exact
+    // literal because `pr-review.yaml` compares against the bare `true` token
+    // and anything else leaves the pipeline inert.
+    expect(ctx.analysisEnabled).toBe("true");
   });
 
   it("projects the PR body and the linked issue once the axis is on (§E2's missing plumbing)", () => {

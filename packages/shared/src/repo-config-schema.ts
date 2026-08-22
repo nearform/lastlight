@@ -1550,6 +1550,8 @@ function shapeReviewAnalysis(raw: unknown, d: ReviewAnalysisConfig): ReviewAnaly
   return {
     enabled: node.enabled === true,
     maxSpecObligations: num(node.maxSpecObligations, d.maxSpecObligations),
+    maxObligations: num(node.maxObligations, d.maxObligations),
+    surveyPasses: num(node.surveyPasses, d.surveyPasses),
   };
 }
 

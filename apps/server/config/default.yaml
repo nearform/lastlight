@@ -24,6 +24,7 @@ models:
   #   screener: anthropic/claude-haiku-4-5-20251001     # the prompt-injection screener
   #   diagnose: anthropic/claude-haiku-4-5-20251001     # the CI-failure classifier
   #   pr-fix-retry: anthropic/claude-opus-4-8           # used above fix.escalateModelAfterAttempt
+  #   review-survey: anthropic/claude-haiku-4-5-20251001  # the six survey passes
   # A per-task entry wins over `default`. `classifier`/`screener` are the cheap
   # one-shot helpers (src/engine/llm.ts); when unset they fall back to the first
   # configured provider's fast model, NOT `default`.
@@ -35,6 +36,17 @@ models:
   # only `default` to another provider would otherwise find this phase reaching
   # for a provider it has no key for. Unset, it falls through to `default`, so
   # each fix run costs one extra call at the default model until you pin it.
+  #
+  # `review-survey` is the key the six survey phases of `pr-review.yaml` declare
+  # (`model: "{{models.review-survey}}"`, one per obligation family). Pinning it
+  # to Haiku 4.5 is NOT a cost downgrade, and that is the unusual part: on review
+  # RECALL, Haiku 4.5 BEATS Sonnet 4.6 on two independent evals — 41.2% vs 22.1%
+  # on the Martian corpus. It is the better model for this phase, and its price
+  # is merely what makes a six-way fan-out affordable inside the pipeline's 2–3x
+  # budget. Left UNSET for exactly the `diagnose` reason above: these examples
+  # name Anthropic models, and a deployment that overrode only `default` to
+  # another provider would find six phases reaching for a provider it has no key
+  # for. Unset, all six fall through to `default` — correct, and dearer.
 
 variants: {}
 
@@ -303,11 +315,34 @@ review:
   #
   # OPERATOR-ONLY — unlike every other `review:` key, a repo may not set this.
   # It is spend, with no "more conservative" direction to clamp towards.
+  # What `enabled: true` additionally adds from WP3 (the facts-derived families):
+  #   - a `facts` phase writing .lastlight/pr-review/facts.json (no model spend)
+  #   - a `seed` phase turning it into obligations.json + one rendered block per
+  #     family, each naming BOTH ENDS of a mechanism
+  #   - six survey phases, one per family, each appending to its OWN
+  #     hypotheses/<family>.jsonl — no pass ever reads or rewrites another's,
+  #     which makes consensus collapse impossible by construction rather than
+  #     by instruction
+  #
+  # Neither phase can run where `lastlight-facts` is not resolvable. That is
+  # true of the SANDBOX IMAGE today (WP2 is what installs it); the eval harness
+  # runs `--sandbox none` on the host, where it is. Set LASTLIGHT_FACTS_BIN to
+  # point at a specific build. A missing binary degrades to a `coverage: "none"`
+  # envelope and the survey phases say so — it never fails the run.
   analysis:
     enabled: false
     # A budget, not a target: the extractor ranks, truncates, and records how
     # many it dropped in the block it renders.
     maxSpecObligations: 6
+    # The same, for the five facts-derived families pooled. Ranked by mechanism
+    # class (`enforcement` and `contract` are the two that have ever converted)
+    # then by how much of the impact cone lies outside the diff.
+    maxObligations: 40
+    # How many of the six families actually run. SIX. A previous design defaulted
+    # this to 3 against six families and never recorded which three ran, so half
+    # never executed and `enforcement` — the only family that has produced a gold
+    # match — could have been among them.
+    surveyPasses: 6
 
 # Retry policy for every PR_FIX_SHAPED workflow — pr-fix and dependabot-ci-fix
 # (issue #251). The loop diagnoses a CI failure before it retries, and these are

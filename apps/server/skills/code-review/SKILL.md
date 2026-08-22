@@ -1,7 +1,7 @@
 ---
 name: code-review
 description: The shared rubric for reviewing a code change — precision-first, high-signal findings only (Critical/Important), plus what to check (correctness, contracts between producer and consumer, security, edge cases, regression risk, test coverage). Use when reviewing a PR or a branch diff.
-version: 2.1.0
+version: 2.2.0
 tags: [review, code-quality]
 ---
 
@@ -21,25 +21,52 @@ not just the happy path.
 
 A review is only useful if people trust it. A noisy reviewer gets muted; every
 low-value comment you post spends the credibility of the ones that matter. So
-the bar is **high-signal only**:
+the bar is **high-signal only** — on what you **post**. Read "Where the gate
+applies" below first: if your output is consumed by a later stage rather than by
+a human, none of the filtering in this section is yours to do.
 
 - **Post only Critical and Important findings.** Suggestions and Nits (below)
   are *not* worth a formal review comment on their own — drop them, or fold at
-  most one genuinely valuable line into the summary. When in doubt, leave it out.
+  most one genuinely valuable line into the summary. When in doubt about a
+  finding's **tier**, leave it out of the review.
 - **If you cannot name the concrete impact — what breaks, and for which input or
   caller — do not post it.** "This could be cleaner" is not a finding; "this
   crashes when `items` is empty because line 42 indexes `[0]`" is.
-- **Confidence gate — refute, don't doubt.** Before you finalise, re-read each
-  finding against the actual code and try to *refute your own claim*. Dropping
-  it requires naming the specific thing that makes it wrong: the guard you
-  missed, the caller that already validates, the type that makes the case
-  unreachable. **Unease is not a refutation.** "I'm not certain" is an
-  instruction to go and read the other side of the contract, not to delete the
-  finding.
+- **Confidence gate — refute, don't doubt, and only at the end.** Before you
+  finalise, re-read each finding against the actual code and try to *refute your
+  own claim*. Dropping it requires naming the specific thing that makes it
+  wrong: the guard you missed, the caller that already validates, the type that
+  makes the case unreachable. **Unease is not a refutation.** "I'm not certain"
+  is an instruction to go and read the other side of the contract, not to delete
+  the finding.
+
+### Where the gate applies
+
+The confidence gate filters what you **post**. It is not a filter on what you
+are allowed to notice, to write down, or to hand to a later stage — and which of
+those you are doing decides whether it fires at all.
+
+- **You are producing the review** — writing `findings.json`, submitting a
+  formal review, or recording a verdict on a branch diff. **The gate fires.**
+  Everything in this section applies: yours is the last hand on the work before
+  a human reads it, so an ungrounded finding costs real credibility.
+- **You are one pass of a multi-pass review** — discharging obligations and
+  appending hypotheses to a per-family file for a later phase to probe and
+  adjudicate. **The gate does not fire.** Record the mechanism you cannot yet
+  refute. Every downstream stage can only *remove*, so nothing there can recover
+  a hypothesis you declined to write down, and a pass that self-censors is
+  deleting evidence on behalf of a stage that has not run yet.
+
+The split is measured, not stylistic. Google's AutoCommenter found a single
+**global** confidence threshold (`t = 0.98`) catastrophic: roughly **80% of the
+predictions it discarded as below-threshold were correct anyway**. Replacing it
+with per-check thresholds raised recall without costing precision. So the gate
+is worth having at the one point where a wrong finding is actually paid for, and
+is expensive everywhere upstream of it.
 
 ### The gate cuts both ways
 
-The gate above exists to stop *speculative* findings. It is not a reason to
+The confidence gate exists to stop *speculative* findings. It is not a reason to
 approve a change you have not actually checked. Two failure modes, equally bad:
 
 | Failure | What it looks like | Cost |

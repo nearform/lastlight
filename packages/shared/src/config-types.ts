@@ -243,6 +243,30 @@ export interface ReviewAnalysisConfig {
    * the shape of the 40-per-PR budget in §D8.
    */
   maxSpecObligations: number;
+  /**
+   * How many **facts-derived** obligations one PR may carry, across all five
+   * families `lastlight-facts seed` produces (`contract`, `enforcement`,
+   * `security`, `state`, `tests`). The `spec` family has its own budget above,
+   * because it is built harness-side from the issue text and shares no ranking
+   * axis with these.
+   *
+   * A budget, so the seeder RANKS: mechanism class first — `enforcement` and
+   * `contract` are the two that have ever converted — then by how much of the
+   * impact cone lies outside the diff. What it drops is counted in
+   * `obligations.json` with the reason, never truncated silently.
+   */
+  maxObligations: number;
+  /**
+   * How many of the six survey families actually run.
+   *
+   * **Six, and the default is not negotiable down without saying which.** The
+   * previous design defaulted this to 3 against six families and never recorded
+   * which three ran — so half the families silently never executed, and
+   * `enforcement`, the one that produced the only gold match, could have been
+   * among them (§D4). A value below 6 takes the families in the seeder's rank
+   * order and the run says so in its artifact.
+   */
+  surveyPasses: number;
 }
 
 /**
@@ -343,6 +367,6 @@ export function defaultReviewConfig(): ReviewConfig {
       "*.generated.*",
       "**/__generated__/**",
     ],
-    analysis: { enabled: false, maxSpecObligations: 6 },
+    analysis: { enabled: false, maxSpecObligations: 6, maxObligations: 40, surveyPasses: 6 },
   };
 }

@@ -1400,6 +1400,22 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
     }),
   );
   return {
+    /**
+     * The ONE key WP3's phases gate on — `skip_if: "analysisEnabled != true"`.
+     *
+     * A string rather than a boolean because the render context is projected to
+     * strings for template use and `coerceBool` reads `"true"` correctly either
+     * way. Absent when the pipeline is off, and absence is what makes the gate
+     * safe: `evalSkipIf` coerces a missing variable to `false`, so
+     * `!= true` MATCHES and the phase skips. The failure direction of a typo is
+     * therefore "the analysis phases skip", never "an unmeasured pipeline runs
+     * on a deployment that did not ask for it" (locked decision 8).
+     *
+     * `review` itself is deliberately not on the context — `build.yaml` emits
+     * `output_var: review` and a top-level object would shadow it — so this is
+     * the projection, not a convenience.
+     */
+    analysisEnabled: "true",
     // The PR's own description — what the AUTHOR says they did.
     prBody: state.body,
     // The issues it closes — what was ASKED, fenced as reference material by

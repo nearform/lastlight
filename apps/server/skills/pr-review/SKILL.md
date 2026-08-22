@@ -1,19 +1,40 @@
 ---
 name: pr-review
-description: Review a GitHub pull request and post one formal review — advance the existing discussion and give precision-first, high-signal feedback. A pure code review — no building. Use when asked to review a PR or on a cron PR scan.
-version: 7.2.0
+description: Review a GitHub pull request and post one formal review — advance the existing discussion and give precision-first, high-signal feedback. Judgement on the diff, not a build gate — CI validates that it builds, and a targeted probe is allowed as evidence. Use when asked to review a PR or on a cron PR scan.
+version: 7.3.0
 tags: [github, review, code-quality]
 chat: true
 ---
 
 # PR Review
 
-Review an open PR — high-signal findings only. This is a **pure code review**:
-read the change and reason about it. Do **not** install dependencies, build, or
-run tests — that is CI's job, and it validates whether the change actually works
-far more reliably than you re-running it here. Your job is judgement on the diff,
-not a build gate. A noisy review gets muted, so precision matters more than
-volume.
+Review an open PR — high-signal findings only. Read the change and reason about
+it; where reasoning cannot settle a question, **run something**. Installing the
+repo's dependencies, opening the installed library source, and writing the
+smallest file that exercises the behaviour and executing it are all **allowed
+and expected** — that is a *probe*, and it is how a question about how code
+actually behaves gets settled instead of guessed.
+
+Two limits on a probe, and they are what keep it from becoming a second CI:
+
+- **It must produce evidence you can quote.** Keep the command and its output,
+  and cite them in the finding that rests on them. "I ran it and it fails" with
+  nothing to quote is worth exactly what a guess is worth.
+- **It is targeted at one question, never a re-derivation of CI.** Whether the
+  change builds and whether the suite is green are already answered — see §4.
+  Never spend a probe on those.
+
+> **Why this is spelled out rather than left implicit.** An earlier version of
+> this skill forbade installing dependencies, and the measured failure was not
+> disobedience — it was the opposite. The reviewer referred to `WebClient` 32
+> times and never once opened `node_modules/@slack`, because the workspace it
+> was given had no `node_modules` at all. "Open the library source" was not
+> ignored; it was structurally impossible. **An affordance you do not have reads
+> to you as an instruction you cannot follow**, so what you *can* run is part of
+> the contract, not an implementation detail.
+
+Your job is judgement on the diff, not a build gate. A noisy review gets muted,
+so precision matters more than volume.
 
 You do **not** post the review yourself. You write your findings to a JSON file
 (`.lastlight/pr-review/findings.json`) and a deterministic follow-up step posts
@@ -125,16 +146,21 @@ speculate about whether this builds.**
   line 42, which is the same issue as finding 2"* — and let it steer you toward
   the part of the diff that is actually wrong.
 - `checksState: pending` / `none` — no CI evidence either way. Review the code
-  as written; still don't build or run it.
+  as written, and do **not** stand in for CI by building it or running the
+  suite — a matrix you cannot reproduce on one machine is not yours to guess at.
+  A targeted probe for one specific question is still fair game.
 
 ### 5. Assess and write your findings
 
 Apply the **code-review** skill's rubric — read each changed file in context;
 check correctness / **contracts** / edge-cases / security / regression-risk /
 test-coverage.
-Reason about the code statically; **don't build or run it** — CI is the build
-gate and it has already spoken (§4); spend your effort on what a human reviewer
-sees.
+Reason about the code statically first, and spend nothing re-deriving whether it
+builds — CI is the build gate and it has already spoken (§4). When a finding
+turns on how the code *behaves* rather than on how it reads — library or
+framework semantics, a lifecycle, an option interaction, an input the code does
+not expect — settle it with a probe (see the top of this skill) and quote the
+transcript in the finding's body.
 Follow that skill's **precision-first** rule: keep **only Critical and Important**
 findings, each anchored to a `path:line` with a one-line concrete impact (what
 breaks, for which input or caller). Drop Suggestions and Nits.

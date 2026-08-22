@@ -993,6 +993,8 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
       enabled: analysisRaw.enabled === true,
       maxSpecObligations:
         nonNegativeNumber(analysisRaw.maxSpecObligations) ?? reviewDefaults.analysis.maxSpecObligations,
+      maxObligations: nonNegativeNumber(analysisRaw.maxObligations) ?? reviewDefaults.analysis.maxObligations,
+      surveyPasses: nonNegativeNumber(analysisRaw.surveyPasses) ?? reviewDefaults.analysis.surveyPasses,
     },
   };
 

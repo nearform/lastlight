@@ -17,7 +17,9 @@
  */
 import { EXIT_UNAVAILABLE, EXIT_OK } from "./errors.js";
 import { runExtractor, runWrapped, writeDocument } from "./run.js";
-import { DOCUMENT_SCHEMAS, type ExtractorName } from "./schema.js";
+import { AllDocumentSchema, DOCUMENT_SCHEMAS, type AllDocument, type ExtractorName } from "./schema.js";
+import { SEEDABLE_FAMILIES, seedObligations } from "./seed.js";
+import { renderFamilyBlock } from "./seed-render.js";
 import { loadManifest, resolveFactsBin, toolchainStamp } from "./toolchain.js";
 import { compilerInfo } from "./project.js";
 import { packageRoot } from "./toolchain.js";
@@ -40,7 +42,15 @@ Commands:
   patterns    opengrep + gitleaks, scoped to the diff (probed on PATH)
   coverage    changed lines executed by zero tests, from an EXISTING report
   all         every extractor, one envelope, one file
+  seed        turn an \`all\` envelope into mechanism-complete obligations
   toolchain   print the pinned manifest and what actually resolved
+
+\`seed\` options (it reads a DOCUMENT, not a repo — no --base/--head):
+  --facts <file>      the \`all\` document to seed from            (required)
+  --out <file>        write obligations.json here                (default: stdout)
+  --blocks <dir>      also write one rendered block per family, \`<family>.md\`
+  --max-obligations <n>  per-PR budget (default 40). The seeder RANKS and the
+                      drop is counted in the document — never silent.
 
 Options:
   --repo <dir>        the checkout to analyse            (default: cwd)
@@ -173,8 +183,51 @@ export function runCli(
     return EXIT_OK;
   }
 
+  if (command === "seed") {
+    const factsPath = stringFlag(flags.facts);
+    if (!factsPath) {
+      io.err("--facts <file> is required (the `all` document to seed from)");
+      return EXIT_UNAVAILABLE;
+    }
+    let document: AllDocument;
+    try {
+      document = AllDocumentSchema.parse(JSON.parse(readFileSync(factsPath, "utf8")));
+    } catch (err) {
+      // A malformed or absent envelope is EXIT_UNAVAILABLE, never an empty
+      // obligation set: "nobody looked" and "looked and found none" must stay
+      // distinguishable at every layer, and this is the layer where an empty
+      // file would be read as the second.
+      io.err(`could not read a valid \`all\` document from ${factsPath}: ${err instanceof Error ? err.message : String(err)}`);
+      return EXIT_UNAVAILABLE;
+    }
+
+    const obligations = seedObligations(document, {
+      maxObligations: numberFlag(flags["max-obligations"]),
+      log,
+    });
+
+    const blocksDir = stringFlag(flags.blocks);
+    if (blocksDir) {
+      for (const family of SEEDABLE_FAMILIES) {
+        const block = renderFamilyBlock(obligations, family);
+        // An empty block means "nothing to say AND nothing degraded". Writing an
+        // empty file would make a phase's `test -s` gate pass on silence.
+        if (block) writeDocument(join(blocksDir, `${family}.md`), block, { raw: true });
+      }
+    }
+
+    const seedOut = stringFlag(flags.out);
+    if (seedOut) writeDocument(seedOut, obligations);
+    else io.out(JSON.stringify(obligations, null, 2));
+
+    // The envelope's coverage is inherited, so the exit code follows it: a
+    // `none` envelope produced obligations from nothing and the caller must be
+    // able to tell without parsing.
+    return obligations.coverage === "none" ? EXIT_UNAVAILABLE : EXIT_OK;
+  }
+
   if (!EXTRACTORS.includes(command as ExtractorName)) {
-    io.err(`unknown command "${command}". One of: ${EXTRACTORS.join(", ")}, toolchain`);
+    io.err(`unknown command "${command}". One of: ${EXTRACTORS.join(", ")}, seed, toolchain`);
     return EXIT_UNAVAILABLE;
   }
 
