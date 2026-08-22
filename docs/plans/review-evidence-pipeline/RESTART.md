@@ -168,6 +168,17 @@ case artifact's mtime falls inside the run window — but the simpler rule is to
 sequence them. Relatedly, start long measurements detached (`nohup`); an agent
 that polls a foreground run stops and restarts repeatedly and wastes cycles.
 
+The second mistake, 2026-08-22: **an agent was killed mid-task for "scope creep"
+that was not its doing.** Files well outside its brief were changing inside its
+working window — a different work package entirely — and the obvious inference
+was drift. They belonged to a concurrent human session in the same checkout. The
+agent was in its lane, and the kill cost a half-finished `run.ts` rewire. So:
+**a repo can have more than one writer, and `git status` does not name them.**
+Before attributing a change to an agent, check it against the files you actually
+gave it; if the two do not overlap, ask before you act. Note also that a stopped
+agent could not be resumed in that session, which makes the cost of a wrong kill
+the whole remaining task.
+
 ## 4. Open backlog
 
 Small, none blocking, all measured rather than suspected.
@@ -180,21 +191,24 @@ raise: **the "0.8–1.3 GB" figure was about this monorepo, not about real
 repos.** On bare corpus trees `grafana-106778` peaks at **2449 MB off a
 fourteen-file diff** and `sentry-greptile-5` at **2988 MB**, so the cost tracks
 *repo* size through `--max-files`, and the only way to hold 2 GB was to go
-blind again. `--resolution changed` remains the default on its own merits —
-a third of the memory and a fraction of the wall clock at zero fidelity cost.
+blind again. > **All of that is now HISTORY, twice over.** `--resolution` does not exist —
+> the engine swap (§2) deleted it along with the file budget it was rationing.
+> Every number in this section is **ts-morph's**, and none of it transfers to
+> the current engine, whose memory is UNMEASURED because the compiler is a child
+> process. Kept because the *shape* is the lesson and the shape repeats: a knob
+> can bound the wrong population entirely while looking like the relevant one.
 
-The analysis below is kept because *where the memory goes* is still true:
-`--max-files` bounds ts-morph's source-file count (**637** on a three-file diff
-of this repo), while the `ts.Program` binds **9,647** files, **8,947 of them
-under `node_modules`**. The fix is a `resolutionHost` that refuses bare
-specifiers into `node_modules` against an allow-list computed from the changed
-files' own imports — `--resolution changed`, which is being made the default,
-with `full` kept as an escape hatch and `none` as an emergency. Measured: **1022
-/ 1274 / 1600 / 1387 / 2157 MB** across five commits of an *installed* tree
-where `full` costs **3699 / 3902 / 4347-OOM / 3481 / 4430**, at **zero
-type-fidelity cost across 499 contract entries**. The full argument, including
-why it is lossless *by construction* and why the sweep's wall-clock figures are
-contaminated and must not be quoted, is in
+The analysis, as it stood: `--max-files` bounded ts-morph's source-file count
+(**637** on a three-file diff of this repo), while the `ts.Program` bound
+**9,647** files, **8,947 of them under `node_modules`** — so the knob everyone
+reasoned about was not the term that dominated. The fix was a `resolutionHost`
+refusing bare specifiers into `node_modules` against an allow-list computed from
+the changed files' own imports (`--resolution changed`, made the default):
+**1022 / 1274 / 1600 / 1387 / 2157 MB** across five commits of an *installed*
+tree where `full` cost **3699 / 3902 / 4347-OOM / 3481 / 4430**, at **zero
+type-fidelity cost across 499 contract entries**. The full argument — including
+why it was lossless *by construction*, and why that sweep's wall-clock figures
+are contaminated and must never be quoted — is in
 [01b-code-facts-hardening.md](01b-code-facts-hardening.md) → "Where the memory
 actually goes".
 
@@ -208,8 +222,24 @@ Still open:
   An `inChangedHunk` flag would let the seeder rank without the extractor
   filtering.
 - **`facts`/`contracts` read head from the filesystem** while the changed set
-  comes from git. Deferred: closing it needs a head worktree as well as the base
-  one, 2× cost. Safe wherever the checkout is guaranteed at head.
-- **Three load-sensitive tests** (`constants` ×2, `fail-loud` ×1) fail under CPU
-  contention. Do not blanket-raise timeouts — that hides real slowdowns, which is
-  the opposite of what this suite is for.
+  comes from git — and the engine swap **widened this**, so re-read it before
+  assuming the old note still applies. The base side is now a virtual-FS overlay
+  that serves base blobs for CHANGED files and falls through to the real
+  filesystem for everything else; the old worktree served base blobs for
+  everything. The two agree exactly when the checkout is clean at head. On a
+  dirty tree they diverge silently — measured: a `languageBreakdown` contract
+  delta the worktree reported and the overlay did not, because `schema.ts` was
+  modified in the working tree but absent from the changed set. The old
+  "2× cost" reason for deferring is void (there is no second worktree to double),
+  so the cheap fix is now a loud `degraded[]` entry when the tree is dirty rather
+  than a silent substitution. **Practical consequence: `pnpm selfcheck` on your
+  own work-in-progress compares old blobs to new files and is meaningless — run
+  it against a clean clone or a `git stash create` snapshot.**
+- **Load-sensitive tests fail under CPU contention**, in two packages. In
+  `code-facts` it was three (`constants` ×2, `fail-loud` ×1). In `lastlight-core`
+  it is unidentified: `lastlight-core#test` failed under `turbo` twice on
+  2026-08-22, both times immediately after parallel sub-agent load, and passed
+  standalone on re-run both times — the failing name was not captured because a
+  passing re-run overwrites `.turbo/turbo-test.log`. **If you hit it, capture the
+  log before re-running.** Do not blanket-raise timeouts — that hides real
+  slowdowns, which is the opposite of what this suite is for.
