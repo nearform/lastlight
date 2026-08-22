@@ -15,6 +15,7 @@ import {
   type TieredFindings,
 } from "../../engine/github/review-poster.js";
 import { getRuntimeConfig } from "../../config/config.js";
+import { defaultReviewConfig } from "lastlight-shared/config-types";
 import { hasMaterialChange } from "../../engine/pr-decisions.js";
 import { logger } from "../../logging/logger.js";
 
@@ -166,7 +167,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     // below: this runs in-process against a run whose repo-clamped block is not
     // threaded here, and `review.analysis` is operator-only anyway, so the two
     // cannot disagree.
-    if (!getRuntimeConfig()?.review?.analysis?.enabled && doc.verdict) {
+    if (!this.analysisEnabled() && doc.verdict) {
       log.info("Ignoring a split verdict: review.analysis is disabled", {
         repo: `${owner}/${repo}`,
         prNumber,
@@ -417,13 +418,44 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
    * the repo-clamped block cannot disagree with it.
    */
   private attentionBoundary(): AttentionBoundary | undefined {
-    const analysis = getRuntimeConfig()?.review?.analysis;
-    if (!analysis?.enabled) return undefined;
+    if (!this.analysisEnabled()) return undefined;
+    const analysis = getRuntimeConfig()?.review?.analysis ?? defaultReviewConfig().analysis;
     return {
       maxInlineComments: analysis.maxInlineComments,
       thresholds: analysis.thresholds ?? {},
       internalFloor: analysis.internalFloor,
     };
+  }
+
+  /**
+   * Is the review evidence pipeline on FOR THIS RUN?
+   *
+   * Two authorities, and the second one is why this is a method rather than a
+   * `getRuntimeConfig()` read at each site. The process-global runtime config is
+   * the production authority. But `analysisEnabled` on the run CONTEXT is what
+   * every gated phase in `pr-review.yaml` actually keys off — `specContext`
+   * projects it, and only when the run's own effective review config had
+   * `analysis.enabled`. So the context is the run-scoped truth, and reading only
+   * the global one makes this handler disagree with the twelve phases upstream
+   * of it about whether the pipeline ran.
+   *
+   * **Measured 2026-08-22, and it silently cost a whole arm.** The eval harness
+   * threads the arm's `review:` policy through `prContextPatch` and never
+   * populates the runtime config, so a pipeline-ON eval run had all twelve
+   * analysis phases fire and then hit a `post-review` that believed the pipeline
+   * was off: the attention boundary was inert (every `internal`-tier finding
+   * POSTED, no inline cap, no family thresholds) and the split verdict was
+   * stripped. Twenty findings posted where the shipped configuration would have
+   * posted eleven — a precision number describing a deployment that does not
+   * exist.
+   *
+   * The inertness guarantee is unchanged: `specContext` returns `{}` when
+   * analysis is off, so `analysisEnabled` is ABSENT — not `false` — on every
+   * deployment that has not opted in, and neither authority can be satisfied.
+   */
+  private analysisEnabled(): boolean {
+    if (getRuntimeConfig()?.review?.analysis?.enabled) return true;
+    return this.run.ctx.analysisEnabled === "true";
   }
 
   /**

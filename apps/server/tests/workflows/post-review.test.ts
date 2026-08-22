@@ -551,6 +551,40 @@ describe("post-review action (runPostReview)", () => {
         expect(existsSync(dispositionPath(taskId))).toBe(false);
       });
 
+      it("applies the boundary from the RUN CONTEXT when the runtime config is silent", async () => {
+        // The eval harness threads the arm's `review:` policy through
+        // `prContextPatch` and never populates the process-global runtime
+        // config. Reading only the global one made this handler disagree with
+        // the twelve gated phases upstream about whether the pipeline ran — so a
+        // pipeline-ON eval posted every `internal`-tier finding, uncapped, and
+        // reported the precision of a deployment that does not exist.
+        withReviewConfig({
+          trigger: "on-request",
+          analysis: { ...defaultReviewConfig().analysis, enabled: false },
+        });
+        const taskId = "widget-42-boundary-ctx";
+        seedFindings(taskId, "widget", {
+          summary: "ok",
+          event: "COMMENT",
+          findings: [...findings(), { path: "src/foo.ts", line: 9, severity: "Minor", title: "recorded only", body: "b", tier: "internal" }],
+        });
+
+        const { executor } = makeExecutor(taskId, { analysisEnabled: "true" });
+        expect((await executor.execute(NODE, {})).status).toBe("succeeded");
+        const posted = reviews[0]!.body as { comments: unknown[]; body: string };
+        // The `internal` finding is withheld even though the runtime config
+        // says the pipeline is off — the run's own context says otherwise.
+        expect(posted.body).not.toContain("recorded only");
+        expect(existsSync(dispositionPath(taskId))).toBe(true);
+      });
+
+      it("stays inert when NEITHER authority says the pipeline is on", () => {
+        // The guarantee that must survive the fallback: `specContext` returns
+        // `{}` when analysis is off, so `analysisEnabled` is ABSENT — not
+        // `false` — and no deployment that never opted in can be moved.
+        expect("analysisEnabled" in ({} as Record<string, unknown>)).toBe(false);
+      });
+
       it("caps inline, keeps the rest in the BODY, and records every disposition", async () => {
         withReviewConfig({
           trigger: "on-request",
