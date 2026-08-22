@@ -226,8 +226,17 @@ export {
 } from "./prepare.js";
 export type { ExecFn, ExecResult, PackageManagerId, PrepareOptions } from "./prepare.js";
 
-export { checkProbes, renderProbeCheck, requiresProbe } from "./probes.js";
+export { checkProbes, readJsonl, renderProbeCheck, requiresProbe } from "./probes.js";
 export type { CheckProbesOptions, CheckProbesResult, ProbeGapKind } from "./probes.js";
+
+export { checkFindings, renderFindingsCheck, titleFrom } from "./findings.js";
+export type {
+  CheckFindingsOptions,
+  CheckFindingsResult,
+  FindingsGap,
+  FindingsGapKind,
+  RepairAction,
+} from "./findings.js";
 
 export { checkAll } from "./selfcheck.js";
 export type { CheckAllOptions, Violation } from "./selfcheck.js";

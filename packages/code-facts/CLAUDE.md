@@ -443,6 +443,8 @@ parsed one of them. Measured on the real corpus — keycloak `37429` reads
 | `coverage` | changed lines executed by zero tests, read from an **existing** report. It never runs a suite. istanbul · lcov · JaCoCo · Cobertura · Go coverprofile · SimpleCov |
 | `all` | one envelope, every payload — what a workflow phase writes |
 | `prepare` | **not an extractor** — installs dependencies so a probe can be RUN, and writes `probes/env.json`. See below |
+| `probes` | the `falsify` loop's exit gate — every hypothesis that needed a probe has a verdict, and every claim of execution has a transcript |
+| `findings` | the `adjudicate` loop's exit gate — the **conservation check**. See below |
 | `toolchain` | the manifest and what actually resolved |
 
 Three fixes must not regress. Two are carried forward from v3 and live in
@@ -612,6 +614,77 @@ leaves — on every re-review too, since the cross-run refresh is deliberately
 `git clean -fdx -e node_modules`. Peak RSS on an installed tree is **unmeasured**
 for the tsgo engine (the compiler is a child process), so none of the older
 figures in the plan transfer. The shell-level catch is not optional.
+
+### `findings` — conservation, and the floor that makes it a mechanism
+
+`src/findings.ts`, WP6c. It is the `adjudicate` phase's `until_bash`, so **exit 0
+closes the loop** and non-zero means iterate again — the same contract as
+`probes`, and for the same reason it is not wrapped by `--never-fail`.
+
+It enforces one property: **every hypothesis id across `hypotheses/*.jsonl`
+appears in `findings.json` with exactly one disposition** — carried by a finding
+(`findings[].hypotheses[]`) or deleted by a `dropped[]` entry whose `refutedBy`
+names a probe transcript **that exists on disk**. In neither list fails; in both
+fails; a cited id no `.jsonl` ever declared fails *distinctly*, because
+inventing provenance and losing it read the opposite way.
+
+**Why it is a gate and not an instruction.** §D11 is blunt: an adjudicator
+reading 30 hypotheses and writing 6 findings *"would have passed every gate in
+this plan"* — which is v2, which worked mechanically and cost recall anyway
+(micro-recall 1/25 → 2/25, precision canary regressed, cost 2.4×; BitsAI-CR
+reproduced the trade independently at 54.5 → 67.1 precision for 45.5 → 39.8
+recall). A unit test can check the plumbing; it cannot check a model's
+compliance. This makes silent omission impossible by construction. It is also
+what WP8 needs: *internal recall* and the auditable `internal` tier are not
+computable unless every hypothesis has a recorded disposition.
+
+Four decisions in it that are decisions, not implementation detail:
+
+- **`--repair` is the §D12 FLOOR, and it never deletes.** Every uncovered
+  hypothesis is appended at `tier: "internal"` — recorded, never posted —
+  carrying its `family`, `obligation`, `claim` (as the body), `existingCode`,
+  and a `path` derived from `bothEnds.introducedAt`. Every drop whose transcript
+  is missing is **un-deleted**: the entry goes and the record comes back at
+  `internal`. **An unjustified deletion becomes a recorded non-deletion**, which
+  is the whole asymmetry of the work package expressed as code — and it means
+  the floor can never be reached by dropping everything. It rewrites the file,
+  exits 0, and is idempotent. A **duplicate** is reported and left alone: the
+  gate cannot know which disposition was meant, and guessing is the deletion it
+  exists to prevent.
+- **A finding with no `hypotheses` field fails nothing.** Those are the shipped
+  reviewer's own findings, which were never hypothesis-derived. Requiring the
+  field would make them unpostable — a recall loss dressed as a conservation
+  win. They are counted in a note, not audited.
+- **No `hypotheses/*.jsonl` at all ⇒ it passes.** The pipeline being off is not
+  a finding, and this must never fail a run for the absence of the thing it
+  audits. The note says so, so that pass is never read as *"the adjudication was
+  complete"*. A missing or unparseable `findings.json` is the separate failure,
+  and it fails — the loop should get another iteration to write one. `--repair`
+  deliberately **does not invent one**: a fabricated `summary`/`event` is a
+  review nobody wrote, and a loop that merely runs out of iterations does not
+  fail the run anyway.
+- **`FindingsDocumentSchema` is LOOSE at every level** (`schema.ts`). The real
+  contract lives in `apps/server/skills/pr-review/references/findings-schema.md`
+  and the adjudicator writes a superset — `mechanism`, `bothEnds`, `evidence`.
+  A schema that stripped unknown fields would turn the floor's rewrite into
+  silent data loss: the gate would delete the evidence packet in the act of
+  preserving the finding. `--repair` mutates the object parsed from disk, not
+  the one zod handed back, so key order survives too. `dropped[].hypothesis` is
+  `optional()` for a second reason — a required one would report a missing id as
+  *"unparseable document"* (a zod dump instead of the actionable line the next
+  iteration needs) **and** make the floor's pre-write validation throw on a
+  document it was mid-rescue. A floor that can crash is not a floor.
+
+Output is capped at 20 named ids plus a `+N more`, on both the gap list and the
+repair list. It goes into an agent's context, and *"3 hypotheses unaccounted
+for"* without the ids cannot be acted on by the next iteration — being acted on
+is the entire point.
+
+What it deliberately does **not** do: read a transcript, judge a verdict,
+validate a quote, or check anything about `summary` / `event` / `verdict`. Quote
+*resolution* is checked upstream; quote *semantics* still is not. v3's five-line
+gate earned the investigation's only gold match and v2's full validator is what
+made it expensive.
 
 ## `toolchain.json` — the single source of truth
 

@@ -147,6 +147,48 @@ describe("tierFindings — the internal tier", () => {
   });
 });
 
+describe("tierFindings — an EXPLICIT tier, which is a cross-package seam", () => {
+  it("never posts a finding the conservation floor recorded at `internal`", () => {
+    // `lastlight-facts findings --repair` writes every unaccounted-for
+    // hypothesis into findings.json at `tier: "internal"` with NO confidence.
+    // A confidence-only internal rule would have posted every one of them,
+    // turning "we recorded what we could not adjudicate" into "we published
+    // what we could not adjudicate" — the exact inversion of the floor's job.
+    const t = tierFindings([f({ line: 1, tier: "internal", title: "repaired" })], COMMENTABLE, BOUNDARY);
+    expect(t.internal.map((x) => x.title)).toEqual(["repaired"]);
+    expect(t.inline).toHaveLength(0);
+    expect(t.body).toHaveLength(0);
+  });
+
+  it("obeys an explicit `body`, and labels it as the adjudicator's own call", () => {
+    const t = tierFindings([f({ line: 1, tier: "body" })], COMMENTABLE, BOUNDARY);
+    expect(t.body.map((d) => d.reason)).toEqual(["adjudicated"]);
+    expect(t.inline).toHaveLength(0);
+  });
+
+  it("does NOT let an explicit `inline` bypass anchorability or the budget", () => {
+    // The asymmetry: a document may demote itself, never promote itself. A
+    // finding that is off-diff cannot be commented on at all (GitHub 422s), and
+    // a document that could grant itself inline slots would make the attention
+    // budget advisory.
+    const off = tierFindings([f({ line: 999, tier: "inline" })], COMMENTABLE, BOUNDARY);
+    expect(off.body.map((d) => d.reason)).toEqual(["off-diff"]);
+
+    const many = tierFindings(
+      [f({ line: 1, tier: "inline" }), f({ line: 2, tier: "inline" })],
+      COMMENTABLE,
+      { ...BOUNDARY, maxInlineComments: 1 },
+    );
+    expect(many.inline).toHaveLength(1);
+    expect(many.body.map((d) => d.reason)).toEqual(["overflow"]);
+  });
+
+  it("still applies the floor to an untagged low-confidence finding", () => {
+    const t = tierFindings([f({ line: 1, confidence: 0.01 })], COMMENTABLE, BOUNDARY);
+    expect(t.internal).toHaveLength(1);
+  });
+});
+
 describe("buildReview — the boundary is opt-in, and absent means today", () => {
   it("is byte-identical to the pre-WP6b behaviour with no boundary", () => {
     const doc = { summary: "s", findings: Array.from({ length: 20 }, (_, i) => f({ line: i + 1 })) };

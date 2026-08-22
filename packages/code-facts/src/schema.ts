@@ -569,6 +569,87 @@ export const ProbeEnvSchema = z.object({
 });
 export type ProbeEnv = z.infer<typeof ProbeEnvSchema>;
 
+// ── `findings` — the conservation gate's view of `findings.json` ─────────────
+
+/**
+ * `.lastlight/pr-review/findings.json`, as far as the WP6c **conservation
+ * gate** cares — and no further
+ * (`docs/plans/review-evidence-pipeline/06-adjudicate.md` §"The phase").
+ *
+ * Two properties are deliberate and both are load-bearing.
+ *
+ * **It is LOOSE, everywhere.** The document's real contract lives in
+ * `apps/server/skills/pr-review/references/findings-schema.md` and the
+ * adjudicator writes a superset of it — `mechanism`, `bothEnds`, `evidence`,
+ * `suggestion`, whatever WP7 adds next. `post-review` passes unknown fields
+ * through untouched, so a schema here that STRIPPED them would turn the §D12
+ * floor's rewrite into silent data loss: the gate would delete the evidence
+ * packet in the act of preserving the finding. Hence `looseObject` at every
+ * level, and hence `--repair` mutating the object it parsed from disk rather
+ * than the one zod handed back.
+ *
+ * **It is thin.** Everything the gate does not use is optional, because a
+ * second, weaker copy of `findings-schema.md` living in this package is drift
+ * waiting to happen — and because a validator that rejects a document for a
+ * missing `summary` would fail the loop for a reason that has nothing to do
+ * with conservation. What it DOES pin is the shape the gate reads: `findings`
+ * and `dropped` are arrays if they are present at all.
+ */
+export const ReviewFindingSchema = z.looseObject({
+  path: z.string().optional(),
+  /** The verbatim excerpt; the anchor of record. `line` is derived, advisory. */
+  existingCode: z.string().optional(),
+  severity: z.string().optional(),
+  title: z.string().optional(),
+  body: z.string().optional(),
+  family: z.string().optional(),
+  obligation: z.string().optional(),
+  confidence: z.number().optional(),
+  /**
+   * Where it goes. `internal` is *recorded and never posted* — the auditable
+   * tier, not a dark drop. Absent means the adjudicator did not tier it, which
+   * `post-review` reads as today's behaviour.
+   */
+  tier: z.enum(["inline", "body", "internal"]).optional(),
+  /**
+   * The hypothesis ids this finding discharges. **Optional on purpose**: a
+   * finding with none is the shipped reviewer's own, which was never
+   * hypothesis-derived, and requiring the field would delete the reviewer we
+   * already have.
+   */
+  hypotheses: z.array(z.string()).optional(),
+});
+export type ReviewFinding = z.infer<typeof ReviewFindingSchema>;
+
+/**
+ * A deletion, and the only sanctioned kind. `refutedBy` names a probe
+ * transcript, and the gate checks that the file EXISTS — a refutation by
+ * argument is the intervention that raised precision 54.5 → 67.1 and cut recall
+ * 45.5 → 39.8 in the measurement this pipeline is a reaction to.
+ */
+export const DroppedHypothesisSchema = z.looseObject({
+  /**
+   * Optional **here** and required by the gate, which is not the same thing.
+   * A drop with no id is a deletion of something unnameable and it fails
+   * `checkFindings` with a message that says so — but if this schema rejected
+   * it, two things would go wrong at once: the whole document would read as
+   * *"unparseable"* (a zod dump instead of the actionable line the next loop
+   * iteration needs), and the §D12 floor's pre-write validation would THROW on
+   * a document it was in the middle of rescuing. A floor that can crash is not
+   * a floor.
+   */
+  hypothesis: z.string().optional(),
+  refutedBy: z.string().optional(),
+  reason: z.string().optional(),
+});
+export type DroppedHypothesis = z.infer<typeof DroppedHypothesisSchema>;
+
+export const FindingsDocumentSchema = z.looseObject({
+  findings: z.array(ReviewFindingSchema).optional(),
+  dropped: z.array(DroppedHypothesisSchema).optional(),
+});
+export type FindingsDocument = z.infer<typeof FindingsDocumentSchema>;
+
 export const DOCUMENT_SCHEMAS = {
   facts: FactsDocumentSchema,
   contracts: ContractsDocumentSchema,

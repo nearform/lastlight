@@ -51,6 +51,19 @@ export interface ReviewFinding {
   family?: string;
   /** 0..1. Absent is NOT zero — see {@link tierFindings}. */
   confidence?: number;
+  /**
+   * An EXPLICIT destination, set by the `adjudicate` phase (and by
+   * `lastlight-facts findings --repair`, which records an unaccounted-for
+   * hypothesis at `internal`).
+   *
+   * Honoured in one direction only: `internal` and `body` are obeyed, `inline`
+   * is a request that still has to clear anchorability and the budget. A
+   * document may not grant itself a scarce inline slot — but it must always be
+   * able to say "record this, do not post it", or the conservation floor's
+   * repaired findings would be POSTED, which is the opposite of what recording
+   * them means.
+   */
+  tier?: "inline" | "body" | "internal";
 }
 
 /** A finding that has an anchor. Narrowed by {@link splitFindings}. */
@@ -504,7 +517,7 @@ export function splitFindings(
  * below-threshold AND overflowed-the-cap, under one heading, is a worse review
  * to read than the one it replaced (§D11).
  */
-export type DemotionReason = "off-diff" | "below-threshold" | "overflow";
+export type DemotionReason = "off-diff" | "below-threshold" | "overflow" | "adjudicated";
 
 /** One demoted finding, carrying the reason it did not earn an inline comment. */
 export interface DemotedFinding {
@@ -581,12 +594,26 @@ export function tierFindings(
 
   for (const f of findings) {
     if (!f) continue;
+    // An explicit `internal` is obeyed unconditionally and FIRST. The
+    // conservation floor writes unaccounted-for hypotheses at this tier with no
+    // `confidence` at all, and a confidence-only rule would have posted every
+    // one of them — turning "we recorded what we could not adjudicate" into
+    // "we published what we could not adjudicate".
+    if (f.tier === "internal") {
+      internal.push(f);
+      continue;
+    }
     if (f.confidence !== undefined && f.confidence < boundary.internalFloor) {
       internal.push(f);
       continue;
     }
     if (!f.path || !f.line || !isAnchored(f, commentable)) {
       body.push({ finding: f, reason: "off-diff" });
+      continue;
+    }
+    // An explicit `body` is a demotion, and a demotion is always safe to obey.
+    if (f.tier === "body") {
+      body.push({ finding: f, reason: "adjudicated" });
       continue;
     }
     const bar = f.family ? boundary.thresholds[f.family] : undefined;
@@ -654,9 +681,15 @@ const DEMOTION_LEAD: Record<DemotionReason, string> = {
   "off-diff": "_Outside this PR's diff — GitHub cannot anchor a comment here._",
   "below-threshold": "_Below the reporting confidence bar for their family._",
   overflow: "_Beyond the inline comment budget, ranked by severity and confidence._",
+  adjudicated: "_Reported here rather than inline by the adjudicating pass._",
 };
 
-const DEMOTION_ORDER: DemotionReason[] = ["off-diff", "below-threshold", "overflow"];
+const DEMOTION_ORDER: DemotionReason[] = [
+  "off-diff",
+  "below-threshold",
+  "adjudicated",
+  "overflow",
+];
 
 /**
  * The "Additional findings" section, grouped by why each finding is here.

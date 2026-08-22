@@ -76,7 +76,13 @@ export interface CheckProbesResult {
   notes: string[];
 }
 
-function readJsonl<T>(path: string): { rows: T[]; malformed: number } {
+/**
+ * One JSON object per line, malformed lines COUNTED rather than skipped.
+ * Exported because `findings.ts` reads the same `hypotheses/*.jsonl` for the
+ * `adjudicate` gate, and two readers of one append-only artifact is two places
+ * for "how many lines did we drop?" to disagree.
+ */
+export function readJsonl<T>(path: string): { rows: T[]; malformed: number } {
   if (!existsSync(path)) return { rows: [], malformed: 0 };
   const rows: T[] = [];
   let malformed = 0;

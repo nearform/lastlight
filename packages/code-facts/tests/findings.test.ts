@@ -1,0 +1,638 @@
+/**
+ * `findings` — the `adjudicate` loop's exit gate, and the conservation check.
+ *
+ * The property under test is the one §D11 says nothing in the plan enforced:
+ * **an adjudicator that reads thirty hypotheses and writes six findings must not
+ * pass.** That is v2, which *"worked mechanically"* and cost recall anyway, and
+ * it passed every existence-plus-schema gate this plan had. So every test here
+ * is about a hypothesis id and where it went — not about whether the document
+ * parses.
+ *
+ * Three of them carry money directly:
+ *
+ * - **A drop with no transcript fails.** *"You may add evidence and lower
+ *   confidence; you may not drop a hypothesis without a counter-transcript."*
+ *   A refutation by argument is exactly the intervention that raised precision
+ *   54.5 → 67.1 and cut recall 45.5 → 39.8.
+ * - **A finding with no `hypotheses` field fails nothing.** Those are the
+ *   shipped reviewer's own findings; a gate that demanded provenance from them
+ *   would delete the reviewer we already have.
+ * - **No hypothesis files at all passes.** The gate must never fail a run for
+ *   the absence of the thing it audits — the pipeline being off is not a
+ *   finding.
+ */
+import { afterAll, describe, expect, it } from "vitest";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { runCli } from "../src/cli.js";
+import { EXIT_DEGRADED, EXIT_OK } from "../src/errors.js";
+import { checkFindings, renderFindingsCheck, titleFrom } from "../src/findings.js";
+
+const dirs: string[] = [];
+afterAll(() => {
+  for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+});
+
+interface Fixture {
+  /** `<root>/.lastlight/pr-review`. */
+  dir: string;
+  root: string;
+  /** The document as it is on disk right now. */
+  read(): Record<string, unknown>;
+}
+
+/** A `.lastlight/pr-review` tree, laid out exactly as the phases write it. */
+function workspace(files: {
+  hypotheses?: Record<string, unknown[] | string>;
+  /** Omit entirely to leave `findings.json` absent. A string is written raw. */
+  findings?: Record<string, unknown> | string;
+  transcripts?: string[];
+}): Fixture {
+  const root = mkdtempSync(join(tmpdir(), "ll-findings-"));
+  dirs.push(root);
+  const dir = join(root, ".lastlight", "pr-review");
+  mkdirSync(join(dir, "hypotheses"), { recursive: true });
+  mkdirSync(join(dir, "probes"), { recursive: true });
+
+  for (const [family, rows] of Object.entries(files.hypotheses ?? {})) {
+    const body = typeof rows === "string" ? rows : rows.map((r) => JSON.stringify(r)).join("\n");
+    writeFileSync(join(dir, "hypotheses", `${family}.jsonl`), `${body}\n`, "utf8");
+  }
+  if (files.findings !== undefined) {
+    const body =
+      typeof files.findings === "string" ? files.findings : JSON.stringify(files.findings, null, 2);
+    writeFileSync(join(dir, "findings.json"), `${body}\n`, "utf8");
+  }
+  for (const name of files.transcripts ?? []) {
+    writeFileSync(join(dir, "probes", name), "npx vitest run probe.test.ts\n  1 failed\n", "utf8");
+  }
+  return {
+    dir,
+    root,
+    read: () => JSON.parse(readFileSync(join(dir, "findings.json"), "utf8")) as Record<
+      string,
+      unknown
+    >,
+  };
+}
+
+const H1 = {
+  id: "H-001",
+  obligation: "O-014",
+  family: "contract",
+  claim: "Token expiry is set on the client and never checked server-side; a stale token is accepted.",
+  bothEnds: { introducedAt: "src/config.ts:12", enforcedAt: null },
+  existingCode: "const MAX_TOKEN_AGE = 3600;",
+  severity: "Critical",
+  confidence: 0.82,
+};
+const H2 = {
+  id: "H-002",
+  obligation: "O-015",
+  family: "enforcement",
+  claim: "The new rate-limit branch is unreachable from the router.",
+  severity: "Important",
+  confidence: 0.4,
+};
+const H3 = { id: "H-003", obligation: "O-016", family: "tests", claim: "No test covers the new path." };
+
+/** A finding that discharges the given hypotheses. */
+function finding(ids: string[], extra: Record<string, unknown> = {}) {
+  return {
+    path: "src/auth.ts",
+    existingCode: "if (token) return ok;",
+    severity: "Critical",
+    title: "Token expiry is never enforced",
+    body: "A stale token is accepted.",
+    tier: "inline",
+    hypotheses: ids,
+    ...extra,
+  };
+}
+
+const doc = (over: Record<string, unknown> = {}) => ({
+  skip: false,
+  summary: "Adds auth.",
+  event: "COMMENT",
+  findings: [],
+  ...over,
+});
+
+// ── Rule 1–3: exactly one disposition, each way it can break ────────────────
+
+describe("every hypothesis has exactly one disposition", () => {
+  it("closes when each id appears once, across every family file", () => {
+    const { dir } = workspace({
+      hypotheses: { contract: [H1], enforcement: [H2] },
+      findings: doc({ findings: [finding(["H-001"]), finding(["H-002"], { tier: "body" })] }),
+    });
+    const result = checkFindings({ dir });
+    expect(result.satisfied).toBe(true);
+    expect(result.hypotheses).toEqual(["H-001", "H-002"]);
+    expect(result.covered).toEqual(["H-001", "H-002"]);
+  });
+
+  it("closes when ONE finding discharges several — dedup across families", () => {
+    // §"Its instructions, in order of importance" #1: the same defect surfaces
+    // from `contract` and `enforcement` and the two records merge. Conservation
+    // is about every id being ACCOUNTED for, not about a finding per id.
+    const { dir } = workspace({
+      hypotheses: { contract: [H1], enforcement: [H2] },
+      findings: doc({ findings: [finding(["H-001", "H-002"])] }),
+    });
+    expect(checkFindings({ dir }).satisfied).toBe(true);
+  });
+
+  it("does NOT close on a hypothesis in neither list — the v2 shape", () => {
+    // Thirty hypotheses in, six findings out. This is the whole work package.
+    const { dir } = workspace({
+      hypotheses: { contract: [H1, H2, H3] },
+      findings: doc({ findings: [finding(["H-001"])] }),
+    });
+    const result = checkFindings({ dir });
+    expect(result.satisfied).toBe(false);
+    expect(result.gaps.map((g) => g.hypothesis)).toEqual(["H-002", "H-003"]);
+    expect(result.gaps.every((g) => g.kind === "uncovered")).toBe(true);
+  });
+
+  it("does NOT close when two findings claim the same id", () => {
+    const { dir } = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc({ findings: [finding(["H-001"]), finding(["H-001"])] }),
+    });
+    const result = checkFindings({ dir });
+    expect(result.satisfied).toBe(false);
+    expect(result.gaps[0].kind).toBe("duplicate");
+    expect(result.gaps[0].detail).toMatch(/findings\[0\], findings\[1\]/);
+  });
+
+  it("does NOT close when an id is both kept and dropped", () => {
+    // Having it both ways is the one disposition that makes internal recall
+    // uncomputable, which is what WP8 needs this gate for.
+    const { dir, root } = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc({
+        findings: [finding(["H-001"])],
+        dropped: [{ hypothesis: "H-001", refutedBy: "probes/H-001.txt" }],
+      }),
+      transcripts: ["H-001.txt"],
+    });
+    const result = checkFindings({ dir, repo: root });
+    expect(result.satisfied).toBe(false);
+    expect(result.gaps[0].kind).toBe("duplicate");
+  });
+});
+
+// ── Rule 4: the single most important rule in the work package ──────────────
+
+describe("only a probe transcript may delete", () => {
+  it("accepts a drop whose transcript is on disk", () => {
+    const { dir, root } = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc({
+        dropped: [{ hypothesis: "H-001", refutedBy: ".lastlight/pr-review/probes/H-001.txt" }],
+      }),
+      transcripts: ["H-001.txt"],
+    });
+    expect(checkFindings({ dir, repo: root }).satisfied).toBe(true);
+  });
+
+  it("resolves `refutedBy` relative to the repo OR to the pr-review dir", () => {
+    // The `falsify` prompt asks for a repo-relative path. An adjudicator that
+    // copies the dir-relative spelling is being helpful, not wrong, and failing
+    // over a path convention would cost a whole iteration for nothing.
+    const { dir, root } = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc({ dropped: [{ hypothesis: "H-001", refutedBy: "probes/H-001.txt" }] }),
+      transcripts: ["H-001.txt"],
+    });
+    expect(checkFindings({ dir, repo: root }).satisfied).toBe(true);
+  });
+
+  it("rejects a drop with no `refutedBy` at all — refutation by argument", () => {
+    const { dir, root } = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc({ dropped: [{ hypothesis: "H-001", reason: "on reflection, fine" }] }),
+    });
+    const result = checkFindings({ dir, repo: root });
+    expect(result.satisfied).toBe(false);
+    expect(result.gaps[0].kind).toBe("unbacked-drop");
+    expect(result.gaps[0].detail).toMatch(/only a probe transcript may delete/);
+  });
+
+  it("rejects a drop naming a transcript that was never written", () => {
+    const { dir, root } = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc({ dropped: [{ hypothesis: "H-001", refutedBy: "probes/H-001.txt" }] }),
+    });
+    const result = checkFindings({ dir, repo: root });
+    expect(result.satisfied).toBe(false);
+    expect(result.gaps[0].kind).toBe("unbacked-drop");
+  });
+
+  it("rejects a drop with no hypothesis id — nothing can be conserved", () => {
+    const { dir } = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc({ findings: [finding(["H-001"])], dropped: [{ refutedBy: "probes/x.txt" }] }),
+    });
+    const result = checkFindings({ dir });
+    expect(result.satisfied).toBe(false);
+    expect(result.gaps[0].kind).toBe("unbacked-drop");
+  });
+});
+
+// ── Rule 5: a fabricated id reads the OPPOSITE way to an uncovered one ──────
+
+describe("a cited id that nothing declared", () => {
+  it("fails distinctly from an omission", () => {
+    const { dir } = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc({ findings: [finding(["H-001"]), finding(["H-999"])] }),
+    });
+    const result = checkFindings({ dir });
+    expect(result.satisfied).toBe(false);
+    expect(result.gaps).toHaveLength(1);
+    expect(result.gaps[0]).toMatchObject({ kind: "fabricated", hypothesis: "H-999" });
+    expect(result.gaps[0].detail).toMatch(/no hypotheses\/\*\.jsonl declares this id/);
+  });
+
+  it("catches a DROP of an id nothing declared, on the same footing", () => {
+    const { dir, root } = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc({
+        findings: [finding(["H-001"])],
+        dropped: [{ hypothesis: "H-404", refutedBy: "probes/H-404.txt" }],
+      }),
+      transcripts: ["H-404.txt"],
+    });
+    const result = checkFindings({ dir, repo: root });
+    expect(result.satisfied).toBe(false);
+    expect(result.gaps[0]).toMatchObject({ kind: "fabricated", hypothesis: "H-404" });
+  });
+});
+
+// ── Rule 6: the shipped reviewer's own findings are not audited ─────────────
+
+describe("a finding with no `hypotheses` field", () => {
+  it("fails nothing, and is counted rather than ignored", () => {
+    // The reviewer we already have does not work from hypotheses. Requiring the
+    // field would make its findings unpostable, which is a recall loss dressed
+    // up as a conservation win.
+    const { dir } = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc({
+        findings: [
+          finding(["H-001"]),
+          { path: "src/x.ts", severity: "Important", title: "Typo", body: "…" },
+        ],
+      }),
+    });
+    const result = checkFindings({ dir });
+    expect(result.satisfied).toBe(true);
+    expect(result.notes.join(" ")).toMatch(/1 finding\(s\) carry no `hypotheses`/);
+  });
+
+  it("is fine as the ONLY finding when there are no hypotheses either", () => {
+    const { dir } = workspace({
+      findings: doc({ findings: [{ path: "src/x.ts", title: "Typo", body: "…" }] }),
+    });
+    expect(checkFindings({ dir }).satisfied).toBe(true);
+  });
+});
+
+// ── Rule 7: never fail a run for the absence of the thing it audits ─────────
+
+describe("no hypothesis files at all", () => {
+  it("passes trivially, and says why that is not a clean bill of health", () => {
+    const { dir } = workspace({ findings: doc() });
+    const result = checkFindings({ dir });
+    expect(result.satisfied).toBe(true);
+    expect(result.hypotheses).toEqual([]);
+    expect(result.notes.join(" ")).toMatch(/did not run.*NOT evidence/);
+  });
+
+  it("still refuses an unbacked deletion, because that rule is unconditional", () => {
+    // The trivial pass is about the ABSENCE of hypotheses, not an amnesty on
+    // findings.json. A drop with no transcript is wrong whether or not the
+    // surveys ran — and with no `.jsonl` at all the id is fabricated too.
+    const { dir } = workspace({
+      findings: doc({ dropped: [{ hypothesis: "H-001", refutedBy: "probes/H-001.txt" }] }),
+    });
+    const result = checkFindings({ dir });
+    expect(result.satisfied).toBe(false);
+    expect(result.gaps.map((g) => g.kind).sort()).toEqual(["fabricated", "unbacked-drop"]);
+  });
+});
+
+// ── Rule 8: no readable document ⇒ another iteration ────────────────────────
+
+describe("findings.json itself", () => {
+  it("fails when it is absent, so the loop gets another go at writing one", () => {
+    const { dir } = workspace({ hypotheses: { contract: [H1] } });
+    const result = checkFindings({ dir });
+    expect(result.satisfied).toBe(false);
+    expect(result.documentError).toMatch(/findings\.json/);
+    expect(renderFindingsCheck(result)).toMatch(/no readable findings\.json/);
+  });
+
+  it("fails when it is not JSON", () => {
+    const { dir } = workspace({ hypotheses: { contract: [H1] }, findings: "{ not json" });
+    expect(checkFindings({ dir }).satisfied).toBe(false);
+  });
+
+  it("fails when `findings` is not an array", () => {
+    const { dir } = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc({ findings: "none" }),
+    });
+    expect(checkFindings({ dir }).satisfied).toBe(false);
+  });
+
+  it("fails when it is absent EVEN with no hypotheses — absence of an output is not absence of an audit", () => {
+    const { dir } = workspace({});
+    expect(checkFindings({ dir }).satisfied).toBe(false);
+  });
+
+  it("counts unparseable hypothesis lines rather than skipping them", () => {
+    const { dir } = workspace({
+      hypotheses: { contract: `${JSON.stringify(H1)}\nnot json at all\n` },
+      findings: doc({ findings: [finding(["H-001"])] }),
+    });
+    const result = checkFindings({ dir });
+    expect(result.malformed).toBe(1);
+    expect(result.notes.join(" ")).toMatch(/1 unparseable JSONL line/);
+    expect(result.satisfied).toBe(true);
+  });
+});
+
+// ── `--repair`: the §D12 floor ──────────────────────────────────────────────
+
+describe("--repair records what the adjudicator did not", () => {
+  it("appends every uncovered hypothesis at tier internal, carrying its record", () => {
+    const { dir, read } = workspace({
+      hypotheses: { contract: [H1], enforcement: [H2] },
+      findings: doc({ findings: [finding(["H-002"])] }),
+    });
+    const result = checkFindings({ dir, repair: true });
+    expect(result.satisfied).toBe(true);
+    expect(result.repaired).toEqual([
+      { kind: "recorded", hypothesis: "H-001", detail: 'no disposition — recorded at tier "internal"' },
+    ]);
+
+    const written = read().findings as Record<string, unknown>[];
+    expect(written).toHaveLength(2);
+    expect(written[1]).toMatchObject({
+      tier: "internal",
+      hypotheses: ["H-001"],
+      family: "contract",
+      obligation: "O-014",
+      severity: "Critical",
+      confidence: 0.82,
+      existingCode: "const MAX_TOKEN_AGE = 3600;",
+      // `path` is derived from `bothEnds.introducedAt`, because an internal
+      // record nobody can navigate back to is not auditable.
+      path: "src/config.ts",
+    });
+    // The claim survives verbatim as the body; the title is its first clause.
+    expect(written[1].body).toBe(H1.claim);
+    expect(written[1].title).toBe("Token expiry is set on the client and never checked server-side");
+    // …and the gate now closes on its own.
+    expect(checkFindings({ dir }).satisfied).toBe(true);
+  });
+
+  it("un-deletes an unbacked drop: the entry goes, the finding comes back", () => {
+    // THE asymmetry of this work package, expressed as code. An unjustified
+    // deletion becomes a recorded non-deletion — never the other way round.
+    const { dir, root, read } = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc({ dropped: [{ hypothesis: "H-001", refutedBy: "probes/H-001.txt" }] }),
+    });
+    const result = checkFindings({ dir, repo: root, repair: true });
+    expect(result.satisfied).toBe(true);
+    expect(result.repaired[0]).toMatchObject({ kind: "promoted", hypothesis: "H-001" });
+
+    const after = read();
+    expect(after.dropped).toEqual([]);
+    expect((after.findings as Record<string, unknown>[])[0]).toMatchObject({
+      tier: "internal",
+      hypotheses: ["H-001"],
+    });
+    expect(checkFindings({ dir, repo: root }).satisfied).toBe(true);
+  });
+
+  it("leaves a BACKED drop exactly where it is", () => {
+    const { dir, root, read } = workspace({
+      hypotheses: { contract: [H1], enforcement: [H2] },
+      findings: doc({ dropped: [{ hypothesis: "H-001", refutedBy: "probes/H-001.txt" }] }),
+      transcripts: ["H-001.txt"],
+    });
+    checkFindings({ dir, repo: root, repair: true });
+    expect(read().dropped).toEqual([{ hypothesis: "H-001", refutedBy: "probes/H-001.txt" }]);
+    // …and only the genuinely uncovered one was recorded.
+    expect(read().findings).toHaveLength(1);
+  });
+
+  it("withdraws an unbacked drop the findings already cover, without duplicating", () => {
+    const { dir, root, read } = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc({
+        findings: [finding(["H-001"])],
+        dropped: [{ hypothesis: "H-001", refutedBy: "probes/gone.txt" }],
+      }),
+    });
+    const result = checkFindings({ dir, repo: root, repair: true });
+    expect(result.repaired[0]).toMatchObject({ kind: "withdrawn", hypothesis: "H-001" });
+    expect(read().dropped).toEqual([]);
+    expect(read().findings).toHaveLength(1);
+    expect(checkFindings({ dir, repo: root }).satisfied).toBe(true);
+  });
+
+  it("leaves a duplicate alone and reports it — guessing would be the deletion", () => {
+    const { dir, read } = workspace({
+      hypotheses: { contract: [H1], enforcement: [H2] },
+      findings: doc({ findings: [finding(["H-001"]), finding(["H-001"])] }),
+    });
+    const result = checkFindings({ dir, repair: true });
+    // The floor never takes the run down…
+    expect(result.satisfied).toBe(true);
+    // …but the duplicate survives, named, for the adjudicator to fix.
+    expect(result.gaps.map((g) => g.kind)).toEqual(["duplicate"]);
+    expect(read().findings).toHaveLength(3); // the two originals + H-002, recorded
+  });
+
+  it("does not invent a findings.json it cannot repair", () => {
+    // A fabricated `summary` and `event` is a review nobody wrote. A loop that
+    // runs out of iterations does not fail the run, so there is nothing to
+    // rescue here — and everything to lose by rescuing it.
+    const { dir } = workspace({ hypotheses: { contract: [H1] } });
+    const result = checkFindings({ dir, repair: true });
+    expect(result.satisfied).toBe(false);
+    expect(result.repaired).toEqual([]);
+    expect(existsSync(join(dir, "findings.json"))).toBe(false);
+  });
+
+  it("preserves every unknown field — the evidence packet is not the gate's to strip", () => {
+    // `post-review` passes unknown fields through, WP7 reads them and the
+    // dashboard renders them. A rewrite that dropped them would delete the
+    // evidence in the act of preserving the finding.
+    const { dir, read } = workspace({
+      hypotheses: { contract: [H1], enforcement: [H2] },
+      findings: doc({
+        verdict: { spec: "fail", standards: "pass" },
+        findings: [
+          finding(["H-002"], {
+            mechanism: "value set on one side, never checked on the other",
+            evidence: [{ type: "transcript", ref: "probes/H-002.txt", result: "reproduced" }],
+            suggestion: "if (expired(token)) return 401;",
+          }),
+        ],
+      }),
+    });
+    checkFindings({ dir, repair: true });
+    const after = read();
+    expect(after.verdict).toEqual({ spec: "fail", standards: "pass" });
+    expect(after.summary).toBe("Adds auth.");
+    const kept = (after.findings as Record<string, unknown>[])[0];
+    expect(kept.mechanism).toBe("value set on one side, never checked on the other");
+    expect(kept.evidence).toHaveLength(1);
+    expect(kept.suggestion).toBe("if (expired(token)) return 401;");
+  });
+
+  it("is IDEMPOTENT — the second run changes nothing on disk", () => {
+    const { dir, root } = workspace({
+      hypotheses: { contract: [H1, H3], enforcement: [H2] },
+      findings: doc({
+        findings: [finding(["H-002"])],
+        dropped: [{ hypothesis: "H-003", refutedBy: "probes/nope.txt" }],
+      }),
+    });
+    const path = join(dir, "findings.json");
+    const first = checkFindings({ dir, repo: root, repair: true });
+    expect(first.repaired).toHaveLength(2);
+    const afterFirst = readFileSync(path, "utf8");
+
+    const second = checkFindings({ dir, repo: root, repair: true });
+    expect(second.repaired).toEqual([]);
+    expect(readFileSync(path, "utf8")).toBe(afterFirst);
+    expect(second.satisfied).toBe(true);
+  });
+
+  it("records a drop of an id nothing declared, rather than deleting the drop's subject", () => {
+    const { dir, root, read } = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc({
+        findings: [finding(["H-001"])],
+        dropped: [{ hypothesis: "H-404" }],
+      }),
+    });
+    const result = checkFindings({ dir, repo: root, repair: true });
+    expect(result.satisfied).toBe(true);
+    const written = (read().findings as Record<string, unknown>[])[1];
+    expect(written).toMatchObject({ tier: "internal", hypotheses: ["H-404"] });
+    expect(written.title).toBe("Unadjudicated hypothesis H-404");
+    expect(String(written.body)).toMatch(/only a probe transcript may delete/);
+    // The fabricated id is still named — recording it does not make it real.
+    expect(result.gaps.map((g) => g.kind)).toEqual(["fabricated"]);
+  });
+});
+
+// ── The summary a phase log actually shows ─────────────────────────────────
+
+describe("the output the next iteration has to act on", () => {
+  it("names each offending id, not just a count", () => {
+    // A gate that says "3 hypotheses unaccounted for" cannot be acted on, and
+    // being acted on in the next iteration is the entire point.
+    const { dir } = workspace({
+      hypotheses: { contract: [H1, H2, H3] },
+      findings: doc({ findings: [finding(["H-001"])] }),
+    });
+    const text = renderFindingsCheck(checkFindings({ dir }));
+    expect(text).toContain("1/3 hypotheses accounted for");
+    expect(text).toContain("inline=1");
+    expect(text).toContain("H-002");
+    expect(text).toContain("H-003");
+  });
+
+  it("caps the list at 20 and counts the rest — this goes into a context window", () => {
+    const many = Array.from({ length: 25 }, (_, i) => ({
+      id: `H-${String(i + 1).padStart(3, "0")}`,
+      family: "contract",
+      obligation: "O-001",
+      claim: "something",
+    }));
+    const { dir } = workspace({ hypotheses: { contract: many }, findings: doc() });
+    const result = checkFindings({ dir });
+    expect(result.gaps).toHaveLength(25);
+    const text = renderFindingsCheck(result);
+    expect(text).toContain("… and 5 more");
+    expect(text.split("\n").filter((l) => l.startsWith("  ✗"))).toHaveLength(20);
+  });
+
+  it("says what it repaired", () => {
+    const { dir } = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc(),
+    });
+    const text = renderFindingsCheck(checkFindings({ dir, repair: true }));
+    expect(text).toContain("1/1 hypotheses accounted for");
+    expect(text).toContain("internal=1");
+    expect(text).toMatch(/\+ H-001: no disposition/);
+  });
+});
+
+// ── The exit-code contract, which is what `until_bash` actually reads ───────
+
+describe("the gate on a command line", () => {
+  const capture = () => {
+    const out: string[] = [];
+    return { out, io: { out: (s: string) => out.push(s), err: (s: string) => out.push(s) } };
+  };
+
+  it("exits 0 when conservation holds and 3 when it does not", () => {
+    // Exit 0 CLOSES the `generic_loop.until_bash`; non-zero means keep looping.
+    const broken = workspace({
+      hypotheses: { contract: [H1, H2] },
+      findings: doc({ findings: [finding(["H-001"])] }),
+    });
+    const first = capture();
+    expect(runCli(["findings", "--dir", broken.dir], first.io)).toBe(EXIT_DEGRADED);
+    expect(first.out.join("\n")).toContain("H-002");
+
+    const whole = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc({ findings: [finding(["H-001"])] }),
+    });
+    expect(runCli(["findings", "--dir", whole.dir], capture().io)).toBe(EXIT_OK);
+  });
+
+  it("exits 0 under --repair, because a floor that can fail is not a floor", () => {
+    const { dir, read } = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc(),
+    });
+    const { out, io } = capture();
+    expect(runCli(["findings", "--dir", dir, "--repair"], io)).toBe(EXIT_OK);
+    expect(out.join("\n")).toMatch(/\+ H-001/);
+    expect((read().findings as Record<string, unknown>[])[0]).toMatchObject({ tier: "internal" });
+  });
+});
+
+describe("a claim is a sentence; a title is a label", () => {
+  it("takes the first clause — a full stop or a semicolon", () => {
+    expect(titleFrom("A leaks into B. Then C happens.")).toBe("A leaks into B");
+    expect(titleFrom("A leaks into B; C accepts it.")).toBe("A leaks into B");
+  });
+
+  it("does not cut a dotted identifier in half", () => {
+    // `foo.bar` has no whitespace after the dot, which is why the stop is
+    // `[.;]` FOLLOWED by a space or the end and not a bare `.`.
+    expect(titleFrom("cfg.host is read before it is set")).toBe("cfg.host is read before it is set");
+  });
+
+  it("collapses whitespace and bounds the length", () => {
+    expect(titleFrom("  a\n  b  ")).toBe("a b");
+    expect(titleFrom("x".repeat(200))).toHaveLength(100);
+  });
+});

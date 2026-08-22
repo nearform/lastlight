@@ -16,6 +16,7 @@
  *     --repo <dir> --base <ref> --head <ref> [--out <file>] [--never-fail]
  */
 import { EXIT_DEGRADED, EXIT_UNAVAILABLE, EXIT_OK } from "./errors.js";
+import { checkFindings, renderFindingsCheck } from "./findings.js";
 import { prepareTree } from "./prepare.js";
 import { checkProbes, renderProbeCheck } from "./probes.js";
 import { runExtractor, runWrapped, writeDocument } from "./run.js";
@@ -48,6 +49,9 @@ Commands:
   prepare     install deps so a probe can be RUN (WP4's affordance, not CI)
   probes      the \`falsify\` loop's exit gate — every hypothesis that needed a
               probe has a verdict, and every claim of execution has a transcript
+  findings    the \`adjudicate\` loop's exit gate — the CONSERVATION check: every
+              hypothesis has exactly one disposition, and every deletion names a
+              transcript that exists
   toolchain   print the pinned manifest and what actually resolved
 
 \`probes\` options (an existence gate, not a validator — it reads no transcript):
@@ -56,6 +60,18 @@ Commands:
   --repo <dir>        what a transcript path is relative to (default: cwd)
   Exit 0 = the loop may stop. Non-zero = something still owes a verdict, which
   a pass can always discharge honestly by recording \`unprobed\`.
+
+\`findings\` options (conservation, not schema validation — WP6c):
+  --dir <dir>         the .lastlight/pr-review directory
+                      (default: .lastlight/pr-review)
+  --repo <dir>        what a \`refutedBy\` path is relative to (default: cwd)
+  --repair            the §D12 FLOOR. Record every unaccounted hypothesis at
+                      tier "internal", un-delete every drop with no transcript,
+                      rewrite findings.json and exit 0. Idempotent, and it never
+                      deletes: an unjustified deletion becomes a recorded
+                      non-deletion. Run it on the LAST iteration.
+  Exit 0 = the loop may stop. Non-zero = a hypothesis is unaccounted for, a
+  deletion has nothing to show for it, or there is no readable findings.json.
 
 \`prepare\` options (it acts on a tree; no --base/--head, and it runs no analysis):
   --repo <dir>        the checkout to prepare               (default: cwd)
@@ -126,6 +142,7 @@ const BOOLEAN_FLAGS = new Set([
   "lifecycle-scripts",
   "typecheck",
   "coverage",
+  "repair",
 ]);
 
 export function parseArgv(argv: string[]): Parsed {
@@ -262,6 +279,21 @@ export function runCli(
     return result.satisfied ? EXIT_OK : EXIT_DEGRADED;
   }
 
+  if (command === "findings") {
+    // The `adjudicate` loop's `until_bash`, and the same contract as `probes`:
+    // its non-zero exit is the LOOP condition, not a failure, so it is not
+    // wrapped by `--never-fail`. `--repair` is the §D12 floor — it always
+    // returns 0, because a floor that can fail is not a floor.
+    const result = checkFindings({
+      dir: stringFlag(flags.dir) ?? ".lastlight/pr-review",
+      repo: stringFlag(flags.repo),
+      repair: flags.repair === true,
+      log,
+    });
+    io.out(renderFindingsCheck(result));
+    return result.satisfied ? EXIT_OK : EXIT_DEGRADED;
+  }
+
   if (command === "seed") {
     const factsPath = stringFlag(flags.facts);
     if (!factsPath) {
@@ -306,7 +338,9 @@ export function runCli(
   }
 
   if (!EXTRACTORS.includes(command as ExtractorName)) {
-    io.err(`unknown command "${command}". One of: ${EXTRACTORS.join(", ")}, seed, prepare, probes, toolchain`);
+    io.err(
+      `unknown command "${command}". One of: ${EXTRACTORS.join(", ")}, seed, prepare, probes, findings, toolchain`,
+    );
     return EXIT_UNAVAILABLE;
   }
 
