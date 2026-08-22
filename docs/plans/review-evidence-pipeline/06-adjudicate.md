@@ -96,9 +96,36 @@ successor, not an unmet criterion.**
   2,145 rows, **retention 100%, precision 70.2%, F1 0.825**, zero model calls,
   `elapsed 0.0s`. Unchanged from the figure below, which is the point — it is the
   bar any adjudicator arm has to clear.
+- **The floor is verified end to end**, on a hand-built workspace rather than
+  only in unit tests: three hypotheses, one adjudicated, one left with no
+  disposition, and one *deleted against a transcript that never existed*. The
+  strict gate fails naming both offending ids; `--repair` restores the deleted
+  Critical (confidence 0.9) as an `internal` finding, preserves the evidence
+  packet on the adjudicated one, and is idempotent to the byte.
+
+**Two bugs the free instruments found before a dollar was spent**, both of the
+silent kind, and both in the seam between the two halves of 6c:
+
+1. **`z.object` would have eaten the evidence packet.** Zod v4 strips unknown
+   keys, so the floor's rewrite would have deleted `mechanism` / `bothEnds` /
+   `evidence` **in the act of preserving the finding**. `looseObject` throughout,
+   and the repair mutates the object parsed from disk rather than zod's output.
+2. **Every finding the floor rescued would have been POSTED.** `tierFindings`
+   decided `internal` from *confidence*, while a repaired finding carries an
+   explicit `tier: "internal"` and no confidence at all — so the rescue would
+   have turned *"we recorded what we could not adjudicate"* into *"we published
+   what we could not adjudicate"*, which is the exact inversion of the floor's
+   purpose. An explicit `internal` or `body` is now obeyed; an explicit `inline`
+   is **not**, because a document may demote itself and may never promote itself
+   past anchorability or the attention budget.
+
+  This is the second time in this plan that reading a free instrument to
+  exhaustion paid before any model spend — WP4 found two silent `prepare` bugs
+  the same way.
+
 - **AC6 is NOT measured.** It needs a model arm against `2026-08-22_092611`
-  (Haiku, pipeline OFF, 8 cases, $1.91, avgF1 **0.229**), and no model has run
-  against WP6. Everything above is mechanism.
+  (Haiku, pipeline OFF, 8 cases, $1.91, avgF1 **0.229**). Everything above is
+  mechanism.
 
 > **Three prerequisites verified against the tree 2026-08-22 — all three have
 > now been ADDRESSED by the work above, and are kept because each explains why a
