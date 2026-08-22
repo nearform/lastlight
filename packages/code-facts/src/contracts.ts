@@ -13,10 +13,11 @@
  * curiosity, because those are the call sites the PR did not touch and the
  * reviewer will not see.
  */
-import type { Node, Project, SourceFile } from "ts-morph";
+import type { JSDocTag, Node, SourceFile } from "ts-morph";
 import { Node as TsNode, SyntaxKind } from "ts-morph";
 import type { ContractDelta, ContractsPayload } from "./schema.js";
-import { isTestPath, repoRelative } from "./project.js";
+import type { Programs } from "./project.js";
+import { isTestPath, repoRelative, sourceFileAt } from "./project.js";
 import type { ChangedFileIndex } from "./facts.js";
 import type { ChangedPath } from "./git.js";
 
@@ -87,14 +88,53 @@ function thrownTypes(node: Node): string[] {
   if (TsNode.isJSDocable(node)) {
     for (const doc of node.getJsDocs()) {
       for (const tag of doc.getTags()) {
-        if (tag.getTagName() === "throws" || tag.getTagName() === "throw") {
-          const text = tag.getCommentText()?.trim();
-          if (text) out.add(text.replace(/^\{(.+?)\}.*$/, "$1").split(/\s+/)[0]);
-        }
+        if (tag.getTagName() !== "throws" && tag.getTagName() !== "throw") continue;
+        const thrown = jsDocThrownType(tag);
+        if (thrown) out.add(thrown);
       }
     }
   }
   return [...out].sort();
+}
+
+/**
+ * The type named by one `@throws` tag — **from the tag's TYPE EXPRESSION first,
+ * and only then from its comment text.**
+ *
+ * TypeScript parses `@throws` as a `JSDocThrowsTag` and lifts the braces into a
+ * separate `typeExpression`, so `getCommentText()` returns the DESCRIPTION and
+ * nothing else:
+ *
+ *   `@throws {ValidationError} when the id is empty`  → comment `"when the id is empty"`
+ *   `@throws {ValidationError}`                       → comment `undefined`
+ *
+ * Reading the type off the comment therefore recorded `"when"` as the thrown
+ * type in the first case and NOTHING in the second — and `{Type}` is the
+ * dominant JSDoc spelling, so that was the common case, not the edge one. Both
+ * halves cost: `throws` is compared raw in `sameShape`, so editing the prose
+ * after a `@throws` moved the "thrown type" and produced a `changed` delta that
+ * did not happen, and a bare `@throws {TypeError}` was an absence claim about a
+ * documented throw that is right there in the source.
+ *
+ * The comment fallback keeps the un-braced spelling (`@throws Foo when …`)
+ * working, which is what a `JSDocUnknownTag` for `@throw` also lands on.
+ */
+function jsDocThrownType(tag: JSDocTag): string | null {
+  // Duck-typed rather than cast: `getTypeExpression` is mixed into the tag
+  // types that have one, and ts-morph exports no guard for the mixin — the same
+  // shape `facts.asImplementationGetable` is narrowed with.
+  const typed = tag as unknown as {
+    getTypeExpression?: () => { getTypeNode?: () => { getText(): string } | undefined } | undefined;
+  };
+  const named =
+    typeof typed.getTypeExpression === "function"
+      ? typed.getTypeExpression()?.getTypeNode?.()?.getText().trim()
+      : undefined;
+  if (named) return named;
+
+  const text = tag.getCommentText()?.trim();
+  if (!text) return null;
+  return text.replace(/^\{(.+?)\}.*$/, "$1").split(/\s+/)[0] || null;
 }
 
 function functionLike(node: Node): Node | null {
@@ -139,6 +179,12 @@ export function shapeOf(node: Node): Shape {
       ...parameter,
       type: stripImportPaths(parameter.type),
     })),
+    // `throws` is a type-text surface too — `thrownTypes` falls back to
+    // `getType().getText()` for anything that is not a `new` expression — and
+    // `sameShape` compares it RAW, with no `canonicalType` pass. An unstripped
+    // path here is therefore a delta on every single run, because the base tree
+    // lives in a temp worktree whose path is different every time.
+    throws: shape.throws.map(stripImportPaths),
   };
 }
 
@@ -199,8 +245,61 @@ function rawShapeOf(node: Node): Shape {
 // paths stripped too — a 4000-character type full of `../../..` is unreadable
 // in an obligation regardless.
 
+/**
+ * BOTH forms, and the second one is the one that bit us.
+ *
+ *   `import("/abs/path/mod").User`  → `User`        — a qualified member
+ *   `typeof import("./schema/sqlite.js")` → `typeof sqlite`  — the module ITSELF
+ *
+ * The original regex required the trailing `.`, so the bare form — a module
+ * namespace type, which is what a `typeof import(...)` parameter is — survived
+ * with its specifier intact. `tests/invariants.test.ts` found it on this
+ * monorepo's own Drizzle commit, where 2 of 207 contract deltas carried
+ * `typeof import("./schema/sqlite.js")` straight into the emitted signature.
+ *
+ * That is the same defect as the dotted case in both of its halves: the text is
+ * unreadable in an obligation (the comment above promises `../../..` is gone),
+ * and an ABSOLUTE specifier — which is what a type outside the tsconfig's root
+ * prints as — differs between the head tree and the temp base worktree, so the
+ * symbol reads as `changed` on every run. Phantom deltas are not noise; IRIS
+ * measured a half-mechanism seed at −3, worse than no seed at all.
+ *
+ * Collapsing the module to its basename loses the ability to distinguish
+ * `import("./a/mod")` from `import("./b/mod")` — exactly the trade the dotted
+ * form has always made, and the same direction: mask a rare real delta rather
+ * than manufacture a routine phantom one.
+ */
 function stripImportPaths(text: string): string {
-  return text.replace(/import\("[^"]*"\)\./g, "");
+  return text.replace(/import\("([^"]*)"\)(\.?)/g, (_match, specifier: string, dot: string) =>
+    dot ? "" : moduleLabel(specifier),
+  );
+}
+
+/** `./state/schema/sqlite.js` → `sqlite`; `@scope/pkg` → `pkg`. */
+function moduleLabel(specifier: string): string {
+  const last = specifier.split("/").filter(Boolean).at(-1) ?? "";
+  return last.replace(/\.[cm]?[jt]sx?$/, "") || "module";
+}
+
+/**
+ * Does `text[i]` close a bracket group?
+ *
+ * The `text[i - 1] !== "="` is the whole reason this is a function. **`=>` is
+ * not a closing angle bracket**, and counting it as one drove the depth NEGATIVE
+ * for the rest of the string — so every signature (which is to say every
+ * function, which is to say most of what this extractor compares) had its
+ * return type split at a union that was never top-level. `tests/noise-floor.test.ts`
+ * measures what that cost: 12 phantom deltas on a fixture whose only real change
+ * is one added parameter.
+ */
+function closesGroup(text: string, i: number): boolean {
+  const ch = text[i];
+  if (ch === ")" || ch === "]" || ch === "}") return true;
+  return ch === ">" && text[i - 1] !== "=";
+}
+
+function opensGroup(ch: string): boolean {
+  return ch === "(" || ch === "[" || ch === "{" || ch === "<";
 }
 
 /** Split on `separator` at bracket depth 0, ignoring string literals. */
@@ -219,8 +318,8 @@ function splitTopLevel(text: string, separator: string): string[] {
       quote = ch;
       continue;
     }
-    if (ch === "(" || ch === "[" || ch === "{" || ch === "<") depth++;
-    else if (ch === ")" || ch === "]" || ch === "}" || ch === ">") depth--;
+    if (opensGroup(ch)) depth++;
+    else if (closesGroup(text, i)) depth--;
     else if (depth === 0 && ch === separator) {
       parts.push(text.slice(start, i));
       start = i + 1;
@@ -228,6 +327,35 @@ function splitTopLevel(text: string, separator: string): string[] {
   }
   parts.push(text.slice(start));
   return parts;
+}
+
+/**
+ * `(…) => A | B` parses as `(…) => (A | B)`: the arrow binds LOOSER than the
+ * union, so it has to come off before anything splits on `|`. Otherwise the
+ * parameter list travels with the first union member and sorting moves it into
+ * the middle of the return type — two orderings of the same type stay different
+ * and the delta is phantom.
+ */
+function splitArrow(text: string): [string, string] | null {
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = 0; i < text.length - 1; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === quote && text[i - 1] !== "\\") quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      continue;
+    }
+    if (opensGroup(ch)) depth++;
+    else if (closesGroup(text, i)) depth--;
+    else if (depth === 0 && ch === "=" && text[i + 1] === ">") {
+      return [text.slice(0, i), text.slice(i + 2)];
+    }
+  }
+  return null;
 }
 
 const CLOSERS: Record<string, string> = { "(": ")", "[": "]", "{": "}", "<": ">" };
@@ -255,6 +383,16 @@ function canonicalise(text: string, sortMembers = false): string {
           .join("; ");
       }
     }
+    // A body with exactly ONE member never reached the split above and fell
+    // through to the union branch, where the property name sorted as part of
+    // the first union member — `{ then: "a" | "b" }` and `{ then: "b" | "a" }`
+    // stayed different. Route it through the same member path.
+    if (trimmed.length > 0) return canonicaliseMember(trimmed);
+  }
+
+  const arrow = splitArrow(trimmed);
+  if (arrow) {
+    return `${canonicalise(arrow[0], false)} => ${canonicalise(arrow[1], false)}`;
   }
 
   const unionParts = splitTopLevel(trimmed, "|");
@@ -280,8 +418,8 @@ function canonicalise(text: string, sortMembers = false): string {
     let end = i;
     for (let j = i; j < trimmed.length; j++) {
       const c = trimmed[j];
-      if (CLOSERS[c]) depth++;
-      else if (c === ")" || c === "]" || c === "}" || c === ">") {
+      if (opensGroup(c)) depth++;
+      else if (closesGroup(trimmed, j)) {
         depth--;
         if (depth === 0) {
           end = j;
@@ -328,9 +466,18 @@ function sameShape(a: Shape, b: Shape): boolean {
 
 export interface ExtractContractsOptions {
   repo: string;
-  headProject: Project;
-  /** `null` when the base tree could not be materialised — degrade, never lie. */
-  baseProject: Project | null;
+  /** One program per tsconfig the diff touches — see `loadProject`. */
+  headProject: Programs;
+  /**
+   * `null` when the base tree could not be materialised — degrade, never lie.
+   *
+   * The two sides discover their own groups. That is not sloppiness: a PR that
+   * ADDS a package tsconfig has one on the head side and none on the base side,
+   * and forcing the head layout onto the base tree would compile a tsconfig
+   * that does not exist there. What must match is the FILE SET, and the
+   * one-sided guard below is what enforces that per file.
+   */
+  baseProject: Programs;
   baseDir: string | null;
   changed: ChangedPath[];
   hunkIndex: Map<string, ChangedFileIndex>;
@@ -348,11 +495,8 @@ export function extractContracts(options: ExtractContractsOptions): ExtractContr
 
   for (const change of options.changed) {
     const path = change.path;
-    const headFile = headProject.getSourceFile((f) => repoRelative(repo, f.getFilePath()) === path);
-    const baseFile =
-      baseProject && baseDir
-        ? baseProject.getSourceFile((f) => repoRelative(baseDir, f.getFilePath()) === path)
-        : undefined;
+    const headFile = sourceFileAt(headProject, repo, path);
+    const baseFile = baseDir ? sourceFileAt(baseProject, baseDir, path) : undefined;
     if (!headFile && !baseFile) continue;
 
     /**

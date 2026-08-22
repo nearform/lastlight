@@ -7,9 +7,14 @@
  * those are the call sites the PR did not touch and the reviewer will not see.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { makeContractFixture, makeConstantFixture, type Fixture } from "./helpers.js";
+import {
+  makeContractFixture,
+  makeConstantFixture,
+  makeSymbolKindsFixture,
+  type Fixture,
+} from "./helpers.js";
 import { runExtractor } from "../src/run.js";
-import { canonicalType, extractContracts } from "../src/contracts.js";
+import { canonicalType, extractContracts, shapeOf } from "../src/contracts.js";
 import { Project } from "ts-morph";
 import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -149,6 +154,132 @@ describe("contracts — the semantic delta", () => {
     } finally {
       constant.cleanup();
     }
+  });
+});
+
+/**
+ * The branches a two-file fixture could never reach: a real DELETION (the
+ * `removed` branch, which nothing had ever executed), a member delta keyed
+ * `Class.method` and `Interface.method`, a JSDoc `@throws`, and the private
+ * method that must stay out of the delta however much it changes.
+ */
+describe("contracts — members, deletions and documented throws", () => {
+  let fixture: Fixture;
+  let document: ContractsDocument;
+
+  beforeAll(() => {
+    fixture = makeSymbolKindsFixture();
+    document = runExtractor({
+      extractor: "contracts",
+      repo: fixture.dir,
+      base: fixture.base,
+      head: fixture.head,
+    }).document as unknown as ContractsDocument;
+  });
+  afterAll(() => fixture.cleanup());
+
+  const delta = (symbol: string) => document.contracts.find((c) => c.symbol === symbol);
+
+  /**
+   * A file the PR deleted has a base side and no head side, so every export in
+   * it is `removed` — with `before` populated and `after` null, which is the
+   * shape a seeder reads as "this is gone, and here is what it used to be".
+   */
+  it("reports every export of a deleted file as `removed`", () => {
+    const removed = delta("farewell");
+    expect(removed?.change).toBe("removed");
+    expect(removed?.file).toBe("src/gone.ts");
+    expect(removed?.after).toBeNull();
+    expect(removed?.before?.returns).toBe("string");
+    // The declaration is gone, so there is no node left to query for consumers.
+    expect(removed?.consumersOutsideDiff).toEqual([]);
+  });
+
+  it("keys a class method `Class.method` and an interface method `Interface.method`", () => {
+    expect(delta("Base.run")?.file).toBe("src/kinds.ts");
+    expect(delta("Base.run")?.change).toBe("changed");
+    expect(delta("Store.get")?.file).toBe("src/port.ts");
+    expect(delta("Store.get")?.change).toBe("changed");
+  });
+
+  /**
+   * A PARAMETER-LIST-ONLY delta: the return type is identical on both sides and
+   * the signature grew one optional argument. It is the commonest real contract
+   * change there is, and the one a diff hides best — every existing call site
+   * still compiles.
+   */
+  it("reports a parameter-list-only change, with the return type unmoved", () => {
+    const changed = delta("Service.run");
+    expect(changed?.change).toBe("changed");
+    expect(changed?.before?.returns).toBe(changed?.after?.returns);
+    expect(changed?.before?.parameters.map((p) => p.name)).toEqual(["id"]);
+    expect(changed?.after?.parameters.map((p) => [p.name, p.optional])).toEqual([
+      ["id", false],
+      ["retries", true],
+    ]);
+  });
+
+  /**
+   * A DOCUMENTED throw, in the spelling almost everybody writes. TypeScript
+   * parses `@throws {ValidationError} desc` as a `JSDocThrowsTag` and lifts the
+   * braces into a separate type expression, so reading the type off the tag's
+   * COMMENT recorded the first word of the description — `"when"` — as the
+   * thrown type, and a bare `@throws {TypeError}` produced nothing at all.
+   */
+  it("reads the thrown type out of a JSDoc `@throws`, not out of its prose", () => {
+    expect(delta("Service.run")?.after?.throws).toEqual(["ValidationError"]);
+    expect(delta("Service.run")?.before?.throws).toEqual([]);
+  });
+
+  it("never emits a delta for a PRIVATE method, however much it changed", () => {
+    // `Service.secret` goes from `(): number` to `(): string` at head. It is not
+    // part of the class's observable contract, so it is not an obligation.
+    expect(document.contracts.map((c) => c.symbol)).not.toContain("Service.secret");
+    expect(document.contracts.some((c) => c.symbol === "Service.run")).toBe(true);
+  });
+});
+
+/**
+ * The three JSDoc spellings, in isolation — the braced form is the one that was
+ * broken and the un-braced one is what the fallback still has to read.
+ */
+describe("contracts — `@throws`, all three spellings", () => {
+  it("takes the type from the tag's type expression, with or without a description", () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    const file = project.createSourceFile(
+      "/repo/src/throws.ts",
+      [
+        "/**\n * @throws {ValidationError} when the id is empty\n */",
+        "export function braced(id: string): string { return id; }",
+        "/**\n * @throws {TypeError}\n */",
+        "export function bracedOnly(id: string): string { return id; }",
+        "/**\n * @throws PlainError with a description\n */",
+        "export function bare(id: string): string { return id; }",
+        "export function undocumented(id: string): string { return id; }",
+      ].join("\n"),
+    );
+    const throwsOf = (name: string): string[] =>
+      shapeOf(file.getFunctionOrThrow(name)).throws;
+
+    // Before the fix these read ["when"], [] and ["PlainError"] — two of the
+    // three wrong, and the wrong ones are the common spelling.
+    expect(throwsOf("braced")).toEqual(["ValidationError"]);
+    expect(throwsOf("bracedOnly")).toEqual(["TypeError"]);
+    expect(throwsOf("bare")).toEqual(["PlainError"]);
+    // …and nothing is invented for a function that documents no throw.
+    expect(throwsOf("undocumented")).toEqual([]);
+  });
+
+  it("strips the import path out of a documented cross-module throw", () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    const file = project.createSourceFile(
+      "/repo/src/x.ts",
+      '/**\n * @throws {import("./errors.js").HttpError}\n */\nexport function f(): void {}\n',
+    );
+    // `throws` is compared RAW by `sameShape`, and the base tree lives in a temp
+    // worktree whose path differs every run — an unstripped specifier here is a
+    // phantom delta on every single run.
+    expect(shapeOf(file.getFunctionOrThrow("f")).throws).toEqual(["HttpError"]);
   });
 });
 
