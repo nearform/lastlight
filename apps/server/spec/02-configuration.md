@@ -594,7 +594,7 @@ against that repo (see the per-repository layer above). Thinking values are pi-a
 |---|---|---|
 | `LASTLIGHT_SANDBOX` | backend: `gondolin` / `docker` / `smol` / `none` / `kubernetes` | `gondolin` (config `sandbox.backend`) |
 | `MAX_TURNS` | agent loop budget per session | `200` (config `sandbox.maxTurns`) |
-| `SANDBOX_MEMORY_LIMIT` | docker only | `2g` |
+| `SANDBOX_MEMORY_LIMIT` | docker only — per-sandbox `--memory`/`--memory-swap`. Raised from `2g` because a type-aware `lastlight facts` pass peaks at 2.4–3.0 GB on a bare tree and 3.5–4.4 GB on an installed one; an OOM there exits 134 with no envelope, which a review cron then re-dispatches every 30 min. Lower it on a small host — the cost is n × this per concurrent sandbox. | `8g` |
 | `SANDBOX_DATA_VOLUME` | docker only — named volume or bind-mount path | `lastlight_agent-data` |
 | `LASTLIGHT_SANDBOX_NETWORK` | docker only | `lastlight_sandbox-egress` |
 | `SMOLVM_BIN` | smol only — `smolvm` CLI path | `smolvm` |

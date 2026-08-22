@@ -296,7 +296,32 @@ Recorded in the work packages themselves, listed here so the trail is findable:
   [09-external-validation.md](09-external-validation.md).
 - **No model spend.** Every number in this file is deterministic and repeatable.
 
-## Where the memory actually goes — and the 2 GB cap, closed
+## Where the memory actually goes — and the 2 GB cap, RETIRED
+
+> **Superseded 2026-08-22 — the cap was raised, not engineered around.**
+> `SANDBOX_MEMORY_LIMIT` now defaults to **8g**
+> (`apps/server/src/sandbox/docker.ts`), an operator decision taken after the
+> section below had already been written, and it retires the constraint rather
+> than closing it. Read the rest of this section as *where the memory goes* —
+> which is still true and still worth knowing — and not as *what we must fit
+> inside*.
+>
+> The measurement that forced it: **"fits the 2 GB sandbox at 0.8–1.3 GB" was
+> true of THIS monorepo's commits and false on the corpus.** At the final WP1b
+> state, on **bare** trees where `--resolution` has nothing to refuse, two of
+> the fifty corpus PRs peak at **2449 MB (`grafana-106778`) and 2988 MB
+> (`sentry-greptile-5`)** — and `grafana-106778` changes **fourteen files**. The
+> driver is *repo* size through the `--max-files 6000` budget, not diff size,
+> so no diff-scoped lever reaches it. The only way to hold 2 GB was to cut
+> `--max-files` far enough to re-open bug 4's blindness, trading a measured
+> number for an unmeasurable one.
+>
+> **`--resolution changed` stays the default anyway.** It was never *only* a
+> memory lever: it is a third of `full`'s memory and a fraction of its wall
+> clock at **zero fidelity cost across 499 contract entries**, proven lossless
+> by construction. Free is worth having whether or not anything is scarce.
+> What *is* retired is the `maxFiles`-as-a-total reasoning and the OOM-loop
+> dependency between WP3 and WP4 below.
 
 **Measured 2026-08-21, after the rest of WP1b had landed.** The 2 GB agent cap
 was [HANDOFF.md](HANDOFF.md) sign-off item 9 and it blocked
@@ -330,11 +355,12 @@ stands; what it was not is the dominant term.
 
 ### Why this was about to become a WP3/WP4 problem
 
-`all` fits the 2 GB sandbox today at **0.8–1.3 GB** — *but only because the
-review workspace has no install.* `pr-review.yaml` has no install phase and the
-pre-clone is bare. **Nothing enforced that.** It was a property of the workflow
-that nobody had written down, and every memory number in this plan was measured
-under it.
+`all` fits the 2 GB sandbox on **this repo's** commits at **0.8–1.3 GB** — *but
+only because the review workspace has no install.* `pr-review.yaml` has no
+install phase and the pre-clone is bare. **Nothing enforced that.** It was a
+property of the workflow that nobody had written down, and every memory number
+in this plan was measured under it. (And, per the note at the top of this
+section, that range does not generalise: two corpus PRs exceed 2 GB *bare*.)
 
 [WP4](04-probe-oracle.md)'s `prepare` ends it. It must produce a coverage
 report; a coverage report means running a suite; running a suite means

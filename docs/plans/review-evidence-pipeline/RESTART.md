@@ -117,9 +117,18 @@ that polls a foreground run stops and restarts repeatedly and wastes cycles.
 
 Small, none blocking, all measured rather than suspected.
 
-**The 2 GB cap is CLOSED — resolved 2026-08-21.** It was the one blocking item
-and it is gone, so do not re-open it from a stale reading of
-[HANDOFF.md](HANDOFF.md). It was never really a `--max-files` question:
+**The 2 GB cap is RETIRED — the operator raised it 2026-08-22.**
+`SANDBOX_MEMORY_LIMIT` defaults to **8g** now. Do not re-open the cap from a
+stale reading of [HANDOFF.md](HANDOFF.md), and do not spend another hour
+shrinking the tool to fit a number that no longer exists. What forced the
+raise: **the "0.8–1.3 GB" figure was about this monorepo, not about real
+repos.** On bare corpus trees `grafana-106778` peaks at **2449 MB off a
+fourteen-file diff** and `sentry-greptile-5` at **2988 MB**, so the cost tracks
+*repo* size through `--max-files`, and the only way to hold 2 GB was to go
+blind again. `--resolution changed` remains the default on its own merits —
+a third of the memory and a fraction of the wall clock at zero fidelity cost.
+
+The analysis below is kept because *where the memory goes* is still true:
 `--max-files` bounds ts-morph's source-file count (**637** on a three-file diff
 of this repo), while the `ts.Program` binds **9,647** files, **8,947 of them
 under `node_modules`**. The fix is a `resolutionHost` that refuses bare

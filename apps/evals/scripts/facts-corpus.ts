@@ -85,8 +85,13 @@ interface CaseRecord {
   repo: string;
   baseSha: string;
   headSha: string;
-  /** `git diff --name-only base..head` — TWO dots, matching what code-facts's
-   * own `git.ts` runs, so `filesAnalysed / changedFiles` is apples-to-apples. */
+  /** `git diff --name-only base..head` — TWO dots. This is NO LONGER what the
+   * tool diffs: `git.ts` moved to the merge base, and `changedFilesMergeBase`
+   * below is the denominator that matches it. Kept because the divergence
+   * table needs both, and because every pre-2026-08-21 run in eval-results/
+   * reports against this one. `filesAnalysed / changedFiles` is therefore a
+   * LOWER bound on coverage wherever the two disagree — report both, and never
+   * switch denominators mid-comparison. */
   changedFiles: number;
   /** The THREE-dot (merge-base) count. Recorded because a PR's stored
    * `base_commit` is the base *branch tip* at import time, not necessarily the
@@ -655,7 +660,7 @@ function renderMarkdown(report: Report): string {
 
   L.push(`### Diff-range divergence — \`base..head\` vs \`base...head\``);
   L.push("");
-  L.push(`code-facts diffs \`base..head\` (two dots, \`git.ts\`). Where the case's stored \`base_commit\` sits behind the merge base, the tool analyses the base branch's own history as PR content — inflating wall clock, RSS **and** the \`changedFiles\` denominator above.`);
+  L.push(`code-facts diffs the **merge base** (\`git.ts\`, since 2026-08-21); this harness still counts \`changedFiles\` two-dot so this table stays readable. Where a case's stored \`base_commit\` sits behind the merge base the two disagree, and the two-dot column is then the base branch's own history — files the PR never touched. Read \`analysed/changed\` against \`base...head\`; against \`base..head\` it understates coverage on exactly these rows.`);
   L.push("");
   if (!r.diffRangeDivergence.length) {
     L.push(`_none — every case's base is the merge base_`);
@@ -716,7 +721,7 @@ function printRollup(report: Report): void {
   for (const b of r.blindSpots) {
     console.log(`    ${b.instanceId.padEnd(34)} tier ${b.tier}  ${String(b.filesAnalysed).padStart(4)} / ${String(b.changedFiles).padEnd(4)} = ${b.ratio}`);
   }
-  console.log(`\n  DIFF-RANGE DIVERGENCE (base..head vs base...head — the tool uses two dots):`);
+  console.log(`\n  DIFF-RANGE DIVERGENCE (base..head vs base...head — the tool uses the MERGE BASE; the two-dot column is this harness's denominator only):`);
   if (!r.diffRangeDivergence.length) console.log(`    none`);
   for (const d of r.diffRangeDivergence) {
     console.log(`    ${d.instanceId.padEnd(34)} ${String(d.twoDot).padStart(5)} vs ${String(d.threeDot).padStart(4)}   (+${d.excess} files the PR never touched)`);

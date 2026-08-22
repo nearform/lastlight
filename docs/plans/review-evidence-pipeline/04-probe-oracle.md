@@ -105,7 +105,13 @@ durationMs }`) so downstream phases read a fact, not a substring of stdout.
 > as time, money and **disk**, and that list was incomplete. It also costs
 > **memory, in a different phase**.
 >
-> `lastlight-facts all` fits the 2 GB agent cap today at 0.8–1.3 GB **only
+> **Re-amended 2026-08-22: the cap was raised to 8g, so this is a cost note,
+> not a blocker.** `--resolution changed` (now the default) keeps the installed
+> case at 1.0–2.2 GB, and the tree below has room. The shape is still worth
+> knowing, because it is the reason an install in one phase changes another
+> phase's memory at all.
+>
+> `lastlight-facts all` fits the old 2 GB agent cap at 0.8–1.3 GB **only
 > because the review workspace has no install** — `pr-review.yaml` has no
 > install phase and the pre-clone is bare, and nothing enforced it. Peak RSS in
 > `code-facts` is dominated by `node_modules`, not by `--max-files`: on a
@@ -220,9 +226,14 @@ rather than precautionary.
 > **Amended 2026-08-21.** The table above is missing a column and the sentence
 > "the **disk** is the real operational risk" is now only half right. Installing
 > dependencies also **triples `facts`' peak RSS in a later phase** — 0.8–1.3 GB
-> bare against 3.5–4.4 GB installed at `--resolution full`, against a 2 GB agent
-> cap. See the correction under `prepare` above. Disk is still a real risk; it is
-> not the only one, and memory is the one that ends in exit 134.
+> bare against 3.5–4.4 GB installed at `--resolution full`. See the correction
+> under `prepare` above. Disk is still a real risk; it is not the only one, and
+> memory is the one that ends in exit 134.
+>
+> **2026-08-22:** the 2 GB cap that made this urgent is gone (raised to 8g), and
+> the default is `--resolution changed`, which measured 1.0–2.2 GB installed.
+> Both numbers now sit inside the limit, so this is a budget line rather than an
+> OOM risk.
 
 ### If we ship it off by default, what does quality lose?
 

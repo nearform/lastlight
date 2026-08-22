@@ -25,7 +25,7 @@ must read alongside their WP. Where either contradicts a WP, it wins.
    │
   ✅ WP1b code-facts hardening          LANDED. 7 bugs; the corpus + the free instruments
    │
-  ✅ memory decision — the 2 GB cap     SETTLED by measurement, not taken
+  ✅ memory decision — the 2 GB cap     RETIRED. cap raised to 8g; --resolution changed kept on merit
    │                                      first model spend below this line
   WP3  seed + SIX survey phases         gate: MECHANISM metrics, not recall (§D6)
    │                                    read EVIDENCE COVERAGE first — it is free
@@ -345,11 +345,17 @@ Never done by a sub-agent unprompted:
    it that single package 404s and takes the Release with it. This is the first
    new published package since the monorepo consolidation, so nothing else in the
    pipeline has ever exercised the path.
-9. ~~**The 2 GB agent-cap decision**~~ — **DISCHARGED 2026-08-21, the same day it
-   was added.** It asked a human to choose between three levers: lower
-   `--max-files` (`sentry-greptile-5` is **2.14 GB with identical output at
-   `--max-files 3000`**), raise the cap, or accept the OOM path. Measurement
-   found a fourth that dominates all three, so there is nothing left to choose.
+9. ~~**The 2 GB agent-cap decision**~~ — **DISCHARGED 2026-08-21 by
+   measurement, then RETIRED 2026-08-22 by the operator**, who raised
+   `SANDBOX_MEMORY_LIMIT` to **8g** rather than keep paying to fit 2 GB. Both
+   halves matter and they say different things. The original item asked a human
+   to choose between three levers: lower `--max-files` (`sentry-greptile-5` is
+   **2.14 GB with identical output at `--max-files 3000`**), raise the cap, or
+   accept the OOM path. Measurement found a fourth that dominates all three —
+   and then the corpus showed the fourth was not sufficient either: on **bare**
+   trees `grafana-106778` peaks at **2449 MB off a fourteen-file diff**, so the
+   cost tracks *repo* size through `--max-files` and no diff-scoped lever
+   reaches it. Lever two was the honest answer, and it was taken.
    `--max-files` bounds **ts-morph's** source-file count — 637 on a three-file
    diff of this repo — while the `ts.Program` binds **9,647** files, **8,947 of
    them under `node_modules`**; peak RSS follows the second number. A
@@ -393,11 +399,13 @@ silently changed the split denominator.
 and unclosed. Each is written down rather than fixed because closing it costs
 more than leaving it visible does — which is only true while it stays visible.
 
-- ~~**The 2 GB agent cap.**~~ **Closed 2026-08-21** — see sign-off item 9 above
-  and [01b](01b-code-facts-hardening.md) → "Where the memory actually goes". The
-  bound was never `--max-files`; it was the **8,947 `node_modules` files the
-  `ts.Program` binds** behind a 637-file ts-morph budget. `--resolution changed`
-  fits the cap losslessly. **The residue worth carrying forward is that the
+- ~~**The 2 GB agent cap.**~~ **Retired 2026-08-22** — the cap was RAISED to
+  **8g**, see sign-off item 9 above and [01b](01b-code-facts-hardening.md) →
+  "Where the memory actually goes". Two things were true at once: the bound was
+  never `--max-files` (it was the **8,947 `node_modules` files the `ts.Program`
+  binds** behind a 637-file ts-morph budget, which `--resolution changed` fits
+  losslessly), *and* two corpus PRs exceed 2 GB on a bare tree where there is no
+  `node_modules` to refuse. **The residue worth carrying forward is that the
   measurement it invalidated was invalidated silently:** every memory number in
   this plan before that day assumed a workspace with no `node_modules`, which is
   true today only because `pr-review.yaml` has no install phase, and

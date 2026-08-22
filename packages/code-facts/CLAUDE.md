@@ -175,7 +175,7 @@ Three things that are load-bearing and were each measured, not assumed:
 
 The cost line: tier-2 `all` on sentry-greptile-5 is **1.75 GB / 13.6 s** against
 the same case at tier 1 (3.15 GB / 24.5 s), so the new work stays under the tier
-it substitutes for and under the 2 GB agent cap. `constants` is unchanged to the
+it substitutes for. `constants` is unchanged to the
 byte and to the megabyte — A/B'd on this repo, 7,992 hits both ways, 406 MB both
 ways — because `interestingKinds` asks the parser only for the node kinds the
 caller's sink can use, and the literal sweep's sink asks for four.
@@ -252,8 +252,10 @@ budget redesign is what sentry needed.
 Three fixes were on the table and two were rejected:
 
 - **A budget per project** — the obvious one — multiplies the memory bound by
-  `maxProjects`. 12 × 6,000 files is ~5 GB against a production sandbox with a
-  **2 GB agent cap**. Rejected on that alone.
+  `maxProjects`: 12 × 6,000 files is ~5 GB. It was rejected against the 2 GB
+  sandbox cap of the day; the cap is **8g** now, and the rejection stands
+  anyway, because a bound that scales with how many packages a diff happens to
+  touch is not a bound. The observed peak would depend on the shape of the PR.
 - **Counting QUERIED files instead of loaded files** is the honest proxy for
   reference-query time, but it cannot bound memory and it is not knowable before
   the program exists. Not this fix.
@@ -330,10 +332,20 @@ fits under the file ceiling and is actually compiled instead of being dropped.
 
 ### WHERE THE MEMORY GOES — it is `node_modules`, not the file budget
 
-A phase that runs this inside the review sandbox has a **2 GB agent cap**, and a
-process that exceeds it dies as `exit 134` with **no envelope** — `--never-fail`
-is an in-process `try`/`catch` and provably cannot catch it (`tests/oom.test.ts`).
-So the peak has to be a number somebody has measured. It is, per extractor, on
+A phase that runs this inside the review sandbox has a memory cap —
+`SANDBOX_MEMORY_LIMIT`, **8g** by default since 2026-08-22, and **2 GB** when
+every number below was measured. A process that exceeds it dies as `exit 134`
+with **no envelope** — `--never-fail` is an in-process `try`/`catch` and
+provably cannot catch it (`tests/oom.test.ts`) — and the review cron then
+re-dispatches the failed run every thirty minutes. So the peak has to be a
+number somebody has measured, whatever the cap is.
+
+**Do not read the table below as a safety margin.** It is five commits of THIS
+repo, and it does not generalise: on the 50-PR corpus, on **bare** trees,
+`grafana-106778` peaks at **2449 MB off a fourteen-file diff** and
+`sentry-greptile-5` at **2988 MB**. Peak RSS tracks *repo* size through
+`--max-files`, so a small diff in a large repo is the expensive case, not the
+cheap one. It is, per extractor, on
 five real commits of THIS repo (darwin-arm64, `/usr/bin/time -l`, `node dist/cli.js`):
 
 | commit (analysable diff) | `facts` | `contracts` | `constants` | `deps` | `patterns` | `coverage` | **`all`** |
