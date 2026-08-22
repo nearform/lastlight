@@ -863,7 +863,7 @@ export function buildGitHubTools(
 
     tool(
       "github_list_pull_request_reviews",
-      "List submitted reviews on a pull request — each { id, author, state (APPROVED/CHANGES_REQUESTED/COMMENTED), submitted_at, body }, body truncated past 4000 chars. Paged: returns { items, page, per_page, has_more, next_page }. Use to check whether the bot has already reviewed this PR.",
+      "List submitted reviews on a pull request — each { id, author, state (APPROVED/CHANGES_REQUESTED/COMMENTED), commit_id, submitted_at, body }, body truncated past 4000 chars. Paged: returns { items, page, per_page, has_more, next_page }. Use to check whether the bot has already reviewed this PR — compare each review's commit_id against the current head SHA, because a review of an earlier head does not cover the code in front of you.",
       Type.Object({
         owner: Type.String(),
         repo: Type.String(),
