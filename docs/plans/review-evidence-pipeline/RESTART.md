@@ -126,37 +126,50 @@ gold set; a single gold moving is McNemar **p = 0.50**.
 the same evening (§4 traps 9 and 10). These are the comparators. Everything
 before them is void.**
 
-| | baseline `183835` | wp3 `184650` | Δ |
+**The wp3 arm was run TWICE, identically. Read both columns or you will
+misreport this.**
+
+| | baseline `183835` | wp3 run 1 `184650` | wp3 run 2 `194234` |
 |---|---|---|---|
-| **micro-recall, arm** | 0.000 | **0.320** | +0.320 |
-| train (5 cases, 13 gold) | 0.000 | **0.462** | +0.462 |
-| blind (3 cases, 12 gold) | 0.000 | **0.167** | +0.167 |
-| matched | 0 of 25 | **8 of 25** | **+8 new, −0 lost** |
-| posted | 1 | 47 | |
-| SNR | — | 0.205 | |
-| cost | $2.28 | $15.65 | **6.9×** |
+| **micro-recall, arm** | 0.000 | **0.320** | **0.080** |
+| train (13 gold) | 0.000 | 0.462 | **0.000** |
+| blind (12 gold) | 0.000 | 0.167 | 0.167 |
+| matched | 0 of 25 | 8 of 25 | **2 of 25** |
+| posted | 1 | 47 | 23 |
+| SNR | — | 0.205 | 0.095 |
+| cost | $2.28 | $15.65 | $17.55 |
 
-`diff-runs.ts` verdict: **KEEP** — train ↑ and held-out held. Arm-level McNemar
-**p = 0.008 two-sided**, and **0.320 is above the ≈0.24 detection floor** — the
-first time any rung of this plan has cleared it. Six of eight cases improved,
-none regressed.
+Same code, same fixtures, same model, same command. **Matched gold went 8 → 2 and
+posted volume 47 → 23.** All eight workflows succeeded in both. `diff-runs`
+returns **KEEP** on run 1 and **REVERT** on run 2 — from the same configuration.
 
-**`−0 lost` is the load-bearing number.** Locked decision 1's failure mode is
-precision up / recall down, reproduced four times (v2, BitsAI-CR, AACR, IRIS).
-It did not happen: every baseline hit survived and eight were added.
+**So the honest claim is a band, not a point.** Pooled across both runs the
+pipeline matched **10 of 50** gold-instances (0.200) against the baseline's
+**0 of 25**, and it has never lost a baseline hit (`−0 lost` in both runs).
+*That* is the result: **the pipeline finds gold the shipped reviewer never
+finds, and how much it finds on any given run is wildly unstable.** Neither
+0.320 nor 0.080 is "the" number, and 0.320 was a favourable draw — it is the one
+that cleared the ≈0.24 floor, and its repeat did not come close.
 
-**Three things this does NOT establish.**
+Per-case, run 1 → run 2: `1587-r2` 3/15 → 0/5, `1680-r2` 1/8 → 0/0, `1667` 0/3 →
+0/0, `1680-r1` 1/4 → **2/7**. Even the *direction* is per-case random.
 
-1. **The blind split is not significant on its own** — +2 of 12, McNemar
-   **p = 0.500**, a coin flip, and 0.167 is *below* the floor. The arm-level
-   significance is carried by train. The generality claim is still
-   [WP9](09-external-validation.md)'s and remains unmade.
-2. **n = 1 per arm.** Generation variance on this tier is *known to be large*:
-   across three runs of one case the union of matched gold was 3/3 and **no gold
-   was ever found twice**. A repeat could plausibly land anywhere near this.
-3. **6.9× the cost**, and 47 posted findings against 25 gold — an attention bill
-   nobody has yet decided is acceptable. SNR 0.205 is roughly one true finding
-   per four false ones.
+**`1641` is a precision-canary hit worth its own line.** Gold 0, and run 2 posted
+**2 findings on a clean PR** where run 1 posted none — F1 1.000 → 0.000 on that
+case, and the whole of `REGRESSED(train)`. The zero-gold case is doing exactly
+the job [review-metrics.ts](../../../apps/evals/src/review-metrics.ts) keeps it
+for.
+
+**What this still does NOT establish**, beyond the instability above:
+
+1. **The blind split has never been significant** — +2 of 12 in both runs,
+   McNemar **p = 0.500**, and 0.167 is *below* the floor. Generality is
+   [WP9](09-external-validation.md)'s unmade claim.
+2. **6.9–7.7× the cost**, 23–47 posted against 25 gold. SNR 0.095–0.205: between
+   one true finding per four false and one per ten.
+3. **n = 2 is still small** for a spread this wide. The next honest step is more
+   repeats, not another lever — you cannot detect a lever's effect inside this
+   much noise.
 
 The baseline half is its own result: **the shipped reviewer posted one finding
 across eight PRs carrying 25 real defects**, on clean fixtures, and matched none
@@ -173,10 +186,15 @@ The instrument and the concurrency flag exist precisely so these are affordable
 now. An 8-case arm was ~4 hours serial; at `--concurrency 4` it is well under
 one, and per-case ~12 minutes rather than ~30.
 
-1. ~~**Re-baseline both arms.**~~ **DONE 2026-08-22 — §2b.** The successor to it,
-   and now the highest-value spend available: **repeat the wp3 arm unchanged.**
-   One arm is not a measurement of an effect this size when the tier's variance
-   is what it is, and every decision below wants a stable denominator.
+1. ~~**Re-baseline both arms.**~~ ~~**Repeat the wp3 arm.**~~ **BOTH DONE
+   2026-08-22 — §2b, and the repeat is why that section reads as a band rather
+   than a number.** What it bought: 0.320 and 0.080 from one configuration.
+   **The highest-value spend now is more repeats of the same arm** — 3–5 of
+   them, to put an error bar on the band. Every lever in §3b is a smaller effect
+   than the noise currently sitting on the measurement, so measuring one before
+   the band is known cannot come back with an answer. This is the same discipline
+   as the detection floor, arrived at from the variance side instead of the
+   sample-size side.
 2. **Repeat one case 3× unchanged** to size generation variance now that the
    funnel is honest. Across runs A/B/C the union of matched gold was 3/3 and **no
    gold was ever found twice** — variance is large and it is the thing that makes
