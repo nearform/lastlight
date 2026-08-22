@@ -116,6 +116,8 @@ export interface BuiltReview {
   comments: InlineComment[];
   inlineCount: number;
   demotedCount: number;
+  /** Below the floor: recorded, never posted. Always 0 without an {@link AttentionBoundary}. */
+  internalCount: number;
 }
 
 const FENCE = "```";
@@ -480,18 +482,128 @@ export function splitFindings(
   return { inline, demoted };
 }
 
+/* ------------------------------------------------------------------ *
+ * WP6b — the attention boundary
+ * ------------------------------------------------------------------ */
+
+/**
+ * Why a finding is in the review body rather than inline. Three causes, and
+ * they must stay distinguishable: "Additional findings" meaning off-diff AND
+ * below-threshold AND overflowed-the-cap, under one heading, is a worse review
+ * to read than the one it replaced (§D11).
+ */
+export type DemotionReason = "off-diff" | "below-threshold" | "overflow";
+
+/** One demoted finding, carrying the reason it did not earn an inline comment. */
+export interface DemotedFinding {
+  finding: ReviewFinding;
+  reason: DemotionReason;
+}
+
+/**
+ * The attention budget. Absent ⇒ today's behaviour exactly: no cap, no
+ * thresholds, no `internal` tier — every finding is inline or body, decided by
+ * anchorability alone.
+ */
+export interface AttentionBoundary {
+  /** Rank by confidence × severity; everything past this goes to the body, never away. */
+  maxInlineComments: number;
+  /** Per-obligation-family confidence bar for an INLINE comment. Below it: the body. */
+  thresholds: Record<string, number>;
+  /** Below this, recorded but not posted. See {@link TieredFindings.internal}. */
+  internalFloor: number;
+}
+
+/** The three destinations. Nothing is dropped; `internal` is recorded, not posted. */
+export interface TieredFindings {
+  inline: AnchoredFinding[];
+  body: DemotedFinding[];
+  /**
+   * Below the floor: kept in `findings.json` with its reason, never posted.
+   *
+   * **This is an attention boundary, not v2's suppressor**, and the difference
+   * is that it is auditable — WP7's `review_findings` table is where it becomes
+   * queryable; until then the run's own findings document is the record.
+   */
+  internal: ReviewFinding[];
+}
+
+const SEVERITY_WEIGHT: Record<string, number> = { critical: 3, important: 2, minor: 1 };
+
+/**
+ * Rank for the inline budget: confidence × severity.
+ *
+ * **An absent `confidence` ranks as 1.0, not as 0.** Nothing the shipped
+ * reviewer writes carries the field, so treating absence as low confidence
+ * would push every one of today's findings below every hypothesis-derived one —
+ * a silent re-ranking of the reviewer that ships, caused by a field it does not
+ * know about. With 1.0 the ranking degenerates to severity order, which is what
+ * a document with no confidences should get.
+ */
+function rankOf(f: ReviewFinding): number {
+  const sev = SEVERITY_WEIGHT[(f.severity || "important").toLowerCase()] ?? 2;
+  return (f.confidence ?? 1) * sev;
+}
+
+/**
+ * Split findings across the three destinations.
+ *
+ * Order matters and each step is a different question: is this worth a human's
+ * attention at all (the floor) · can it even be anchored (GitHub's constraint) ·
+ * is it confident enough for an inline comment (the family threshold) · and is
+ * there room (the budget).
+ *
+ * **A missing `confidence` never demotes and never suppresses.** Both bars are
+ * `confidence !== undefined && confidence < bar`, so a finding that declines to
+ * self-score is treated as passing — the alternative silently deletes every
+ * finding from any prompt that has not been taught the field.
+ */
+export function tierFindings(
+  findings: ReviewFinding[],
+  commentable: Map<string, Set<string>> | null,
+  boundary: AttentionBoundary,
+): TieredFindings {
+  const internal: ReviewFinding[] = [];
+  const body: DemotedFinding[] = [];
+  const candidates: AnchoredFinding[] = [];
+
+  for (const f of findings) {
+    if (!f) continue;
+    if (f.confidence !== undefined && f.confidence < boundary.internalFloor) {
+      internal.push(f);
+      continue;
+    }
+    if (!f.path || !f.line || !isAnchored(f, commentable)) {
+      body.push({ finding: f, reason: "off-diff" });
+      continue;
+    }
+    const bar = f.family ? boundary.thresholds[f.family] : undefined;
+    if (bar !== undefined && f.confidence !== undefined && f.confidence < bar) {
+      body.push({ finding: f, reason: "below-threshold" });
+      continue;
+    }
+    candidates.push(f as AnchoredFinding);
+  }
+
+  // Stable within equal rank: `sort` is stable in V8, so the model's own
+  // ordering breaks ties rather than something arbitrary.
+  candidates.sort((a, b) => rankOf(b) - rankOf(a));
+  const inline = candidates.slice(0, Math.max(0, boundary.maxInlineComments));
+  for (const f of candidates.slice(Math.max(0, boundary.maxInlineComments))) {
+    body.push({ finding: f, reason: "overflow" });
+  }
+  return { inline, body, internal };
+}
+
 function commentBody(f: ReviewFinding): string {
   let b = "**[" + (f.severity || "Important") + "] " + (f.title || "") + "**\n\n" + (f.body || "");
   if (f.suggestion) b += "\n\n" + FENCE + "suggestion\n" + f.suggestion + "\n" + FENCE;
   return b;
 }
 
-/** The "Additional findings" section appended to the body for demoted findings. */
-export function renderDemoted(list: ReviewFinding[]): string {
-  if (!list.length) return "";
-  return (
-    "\n\n### Additional findings\n" +
-    list
+/** The bullet list itself — shared by the flat and the grouped renderings. */
+function renderDemotedItems(list: ReviewFinding[]): string {
+  return list
       .map(
         (f) =>
           "- **[" +
@@ -507,8 +619,51 @@ export function renderDemoted(list: ReviewFinding[]): string {
           ") — " +
           (f.body || ""),
       )
-      .join("\n")
-  );
+      .join("\n");
+}
+
+/**
+ * The flat "Additional findings" section — no reasons, one heading. Still the
+ * whole story when there is no attention boundary configured, and the shape the
+ * body-only retry uses (there every finding is demoted for the same reason).
+ */
+export function renderDemoted(list: ReviewFinding[]): string {
+  if (!list.length) return "";
+  return "\n\n### Additional findings\n" + renderDemotedItems(list);
+}
+
+/**
+ * The reason lead-ins for the grouped body section. Three causes under one
+ * heading is a worse review to read, so each group says what it is — and the
+ * wording matters: none of these mean "we were not sure", they mean "this did
+ * not earn an inline comment", which is a different claim.
+ */
+const DEMOTION_LEAD: Record<DemotionReason, string> = {
+  "off-diff": "_Outside this PR's diff — GitHub cannot anchor a comment here._",
+  "below-threshold": "_Below the reporting confidence bar for their family._",
+  overflow: "_Beyond the inline comment budget, ranked by severity and confidence._",
+};
+
+const DEMOTION_ORDER: DemotionReason[] = ["off-diff", "below-threshold", "overflow"];
+
+/**
+ * The "Additional findings" section, grouped by why each finding is here.
+ *
+ * Everything in it is still POSTED and still visible — demotion is not
+ * suppression. What it is not is an inline comment at the defect site, and the
+ * evidence says that difference is large ("Does AI Code Review Lead to Code
+ * Changes?", 22k+ real comments: concise, hunk-level, actionable findings are
+ * substantially likelier to cause a change).
+ */
+export function renderDemotedGrouped(entries: DemotedFinding[]): string {
+  if (!entries.length) return "";
+  const out = ["\n\n### Additional findings"];
+  for (const reason of DEMOTION_ORDER) {
+    const group = entries.filter((e) => e.reason === reason);
+    if (!group.length) continue;
+    out.push("", DEMOTION_LEAD[reason], renderDemotedItems(group.map((e) => e.finding)));
+  }
+  return out.join("\n");
 }
 
 /** Build the inline-comment objects GitHub's create-review API expects. */
@@ -581,15 +736,31 @@ export function resolveEvent(doc: ReviewFindingsDoc): ReviewEvent {
 export function buildReview(
   doc: ReviewFindingsDoc,
   commentable: Map<string, Set<string>> | null,
+  boundary?: AttentionBoundary,
 ): BuiltReview {
   const findings = Array.isArray(doc.findings) ? doc.findings : [];
-  const { inline, demoted } = splitFindings(findings, commentable);
+  if (!boundary) {
+    // No attention boundary — anchorability is the only question, exactly as
+    // before WP6b. This branch is what makes the feature inert on a deployment
+    // that has not enabled the evidence pipeline.
+    const { inline, demoted } = splitFindings(findings, commentable);
+    return {
+      event: resolveEvent(doc),
+      body: (doc.summary || "") + renderDemoted(demoted),
+      comments: toInlineComments(inline),
+      inlineCount: inline.length,
+      demotedCount: demoted.length,
+      internalCount: 0,
+    };
+  }
+  const tiered = tierFindings(findings, commentable, boundary);
   return {
     event: resolveEvent(doc),
-    body: (doc.summary || "") + renderDemoted(demoted),
-    comments: toInlineComments(inline),
-    inlineCount: inline.length,
-    demotedCount: demoted.length,
+    body: (doc.summary || "") + renderDemotedGrouped(tiered.body),
+    comments: toInlineComments(tiered.inline),
+    inlineCount: tiered.inline.length,
+    demotedCount: tiered.body.length,
+    internalCount: tiered.internal.length,
   };
 }
 
@@ -606,5 +777,6 @@ export function buildBodyOnlyReview(doc: ReviewFindingsDoc): BuiltReview {
     comments: [],
     inlineCount: 0,
     demotedCount: findings.length,
+    internalCount: 0,
   };
 }

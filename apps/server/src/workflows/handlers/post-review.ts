@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { GitHubClient } from "../../engine/github/github.js";
 import {
@@ -8,7 +8,9 @@ import {
   buildBodyOnlyReview,
   commentableOf,
   parseDiffFiles,
+  tierFindings,
   worstAxis,
+  type AttentionBoundary,
   type DiffFile,
   type ReviewFindingsDoc,
 } from "../../engine/github/review-poster.js";
@@ -246,7 +248,17 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       }
       doc = { ...doc, findings: anchored.findings };
     }
-    const review = buildReview(doc, commentable);
+
+    // WP6b — the attention boundary, and it exists ONLY when the evidence
+    // pipeline is on. `undefined` here is not a default, it is the whole
+    // inertness guarantee: `buildReview` takes its pre-WP6b branch and a
+    // deployment that never opted in gets no cap, no thresholds and no
+    // `internal` tier, whatever a findings.json happens to carry.
+    const boundary = this.attentionBoundary();
+    const review = buildReview(doc, commentable, boundary);
+    if (boundary) {
+      this.recordDisposition(hostRepoDir, doc, commentable, boundary);
+    }
 
     const repeat = this.repeatOfLastReview(history.latest, review);
     if (repeat) {
@@ -395,6 +407,71 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     if (existsSync(join(repoDir, ".lastlight", "pr-review"))) return repoDir;
     if (existsSync(join(workDir, ".lastlight", "pr-review"))) return workDir;
     return repoDir;
+  }
+
+  /**
+   * The attention budget, or `undefined` when the evidence pipeline is off.
+   *
+   * Operator-layer config, matching the `verdict` strip and
+   * `staleAgainstCurrentHead` — `review.analysis` is operator-only anyway, so
+   * the repo-clamped block cannot disagree with it.
+   */
+  private attentionBoundary(): AttentionBoundary | undefined {
+    const analysis = getRuntimeConfig()?.review?.analysis;
+    if (!analysis?.enabled) return undefined;
+    return {
+      maxInlineComments: analysis.maxInlineComments,
+      thresholds: analysis.thresholds ?? {},
+      internalFloor: analysis.internalFloor,
+    };
+  }
+
+  /**
+   * Write what happened to each finding — its tier, and why.
+   *
+   * [WP6](../../../../docs/plans/review-evidence-pipeline/06-adjudicate.md)'s
+   * AC1b asks for this in a `review_findings` table, and that table is
+   * [WP7](../../../../docs/plans/review-evidence-pipeline/07-review-memory.md)'s
+   * — which depends on WP6, so it does not exist yet. **Decided deliberately
+   * (2026-08-22): scope the record to the run's own workspace for now** rather
+   * than pull a schema change forward for a consumer that has not been written,
+   * on a table whose shape would be a guess.
+   *
+   * What it buys today is the thing that separates an attention boundary from
+   * v2's suppressor: *"what did we know and not say?"* is answerable. Without a
+   * record the `internal` tier is a dark drop, and a dark drop is the defect
+   * this whole work package exists to avoid re-introducing.
+   *
+   * Best-effort — a failure here must never stop a review posting.
+   */
+  private recordDisposition(
+    repoDir: string,
+    doc: ReviewFindingsDoc,
+    commentable: Map<string, Set<string>> | null,
+    boundary: AttentionBoundary,
+  ): void {
+    try {
+      const tiered = tierFindings(
+        Array.isArray(doc.findings) ? doc.findings : [],
+        commentable,
+        boundary,
+      );
+      const rows = [
+        ...tiered.inline.map((f) => ({ tier: "inline" as const, reason: null, finding: f })),
+        ...tiered.body.map((d) => ({ tier: "body" as const, reason: d.reason, finding: d.finding })),
+        ...tiered.internal.map((f) => ({
+          tier: "internal" as const,
+          reason: "below the internal floor" as string,
+          finding: f,
+        })),
+      ];
+      writeFileSync(
+        join(repoDir, ".lastlight", "pr-review", "disposition.json"),
+        JSON.stringify({ generatedAt: new Date().toISOString(), boundary, findings: rows }, null, 2),
+      );
+    } catch (err) {
+      log.warn("Could not record the finding disposition", { err });
+    }
   }
 
   /**

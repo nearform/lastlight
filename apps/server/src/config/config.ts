@@ -1009,6 +1009,20 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
       coverageTimeoutSeconds:
         nonNegativeNumber(analysisRaw.coverageTimeoutSeconds) ?? reviewDefaults.analysis.coverageTimeoutSeconds,
       probeRounds: nonNegativeNumber(analysisRaw.probeRounds) ?? reviewDefaults.analysis.probeRounds,
+      // WP6b, the attention boundary. `maxInlineComments` allows 0 — a
+      // deployment that wants every finding in the review body is a coherent
+      // choice — so `nonNegativeNumber` is right and `|| default` would not be.
+      maxInlineComments:
+        nonNegativeNumber(analysisRaw.maxInlineComments) ?? reviewDefaults.analysis.maxInlineComments,
+      // The per-family bars merge onto the packaged set rather than replacing
+      // it: an overlay tuning ONE family must not silently un-bar the other
+      // five, which a whole-map replacement would do.
+      thresholds: {
+        ...reviewDefaults.analysis.thresholds,
+        ...numericMap(analysisRaw.thresholds),
+      },
+      internalFloor:
+        nonNegativeNumber(analysisRaw.internalFloor) ?? reviewDefaults.analysis.internalFloor,
     },
   };
 
@@ -1242,6 +1256,22 @@ function positiveNumber(raw: unknown): number | undefined {
 /** As {@link positiveNumber}, but 0 is a legal value rather than a fallback trigger. */
 function nonNegativeNumber(raw: unknown): number | undefined {
   return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : undefined;
+}
+
+/**
+ * The numeric leaves of a flat map, dropping anything that is not a finite
+ * number. Used for `review.analysis.thresholds`, where a non-numeric value must
+ * fall through to the packaged bar rather than silently becoming `NaN` — every
+ * comparison against which is `false`, so the family would lose its bar while
+ * looking configured.
+ */
+function numericMap(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
+  }
+  return out;
 }
 
 /**

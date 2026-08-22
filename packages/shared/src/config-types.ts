@@ -334,6 +334,42 @@ export interface ReviewAnalysisConfig {
    * overkill and cost 2.4× for a worse result.
    */
   probeRounds: number;
+  /**
+   * The inline-comment attention budget (WP6b).
+   *
+   * Preserving internal recall and spending a human's attention are two
+   * different budgets, and conflating them is how a recall-first reviewer
+   * becomes unreadable. Everything past this rank goes to the review BODY —
+   * still posted, still visible, just not an inline comment. Nothing is dropped.
+   *
+   * Eight, on the evidence in *"Does AI Code Review Lead to Code Changes?"*
+   * (22k+ real review comments): concise, hunk-level, actionable findings are
+   * substantially likelier to lead to a change. Twenty inline comments is not
+   * twenty times the signal of eight; it is a muted bot.
+   */
+  maxInlineComments: number;
+  /**
+   * Per-obligation-family confidence bar for an INLINE comment. Below the bar a
+   * finding goes to the body; it is never deleted.
+   *
+   * **Per-family, not global, and that is a measured choice.** AutoCommenter
+   * (Google Critique) found a global threshold catastrophic — at `t = 0.98`,
+   * ~80% of below-threshold predictions were still correct — while per-URL
+   * thresholds raised recall without hurting precision.
+   *
+   * **These numbers are initial guesses to be tuned on the train split, not
+   * measurements.** Record each retune in the eval journal.
+   */
+  thresholds: Record<string, number>;
+  /**
+   * Below this confidence a finding is recorded but not posted at all.
+   *
+   * The one tier that costs recall, so it is deliberately low and deliberately
+   * auditable. A finding carrying NO confidence is never affected — see
+   * `tierFindings`; treating an absent field as zero would silently delete every
+   * finding from any prompt that has not been taught to self-score.
+   */
+  internalFloor: number;
 }
 
 /**
@@ -446,6 +482,16 @@ export function defaultReviewConfig(): ReviewConfig {
       prepareTimeoutSeconds: 300,
       coverageTimeoutSeconds: 900,
       probeRounds: 2,
+      maxInlineComments: 8,
+      thresholds: {
+        contract: 0.35,
+        enforcement: 0.35,
+        security: 0.3,
+        state: 0.5,
+        tests: 0.6,
+        spec: 0.45,
+      },
+      internalFloor: 0.15,
     },
   };
 }

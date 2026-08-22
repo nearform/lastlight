@@ -389,6 +389,38 @@ review:
     # five-line existence gate, not a validator — v2's full quote validator was
     # overkill and cost 2.4x for a worse result.
     probeRounds: 2
+    # The attention boundary (WP6b). Preserving internal recall and spending a
+    # human's attention are two different budgets; conflating them is how a
+    # recall-first reviewer becomes unreadable.
+    #
+    # Everything past the inline budget goes to the review BODY under
+    # "Additional findings" — still posted, still visible. Nothing is dropped
+    # for being noisy: this is an attention boundary, not the v2 suppressor that
+    # was built, measured and reverted.
+    #
+    # Eight, from "Does AI Code Review Lead to Code Changes?" (22k+ real review
+    # comments): concise, hunk-level, actionable findings are substantially
+    # likelier to cause a change. Twenty inline comments is a muted bot.
+    maxInlineComments: 8
+    # Per-family confidence bar for an INLINE comment; below it, the body.
+    # Per-family and not global because AutoCommenter (Google Critique) measured
+    # a global threshold as catastrophic — at t=0.98, ~80% of below-threshold
+    # predictions were still CORRECT — while per-URL thresholds raised recall
+    # without hurting precision.
+    #
+    # THESE ARE INITIAL GUESSES TO BE TUNED ON THE TRAIN SPLIT, NOT
+    # MEASUREMENTS. Record each retune in the eval journal.
+    thresholds:
+      contract: 0.35      # converts; cheap to check; bias to surface
+      enforcement: 0.35
+      security: 0.30
+      state: 0.50
+      tests: 0.60         # mechanical provenance, but noisier as prose
+      spec: 0.45
+    # Below this, recorded in findings.json but not posted at all. The one tier
+    # that costs recall, so it is low. A finding carrying NO confidence is never
+    # affected — an absent field is not a zero.
+    internalFloor: 0.15
 
 # Retry policy for every PR_FIX_SHAPED workflow — pr-fix and dependabot-ci-fix
 # (issue #251). The loop diagnoses a CI failure before it retries, and these are

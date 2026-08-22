@@ -1559,7 +1559,21 @@ function shapeReviewAnalysis(raw: unknown, d: ReviewAnalysisConfig): ReviewAnaly
     prepareTimeoutSeconds: num(node.prepareTimeoutSeconds, d.prepareTimeoutSeconds),
     coverageTimeoutSeconds: num(node.coverageTimeoutSeconds, d.coverageTimeoutSeconds),
     probeRounds: num(node.probeRounds, d.probeRounds),
+    maxInlineComments: num(node.maxInlineComments, d.maxInlineComments),
+    // Total, leaf-by-leaf like everything else here, but the KEY SET is the
+    // caller's: an unknown family name would configure a threshold nothing
+    // reads, which is worse than rejecting it, and a missing one correctly
+    // means "no bar for this family" rather than zero.
+    thresholds: shapeThresholds(node.thresholds, d.thresholds),
+    internalFloor: num(node.internalFloor, d.internalFloor),
   };
+}
+
+function shapeThresholds(raw: unknown, d: Record<string, number>): Record<string, number> {
+  const node = isPlainObject(raw) ? raw : {};
+  const out: Record<string, number> = {};
+  for (const [family, fallback] of Object.entries(d)) out[family] = num(node[family], fallback);
+  return out;
 }
 
 function num(raw: unknown, fallback: number): number {
