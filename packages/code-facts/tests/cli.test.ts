@@ -13,12 +13,13 @@
  * the CLI's own output is a value here rather than a side effect.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeConstantFixture, makeFakeTool, type Fixture } from "./helpers.js";
 import { parseArgv, runCli } from "../src/cli.js";
-import { EXIT_OK, EXIT_UNAVAILABLE } from "../src/errors.js";
+import { EXIT_DEGRADED, EXIT_OK, EXIT_UNAVAILABLE } from "../src/errors.js";
+import { ProbeEnvSchema } from "../src/schema.js";
 import type { CoverageDocument, FactsDocument, PatternsDocument } from "../src/schema.js";
 
 /** Collect what the CLI wrote, keeping the two streams apart. */
@@ -269,6 +270,68 @@ describe("the flags reach the extraction", () => {
     expect(out).toBe("");
     const written = JSON.parse(readFileSync(target, "utf8")) as FactsDocument;
     expect(written.symbols.some((s) => s.name === "MAX_TOKEN_AGE")).toBe(true);
+  });
+});
+
+/**
+ * `prepare` — WP4. The branching lives in `tests/prepare.test.ts`; what is
+ * asserted here is the CLI contract, because that is what a workflow phase
+ * actually invokes.
+ */
+describe("the `prepare` command", () => {
+  const trees: string[] = [];
+  afterAll(() => {
+    for (const dir of trees) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function tree(files: Record<string, string>): string {
+    const dir = mkdtempSync(join(tmpdir(), "ll-facts-prepare-cli-"));
+    trees.push(dir);
+    for (const [path, contents] of Object.entries(files)) {
+      mkdirSync(join(dir, path, ".."), { recursive: true });
+      writeFileSync(join(dir, path), contents, "utf8");
+    }
+    return dir;
+  }
+
+  it("needs no --base: it makes no claim about a commit range", () => {
+    // Every other command refuses without one. `prepare` analyses nothing, so
+    // demanding a range would be asking for an answer it never gives.
+    const repo = tree({ "package.json": "{}", "node_modules/.keep": "" });
+    const { io, out } = capture();
+    expect(runCli(["prepare", "--repo", repo], io)).toBe(EXIT_OK);
+    expect(JSON.parse(out.join("\n")).install).toBe("already-present");
+  });
+
+  it("exits 3 when something degraded, so a human reading the code learns it", () => {
+    const repo = tree({ "pom.xml": "<project/>" });
+    const { io } = capture();
+    expect(runCli(["prepare", "--repo", repo], io)).toBe(EXIT_DEGRADED);
+  });
+
+  it("`--never-fail` flattens that to 0 — §D12, the 30-minute re-dispatch loop", () => {
+    const repo = tree({ "pom.xml": "<project/>" });
+    const { io } = capture();
+    expect(runCli(["prepare", "--repo", repo, "--never-fail"], io)).toBe(EXIT_OK);
+  });
+
+  it("`--no-install` reports the tree without touching it", () => {
+    const repo = tree({ "package.json": "{}", "package-lock.json": "{}" });
+    const { io, out } = capture();
+    expect(runCli(["prepare", "--repo", repo, "--no-install"], io)).toBe(EXIT_OK);
+    const env = JSON.parse(out.join("\n"));
+    expect(env.install).toBe("skipped");
+    expect(env.installed).toBe(false);
+    expect(existsSync(join(repo, "node_modules"))).toBe(false);
+  });
+
+  it("`--out` writes env.json into a directory that does not exist yet", () => {
+    const repo = tree({ "package.json": "{}", "node_modules/.keep": "" });
+    const target = join(repo, ".lastlight", "pr-review", "probes", "env.json");
+    const { io, out } = capture();
+    expect(runCli(["prepare", "--repo", repo, "--out", target], io)).toBe(EXIT_OK);
+    expect(out.join("")).toBe("");
+    expect(ProbeEnvSchema.parse(JSON.parse(readFileSync(target, "utf8")))).toBeTruthy();
   });
 });
 

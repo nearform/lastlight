@@ -442,6 +442,7 @@ parsed one of them. Measured on the real corpus — keycloak `37429` reads
 | `patterns` | opengrep + gitleaks, scoped to the diff, normalised into `skills/security-review/SKILL.md`'s finding shape. **Evidence, not findings** — never posted directly |
 | `coverage` | changed lines executed by zero tests, read from an **existing** report. It never runs a suite. istanbul · lcov · JaCoCo · Cobertura · Go coverprofile · SimpleCov |
 | `all` | one envelope, every payload — what a workflow phase writes |
+| `prepare` | **not an extractor** — installs dependencies so a probe can be RUN, and writes `probes/env.json`. See below |
 | `toolchain` | the manifest and what actually resolved |
 
 Three fixes must not regress. Two are carried forward from v3 and live in
@@ -563,6 +564,54 @@ shows the `tests` family converts at all, mutation seeding becomes a
 well-motivated follow-on** — a deferral with a trigger, not a rejection.
 
 `coverage` here READS an artifact; producing one is WP4's `prepare`.
+
+### `prepare` — the one command that WRITES to the tree
+
+`src/prepare.ts`. It is not an extractor: it emits no envelope, resolves no
+tier, takes no `--base`, and makes no claim about a commit range. It installs
+dependencies when they are absent, optionally typechecks, optionally produces a
+coverage artifact, and writes `.lastlight/pr-review/probes/env.json` — validated
+against `ProbeEnvSchema`, so a downstream phase reads a field rather than
+grepping stdout.
+
+It lives here rather than at the `/opt/lastlight/code-facts/bin/prepare-tree.sh`
+path WP4 originally spelled, because **nothing installs that path** and the eval
+harness runs `--sandbox none` on the host where `/opt/lastlight/` does not
+exist. As a subcommand it resolves through §D1's order like everything else.
+
+Four things about it that are decisions, not implementation detail:
+
+- **It is not a second CI.** `checksState` / `ciSection` are already in the run
+  context; re-deriving red/green here duplicates a matrix build on one machine
+  (locked decision 11). What execution buys is a *probe*, and a probe needs an
+  install, not a test run.
+- **Lifecycle scripts are OFF by default**, and this is the one cost WP4 never
+  priced. An install runs `postinstall` from a **pull request head** — code the
+  PR author wrote, on the operator's machine — and `pr-review`'s workspace has
+  never installed anything, so this phase is the first thing that could. Neither
+  reason to install needs the scripts: a package-extending `tsconfig` resolves
+  off files. `--lifecycle-scripts` opts in, and `env.json` records which it was.
+- **`--coverage` runs the repo's test suite**, which is the wall-clock item §D13
+  deleted with `suite`. It is opt-in, it takes only a command the repo itself
+  named (a `coverage` / `test:coverage` script, or `--coverage-cmd`), and it
+  never guesses — because after a guessed fifteen-minute run that produced
+  nothing, *"no command"* and *"no artifact"* would be the same row. A **red**
+  suite still counts: coverage needs no green baseline, which is the whole
+  reason it replaced `mutants`.
+- **Every step distinguishes "could not" from "found nothing".** `typecheck`
+  is `unavailable` — never `clean` — when there is no compiler or no root
+  tsconfig; `coverage` is `absent` when a command ran and produced no readable
+  report, which is what stands between the `tests` family and *"well tested"*.
+  `installed` is read off the filesystem at the end rather than inferred from an
+  exit code, because a failed install can leave a partial tree and
+  `already-present` and `installed` are the same answer to the only question a
+  later phase has.
+
+**And it re-arms the memory question.** `facts` inherits whatever tree this
+leaves — on every re-review too, since the cross-run refresh is deliberately
+`git clean -fdx -e node_modules`. Peak RSS on an installed tree is **unmeasured**
+for the tsgo engine (the compiler is a child process), so none of the older
+figures in the plan transfer. The shell-level catch is not optional.
 
 ## `toolchain.json` — the single source of truth
 

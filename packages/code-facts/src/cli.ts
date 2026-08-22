@@ -15,7 +15,9 @@
  *   lastlight-facts <facts|contracts|constants|deps|patterns|coverage|all> \
  *     --repo <dir> --base <ref> --head <ref> [--out <file>] [--never-fail]
  */
-import { EXIT_UNAVAILABLE, EXIT_OK } from "./errors.js";
+import { EXIT_DEGRADED, EXIT_UNAVAILABLE, EXIT_OK } from "./errors.js";
+import { prepareTree } from "./prepare.js";
+import { checkProbes, renderProbeCheck } from "./probes.js";
 import { runExtractor, runWrapped, writeDocument } from "./run.js";
 import { AllDocumentSchema, DOCUMENT_SCHEMAS, type AllDocument, type ExtractorName } from "./schema.js";
 import { SEEDABLE_FAMILIES, seedObligations } from "./seed.js";
@@ -43,7 +45,32 @@ Commands:
   coverage    changed lines executed by zero tests, from an EXISTING report
   all         every extractor, one envelope, one file
   seed        turn an \`all\` envelope into mechanism-complete obligations
+  prepare     install deps so a probe can be RUN (WP4's affordance, not CI)
+  probes      the \`falsify\` loop's exit gate — every hypothesis that needed a
+              probe has a verdict, and every claim of execution has a transcript
   toolchain   print the pinned manifest and what actually resolved
+
+\`probes\` options (an existence gate, not a validator — it reads no transcript):
+  --dir <dir>         the .lastlight/pr-review directory
+                      (default: .lastlight/pr-review)
+  --repo <dir>        what a transcript path is relative to (default: cwd)
+  Exit 0 = the loop may stop. Non-zero = something still owes a verdict, which
+  a pass can always discharge honestly by recording \`unprobed\`.
+
+\`prepare\` options (it acts on a tree; no --base/--head, and it runs no analysis):
+  --repo <dir>        the checkout to prepare               (default: cwd)
+  --out <file>        write env.json here                   (default: stdout)
+  --no-install        don't install, just report what is already there
+  --lifecycle-scripts allow the tree's own postinstall to run. OFF by default:
+                      this runs against a PR HEAD, so that is the author's code
+                      executing on the operator's machine
+  --typecheck         run the repo's own tsc --noEmit for per-line diagnostics
+                      (NOT a CI re-run — CI reports pass/fail, this reports
+                      something a hypothesis can be anchored to)
+  --coverage          run a coverage command so the \`tests\` family has an input.
+                      The one step that runs a test suite; opt-in for that reason
+  --coverage-cmd <s>  explicit coverage command (beats package.json detection)
+  --install-timeout <ms> / --typecheck-timeout <ms> / --coverage-timeout <ms>
 
 \`seed\` options (it reads a DOCUMENT, not a repo — no --base/--head):
   --facts <file>      the \`all\` document to seed from            (required)
@@ -87,7 +114,19 @@ interface Parsed {
   flags: Record<string, string | boolean>;
 }
 
-const BOOLEAN_FLAGS = new Set(["never-fail", "stage", "help", "h", "version", "v", "json"]);
+const BOOLEAN_FLAGS = new Set([
+  "never-fail",
+  "stage",
+  "help",
+  "h",
+  "version",
+  "v",
+  "json",
+  "no-install",
+  "lifecycle-scripts",
+  "typecheck",
+  "coverage",
+]);
 
 export function parseArgv(argv: string[]): Parsed {
   const flags: Record<string, string | boolean> = {};
@@ -183,6 +222,46 @@ export function runCli(
     return EXIT_OK;
   }
 
+  if (command === "prepare") {
+    // `prepare` never analyses anything, so it has no envelope, no tier and no
+    // exit code that could mean "could not run": the tree is whatever it is and
+    // `env.json` says so. The exit code follows `degraded[]` alone, and
+    // `--never-fail` flattens even that — §D12, the same reason every other
+    // command has the flag.
+    const env = prepareTree({
+      repo: stringFlag(flags.repo) ?? process.cwd(),
+      install: flags["no-install"] !== true,
+      lifecycleScripts: flags["lifecycle-scripts"] === true,
+      typecheck: flags.typecheck === true,
+      coverage: flags.coverage === true,
+      coverageCommand: stringFlag(flags["coverage-cmd"]),
+      installTimeoutMs: numberFlag(flags["install-timeout"]),
+      typecheckTimeoutMs: numberFlag(flags["typecheck-timeout"]),
+      coverageTimeoutMs: numberFlag(flags["coverage-timeout"]),
+      log,
+    });
+
+    const envOut = stringFlag(flags.out);
+    if (envOut) writeDocument(envOut, env);
+    else io.out(JSON.stringify(env, null, 2));
+
+    if (flags["never-fail"] === true) return EXIT_OK;
+    return env.degraded.length > 0 ? EXIT_DEGRADED : EXIT_OK;
+  }
+
+  if (command === "probes") {
+    // The `falsify` loop's `until_bash`. NOT wrapped by `--never-fail`: its
+    // non-zero exit is the loop condition, not a failure — the phase around it
+    // still succeeds when the loop runs out of iterations, which is what keeps
+    // §D12 intact.
+    const result = checkProbes({
+      dir: stringFlag(flags.dir) ?? ".lastlight/pr-review",
+      repo: stringFlag(flags.repo),
+    });
+    io.out(renderProbeCheck(result));
+    return result.satisfied ? EXIT_OK : EXIT_DEGRADED;
+  }
+
   if (command === "seed") {
     const factsPath = stringFlag(flags.facts);
     if (!factsPath) {
@@ -227,7 +306,7 @@ export function runCli(
   }
 
   if (!EXTRACTORS.includes(command as ExtractorName)) {
-    io.err(`unknown command "${command}". One of: ${EXTRACTORS.join(", ")}, seed, toolchain`);
+    io.err(`unknown command "${command}". One of: ${EXTRACTORS.join(", ")}, seed, prepare, probes, toolchain`);
     return EXIT_UNAVAILABLE;
   }
 

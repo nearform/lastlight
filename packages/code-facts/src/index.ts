@@ -214,6 +214,21 @@ export {
 } from "./git.js";
 export type { DiffBase, FileListing, ListedFile, ListFilesOptions, ListingSource } from "./git.js";
 
+export {
+  MAX_TYPECHECK_DIAGNOSTICS,
+  PACKAGE_MANAGERS,
+  detectPackageManager,
+  envFor,
+  parseTscDiagnostics,
+  prepareTree,
+  realExec,
+  resolveCoverageCommand,
+} from "./prepare.js";
+export type { ExecFn, ExecResult, PackageManagerId, PrepareOptions } from "./prepare.js";
+
+export { checkProbes, renderProbeCheck, requiresProbe } from "./probes.js";
+export type { CheckProbesOptions, CheckProbesResult, ProbeGapKind } from "./probes.js";
+
 export { checkAll } from "./selfcheck.js";
 export type { CheckAllOptions, Violation } from "./selfcheck.js";
 

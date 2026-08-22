@@ -474,6 +474,101 @@ export const AllDocumentSchema = EnvelopeSchema.extend({
 });
 export type AllDocument = z.infer<typeof AllDocumentSchema>;
 
+// ── `prepare` — the probe environment ────────────────────────────────────────
+
+/**
+ * `.lastlight/pr-review/probes/env.json` — what WP4's `prepare` phase did to the
+ * tree, as a FACT rather than a substring of stdout
+ * (`docs/plans/review-evidence-pipeline/04-probe-oracle.md`).
+ *
+ * It is not an {@link EnvelopeSchema} document and deliberately so: `prepare`
+ * makes no claim about `baseSha..headSha`, resolves no tier and runs no parser,
+ * so every one of the envelope's fields would be a fabricated answer. What it
+ * DOES share is the half that carries the loudness — `degraded[]` in the same
+ * shape, for the same reason: an install that quietly did nothing and an install
+ * that was never asked for must not be the same JSON.
+ */
+export const ProbeEnvSchema = z.object({
+  version: z.literal(1),
+  generatedAt: z.iso.datetime(),
+  /** `owner/name` when derivable from the remote, else the directory name. */
+  repo: z.string(),
+  /**
+   * What resolved, in the order corepack does it: `package.json`'s
+   * `packageManager` field, then the lockfile, then npm as the default for a
+   * package.json with neither. `null` = no npm project at the repo root, which
+   * on a Java or Go PR is the correct answer and not a failure.
+   */
+  packageManager: z.enum(["pnpm", "npm", "yarn", "bun"]).nullable(),
+  /**
+   * `installed` — this run installed them.
+   * `already-present` — `node_modules` was there (the warm per-PR reuse path,
+   *   which is the common case: `git clean -fdx -e node_modules`).
+   * `failed` — the package manager exited non-zero or timed out.
+   * `no-project` — nothing to install.
+   * `skipped` — the caller did not ask.
+   */
+  install: z.enum(["installed", "already-present", "failed", "no-project", "skipped"]),
+  /**
+   * THE AFFORDANCE QUESTION, and the one field downstream phases branch on:
+   * does `node_modules` exist at the end? Deliberately separate from `install`,
+   * because `already-present` and `installed` are the same answer to it and
+   * `failed` may still leave a partially-populated tree that resolves nothing.
+   */
+  installed: z.boolean(),
+  /**
+   * Whether the install was allowed to run the package's own lifecycle scripts.
+   *
+   * **Defaults to false**, which is a security decision rather than a
+   * performance one: `prepare` runs against a PULL REQUEST HEAD, and a
+   * `postinstall` in that tree is arbitrary code the PR author wrote executing
+   * on the operator's infrastructure. The review workspace has never installed
+   * anything, so this phase is the first thing in `pr-review` that could. What
+   * `prepare` is actually FOR — making a package-extending `tsconfig` resolve,
+   * and putting library source on disk to be read — needs the files, not their
+   * scripts.
+   */
+  lifecycleScripts: z.boolean(),
+  /**
+   * `clean` / `errors` — the repo's own `tsc --noEmit` ran and said so.
+   * `unavailable` — no `typescript` in the tree, or no root tsconfig; NOT a
+   *   clean typecheck, and the distinction is the whole point of the field.
+   * `failed` — the compiler could not be run (timeout, crash).
+   * `skipped` — the caller did not ask.
+   */
+  typecheck: z.enum(["clean", "errors", "unavailable", "failed", "skipped"]),
+  /**
+   * Per-file, per-line diagnostics — which is the ONLY reason to typecheck
+   * locally at all. CI already reports pass/fail and re-deriving that would be
+   * duplication (locked decision 11); a diagnostic that can be attached to a
+   * specific hypothesis is a different thing. Truncated to a budget, and the
+   * truncation is named in `degraded[]` rather than silently applied.
+   */
+  typecheckDiagnostics: z.array(
+    z.object({ file: z.string(), line: z.number().int(), code: z.string(), message: z.string() }),
+  ),
+  /**
+   * `produced` — a report the `coverage` extractor can read now exists.
+   * `absent` — the command ran and produced no artifact in any known format.
+   *   This is the loud one: it is what stands between the `tests` family and
+   *   *"well tested"*.
+   * `unavailable` — no coverage command could be resolved.
+   * `failed` / `skipped` — as above.
+   */
+  coverage: z.enum(["produced", "absent", "unavailable", "failed", "skipped"]),
+  /** Repo-relative path of the artifact, when one was produced. */
+  coverageReport: z.string().nullable(),
+  /** Milliseconds per step, and the total the phase actually cost. */
+  durationMs: z.object({
+    install: z.number().int(),
+    typecheck: z.number().int(),
+    coverage: z.number().int(),
+    total: z.number().int(),
+  }),
+  degraded: z.array(DegradedEntrySchema),
+});
+export type ProbeEnv = z.infer<typeof ProbeEnvSchema>;
+
 export const DOCUMENT_SCHEMAS = {
   facts: FactsDocumentSchema,
   contracts: ContractsDocumentSchema,
