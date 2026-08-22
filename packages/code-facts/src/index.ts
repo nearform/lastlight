@@ -129,7 +129,7 @@ export {
 export type { LoadedProject, LoadProjectOptions, Programs, ProjectGroup } from "./project.js";
 
 /**
- * SELECTIVE RESOLUTION — a prototype behind `--resolution`, default `"full"`.
+ * SELECTIVE RESOLUTION — `--resolution`, default `"changed"` (`resolution.ts`).
  * Exported so a measurement harness can drive the tiers without a subprocess.
  */
 export {

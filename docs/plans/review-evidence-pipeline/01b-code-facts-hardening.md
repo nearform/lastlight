@@ -394,11 +394,12 @@ proves the argument is doing work: block *everything* and 78 entries lose their
 type text, 76 of them by gaining `any`.)
 
 `workspace` and `hop` are **dominated** — both cost more memory than `changed`
-on every installed commit measured, for no fidelity `changed` lacks, and both
-carry
-pathological wall-clock outliers (2124 s and 342 s on the 158-file commit,
-against `changed`'s 21 s). They stay implemented as tiers because the sweep is
-cheaper to keep than to rebuild, not because either is a candidate.
+on every installed commit measured (1057–2182 and 1106–2349 MB), for no
+fidelity `changed` lacks, and both carry pathological wall-clock outliers
+(2124 s and 342 s on the 158-file commit, against `changed`'s 21 s), with `hop`
+opening hundreds of package manifests to get there. They were therefore **cut**:
+the shipped tiers are `full` / `changed` / `none` only. A dominated option left
+in a list is an invitation to pick it.
 
 The decision this evidence supports: **`changed` becomes the default**, `full`
 remains the escape hatch for a run that must reproduce today's document exactly,

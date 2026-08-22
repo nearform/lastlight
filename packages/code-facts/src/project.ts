@@ -323,9 +323,10 @@ export interface LoadProjectOptions {
   /** A ceiling on how many programs one diff may open. See `DEFAULT_MAX_PROJECTS`. */
   maxProjects?: number;
   /**
-   * PROTOTYPE, absent by default: a ts-morph `resolutionHost` that decides
-   * which bare specifiers the checker may follow — the memory axis
-   * `maxFiles` cannot reach (CLAUDE.md, "WHERE THE MEMORY GOES").
+   * Absent at THIS layer, but supplied on every real run: a ts-morph
+   * `resolutionHost` that decides which bare specifiers the checker may follow
+   * — the memory axis `maxFiles` cannot reach (CLAUDE.md, "WHERE THE MEMORY
+   * GOES"). Absent means `full`, which is not the CLI default.
    *
    * It is passed in rather than built here on purpose. The policy has to be
    * the UNION of base and head to be safe, and only `run.ts` can see both
