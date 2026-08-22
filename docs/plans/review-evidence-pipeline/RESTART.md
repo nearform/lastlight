@@ -150,6 +150,16 @@ gate green. What is built: `lastlight-facts seed`, the six survey phases in
 `pr-review.yaml`, six prompts, the two skill rebalances, and 46 tests.
 **No model has run against it.** Three things a reader needs before starting:
 
+**The gate was read where it was free, and the arm was stopped.** 135 obligations
+across all 8 gate cases, 0 dropped, at zero model spend — four of AC5's five
+mechanism metrics, at a better n than an arm would have given. The re-baseline
+(`2026-08-22_092611`, Haiku, pipeline OFF, $1.91, avgF1 **0.229**) is the
+comparator from here. The pipeline-ON arm was killed after the baseline: its only
+remaining metric is discharge rate, which must be re-measured after WP6 changes
+what the surveys feed, and its recall columns are pinned at zero by WP3's own
+non-goals. See [03](03-seed-and-survey.md) §"The WP3 gate, as far as it can be
+read". **Read every free denominator to exhaustion before buying a model one.**
+
 1. **The comparator is dead.** `apps/evals/src/run-instance.ts` excluded
    `pr-review` from `prContextPatch` — deliberately, so enriching its context
    would not silently move historical judge-scored numbers. The cost of that

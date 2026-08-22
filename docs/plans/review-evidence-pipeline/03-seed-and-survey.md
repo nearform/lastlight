@@ -272,6 +272,49 @@ audit is 20 PENDING, against Martian's audited 0/20 spurious), so they have no
 error bar; and 88% of them are `diffuse` against a median 58 matched lines,
 which is why the entity-level bar is the only one read.
 
+### The WP3 gate, as far as it can be read — measured 2026-08-22
+
+The arm was **deliberately not run past the baseline**, and the reason is the
+useful part: **four of AC5's five mechanism metrics turned out to cost nothing.**
+
+**The deterministic half, all 8 gate cases, zero model spend** — `lastlight-facts
+seed` over the stored envelopes:
+
+| | |
+|---|---|
+| obligations built | **135** |
+| dropped (one-ended, or over budget) | **0** |
+| per family | `state` 64 · `enforcement` 47 · `contract` 15 · `security` 9 · `tests` 0 · `spec` 0 |
+
+That is "obligations generated", "obligations well-formed" and the funnel's first
+column, at **n = 135** — the *"n in the hundreds"* §D6 asks a mechanism gate to be
+read at, and it is a far better n than the 8 cases a model arm would have given.
+`tests` and `spec` are 0 for the structural reasons recorded above, not because
+they failed.
+
+**The re-baseline** (`2026-08-22_092611`, Haiku 4.5, pipeline OFF, 8 cases,
+**$1.91**, 0 errors): avgRecall **0.198**, avgPrecision **0.313**, avgF1
+**0.229**. This is the comparator every later rung is read against, and it exists
+because lifting the `prContextPatch` exclusion retired `2026-08-20_074355`.
+
+> **Do not compare it to that retired run** (which scored avgF1 0.1875 on Sonnet).
+> They differ by *two* variables — model and template context — and sit on
+> opposite sides of the 2026-08-22 context boundary. The Haiku-beats-Sonnet
+> reading is *consistent* with it and is not evidence from it.
+
+**Why the arm stopped there.** The one metric left — discharge rate, obligations
+→ hypotheses — is the only model-dependent one, and it was already sampled at
+n = 1 (`1587-r2`: 40 KB of obligations, 18+ hypotheses, all six prompts firing).
+Paying ~$18 for n = 8 would have bought a number that **must be re-measured after
+[WP6](06-adjudicate.md) anyway**, because connecting the exit changes what the
+surveys feed and very likely their prompts. The funnel's remaining columns —
+posted, matched — are pinned at zero by WP3's own non-goals, so no spend could
+have moved them.
+
+The rule this is an instance of, worth keeping: **read every free denominator to
+exhaustion before buying a model one.** Here that was the difference between
+n = 135 for nothing and n = 8 for $18.
+
 ## The survey phase
 
 ### Shape — six declared phases
