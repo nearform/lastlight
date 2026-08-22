@@ -73,12 +73,16 @@ corpus, so they raise the generality claim rather than the shipping path.
 ✅ WP4a's free gate, n=1    — cal-com-10600: tier 2→1, contracts 0→3. §2c
              the same gate at n=50   ← hours of compute, no money
              WP4b's arm             ← model spend, and NO CONSUMER until WP6
-✅ WP6 BUILT — all four pieces, inert, gate green. §2e
+✅ WP6 BUILT — all four pieces, inert, gate green. §2d
    ✅ WP6a anchor cascade      — `existingCode` derives the line. SHIPPED reviewer
    ✅ WP6b attention boundary  — maxInlineComments 8 + family thresholds + floor
    ✅ WP6c adjudicate          — the phase, the conservation gate, and its FLOOR
    ✅ WP6d where `internal` lives — DECIDED: disposition.json, not review_findings
-             WP6's arm              ← model spend. THE rung for RECALL, unmeasured
+✅ WP6 RUN BY A MODEL, n=1, twice — the exit IS connected. §2e
+             the 8-case arm         ← STOPPED after 1 case. Two confounds, §2e
+   ── ▶ NEXT: SPEED. 30 min/PR is not shippable. §2e "The blocker" ──
+             parallel surveys       ← engine change; ~29 min → ~17
+             stage the diff once    ← six agents rebuild one artifact
    ── ship-capable on TypeScript here ──
              WP1c Stage 2 grammars (scoped)   ← generality, not shipping
              WP9  external validation         ← deterministic half is now free
@@ -424,6 +428,156 @@ calls), and the conservation gate is a unit test rather than a spend.
 so nothing has produced a transcript. With no transcripts the adjudicator's
 delete power cannot fire at all — which is the safe direction, and means WP6's
 first arm measures *connect the exit, rank and tier*.
+
+## 2e. WP6 MEASURED — the first model runs, and why the next work is SPEED
+
+**2026-08-22. Two runs of one case. Nothing in this pipeline had ever been run
+by a model before these.** Both on `prreview__skillspro-1587-r1`, Haiku,
+`overlays/wp3`, probes OFF. Read §2f for how to run one at all — three of the
+five attempts measured the wrong thing.
+
+### The exit is connected, and that much is settled
+
+| | baseline (pipeline OFF) | run A | run B |
+|---|---:|---:|---:|
+| hypotheses the surveys wrote | — | **41** | **26** |
+| adjudicator findings | — | 30 | 24 |
+| Critical findings produced | — | 1 | **0** |
+| posted | 1 | 20 | 3 |
+| gold matched (of 3) | 1 | **2** | **0** |
+| recall | 0.333 | **0.667** | 0.0 |
+| precision | 1.00 | 0.10 | 0.0 |
+| F1 | **0.50** | 0.174 | 0.0 |
+| cost / wall | $0.38 | $2.49 / 29m13 | $2.90 / 30m32 |
+
+Run A is `2026-08-22_123348`, run B is `2026-08-22_131120` (case 1 of an 8-case
+arm that was **stopped after one case**). The two differ in one code change (the
+§2f config-seam fix) and in nothing else.
+
+**What is proven:** the `review` phase alone produced `APPROVE` with **zero
+findings while 41 hypotheses sat unread beside it** — the exact historical
+failure this work package exists to end — and `adjudicate` turned them into a
+ranked, tiered `REQUEST_CHANGES` with a split verdict. Cross-family dedup fired
+unprompted on real data. The conservation gate rejected the adjudicator's first
+attempt and made it try again (9 agent calls, not 8). In run B conservation was
+**perfect**: 26 ids on disk, 26 covered, 0 unaccounted, 0 fabricated, 0 dropped.
+`reconcile` appears in the phase list, so the floor executed.
+
+**What is NOT proven: anything about recall.** Two runs of one case is not a
+measurement, and run B's 0 gold has **two confounded causes** that n=1 cannot
+separate:
+
+1. **Generation variance.** The surveys produced 41 hypotheses in run A and 26
+   in run B on the identical case, and run B produced **no Critical finding at
+   all** — the nonce race condition that earned run A's gold match was never
+   written. That is upstream of every change made that day.
+2. **A real design question, and it is the plan's own.** Run B tiered **21 of 24
+   findings `internal`**, i.e. recorded and not posted. Most are *correct* uses —
+   *"MAX_PENDING_NONCES **is properly enforced** via…"* is a discharged
+   obligation, not a defect, and the conservation gate is what forces a
+   disposition for it. But only 2 of the 21 fall below `internalFloor`; the rest
+   are **model-asserted**, and honouring a model-asserted `internal` hands the
+   adjudicator exactly the suppression lever [06](06-adjudicate.md) forbids:
+   *"It may re-rank, re-tier, and demote a finding **into the review body**."*
+   Body, not internal. `internal` was specified as driven by the confidence floor
+   or [WP7](07-review-memory.md)'s dismissal memory — never by assertion.
+
+> **Do not resolve #2 by argument, and do not resolve it on n=1.** The cheap
+> discriminator is re-running the SAME case 2–3 times unchanged: gold matches
+> swinging 0/1/2 is variance and the 8-case arm is worth buying; 0 every time
+> means the tiering is suppressing gold and must be fixed first. ~$9, ~90 min.
+
+### The blocker that matters more: 30 MINUTES PER PR
+
+**This is too slow to ship, and it is the next work.** A baseline review is
+2m30; the pipeline is **29–30 minutes and ~$2.50** for one PR. Measured
+breakdown of run A — `durationSec` per agent call, so this is not an estimate:
+
+| what | sec | share |
+|---|---:|---:|
+| six surveys (146+124+178+145+93+165) | 851 | **49%** |
+| `adjudicate` attempt 1 | 426 | 24% |
+| `adjudicate` attempt 2 | 274 | 16% |
+| `review` | 152 | 9% |
+| **everything deterministic** (facts, seed, gates, clone, grading) | **48** | **3%** |
+
+**97% of the wall clock is model time**, so nothing in `code-facts` is worth
+optimising for speed. Token shape for the one case: **3,178 fresh input,
+12,263,397 CACHED input, 135,431 output** — roughly 250 model turns each
+re-sending the context. At Haiku cache-read pricing that is about half the cost.
+
+Four levers, in the order they look worth taking:
+
+1. **The six surveys are structurally parallel and are run sequentially.** Each
+   owns its own `hypotheses/<family>.jsonl`, pairwise disjoint, no shared state —
+   the design says so and `pr-review-survey.test.ts` pins it. They run one at a
+   time only because the scheduler executes one node at a time (`runner.ts`:
+   *"real concurrency via git worktrees is deferred to a later issue"*). Parallel
+   surveys take this case from ~29 min to **~17**. This is an ENGINE change, not
+   a pipeline change, and it is the single biggest lever.
+2. **Six agents each re-derive the same diff.** Profiled from the transcripts:
+   93 bash calls across the six surveys — `git` 34, `sed` 17, `grep` 16, `find`
+   5 — and ~30 of the git calls are `git diff origin/main HEAD -- <file>` or
+   `git show HEAD:<file>` over one fixed commit range. `facts.json` (137 KB) is
+   *right there* and contains the analysis; the surveys read the rendered
+   obligations block instead. Nothing hands them a prepared diff. `deps --stage`
+   already establishes the affordance pattern for exactly this.
+   **Individually the commands are excellent** — `sed -n '36,50p'` line ranges,
+   scoped `grep -n`, per-file diffs. This is not a model flailing; it is six
+   agents rebuilding one artifact.
+3. **`adjudicate` failing its gate costs 7 minutes** — 40% of the case is the
+   adjudicator and more than half of that is a first attempt that did not
+   account for every hypothesis. Attack it in the prompt (enumerate every id),
+   never by weakening the gate.
+4. Small change, real: `survey_contract` runs a network
+   `git fetch origin main --depth 50` because the shallow clone lacks the merge
+   base at survey time — which `ensureBaseAvailable` is supposed to have handled
+   during provisioning. Worth checking whether the other five surveys'
+   `origin/main...HEAD` diffs are silently degraded.
+
+## 2f. Running an arm at all — three of five attempts measured the wrong thing
+
+Every one of these was silent. None failed loudly.
+
+1. **The globally-installed `lastlight-evals` SILENTLY RUNS THE BASELINE.** The
+   `arm.review` threading — the seam carrying an overlay's
+   `review.analysis.enabled` into the run — landed 2026-08-22, and the global
+   npm build predates it **while carrying the same version number** (`0.10.0`).
+   `--overlay overlays/wp3` completes happily, at baseline cost, with every
+   analysis phase skipped, and reports itself as the wp3 arm. **One agent call
+   per case and ~$0.21 is the tell**; eight-to-nine is a real pipeline case.
+2. **`LASTLIGHT_CORE_DIR` must be `apps/server`**, not the monorepo root — the
+   root has no `workflows/`. Fails at $0 with *"Workflow not found"*.
+3. **Running the harness with cwd inside `apps/evals` finds no provider key** —
+   the `.env` lives in the eval workspace.
+
+So: run from source, with cwd in the workspace.
+
+```bash
+cd ~/work/nearform-evals
+LASTLIGHT_FACTS_BIN=~/work/lastlight/packages/code-facts/dist/cli.js \
+  ~/work/lastlight/apps/evals/node_modules/.bin/tsx \
+  ~/work/lastlight/apps/evals/src/run.ts run pr-review \
+  --overlay overlays/wp3 --model anthropic/claude-haiku-4-5-20251001 \
+  --limit 1 --keep-workspace
+```
+
+It prints `core → 0.27.0-dev (working tree)` when it is reading local source.
+
+> **VERIFY THE ARM, DO NOT READ ITS LABEL.** Within the first minute the
+> `--keep-workspace` path must hold `facts.json`, a populated `obligations.json`
+> and per-family blocks under `obligations/`; by the end it must hold
+> **`disposition.json`**, whose absence means the attention boundary never ran.
+> Both checks are free and each one caught a wasted arm.
+
+**The fourth trap was in `post-review` itself and is now FIXED** (`321634ec`):
+it read the process-global `getRuntimeConfig()` to decide whether the pipeline
+was on, while all twelve gated phases key off `analysisEnabled` on the run
+CONTEXT — which is what the eval populates. So a pipeline-ON run had every
+analysis phase fire and then hit a `post-review` that believed the pipeline was
+off: the split verdict stripped, the attention boundary inert, every
+`internal`-tier finding POSTED, no inline cap, no family thresholds. That is run
+A above, and its precision number describes a deployment that does not exist.
 
 ## 3. Driving sub-agents on this work
 

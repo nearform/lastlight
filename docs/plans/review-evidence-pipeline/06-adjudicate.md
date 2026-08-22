@@ -123,9 +123,46 @@ silent kind, and both in the seam between the two halves of 6c:
   exhaustion paid before any model spend — WP4 found two silent `prepare` bugs
   the same way.
 
-- **AC6 is NOT measured.** It needs a model arm against `2026-08-22_092611`
-  (Haiku, pipeline OFF, 8 cases, $1.91, avgF1 **0.229**). Everything above is
-  mechanism.
+- **AC6 is NOT met.** Two runs of ONE case exist (2026-08-22, `RESTART` §2e) and
+  two runs of one case is not a measurement. The 8-case arm was **stopped after
+  its first case**, deliberately: run B scored 0 gold with two confounded causes
+  — the surveys generated 26 hypotheses where run A generated 41 and produced no
+  Critical finding at all (variance), and 21 of 24 findings were tiered
+  `internal` (suppression). Averaging over 8 cases would not separate them, so
+  the cheap discriminator is re-running the SAME case 2–3 times first.
+
+### What the two runs DID settle
+
+**The exit is connected.** The `review` phase alone produced `APPROVE` with zero
+findings while 41 hypotheses sat unread beside it — the exact failure this work
+package exists to end — and `adjudicate` turned them into a ranked, tiered
+`REQUEST_CHANGES` carrying a split verdict. Cross-family dedup fired unprompted
+on real data (AC5). The conservation gate rejected the adjudicator's first
+attempt and made it try again. On run B conservation was **exact**: 26 ids on
+disk, 26 covered, 0 unaccounted, 0 fabricated, 0 dropped — and `reconcile` ran.
+
+**Probe-backed deletion is inert, exactly as predicted.** `falsify` was off, no
+transcript exists, `dropped` is empty on both runs. The note above said to
+expect this rather than discover it, and that held.
+
+### The design question the runs exposed, and it is this document's own
+
+Run B tiered **21 of 24 findings `internal`** — recorded, not posted. Most are
+*correct*: *"MAX_PENDING_NONCES **is properly enforced** via…"* is a discharged
+obligation rather than a defect, and the conservation gate is precisely what
+forces a disposition to exist for it. But **only 2 of the 21 fall below
+`internalFloor`** — the rest are **model-asserted**, and honouring a
+model-asserted `internal` hands the adjudicator the suppression lever this
+document forbids in its own words:
+
+> *"It may re-rank, re-tier, and demote a finding **into the review body**."*
+
+Body, not internal. §"The user-attention boundary" specifies `internal` as
+*"below a floor, or a known-dismissed repeat"* — the confidence bar or
+[WP7](07-review-memory.md)'s memory, never assertion. The candidate fix is to
+render a model-asserted `internal` as `body` (visible, demoted) and reserve true
+suppression for the floor and for `--repair`'s own records, which are
+mechanically generated. **Do not take it on n=1**: it may be fixing variance.
 
 > **Three prerequisites verified against the tree 2026-08-22 — all three have
 > now been ADDRESSED by the work above, and are kept because each explains why a
