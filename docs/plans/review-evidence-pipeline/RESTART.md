@@ -17,19 +17,20 @@ git -C ~/work/lastlight log --oneline -1
 git -C ~/work/lastlight status --porcelain | wc -l
 ```
 
-**As of 2026-08-22 everything through the engine swap is committed** — WP1b in
-five commits ending `948e25d1`, then `7602ef47` (the tsgo seam) and `5a79f2da`
-(ts-morph removed). If `HEAD` is one of those and the tree is clean, skip to §1.
+**As of 2026-08-22 everything through WP3 is committed**, ending at `2563ca41`.
+If `HEAD` is that and the tree is clean, skip to §1.
 
-If `HEAD` is `c8530b83` (WP1) and the status count is large, you are on an older
-checkout and a full day of WP1b work is uncommitted; the units it splits into
-are in the git log of this branch.
+**WP4 may not be.** If `HEAD` is `2563ca41` and the status count is large, the
+uncommitted tree is WP4 — `prepare`, `falsify`, the `probes` gate, the seven
+config switches, `--keep-workspace`, the corpus `--install` arm, and the doc
+updates in this folder. It is gate-green (24/24, 3612 core tests, 486 in
+code-facts); §2c says what it measured.
 
 ## 1. Prove the tree is sane — three commands, ~2 minutes
 
 ```bash
 cd ~/work/lastlight
-pnpm turbo run typecheck test build            # expect 24/24 tasks, 417 code-facts tests
+pnpm turbo run typecheck test build            # expect 24/24 tasks, 486 code-facts tests
 pnpm --filter lastlight-code-facts selfcheck   # real-commit census; expect 31 of 31 analysed, exit 0
 cd ~/work/lastlight/apps/evals && npx tsx scripts/facts-corpus.ts --profile smoke \
   --dataset ~/work/lastlight-evals/datasets/pr-review/instances.json \
@@ -67,10 +68,14 @@ corpus, so they raise the generality claim rather than the shipping path.
 ✅ the 2 GB agent-cap decision — RETIRED. cap raised to 8g, not engineered around
 ✅ the FACT ENGINE          — ts-morph replaced by the TS 7 API (docs/plans/fact-engine/)
 ✅ WP3 BUILT (9536be3b)     — seeder, six survey phases, prompts, skills; inert,
-                              gate green. The ARM is what remains — see §2b.
-             WP4  prepare + falsify           ← makes `coverage` live, AND `contracts`
+                              gate green. Its gate was read where it was free.
+✅ WP4 BUILT                — `prepare` + `falsify` + the `probes` gate + the
+                              seven switches + `--keep-workspace`. Inert, and
+                              NO MODEL HAS RUN AGAINST IT. §2c
+✅ WP4a's free gate, n=1    — cal-com-10600: tier 2→1, contracts 0→3. §2c
+             the same gate at n=50   ← hours of compute, no money
+             WP4b's arm             ← model spend, and NO CONSUMER until WP6
              WP6  adjudicate + 7a/7b          ← the only rung that can move RECALL
-   ── pick ONE of those two as next; see "the ordering question" below ──
    ── ship-capable on TypeScript here ──
              WP1c Stage 2 grammars (scoped)   ← generality, not shipping
              WP9  external validation         ← deterministic half is now free
@@ -178,10 +183,110 @@ read". **Read every free denominator to exhaustion before buying a model one.**
    `PATH` there. It is **not in the sandbox image either** — that is WP2, and
    until it lands the pipeline cannot be switched on in production, only measured.
 
-### The ordering question — WP4 or WP6? Decide it, do not inherit it
+## 2c. WP4 is BUILT — what it measured, and what it still owes
 
-The ladder used to read WP3 → WP4 → WP6 and that order is no longer obvious.
-Both arguments are now measured rather than assumed, so pick deliberately.
+**The ordering question below was decided: WP4.** The half of it that is built
+is `prepare`, and it was built first for a reason worth keeping — *"read every
+free denominator to exhaustion before buying a model one"*. `prepare` is
+model-free and its claim is deterministic, so there is a gate for it that costs
+nothing but compute.
+
+**What landed, inert, gate green (24/24 turbo tasks, 3598 core tests, 467
+code-facts tests):**
+
+- **`lastlight-facts prepare`** (`packages/code-facts/src/prepare.ts`) — package
+  manager detection, install, optional typecheck, optional coverage run, and
+  `.lastlight/pr-review/probes/env.json` validated against `ProbeEnvSchema`.
+  A subcommand rather than the `/opt/lastlight/code-facts/bin/prepare-tree.sh`
+  the plan spelled, because **nothing installs that path** and the eval host —
+  `--sandbox none` — could never see it anyway.
+- **The `prepare` phase**, FIRST in `pr-review.yaml`, gated on **both**
+  `analysisEnabled` and `probesEnabled`, with the same shell-level §D12 catch
+  `facts` carries.
+- **Four config switches**, operator-only like the rest of the block:
+  `probes`, `probeLifecycleScripts`, `probeTypecheck`, `probeCoverage`, plus
+  `prepareTimeoutSeconds` / `coverageTimeoutSeconds` / `probeRounds`.
+- **`lastlight-evals run --keep-workspace`** — WP4's inherited item 4. Every
+  kept path lands on the result as `workspaceDir` and is printed at the end.
+
+**Three decisions taken that the plan did not contain**, each written up in
+[04](04-probe-oracle.md):
+
+1. **Lifecycle scripts are OFF.** The plan priced `prepare` in time, money, disk
+   and memory. The fifth cost is that an install runs `postinstall` **from a pull
+   request head** — the author's code, on the operator's machine — and
+   `pr-review`'s workspace has never installed anything, so this phase is the
+   first thing in the workflow that could. Nothing `prepare` exists for needs
+   them: an `extends` resolves off files.
+2. **The coverage run is its own switch**, because it is the wall-clock item
+   §D13 deleted with `suite`, bought back only for the `tests` family. It never
+   guesses a command — only one the repo itself named.
+3. **The phase timeout is a SUM** computed in `specContext`, not the install
+   budget. A phase killed part-way through a coverage run writes no `env.json`
+   at all, which is the one outcome the design is against.
+
+**`falsify` also landed**, with `lastlight-facts probes` as its exit gate:
+verdicts go to their own append-only `probes/verdicts.jsonl` (never into a
+`hypotheses/*.jsonl`, which the surveys own), and the gate mechanises exactly one
+rule — a `reproduced` or `refuted` verdict must name a **transcript that
+exists**. `unprobed` closes the gate with no transcript, deliberately: a gate a
+pass cannot close honestly will be closed dishonestly, and WP3 already hit the
+other failure once.
+
+### The gate, read where it was free — n = 1, and it reads
+
+`scripts/facts-corpus.ts --install` runs `prepare` in each worktree before
+`all`. On `cal-com-10600`, one variable, both arms:
+
+| | bare | `--install` |
+|---|---|---|
+| tier | 2 | **1** |
+| **contract deltas** | **0** | **3**, with 15 consumers outside the diff |
+| `degraded[]` | 16 | 3 |
+| reference sites | **4577** (`name-match`) | **76** (`type-aware`) |
+| `all` peak RSS | 399 MB | **1626 MB** |
+| `prepare` wall clock | — | 85.8 s (first review only) |
+
+The claim is discharged at n = 1: `contract` went from structurally impossible to
+populated. Two readings beside it, both worth carrying:
+
+- **4577 → 76 is not lost references, it is a 60× over-claim collapsing.** A
+  tier-2 `facts` payload is BIGGER than a tier-1 one and worth far less.
+- **1626 MB is the first installed-tree memory figure for the tsgo engine.**
+  This plan has said `UNMEASURED` since the swap and every older number in it is
+  ts-morph's. Well inside the 8g cap; 4× the bare figure; tracks repo size.
+
+**Two silent bugs the measurement found, both in `prepare`, in three runs.**
+Corepack's download prompt is not silenced by `CI=1`, so the first arm reported
+`install: "failed"` on every case; and the strict→loose fallback **was not
+loose** — yarn Berry and pnpm read `CI` and turn immutable installs on, so the
+"fallback" re-ran the identical command and failed identically. Both would have
+been honest, permanent failures in production on exactly the repos this phase
+exists for. **This is the cheapest possible form of "read the free instrument
+before buying a model one"**, and it paid twice before a single dollar.
+
+**What WP4 still owes.** The same gate at **n = 50** — hours of compute,
+gigabytes, no money — and the `falsify` arm, which costs model spend and whose
+verdicts nothing reads until [WP6](06-adjudicate.md). `falsify` can move the
+*mechanism* metrics (probes attempted / succeeded / reproduced / refuted, the
+oracle's own hit rate); it cannot move recall until the exit is connected. That
+is not an argument against having built it — it is the reason its gate is a
+mechanism gate. **Sequence any corpus run after a `dist/cli.js` rebuild, never
+concurrently** (§3).
+
+> **A latent WP3 bug WP4's tests surfaced, and it is the §D12 shape.**
+> `on_soft_failure` is a **`generic_loop`** key, and all six survey phases
+> declared it at **phase level**, where zod strips it. Every survey was running
+> `{ retries: 0, then: "fail" }`, so one degenerate agent turn would hard-fail
+> the whole review — which records no `assessedHeadShaByWorkflow` and hands
+> `cron-review.yaml` something to re-dispatch every thirty minutes forever. It
+> had never fired because no model had ever run the pipeline. Fixed; the test now
+> asserts the key's LOCATION, not just its value.
+
+### The ordering question — WP4 or WP6? DECIDED: WP4 (2026-08-22)
+
+Kept because the argument is still live for what comes *after* WP4b, and because
+the reasoning on both sides was measured rather than assumed.
 
 **For WP4 (`prepare` + `falsify`) first.** `prepare` turned out to gate **two**
 families, not one. It was always what makes `coverage` — and therefore `tests` —
@@ -214,6 +319,16 @@ and more to the point, a one-ended drop is counted in `obligations.json` and
 That is arguably correct (the whole point is that a one-ended obligation never
 reaches the model), but it means `dropped[]` currently has no consumer. WP6's
 `adjudicate` is the natural one.
+
+> **Do not close that missing edge — it is load-bearing.** The CLI is invoked as
+> a PROCESS, resolved at run time through `LASTLIGHT_FACTS_BIN` → `PATH` →
+> `/opt/lastlight/bin/`, and that indirection is the only reason the eval harness
+> can measure any of this on a host that has never seen the sandbox image. WP4a
+> paid the price rather than the edge: `env.json`'s field list is pinned as a
+> literal on both sides (`packages/code-facts/tests/prepare.test.ts` and
+> `apps/server/tests/workflows/pr-review-probes.test.ts`), each naming the other,
+> because `pr-review.yaml`'s shell fallback hand-writes that document and is only
+> ever reached when something has already gone wrong.
 
 ## 3. Driving sub-agents on this work
 

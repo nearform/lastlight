@@ -93,12 +93,14 @@ findings** against five gold. That is WP3 behaving as specified — but it means
 `falsify` will produce probe verdicts that also go nowhere. Decide deliberately
 whether WP4 or WP6 comes next (see RESTART §2).
 
-**4. The eval workspace is DELETED at the end of every run.** `runInstance` has
-a `keepWorkspace` option and **no CLI flag exposes it**, so probe artifacts,
-`facts.json` and any transcript a `falsify` phase writes cannot be inspected
-after the fact — today they can only be sampled while the run is live. WP4 is
-the work package that most needs post-hoc artifact inspection, so **expose that
-flag before building the oracle**, not after.
+**4. The eval workspace is DELETED at the end of every run.** ~~`runInstance` has
+a `keepWorkspace` option and **no CLI flag exposes it**~~ — **DONE 2026-08-22**:
+`--keep-workspace` now reaches it, every kept path lands on the result as
+`workspaceDir`, and the runner prints all of them at the end (per TRIAL, not off
+the aggregate — `aggregateTrials` carries trial 1's fields through, so with
+`--runs 3` the other two would have been on disk and named nowhere). Off by
+default: a kept workspace is a full checkout plus, once `prepare` runs,
+`node_modules`.
 
 **5. `lastlight-facts` is not in the sandbox image.** The `facts` and `seed`
 phases resolve `LASTLIGHT_FACTS_BIN` → `PATH` → `/opt/lastlight/bin/`, and only
@@ -107,9 +109,61 @@ the first of those exists on the eval host. The YAML above already spells a
 **WP2 is the blocker for switching any of this on in production**, and it is not
 on the measurement path — the eval runs `--sandbox none` on the host.
 
-### `prepare` — the affordance (cheap, no model)
+### `prepare` — the affordance (cheap, no model). **BUILT 2026-08-22**
 
 Install dependencies if they are absent. That is all.
+
+> **What shipped, and the five places it differs from the sketch below.** The
+> phase is live, inert (`review.analysis.probes: false`), and the gate is green.
+> Nothing has run a model against it. Read this before reading the YAML sketch,
+> which is kept for its shape and is wrong in each of these respects.
+>
+> 1. **It is `lastlight-facts prepare`, not a shell script.** The sketch spells
+>    `/opt/lastlight/code-facts/bin/prepare-tree.sh` — a path **nothing
+>    installs**, and one the eval harness could never see anyway (it runs
+>    `--sandbox none` on the host). As a subcommand it resolves through §D1's
+>    order like every other invocation, so the same phase works on the host and
+>    in the image, and the branching is unit-tested against real trees rather
+>    than living in a shell script nobody can call. `src/prepare.ts` +
+>    `tests/prepare.test.ts` in `packages/code-facts`.
+> 2. **It runs BEFORE `facts`, not after it.** That follows directly from
+>    discovery 1 below: if `prepare` ran after `facts`, the install would arrive
+>    one phase too late to make a package-extending `tsconfig` resolve, and
+>    `contracts` would still emit nothing on exactly the repos this was built
+>    for.
+> 3. **Lifecycle scripts are OFF by default, and that cost was never priced
+>    here.** This page costs `prepare` in time, money, disk and (in the
+>    correction below) memory. The fifth cost is that an install runs
+>    `postinstall` **from a pull request head** — arbitrary code the PR author
+>    wrote, executing on the operator's infrastructure — and `pr-review`'s
+>    workspace has never installed anything, so this phase is the first thing in
+>    the workflow that could. Neither reason `prepare` exists needs the scripts:
+>    an `extends` resolves off files on disk. `review.analysis.probeLifecycleScripts`
+>    opts in; `env.json` records which it was.
+> 4. **`probes` is a second switch, and the coverage run is a third.** The config
+>    block below is what shipped, plus `probeLifecycleScripts` and — renamed —
+>    `probeTypecheck` / `probeCoverage`. The coverage run is the one step that
+>    executes a test suite, i.e. the wall-clock item §D13 deleted with `suite`,
+>    bought back **only** for the `tests` family. It never guesses a command,
+>    only one the repo itself named (a `coverage` / `test:coverage` script, or an
+>    explicit `--coverage-cmd`) — because after a guessed fifteen-minute run that
+>    produced nothing, *"no command"* and *"no artifact"* would be the same row
+>    in the funnel and opposite conclusions.
+> 5. **The phase timeout is a SUM, computed in `specContext`.** `timeout_seconds`
+>    bounds the whole phase, so handing it the install budget would kill the
+>    process part-way through a coverage run — and a killed process writes no
+>    `env.json` at all, which is the one outcome this design exists to prevent.
+>    `templated-number` reads a context value and cannot add, so the arithmetic
+>    is in `pr-decisions.ts` and the YAML reads
+>    `{ from: probePhaseTimeoutSeconds, default: 300 }`.
+>
+> Two gates it carries that the sketch does not. `skip_if` lists **both**
+> `analysisEnabled != true` and `probesEnabled != true`: the projection already
+> pairs them, but "it cannot happen because of how the projection is written" is
+> a weaker guarantee than "the phase refuses", and this is the phase that
+> installs a stranger's dependency tree. And the §D12 catch is at the **shell**,
+> exactly as `facts` carries it — `--never-fail` is an in-process try/catch and
+> cannot cover a process that dies.
 
 ```yaml
   - name: prepare
@@ -135,6 +189,67 @@ diagnostics that can be attached to a specific hypothesis. Gate it separately
 Write `.lastlight/pr-review/probes/env.json`
 (`{ installed: true|false, packageManager, typecheck: "clean"|"errors"|"skipped",
 durationMs }`) so downstream phases read a fact, not a substring of stdout.
+
+#### The gate, read where it was free — `cal-com-10600`, 2026-08-22
+
+`prepare`'s claim is deterministic, so it has a gate that costs no model spend:
+`facts-corpus.ts --install` runs it in each worktree before `all`. One case, both
+arms, one variable:
+
+| | bare | `--install` |
+|---|---|---|
+| tier | 2 | **1** |
+| `degraded[]` entries | 16 | **3** |
+| **contract deltas** | **0** | **3** (1 added, 2 changed) |
+| consumers outside the diff | 0 | **15** |
+| `facts` symbols | 22, `name-match` | 15, `type-aware` |
+| reference sites | **4577** | **76** |
+| `all` wall clock | 5.9 s | 7.7 s |
+| `all` peak RSS | 399 MB | **1626 MB** |
+| `prepare` wall clock | — | 85.8 s |
+
+**The `contract` family went from structurally impossible to populated**, which
+is the claim, discharged. Three things beside it are worth more than the headline:
+
+- **4577 → 76 reference sites.** Those are not lost references, they are the
+  name-match engine's false ones — a **60× over-claim** collapsing under a type
+  checker. Consistent with the measured precision table in
+  `packages/code-facts/CLAUDE.md` (cal.com: 9.0% whole-repo precision), and a
+  reminder that a tier-2 `facts` payload is *bigger* than a tier-1 one and worth
+  far less.
+- **Memory: 399 → 1626 MB, and this is the FIRST installed-tree figure for the
+  tsgo engine.** The plan has been carrying `UNMEASURED` here since the engine
+  swap, and every older number in it is ts-morph's. It sits well inside the 8g
+  cap; it is 4× the bare figure, on one mid-sized monorepo, and it tracks repo
+  size rather than diff size.
+- **`prepare` costs 86 s against `all`'s 8 s.** On a first review. Every
+  re-review pays zero, because the cross-run refresh is `git clean -fdx -e
+  node_modules` — which is exactly why that flag exists.
+
+**Two bugs the first two attempts found, both mine, both silent.** The run had to
+be made three times, and each failure is the shape this plan keeps meeting:
+
+1. `install: "failed"` on **every** case, because Corepack's *"about to
+   download…"* confirmation prompt is not silenced by `CI=1` — and a repo that
+   pins its manager through `packageManager` (the field `detectPackageManager`
+   reads first, and the shape of every monorepo this phase exists for) cannot
+   install without it. Fixed with `COREPACK_ENABLE_DOWNLOAD_PROMPT=0`.
+2. The strict→loose fallback **was not loose**. yarn Berry and pnpm both read
+   `CI` and turn immutable installs *on*, so a bare `yarn install` re-ran the
+   identical command and failed identically (`YN0028: The lockfile would have
+   been modified`). A fallback bit-identical to what it falls back from is a
+   second copy of the failure. Fixed with explicit `--no-immutable` /
+   `--no-frozen-lockfile`; a test now asserts `loose !== strict` for every
+   manager.
+
+Both would have reported an honest `install: "failed"` in production forever, on
+exactly the repos the phase was built for. **This is the argument for reading the
+free instrument before buying a model one**, in its cheapest possible form.
+
+**Not yet read: the other 49 cases.** The corpus claim — tier-1 21 → 5 and
+contract deltas 73 → 19 — is a fifty-case number and this is one of them. The
+full arm costs hours of wall clock and gigabytes, no money, and it is the
+remaining half of AC1's evidence.
 
 > **`prepare` also unblocks the `tests` family — measured 2026-08-21
 > ([WP1b](01b-code-facts-hardening.md)), and it is a HARD ORDERING
@@ -325,7 +440,45 @@ Both `prepare` and `suite` are **operator-only** in the repo-config bounds — t
 spend the operator's compute and disk, so they sit with `fix.gateTimeoutSeconds`
 rather than with the add-only leaves a repo may raise.
 
-### `falsify` — the oracle
+### `falsify` — the oracle. **BUILT 2026-08-22**
+
+> **What shipped.** `prompts/review-falsify.md`, the phase between `survey_spec`
+> and `review`, and `lastlight-facts probes` — the loop's exit gate. Inert
+> (`review.analysis.probes: false`), gate green, **no model has run against it**.
+> Four things a reader needs:
+>
+> 1. **Verdicts go in their own file.** `probes/verdicts.jsonl`, append-only,
+>    one line per probed hypothesis. `falsify` never edits a
+>    `hypotheses/*.jsonl` — those are owned by the passes that wrote them, and
+>    the append-only union is what makes consensus collapse impossible by
+>    construction. A second round revises a verdict by appending; the gate takes
+>    the last line.
+> 2. **The gate mechanises the rule, and only the rule.** `probes` checks that
+>    every hypothesis with `needsProbe` or `severity: Critical` has a verdict,
+>    and that every `reproduced` / `refuted` names a transcript **that exists**.
+>    It reads no transcript and judges no verdict — v3's five-line existence gate
+>    earned the gold; v2's quote validator cost 2.4× for a worse result.
+> 3. **It is satisfiable in one pass without lying.** `unprobed` closes the gate
+>    with no transcript, which is the whole reason that verdict exists: a gate a
+>    pass cannot honestly close will be closed dishonestly. WP3 already hit the
+>    other failure — `$LL_FAMILY` was never set, so the gate tested
+>    `hypotheses/.jsonl`, always failed, and the loop burned `max_iterations`
+>    against a condition that meant nothing.
+> 4. **Nothing reads `verdicts.jsonl`.** [WP6](06-adjudicate.md)'s `adjudicate`
+>    is its consumer and does not exist. So this phase can move the mechanism
+>    metrics — probes attempted / succeeded / reproduced / refuted, the oracle's
+>    own hit rate — and **cannot move recall**. Stated in the phase's own
+>    comment so nobody measures it expecting otherwise.
+
+> **A latent WP3 bug this work surfaced, and it is the §D12 shape.**
+> `on_soft_failure` is a **`generic_loop`** key (`schema.ts`), and all six survey
+> phases declared it at **phase level**, where zod strips it. Every one of them
+> was therefore running the default `{ retries: 0, then: "fail" }` — so one
+> degenerate agent turn in any survey would **hard-fail the whole review**, which
+> records no `assessedHeadShaByWorkflow` and hands `cron-review.yaml` something
+> to re-dispatch every thirty minutes forever. It had never fired because no
+> model had run the pipeline. Fixed by moving the key inside each loop; the test
+> asserts the **location**, not just the value.
 
 For every hypothesis with `needsProbe: true` (and every `severity: Critical`
 regardless), write the smallest artefact that settles it and run it:
@@ -398,24 +551,48 @@ allow/deny — that gap already killed one design and is not needed here
 
 ## Config
 
+What shipped 2026-08-22 (the sketch this replaces named `typecheck`, `mutants`
+and `suiteTimeoutSeconds`; `mutants` and `suite` were cut by §D13):
+
 ```yaml
 review:
   analysis:
     probes: false                  # `prepare` + `falsify`. Operator-only.
                                    # OFF in prod, ON in the eval overlay.
-    typecheck: false               # local tsc diagnostics (not CI duplication)
-    mutants: false                 # implies `suite`; the expensive tail
+    probeLifecycleScripts: false   # run the PR's own postinstall. A SECURITY
+                                   # default: that is the author's code, here.
+    probeTypecheck: false          # local tsc diagnostics (not CI duplication)
+    probeCoverage: false           # the one step that runs a test suite
     prepareTimeoutSeconds: 300
-    suiteTimeoutSeconds: 900
+    coverageTimeoutSeconds: 900
     probeRounds: 2
 ```
 
-Three separate switches, deliberately. `probes` buys the oracle; `mutants` buys
-the `tests` obligation family and drags a full suite run with it; `typecheck` is
-cheap and independent of both. Conflating them is how a plan ends up unable to
-tell which part earned the recall.
+Four separate switches, deliberately. `probes` buys the affordance and the
+oracle; `probeCoverage` buys the `tests` obligation family and drags a suite run
+with it; `probeTypecheck` is cheap and independent of both;
+`probeLifecycleScripts` is not a cost dial at all but a trust one. Conflating
+them is how a plan ends up unable to tell which part earned the recall — and, in
+the last case, how an operator ends up running a stranger's `postinstall`
+because they wanted a contract delta.
 
 ## Acceptance criteria
+
+> **Status 2026-08-22.** 1, 2 and 2b are **discharged in code and tested**; 3, 4,
+> 5 and 6 belong to `falsify`, which is not built. What discharges 1 and 2 is
+> split across two suites on purpose, because there is **no dependency edge from
+> `apps/server` to `lastlight-code-facts`** and there must not be one — the CLI
+> is invoked as a process resolved at run time, which is the whole reason the
+> eval harness can measure this on a host that has never seen the sandbox image.
+> So `packages/code-facts/tests/prepare.test.ts` owns the branching
+> (`unavailable` ≠ `clean`, `absent` ≠ `produced`, a red suite's artifact still
+> counts, a timeout does not trigger the lockfile fallback) and
+> `apps/server/tests/workflows/pr-review-probes.test.ts` owns the wiring — the
+> config → context → flag chain, the shell fallback **executed in a real shell**
+> and parsed, and AC2b. The `env.json` field list is pinned as a literal in both,
+> each naming the other; that is the drift guard the missing edge costs.
+
+
 
 1. ~~A red base test suite yields a **succeeded** run and `mutants` reporting
    `degraded`, not `0 surviving mutants`.~~ **Replaced 2026-08-21**, since
