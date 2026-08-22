@@ -1,5 +1,11 @@
 # RESTART — pick this plan up in a new session
 
+> **Starting fresh on 2026-08-23 or later? Read [NEXT.md](NEXT.md) first.** It is
+> two pages: the three run ids that are now the comparators, what a no-spend deep
+> scan of the artifacts found, and four small experiments in cost order. This
+> file stays the operational reference — tree state, the commands, and §4's ten
+> traps — and §2b below carries the measured numbers.
+
 Say *"restart the plan in `docs/plans/review-evidence-pipeline/`"* and start
 here. This file is the operational entry point: what state the tree is in, what
 is built, what to do next, and which traps will silently waste money.
