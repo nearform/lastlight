@@ -183,6 +183,95 @@ above zero, so "did not convert" and "was never nameable" stay distinguishable.
 That is locked decision 6's requirement, applied to the seeder instead of the
 extractor.
 
+### Measured 2026-08-22 — the precondition, read on both populations
+
+AC6 discharged before any spend. `facts-evidence.ts` grew a per-family table
+(surfaces → families, TS/JS split derived from the envelope's own `languages[]`
+rather than the dataset's PR-level label). Two corpora, both on the **tsgo**
+engine: Martian's 50 and — the one that matters — the eight `skillspro` cases
+the gates are actually read on.
+
+**On the gate set: anchor rate 25/25 (100%), discovery ceiling 76.0%,
+EC-strict 52.0%, all eight cases tier 1.**
+
+| family | entity (strict) | + file (loose) | only this family | on Martian (strict) |
+|---|---|---|---|---|
+| `contract` | 11/25 44.0% | 18/25 72.0% | 0 | 14/28 50.0% |
+| `enforcement` | 4/25 16.0% | 4/25 16.0% | **1** | **0/28 0.0%** |
+| `security` | 11/25 44.0% | 11/25 44.0% | 0 | 14/28 50.0% |
+| `state` | 11/25 44.0% | 18/25 72.0% | 0 | 14/28 50.0% |
+| `tests` | notMeasured | | | notMeasured |
+| `spec` | notMeasured | | | notMeasured |
+
+Four things follow, and three of them change what this WP should do.
+
+**1. `enforcement` reads 0 on Martian and 16% on the gate set, and the zero is
+about the corpus.** `constants` emits **0 constants across all 50 Martian
+cases** — on *both* engines, so it is not the swap. The extractor requires a
+module-level `const` with a **literal initializer whose declaration line is
+itself inside a changed hunk**, and across 50 real PRs that never happens. On
+`skillspro` it fires richly (13 / 14 / 17 constants on the three `1587` cases).
+A family that cannot be measured on one corpus and converts on another is not a
+weak family; it is a family whose corpus was wrong.
+
+**2. `1587-r2`'s Critical is named mechanically, and by `constants`
+specifically.** The gold the whole investigation turns on is hit through
+`SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS` — 2 references, 1 hard-coded duplicate,
+in the envelope, with no model. AC5 asks whether the O6 → Critical conversion
+reproduces mechanically; its **deterministic precondition now holds**. And
+`enforcement` is the only family with an exclusive finding (`1587-r3#3`, reached
+by no other surface), which is the measured form of the argument that it earns
+its own pass.
+
+**3. `sides` is INERT on the gate repo and the seeder must not depend on it.**
+Every reference partitions to `shared` — `client: 0, server: 0` on all 14
+constants of `1587-r2` — because `--sides` is a heuristic path prefix nobody
+configured for this repo. The `1587-r2` mechanism is *"referenced client-side,
+never compared server-side"*, which is exactly what `sides` would express and
+exactly what it does not. **Build the `enforcement` both-ends from the
+subtraction (`references` vs `hardCodedDuplicates`), which is populated, and
+treat `sides` as a ranking hint that is frequently absent.**
+
+**4. The engine swap is evidence-coverage neutral — and the instrument is blind
+to what it did cost.** Scored against the ts-morph run, *nothing moved*: TS/JS
+EC-strict 46.2% both ways, EC-loose 41.9%, ALL 14.1%, zero per-finding moves.
+The TS/JS candidate pool fell 214 → 186, so it is the same naming from a
+smaller pool. But underneath:
+
+| | ts-morph | tsgo |
+|---|---|---|
+| tier-1 cases | 21 | **5** |
+| contract deltas, corpus-wide | 73 | **19** (−74%) |
+| `cal-com-10600` | tier 1, 15 symbols `type-aware`, 4 contracts, 1 degraded | tier 2, 22 symbols `name-match`, **0 contracts**, 16 degraded |
+
+One cause, verified on all 16 demoted cases: a tsconfig that `extends` a **bare
+package specifier** (`@calcom/tsconfig/react-library.json`, `@grafana/tsconfig`)
+does not resolve on a bare corpus tree with no `node_modules`. tsgo reports a
+config parsing error and — correctly, per its rule 3 — **excludes** the project
+rather than degrading it; the case drops to tier 2 and `contracts` emits
+nothing. ts-morph recovered from the same unresolvable `extends` and stayed
+tier 1.
+
+**Evidence coverage cannot see this, by construction**: tier 2's name-match
+still populates `facts.symbols[].name`, so naming survives a tier demotion
+intact. Nor could the swap's fidelity gate have caught it — that was read on
+*this* repo at `HEAD~1..HEAD` **with `node_modules` installed**, where every
+`extends` resolves. The population where it shows is bare monorepo checkouts,
+which is what a review workspace is.
+
+> **So `contract` joins `tests` as a family gated on [WP4](04-probe-oracle.md)'s
+> `prepare`** — on any repo whose tsconfigs extend a package, which is the
+> normal monorepo shape. Installing dependencies makes the `extends` resolve and
+> the project load. The gate set is unaffected (`skillspro` is 8/8 tier 1), so
+> this does not block WP3's arm; it bounds what a `contract` result generalises
+> to, and it is a second measured instance of the same ordering constraint
+> §D13 already recorded for `coverage`.
+
+Two caveats to carry: the `skillspro` anchor labels are **unaudited** (the hand
+audit is 20 PENDING, against Martian's audited 0/20 spurious), so they have no
+error bar; and 88% of them are `diffuse` against a median 58 matched lines,
+which is why the entity-level bar is the only one read.
+
 ## The survey phase
 
 ### Shape — six declared phases
