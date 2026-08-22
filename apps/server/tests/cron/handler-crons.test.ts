@@ -45,6 +45,18 @@ vi.mock("#src/logging/logger.js", () => {
 const { getJobs } = await import("#src/cron/jobs.js");
 const { CronWorkflowSchema } = await import("lastlight-workflow-engine");
 const { makeTestDb } = await import("../helpers/state-db.js");
+// Hoisted 2026-08-22, with the three above, because they were NOT: imported
+// inside the first test body, the module-graph load was billed to that test's
+// 5 s budget. Under parallel load it took 6963 ms and the suite failed with
+// `Test timed out in 5000ms` — an import cost, never the assertion. It passed
+// standalone every time, and a passing re-run overwrites `.turbo/turbo-test.log`,
+// so it read as an unattributable flake twice before it was captured.
+//
+// Hoisting is the fix rather than a bigger timeout: the cost is paid once at
+// collection instead of once per suite run, and a raised ceiling would have hidden
+// a real slowdown here later, which is the opposite of what this suite is for.
+const { withLedger } = await import("#src/cron/handlers.js");
+const { CronScheduler } = await import("#src/cron/scheduler.js");
 
 const NO_CRONS = { enable: [], disable: [] };
 
@@ -141,7 +153,6 @@ describe("withLedger — a handler cron is countable", () => {
    * every cron fire, so `GET /crons` stops branching on the kind of cron.
    */
   it("records a row per invocation, keyed by the CRON name", async () => {
-    const { withLedger } = await import("#src/cron/handlers.js");
     const db = await makeTestDb();
     const wrapped = withLedger(db, "repo-digest", async () => {});
     await wrapped({ repos: ["acme/a"] });
@@ -157,7 +168,6 @@ describe("withLedger — a handler cron is countable", () => {
   });
 
   it("records the failure AND re-throws — the row is a record, not a swallow", async () => {
-    const { withLedger } = await import("#src/cron/handlers.js");
     const db = await makeTestDb();
     const wrapped = withLedger(db, "repo-digest", async () => {
       throw new Error("invalid_auth");
@@ -170,7 +180,6 @@ describe("withLedger — a handler cron is countable", () => {
   });
 
   it("makes the alerting input — recentFailures — actually count", async () => {
-    const { withLedger } = await import("#src/cron/handlers.js");
     const db = await makeTestDb();
     const wrapped = withLedger(db, "repo-digest", async () => {
       throw new Error("not_in_channel");
@@ -181,7 +190,6 @@ describe("withLedger — a handler cron is countable", () => {
   });
 
   it("attributes a manual 'Run now' to the person who pressed it", async () => {
-    const { withLedger } = await import("#src/cron/handlers.js");
     const db = await makeTestDb();
     await withLedger(db, "repo-digest", async () => {})({
       sender: "cliftonc",
@@ -194,7 +202,6 @@ describe("withLedger — a handler cron is countable", () => {
   });
 
   it("defaults a scheduled tick to source=schedule with no actor", async () => {
-    const { withLedger } = await import("#src/cron/handlers.js");
     const db = await makeTestDb();
     await withLedger(db, "repo-digest", async () => {})({ repos: ["acme/a"] });
     const row = (await db.cronRuns.latestByCron()).get("repo-digest")!;
@@ -203,7 +210,6 @@ describe("withLedger — a handler cron is countable", () => {
   });
 
   it("writes nothing to the executions ledger", async () => {
-    const { withLedger } = await import("#src/cron/handlers.js");
     const db = await makeTestDb();
     await withLedger(db, "repo-digest", async () => {})({});
     // The move is a REPLACEMENT, not a dual write — an executions row here
@@ -224,7 +230,6 @@ describe("CronScheduler — running a handler job", () => {
   };
 
   it("invokes the handler, with the job's context, instead of the workflow runner", async () => {
-    const { CronScheduler } = await import("#src/cron/scheduler.js");
     const db = await makeTestDb();
     const runner = vi.fn(async () => {});
     const handler = vi.fn(async () => {});
@@ -247,7 +252,6 @@ describe("CronScheduler — running a handler job", () => {
   });
 
   it("counts a throwing handler's failures under the CRON name", async () => {
-    const { CronScheduler } = await import("#src/cron/scheduler.js");
     const db = await makeTestDb();
     // The gap: this used to be gated on `job.workflow`, so a handler cron
     // failing every tick produced one log line, no count, and a dashboard

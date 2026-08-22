@@ -54,6 +54,59 @@ So separate the *information* from the *capability*:
 
 That splits the old phase in two, with very different price tags.
 
+### What WP4 inherits from WP3 — measured 2026-08-22, read this first
+
+WP3 landed built-but-unmeasured (`9536be3b`; see
+[RESTART §2b](RESTART.md)). Five things it discovered change this work package
+rather than merely preceding it.
+
+**1. `prepare` now has a SECOND, independent reason to exist, and it is bigger
+than the first.** The stated reason was the coverage artifact that makes the
+`tests` family live. The new one: on a bare checkout with no `node_modules`, a
+tsconfig that `extends` a **bare package specifier** — `@calcom/tsconfig/react-library.json`,
+`@grafana/tsconfig` — does not resolve, tsgo reports a config parsing error and
+(correctly, per its rule 3) **excludes the project**. The case drops to tier 2
+and `contracts` emits nothing. Measured across the 50-PR corpus: **tier-1 cases
+21 → 5, contract deltas 73 → 19**, single cause, all 16 demoted cases.
+
+> So **`contract` joins `tests` as a family that cannot seed until `prepare`
+> lands**, on any repo whose tsconfigs extend a package — which is the normal
+> monorepo shape. `prepare` stops being an affordance for probes and becomes a
+> precondition for two of the six families.
+
+Note what this does to the ordering argument in reverse: `prepare` installing
+dependencies is also what **re-arms the memory question**, and memory is
+currently **UNMEASURED** on the tsgo engine (the compiler is a child process, so
+every `rss()` figure in this plan is ts-morph's). Do not carry the old numbers.
+
+**2. The gate set is unaffected, so it will not warn you.** All eight
+`skillspro` cases are tier 1 with no package-extending tsconfig. A `contract`
+result measured there generalises less far than it looks, and the corpus is the
+population that shows it.
+
+**3. Hypotheses have NO CONSUMER.** WP3's non-goals exclude adjudication and any
+`findings.json` write, so the six surveys append to
+`hypotheses/<family>.jsonl` and **nothing reads them**. Verified on a real eval
+case: 40 KB of obligations, 18+ hypotheses, `APPROVE` with **zero posted
+findings** against five gold. That is WP3 behaving as specified — but it means
+**no rung between here and [WP6](06-adjudicate.md) can move recall**, and WP4's
+`falsify` will produce probe verdicts that also go nowhere. Decide deliberately
+whether WP4 or WP6 comes next (see RESTART §2).
+
+**4. The eval workspace is DELETED at the end of every run.** `runInstance` has
+a `keepWorkspace` option and **no CLI flag exposes it**, so probe artifacts,
+`facts.json` and any transcript a `falsify` phase writes cannot be inspected
+after the fact — today they can only be sampled while the run is live. WP4 is
+the work package that most needs post-hoc artifact inspection, so **expose that
+flag before building the oracle**, not after.
+
+**5. `lastlight-facts` is not in the sandbox image.** The `facts` and `seed`
+phases resolve `LASTLIGHT_FACTS_BIN` → `PATH` → `/opt/lastlight/bin/`, and only
+the first of those exists on the eval host. The YAML above already spells a
+`/opt/lastlight/code-facts/bin/prepare-tree.sh` path that nothing installs.
+**WP2 is the blocker for switching any of this on in production**, and it is not
+on the measurement path — the eval runs `--sandbox none` on the host.
+
 ### `prepare` — the affordance (cheap, no model)
 
 Install dependencies if they are absent. That is all.

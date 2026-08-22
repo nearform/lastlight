@@ -67,10 +67,10 @@ corpus, so they raise the generality claim rather than the shipping path.
 ✅ the 2 GB agent-cap decision — RETIRED. cap raised to 8g, not engineered around
 ✅ the FACT ENGINE          — ts-morph replaced by the TS 7 API (docs/plans/fact-engine/)
 ✅ WP3 BUILT (9536be3b)     — seeder, six survey phases, prompts, skills; inert,
-                              gate green. The ARM is what remains — see §5.
-             WP3  seed + six surveys          ← YOU ARE HERE. first model spend
-             WP4  prepare + falsify           ← also the only thing that makes `coverage` live
-             WP6  adjudicate + 7a/7b
+                              gate green. The ARM is what remains — see §2b.
+             WP4  prepare + falsify           ← makes `coverage` live, AND `contracts`
+             WP6  adjudicate + 7a/7b          ← the only rung that can move RECALL
+   ── pick ONE of those two as next; see "the ordering question" below ──
    ── ship-capable on TypeScript here ──
              WP1c Stage 2 grammars (scoped)   ← generality, not shipping
              WP9  external validation         ← deterministic half is now free
@@ -167,6 +167,35 @@ gate green. What is built: `lastlight-facts seed`, the six survey phases in
    The eval runs `--sandbox none` on the host and `lastlight-facts` is not on
    `PATH` there. It is **not in the sandbox image either** — that is WP2, and
    until it lands the pipeline cannot be switched on in production, only measured.
+
+### The ordering question — WP4 or WP6? Decide it, do not inherit it
+
+The ladder used to read WP3 → WP4 → WP6 and that order is no longer obvious.
+Both arguments are now measured rather than assumed, so pick deliberately.
+
+**For WP4 (`prepare` + `falsify`) first.** `prepare` turned out to gate **two**
+families, not one. It was always what makes `coverage` — and therefore `tests` —
+live. It is now also what makes **`contract`** live on any repo whose tsconfigs
+`extends` a bare package specifier, because without `node_modules` tsgo excludes
+the project and `contracts` emits nothing (corpus: tier-1 21 → 5, contract
+deltas 73 → 19; [03](03-seed-and-survey.md) §"Measured 2026-08-22"). So WP4
+raises the number of families that can seed at all from three to five, and it is
+cheap and model-free.
+
+**For WP6 (`adjudicate`) first.** **Nothing consumes a hypothesis.** The surveys
+append to `hypotheses/<family>.jsonl` and no phase reads the file, so the run
+still ends in the unchanged shipped reviewer. Verified on a real case: 40 KB of
+obligations, 18+ hypotheses, `APPROVE` with **zero posted findings** against five
+gold. **No rung before WP6 can move recall, including WP4** — a probe verdict
+lands in the same unread place a hypothesis does. If the question being asked is
+"does any of this improve the review", WP6 is the only rung that can answer it.
+
+The honest summary: **WP4 widens the funnel's mouth; WP6 is the only thing that
+opens its exit.** WP4 is cheaper and unblocks two families; WP6 is what makes
+every number since WP1 mean something. A defensible third option is the smallest
+possible slice of WP6 — a phase that reads the hypothesis files and writes
+`findings.json` with no ranking, no tiering and no deletion — purely to connect
+the exit, measured before either full work package.
 
 **AC2 is not covered and should not be faked.** `apps/server` has no dependency
 edge to `lastlight-code-facts`, so the seeder is unreachable from a core test;
@@ -289,8 +318,25 @@ Still open:
   whatever change happens to be in flight when it fires, which is why it has
   twice looked like a mystery.
 
-  It is left **unfixed on purpose**: raising this one test's timeout is probably
-  right, but it is a change to somebody else's subsystem and it belongs in its own
-  commit with its own reasoning, not smuggled into a review-pipeline one. Do not
-  blanket-raise timeouts — that hides real slowdowns, which is the opposite of
-  what this suite is for.
+  **FIXED 2026-08-22, and not by raising the timeout.** The two modules that test
+  imported inside its body (`#src/cron/handlers.js`, `#src/cron/scheduler.js`)
+  are now hoisted to top-level `await import`s beside the three the file already
+  hoisted — the file's own established convention, and below every `vi.mock`, so
+  mock ordering is unchanged. The module-graph load is paid once at collection
+  instead of being billed to whichever test happens to run first. Verified under
+  load (two eval arms running): 16/16 in 4.57 s, with `import 2.85s` against
+  `tests 1.62s` for all sixteen — where that single test used to burn 6963 ms.
+
+  A bigger ceiling was the obvious fix and the wrong one: it would have hidden a
+  real slowdown here later, which is the opposite of what this suite is for.
+
+  **The same shape is latent in five other files** — an `await import()` inside a
+  test body, where ESM caching means only the FIRST such test in the file pays
+  the graph load: `tests/admin/routes.test.ts` (19 of them, the largest graph and
+  so the likeliest next sighting), `tests/admin/auth.test.ts`,
+  `tests/engine/github-app-client.test.ts`, `tests/engine/team-visibility.test.ts`,
+  `tests/engine/pr-notes-harvest.test.ts`. **None has ever been observed to
+  fail**, and none uses `vi.resetModules()`, so none of them *needs* the in-test
+  import for module-state reasons and all five could be hoisted the same way.
+  Left alone deliberately: five speculative edits to other subsystems' tests is
+  not a fix, it is a guess with a diff. Hoist one when it actually fires.
