@@ -228,10 +228,162 @@ Minimal, and mostly nothing:
   the three-dot → two-dot → API diff fallback chain for anchoring, and the
   body-only retry. None of them are affected and all of them are load-bearing.
 
+### The model must stop emitting line numbers
+
+**Added 2026-08-22, from `alibaba/open-code-review` (Apache-2.0).**
+
+`findings-schema.md` today makes `line` a **required** field the model produces:
+*"Line number on `side` that the comment anchors to. Must appear in the diff."*
+`post-review` then computes a commentable line set from the local diff and
+**demotes anything outside it** to the body.
+
+That guard is correct and must stay. But notice what it does to a near miss. A
+finding whose analysis is perfect and whose line number is off by two is not
+corrected, it is **demoted** — and the attention boundary above exists precisely
+because an inline comment at the defect site is worth much more than a body
+entry (*"concise hunk-level actionable findings are substantially likelier to
+cause a change"*). We are paying the full cost of a wrong answer for what is
+actually an arithmetic slip. Open Code Review names this failure "position
+drift" and lists it second of the three it built its architecture against.
+
+**The fix is to stop asking the model to count lines.** Models quote code well
+and count lines badly. So the finding record carries a verbatim excerpt, and the
+line number is *derived*:
+
+| # | Step | Model? | Behaviour |
+|---|---|---|---|
+| 1 | Match `existingCode` against the file's diff hunks | no | New side first (context + added → new-file numbers), then old side (context + deleted → old-file numbers) |
+| 2 | Scan the full head-side file content | no | Fallback when the excerpt sits outside a hunk |
+| 3 | **Relocate across files** | **no** | Plain string match of the excerpt over every in-memory diff. **Unique hit only**: re-file `path`, `line` and `endLine` together. Zero hits and multiple hits both decline and leave it unlocated |
+| 4 | Ask a model to regenerate a precise excerpt, then retry step 1 | yes | Last resort only |
+| 5 | Still unlocated | — | Demote to body, exactly as today |
+
+**Step 3 must run before step 4, and the ordering is the whole insight.** Open
+Code Review's source explains why, and it is worth quoting because it is a trap
+we would otherwise walk into:
+
+> The reviewing Agent reads related files through `file_read_diff`, so it can
+> describe code from a file other than the one under review and still file the
+> comment against the file under review — typically a declaration/implementation
+> split. `ResolveComment` then fails, and the LLM re-location that follows is
+> given only the wrong file's diff and a prompt that demands a code block back,
+> so it answers with whatever token in that diff looks closest. That overwrites
+> the one piece of evidence pointing at the real code, and the comment ends up
+> **looking located while pointing at an unrelated line.**
+
+A declaration/implementation split is not an exotic case for us. It is the
+normal shape of a finding that came out of a **contract delta** or an **impact
+cone**, which is to say the normal shape of everything WP1 exists to produce.
+Handing a model the wrong file's diff and demanding a snippet back is a
+finding-corruption machine, and it fails *silently* — the output is a
+confidently anchored comment on unrelated code, which is worse than a demotion.
+
+**Schema change.** `existingCode` (verbatim excerpt) becomes required on the
+hypothesis record in [03](03-seed-and-survey.md) and on the finding;
+`line` / `start_line` become **optional and advisory**, resolved by the cascade
+and overwritten when resolution succeeds. This is a `findings-schema.md` change
+and a `post-review` change, and it is worth doing even if nothing else in this
+work package ships.
+
+## The external instrument, and the floor it pins
+
+**Added 2026-08-22.** This work package had no external gate. It now has one:
+`apps/evals/scripts/aacr-adjudicate.ts` scores an adjudicator arm against
+AACR-Bench's 1,505 valid / 640 invalid review comments
+([09](09-external-validation.md) §"AACR-Bench" for the corpus and its biases).
+
+The floor is the null adjudicator — keep everything, which is exactly what
+production does today — and it is deliberately high:
+
+| Arm | retention (label=1) | interception (label=0) | precision | F1 |
+|---|---|---|---|---|
+| `keep-all` (production today) | **100.0%** (1505/1505) | 0.0% (0/640) | 70.2% | **0.825** |
+| `drop-all` | 0.0% (0/1505) | 100.0% (640/640) | n/a | n/a |
+
+**An adjudicator that does not beat F1 0.825 while holding retention is worse
+than not having one.** That is the whole asymmetry of this document expressed as
+a number, and it is free to reproduce (no model calls, `--arm keep-all --all`).
+
+### Measured 2026-08-22: two models, and neither beats doing nothing
+
+Full 2,145 rows, both arms, `llm` arm prompt (which carries a deliberate
+keep-when-unsure bias, so **these retention figures are the optimistic end**).
+
+| Arm | retention (L1) | interception (L0) | precision | F1 |
+|---|---|---|---|---|
+| `keep-all` | **100.0%** (1505/1505) | 0.0% (0/640) | 70.2% | **0.825** |
+| `anthropic/claude-haiku-4-5` | 91.3% (1371/1502) | 15.4% (98/638) | 71.7% | 0.803 |
+| `fireworks/…/glm-5p2-fast` (reasoning off) | 76.3% (1143/1499) | 33.0% (211/639) | 72.8% | 0.745 |
+| `drop-all` | 0.0% | 100.0% (640/640) | n/a | n/a |
+
+Read the confusion matrices, not the rates. Haiku destroys **131 valid comments
+to catch 98** invalid ones; GLM destroys **356 to catch 211**. That is 1.34 and
+1.69 real findings burned per piece of noise removed, and precision barely moves
+(70.2 → 71.7 → 72.8) because both drop valid and invalid at nearly the same
+rate. **That is the signature of a filter that is not discriminating, only
+shrinking.** Cost was ~$2 (Haiku) and negligible (GLM). Wall clock is not
+reported here: the two runs overlapped, so both `elapsed` figures are
+contaminated (`01b` house rule).
+
+**The threshold sweep is the part that closes the question.** Haiku's confidence
+axis is inert across its whole useful range — F1 sits at 0.825 from t=0.0 to
+t=0.7 with interception under 1%, then collapses to 0.467 at t=0.8 and 0.070 at
+t=0.9. **No threshold anywhere on the curve beats `keep-all`.** There is no
+operating point to tune toward, so this is not a calibration problem that
+[§"Per-check calibration"](#per-check-calibration-not-a-global-gate) can rescue.
+The sweep's bracketing check passed (t=0.0 reproduces `keep-all`, t=1.0
+reproduces `drop-all`), so the axis is monotone and this is a property of the
+model, not of the instrument.
+
+**The authorship split runs the wrong way for us**, on both models:
+
+| | Haiku retention | GLM retention |
+|---|---|---|
+| AI-authored (n≈1590) | 94.4% (1049/1111) | 82.9% (919/1108) |
+| **human-authored** (n=548) | **82.4%** (322/391) | **57.3%** (224/391) |
+
+Both judge machine-written comments markedly better than human-written ones —
+GLM discards **43% of valid human review comments**. The reviewer's job is to
+find what human reviewers find, so the human column is the one that counts, and
+it is the worse one on both arms.
+
+### What this changes
+
+Nothing in the design, and that is the point — it is the fifth independent
+reproduction of locked decision #1, and the first run on a labelled **negative**
+set (our v2, BitsAI-CR, Open Code Review's leaderboard, now these two). But it
+sharpens the prohibition from a principle into a measured bound:
+
+> **A cheap model asked "is this comment valid" is worse than useless here.**
+> `adjudicate` earns its cost through **ranking and tiering** into
+> inline/body/internal, and through **probe-backed deletion**
+> ([WP4](04-probe-oracle.md)). It may not earn it by judging plausibility.
+
+Two follow-ups this leaves open, neither blocking:
+
+- **An unbiased-prompt arm** to bound the other side. The measured numbers are
+  the optimistic end; a neutral prompt is very likely worse, and it should be a
+  second arm rather than an edit so both numbers exist.
+- **A strong model** has not been tried. `08-evals.md`'s Reflexion note says the
+  FN hunt degrades badly on small models (SNR 2.89 → 0.91); the same may be true
+  of adjudication, in which case the finding is about model class, not the task.
+  Until that is run, "cheap adjudication does not work" is the honest claim, not
+  "adjudication does not work".
+
+Read it with two limits in mind. It measures judging a comment **when handed the
+comment**, which is not review recall. And it **cannot supply SNR** — with no
+generation step, SNR degenerates into precision — so AC6 below must still be
+read on our own eval.
+
 ## Acceptance criteria
 
 1. A finding below its family threshold **appears in the review body**, not
    nowhere. Unit-test the demotion path directly.
+1a. **Added 2026-08-22.** A finding whose `line` is wrong but whose
+   `existingCode` matches a hunk verbatim **anchors inline anyway**. Test the
+   cross-file case explicitly: an excerpt filed against the header that lives in
+   the source file re-files to the source file, and an excerpt appearing in two
+   files declines rather than guessing.
 1b. With 20 surviving findings and `maxInlineComments: 8`, exactly 8 are inline
    and **12 are in the body** — none are lost. Every `internal`-tier finding is
    written to `review_findings` with its reason.

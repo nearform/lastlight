@@ -43,6 +43,16 @@ function openAiCompatible(url: string, apiKey: string): Provider {
         { role: "user", content: user },
       ],
       ...(temperature !== undefined ? { temperature } : {}),
+      // Reasoning models on OpenAI-compatible endpoints burn their budget on
+      // hidden tokens before emitting any content — GLM-5.2 spends ~119 of them
+      // answering "reply with exactly: OK". For a judge that must return a small
+      // fixed JSON shape that is pure cost, so `EVAL_JUDGE_REASONING_EFFORT=none`
+      // turns it off. Unset means "provider default", which is the safe default:
+      // a model that does not know the field ignores it, but silently forcing
+      // `none` everywhere would change what an existing arm measures.
+      ...(process.env.EVAL_JUDGE_REASONING_EFFORT
+        ? { reasoning_effort: process.env.EVAL_JUDGE_REASONING_EFFORT }
+        : {}),
     }),
     extract: (json) => {
       const j = json as { choices?: { message?: { content?: string } }[] };
@@ -79,6 +89,14 @@ function providerFor(modelId: string): Provider {
     // openrouter keeps the vendor prefix (e.g. `anthropic/claude-...`).
     const or = openAiCompatible("https://openrouter.ai/api/v1/chat/completions", key);
     return { ...or, body: (_m, s, u, t) => or.body(model, s, u, t) };
+  }
+  if (family === "fireworks") {
+    const key = process.env.FIREWORKS_API_KEY;
+    if (!key) throw new Error("judge: FIREWORKS_API_KEY not set for a fireworks judge model");
+    // Fireworks ids are themselves slash-paths (`accounts/fireworks/models/…`),
+    // and `wireModel` only strips up to the FIRST slash — so the remainder is
+    // already the wire id. Routers (`…/routers/glm-5p2-fast`) work the same way.
+    return openAiCompatible("https://api.fireworks.ai/inference/v1/chat/completions", key);
   }
   if (family === "deepseek") {
     const key = process.env.DEEPSEEK_API_KEY;

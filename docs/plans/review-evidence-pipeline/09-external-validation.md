@@ -88,6 +88,136 @@ CR-Bench and c-CRAB give directly comparable public numbers
 precision, c-CRAB Claude Code at 32.1%. Running against these is how we answer
 "are we good" rather than "did we improve".
 
+Those two are **papers**: we can compare against their published numbers but we
+cannot run them. **AACR-Bench is the runnable one**, and it changes what tier 3
+costs.
+
+#### AACR-Bench — added 2026-08-22
+
+[`Alibaba-Aone/aacr-bench`](https://huggingface.co/datasets/Alibaba-Aone/aacr-bench)
+on Hugging Face, published alongside
+[`alibaba/open-code-review`](https://github.com/alibaba/open-code-review)
+(Apache-2.0, Go, 21k stars). **50 popular open-source repositories, 200 real
+pull requests, 10 languages, cross-validated by 80+ senior engineers.** Against
+that, decision #13's "eight cases from one private repo" is 25 gold findings and
+really four PRs.
+
+**Two corrections to how this was first written up here, both found by
+inspecting the artifact rather than the README (2026-08-22).**
+
+- **It is 2,145 rows, not 1,505.** The published `dataset.json` carries **1,505
+  `label=1`** (expert-verified correct) and **640 `label=0`** (expert-verified
+  incorrect). 1,505 is the leaderboard's recall *denominator*, which is why
+  `301/1505` appears in the table above. The 640 are invisible to that
+  denominator and are the more useful half for us: a labelled **negative** set
+  is something we have never had.
+- **1,597 of the 2,145 comments are machine-authored** (`is_ai_comment: true`,
+  with the generating model named in `source_model`); only **548 are
+  human-authored**. This is the single most load-bearing fact about the corpus
+  and it changes what a number from it means: the gold is "an expert agreed this
+  AI comment was valid", not "a human reviewer raised this". It therefore
+  over-represents defects AI reviewers already find, which is a survivorship
+  bias pointing the wrong way for a recall claim. **Report the two authorship
+  populations separately and never pool them.**
+
+The dataset was built to evaluate *reflection* models — "the extent to which a
+model can intercept low-quality review comments" — which is [WP6](06-adjudicate.md)'s
+job, not the reviewer's. That makes it usable in two distinct ways, and the
+cheap one is available now:
+
+| | What it measures | Cost | Depends on |
+|---|---|---|---|
+| **Use B — adjudicate** | Hand the arm a comment; can it tell `label=1` from `label=0`? | No clone, no checkout, no review run | nothing — **built**, see below |
+| **Use A — reconstruct** | Group by `pr_url`, `label=1` as `review_gold` → a 196-case `pr-review` tier | ~38 GB of mirrors; ~92% of historical head SHAs still fetchable | WP3 + WP4 to mean anything |
+
+**Use B is built**: `apps/evals/scripts/aacr-adjudicate.ts`, with
+`datasets/aacr-bench/README.md`. It is a measurement script, not a test. The
+floor to beat is pinned and costs nothing to reproduce: the null adjudicator
+(`--arm keep-all`, which is *what production does today*, there being no
+`adjudicate` phase) scores **retention 100.0% (1505/1505), interception 0.0%
+(0/640), precision 70.2%, F1 0.825**. Any WP6 adjudicator that does not beat
+0.825 while holding retention is worse than not having one.
+
+**First results, 2026-08-22: neither model beats the floor.** Haiku 4.5 scores
+F1 **0.803** (retention 91.3%, interception 15.4%); GLM-5.2-fast with reasoning
+disabled scores **0.745** (76.3% / 33.0%). Haiku's confidence axis is inert —
+no threshold on the sweep beats `keep-all`. Both judge machine-written comments
+better than human-written ones, GLM discarding 43% of valid *human* review
+comments, which is the corpus's authorship bias biting in the direction that
+matters least to us. Full table, confusion matrices and reading in
+[06-adjudicate.md](06-adjudicate.md) §"Measured 2026-08-22".
+
+Two limits of that instrument, stated so they are not quoted past:
+
+- It measures whether an arm can judge a comment **when handed the comment**. It
+  says nothing about whether our reviewer would ever have generated it, so it is
+  **not review recall** and is not comparable to the leaderboard above.
+- **It cannot supply SNR.** [08-evals.md](08-evals.md) §2 defines SNR over a
+  *generated* review (`matched ÷ (posted − matched)`); with no generation step
+  it degenerates to a restatement of precision. WP6's acceptance criteria name
+  SNR as a gate — that gate has to be read on our own eval, not on this one.
+
+**Use A** additionally needs the `pr_source_commit` gotcha recorded: it is
+`base.sha` (verified 12/12 against `gh`), **not** the head, and
+`pr_target_commit` is a *historical* head that no longer matches `head.sha` in
+11 of 12 sampled PRs. `seed.ts`'s `ensurePrCommitsInCache` already handles that
+exact case with its bare-SHA fallback, so the runtime needs no change; the
+importer is the only new code.
+
+It also ships a **14-entry leaderboard** whose two most important rows are the
+same model under two harnesses:
+
+| Harness | Model | F1 | Precision | Recall | Time | Tokens |
+|---|---|---|---|---|---|---|
+| Open Code Review v1.3.1 | Claude-4.6-Opus | **25.10%** | **33.90%** (301/889) | 20.00% (301/1505) | 1m23s | 385K |
+| Claude Code v2.1.169 (a skill) | Claude-4.6-Opus | 11.57% | 7.23% (435/5980) | **28.90%** (435/1505) | 13m6s | 5,664K |
+
+Read the raw counts, not the percentages. The skill posts 5,980 findings and
+catches 435 real ones. The deterministic hybrid posts 889 and catches 301: it
+**discards roughly 5,100 findings to buy precision, and loses 134 real defects
+doing it.** Their README states the trade openly — *"its Recall is lower than
+general-purpose agents, a deliberate trade-off favoring precision over noise."*
+
+Three things follow, and they are why this belongs in the plan rather than in a
+research note.
+
+1. **Third independent corroboration of locked decision #1.** A filtering
+   deterministic layer cost 8.9 points of recall against the unfiltered agent,
+   on a 1,505-issue set. That is the same shape as our own v2 result (1/25 →
+   2/25, F1 halved, reverted) and BitsAI-CR's ReviewFilter (precision 54.5 →
+   67.1, recall 45.5 → 39.8), now from a third direction. **Their determinism
+   routes prompts; ours generates facts.** That distinction is the whole bet,
+   and it is still the unproven part.
+2. **It is also the strongest available warning.** This is 29k lines of Go with
+   57k lines of tests behind it, and its determinism did not raise recall.
+   Nothing on the board exceeds **28.9%** recall. Whatever we claim after WP3
+   and WP4, it is claimed into a field whose ceiling is roughly one defect in
+   four.
+3. **It gives us a same-class baseline to sanity-check our own harness
+   against.** A plain Claude Code skill scores 28.9% recall here. We score
+   0.040 micro-recall on skillspro. The datasets and the graders differ so the
+   numbers are not comparable, but the gap is large enough to be worth
+   excluding a mundane cause before an exotic one: their stated failure mode of
+   general agents is *"on larger changesets, agents cut corners, selectively
+   reviewing only some files"*, and "posted nothing at all on five of seven
+   recall cases" is that failure mode. See
+   [03-seed-and-survey.md](03-seed-and-survey.md) §"Coverage is a frozen
+   denominator".
+
+**Caveats, to be carried into any write-up.**
+
+- The leaderboard is maintained by the vendor whose product tops it. Quote our
+  own run; cite theirs as a claim, not as ground truth.
+- Their grading is their own (annotated issues plus a matcher). Either map
+  micro-recall / SNR onto their scoring or adopt theirs and report both, but
+  **say which**, and never mix the two denominators (`01b` house rule).
+- These are public repositories, so the contamination threat below applies to
+  AACR-Bench exactly as it does to the Martian set. It is a *contaminated,
+  large, public* set, complementary to a *clean, tiny, private* one. Report
+  unpooled.
+- 10 languages means it exercises the non-TS half, where evidence coverage is
+  2.7%. Read acceptance criterion 6 before reading any headline from it.
+
 ## WP1c — Stage 2 grammars: justified, and SCOPED
 
 **Added 2026-08-21.** Tier 1 is 40 non-TypeScript cases out of 50, and today the
@@ -231,6 +361,15 @@ result, suspect contamination before celebrating.
 7. **Added 2026-08-21.** WP1c ships module-level declarations only, and the
    `name-match-gate` numbers are re-measured on the shipped grammars rather than
    carried over from the TypeScript proxy they were derived on.
+8. **Added 2026-08-22.** A tier-3 **AACR-Bench** arm runs for the shipped
+   baseline and the candidate, and the **`lastlight` skill's own score is
+   reported beside Claude Code's published 28.90% recall on the same set**.
+   That row is a harness self-check, not a product claim: a score far below it
+   indicts our coverage, not our review quality, and must be chased before any
+   pipeline result from WP3/WP4 is believed.
+9. **Added 2026-08-22.** Grading provenance is stamped on every AACR-Bench
+   result — whose matcher, whose denominator — and our number and theirs are
+   never averaged, pooled or presented in the same column.
 
 ## Non-goals
 

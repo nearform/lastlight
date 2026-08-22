@@ -244,6 +244,68 @@ to disjoint files makes collapse **impossible by construction** rather than by
 instruction, and disjoint paths are also what makes the phases safe to
 parallelise later ([WP5](05-parallel-phases.md)).
 
+### Coverage is a frozen denominator
+
+**Added 2026-08-22, from `alibaba/open-code-review` (Apache-2.0). Prior art, not
+speculation** — see [09](09-external-validation.md) §"AACR-Bench" for why that
+project's *conclusions* are the opposite of ours while this *mechanism* is worth
+taking wholesale.
+
+The blocker this addresses is the plainest one in
+[00-evidence](00-evidence.md): the shipped reviewer **posted nothing at all on
+five of seven recall cases**. Open Code Review names the same failure as the
+first of three it built its architecture against — *"on larger changesets,
+agents tend to cut corners, selectively reviewing only some files and missing
+others"* — and the fix is not a prompt.
+
+**The rule.** A run cannot report what it did not look at, and it must not be
+able to *silently* look at less than it was given. So:
+
+1. **Register before dispatch.** Every planned item (here: every obligation, and
+   every changed file an obligation names) is registered into a `selected` set
+   before any model call.
+2. **Seal it.** After sealing, registration fails. The denominator cannot grow
+   to match what was actually achieved — which is the only way it can lie.
+3. **Mark, never re-register.** Items move to `reviewed` / `failed` / `waived`
+   by transition, keyed on a **content-independent item id** so a resume that
+   changes diff content does not silently mint a second identity and no-op the
+   transition. (Open Code Review keys transitions on `ItemID(operation, mode,
+   oldPath, newPath)` and keeps the content-sensitive `Fingerprint` as a
+   *separate* field used only for checkpoint matching. Two keys, two jobs. We
+   have already been bitten by the general shape of this at resume boundaries —
+   see the `skip_if` and `phaseOutputs` traps in [HANDOFF](HANDOFF.md).)
+4. **The terminal state is derived from coverage alone.** Not from finding
+   count, not from warnings:
+
+   ```
+   run_failure set        -> failed
+   selected == 0          -> skipped      (NOT success)
+   failed == 0            -> complete
+   failed == selected     -> failed
+   otherwise              -> partial
+   ```
+
+This is the missing half of **§D12**. D12 says *fail loud means loud in the
+artifact, never fatal to the run*, because `cron-review.yaml` re-dispatches a
+failed run every 30 minutes forever. What D12 did not give us was a way to be
+loud about **partial** work. `partial` is exactly that state: the run succeeded,
+`assessedHeadShaByWorkflow` is written, the re-dispatch loop stays shut, and the
+artifact still says which obligations were never surveyed and why.
+
+It is also the same invariant `code-facts` already enforces one level down —
+**`null` means nobody looked, `[]` means looked and found none**
+([01](01-code-facts.md), and the M6 bug in the package's `CLAUDE.md`). A sealed
+coverage set is that distinction applied to the review rather than to a fact.
+`APPROVE` with zero findings and `terminal_state: complete` is a claim.
+`APPROVE` with zero findings and `terminal_state: partial` is the bug we have
+been shipping for months without being able to see it.
+
+**Where it lives.** The survey phases produce it, `adjudicate` reads it
+([06](06-adjudicate.md)), and `post-review` must refuse to emit `APPROVE` on a
+`partial` or `skipped` run. The eval harness reads it too: a case whose coverage
+is `partial` is `notMeasured`, never a zero
+([08-evals.md](08-evals.md) — *"a missing analyser is not a null result"*).
+
 ### Hypothesis record
 
 ```jsonc
