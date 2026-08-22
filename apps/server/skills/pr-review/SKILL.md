@@ -199,8 +199,8 @@ the shape is:
   "findings": [
     {
       "path": "src/foo.ts",
+      "existingCode": "the verbatim line(s) this finding is about",
       "line": 42,
-      "side": "RIGHT",
       "severity": "Critical",
       "title": "Short label for the finding",
       "body": "Concrete impact — what breaks, for which input or caller.",
@@ -216,11 +216,16 @@ SHA and diff from the harness's own context and the checkout, so you do **not**
 record any of that metadata (that reliance was a footgun — omit it).
 
 Rules:
-- **Anchor precisely.** `path` must match the diff path exactly; `line`/`side`
-  must point at a line that appears in the diff (added/context → `side: RIGHT`;
-  removed/context → `side: LEFT`). A finding whose line isn't in the diff is
-  demoted to the summary body, so get the anchor right. Use optional `start_line`
-  (same side) for a multi-line range.
+- **Quote the code; do not count the lines.** `existingCode` is the anchor of
+  record: copy the line(s) the finding is about character-for-character and the
+  harness finds them for you — in the file's own hunks, then the whole file, then
+  (on a *unique* match) elsewhere in the diff, which is how a finding filed
+  against the wrong half of a declaration/implementation pair still lands. `line`
+  and `side` are **advisory hints** that get overwritten; `start_line` is derived,
+  so do not set it. `path` should still match the diff path. An excerpt that
+  cannot be found is demoted to the summary body — nothing is lost, but an inline
+  comment at the defect site is worth much more, so copy carefully rather than
+  paraphrasing.
 - `severity` is `Critical` or `Important` only.
 - `suggestion` is optional — include it only when a concrete one-to-few-line fix
   is obvious. It must be the exact replacement text for the anchored line(s),

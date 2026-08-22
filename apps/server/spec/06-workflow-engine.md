@@ -236,7 +236,11 @@ deterministic `bash` / `script` pair (a command, no LLM).
   and supplies every other fact from the harness's own run context: the PR
   number (`ctx.prNumber`/`ctx.issueNumber`), the base ref (`ctx.baseBranch`),
   and the head SHA + diff (`git` on the checkout). It anchors each finding to a
-  changed line via `src/engine/github/review-poster.ts`, demotes off-diff
+  changed line via `src/engine/github/review-poster.ts` — **deriving** the line
+  from the finding's verbatim `existingCode` excerpt rather than trusting the
+  number the model counted (own hunks → whole head file → a *unique* match
+  elsewhere in the diff, which re-files a finding filed against the wrong half
+  of a declaration/implementation pair) — demotes off-diff
   findings to the body, and posts one review through `GitHubClient` (App auth in
   prod; a bearer token + `config.githubApiBaseUrl` against the eval mock, which
   serves no App-token or diff endpoint). A genuine failure — missing findings

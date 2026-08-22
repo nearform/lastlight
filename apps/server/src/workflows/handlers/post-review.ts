@@ -1,12 +1,15 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import { GitHubClient } from "../../engine/github/github.js";
 import {
+  anchorFindings,
   buildReview,
   buildBodyOnlyReview,
-  parseDiff,
+  commentableOf,
+  parseDiffFiles,
   worstAxis,
+  type DiffFile,
   type ReviewFindingsDoc,
 } from "../../engine/github/review-poster.js";
 import { getRuntimeConfig } from "../../config/config.js";
@@ -215,12 +218,34 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     // harness) runs a guaranteed-to-fail `git diff` that dumps a usage block and
     // a FALSE "demoting all findings to the body" on every run — before the API
     // fallback silently rescues the findings.
-    let commentable =
-      localHeadSha && baseRef ? this.gitCommentableDiff(hostRepoDir, baseRef) : null;
+    let files = localHeadSha && baseRef ? this.gitDiffFiles(hostRepoDir, baseRef) : null;
     // No local checkout (or no base ref) — fall back to GitHub's own PR diff
     // (the same merge-base diff) so findings still anchor inline on k8s instead
     // of demoting to the body.
-    if (!commentable) commentable = await this.apiCommentableDiff(github, owner, repo, prNumber);
+    if (!files) files = await this.apiDiffFiles(github, owner, repo, prNumber);
+    const commentable = files ? commentableOf(files) : null;
+
+    // WP6a — derive each finding's anchor from its verbatim `existingCode`
+    // before anything partitions on `line`. A finding whose analysis is right
+    // and whose arithmetic is off by two is otherwise demoted to the body, which
+    // is the full price of a wrong answer for a counting slip. Inert on a
+    // findings.json whose entries carry no excerpt: `anchorFindings` returns
+    // them untouched, so this cannot move a deployment that has not opted in.
+    if (files) {
+      const anchored = anchorFindings(
+        Array.isArray(doc.findings) ? doc.findings : [],
+        files,
+        localHeadSha ? (p) => this.readHeadFile(hostRepoDir, p) : undefined,
+      );
+      if (anchored.stats.hunk || anchored.stats.file || anchored.stats.relocated) {
+        log.info("Anchored findings from their code excerpts", {
+          repo: `${owner}/${repo}`,
+          prNumber,
+          ...anchored.stats,
+        });
+      }
+      doc = { ...doc, findings: anchored.findings };
+    }
     const review = buildReview(doc, commentable);
 
     const repeat = this.repeatOfLastReview(history.latest, review);
@@ -372,6 +397,29 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     return repoDir;
   }
 
+  /**
+   * Read a head-side file for the anchor cascade's step 2. Best-effort by
+   * design: a miss just means the excerpt is not found there and the cascade
+   * moves on to relocation.
+   *
+   * **The path comes from a model**, so it is confined to the checkout the same
+   * way every other path in this handler is — `resolve` then a prefix check, not
+   * a `..` denylist. Size-capped because the excerpt scan is O(file) and a
+   * findings.json naming a vendored bundle should cost nothing.
+   */
+  private readHeadFile(repoDir: string, relPath: string): string | null {
+    try {
+      const root = resolve(repoDir);
+      const full = resolve(root, relPath);
+      if (full !== root && !full.startsWith(root + sep)) return null;
+      const st = statSync(full);
+      if (!st.isFile() || st.size > 2 * 1024 * 1024) return null;
+      return readFileSync(full, "utf8");
+    } catch {
+      return null;
+    }
+  }
+
   /** Build the GitHub client for the post: token+baseUrl in evals, App auth in prod. */
   private buildReviewClient(): GitHubClient {
     return resolveReviewGitHubClient(this.run.config);
@@ -391,8 +439,8 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     }
   }
 
-  /** Compute the base…head diff locally and parse it into a commentable set. */
-  private gitCommentableDiff(repoDir: string, baseRef: string): Map<string, Set<string>> | null {
+  /** Compute the base…head diff locally and parse it into per-file hunks. */
+  private gitDiffFiles(repoDir: string, baseRef: string): DiffFile[] | null {
     const git = (...args: string[]): string =>
       execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
     const tryGit = (...args: string[]): void => {
@@ -406,14 +454,14 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     // The three-dot (merge-base…head) diff mirrors GitHub's own PR diff exactly,
     // so it's the ideal anchor set — but it needs the merge-base present locally,
     // which a shallow `--depth 1 --single-branch` pr-review clone doesn't have.
-    const threeDot = () => parseDiff(git("diff", `origin/${baseRef}...HEAD`));
+    const threeDot = () => parseDiffFiles(git("diff", `origin/${baseRef}...HEAD`));
     // Two-dot compares the two end trees directly — no history walk — so it works
     // on ANY clone depth (down to depth 1). It's a *superset* of the three-dot
     // diff (it also shows changes the base picked up since the PR forked), which
     // is a safe over-approximation for anchoring: the agent's findings sit on the
     // PR's own changed lines (⊆ three-dot ⊆ two-dot), and any stray off-diff
     // anchor is caught by the body-only POST retry.
-    const twoDot = () => parseDiff(git("diff", `origin/${baseRef}`, "HEAD"));
+    const twoDot = () => parseDiffFiles(git("diff", `origin/${baseRef}`, "HEAD"));
 
     // Materialize origin/<base> as a real remote-tracking ref (a single-branch
     // clone's refspec only covers the PR branch, so a bare `fetch origin <base>`
@@ -462,19 +510,19 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     return null;
   }
 
-  /** Fetch the PR's diff from the GitHub API and parse it into a commentable
-   *  set — the fallback when there's no local checkout (k8s). GitHub's PR diff
-   *  is the same merge-base…head diff the local three-dot path targets, so the
-   *  anchor set is identical. Best-effort: any failure returns null and every
-   *  finding demotes to the body (the review still posts). */
-  private async apiCommentableDiff(
+  /** Fetch the PR's diff from the GitHub API and parse it into per-file hunks —
+   *  the fallback when there's no local checkout (k8s). GitHub's PR diff is the
+   *  same merge-base…head diff the local three-dot path targets, so the anchor
+   *  set is identical. Best-effort: any failure returns null and every finding
+   *  demotes to the body (the review still posts). */
+  private async apiDiffFiles(
     github: GitHubClient,
     owner: string,
     repo: string,
     prNumber: number,
-  ): Promise<Map<string, Set<string>> | null> {
+  ): Promise<DiffFile[] | null> {
     try {
-      return parseDiff(await github.getPullRequestDiff(owner, repo, prNumber));
+      return parseDiffFiles(await github.getPullRequestDiff(owner, repo, prNumber));
     } catch (err) {
       return this.diffFailed(err instanceof Error ? err.message : String(err));
     }

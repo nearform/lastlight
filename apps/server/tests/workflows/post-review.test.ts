@@ -297,7 +297,7 @@ describe("post-review action (runPostReview)", () => {
 
   it("does NOT shell out to the local git diff when there is no checkout, even with a base ref (k8s)", async () => {
     // Robin's homelab hit this: a real PR carries `baseBranch` ("main"), so
-    // pre-fix `gitCommentableDiff` ran against the harness path — which on k8s
+    // pre-fix `gitDiffFiles` ran against the harness path — which on k8s
     // holds only the harvested `.lastlight/`, never a `.git`. Every git call
     // failed with `fatal: not a git repository`, dumping the giant `git diff`
     // usage block + a FALSE "demoting all findings to the body" (the API
@@ -306,8 +306,8 @@ describe("post-review action (runPostReview)", () => {
     // misleading log. seedFindings writes findings.json but no `.git`, exactly
     // reproducing the k8s state; the base ref present is what triggers the bug.
     const gitDiffSpy = vi.spyOn(
-      GitHubPostReviewHandler.prototype as unknown as { gitCommentableDiff: () => unknown },
-      "gitCommentableDiff",
+      GitHubPostReviewHandler.prototype as unknown as { gitDiffFiles: () => unknown },
+      "gitDiffFiles",
     );
     try {
       const taskId = "widget-42-nogit-baseref";
