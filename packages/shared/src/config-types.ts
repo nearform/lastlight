@@ -266,6 +266,35 @@ export interface ReviewAnalysisConfig {
    */
   maxObligations: number;
   /**
+   * Which obligation BLOCK the six survey families are handed — the CONTROL for
+   * 2026-08-23, and the only key in this block that exists to make a result
+   * readable rather than to buy compute.
+   *
+   * `full` (the default) is that day's block: a mandatory discharge contract
+   * with a `discharge` field to record a code in, an un-truncated id checklist,
+   * and one worked exemplar. It moved discharge compliance 0/33 → 33/33 on
+   * `prreview__skillspro-1587-r2` — and moved the union of matched gold
+   * **4-of-5 → 0-of-5**, over three repeats, with half to two thirds of every
+   * hypothesis becoming a clean quote (`QUOTE`, `failureScenario: null`).
+   *
+   * Two variables changed in the same commit, so the run cannot say which:
+   * whether the obligations ask the WRONG QUESTION and making a wrong question
+   * mandatory turns hunting into checklist-clearing, or whether RELIABLE SEEDING
+   * itself suppresses discovery (the same commit stopped ~24% of survey branches
+   * losing their seed entirely). `minimal` renders the pre-2026-08-23 block —
+   * same obligations, delivered just as reliably, asking the old question — so
+   * one arm separates them.
+   *
+   * It reaches the five facts-derived families as `lastlight-facts seed
+   * --contract`, is stamped into `obligations.json`, and the `spec` family reads
+   * it directly (`renderSpecObligations`) because it is rendered harness-side.
+   * **`lastlight-facts discharge` degrades to its `test -s` floor under
+   * `minimal`**: measured compliance under that block was 0/31, 0/34 and 0/40,
+   * so a gate demanding a code the block never asked for would fail every family
+   * of every run.
+   */
+  obligationContract: "full" | "minimal";
+  /**
    * How many of the six survey families actually run.
    *
    * **Six, and the default is not negotiable down without saying which.** The
@@ -505,6 +534,9 @@ export function defaultReviewConfig(): ReviewConfig {
       // capping generation truncates discovery, which is the measured ceiling.
       maxSpecObligations: 40,
       maxObligations: 40,
+      // `full` — today's block, byte-for-byte. `minimal` is an experiment arm and
+      // has to be asked for by name.
+      obligationContract: "full",
       surveyPasses: 6,
       surveyConcurrency: 6,
       probes: false,

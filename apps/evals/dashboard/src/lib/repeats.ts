@@ -16,6 +16,35 @@ import { microReview } from "../../../src/review-metrics.js";
 import type { IndexRun, InstanceResult, Scorecard } from "../types";
 
 /**
+ * ── Why this is not `varianceRollup` ────────────────────────────────────────
+ *
+ * The harness has its own band roll-up (`varianceRollup` in
+ * `src/review-metrics.ts`, driven headlessly by `scripts/band.ts`), and on a
+ * FULLY-TRACED repeat group the two agree exactly — `repeats.test.ts` pins that
+ * against the real three-run fixture, so the definitions of band / union /
+ * intersection cannot drift apart unnoticed.
+ *
+ * They deliberately part company on INCOMPLETE data, and that is why this is not
+ * a call into that function:
+ *
+ *  - a cell here is `boolean | undefined`, where `undefined` means "this repeat
+ *    has no judge trace for this case" — **unknown, not missed**. `varianceRollup`
+ *    has no third state: it drops the whole case into `untraced` and excludes its
+ *    gold from the denominator. Both are honest; only one of them can be drawn.
+ *  - so `totalGold` here counts a partially-traced case (its unknown cells cannot
+ *    satisfy the intersection and do not count toward the union), while
+ *    `VarianceRollup.gold` excludes it.
+ *  - and this carries what a reader needs and a number does not: each gold row's
+ *    description + severity, `onceOnly`, the per-column git SHA and `partial`.
+ *
+ * Delegating would mean either feeding `false` for the unknown cells — turning
+ * "not measured" into "missed", exactly the conflation the rest of this file
+ * exists to prevent — or dropping the cases the view is most useful for. The
+ * duplication is three `filter` calls; the information loss would be the point
+ * of the screen.
+ */
+
+/**
  * The heuristic group key for a run, used when `meta.repeat.group` is absent —
  * which is every run measured before that field existed.
  *

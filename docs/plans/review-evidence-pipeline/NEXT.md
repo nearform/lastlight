@@ -39,15 +39,34 @@ All in `~/work/nearform-evals/eval-results/pr-review/`.
 | `2026-08-22_194234-00cc469` | **wp3 run 2** | 2 of 25 (μrec 0.080), 23 posted, $17.55 |
 | `2026-08-22_201607-64862d5` | **wp3 run 3** | 5 of 25 (μrec 0.200), 44 posted |
 
+A fifth set matters as much and is not in that table — the **2026-08-23
+`--repeats 3` band** on `prreview__skillspro-1587-r2`, which is the hard
+comparator for X1: `2026-08-23_053348-64862d5` (group), `054143`, `055425`.
+Single case, 5 gold, **0 matched in all three**, and the first run in this
+plan's history to carry real provenance (`meta.repeat`, `meta.overlay`,
+`meta.argv`).
+
 `TMPDIR` is purged periodically, so the kept workspaces are **copied out** to:
 
 ```
 ~/lastlight-run-artifacts/2026-08-22_184650-wp3-run1/             (run 1 — note: no sha in this one)
 ~/lastlight-run-artifacts/2026-08-22_201607-64862d5-wp3-run3/     (run 3)
+~/lastlight-run-artifacts/2026-08-23_053348-64862d5-wp3-rep1/     (the band, copied out 2026-08-23)
+~/lastlight-run-artifacts/2026-08-23_054143-64862d5-wp3-rep2/
+~/lastlight-run-artifacts/2026-08-23_055425-64862d5-wp3-rep3/
   └── <instance_id>/pr-review/
         facts.json  obligations.json  obligations/*.md
         hypotheses/*.jsonl  findings.json  disposition.json
 ```
+
+**The four 2026-08-22 runs carry NO overlay provenance** — `meta.overlay`,
+`meta.overlays`, `meta.harness`, `meta.argv` and `meta.keepWorkspace` are all
+absent; they predate the `RunProvenance` stamp. Their identity as
+"baseline" vs "wp3 run 1/2/3" exists **only in this file**. Any tool that
+re-analyses them must take the run ids as an argument and must never infer the
+arm from disk — all four are the same tier, the same run type, the same arm
+label and the same 8-case set, so anything grouping by those will fold the
+*baseline* in with the candidates.
 
 The **transcripts are not there** — they live beside the scorecards, under
 `eval-results/pr-review/<run-id>/sessions/<instance>__<model>/trial-1/*.jsonl`,
@@ -206,6 +225,59 @@ for finding 3's "identical brief, 18 vs 43 hypotheses", and it should be fixed
 before any more money is spent measuring the variance it causes. (`spec` reads no
 `.md` at all — it is seeded inline, per finding 8 — so it is excluded from the
 denominator, not a 24th failure.)
+
+## 2026-08-23, later — internal recall exists now, and it moves the target
+
+**The instrument that measures discovery separately from posting had never been
+wired** (see [RESTART.md](RESTART.md) §2d). It is now, and back-filled onto every
+preserved run for ~$0.66 of judge calls. What it says reframes most of this file.
+
+| run | posted recall | **internal recall** |
+|---|---|---|
+| `2026-08-22_184650` (wp3 run 1) | 0.320 (8/25) | **0.480 (12/25)** |
+| `2026-08-22_201607` (wp3 run 3) | 0.200 (5/25) | **0.480 (12/25)** |
+| `2026-08-23` band, rep 1 / 2 / 3 | 0.000 / 0.000 / 0.000 | **0.400 / 0.400 / 0.000** |
+
+**The two 8-case runs discovered exactly the same amount — 12 of 25, both — and
+said 8 and 5.** The whole 0.120 posted-recall difference between the two runs
+that this file has spent pages characterising as *"the pipeline is noisy"* sits
+**downstream of discovery**. Discovery was stable; what happened to it afterwards
+was not.
+
+Decomposing the 12 → 8 and 12 → 5 gaps:
+
+| | run 1 | run 3 |
+|---|---|---|
+| found | 12 | 12 |
+| …on a posted tier | 9 | 9 |
+| …withheld by the boundary | 1 | 3 |
+| …tier unknown (no `disposition.json`) | 2 | 0 |
+| **credited by the posted-review judge** | **8** | **5** |
+
+So the attention boundary is **not** the main channel. Nine matched findings were
+on a posted tier in both runs, and the judge credited 8 and 5 — meaning
+**something loses a true finding between "tiered for posting" and "recognised in
+the review text"**, and in run 3 that channel is larger than the boundary. Two
+candidate causes, and they are not the same problem:
+
+- **The body buries it.** Run 3 posted 44 findings; the 08-23 rep1 posted 27 body
+  bullets of which 17 were anti-findings. The judge's extract step is instructed
+  to ignore *"praise, approvals, meta commentary"* — a real finding in that
+  company may read as confirmation. If this is it, anti-findings do not merely
+  cost attention, **they camouflage the findings that matter**, and the
+  clean-discharge demotion is a recall lever rather than a precision one.
+- **Grader noise** between two matching passes over different inputs (structured
+  findings vs prose). `scripts/rescore.ts --repeat-judge N` measures exactly this
+  and is the cheapest next thing in this file.
+
+**Consequences for what to run.** Read every arm on internal recall first —
+posted recall now has a measured, large, and previously unattributed loss stack
+in front of it. And the 08-23 regression is **not purely a discovery regression**:
+two of its three repeats found 2 of 5 and posted none of them.
+
+**This also retires [RESTART.md](RESTART.md) §3c as written.** *"Both misses were
+discovery failures … the filters demonstrably kept their hands off gold"* was
+traced on one run's three gold. Over 25 gold it does not hold.
 
 ## Five experiments, cheapest first
 

@@ -13,6 +13,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  buildBodyOnlyReview,
   buildReview,
   renderDemotedGrouped,
   tierFindings,
@@ -133,7 +134,8 @@ describe("tierFindings — the internal tier", () => {
       COMMENTABLE,
       BOUNDARY,
     );
-    expect(t.internal.map((x) => x.title)).toEqual(["dark"]);
+    expect(t.internal.map((x) => x.finding.title)).toEqual(["dark"]);
+    expect(t.internal.map((x) => x.reason)).toEqual(["below-floor"]);
     expect(t.inline).toHaveLength(2);
   });
 
@@ -155,7 +157,8 @@ describe("tierFindings — an EXPLICIT tier, which is a cross-package seam", () 
     // turning "we recorded what we could not adjudicate" into "we published
     // what we could not adjudicate" — the exact inversion of the floor's job.
     const t = tierFindings([f({ line: 1, tier: "internal", title: "repaired" })], COMMENTABLE, BOUNDARY);
-    expect(t.internal.map((x) => x.title)).toEqual(["repaired"]);
+    expect(t.internal.map((x) => x.finding.title)).toEqual(["repaired"]);
+    expect(t.internal.map((x) => x.reason)).toEqual(["adjudicated"]);
     expect(t.inline).toHaveLength(0);
     expect(t.body).toHaveLength(0);
   });
@@ -186,6 +189,200 @@ describe("tierFindings — an EXPLICIT tier, which is a cross-package seam", () 
   it("still applies the floor to an untagged low-confidence finding", () => {
     const t = tierFindings([f({ line: 1, confidence: 0.01 })], COMMENTABLE, BOUNDARY);
     expect(t.internal).toHaveLength(1);
+  });
+});
+
+/**
+ * The anti-finding rule.
+ *
+ * A finding whose supporting hypotheses are ALL clean discharges — `QUOTE` with
+ * an explicit `failureScenario: null`, the survey saying "I looked, I quote the
+ * line, and it is fine" — is a confident report that nothing is wrong. It
+ * cannot match a gold defect by construction, so posting it is pure attention
+ * cost.
+ *
+ * Measured on `prreview__skillspro-1587-r2` (three identical repeats,
+ * 2026-08-23): 23 / 25 / 30 of 45 / 48 / 46 hypotheses were clean discharges,
+ * 17 / 14 / 7 findings traced entirely to them, and on the first repeat all 17
+ * were POSTED. The confidence bars cannot reach them — minimum confidence
+ * across that whole document is 0.75 — which is why this is a rule about what
+ * the finding SAYS, not about how sure it is.
+ */
+describe("tierFindings — findings whose evidence is entirely clean discharges", () => {
+  const CLEAN = new Set(["contract-002", "contract-003", "spec-001"]);
+
+  it("records a finding built only from clean discharges, and does not post it", () => {
+    const t = tierFindings(
+      [f({ line: 1, confidence: 0.95, hypotheses: ["contract-002"], title: "anti" })],
+      COMMENTABLE,
+      BOUNDARY,
+      CLEAN,
+    );
+    expect(t.internal.map((x) => [x.finding.title, x.reason])).toEqual([["anti", "clean-discharge"]]);
+    expect(t.inline).toHaveLength(0);
+    expect(t.body).toHaveLength(0);
+  });
+
+  it("holds back a HIGH-confidence one, which is the whole point", () => {
+    // 1.00 confidence, no family bar, on-diff: every existing gate passes it.
+    // Only its provenance says it reports nothing.
+    const t = tierFindings(
+      [f({ line: 1, confidence: 1, hypotheses: ["contract-002", "contract-003"] })],
+      COMMENTABLE,
+      BOUNDARY,
+      CLEAN,
+    );
+    expect(t.internal).toHaveLength(1);
+  });
+
+  it("does NOT touch a finding with no hypotheses at all — absence of provenance is not innocence", () => {
+    // Measured: 0 / 1 / 1 findings across the three repeats carried no ids.
+    // They are generated downstream of the surveys, or are the shipped
+    // reviewer's own, and nothing about them is knowable from an empty list.
+    const t = tierFindings(
+      [f({ line: 1, title: "none" }), f({ line: 2, hypotheses: [], title: "empty" })],
+      COMMENTABLE,
+      BOUNDARY,
+      CLEAN,
+    );
+    expect(t.internal).toHaveLength(0);
+    expect(t.inline.map((x) => x.title)).toEqual(["none", "empty"]);
+  });
+
+  it("does NOT touch a finding citing an id that resolves to no row", () => {
+    const t = tierFindings(
+      [f({ line: 1, hypotheses: ["contract-002", "ghost-001"], title: "unresolvable" })],
+      COMMENTABLE,
+      BOUNDARY,
+      CLEAN,
+    );
+    expect(t.internal).toHaveLength(0);
+    expect(t.inline.map((x) => x.title)).toEqual(["unresolvable"]);
+  });
+
+  it("posts a MIXED finding — one defect hypothesis is enough to earn the review", () => {
+    // `contract-009` is not in the clean set: either it discharged a defect or
+    // it is not a clean QUOTE. Either way the finding is not an anti-finding,
+    // and demoting it would be the recall loss this boundary exists to avoid.
+    const t = tierFindings(
+      [f({ line: 1, hypotheses: ["contract-002", "contract-009"], title: "mixed" })],
+      COMMENTABLE,
+      BOUNDARY,
+      CLEAN,
+    );
+    expect(t.internal).toHaveLength(0);
+    expect(t.inline.map((x) => x.title)).toEqual(["mixed"]);
+  });
+
+  it("is inert with no clean set and with an empty one — no pipeline, no change", () => {
+    const findings = [f({ line: 1, hypotheses: ["contract-002"], title: "anti" })];
+    for (const clean of [undefined, new Set<string>()]) {
+      const t = tierFindings(findings, COMMENTABLE, BOUNDARY, clean);
+      expect(t.internal, String(clean)).toHaveLength(0);
+      expect(t.inline.map((x) => x.title)).toEqual(["anti"]);
+    }
+  });
+
+  it("still obeys an explicit `internal` first, and labels it as the document's own call", () => {
+    // Ordering is load-bearing: the conservation floor's repaired findings have
+    // no confidence and may cite any hypothesis. They must read as
+    // `adjudicated`, not be re-explained by whichever rule happened to run.
+    const t = tierFindings(
+      [f({ line: 1, tier: "internal", hypotheses: ["contract-002"] })],
+      COMMENTABLE,
+      BOUNDARY,
+      CLEAN,
+    );
+    expect(t.internal.map((x) => x.reason)).toEqual(["adjudicated"]);
+  });
+
+  it("prefers `clean-discharge` over `below-floor` when both apply", () => {
+    // Same tier either way; the more specific reason is the one worth keeping,
+    // because "we withheld it because it says nothing" and "we withheld it
+    // because we were unsure" are different facts about the same run.
+    const t = tierFindings(
+      [f({ line: 1, confidence: 0.01, hypotheses: ["spec-001"] })],
+      COMMENTABLE,
+      BOUNDARY,
+      CLEAN,
+    );
+    expect(t.internal.map((x) => x.reason)).toEqual(["clean-discharge"]);
+  });
+
+  it("holds back an OFF-DIFF anti-finding too, rather than folding it into the body", () => {
+    const t = tierFindings(
+      [f({ line: 999, hypotheses: ["spec-001"] })],
+      COMMENTABLE,
+      BOUNDARY,
+      CLEAN,
+    );
+    expect(t.internal.map((x) => x.reason)).toEqual(["clean-discharge"]);
+    expect(t.body).toHaveLength(0);
+  });
+
+  it("conserves: nothing is dropped, only re-routed", () => {
+    const findings = [
+      f({ line: 1, hypotheses: ["contract-002"], title: "anti" }),
+      f({ line: 2, hypotheses: ["contract-009"], title: "real" }),
+      f({ line: 3, title: "unprovenanced" }),
+    ];
+    const t = tierFindings(findings, COMMENTABLE, BOUNDARY, CLEAN);
+    expect(t.inline.length + t.body.length + t.internal.length).toBe(3);
+    expect(t.internal.map((x) => x.finding.title)).toEqual(["anti"]);
+  });
+});
+
+describe("buildReview — an anti-finding never reaches the review text", () => {
+  it("keeps it out of both the comments and the body", () => {
+    const doc = {
+      summary: "s",
+      findings: [
+        f({ line: 1, hypotheses: ["contract-002"], title: "anti", body: "SHOULD NOT APPEAR" }),
+        f({ line: 2, hypotheses: ["contract-009"], title: "real", body: "keep" }),
+      ],
+    };
+    const after = buildReview(doc, COMMENTABLE, BOUNDARY, new Set(["contract-002"]));
+    expect(after.internalCount).toBe(1);
+    expect(after.inlineCount).toBe(1);
+    expect(after.body).not.toContain("SHOULD NOT APPEAR");
+    expect(after.comments[0]!.body).toContain("real");
+  });
+
+  it("ignores the clean set entirely when no boundary is configured", () => {
+    // The pre-WP6b branch: anchorability is the only question, so a deployment
+    // that never opted in cannot be moved by a hypotheses directory.
+    const doc = { summary: "s", findings: [f({ line: 1, hypotheses: ["contract-002"], title: "anti" })] };
+    const before = buildReview(doc, COMMENTABLE, undefined, new Set(["contract-002"]));
+    expect(before.inlineCount).toBe(1);
+    expect(before.internalCount).toBe(0);
+  });
+});
+
+describe("buildBodyOnlyReview — the 422 retry must not republish the internal tier", () => {
+  it("posts the inline+body tiers and withholds the rest when given the tiering", () => {
+    // Without this the guarantee is conditional on GitHub accepting the first
+    // POST: a stale anchor 422s and the retry publishes every anti-finding and
+    // every hypothesis the conservation floor repaired — a publication nobody
+    // decided on, reached through a failure in an unrelated request.
+    const doc = {
+      summary: "s",
+      findings: [
+        f({ line: 1, title: "posted" }),
+        f({ line: 2, title: "anti", hypotheses: ["contract-002"] }),
+        f({ line: 3, title: "repaired", tier: "internal" as const }),
+      ],
+    };
+    const tiered = tierFindings(doc.findings, COMMENTABLE, BOUNDARY, new Set(["contract-002"]));
+    const retry = buildBodyOnlyReview(doc, tiered);
+    expect(retry.demotedCount).toBe(1);
+    expect(retry.body).toContain("posted");
+    expect(retry.body).not.toContain("anti");
+    expect(retry.body).not.toContain("repaired");
+  });
+
+  it("is byte-identical to today when no tiering is supplied", () => {
+    const doc = { summary: "s", findings: [f({ line: 1, title: "a" }), f({ line: 2, title: "b" })] };
+    expect(buildBodyOnlyReview(doc).demotedCount).toBe(2);
   });
 });
 

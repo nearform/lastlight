@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 
+import { varianceRollup } from "../../../src/review-metrics.js";
 import fixture from "../__fixtures__/repeat-group.json" with { type: "json" };
 import type { IndexRun, Scorecard } from "../types";
-import { buildRepeatBand, inRepeatGroup, repeatCandidates, repeatGroupKey } from "./repeats";
+import { buildRepeatBand, inRepeatGroup, repeatCandidates, repeatGroupKey, tierResults } from "./repeats";
 
 /**
  * The fixture is the REAL three-run repeat group
@@ -123,6 +124,59 @@ describe("unmeasured cells", () => {
     // gain from an unknown cell.
     expect(affected.filter((r) => r.hits.every((h) => h === true))).toHaveLength(0);
     expect(band.columns[0].partial).toBe(true);
+  });
+});
+
+/**
+ * The anti-divergence gate for the two band implementations.
+ *
+ * `buildRepeatBand` (here, for the screen) and `varianceRollup`
+ * (`src/review-metrics.ts`, for `scripts/band.ts`) are separate on purpose — the
+ * header comment in `repeats.ts` says why, and it comes down to this file needing
+ * a third cell state (`undefined` = no trace = UNKNOWN) that the harness roll-up
+ * does not have. What must never differ is the arithmetic they share, so it is
+ * asserted here rather than assumed.
+ */
+describe("agrees with the harness's own varianceRollup", () => {
+  const roll = varianceRollup(cards.map((card) => ({ results: tierResults(card, TIER), meta: card.meta })));
+  const band = buildRepeatBand(group, TIER);
+
+  it("produces the same points, band, union and intersection on a fully-traced group", () => {
+    expect(roll.repeats.map((r) => r.microRecall)).toEqual(band.columns.map((c) => c.microRecall));
+    expect(roll.meanMicroRecall).toBe(band.meanRecall);
+    expect(roll.minMicroRecall).toBe(band.minRecall);
+    expect(roll.maxMicroRecall).toBe(band.maxRecall);
+    expect(roll.band).toBeCloseTo(band.maxRecall! - band.minRecall!, 10);
+    expect(roll.gold).toBe(band.totalGold);
+    expect(roll.unionMatched).toBe(band.unionMatched);
+    expect(roll.intersectionMatched).toBe(band.intersectionMatched);
+  });
+
+  it("parts company only where a trace is MISSING — the reason they are separate", () => {
+    // Strip one repeat's trace from a 5-gold case. This view keeps the case and
+    // marks those cells unknown; the harness roll-up cannot express "unknown", so
+    // it excludes the case entirely and NAMES it. Both are right; a delegation
+    // would have to pick one and silently lose the other.
+    const stripped: Scorecard = {
+      ...cards[0],
+      results: cards[0].results.map((r) =>
+        r.instance_id === "prreview__skillspro-1587-r2" && r.review
+          ? { ...r, review: { ...r.review, trace: undefined } }
+          : r,
+      ),
+    };
+    const partialCards = [stripped, cards[1], cards[2]];
+    const partialBand = buildRepeatBand(
+      [{ id: "r0", run: asIndexRun(stripped, 0), card: stripped }, group[1], group[2]],
+      TIER,
+    );
+    const partialRoll = varianceRollup(partialCards.map((card) => ({ results: tierResults(card, TIER), meta: card.meta })));
+
+    expect(partialBand.totalGold).toBe(25); // the case stays, its cells read unknown
+    expect(partialRoll.gold).toBe(20); // the case is excluded from the denominator
+    expect(partialRoll.untraced).toContain("prreview__skillspro-1587-r2");
+    // Neither treats an unknown cell as a hit.
+    expect(partialRoll.intersectionMatched).toBeLessThanOrEqual(partialBand.intersectionMatched);
   });
 });
 

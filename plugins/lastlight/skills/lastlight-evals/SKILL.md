@@ -159,8 +159,11 @@ Before reading any delta as progress, get the two error bars:
 
 ```bash
 lastlight-evals run pr-review --repeats 3            # the ARM's own band
+npx tsx scripts/band.ts <run1> <run2> <run3>         # read it: mean/band + union & intersection recall (free)
 npx tsx scripts/rescore.ts <scorecard.json> --repeat-judge 3   # the GRADER's band (SPENDS MONEY)
 ```
+
+`scripts/band.ts` is the read-only way to see a band without the dashboard: per-repeat points, mean/min/max, the band (**null** below two repeats — one run cannot bound its own noise), **union** and **intersection** recall, the per-gold hit matrix, and any case it could not align, by name. Pass the repeats' run dirs (or `scorecard.json` paths) **explicitly** — it never infers which runs form an arm, because same tier + same arm label + same case set also describes a completely different configuration. `--vs <runs…>` adds a second arm and a band-first KEEP/REVERT/INDISTINGUISHABLE verdict.
 
 `scripts/rescore.ts --repeat-judge N` re-runs the LLM judge N times over a stored
 scorecard's review text + gold set and reports the spread, which separates grader

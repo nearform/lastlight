@@ -20,16 +20,12 @@ and the human sign-off list, [HANDOFF.md](HANDOFF.md).
 
 ## 0. Tree state — READ THIS FIRST
 
-> **2026-08-23: the tree is DIRTY and the work is UNCOMMITTED.** A day of fixes
-> (three measured defects, below) plus the eval-harness `--repeats` work sits in
-> the working tree with several untracked files. `main...HEAD` does not show any
-> of it. Commit or stash deliberately before trusting any `git`-based comparison,
-> and note that `facts`/`contracts` read head off the **filesystem** while the
-> changed set comes from git — so a dirty tree silently invalidates §1's
-> `selfcheck` and makes the base view partly a claim about somebody's edits.
-
-Everything through WP11 is committed at `1cbc1f9d`; four `docs(plan)` commits
-follow it, and everything after that is uncommitted.
+> **2026-08-23, later: that work is COMMITTED**, as `5fa06da1` ("the
+> deterministic seed was decorative"). The warning below stands as a standing
+> rule rather than a description of today: `facts`/`contracts` read head off the
+> **filesystem** while the changed set comes from git, so a dirty tree silently
+> invalidates §1's `selfcheck` and makes the base view partly a claim about
+> somebody's edits. Check before trusting any `git`-based comparison.
 
 ```bash
 git -C ~/work/lastlight status --porcelain | wc -l   # expect 0 ONLY on a clean tree
@@ -40,7 +36,7 @@ git -C ~/work/lastlight log --oneline -1
 
 ```bash
 cd ~/work/lastlight
-pnpm turbo run typecheck test build            # expect 24/24
+pnpm turbo run typecheck test build            # expect 25/25 (2026-08-23: 3769 tests)
 pnpm --filter lastlight-code-facts selfcheck   # 31 of 31 analysed, exit 0
 ```
 
@@ -291,6 +287,137 @@ Both are worth fixing and they are not exclusive. C1 is the one the evidence
 names directly; C2 is the one that would overturn the plan's thesis, so it needs
 a control rather than an argument.
 
+## 2d. 2026-08-23, later — the gates were never wired, and what the funnel says
+
+**Read this before §3. It changes what X1 should measure.**
+
+### The mechanism gates have never produced a value
+
+§0b of [08-evals.md](08-evals.md) is unambiguous: *"WP3's and WP4's gates are
+mechanism gates"* — obligations, discharge rate, the per-family funnel — and
+micro-recall is *"reported at every rung, never gated on"*. The mechanism gates
+were **declared and consumed but never produced**.
+
+`ReviewPipelineStats` (`apps/evals/src/schema.ts`) is read by `boundaryMetrics()`
+and `familyFunnels()` (`apps/evals/src/review-metrics.ts`), both of which begin
+by filtering for `review.pipeline`. **No run has ever carried one.** Verified
+against all four keeper runs: no `pipeline` key on any result. So both functions
+have returned `undefined` for their whole existence, internal recall has never
+been measured on anything, and every decision in this plan fell back to posted
+micro-recall — the number this file says is unusable below 0.24.
+
+Compounding it: `varianceRollup` / `bandVerdict` / `groupRepeats` are
+implemented and tested and **nothing calls them**. Union and intersection existed
+only inside the dashboard, as a second implementation. `run.ts`'s own help text
+claimed `scripts/rescore.ts` rolls up a band; it does not.
+
+Both are now wired (`apps/evals/src/review-pipeline-stats.ts` — a deterministic
+read of the artifacts the run already writes, plus one MATCH-only judge call per
+case for internal recall), read headlessly by `apps/evals/scripts/band.ts`, and
+back-filled onto every preserved run by
+`apps/evals/scripts/backfill-pipeline.ts` (`--no-judge` refreshes the free half
+without re-spending; the judged half is carried across and the write refuses if
+it moves).
+
+### And the first thing internal recall said
+
+**Both 8-case runs discovered 12 of 25 — the same number — and said 8 and 5.**
+
+| | run 1 `184650` | run 3 `201607` |
+|---|---|---|
+| internal recall | **0.480 (12/25)** | **0.480 (12/25)** |
+| …on a posted tier | 9 | 9 |
+| …withheld by the boundary | 1 | 3 |
+| …tier unknown (no `disposition.json`) | 2 | 0 |
+| credited by the posted-review judge | 8 | 5 |
+| posted recall | 0.320 | 0.200 |
+
+The 0.240 band this plan has spent pages characterising as *"the pipeline is
+noisy"* is **downstream of discovery**, and discovery was identical. Note also
+that the boundary is not the main channel: nine matched findings were on a posted
+tier in both runs and the judge credited eight and five, so **something loses a
+true finding between "tiered for posting" and "recognised in the review text"**.
+Two candidates — the body buries it among anti-findings (run 3 posted 44; rep1
+posted 27 body bullets of which 17 were clean discharges), or grader noise
+between two matching passes. `rescore.ts --repeat-judge N` separates them and is
+the cheapest open question in this plan. See [NEXT.md](NEXT.md).
+
+**This retires §3c as written.** *"Both misses were discovery failures … the
+filters demonstrably kept their hands off gold"* was traced on one run's three
+gold; over 25 it does not hold.
+
+### The funnel, read off the preserved workspaces at zero spend
+
+Reproduces [NEXT.md](NEXT.md)'s independently hand-counted hypothesis volumes
+exactly (run 1 → run 3: 18→43, 10→23, 10→19, 45→45, 42→39), which is what says
+the reader is honest.
+
+`prreview__skillspro-1587-r2`, the comparator case:
+
+| | 08-22 run 1 | 08-22 run 3 | 08-23 rep1 | rep2 | rep3 |
+|---|---|---|---|---|---|
+| obligations | 33 | 33 | 33 | 33 | 33 |
+| hypotheses | 42 | 39 | 45 | 48 | 46 |
+| **carrying a discharge code** | **0** | 6 | **33** | **36** | **41** |
+| **clean discharges** (QUOTE + `failureScenario: null`) | 0 | 0 | **23** | **25** | **23** |
+| findings | 37 | 36 | 32 | 25 | 16 |
+| posted (inline+body) | 14 | 7 | **30** | 8 | 7 |
+| — of which trace to a clean discharge | 0 | 0 | **17** | 0 | 0 |
+| internal | 22 | 29 | **2** | 17 | 9 |
+
+**A clean discharge requires `failureScenario` PRESENT and explicitly `null`,
+not merely absent**, and the distinction decides whether any of this is
+measurable. Under the minimal contract the field did not exist and the `spec`
+pass's invented row shape has nowhere to record one, so 37 rows across the
+preserved 2026-08-22 runs are `QUOTE` with no key at all. Reading absence as
+"clean" marks those as anti-findings on the strength of a field nobody asked
+for — 28 findings across 4 of 16 instances, measured. On the strict reading the
+count is **0 across all sixteen minimal-era instances** and 71 across the three
+full-contract repeats. The eval instrument
+(`apps/evals/src/review-pipeline-stats.ts`) and the attention boundary
+(`apps/server/src/engine/github/review-poster.ts`) key on the same predicate and
+resolve citations through the same canonical `<family>-NNN` identity; they have
+to, or the instrument reports a demotion that did not happen.
+
+Two claims, and only one of them generalises:
+
+- **Robust — generation.** Half to two-thirds of everything the surveys now
+  produce is a clean quote: *"I looked, I quote the line, it is fine."* Same in
+  all three repeats. This is **C1's mechanism measured on a number** rather than
+  inferred from prose, and it is the strongest single piece of evidence in the
+  C1/C2 question.
+- **NOT robust — posting.** The boundary held those back in rep2 and rep3 and let
+  17 through in rep1. It is not *inert*; it is **wildly variable** — 30 / 8 / 7
+  posted from near-identical generation. Confidence is uniformly ≥0.7 (median
+  0.95 → 1.00, minimum 0.75), so `internalFloor: 0.15` and the family thresholds
+  (0.30–0.60) rarely bind on their own merits and the tier lands nearly at
+  random. **The attention boundary is itself a large, previously unattributed
+  variance source**, which is more useful than "it is inert".
+
+### Three smaller findings from the same read
+
+1. **`1587-r3` in keeper run 1 has no `disposition.json`** — and `reconcile` and
+   `post-review` both ran, and it posted 9 findings including a gold match. By
+   §5's own rule that means the attention boundary never ran on one of the eight
+   comparator cases. Same class as §4 trap 5, sitting undetected inside a run
+   this file treats as a baseline.
+2. **Conservation is checked in one direction only** — every hypothesis must
+   reach a finding, nothing requires the reverse — so a finding citing no
+   hypothesis is invisible to the discharge histogram. Measured it is **rare**:
+   0 on rep1, 1 each on rep2 and rep3. (An earlier draft of this section said
+   "8 of 32 on rep1", which was an artifact of a hand-written probe that resolved
+   citations against `row.id` only — `spec` rows carry no `id`, so eight findings
+   citing `S-*` looked unprovenanced. Resolve through the canonical
+   `<family>-NNN` identity, as `hypotheses.ts` does, and they resolve fine.)
+3. **`disposition.json` re-anchors line numbers** (`APIContext.tsx:1042` →
+   `:1063`) so GitHub can hang a comment on a changed line. Any tool joining
+   `findings.json` to `disposition.json` on `path:line` silently loses ~a third
+   of the findings, and a failed join is indistinguishable from "never tiered".
+4. **§2c defect 3's fix has never been exercised.** `spec.jsonl` in all three
+   08-23 repeats still carries the invented `{verdict, rationale}` shape — the
+   renderer unification landed in `5fa06da1` at 07:21, after those runs at
+   05:33–05:54. No measured run has ever used the unified spec row.
+
 ## 3. What to do next
 
 **Superseded 2026-08-23.** The old §3a ("more repeats before any lever") is
@@ -306,14 +433,59 @@ case is normally unreadable; a union that moves 4 → 0 → back is not.
 
 **X1 — separate C1 from C2. The control, and it comes first.** Run with
 `context_file` ON (branches all receive their obligations) but the obligations
-themselves reverted to the pre-2026-08-23 block — no mandatory discharge, no id
-checklist, no exemplar. That is the seed delivered reliably, asking the OLD
-question.
+themselves rendered as the pre-2026-08-23 block: `--contract minimal`. That is
+the seed delivered reliably, asking the OLD question.
+
+**`minimal` is NOT "no discharge contract", and describing it that way will make
+you misread the arm.** The four codes and *"Reading a file is not a discharge"*
+are older than the regression — `5fa06da1` added exactly **three lines** to that
+block. What `minimal` removes is those three lines (the pointer to the row's
+`discharge` field and to the id checklist), the un-truncated id checklist itself,
+the `failureScenario` requirement, and the worked exemplar. The block still
+demands a discharge and gives the survey nowhere to record one, which is exactly
+why compliance measured 0/31, 0/34 and 0/40 under it — and reproducing that
+faithfully is the point. `DISCHARGE_MINIMAL` is byte-identical to `5fa06da1^`,
+verified both directions; `full` is byte-identical to today.
+
+The selection travels as a field on `obligations.json`, not as a render
+argument, so the block a survey was handed, the contract `checkDischarge` graded
+it against, and the artifact read three weeks later cannot disagree.
+`checkDischarge` degrades to the `test -s` floor under `minimal` — grading a
+field nobody was told to write would make five of six branches record
+`condition_not_met` on every run of the control arm, a pipeline-failure
+signature the arm would then have to be read around.
 - Recovers to ~4/5 union ⇒ **C1 confirmed**: the discharge contract is what cost
   the recall, and the fix is the question, not the delivery.
 - Stays at 0/5 ⇒ **C2 is live**: reliable seeding itself suppresses discovery,
   and the free-styling branches were carrying the old recall. That would overturn
   this plan's thesis and is worth knowing before another lever is built.
+
+**Read X1 on INTERNAL recall, not posted recall** (§2d). Posted recall on this
+case now runs through a boundary that put 30 findings on the PR in one repeat and
+7 in the next from near-identical generation; reading a discovery question
+through that much attention-layer noise is how the last three arms got their
+spread. Internal recall — gold matched by anything the pipeline *generated*,
+tiered or not — is the discovery number, and it is what C1-vs-C2 is actually
+about. Both are now on the scorecard.
+
+**A clean-discharge rule is structurally inert under `minimal`, so anything
+bundled into X1 that keys on discharge is NOT measured by X1 and must not be
+reported as if it were.** The mechanism is not "no row carries a code": of 447
+minimal-era rows, **74 carry a `discharge`/`status` string and 43 of those are
+one of the four codes**. It is that a clean discharge requires `failureScenario`
+present and `null`, and the minimal row shape has no such field — measured,
+`cleanIds` is **0 across all sixteen** minimal-era instances and the tiering is
+byte-identical. The demotion needs a **`full`-contract arm** to be measured at
+all.
+
+**And the other 31 invented a fifth code.** `N/A` ×11, `enforced` ×6,
+`needs_investigation` ×4, `hypothesis` ×3, `met_with_caveat`, `backend_only`,
+`enforced_by_http`, `potential_future_issue`. So the minimal block fails in two
+ways at once — it asks for a discharge with nowhere to write one, *and* the
+models that do answer largely answer off-vocabulary. `N/A` being the most common
+is why `SPEC_DISCHARGE` carries a *"THERE IS NO FIFTH CODE"* paragraph. Read
+X1's discharge histogram with that in mind: `none` there is two different
+failures added together.
 
 **X2 — rewrite what the obligations ASK** (blocked on X1 only if X1 says C2).
 The catalogue is drafted in [NEXT.md](NEXT.md) from the `1667` forensics. The
@@ -363,7 +535,7 @@ time.
 | # | Lever | Why it is worth it |
 |---|---|---|
 | **f1** | **Stage the diff once** | 93 bash calls across the six surveys, ~30 re-deriving one fixed range that `facts.json` (137 KB) already holds. `survey_branch_contract` at 234s **is** the whole survey span, and it is the branch doing the most re-derivation. Cuts turns, which cuts latency *and* spend |
-| **f4** | **Reshape `review` when the pipeline is on** | It still runs a full independent review — 137s and $0.30 — and in run A produced `APPROVE` with **zero findings while 41 hypotheses sat unread beside it**. **It cannot simply be skipped**: `post-review` depends on it with `all_success`, and a skipped node is not `succeeded`. Change its brief under `{{#if analysisEnabled}}` instead |
+| **f4** | **Reshape `review` when the pipeline is on** | It still runs a full independent review — 137s and $0.30 — and in run A produced `APPROVE` with **zero findings while 41 hypotheses sat unread beside it**. **It cannot simply be skipped**: `post-review` depends on it with `all_success`, and a skipped node is not `succeeded`. **Note the `review` node declares no `prompt:` at all** (`pr-review.yaml`), so it hits the skill-only fallback in `phase-executor.ts` — f4 means ADDING a prompt (or editing `skills/pr-review/SKILL.md`), not editing one. `{{#if analysisEnabled}}` does not exist anywhere in the repo either; the gating idiom here is `skip_if: "analysisEnabled != true"` |
 | **f3** | **A stronger adjudicator** | `models.review-adjudicate`, falling through to `models.review`. Haiku-beats-Sonnet is a *recall* result about *discovery*; adjudication is ranking over an already-generated set, a different task |
 | **f2** | **Thinking effort** | The survey phases declare **no `variant:` at all**, so they inherit agentic-pi's default. Wire `{{variants.review-survey}}` through and measure |
 
@@ -371,6 +543,29 @@ time.
 the fifth reproduction of locked decision 1, not a tuning opportunity. No
 adjudicator has ever beaten keeping everything (AACR F1 0.825, two models, 2,145
 labelled comments, neither beat it).
+
+**Two structural facts that bound what any of these can buy**, both confirmed
+2026-08-23 by reading the source rather than the plan:
+
+- **`tests` has no seeder.** `SEEDABLE_FAMILIES` lists five and only four
+  seeder functions exist — there is no `seedTests` in `packages/code-facts/src/seed.ts`.
+  Combined with `prepare` being skipped 8/8 (so no coverage artifact is ever
+  produced), that family is dead at both ends. **One of the six fan-out branches
+  cannot produce anything**, and has not in any measured run. Build the seeder or
+  drop the branch; running it is paying for a sixth of the survey to write
+  `NOT_MEASURED`.
+- **The four mint rules are four different conditions, not one.** The
+  `referenceCount − referencesInDiff > 0` shorthand this plan uses describes only
+  `state` — and even there the code filters the **capped** `references[]` array
+  and additionally requires `changedHunks.length > 0`. `contract` mints on
+  `consumersOutsideDiff.length > 0 && change !== "added"`, `enforcement` on
+  candidate count, `security` on a scanner hit in the same file. "Widen the
+  minting rule" is four decisions with four different failure modes.
+
+**And `models.review-adjudicate` does not exist** — `adjudicate` resolves
+`{{models.review}}`. Every measured run was `runType: "models"` with Haiku
+**forced on every phase**, adjudicate included, so f3 has never been tested even
+by accident.
 
 ### 3c. Where the evidence says quality actually lives
 
@@ -411,6 +606,17 @@ Tracked as tasks; none blocking.
   back-filled runs conflate "skipped" with "un-instrumented".
 - **#23** `add-case` does not capture linked issues, so every new pr-review case
   reintroduces the dead spec axis.
+- **#24** `review.analysis.maxObligations` is **dead config on the workflow
+  path.** The `seed` phase never passed `--max-obligations`, so the operator's
+  value has never reached the seeder — `code-facts`' own default applies, and it
+  happens to be the same 40, so this is inert-but-dead rather than wrong. Thread
+  it the way `--contract` now is. Found 2026-08-23; deliberately not fixed
+  mid-experiment, because changing the effective budget would confound X1.
+- **#25** A finding may **invent an obligation family**. One backfilled run
+  carries a `correctness` row — a family outside the six-family partition,
+  self-declared by the finding. Hypothesis families come from the FILENAME and
+  cannot drift; `posted`/`matched` come from the finding's own `family` field and
+  can. Decide whether an unknown family is a fact to record or a value to reject.
 
 Longer-standing, from WP1b and unchanged: fingerprint collisions silently drop
 findings (13 corpus findings → 11 fingerprints); `patterns` scopes to changed

@@ -420,11 +420,52 @@ export interface ReviewPipelineStats {
    * so `hypotheses - discharged` should be 0 — and when it is not, that is a
    * measurement, not a crash. */
   discharged?: number;
+  /**
+   * How each hypothesis discharged its obligation — the **discharge rate**
+   * 08-evals.md asks every rung to be gated on.
+   *
+   * `none` is a column and not an omission. Across both preserved 2026-08-22
+   * runs, every case and every family, **no obligation carried a code at all**
+   * (0/31, 0/34, 0/40) — the prescribed row shape had no field to record one in.
+   * A histogram that dropped the empty bucket would have made an impossible
+   * contract look like an unenthusiastic one.
+   */
+  dischargeCodes?: Record<string, number>;
+  /**
+   * Hypotheses discharged `QUOTE` with no `failureScenario` — the pass looked,
+   * quoted the line, and found it fine.
+   *
+   * These are **anti-findings**: they cannot match gold by construction, so
+   * wherever one is posted it is pure attention cost. On `1587-r2` (2026-08-23)
+   * 35 of 45 hypotheses were clean and **17 of the 27 body-posted findings**
+   * traced back to them. Counted separately from `dischargeCodes.QUOTE` because
+   * a QUOTE that *does* raise a defect is the pipeline working.
+   */
+  cleanDischarges?: number;
+  /**
+   * Findings carrying no `hypotheses[]` at all — generated downstream of the
+   * surveys rather than built from one.
+   *
+   * Conservation is checked in one direction only (every hypothesis must reach a
+   * finding); nothing requires the reverse. 8 of 32 findings on the measured
+   * case had no provenance, which means neither the discharge histogram nor the
+   * clean-discharge rule can say anything about a quarter of what got posted.
+   */
+  unprovenanced?: number;
   /** Findings by destination tier (`inline` / `body` / `internal`). */
   tiers?: Partial<Record<"inline" | "body" | "internal", number>>;
   /** Gold findings matched by ANYTHING generated, posted or not — the numerator
    * of internal recall. */
   internalMatched?: number;
+  /**
+   * The internal-recall judge did not run or did not parse, and why.
+   *
+   * Present ⇒ `internalMatched` is deliberately ABSENT rather than 0. An
+   * ungraded internal pass is not an internal recall of zero, and the case's
+   * posted grade is complete without it, so this is recorded here instead of
+   * erroring the case.
+   */
+  internalUngraded?: string;
   /** Inline-only counts, for the attention boundary. */
   inlinePosted?: number;
   inlineMatched?: number;
@@ -449,8 +490,23 @@ export interface ReviewPipelineStats {
 export interface ReviewFamilyStats {
   obligations?: number;
   hypotheses?: number;
+  /** Findings this family got POSTED — inline or body. Absent (never 0) when
+   * the run wrote no `disposition.json`, because nothing then knows where its
+   * findings went. */
   posted?: number;
+  /** Gold matched by this family's POSTED findings. Pairs with `posted`, so the
+   * funnel obligations → hypotheses → posted → matched stays one story. */
   matched?: number;
+  /**
+   * Gold matched by anything this family GENERATED, posted or withheld.
+   *
+   * Separate from `matched` because the two answer different questions and a
+   * single column cannot: `matched` is what the family contributed to the
+   * review, this is what it was capable of. A family whose findings are all
+   * tiered `internal` scores 0 on the first and can score well on the second —
+   * which is the signal that its threshold is wrong rather than its reasoning.
+   */
+  internalMatched?: number;
   /** The family could not be measured here (e.g. `security` with no Opengrep on
    * PATH). Reported as "not measured", never as "did not convert". */
   notMeasured?: boolean;

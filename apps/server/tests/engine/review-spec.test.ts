@@ -421,6 +421,95 @@ describe("the spec block and renderFamilyBlock prescribe ONE contract", () => {
       expect(renderSpecObligations(set)).not.toMatch(/\{\{|\}\}/);
     }
   });
+
+  /**
+   * The control arm, pinned the same way — because the whole point of
+   * `--contract minimal` is that SIX blocks change, not five.
+   *
+   * `spec` is the one family whose block is rendered here rather than by
+   * `lastlight-facts`, so it is also the one that could silently stay on `full`
+   * while its five siblings moved. An arm in which five families ask the old
+   * question and one asks the new one measures neither.
+   *
+   * The anchor pair is different because the wording is: `minimal` restores
+   * *"Append one JSON object per **hypothesis** to"*, which is the pre-2026-08-23
+   * spelling and appears exactly once in each file, whichever contract is
+   * rendered.
+   */
+  describe("…and they agree under `minimal` too", () => {
+    const specSet = buildSpecObligations({
+      prBody: "",
+      closes: [{ number: 1587, title: "T", body: "- [ ] Expiry is enforced server-side on every request" }],
+      changedFiles: CHANGED,
+      max: 6,
+    });
+    const minimalSpec = renderSpecObligations(specSet, "minimal");
+
+    it("prescribes the same row FIELDS as the reference renderer's minimal block", () => {
+      const reference = fieldsBetween(
+        seedRender,
+        "Append one JSON object per hypothesis to",
+        "numbered within THIS family",
+      );
+      const spec = fieldsBetween(
+        minimalSpec,
+        "Append one JSON object per hypothesis to",
+        "numbered within THIS family",
+      );
+      // Non-vacuity, in the direction that matters: this row must NOT be able to
+      // hold a discharge code. That is the variable under test.
+      expect(reference).not.toContain("discharge");
+      expect(reference).not.toContain("failureScenario");
+      expect(reference.length).toBeGreaterThan(10);
+      expect(spec).toEqual(reference);
+    });
+
+    it("drops exactly what the siblings drop: the code field, the checklist, the exemplar", () => {
+      expect(minimalSpec).not.toMatch(/"discharge":/);
+      expect(minimalSpec).not.toMatch(/"failureScenario":/);
+      expect(minimalSpec).not.toContain("None is optional");
+      expect(minimalSpec).not.toContain("WORKED EXAMPLE");
+      expect(minimalSpec).not.toContain("discharge --ledger");
+    });
+
+    it("keeps the four codes and the hard limits — and never re-grows the fifth", () => {
+      // `N/A` was this family's own pre-2026-08-23 code and it is NOT what
+      // `minimal` restores: it is not in DISCHARGE_CODES, so every row using it
+      // lands `bad-code`. The control is over the QUESTION, not over whether the
+      // answer can be read by anything.
+      for (const code of ["QUOTE", "ABSENT", "PARTIAL", "PROBE"]) expect(minimalSpec).toContain(code);
+      expect(minimalSpec).not.toContain("N/A");
+      expect(minimalSpec).toContain("Do NOT write findings.json");
+      expect(minimalSpec).toContain("ADJUDICATOR");
+    });
+
+    it("still prescribes a ROW — the defect that made spec unreadable is not part of the arm", () => {
+      // Restoring this file's own pre-change text would have restored "no row
+      // shape at all", which is what made every measured `spec.jsonl` row
+      // (`verdict`, a nested obligations[] form) invisible to every gate. That
+      // corrupts the instrument rather than the variable.
+      expect(minimalSpec).toContain("hypotheses/spec.jsonl");
+      expect(minimalSpec).toMatch(/"id": "spec-001"/);
+      expect(minimalSpec).not.toMatch(/"verdict"/);
+    });
+
+    it("is rendered, so it may not carry a template marker either", () => {
+      expect(minimalSpec).not.toMatch(/\{\{|\}\}/);
+      for (const set of [
+        buildSpecObligations({ prBody: "", closes: [], changedFiles: CHANGED, max: 6 }),
+        buildSpecObligations({ prBody: "", closes: [], changedFiles: null, max: 6 }),
+      ]) {
+        expect(renderSpecObligations(set, "minimal")).not.toMatch(/\{\{|\}\}/);
+      }
+    });
+
+    it("leaves `full` alone: the default argument renders what it always rendered", () => {
+      // The baseline of a control arm must not move.
+      expect(renderSpecObligations(specSet, "full")).toBe(specBlock);
+      expect(renderSpecObligations(specSet)).toBe(specBlock);
+      expect(minimalSpec).not.toBe(specBlock);
+    });
+  });
 });
 
 describe("renderLinkedIssues", () => {

@@ -120,17 +120,36 @@ export function factsToolchainStamp(bin: string | null): Record<string, string> 
   try {
     const r = spawnSync(bin, ["toolchain"], { encoding: "utf8", timeout: 30_000 });
     if (r.status !== 0 || !r.stdout) return undefined;
-    const parsed = JSON.parse(r.stdout) as {
-      resolved?: { bundled?: Record<string, string>; binaries?: Record<string, { resolved?: string | null; status?: string }> };
-    };
-    const out: Record<string, string> = { ...(parsed.resolved?.bundled ?? {}) };
-    for (const [tool, stamp] of Object.entries(parsed.resolved?.binaries ?? {})) {
-      out[tool] = `${stamp?.resolved ?? "—"} (${stamp?.status ?? "unknown"})`;
-    }
-    return Object.keys(out).length ? out : undefined;
+    const parsed = JSON.parse(r.stdout) as { resolved?: ToolchainReport };
+    return flattenToolchain(parsed.resolved);
   } catch {
     return undefined;
   }
+}
+
+/** What `lastlight-facts` reports about its own toolchain, at either level. */
+export interface ToolchainReport {
+  bundled?: Record<string, string>;
+  binaries?: Record<string, { resolved?: string | null; status?: string }>;
+}
+
+/**
+ * Flatten a toolchain report to `tool → "<resolved> (<status>)"`.
+ *
+ * Shared by the run-level stamp above and the per-case
+ * `ReviewPipelineStats.toolchain` (`review-pipeline-stats.ts`), which reads the
+ * same structure out of a case's own `facts.json`. One implementation because
+ * they are one fact recorded at two levels — two flatteners would let the run
+ * and the case disagree about which opengrep produced a measurement, which is
+ * precisely the drift the stamp exists to make visible.
+ */
+export function flattenToolchain(report: ToolchainReport | undefined): Record<string, string> | undefined {
+  if (!report) return undefined;
+  const out: Record<string, string> = { ...(report.bundled ?? {}) };
+  for (const [tool, stamp] of Object.entries(report.binaries ?? {})) {
+    out[tool] = `${stamp?.resolved ?? "—"} (${stamp?.status ?? "unknown"})`;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 /** Short git SHA of HEAD, or `undefined` outside a repo / on any failure. */

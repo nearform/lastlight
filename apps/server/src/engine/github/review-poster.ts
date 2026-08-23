@@ -52,6 +52,18 @@ export interface ReviewFinding {
   /** 0..1. Absent is NOT zero — see {@link tierFindings}. */
   confidence?: number;
   /**
+   * The survey hypothesis ids this finding was built from, as written by the
+   * `adjudicate` phase (`findings[].hypotheses[]`, the same field the
+   * conservation gate reads).
+   *
+   * **Optional, and an empty array is not the same as a clean one.** A finding
+   * with none is either the shipped reviewer's own — which was never
+   * hypothesis-derived — or one the adjudicator generated downstream of the
+   * surveys. Neither can be judged by its provenance, so both keep the
+   * confidence path. See {@link tierFindings}.
+   */
+  hypotheses?: string[];
+  /**
    * An EXPLICIT destination, set by the `adjudicate` phase (and by
    * `lastlight-facts findings --repair`, which records an unaccounted-for
    * hypothesis at `internal`).
@@ -526,6 +538,28 @@ export interface DemotedFinding {
 }
 
 /**
+ * Why a finding was recorded rather than posted. The same treatment
+ * {@link DemotionReason} gives the body tier, and for the same reason: three
+ * causes under one label is a record that cannot answer *"what did we know and
+ * not say, and why?"* — which is the only thing separating an attention
+ * boundary from v2's suppressor.
+ *
+ * - `adjudicated` — the document said `tier: "internal"` itself. That includes
+ *   every hypothesis the conservation floor repaired, which carries no
+ *   confidence at all.
+ * - `clean-discharge` — every supporting hypothesis is a clean QUOTE, so the
+ *   finding is an ANTI-finding. See {@link tierFindings}.
+ * - `below-floor` — under {@link AttentionBoundary.internalFloor}.
+ */
+export type InternalReason = "adjudicated" | "clean-discharge" | "below-floor";
+
+/** One recorded-not-posted finding, carrying the reason it was withheld. */
+export interface InternalFinding {
+  finding: ReviewFinding;
+  reason: InternalReason;
+}
+
+/**
  * The attention budget. Absent ⇒ today's behaviour exactly: no cap, no
  * thresholds, no `internal` tier — every finding is inline or body, decided by
  * anchorability alone.
@@ -550,7 +584,7 @@ export interface TieredFindings {
    * is that it is auditable — WP7's `review_findings` table is where it becomes
    * queryable; until then the run's own findings document is the record.
    */
-  internal: ReviewFinding[];
+  internal: InternalFinding[];
 }
 
 const SEVERITY_WEIGHT: Record<string, number> = { critical: 3, important: 2, minor: 1 };
@@ -571,24 +605,91 @@ function rankOf(f: ReviewFinding): number {
 }
 
 /**
+ * Is every hypothesis behind this finding a CLEAN DISCHARGE — i.e. is the
+ * finding an anti-finding?
+ *
+ * Two absences are deliberately NOT clean, and both are the same rule read
+ * twice: **absence of provenance is not evidence of innocence.**
+ *
+ * - **No `hypotheses[]` at all.** Measured on the three `1587-r2` repeats of
+ *   2026-08-23: 0, 1 and 1 findings carried none. Those are either the shipped
+ *   reviewer's own or generated downstream of the surveys; nothing about them
+ *   is knowable from a set of ids that does not exist, so they take the
+ *   confidence path unchanged.
+ * - **An id that resolves to no row.** It falls out of `every` for free —
+ *   `clean` holds only ids that resolved AND were clean — which is the correct
+ *   direction: a citation naming provenance that does not exist is exactly the
+ *   case where the boundary must not act on the citation.
+ */
+function allHypothesesClean(f: ReviewFinding, clean: ReadonlySet<string> | undefined): boolean {
+  if (!clean || clean.size === 0) return false;
+  const ids = f.hypotheses;
+  if (!Array.isArray(ids) || ids.length === 0) return false;
+  return ids.every((id) => typeof id === "string" && clean.has(id));
+}
+
+/**
  * Split findings across the three destinations.
  *
- * Order matters and each step is a different question: is this worth a human's
- * attention at all (the floor) · can it even be anchored (GitHub's constraint) ·
- * is it confident enough for an inline comment (the family threshold) · and is
- * there room (the budget).
+ * Order matters and each step is a different question: does this SAY anything
+ * (the clean-discharge rule) · is it worth a human's attention at all (the
+ * floor) · can it even be anchored (GitHub's constraint) · is it confident
+ * enough for an inline comment (the family threshold) · and is there room (the
+ * budget).
  *
  * **A missing `confidence` never demotes and never suppresses.** Both bars are
  * `confidence !== undefined && confidence < bar`, so a finding that declines to
  * self-score is treated as passing — the alternative silently deletes every
  * finding from any prompt that has not been taught the field.
+ *
+ * ## The clean-discharge rule, and why it is not a confidence rule
+ *
+ * A survey discharges each obligation with QUOTE / ABSENT / PARTIAL / PROBE,
+ * and the row shape's own contract is *"on a clean QUOTE write
+ * `failureScenario: null`"*. So a row that is a `QUOTE` with an explicit null
+ * scenario is the pass saying **"I looked, I quote the line, and it is fine"**.
+ * A finding built ENTIRELY out of such rows is an anti-finding: it cannot match
+ * a gold defect by construction, and posting it spends a maintainer's attention
+ * on a report that nothing is wrong.
+ *
+ * **Measured on `prreview__skillspro-1587-r2`, three identical repeats**: of the
+ * 45 / 48 / 46 hypotheses, **23 / 25 / 23** are clean discharges under the rule
+ * this file implements — `QUOTE` with `failureScenario` PRESENT and explicitly
+ * `null` — and 17 / 14 / 7 findings trace entirely to them.
+ *
+ * The looser reading that counts a merely ABSENT key scores 23 / 25 / 30, and
+ * the seven-row gap is the whole reason the strict form is the one here. Under
+ * the pre-2026-08-23 obligation contract the field did not exist at all, and the
+ * `spec` pass's row shape has nowhere to record one, so 37 rows across the
+ * preserved minimal-contract runs are `QUOTE` with no key — silence that carries
+ * no information. Reading it as "clean" would demote 28 findings across 4 of 16
+ * of those instances on the strength of a field nobody asked for. Strictly, the
+ * count there is **0 of 16** and this rule is a verified no-op, which is what
+ * keeps the control arm single-variable. On the first repeat **all 17 were posted**
+ * — "Type contract: consolidateData correctly accepts…", "GOOGLE_CLIENT_ID
+ * constant imported and passed correctly". The confidence bars cannot catch
+ * them: confidence on those rows is uniformly ≥ 0.7 (median 0.95–1.00, minimum
+ * 0.75 across the whole document), so `internalFloor` and every family
+ * threshold pass them. That is the point — **an anti-finding is not an
+ * unconfident finding, it is a confident report of nothing**, and only its
+ * provenance says so.
+ *
+ * It is checked BEFORE the floor because it is the more specific answer to
+ * "why was this withheld?", not because the two disagree about the tier — they
+ * cannot; both are `internal`.
+ *
+ * `clean` is supplied by the caller (`post-review` reads the sibling
+ * `hypotheses/*.jsonl`), never read here: this module does no I/O. Absent or
+ * empty ⇒ the rule cannot fire, which is the inertness guarantee for every
+ * deployment and every arm that runs no evidence pipeline.
  */
 export function tierFindings(
   findings: ReviewFinding[],
   commentable: Map<string, Set<string>> | null,
   boundary: AttentionBoundary,
+  clean?: ReadonlySet<string>,
 ): TieredFindings {
-  const internal: ReviewFinding[] = [];
+  const internal: InternalFinding[] = [];
   const body: DemotedFinding[] = [];
   const candidates: AnchoredFinding[] = [];
 
@@ -600,11 +701,15 @@ export function tierFindings(
     // one of them — turning "we recorded what we could not adjudicate" into
     // "we published what we could not adjudicate".
     if (f.tier === "internal") {
-      internal.push(f);
+      internal.push({ finding: f, reason: "adjudicated" });
+      continue;
+    }
+    if (allHypothesesClean(f, clean)) {
+      internal.push({ finding: f, reason: "clean-discharge" });
       continue;
     }
     if (f.confidence !== undefined && f.confidence < boundary.internalFloor) {
-      internal.push(f);
+      internal.push({ finding: f, reason: "below-floor" });
       continue;
     }
     if (!f.path || !f.line || !isAnchored(f, commentable)) {
@@ -782,6 +887,7 @@ export function buildReview(
   doc: ReviewFindingsDoc,
   commentable: Map<string, Set<string>> | null,
   boundary?: AttentionBoundary,
+  clean?: ReadonlySet<string>,
 ): BuiltReview {
   const findings = Array.isArray(doc.findings) ? doc.findings : [];
   if (!boundary) {
@@ -798,7 +904,7 @@ export function buildReview(
       internalCount: 0,
     };
   }
-  const tiered = tierFindings(findings, commentable, boundary);
+  const tiered = tierFindings(findings, commentable, boundary, clean);
   return {
     event: resolveEvent(doc),
     body: (doc.summary || "") + renderDemotedGrouped(tiered.body),
@@ -812,11 +918,23 @@ export function buildReview(
 
 /**
  * The body-only fallback: when the inline POST is rejected (e.g. a stale diff
- * yields a 422 on a comment line), re-render with ALL findings in the body so
- * the review still lands. Same event as the inline attempt.
+ * yields a 422 on a comment line), re-render with every POSTABLE finding in the
+ * body so the review still lands. Same event as the inline attempt.
+ *
+ * **Pass `tiered` whenever the boundary produced one.** Without it this
+ * re-reads `doc.findings` wholesale, which republishes the `internal` tier —
+ * the conservation floor's repaired hypotheses and the anti-findings alike — so
+ * "recorded, never posted" would hold on the happy path and quietly stop
+ * holding on the retry. That is a dark drop's mirror image: a publication
+ * nobody decided on, reached by a failure in an unrelated request. Omitted ⇒
+ * today's behaviour exactly, which is what every no-boundary caller gets.
  */
-export function buildBodyOnlyReview(doc: ReviewFindingsDoc): BuiltReview {
-  const findings = Array.isArray(doc.findings) ? doc.findings : [];
+export function buildBodyOnlyReview(doc: ReviewFindingsDoc, tiered?: TieredFindings): BuiltReview {
+  const findings = tiered
+    ? [...tiered.inline, ...tiered.body.map((d) => d.finding)]
+    : Array.isArray(doc.findings)
+      ? doc.findings
+      : [];
   return {
     event: resolveEvent(doc),
     body: (doc.summary || "") + renderDemoted(findings),

@@ -48,6 +48,22 @@
  * `./pr-decisions.ts`.
  */
 
+/**
+ * Which obligation block this family renders — the harness-side half of
+ * `review.analysis.obligationContract`.
+ *
+ * Structurally identical to `ObligationContract` in
+ * `packages/code-facts/src/seed-render.ts`'s `seed.ts`, and DECLARED here rather
+ * than imported for the reason this module has no imports at all: it is pure,
+ * dependency-free and testable without a GitHub mock, and `lastlight-core` has
+ * no dependency edge to `lastlight-code-facts` to import it across anyway. The
+ * union is two literals; `ReviewAnalysisConfig.obligationContract` in
+ * `lastlight-shared` declares the same two, and `review-spec.test.ts` pins the
+ * two renderers against each other under BOTH values, which is the check that
+ * actually matters.
+ */
+export type ObligationContract = "full" | "minimal";
+
 /** One issue the PR says it closes, as the spec extractor needs it. */
 export interface SpecLinkedIssue {
   number: number;
@@ -498,6 +514,53 @@ const SPEC_DISCHARGE = [
 ];
 
 /**
+ * `SPEC_DISCHARGE` with the two clauses `--contract minimal` removes, and
+ * nothing else.
+ *
+ * The switch is `renderFamilyBlock`'s, applied to this family so the six axes
+ * move together — `packages/code-facts/src/seed-render.ts` carries the argument
+ * and the measurement. What `minimal` takes out of the SIBLING blocks is
+ * exactly four things: the row's `discharge` field, the row's `failureScenario`,
+ * the un-truncated id checklist, and the worked exemplar. Here that means the
+ * pointer at the row's `discharge` field goes, and the "no fifth code"
+ * paragraph loses its one reference to `failureScenario` — because the field is
+ * no longer on the prescribed row and an instruction about a field that is not
+ * there is how the original bug got written.
+ *
+ * **What does NOT change under `minimal`, deliberately.** The four codes stay
+ * (they predate the change and `N/A` was never one of them), both ends stay, the
+ * hard limits stay, and this family still prescribes a ROW. Restoring THIS
+ * file's pre-2026-08-23 text instead would have restored `N/A` and *no row shape
+ * at all* — the defect that made every `spec` row structurally unreadable by
+ * every gate — which would corrupt the instrument rather than the variable. The
+ * control is over the QUESTION, not over whether the answer can be recorded.
+ */
+const SPEC_DISCHARGE_MINIMAL = [
+  "DISCHARGE EVERY OBLIGATION BELOW. Exactly one of:",
+  "",
+  "  QUOTE   — `path:line` and the line's text, in a CHANGED file, that implements the criterion. This is",
+  "            the only clean discharge.",
+  "  ABSENT  — you read every candidate and no changed file implements it. THAT IS A FINDING: raise it,",
+  "            anchored to the closest changed line, and say what was asked.",
+  "  PARTIAL — implemented for some inputs or paths and not others. Quote the line AND name the gap.",
+  "  PROBE   — it cannot be settled by reading, only by RUNNING something. Record it and say what you",
+  '            would run. "returns 429 once the caller exceeds ten requests" is exactly that shape.',
+  "",
+  "Reading a file is not a discharge. Summarising the code is not a discharge. Quote a line, or say it is",
+  "absent.",
+  "",
+  "THERE IS NO FIFTH CODE. A criterion that turns out not to be about code in this PR — a follow-up, a",
+  "process step, a promise about docs — is still ABSENT: it is factually true that no changed file",
+  'implements it. Write it at `severity: "Minor"` and say in `claim` why it was out of scope. The four',
+  "codes record WHAT YOU FOUND; `severity` records how much it matters, and a later phase decides what is",
+  "worth posting. A code outside the four puts the row outside every gate.",
+  "",
+  "OVER-PRODUCE. A plausible mechanism you cannot yet refute is a hypothesis, not noise — a later phase runs a",
+  "probe and a stronger model adjudicates, and both can only remove. Nothing downstream can recover a mechanism",
+  "you declined to write down, so the cost of a wrong hypothesis here is far below the cost of a missing one.",
+];
+
+/**
  * The one worked exemplar, and — as in `renderFamilyBlock` — the only positive
  * example this family's prompt carries.
  *
@@ -623,6 +686,40 @@ function rowShape(family = "spec"): string[] {
   ];
 }
 
+/**
+ * The `minimal` row — the same fields the pre-2026-08-23 sibling block
+ * prescribed, plus this family's `path`.
+ *
+ * Two fields are gone and they are the experiment: `discharge` (so no code can
+ * be recorded, which is what measured 0/31, 0/34 and 0/40) and
+ * `failureScenario`. `path` stays because it is not part of the contract that
+ * changed — it is what makes a `spec` row navigable when its first end is a
+ * document rather than a code site.
+ *
+ * The header line says *"per hypothesis"*, matching `minimalTail` in
+ * `seed-render.ts` exactly, and that is load-bearing twice over: it is the
+ * pre-change wording, and `review-spec.test.ts` anchors its cross-renderer field
+ * comparison on the strings *"…per obligation to"* / *"…per hypothesis to"*, so
+ * each contract's row shape is selectable in each file without ambiguity.
+ */
+function rowShapeMinimal(family = "spec"): string[] {
+  return [
+    `Append one JSON object per hypothesis to .lastlight/pr-review/hypotheses/${family}.jsonl — one line each:`,
+    "",
+    `  { "id": "${family}-001", "obligation": "S-1", "family": "${family}", "claim": "…",`,
+    '    "bothEnds": { "introducedAt": "issue #1587" | "the PR body", "enforcedAt": "path:line" | null },',
+    '    "path": "the changed file this row is about",',
+    '    "quotes": [ { "path": "…", "line": 12, "text": "the line, verbatim" } ],',
+    '    "existingCode": "the verbatim excerpt this is about",',
+    '    "needsProbe": false, "severity": "Critical|Important|Minor", "confidence": 0.0-1.0 }',
+    "",
+    "`bothEnds` names both ends the same way the obligation does: end one is WHERE THE CRITERION WAS ASKED",
+    "(an issue, or the PR body — this family's first end is a document, not a code site), end two is",
+    "`path:line` in a changed file, or `null` when there is none. `path` is the changed file the row is",
+    "about, and it is what makes a recorded claim navigable when the first end is not a path.",
+  ];
+}
+
 /** The rules that travel with the row shape, in `renderFamilyBlock`'s words. */
 const ROW_RULES = [
   "A clean QUOTE gets a row too. That row is the RECORD that the criterion was answered, not a finding you",
@@ -694,9 +791,30 @@ const HARD_LIMITS = [
  * absence fires `survey-spec.md`'s own fallback. **It is also unreachable from
  * {@link buildSpecObligations}**, which pushes a `degraded[]` reason on every
  * path that returns no obligation.
+ *
+ * ── `contract` — the sixth axis moves with the five ─────────────────────────
+ *
+ * `review.analysis.obligationContract`, the control for 2026-08-23's result
+ * (recall 4-of-5 → 0-of-5 while compliance went 0/33 → 33/33, two variables at
+ * once). Its argument, its measurement and the five siblings' implementation are
+ * in `packages/code-facts/src/seed-render.ts`; this parameter is the same switch
+ * so that the arm changes six blocks and not five. Under `minimal` this block
+ * drops the pointer at the row's `discharge` field, the `discharge` and
+ * `failureScenario` fields themselves, the un-truncated id checklist (and the
+ * note explaining why there is no `--ledger` for it), the worked exemplar and
+ * the `ROW_RULES` that only exist to govern those two fields. Nothing else
+ * moves — see {@link SPEC_DISCHARGE_MINIMAL} for why this is not a revert of
+ * this file to its own pre-2026-08-23 text.
+ *
+ * The default is `full`, so every existing caller — including every test that
+ * passes one argument — renders exactly what it rendered before.
  */
-export function renderSpecObligations(set: SpecObligationSet): string {
+export function renderSpecObligations(
+  set: SpecObligationSet,
+  contract: ObligationContract = "full",
+): string {
   if (set.obligations.length === 0 && set.degraded.length === 0) return "";
+  const minimal = contract === "minimal";
 
   const lines: string[] = [];
   lines.push("=== SPEC — does this change do what was asked? ===");
@@ -715,12 +833,11 @@ export function renderSpecObligations(set: SpecObligationSet): string {
       "Record what you did either way, in the same shape a seeded pass uses. Do NOT record it in",
       "findings.json: a later phase owns that file and writes the split verdict off these rows.",
       "",
-      ...rowShape(),
+      ...(minimal ? rowShapeMinimal() : rowShape()),
       "",
       "No `S-` id exists for you to name, because none was built. Put the criterion you quoted for",
       "yourself in `obligation` — or `null` when the row is about the absence of any criterion at all.",
-      "",
-      ...ROW_RULES,
+      ...(minimal ? [] : ["", ...ROW_RULES]),
     );
     return lines.join("\n");
   }
@@ -743,7 +860,7 @@ export function renderSpecObligations(set: SpecObligationSet): string {
   }
   if (set.degraded.length > 0) lines.push(`Degraded: ${set.degraded.join("; ")}.`);
 
-  lines.push("", ...SPEC_DISCHARGE, "");
+  lines.push("", ...(minimal ? SPEC_DISCHARGE_MINIMAL : SPEC_DISCHARGE), "");
 
   for (const o of set.obligations) {
     lines.push(`${o.id}  (from ${o.source})`);
@@ -752,6 +869,11 @@ export function renderSpecObligations(set: SpecObligationSet): string {
     lines.push(`  found:      false   ← nothing has been checked; this is the claim, not a placeholder`);
     lines.push(`  question:   ${o.question}`);
     lines.push("");
+  }
+
+  if (minimal) {
+    lines.push(...rowShapeMinimal(), "", ...HARD_LIMITS);
+    return lines.join("\n");
   }
 
   lines.push(

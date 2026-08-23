@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { basename, join, resolve, sep } from "node:path";
 import { GitHubClient } from "../../engine/github/github.js";
 import {
   anchorFindings,
@@ -72,6 +72,123 @@ export function resolveReviewGitHubClient(runConfig: { githubApiBaseUrl?: string
     appId: process.env.GITHUB_APP_ID || "",
     privateKeyPath: process.env.GITHUB_APP_PRIVATE_KEY_PATH || "",
   });
+}
+
+/**
+ * Is this hypothesis row a CLEAN DISCHARGE — the pass saying *"I looked, I
+ * quote the line, and it is fine"*?
+ *
+ * Two conditions, and each one is defensive about a shape that was actually
+ * measured on disk:
+ *
+ * 1. **`discharge` OR `status`, case-insensitively**, mirroring `codeOf` in
+ *    `code-facts`' `discharge.ts` so the gate and the boundary can never
+ *    disagree about whether a row was discharged. Rows are heterogeneous: some
+ *    carry neither (the `spec` pass's invented `{verdict, rationale, path,
+ *    line, obligation}` shape), and a dead family writes `{status:
+ *    "notMeasured"}`. Neither is a QUOTE, so neither is clean.
+ * 2. **`failureScenario` PRESENT and explicitly `null`**, not merely absent —
+ *    and this is the load-bearing half. The rule being read is the row shape's
+ *    own contract, *"on a clean QUOTE write `failureScenario: null`"*, so it is
+ *    a SELF-REPORT: a row that never wrote the key made no report at all.
+ *
+ *    Measured, and it decides the `--contract minimal` question. Across the two
+ *    preserved 2026-08-22 runs (the pre-`full` contract, which never asked for
+ *    the field) **37 rows are `QUOTE` with no `failureScenario` key, and every
+ *    single one is from `spec.jsonl`'s invented `{claim, status, path, line,
+ *    evidence}` shape** — a shape with nowhere to record a scenario, so its
+ *    silence carries no information. Under the `full` contract of 2026-08-23,
+ *    71 of 78 clean rows write the key explicitly. Requiring it therefore costs
+ *    **zero findings** on the full-contract runs (17 / 14 / 7 demoted either
+ *    way) and makes the rule a **true no-op** on every minimal-contract run,
+ *    where the loose reading would have silently demoted 28 findings on the
+ *    strength of a field nobody asked for.
+ */
+function isCleanDischarge(row: unknown): boolean {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return false;
+  const r = row as Record<string, unknown>;
+  const raw = r.discharge ?? r.status;
+  if (typeof raw !== "string" || raw.trim().toUpperCase() !== "QUOTE") return false;
+  return "failureScenario" in r && r.failureScenario === null;
+}
+
+/**
+ * Which hypothesis ids in `<dir>/hypotheses/*.jsonl` are clean discharges.
+ *
+ * **`undefined` means there is no `hypotheses/` directory at all** — the
+ * shipped two-phase reviewer, and every arm that runs no evidence pipeline. The
+ * caller passes it straight through, so no pipeline ⇒ byte-identical output.
+ * (An empty set behaves identically by construction: `every` over a non-empty
+ * id list against an empty set is false. The distinction is kept for the log.)
+ *
+ * Identity is assigned exactly as `code-facts`' `readHypothesisSet` assigns it,
+ * because the ids in `findings[].hypotheses[]` came out of that reader's own
+ * `--ledger`: canonical **`<family>-NNN`**, family from the FILENAME (the
+ * survey branch owns its file, so the name is authoritative in a way a
+ * self-reported field is not), ordinal from position in an append-only file.
+ * A model-declared `id` is honoured as an **alias** only when exactly one row
+ * claims it and it shadows no canonical id — an ambiguous alias resolves to
+ * nothing, which leaves the finding on the confidence path rather than crediting
+ * whichever file sorted first.
+ *
+ * Parsing is defensive throughout: a torn final line on a killed run is normal
+ * and must not throw. Note that a line that parses to a non-object still
+ * consumes its ordinal, because `readHypothesisSet` counts it — an ordinal that
+ * drifted from the ledger's would mis-resolve every later citation in the file.
+ */
+export function readCleanDischarges(dir: string): ReadonlySet<string> | undefined {
+  let files: string[];
+  try {
+    files = readdirSync(join(dir, "hypotheses"))
+      .filter((f) => f.endsWith(".jsonl"))
+      .sort();
+  } catch {
+    // No `hypotheses/` directory — the surveys never ran. Not an empty set:
+    // "nobody looked" and "looked, found none clean" are different facts.
+    return undefined;
+  }
+
+  const cleanCanonical = new Set<string>();
+  const canonical = new Set<string>();
+  /** A model-declared id → every canonical id claiming it. */
+  const claims = new Map<string, string[]>();
+
+  for (const file of files) {
+    const family = basename(file, ".jsonl");
+    let rows: unknown[];
+    try {
+      rows = readFileSync(join(dir, "hypotheses", file), "utf8")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .flatMap((line) => {
+          try {
+            return [JSON.parse(line) as unknown];
+          } catch {
+            return []; // a torn final line on a killed run is normal
+          }
+        });
+    } catch {
+      continue; // unreadable file — the other families still count
+    }
+    rows.forEach((row, index) => {
+      const id = `${family}-${String(index + 1).padStart(3, "0")}`;
+      canonical.add(id);
+      if (isCleanDischarge(row)) cleanCanonical.add(id);
+      const declared = (row as { id?: unknown } | null)?.id;
+      if (typeof declared === "string" && declared.length > 0 && declared !== id) {
+        claims.set(declared, [...(claims.get(declared) ?? []), id]);
+      }
+    });
+  }
+
+  const clean = new Set(cleanCanonical);
+  for (const [declared, claimedBy] of claims) {
+    // Canonical always wins, and an id two rows claim credits neither.
+    if (canonical.has(declared) || claimedBy.length !== 1) continue;
+    if (cleanCanonical.has(claimedBy[0]!)) clean.add(declared);
+  }
+  return clean;
 }
 
 /**
@@ -256,8 +373,23 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     // deployment that never opted in gets no cap, no thresholds and no
     // `internal` tier, whatever a findings.json happens to carry.
     const boundary = this.attentionBoundary();
-    const review = buildReview(doc, commentable, boundary);
+    // The anti-finding rule (below). Read ONLY when a boundary exists, so a
+    // deployment that never opted in does not even stat the directory — the
+    // same inertness discipline the boundary itself keeps.
+    const clean = boundary
+      ? readCleanDischarges(join(hostRepoDir, ".lastlight", "pr-review"))
+      : undefined;
+    const review = buildReview(doc, commentable, boundary, clean);
     if (boundary && review.tiered) {
+      const antiFindings = review.tiered.internal.filter((r) => r.reason === "clean-discharge").length;
+      if (clean?.size || antiFindings) {
+        log.info("Withheld findings whose evidence is entirely clean discharges", {
+          repo: `${owner}/${repo}`,
+          prNumber,
+          cleanHypotheses: clean?.size ?? 0,
+          antiFindings,
+        });
+      }
       this.recordDisposition(hostRepoDir, boundary, review.tiered);
     }
 
@@ -281,15 +413,22 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
         doc.event === "APPROVE" && review.event !== "APPROVE" && worstAxis(doc.verdict) === "fail"
           ? `, downgraded from APPROVE by verdict spec=${doc.verdict?.spec ?? "-"}/standards=${doc.verdict?.standards ?? "-"}`
           : "";
+      // The `internal` count is reported even when it is zero, and only when a
+      // boundary applied: "recorded, not posted" is a number nobody can read off
+      // the review itself, and leaving it out of the one line the ledger keeps
+      // is how a dark drop would look exactly like a quiet review.
+      const withheld = review.tiered ? `, ${review.internalCount} recorded-only` : "";
       return succeed(
-        `posted review: ${review.inlineCount} inline, ${review.demotedCount} in body, event=${review.event}${downgraded}`,
+        `posted review: ${review.inlineCount} inline, ${review.demotedCount} in body${withheld}, event=${review.event}${downgraded}`,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.warn("Inline review POST failed; retrying body-only", { err });
       // Off-diff anchors (e.g. a stale diff) 422 — retry with everything in the
       // body so the review still lands.
-      const bodyOnly = buildBodyOnlyReview(doc);
+      // The tiering, when there was one: the retry must not republish what the
+      // boundary recorded-and-withheld just because GitHub rejected an anchor.
+      const bodyOnly = buildBodyOnlyReview(doc, review.tiered);
       try {
         await github.createPullRequestReview(owner, repo, prNumber, {
           body: bodyOnly.body,
@@ -485,10 +624,14 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       const rows = [
         ...tiered.inline.map((f) => ({ tier: "inline" as const, reason: null, finding: f })),
         ...tiered.body.map((d) => ({ tier: "body" as const, reason: d.reason, finding: d.finding })),
-        ...tiered.internal.map((f) => ({
+        // `reason` is the same machine token the body tier carries, not prose:
+        // the sibling eval harness reads this file, and "below the internal
+        // floor" as a sentence made the three causes of a withheld finding
+        // indistinguishable to anything but a human.
+        ...tiered.internal.map((r) => ({
           tier: "internal" as const,
-          reason: "below the internal floor" as string,
-          finding: f,
+          reason: r.reason as string,
+          finding: r.finding,
         })),
       ];
       writeFileSync(

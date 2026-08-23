@@ -48,7 +48,8 @@ import {
   concatJsonl,
 } from "./metrics.js";
 import { modelCost } from "./env.js";
-import { gradeBehavioral, gradeExecution, gradeTriage, gradeReview, gradeMarkers } from "./grade.js";
+import { gradeBehavioral, gradeExecution, gradeTriage, gradeReview, gradeInternalRecall, gradeMarkers } from "./grade.js";
+import { readPipelineStats, internalJudgeInputs, withInternalRecall } from "./review-pipeline-stats.js";
 import { prContextPatch, type ReviewOverride } from "./pr-context.js";
 
 export interface RunInstanceOptions {
@@ -666,7 +667,20 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
           /* leave diff undefined — judge falls back to diff-blind */
         }
       }
+      // The evidence pipeline's own telemetry, read off the artifacts it wrote.
+      // Deliberately read HERE and not from the `--keep-workspace` branch below:
+      // making the mechanism metrics conditional on a debugging flag is how they
+      // came to be absent from every arm ever measured. `undefined` for a
+      // baseline arm, which runs no pipeline and writes no artifacts.
+      const readout = readPipelineStats(repoDir);
       const rg = await gradeReview({ gold: inst.review_gold, reviews, beta: opts.judge?.beta, diff });
+      // Internal recall — gold matched by everything the pipeline GENERATED,
+      // including what the attention boundary held back. One extra judge call
+      // (MATCH only; `findings.json` needs no extraction), and it is what makes
+      // "never found it" separable from "found it and did not say it".
+      const internal = readout
+        ? await gradeInternalRecall({ gold: inst.review_gold, findings: internalJudgeInputs(readout.findings), diff })
+        : undefined;
       result.review = {
         precision: rg.precision,
         recall: rg.recall,
@@ -678,6 +692,7 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
         falsePositives: rg.falsePositives,
         falseNegatives: rg.falseNegatives,
         trace: rg.trace,
+        ...(readout ? { pipeline: withInternalRecall(readout, internal) } : {}),
       };
       if (rg.error) result.error = result.error ?? `review judge: ${rg.error}`;
     }

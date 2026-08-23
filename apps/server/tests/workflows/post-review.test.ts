@@ -199,6 +199,13 @@ describe("post-review action (runPostReview)", () => {
     writeFileSync(join(dir, "findings.json"), JSON.stringify(doc));
   }
 
+  /** Write one survey's `hypotheses/<family>.jsonl` beside findings.json. */
+  function seedHypotheses(taskId: string, repo: string, family: string, rows: object[]): void {
+    const dir = join(stateDir, "sandboxes", taskId, repo, ".lastlight", "pr-review", "hypotheses");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${family}.jsonl`), rows.map((r) => JSON.stringify(r)).join("\n"));
+  }
+
   function makeExecutor(taskId: string, ctxOverrides: Partial<TemplateContext> = {}) {
     const ctx: TemplateContext = {
       owner: "acme",
@@ -619,6 +626,104 @@ describe("post-review action (runPostReview)", () => {
           ["on-diff C", "overflow"],
           ["on-diff D", "overflow"],
         ]);
+      });
+
+      /**
+       * The anti-finding rule, at the deployment level.
+       *
+       * `tierFindings` is unit-covered; what only this layer can prove is that
+       * the clean-discharge set is READ OFF THE WORKSPACE at all — the sibling
+       * `hypotheses/` directory beside the findings the handler already reads —
+       * and that a run with no such directory is byte-identical to today.
+       *
+       * Measured on `prreview__skillspro-1587-r2`: half to two thirds of every
+       * hypothesis three identical repeats generated was a clean QUOTE, and on
+       * one of the three, 17 findings built entirely out of them were POSTED at
+       * confidence ≥ 0.75 — above every bar the boundary has.
+       */
+      it("records, and does not post, a finding whose evidence is all clean discharges", async () => {
+        withReviewConfig({
+          trigger: "on-request",
+          analysis: { ...defaultReviewConfig().analysis, enabled: true, maxInlineComments: 8 },
+        });
+        const taskId = "widget-42-clean-discharge";
+        seedFindings(taskId, "widget", {
+          summary: "ok",
+          event: "COMMENT",
+          findings: [
+            {
+              path: "src/foo.ts",
+              line: 7,
+              severity: "Important",
+              title: "anti-finding",
+              body: "Type contract: consolidateData correctly accepts the new shape",
+              confidence: 0.95,
+              hypotheses: ["contract-001"],
+            },
+            {
+              path: "src/foo.ts",
+              line: 8,
+              severity: "Important",
+              title: "real finding",
+              body: "the token can be null here",
+              confidence: 0.8,
+              hypotheses: ["contract-002"],
+            },
+            // No provenance at all: it must keep the confidence path, whatever
+            // the surveys said. Absence of provenance is not innocence.
+            { path: "src/foo.ts", line: 9, severity: "Minor", title: "unprovenanced", body: "b" },
+          ],
+        });
+        seedHypotheses(taskId, "widget", "contract", [
+          { discharge: "QUOTE", failureScenario: null },
+          { discharge: "QUOTE", failureScenario: "a null token reaches the header" },
+        ]);
+
+        const { executor } = makeExecutor(taskId);
+        const outcome = await executor.execute(NODE, {});
+        expect(outcome.status).toBe("succeeded");
+        const posted = reviews[0]!.body as { comments: { body: string }[]; body: string };
+
+        expect(posted.comments.map((c) => c.body.includes("real finding"))).toEqual([true, false]);
+        expect(posted.body).not.toContain("consolidateData correctly accepts");
+        // …and the count is in the ledger row, so the effect is measurable
+        // rather than felt.
+        expect(outcome.results[0]!.output).toContain("1 recorded-only");
+
+        const record = JSON.parse(readFileSync(dispositionPath(taskId), "utf8")) as {
+          findings: { tier: string; reason: string | null; finding: { title: string } }[];
+        };
+        expect(record.findings.filter((r) => r.tier === "internal").map((r) => [r.finding.title, r.reason])).toEqual([
+          ["anti-finding", "clean-discharge"],
+        ]);
+        expect(record.findings.filter((r) => r.tier === "inline")).toHaveLength(2);
+      });
+
+      it("is unmoved by a hypotheses dir when the pipeline is off", async () => {
+        // No boundary ⇒ the directory is never even read, so a deployment that
+        // has not opted in cannot be changed by what a survey happened to write.
+        withReviewConfig({
+          trigger: "on-request",
+          analysis: { ...defaultReviewConfig().analysis, enabled: false },
+        });
+        const taskId = "widget-42-clean-discharge-off";
+        seedFindings(taskId, "widget", {
+          summary: "ok",
+          event: "COMMENT",
+          findings: [
+            { path: "src/foo.ts", line: 7, severity: "Important", title: "anti-finding", body: "b", hypotheses: ["contract-001"] },
+          ],
+        });
+        seedHypotheses(taskId, "widget", "contract", [{ discharge: "QUOTE", failureScenario: null }]);
+
+        const { executor } = makeExecutor(taskId);
+        const outcome = await executor.execute(NODE, {});
+        expect(outcome.status).toBe("succeeded");
+        expect((reviews[0]!.body as { comments: unknown[] }).comments).toHaveLength(1);
+        // The `recorded-only` clause belongs to the boundary; with none applied
+        // the ledger line is exactly the one it has always been.
+        expect(outcome.results[0]!.output).not.toContain("recorded-only");
+        expect(existsSync(dispositionPath(taskId))).toBe(false);
       });
     });
   });

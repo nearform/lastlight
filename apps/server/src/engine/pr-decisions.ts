@@ -1398,6 +1398,7 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
       changedFiles: state.changedFiles,
       max: review.analysis.maxSpecObligations,
     }),
+    review.analysis.obligationContract,
   );
   return {
     /**
@@ -1426,6 +1427,23 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      * this is the operator's ask, never the effective value.
      */
     surveyConcurrency: String(review.analysis.surveyConcurrency),
+    /**
+     * The CONTROL arm — `--contract` on the `seed` phase's `lastlight-facts`
+     * invocation, and the argument `renderSpecObligations` above just took.
+     *
+     * Projected unconditionally beside `analysisEnabled` (not under the probes
+     * branch) because it governs the surveys themselves, and projected at all
+     * because the five facts-derived families are rendered by a CLI in the
+     * sandbox: the only way the operator's answer reaches them is through the
+     * phase's command line. `spec` gets it in-process, one call up. Two readers,
+     * one config key, so the sixth axis cannot silently stay on `full` while its
+     * five siblings move.
+     *
+     * A string like every other key here: the render context is projected to
+     * strings, and the phase's shell defaults an empty value back to `full` —
+     * the direction every switch in this block fails in.
+     */
+    obligationContract: review.analysis.obligationContract,
     /**
      * WP4's gate, and a SEPARATE one — `skip_if: "probesEnabled != true"`.
      *

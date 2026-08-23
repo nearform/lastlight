@@ -71,6 +71,20 @@
  * the agent writes can fix a misspelled `--family`, so it must break loudly at
  * the wiring rather than quietly pass.
  *
+ * ── The second degradation: `contract: "minimal"` ───────────────────────────
+ *
+ * Same rule, second instance: **never grade a contract the block did not ask
+ * for.** `lastlight-facts seed --contract minimal` renders the obligation block
+ * as it stood before 2026-08-23 — no `discharge` field on the prescribed row,
+ * no id checklist, no exemplar — as the control for that day's result (recall
+ * 4-of-5 → 0-of-5 with compliance 0/33 → 33/33, two variables at once). Measured
+ * compliance under exactly that block was 0/31, 0/34 and 0/40. Grading it would
+ * fail every family of every run over a field nobody was told to write, which is
+ * the `$LL_FAMILY` bug rebuilt out of a config key. So an explicit `minimal` in
+ * `obligations.json` falls back to the same `test -s` floor, says so, and
+ * suppresses the per-obligation todo list that would otherwise read as the
+ * failure the note is denying.
+ *
  * ── What it deliberately does NOT do ────────────────────────────────────────
  *
  * It does not read a quote, resolve a `path:line`, judge a claim, or check that
@@ -84,7 +98,7 @@ import { join } from "node:path";
 import { titleFrom } from "./findings.js";
 import { readHypothesisSet } from "./hypotheses.js";
 import { noopLogger, type LoggerPort } from "./log.js";
-import type { ObligationsDocument } from "./seed.js";
+import type { ObligationContract, ObligationsDocument } from "./seed.js";
 
 /**
  * The four codes `seed-render.ts`'s DISCHARGE contract demands, and the only
@@ -165,6 +179,17 @@ export interface CheckDischargeResult {
    * it is fatal and never satisfied.
    */
   familyError: string | null;
+  /**
+   * Which obligation block the seeder rendered, off `obligations.json`.
+   *
+   * `minimal` prescribes no `discharge` field, so this gate GRADES NOTHING and
+   * falls back to the `test -s` floor — the verdict block says why. Recorded
+   * here so a consumer (and `renderDischargeCheck`) can tell "nothing was
+   * discharged" from "nothing was asked", which is this package's founding
+   * distinction wearing a config key. A document written before the switch
+   * existed reads as `full`.
+   */
+  contract: ObligationContract;
   /** True ⇒ the loop may stop. */
   satisfied: boolean;
   /** One line per interesting fact, for the phase log. */
@@ -402,6 +427,11 @@ export function checkDischarge(options: CheckDischargeOptions): CheckDischargeRe
   const notMeasuredReason = familyRow?.notMeasuredReason ?? null;
   const outstanding = entries.filter((e) => e.status !== "discharged");
 
+  // Read off the document, defaulting to `full` — a document written before the
+  // switch existed, or one whose field was hand-edited to something else, is a
+  // `full` document. The gate degrades only on an EXPLICIT `minimal`.
+  const contract: ObligationContract = doc?.contract === "minimal" ? "minimal" : "full";
+
   // ── The verdict, in the order the conditions actually bite.
   let satisfied: boolean;
   if (familyError !== null) {
@@ -414,6 +444,32 @@ export function checkDischarge(options: CheckDischargeOptions): CheckDischargeRe
     satisfied = fileState === "present";
     notes.push(
       `obligations.json could not be read, so NOTHING was graded — this run fell back to the \`test -s\` floor this gate exists to replace (${documentError})`,
+    );
+  } else if (contract === "minimal") {
+    // ── The SECOND degradation, and it is the same rule as the first: never
+    // grade a contract the block did not ask for.
+    //
+    // `--contract minimal` renders the obligation block as it stood before
+    // 2026-08-23 — no `discharge` field on the prescribed row, no id checklist,
+    // no exemplar. Measured compliance under exactly that block was **0 of 31,
+    // 0 of 34 and 0 of 40** across both preserved runs, so grading it here would
+    // fail every family of every run, forever, over a field the survey was never
+    // told to write. That is WP3's `$LL_FAMILY` bug reconstructed out of a config
+    // key instead of an unset shell variable.
+    //
+    // What it costs today is a false signal rather than money: since WP11c the
+    // survey is a `type: fanout` and `runBranchGate` is OBSERVATIONAL — it runs
+    // the command once, records `condition_met` / `condition_not_met`, and never
+    // re-runs the branch (`apps/server/src/workflows/handlers/fanout.ts`). So a
+    // gate that could not close would burn no iterations at present. It is
+    // degraded anyway, for two reasons: five branches recording
+    // `condition_not_met` on every run of the control arm is a pipeline failure
+    // signature the arm would then have to be read around; and that handler's
+    // own comment frames single-shot as *reproducing* the old chained loops
+    // exactly, which means the loop can come back and the money with it.
+    satisfied = fileState === "present";
+    notes.push(
+      `obligations.json records \`contract: "minimal"\` — the block this run rendered prescribes no \`discharge\` field, so NOTHING was graded and this fell back to the \`test -s\` floor this gate exists to replace. That is the control arm behaving correctly, not a clean discharge`,
     );
   } else if (!measured && mine.length === 0) {
     // NOT MEASURED is not a failure and is not a pass either — it is the third
@@ -466,9 +522,11 @@ export function checkDischarge(options: CheckDischargeOptions): CheckDischargeRe
     obligations: mine.length,
     outstanding: outstanding.length,
     fileState,
+    contract,
   });
 
   return {
+    contract,
     family,
     dir: options.dir,
     fileState,
@@ -521,6 +579,11 @@ export function renderDischargeCheck(result: CheckDischargeResult): string {
       ` (${codes ? `${codes}, ` : ""}${result.rows} hypothesis row(s), file ${result.fileState})`,
   ];
   for (const note of result.notes) lines.push(`  note: ${note}`);
+  // Under `minimal` the entries are real — nothing WAS discharged — but the
+  // per-entry detail is imperative ("answer it with QUOTE, ABSENT, PARTIAL or
+  // PROBE") and the survey was never asked for one. Thirty of those lines under
+  // the note that says so would read as the failure the note is denying.
+  if (result.contract === "minimal") return lines.join("\n");
   for (const entry of result.outstanding.slice(0, MAX_LISTED)) {
     lines.push(`  ✗ ${entry.obligation} [${entry.status}]: ${detailOf(entry)}`);
     lines.push(`        ${titleFrom(entry.question)}`);
@@ -570,6 +633,20 @@ export function renderDischargeLedger(result: CheckDischargeResult): string {
 
   const lines: string[] = [];
   const total = result.entries.length;
+
+  // The `minimal` block does not point at this ledger — there is nothing for it
+  // to tick off — so reaching it means a human asked. Answer the question they
+  // actually have rather than reciting a contract this run never issued.
+  if (result.contract === "minimal") {
+    lines.push(
+      `discharge ledger [${result.family}]: NOT APPLICABLE — obligations.json records \`contract: "minimal"\`.`,
+      `  The block this run rendered prescribes no \`discharge\` field, so none of the ${total} obligation(s)`,
+      "  below was ever asked for a code and the gate grades none of them (it falls back to the `test -s`",
+      "  floor). Nothing here is outstanding work; it is the control arm, behaving as designed.",
+    );
+    for (const note of result.notes) lines.push(`  ${note}`);
+    return lines.join("\n");
+  }
 
   if (total === 0) {
     lines.push(`discharge ledger [${result.family}]: no obligations to discharge.`);

@@ -408,7 +408,7 @@ review:
     - "**/__generated__/**"
   analysis:
     enabled: false             # the review evidence pipeline — off, and inert
-    maxSpecObligations: 6      # per-PR budget for the `spec` obligation family
+    maxSpecObligations: 40     # SAFETY BOUND for the `spec` family — should never bind
     maxObligations: 40         # …and for the five facts-derived families pooled
     surveyPasses: 6            # how many of the six survey families actually run
     probes: false              # install deps so a probe can be RUN. Its own switch

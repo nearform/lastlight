@@ -161,6 +161,8 @@ The release commit is conventionally just the two version-file lines
 | `scripts/mine-failures.ts` | Read-only TRAIN-only failure-signature miner — clusters `review.falseNegatives`/`falsePositives` into ranked recall/precision signatures (the evidence bundle) for the `lastlight-evals-loop` skill's diagnose step. |
 | `scripts/diff-runs.ts` | Read-only two-scorecard F1 diff (per-case + arm delta) + train/held-out keep/revert verdict (opt-in `--symmetric` non-regressive gate; split-partitioned `REGRESSED(...)` line) — the measurement step of the `lastlight-evals-loop` skill. Also prints the MICRO section (micro-recall / SNR / paired McNemar) and refuses a verdict when the two runs graded different case sets. |
 | `scripts/facts-anchors.ts` | Builds `datasets/pr-review/anchors.json` — the **frozen, versioned** deterministic anchor labels (tokenizer `v1`) that give the code-facts evidence-coverage metric its denominator. No model anywhere. Freeze the labels, not the tokenizer: the artifact stamps `tokenizer`, so a better tokenizer ships as `v2` rather than rewriting past numbers. Carries a hand-audit block (seed + verdicts) that is the metric's error bar. Never commits gold text — `instances.json` is gitignored for a reason. |
+| `scripts/band.ts` | Read-only headless repeat band — the CLI path to `varianceRollup`/`bandVerdict` (union + intersection recall existed only in the dashboard before). Takes the arm's scorecards/run dirs EXPLICITLY (the mapping is an input, never inferred: the preserved 2026-08-22 runs carry no `meta.repeat`/`meta.overlay`, so any heuristic groups the baseline in with the candidates) and prints the per-repeat points, mean/min/max + band (null below 2 repeats), union/intersection recall, the per-gold hit matrix and the untraced cases by name. `--vs` adds a second arm and a `bandVerdict`. |
+| `scripts/backfill-pipeline.ts` | Back-fills `review.pipeline` onto a scorecard measured before the producer existed, from a PRESERVED workspace (`~/lastlight-run-artifacts/<run>/<instance>/pr-review/` — no `.lastlight` level, hence `readPipelineArtifacts`). The mechanism half is deterministic and free; **internal recall spends** (one MATCH judge call per case, `gradeInternalRecall`). Read-only unless `--write` (atomic), prints a cost estimate, refuses above `--max-spend` (default $1), refuses to write on any published-number drift, and a non-TTY without `--yes` is a REFUSAL — this script spends on plain invocation, so `rescore.ts`'s "no TTY = consent" rule would let a pipe buy judge calls. **`--no-judge` refreshes the FREE half only** (see below). |
 | `scripts/rescore.ts` | Read-only (unless `--write`) offline re-score: back-fills micro-recall / SNR / the attention boundaries onto an EXISTING scorecard with no model spend, and refuses to write if a published number changed. Plus `--repeat-judge N` — the ONE mode that spends (2 judge calls per case per repeat): it re-runs the judge N times over the stored review text + gold and reports the spread, separating GRADER noise from pipeline noise. Never runs by default, prints its cost estimate first, and refuses `--write` (a re-judge measures the grader, it does not correct the run). |
 | `src/review-metrics.ts` | The recall-first metrics — micro-aggregation, SNR, the detection floor + exact McNemar, the attention boundaries, per-family attribution. Pure arithmetic over stored fields, which is what makes the back-fill possible. |
 | `src/report.ts` | Scorecard roll-up + JSON/JSONL artifacts + `buildIndex` (filesystem → the SPA's `/api/index`). |
@@ -184,7 +186,9 @@ The release commit is conventionally just the two version-file lines
   strictly sequentially, as N **sibling** run dirs — each a normal run tagged
   `meta.repeat = {group, index, of}` (`group` = the first repeat's `runId`), which
   `varianceRollup` (`review-metrics.ts`) folds into a band with union/intersection
-  recall. Repeats are siblings and never nested because `indexTier`/`buildIndex`
+  recall — read it with `npx tsx scripts/band.ts <run> <run> <run>` (pass the runs
+  explicitly; nothing infers which runs are one arm) or in the dashboard's repeat
+  view. Repeats are siblings and never nested because `indexTier`/`buildIndex`
   and `clean.ts` all walk exactly two levels. It implies `--keep-workspace` (when
   repeats disagree the question is always *which* evidence each produced) and
   `--no-open` (a finished run holds its dashboard server open forever — a repeat
@@ -204,6 +208,25 @@ The release commit is conventionally just the two version-file lines
   nowhere at all; a globally-installed harness once ran the *baseline* while
   reporting itself as the pipeline arm and nothing in the artifact could contradict
   it. Every field is optional — absent means "not recorded", never "off".
+- **Re-read the mechanism metrics after the reader changes — `backfill-pipeline
+  --no-judge`.** `review.pipeline` has two halves that age differently. The
+  mechanism half is a pure function of the artifacts on disk, so it goes stale the
+  moment `readPipelineArtifacts` (`src/review-pipeline-stats.ts`) learns something
+  — on 2026-08-23 it learned that a clean discharge needs `failureScenario`
+  PRESENT and explicitly `null`, and that citations resolve through the canonical
+  `<family>-NNN` identity, which moved `cleanDischarges` on five preserved runs
+  (37→0 across the 16 minimal-era instances; 30→23 on one full-contract repeat).
+  The judge half (`internalMatched`, `inlineMatched`, per-family
+  `matched`/`internalMatched`) cost real money and **cannot be recomputed from a
+  scorecard at all** — `withInternalRecall` needs the judge's `goldToFinding`
+  reply, which nothing stores. So `--no-judge` re-reads the artifacts, rewrites
+  only the mechanism fields, and CARRIES the judged ones
+  (`mergePreservedJudgement`). Zero model calls, so no estimate and no
+  confirmation; a run with no stored internal recall never gains a fabricated one,
+  a stored `internalUngraded` survives, and the write is refused if the judged
+  half moved at all (`judgedHalf`) as well as on the usual published-number drift.
+  Re-running the full back-fill instead would re-buy every MATCH call to reach the
+  same answers.
 - **Verifying the harness/UI (not a model):** when running an eval just to check
   the plumbing or dashboard works, pick the **cheapest, fastest** model available
   (e.g. `--model haiku`, or the cheapest entry in `models.json`) and the smallest

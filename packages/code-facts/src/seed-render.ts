@@ -30,8 +30,30 @@
  * needs one**, wrapped and never truncated, exactly as the discharge ledger
  * does; and `tests/seed-render.test.ts` feeds the rendered exemplar back through
  * `checkDischarge` so the emitted shape cannot drift out of the gate's reading.
+ *
+ * ── …and then recall went to zero. `--contract minimal` is the control ──────
+ *
+ * Measured the same day on `prreview__skillspro-1587-r2` with `--repeats 3`:
+ * discharge compliance 0/33 → **33/33**, and the union of matched gold **4-of-5
+ * → 0-of-5**, three repeats running. Half to two thirds of every hypothesis
+ * became a *clean quote* — `discharge: QUOTE`, `failureScenario: null`, "I found
+ * the line and it is fine" — 23, 25 and 30 clean of 45, 48 and 46.
+ *
+ * Two causes and the run cannot separate them, because two things changed at
+ * once: the obligations may ask the WRONG QUESTION and making a wrong question
+ * mandatory turns hunting into checklist-clearing (C1); or reliable seeding
+ * itself suppresses discovery (C2 — the same commit stopped ~24% of survey
+ * branches losing their seed entirely).
+ *
+ * So BOTH blocks live in this file, selected by `ObligationsDocument.contract`.
+ * `full` is what is above and is the default, byte-for-byte. `minimal` is this
+ * file exactly as it stood at `5fa06da1^` — restored from the diff, not
+ * reimagined — which holds the delivery fix constant and puts the question back.
+ * Two exceptions, each deliberate and each named at its site: the never-empty
+ * rule below is DELIVERY and is kept under both, and the obligation line goes
+ * back to `discharge:` under `minimal` (see {@link renderOne}).
  */
-import type { Obligation, ObligationsDocument, SeedFamily } from "./seed.js";
+import type { Obligation, ObligationContract, ObligationsDocument, SeedFamily } from "./seed.js";
 
 const FAMILY_TITLE: Record<SeedFamily, string> = {
   contract: "CONTRACT — a producer's shape moved; does every consumer outside the diff still satisfy it?",
@@ -59,6 +81,38 @@ const DISCHARGE = [
   "The code goes in the row's `discharge` field — the shape, and every id that needs one, are at the end of this",
   "block. An obligation's own `expects:` (quote / probe / either) is what it is LIKELY answerable by: a hint, not",
   "one of the four, and `either` is not a discharge. Never copy it into `discharge`.",
+  "",
+  "OVER-PRODUCE. A plausible mechanism you cannot yet refute is a hypothesis, not noise — a later phase runs a",
+  "probe and a stronger model adjudicates, and both can only remove. Nothing downstream can recover a mechanism",
+  "you declined to write down, so the cost of a wrong hypothesis here is far below the cost of a missing one.",
+];
+
+/**
+ * The SAME contract as it stood at `5fa06da1^` — three lines shorter, and those
+ * three lines are the whole difference.
+ *
+ * Kept as a second literal rather than composed out of {@link DISCHARGE}'s parts,
+ * so that `full` is not one refactor away from moving. A control arm whose
+ * baseline drifts measures nothing.
+ *
+ * **Note what this is NOT.** It is not "no discharge contract": the four codes
+ * were always named here, and *"Reading a file is not a discharge"* is older
+ * than the bug. What `minimal` removes is the three lines that made the codes
+ * RECORDABLE — the pointer to the row's `discharge` field and to the id
+ * checklist at the end of the block — which is why compliance measured 0/31,
+ * 0/34 and 0/40 under it. This block asks for a discharge and gives the survey
+ * nowhere to write one, and reproducing that exactly is the point.
+ */
+const DISCHARGE_MINIMAL = [
+  "DISCHARGE EVERY OBLIGATION BELOW. Exactly one of:",
+  "",
+  "  QUOTE   — `path:line` and the line's text that answers the question. This is the only clean discharge.",
+  "  ABSENT  — you read every candidate and no line answers it. THAT IS A FINDING: raise it, anchored to the",
+  "            closest changed line, and say what the mechanism was.",
+  "  PARTIAL — answered on some paths and not others. Quote the line AND name the gap.",
+  "  PROBE   — it cannot be settled by reading, only by RUNNING something. Record it and say what you would run.",
+  "",
+  "Reading a file is not a discharge. Summarising the code is not a discharge. Quote a line, or say it is absent.",
   "",
   "OVER-PRODUCE. A plausible mechanism you cannot yet refute is a hypothesis, not noise — a later phase runs a",
   "probe and a stronger model adjudicates, and both can only remove. Nothing downstream can recover a mechanism",
@@ -149,16 +203,67 @@ function wrapIds(ids: string[]): string[] {
  * (`discharge.ts`, `codeOf`), `either` is not one of the four: a model copying
  * the label it just read lands `bad-code` and the loop cannot satisfy the gate
  * however many iterations it spends. One word of separation removes that.
+ *
+ * **Under `minimal` the label goes back to `discharge:`, and that is a decision
+ * rather than an oversight.** The trap the rename closes needs a row-level
+ * `discharge` field for `either` to be copied INTO, and `minimal`'s prescribed
+ * row has none — so the collision is inert there, while the label is one of the
+ * strings the arm is trying to hold constant against the runs that scored 4-of-5.
+ * A control that silently improves the thing it is controlling for measures the
+ * improvement, not the variable. `checkDischarge` degrading to the `test -s`
+ * floor under `minimal` (`discharge.ts`) is what makes the inertness real rather
+ * than argued: no code is graded, so no code can land `bad-code`.
  */
-function renderOne(o: Obligation): string[] {
+function renderOne(o: Obligation, contract: ObligationContract): string[] {
   return [
-    `${o.id}  [${o.family}]  expects: ${o.discharge}`,
+    contract === "minimal"
+      ? `${o.id}  [${o.family}]  discharge: ${o.discharge}`
+      : `${o.id}  [${o.family}]  expects: ${o.discharge}`,
     `  mechanism:    ${o.mechanism}`,
     `  introduced:   ${o.introducedAt.path}:${o.introducedAt.line}   ${o.introducedAt.quote}`,
     `  enforced at:  ${o.enforcedAt.candidates.join(", ")}`,
     `  found:        false   ← nothing has been checked; this is the claim, not a placeholder`,
     `  question:     ${o.question}`,
     "",
+  ];
+}
+
+/**
+ * The tail of the block as it stood at `5fa06da1^`, restored from the diff.
+ *
+ * Four things are absent from it and they ARE the experiment: the row has no
+ * `discharge` field and no `failureScenario`; there is no *"all N below, none
+ * optional"* id checklist and no `discharge --ledger` pointer; there is no
+ * worked exemplar; and the header line asks for one object *per hypothesis*
+ * rather than *per obligation*. That last one is not cosmetic — it is the
+ * difference between "write down what you found" and "clear this list" — and it
+ * is also load-bearing on the test bench: `review-spec.test.ts` anchors its
+ * cross-renderer field comparison on the literal string *"Append one JSON object
+ * per obligation to"*, which appears in this file exactly once whatever the
+ * contract, because `minimal` says *per hypothesis*.
+ *
+ * The last seven lines are common to both contracts and are repeated rather than
+ * shared, for the reason {@link DISCHARGE_MINIMAL} is a second literal: the
+ * baseline of a control arm must not be reachable by editing the arm under test.
+ */
+function minimalTail(family: SeedFamily): string[] {
+  return [
+    `Append one JSON object per hypothesis to .lastlight/pr-review/hypotheses/${family}.jsonl — one line each:`,
+    "",
+    `  { "id": "${family}-001", "obligation": "O-001", "family": "${family}", "claim": "…",`,
+    '    "bothEnds": { "introducedAt": "path:line", "enforcedAt": "path:line" | null },',
+    '    "quotes": [ { "path": "…", "line": 12, "text": "the line, verbatim" } ],',
+    '    "existingCode": "the verbatim excerpt this is about",',
+    '    "needsProbe": false, "severity": "Critical|Important|Minor", "confidence": 0.0-1.0 }',
+    "",
+    `\`id\` is \`${family}-001\`, \`${family}-002\`, … — numbered within THIS family. Six passes append to six files`,
+    "and none of them can see another's, so a bare `H-001` collides with whatever another family minted and",
+    "credits neither claim. The id is namespaced so that cannot happen.",
+    "",
+    "`quotes` must be REAL text at REAL lines — a later phase checks that they resolve, and a claim whose quote",
+    "does not resolve is discarded whatever its reasoning. `existingCode` is how the finding gets anchored:",
+    "quote the code, do not count the lines. Do NOT write findings.json, do NOT post a review, and do NOT",
+    `reason about any family other than ${family} — another pass owns each of the others.`,
   ];
 }
 
@@ -180,8 +285,21 @@ function renderOne(o: Obligation): string[] {
  * per-family manifest off the same fact, and the survey branch is handed a loud
  * NOT AVAILABLE notice rather than an escape hatch (locked decision 6: "we could
  * not look" and "we looked and it is clean" are different facts, at every layer).
+ *
+ * **The never-empty rule holds under BOTH contracts, and that is the control's
+ * boundary.** It is the delivery half of `5fa06da1` — the same half as
+ * `FanoutBranch.context_file` — and `minimal` exists to hold delivery constant
+ * while the QUESTION changes. Restoring `return ""` here would put a family's
+ * missing block back on the table and re-confound C1 with C2, which is the one
+ * thing this switch is for.
+ *
+ * Which block is rendered comes off `doc.contract` rather than an argument: the
+ * seeder stamps it, this renders it, and `checkDischarge` grades against it, so
+ * the three cannot disagree. A document written before the field existed reads
+ * as `full`.
  */
 export function renderFamilyBlock(doc: ObligationsDocument, family: SeedFamily): string {
+  const contract: ObligationContract = doc.contract === "minimal" ? "minimal" : "full";
   const mine = doc.obligations.filter((o) => o.family === family);
   const row = doc.families.find((f) => f.family === family);
   const notMeasured = row && !row.measured ? row.notMeasuredReason : null;
@@ -239,8 +357,13 @@ export function renderFamilyBlock(doc: ObligationsDocument, family: SeedFamily):
     );
   }
 
-  lines.push("", ...DISCHARGE, "");
-  for (const o of mine) lines.push(...renderOne(o));
+  lines.push("", ...(contract === "minimal" ? DISCHARGE_MINIMAL : DISCHARGE), "");
+  for (const o of mine) lines.push(...renderOne(o, contract));
+
+  if (contract === "minimal") {
+    lines.push(...minimalTail(family));
+    return lines.join("\n");
+  }
 
   lines.push(
     `Append one JSON object per obligation to .lastlight/pr-review/hypotheses/${family}.jsonl — one line each:`,

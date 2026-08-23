@@ -461,20 +461,9 @@ export async function gradeReview(opts: {
     return empty({ error: `judge match: ${(err as Error).message}`, posted });
   }
 
-  // De-dup the matching: each finding + each gold used at most once (guard the
-  // judge over-pairing), and drop out-of-range indices. Keep the accepted pairing
-  // (finding→gold) for the trace.
-  const usedFinding = new Set<number>();
-  const usedGold = new Set<number>();
-  const findingToGold = new Map<number, number>();
-  for (const m of matches) {
-    if (!Number.isInteger(m.finding) || !Number.isInteger(m.gold)) continue;
-    if (m.finding < 0 || m.finding >= posted || m.gold < 0 || m.gold >= gold.length) continue;
-    if (usedFinding.has(m.finding) || usedGold.has(m.gold)) continue;
-    usedFinding.add(m.finding);
-    usedGold.add(m.gold);
-    findingToGold.set(m.finding, m.gold);
-  }
+  const findingToGold = acceptPairs(matches, posted, gold.length);
+  const usedFinding = new Set(findingToGold.keys());
+  const usedGold = new Set(findingToGold.values());
 
   const matched = usedFinding.size;
   const precision = matched / posted;
@@ -511,6 +500,100 @@ export async function gradeReview(opts: {
   };
 
   return { precision, recall, fbeta, beta, posted, gold: gold.length, matched, falsePositives, falseNegatives, trace };
+}
+
+/**
+ * De-dup a judge's pairing: each finding and each gold used at most once, and
+ * out-of-range indices dropped.
+ *
+ * The judge is instructed to pair one-to-one and mostly does; this is the guard
+ * for when it does not, and it must be the SAME guard on both passes below —
+ * internal recall differing from posted recall because the two ends counted
+ * over-pairing differently would be a measurement artifact wearing a result's
+ * clothes.
+ */
+function acceptPairs(matches: { finding: number; gold: number }[], nFindings: number, nGold: number): Map<number, number> {
+  const usedFinding = new Set<number>();
+  const usedGold = new Set<number>();
+  const findingToGold = new Map<number, number>();
+  for (const m of matches) {
+    if (!Number.isInteger(m.finding) || !Number.isInteger(m.gold)) continue;
+    if (m.finding < 0 || m.finding >= nFindings || m.gold < 0 || m.gold >= nGold) continue;
+    if (usedFinding.has(m.finding) || usedGold.has(m.gold)) continue;
+    usedFinding.add(m.finding);
+    usedGold.add(m.gold);
+    findingToGold.set(m.finding, m.gold);
+  }
+  return findingToGold;
+}
+
+/** Gold matched by everything the pipeline generated, posted or not. */
+export interface InternalRecallGrade {
+  /** `goldToFinding[j]` — the index into the supplied findings that matched gold
+   * `j`, or `null`. Same index space the caller passed in, so a match can be
+   * attributed back to the finding's family and tier. */
+  goldToFinding: (number | null)[];
+  matched: number;
+  /** The judge failed. `matched` is then 0 and must NOT be read as a result —
+   * an ungraded internal pass is not an internal recall of zero. */
+  error?: string;
+}
+
+/**
+ * **Internal recall** — did the pipeline find it at all, as against did it say
+ * it.
+ *
+ * `gradeReview` judges the posted review text, so a finding the attention
+ * boundary tiered `internal` is indistinguishable from one that was never
+ * generated. Those are completely different failures: the first is an attention
+ * problem with a threshold to turn, the second is the discovery ceiling this
+ * plan's whole thesis is about
+ * (`docs/plans/review-evidence-pipeline/TLDR.md`). Measuring them as one number
+ * is how "the filters kept their hands off gold" and "the boundary is inert"
+ * were both believed at once.
+ *
+ * **One judge call, not two.** The EXTRACT step exists to distil free-text prose
+ * into discrete findings; `findings.json` is already a structured list, so this
+ * runs only MATCH. That is what makes it ~$0.01 a case and affordable to
+ * back-fill across every preserved run.
+ */
+export async function gradeInternalRecall(opts: {
+  gold: GoldComment[];
+  findings: ExtractedFinding[];
+  judgeModel?: string;
+  diff?: string;
+}): Promise<InternalRecallGrade | undefined> {
+  const { gold, findings } = opts;
+  // Nothing to measure. Distinct from "measured zero", hence `undefined`.
+  if (!gold.length || !findings.length) return undefined;
+
+  let model: string;
+  try {
+    model = opts.judgeModel ?? defaultJudgeModel();
+  } catch (err) {
+    return { goldToFinding: gold.map(() => null), matched: 0, error: (err as Error).message };
+  }
+
+  const diff = opts.diff?.trim() ? opts.diff : undefined;
+  const user = JSON.stringify({
+    findings: findings.map((f, i) => ({ index: i, description: f.description, file: f.file ?? null })),
+    gold: gold.map((g, i) => ({ index: i, file: g.file ?? null, line: g.line ?? null, severity: g.severity, description: g.description })),
+  });
+
+  let matches: { finding: number; gold: number }[];
+  try {
+    const raw = await judge(model, MATCH_SYSTEM, withDiffContext(diff, "resolve whether a finding and a gold issue point at the same code", user));
+    const parsed = parseJudgeJson<{ matches?: { finding: number; gold: number }[] }>(raw);
+    if (!parsed?.matches) return { goldToFinding: gold.map(() => null), matched: 0, error: "judge: unparseable match reply" };
+    matches = parsed.matches;
+  } catch (err) {
+    return { goldToFinding: gold.map(() => null), matched: 0, error: `internal match: ${(err as Error).message}` };
+  }
+
+  const findingToGold = acceptPairs(matches, findings.length, gold.length);
+  const goldToFinding: (number | null)[] = gold.map(() => null);
+  for (const [f, g] of findingToGold) goldToFinding[g] = f;
+  return { goldToFinding, matched: findingToGold.size };
 }
 
 // ── Execution grade (SWE-bench resolved) ────────────────────────────────────

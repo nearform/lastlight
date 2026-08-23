@@ -443,7 +443,7 @@ parsed one of them. Measured on the real corpus — keycloak `37429` reads
 | `coverage` | changed lines executed by zero tests, read from an **existing** report. It never runs a suite. istanbul · lcov · JaCoCo · Cobertura · Go coverprofile · SimpleCov |
 | `all` | one envelope, every payload — what a workflow phase writes |
 | `prepare` | **not an extractor** — installs dependencies so a probe can be RUN, and writes `probes/env.json`. See below |
-| `discharge` | each `survey` branch's exit gate — every obligation the family owns carries a `QUOTE` / `ABSENT` / `PARTIAL` / `PROBE` discharge in `hypotheses/<family>.jsonl`. See below |
+| `discharge` | each `survey` branch's exit gate — every obligation the family owns carries a `QUOTE` / `ABSENT` / `PARTIAL` / `PROBE` discharge in `hypotheses/<family>.jsonl`. Degrades to the `test -s` floor on an unreadable `obligations.json` **or** on `contract: "minimal"`. See below |
 | `probes` | the `falsify` loop's exit gate — every hypothesis that needed a probe has a verdict, and every claim of execution has a transcript |
 | `findings` | the `adjudicate` loop's exit gate — the **conservation check**. See below |
 | `toolchain` | the manifest and what actually resolved |
@@ -662,6 +662,18 @@ Four decisions that are decisions:
   unsatisfiable by the agent. That is WP3's original `$LL_FAMILY` bug exactly (a
   gate testing `hypotheses/.jsonl`, failing forever, burning every iteration),
   and it is the failure mode this file guards hardest against.
+- **It degrades the same way on `contract: "minimal"`, and it is the same rule:
+  never grade a contract the block did not ask for.** `seed --contract minimal`
+  (`review.analysis.obligationContract`) renders the pre-2026-08-23 block — no
+  `discharge` field on the prescribed row, no id checklist, no exemplar — as the
+  CONTROL for that day's result. Measured compliance under exactly that block was
+  **0/31, 0/34, 0/40**, so grading it would fail every family of every run over a
+  field nobody was told to write. The mode is stamped into `obligations.json` by
+  the seeder, so the block, the gate and the artifact read ONE field; a
+  render-time flag would have let the first two disagree. `--ledger` says NOT
+  APPLICABLE rather than reciting a contract the run never issued, and
+  `renderDischargeCheck` suppresses the per-obligation todo list, whose detail
+  line is imperative and would read as the failure the note is denying.
 - **An unknown `--family` is the opposite case and stays fatal.** Nothing an
   agent writes can fix a misspelled or unset flag, so it breaks loudly at the
   wiring. An empty `--family` is refused at the CLI door.
@@ -704,6 +716,44 @@ than being confused with "nothing to say" or "the consumer looked in the wrong
 place". `tests/seed-render.test.ts` parses the rendered exemplar back out and
 feeds it to `checkDischarge`, so the emitted shape cannot drift out of the
 gate's reading.
+
+#### And then recall went to zero — `seed --contract full|minimal`
+
+On the same comparator case (`prreview__skillspro-1587-r2`, `--repeats 3`) that
+change took discharge compliance 0/33 → **33/33** *and* the union of matched gold
+**4-of-5 → 0-of-5**, three repeats running, with half to two thirds of every
+hypothesis becoming a *clean quote* — `QUOTE` with `failureScenario: null`, "I
+found the line and it is fine" (23, 25 and 30 clean of 45, 48 and 46). Two
+variables moved in one commit and the run cannot separate them: the obligations
+may ask the **wrong question**, and making a wrong question mandatory turns
+hunting into checklist-clearing (C1); and/or **reliable seeding itself suppresses
+discovery** (C2 — the same commit stopped ~24% of survey branches losing their
+seed entirely).
+
+So both blocks live in `seed-render.ts`, selected by
+`ObligationsDocument.contract` and driven by `review.analysis.obligationContract`
+→ `lastlight-facts seed --contract`. `full` is the default and is byte-identical;
+`minimal` is this file's block exactly as it stood at `5fa06da1^`, restored from
+the diff rather than reimagined. Two deliberate exceptions, each named at its
+site: the **never-empty rule holds under both**, because it is the DELIVERY half
+of that commit and the control exists to hold delivery constant while the
+question changes; and the per-obligation label goes back to `discharge:` under
+`minimal`, because the `expects:` rename closes a trap that needs a row-level
+`discharge` field to spring and `minimal`'s row has none.
+`apps/server/src/engine/review-spec.ts` mirrors the same switch so the sixth
+(`spec`) axis moves with its five siblings — as the same four removals, **not**
+as a revert of that file to its own pre-change text, which carried `N/A` and no
+row shape at all and would have corrupted the instrument rather than the
+variable. `review-spec.test.ts` pins the two renderers against each other under
+**both** contracts.
+
+Two things that are true and are not obvious. **`minimal` is not "no discharge
+contract"** — the four codes and *"Reading a file is not a discharge"* predate
+the bug; what `minimal` removes is the three lines that made a code
+*recordable*, which is why compliance measured zero under it. And **`--contract`
+is refused rather than defaulted on an unrecognised value**: a typo'd control arm
+that fell back to `full` would run, produce a number, and report it for an
+experiment that never happened, which nothing downstream could detect.
 
 ### `findings` — conservation, and the floor that makes it a mechanism
 

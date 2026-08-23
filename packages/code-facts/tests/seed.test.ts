@@ -266,4 +266,35 @@ describe("the rendered block carries the rule, not just the data", () => {
     // look" and "we looked and it is clean" are different facts.
     expect(renderFamilyBlock(degraded, "contract")).toContain("[facts] x");
   });
+
+  /**
+   * The contract is STAMPED, not passed twice.
+   *
+   * `renderFamilyBlock` reads it off the document and `checkDischarge` reads it
+   * off the same document, so the block a survey was handed and the contract the
+   * gate grades against cannot come from two different answers. A render-time
+   * argument would have allowed exactly that — which is the separability this
+   * pipeline has now paid for three times.
+   */
+  it("records which contract it rendered, and defaults to `full`", () => {
+    expect(seedObligations(envelope({})).contract).toBe("full");
+    expect(seedObligations(envelope({}), { contract: "full" }).contract).toBe("full");
+    expect(seedObligations(envelope({}), { contract: "minimal" }).contract).toBe("minimal");
+  });
+
+  it("renders the block the document says it rendered", () => {
+    const minimal = seedObligations(
+      envelope({
+        constants: {
+          sideDefinitions: {},
+          constants: [constant({ declaredAt: "src/config.ts:12", references: ["src/server/auth.ts:73"] })],
+        },
+      }),
+      { contract: "minimal" },
+    );
+    expect(minimal.contract).toBe("minimal");
+    const block = renderFamilyBlock(minimal, "enforcement");
+    expect(block).not.toMatch(/"discharge":/);
+    expect(block).toContain("Append one JSON object per hypothesis to");
+  });
 });

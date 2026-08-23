@@ -177,13 +177,26 @@ phases:
     # for the reason renderSpecObligations does: v3 measured a 17-row ledger
     # honestly discharged into ZERO findings, and obligations without the
     # contract reproduce exactly that.
+    #
+    # `--contract` is the CONTROL for 2026-08-23 (review.analysis.obligationContract,
+    # `full` | `minimal`; see config/default.yaml for the measurement). It is
+    # read into a variable and defaulted in the shell rather than interpolated
+    # straight into the argument list, because renderTemplate substitutes an
+    # ABSENT context key with the empty string — and `--contract --out` would
+    # then swallow the next flag. The key is projected unconditionally beside
+    # `analysisEnabled`, which this phase is already gated on, so the default is
+    # a belt to that brace. The sixth family (`spec`) gets the same setting
+    # in-process from `specContext`, so all six axes move together.
     command: |
       set -u
       FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+      CONTRACT="{{obligationContract}}"
       mkdir -p .lastlight/pr-review/hypotheses
       "$FACTS" seed --facts .lastlight/pr-review/facts.json \
         --out .lastlight/pr-review/obligations.json \
+        --contract "${CONTRACT:-full}" \
         --blocks .lastlight/pr-review/obligations || true
+      echo "seed: contract ${CONTRACT:-full}"
       echo "seed: $(ls .lastlight/pr-review/obligations 2>/dev/null | wc -l) family block(s)"
 
       # The MANIFEST, and it exists so that "the seeder wrote nothing for this
@@ -318,6 +331,23 @@ phases:
     # reach `obligations.json`, so the gate would be vacuous there. That leaves
     # it constraining five branches, and meaningfully four until WP4's `prepare`
     # gives the `tests` family a coverage artifact to be measured against.
+    #
+    # UNDER `review.analysis.obligationContract: minimal` ALL SIX ARE `test -s`,
+    # and the gate commands below do NOT change to say so. `seed --contract
+    # minimal` stamps the mode into obligations.json and `discharge` reads it,
+    # degrading to the same `test -s` floor it degrades to when the document is
+    # unreadable — one mechanism, two triggers. That is deliberate: an
+    # until_bash rewritten per arm could disagree with the block the survey was
+    # actually handed, which is the separability this pipeline keeps paying for.
+    # The reason it must degrade at all is measured: under the `minimal` block
+    # NOT ONE obligation ever carried a code (0/31, 0/34, 0/40), because that
+    # block's prescribed row has no field to put one in. What it would cost
+    # today is a false signal rather than money — a fan-out branch gate is
+    # OBSERVATIONAL (handlers/fanout.ts `runBranchGate`: it runs once, records
+    # condition_met/not_met and never re-runs the branch, exactly as the six
+    # chained `generic_loop: {max_iterations: 1}` phases did) — but that handler
+    # frames single-shot as reproducing the old loops, so the loop can come back
+    # and the burned budget with it.
     branches:
       - name: contract
         prompt: prompts/survey-contract.md

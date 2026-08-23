@@ -994,6 +994,15 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
       maxSpecObligations:
         nonNegativeNumber(analysisRaw.maxSpecObligations) ?? reviewDefaults.analysis.maxSpecObligations,
       maxObligations: nonNegativeNumber(analysisRaw.maxObligations) ?? reviewDefaults.analysis.maxObligations,
+      // The control arm. Anything that is not literally `"minimal"` is `full`,
+      // in the same direction every switch in this block fails: a typo leaves
+      // the deployment on the shipped block rather than silently running an
+      // experiment arm. `lastlight-facts seed` refuses an unrecognised value
+      // outright, so a misspelling is loud at the CLI door and inert here.
+      obligationContract:
+        analysisRaw.obligationContract === "minimal"
+          ? "minimal"
+          : reviewDefaults.analysis.obligationContract,
       surveyPasses: nonNegativeNumber(analysisRaw.surveyPasses) ?? reviewDefaults.analysis.surveyPasses,
       // WP11c. A CEILING the run clamps again per backend, so an overlay that
       // asks for six on gondolin still gets one — the operator's ask is not the

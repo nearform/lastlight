@@ -24,7 +24,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { checkDischarge, DISCHARGE_CODES } from "../src/discharge.js";
+import { checkDischarge, DISCHARGE_CODES, renderDischargeCheck } from "../src/discharge.js";
 import { renderFamilyBlock } from "../src/seed-render.js";
 import type { Obligation, ObligationsDocument, SeedFamily } from "../src/seed.js";
 
@@ -59,6 +59,7 @@ function doc(over: Partial<ObligationsDocument> = {}): ObligationsDocument {
   return {
     version: 1,
     generatedAt: "2026-08-23T00:00:00.000Z",
+    contract: "full",
     repo: "acme/widgets",
     baseSha: "b".repeat(40),
     headSha: "h".repeat(40),
@@ -297,5 +298,160 @@ describe("what the block must NOT blur", () => {
     );
     expect(block).toMatch(/No security obligations could be built/);
     expect(block).not.toMatch(/"discharge":/);
+  });
+});
+
+/**
+ * `--contract minimal` — the CONTROL for the 2026-08-23 result.
+ *
+ * That change moved discharge compliance 0/33 → 33/33 and the union of matched
+ * gold 4-of-5 → **0-of-5**, over three repeats, and it moved TWO variables at
+ * once: the question the obligations ask, and whether the seed is delivered
+ * reliably at all. `minimal` holds the delivery fix and puts the question back,
+ * so one arm separates them.
+ *
+ * The assertions therefore come in pairs — what `minimal` must NOT carry, and
+ * what it must still carry — because a control that changed anything else would
+ * measure that instead.
+ */
+describe("--contract minimal restores the pre-2026-08-23 block", () => {
+  const minimal = (family: SeedFamily = "enforcement") =>
+    renderFamilyBlock(doc({ contract: "minimal" }), family);
+
+  it("prescribes a row with NO field to record a discharge in — the measured bug, on purpose", () => {
+    // 0/31, 0/34, 0/40 obligations carried a code under exactly this block, and
+    // that is what is being reproduced. If this test ever goes green against a
+    // row that CAN hold a code, the arm is measuring `full` twice.
+    const rendered = minimal();
+    expect(rendered).not.toMatch(/"discharge":/);
+    expect(rendered).not.toMatch(/"failureScenario":/);
+    expect(rendered).toContain("Append one JSON object per hypothesis to");
+    expect(rendered).not.toContain("Append one JSON object per obligation to");
+  });
+
+  it("carries no id checklist, no ledger pointer and no worked exemplar", () => {
+    const rendered = minimal();
+    expect(rendered).not.toContain("none optional:");
+    expect(rendered).not.toContain("discharge --ledger");
+    expect(rendered).not.toContain("WORKED EXAMPLE");
+    // The exemplar is the only line in a `full` block that parses as a JSON
+    // object. There is no such line here at all.
+    const jsonLines = rendered.split("\n").filter((line) => {
+      try {
+        const v: unknown = JSON.parse(line.trim());
+        return typeof v === "object" && v !== null && !Array.isArray(v);
+      } catch {
+        return false;
+      }
+    });
+    expect(jsonLines).toEqual([]);
+  });
+
+  it("prints the obligation's requirement as `discharge:` again, and says why it is inert", () => {
+    // The `expects:` rename fixes a trap that needs a row-level `discharge`
+    // field for `either` to be copied INTO — and this row has none. Restoring
+    // the old label keeps the control faithful to the runs that scored 4-of-5;
+    // the gate degrading to `test -s` is what makes the trap unreachable.
+    const rendered = minimal();
+    expect(rendered).toMatch(/O-003\s+\[enforcement]\s+discharge: either/);
+    expect(rendered).not.toMatch(/\bexpects:/);
+  });
+
+  it("still names the four codes, and still over-produces — those predate the change", () => {
+    // `minimal` is NOT "no discharge contract". The codes and "Reading a file is
+    // not a discharge" are older than the bug; what is gone is the mechanism
+    // that made a code recordable.
+    const rendered = minimal();
+    for (const code of DISCHARGE_CODES) expect(rendered).toContain(code);
+    expect(rendered).toContain("Reading a file is not a discharge");
+    expect(rendered).toContain("OVER-PRODUCE");
+  });
+
+  it("is still NEVER EMPTY — delivery is held constant, and that is the point", () => {
+    // The never-empty rule is the DELIVERY half of the same commit, the half
+    // that stopped ~24% of survey branches losing their seed. Restoring
+    // `return ""` here would re-confound the two causes this arm exists to
+    // separate.
+    for (const family of ["contract", "enforcement", "security", "state", "tests"] as SeedFamily[]) {
+      expect(minimal(family).length, family).toBeGreaterThan(0);
+    }
+    expect(minimal("tests")).toMatch(/NOT MEASURED: no coverage report/);
+  });
+
+  it("leaves `full` alone: an absent `contract` field renders exactly what an explicit `full` does", () => {
+    // The baseline of a control arm must not move. A document written before
+    // this switch existed has no field at all and has to read as `full`.
+    const { contract: _drop, ...legacy } = doc();
+    const asLegacy = renderFamilyBlock(legacy as ObligationsDocument, "enforcement");
+    expect(asLegacy).toBe(renderFamilyBlock(doc({ contract: "full" }), "enforcement"));
+    expect(asLegacy).not.toBe(minimal());
+  });
+});
+
+/**
+ * The gate under `minimal`, and it is the half that costs money to get wrong.
+ *
+ * The block above asks for no discharge code. `checkDischarge` demands one per
+ * obligation. Left alone, five of six branches would fail their `until_bash` on
+ * every run of the control arm, over a field the survey was never told to write
+ * — WP3's `$LL_FAMILY` bug rebuilt out of a config key. So an explicit
+ * `contract: "minimal"` degrades to the same `test -s` floor an unreadable
+ * document degrades to.
+ */
+describe("the discharge gate degrades under `minimal`", () => {
+  /** One free-form row, citing nothing — the pre-change measured shape. */
+  const freeForm = [{ claim: "the nonce lifetime is never compared server-side" }];
+
+  it("passes on one parsed row, and says it graded nothing", () => {
+    const dir = workspace(doc({ contract: "minimal" }), { enforcement: freeForm });
+    const result = checkDischarge({ dir, family: "enforcement" });
+
+    expect(result.satisfied).toBe(true);
+    expect(result.contract).toBe("minimal");
+    expect(result.discharged).toEqual([]);
+    expect(result.notes.join(" ")).toMatch(/contract: "minimal"/);
+    expect(result.notes.join(" ")).toMatch(/test -s/);
+  });
+
+  it("NON-VACUITY: the SAME rows under `full` fail — the degrade is the contract, not the rows", () => {
+    // If this passed, the branch above would be indistinguishable from the gate
+    // simply having stopped working.
+    const dir = workspace(doc(), { enforcement: freeForm });
+    const result = checkDischarge({ dir, family: "enforcement" });
+
+    expect(result.satisfied).toBe(false);
+    expect(result.outstanding.map((e) => e.status)).toEqual([
+      "undischarged",
+      "undischarged",
+      "undischarged",
+    ]);
+  });
+
+  it("is a FLOOR, not a pass: no file at all still fails", () => {
+    // `test -s` is one line of any content — but it is still one line. A branch
+    // that wrote nothing has not cleared it under either contract.
+    const dir = workspace(doc({ contract: "minimal" }), {});
+    const result = checkDischarge({ dir, family: "enforcement" });
+
+    expect(result.satisfied).toBe(false);
+    expect(result.fileState).toBe("missing");
+  });
+
+  it("does not print a per-obligation todo list nobody was asked for", () => {
+    // The entries are real — nothing WAS discharged — but their detail line is
+    // imperative ("answer it with QUOTE, ABSENT, PARTIAL or PROBE"), and thirty
+    // of those under a note saying none was requested reads as the failure the
+    // note is denying.
+    const dir = workspace(doc({ contract: "minimal" }), { enforcement: freeForm });
+    const rendered = renderDischargeCheck(checkDischarge({ dir, family: "enforcement" }));
+    expect(rendered).toMatch(/contract: "minimal"/);
+    expect(rendered).not.toMatch(/answer it with QUOTE/);
+  });
+
+  it("an unknown --family stays fatal — a wiring bug is not an arm", () => {
+    const dir = workspace(doc({ contract: "minimal" }), { enforcement: freeForm });
+    const result = checkDischarge({ dir, family: "enfrocement" });
+    expect(result.satisfied).toBe(false);
+    expect(result.familyError).toMatch(/WIRING bug/);
   });
 });

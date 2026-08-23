@@ -1351,8 +1351,9 @@ Run options:
                        identical arms measured 0.320/0.080/0.200 micro-recall, so
                        one arm is not a measurement of that arm. Each repeat is a
                        normal run (its own runId + scorecard) tagged with
-                       meta.repeat={group,index,of}; scripts/rescore.ts and the
-                       dashboard roll them up. Implies --keep-workspace (you will
+                       meta.repeat={group,index,of}; scripts/band.ts and the
+                       dashboard roll them up into a band (mean/min/max + union
+                       and intersection recall). Implies --keep-workspace (you will
                        want each repeat's evidence) and --no-open (a run holds a
                        dashboard server open forever; n of them leak). Or
                        EVAL_REPEATS.

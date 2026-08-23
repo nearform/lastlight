@@ -350,6 +350,34 @@ review:
     # class (`enforcement` and `contract` are the two that have ever converted)
     # then by how much of the impact cone lies outside the diff.
     maxObligations: 40
+
+    # Which obligation BLOCK the six families are handed. `full` | `minimal`.
+    #
+    # This is a CONTROL, not a dial. On 2026-08-23 the block gained a mandatory
+    # discharge contract (a `discharge` field the row can actually hold a code
+    # in), an un-truncated id checklist and one worked exemplar. Measured on
+    # `prreview__skillspro-1587-r2` with `--repeats 3`: discharge compliance went
+    # 0/33 to 33/33, and the union of matched gold went 4-of-5 to ZERO-of-5, all
+    # three repeats. Half to two thirds of every hypothesis became a "clean
+    # quote" — QUOTE with `failureScenario: null`, i.e. "I found the line and it
+    # is fine".
+    #
+    # Two variables moved in that one commit, so it cannot say which caused it:
+    # the obligations may ask the WRONG QUESTION (and making a wrong question
+    # mandatory turns hunting into checklist-clearing), and/or RELIABLE SEEDING
+    # itself suppresses discovery — the same commit stopped ~24% of survey
+    # branches losing their seed entirely.
+    #
+    # `minimal` is the control: the block exactly as it stood before that commit,
+    # with the delivery fix HELD CONSTANT. Same obligations, delivered just as
+    # reliably, asking the old question. Under it `lastlight-facts discharge`
+    # degrades to the `test -s` floor it replaces — measured compliance under
+    # that block was 0/31, 0/34 and 0/40, so grading it would fail every family
+    # of every run over a field the survey was never told to write.
+    #
+    # Leave this at `full` unless you are running that arm.
+    obligationContract: full
+
     # How many of the six families actually run. SIX. A previous design defaulted
     # this to 3 against six families and never recorded which three ran, so half
     # never executed and `enforcement` — the only family that has produced a gold

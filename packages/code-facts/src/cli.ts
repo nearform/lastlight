@@ -32,7 +32,12 @@ import { prepareTree } from "./prepare.js";
 import { checkProbes, renderProbeCheck } from "./probes.js";
 import { runExtractor, runWrapped, writeDocument } from "./run.js";
 import { AllDocumentSchema, DOCUMENT_SCHEMAS, type AllDocument, type ExtractorName } from "./schema.js";
-import { SEEDABLE_FAMILIES, seedObligations } from "./seed.js";
+import {
+  isObligationContract,
+  OBLIGATION_CONTRACTS,
+  SEEDABLE_FAMILIES,
+  seedObligations,
+} from "./seed.js";
 import { renderFamilyBlock } from "./seed-render.js";
 import { loadManifest, resolveFactsBin, toolchainStamp } from "./toolchain.js";
 import { compilerInfo } from "./project.js";
@@ -126,6 +131,15 @@ passes; it reads no quote and judges no claim):
   --blocks <dir>      also write one rendered block per family, \`<family>.md\`
   --max-obligations <n>  per-PR budget (default 40). The seeder RANKS and the
                       drop is counted in the document — never silent.
+  --contract <mode>   which obligation BLOCK the families get: \`full\` (default —
+                      the mandatory discharge contract, the un-truncated id
+                      checklist and the worked exemplar) or \`minimal\` (the block
+                      as it stood before 2026-08-23: same obligations, delivered
+                      just as reliably, asking the OLD question). It is stamped
+                      into obligations.json, and \`discharge\` degrades to the
+                      \`test -s\` floor when it reads \`minimal\` — a gate must
+                      never grade a contract the block did not ask for. A value
+                      that is neither is a WIRING bug and exits 2.
 
 Options:
   --repo <dir>        the checkout to analyse            (default: cwd)
@@ -386,6 +400,21 @@ export function runCli(
       io.err("--facts <file> is required (the `all` document to seed from)");
       return EXIT_UNAVAILABLE;
     }
+    // An unrecognised contract is the `--family` case, not the `--max-files`
+    // case: nothing downstream can recover from it, and the failure is silent in
+    // the direction that matters — a typo'd control arm would render `full`,
+    // run, and report a number for an experiment that never happened. So it
+    // breaks at the wiring, exactly as an unknown `--family` does, and it breaks
+    // BEFORE any work: a flag nobody can fix from inside the run should not cost
+    // a document parse first.
+    const contractFlag = stringFlag(flags.contract);
+    if (contractFlag !== undefined && !isObligationContract(contractFlag)) {
+      io.err(
+        `--contract must be one of ${OBLIGATION_CONTRACTS.join(" | ")} (got "${contractFlag}")`,
+      );
+      return EXIT_UNAVAILABLE;
+    }
+
     let document: AllDocument;
     try {
       document = AllDocumentSchema.parse(JSON.parse(readFileSync(factsPath, "utf8")));
@@ -400,6 +429,7 @@ export function runCli(
 
     const obligations = seedObligations(document, {
       maxObligations: numberFlag(flags["max-obligations"]),
+      contract: contractFlag,
       log,
     });
 

@@ -335,6 +335,104 @@ describe("the `prepare` command", () => {
   });
 });
 
+/**
+ * `seed --contract` — the CONTROL arm's one entry point.
+ *
+ * Asserted THROUGH THE EMITTED DOCUMENT and the emitted BLOCKS, per this file's
+ * opening note: a test that watched the option object reach `seedObligations`
+ * would pass while the block on disk still said `full`, and the block on disk is
+ * the only thing a survey ever reads.
+ */
+describe("`seed --contract`", () => {
+  const trees: string[] = [];
+  afterAll(() => {
+    for (const dir of trees) rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A minimal `all` envelope with one constant, so a family has an obligation. */
+  function factsTree(): { dir: string; facts: string } {
+    const dir = mkdtempSync(join(tmpdir(), "ll-facts-seed-cli-"));
+    trees.push(dir);
+    const facts = join(dir, "facts.json");
+    writeFileSync(
+      facts,
+      JSON.stringify({
+        version: 2,
+        generatedAt: "2026-08-23T00:00:00.000Z",
+        extractor: "all",
+        repo: "acme/widgets",
+        baseSha: "b".repeat(40),
+        headSha: "h".repeat(40),
+        tier: 1,
+        engine: "tsgo",
+        languages: [],
+        coverage: "full",
+        degraded: [],
+        toolchain: { manifest: 2, bundled: {}, binaries: {} },
+        extractors: {
+          constants: {
+            sideDefinitions: {},
+            constants: [
+              {
+                constant: "MAX_TOKEN_AGE",
+                declaredAt: "src/config.ts:12",
+                value: "900",
+                valueKind: "number",
+                references: ["src/server/auth.ts:73"],
+                hardCodedDuplicates: [],
+                sides: null,
+              },
+            ],
+          },
+        },
+      }),
+      "utf8",
+    );
+    return { dir, facts };
+  }
+
+  const seedInto = (dir: string, facts: string, argv: string[]) => {
+    const { io, out, err } = capture();
+    const code = runCli(
+      ["seed", "--facts", facts, "--out", join(dir, "obligations.json"), "--blocks", join(dir, "blocks"), ...argv],
+      io,
+    );
+    return { code, out, err };
+  };
+
+  it("defaults to `full`, and stamps it", () => {
+    const { dir, facts } = factsTree();
+    expect(seedInto(dir, facts, []).code).toBe(EXIT_OK);
+    const doc = JSON.parse(readFileSync(join(dir, "obligations.json"), "utf8"));
+    expect(doc.contract).toBe("full");
+    expect(readFileSync(join(dir, "blocks", "enforcement.md"), "utf8")).toMatch(/"discharge":/);
+  });
+
+  it("`--contract minimal` reaches the BLOCK on disk, not just the option object", () => {
+    const { dir, facts } = factsTree();
+    expect(seedInto(dir, facts, ["--contract", "minimal"]).code).toBe(EXIT_OK);
+    const doc = JSON.parse(readFileSync(join(dir, "obligations.json"), "utf8"));
+    expect(doc.contract).toBe("minimal");
+
+    const block = readFileSync(join(dir, "blocks", "enforcement.md"), "utf8");
+    expect(block).not.toMatch(/"discharge":/);
+    expect(block).not.toMatch(/"failureScenario":/);
+    expect(block).not.toContain("WORKED EXAMPLE");
+    expect(block).toContain("Append one JSON object per hypothesis to");
+  });
+
+  it("refuses an unrecognised value instead of quietly rendering `full`", () => {
+    // The `--family` case, not the `--max-files` case: a typo'd control arm that
+    // fell back to the default would RUN, produce a number, and report it for an
+    // experiment that never happened. Nothing downstream could detect that.
+    const { dir, facts } = factsTree();
+    const { code, err } = seedInto(dir, facts, ["--contract", "mininal"]);
+    expect(code).toBe(EXIT_UNAVAILABLE);
+    expect(err.join(" ")).toMatch(/--contract must be one of full \| minimal/);
+    expect(existsSync(join(dir, "obligations.json"))).toBe(false);
+  });
+});
+
 afterEach(() => {
   delete process.env.LASTLIGHT_OPENGREP_BIN;
 });

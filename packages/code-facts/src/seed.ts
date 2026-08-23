@@ -126,9 +126,40 @@ export interface CoverageSet {
   terminalState: "pending";
 }
 
+/**
+ * Which obligation block the seeder rendered — the CONTROL for the 2026-08-23
+ * result, and it is deliberately a document field rather than a render-time
+ * argument.
+ *
+ * `full` is `5fa06da1`'s block: a mandatory discharge contract, an un-truncated
+ * id checklist, and one worked exemplar. `minimal` is the block as it stood
+ * BEFORE that commit — the same obligations, delivered just as reliably (the
+ * `context_file` half of the fix is not part of this switch), asking the OLD
+ * question, with no field to record a discharge code in and nothing to tick off.
+ *
+ * It is stamped into `obligations.json` because THREE readers have to agree
+ * about it and only one of them renders: `seed-render.ts` (what the survey is
+ * asked), `discharge.ts` (what the gate demands back) and whoever reads the
+ * artifact months later asking which arm produced this run. A render-time flag
+ * would let the block and the gate disagree, which is exactly the separability
+ * this pipeline keeps paying for.
+ */
+export const OBLIGATION_CONTRACTS = ["full", "minimal"] as const;
+export type ObligationContract = (typeof OBLIGATION_CONTRACTS)[number];
+
+export function isObligationContract(value: unknown): value is ObligationContract {
+  return typeof value === "string" && (OBLIGATION_CONTRACTS as readonly string[]).includes(value);
+}
+
 export interface ObligationsDocument {
   version: 1;
   generatedAt: string;
+  /**
+   * PROVENANCE — which block the five family files carry, and which contract the
+   * `discharge` gate is entitled to grade against. Absent on a document written
+   * before the switch existed, which reads as `full` (see {@link ObligationContract}).
+   */
+  contract: ObligationContract;
   repo: string;
   baseSha: string;
   headSha: string;
@@ -151,6 +182,11 @@ export interface ObligationsDocument {
 export interface SeedOptions {
   /** `review.analysis.maxObligations`. A BUDGET, so the seeder ranks. */
   maxObligations?: number;
+  /**
+   * `review.analysis.obligationContract`. Default `full` — today's block,
+   * byte-identical. See {@link ObligationContract}.
+   */
+  contract?: ObligationContract;
   log?: LoggerPort;
 }
 
@@ -521,16 +557,20 @@ export function seedObligations(doc: AllDocument, options: SeedOptions = {}): Ob
     },
   ];
 
+  const contract = options.contract ?? "full";
+
   log.info?.("seeded obligations", {
     candidates: candidates.length,
     valid: valid.length,
     kept: kept.length,
     coverage: doc.coverage,
+    contract,
   });
 
   return {
     version: 1,
     generatedAt: new Date().toISOString(),
+    contract,
     repo: doc.repo,
     baseSha: doc.baseSha,
     headSha: doc.headSha,
