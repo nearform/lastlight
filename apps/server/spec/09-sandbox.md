@@ -77,6 +77,20 @@ Five backends, all behind the **Sandbox port** (`src/sandbox/sandbox.ts`):
 isolation mechanism and translates the intent-only `EgressPolicy` to its own
 controls.
 
+`provision()` returns three paths, and the third is not derivable from the
+other two: `hostWorkspaceDir` (the workspace **root**, as this process sees
+it), `agentCwd` (the directory the agent/command process runs in, as the
+*sandbox* sees it), and `hostAgentCwd` — that same directory addressed from
+the harness. On a pre-cloned workflow the cwd is `<workspace>/<repo>`, one
+level below the root, so a harness-side reader of what a phase wrote needs
+the exact directory rather than its parent; that one level is what
+[`fanout`'s `context_file`](/spec/06-workflow-engine) resolves against, so
+the phase that writes a file and the harness that reads it share one base by
+construction. **On `kubernetes` `hostAgentCwd` — like `hostWorkspaceDir` — is
+an in-pod path that does not exist on the harness host**, so a caller must
+read a failure there as *not available on this backend*, never as *the file
+is absent*.
+
 The **orchestrator** (`src/engine/executors/orchestrator.ts`) drives any
 adapter through that port: `withSandbox` brackets provision → work → dispose,
 and `runSandboxedAgent` / `runSandboxedCommand` hold the skill staging,

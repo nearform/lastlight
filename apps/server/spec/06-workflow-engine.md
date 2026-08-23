@@ -291,7 +291,8 @@ extend when a deployment needs a step the engine should not know about.
   branches:
     - name: contract
       prompt: prompts/survey-contract.md
-      until_bash: test -s .lastlight/pr-review/hypotheses/contract.jsonl
+      context_file: .lastlight/pr-review/obligations/contract.md
+      until_bash: lastlight-facts discharge --dir .lastlight/pr-review --family contract
     - name: security
       prompt: prompts/survey-security.md
       skills: [pr-review, code-review, security-review]
@@ -302,6 +303,26 @@ Each branch inherits the phase's `prompt` / `skills` / `model` /
 keys**, so they are alphanumeric-with-hyphens (no underscores, which
 `PhaseRef` uses as its separator), must be unique, and may not end in
 the reserved `-retry` / `-check` suffixes.
+
+**`context_file` — a path in a prompt is not a path.** A branch may name a
+workspace file, relative to the AGENT'S OWN CWD, whose contents the harness
+reads and appends to that branch's rendered prompt. The model never resolves
+it. This exists because it was measured: across three stored `pr-review` runs
+on 2026-08-22, 27 of 133 attempts to open the per-family obligations block
+resolved against the workspace ROOT rather than the checkout and hit ENOENT
+(23 of 120 branches never recovered), while all 98 relative reads succeeded.
+The model's only absolute anchor by its first turn is its skill bundle at
+`<workspaceRoot>/.lastlight-skills/…`, one level above the checkout the
+deterministic phases write in — so a seeded pass silently became an unseeded
+one. The harness resolves the path against `ProvisionResult.hostAgentCwd`, the
+host end of the very `cwd` a `type: bash` phase runs in, so producer and
+consumer share one base by construction. It is appended **last**, which is the
+prompt-cache ordering the fan-out already depends on. An unreadable or escaping
+path (absolute, or containing `..`) appends a **loud NOT AVAILABLE notice**
+naming it, never silence: "nobody looked" must never render as "looked, found
+none". The one carve-out is **`kubernetes`**, whose `hostAgentCwd` is an in-pod
+path this process cannot see at all — there the read is not attempted and the
+branch is handed the path to open itself, with the mis-anchoring trap named.
 
 **Why one node instead of N parallel phases.** Real DAG concurrency is
 parked behind four hard blockers, and

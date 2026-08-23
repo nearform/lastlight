@@ -136,6 +136,24 @@ export interface ProvisionResult {
   hostWorkspaceDir: string;
   /** Working directory the agent/command process runs in (sandbox-visible). */
   agentCwd: string;
+  /**
+   * The SAME directory as {@link agentCwd}, addressed from the harness process.
+   *
+   * They differ on the container backends — docker's agent runs at
+   * `/home/agent/workspace/<repo>` while the harness sees
+   * `<stateDir>/sandboxes/<taskId>/<repo>` — and the harness needs the second
+   * whenever it has to READ what a phase wrote (or write something a phase will
+   * read) without going through a shell. `hostWorkspaceDir` is not that path:
+   * it is the workspace ROOT, one level above a pre-cloned checkout, and that
+   * one level is exactly the ambiguity that lost 23 of 120 survey branches
+   * their obligations (see `FanoutBranchSchema.context_file`).
+   *
+   * **On `kubernetes` this is an in-pod path that does not exist on the harness
+   * host** — the same caveat `hostWorkspaceDir` already carries there. Callers
+   * must treat a failed read as "not available on this backend" and degrade,
+   * never as "the file is absent".
+   */
+  hostAgentCwd: string;
 }
 
 export type SandboxEvent = Record<string, unknown>;
@@ -326,7 +344,14 @@ class DockerSandbox implements Sandbox {
       await sbx.sandbox.startServices(this.opts.taskId, this.opts.services);
     }
     this.agentCwd = pre ? `${DOCKER_WORKSPACE_DIR}/${pre.repo}` : DOCKER_WORKSPACE_DIR;
-    return { hostWorkspaceDir: sbx.workDir, agentCwd: this.agentCwd };
+    // The guest path and the host path are the two ends of ONE bind mount, so
+    // they are derived from one `pre.repo` here rather than recomputed by a
+    // caller that would have to know this backend's layout.
+    return {
+      hostWorkspaceDir: sbx.workDir,
+      agentCwd: this.agentCwd,
+      hostAgentCwd: pre ? join(sbx.workDir, pre.repo) : sbx.workDir,
+    };
   }
 
   stageSkills(phaseKey: string, skillPaths: string[] | undefined): string[] | undefined {
@@ -424,7 +449,11 @@ class SmolSandbox implements Sandbox {
     if (pre) prePopulateWorkspace(hostWs, pre);
     this.hostWorkspaceDir = hostWs;
     this.agentCwd = pre ? `${SMOL_WORKSPACE_DIR}/${pre.repo}` : SMOL_WORKSPACE_DIR;
-    return { hostWorkspaceDir: hostWs, agentCwd: this.agentCwd };
+    return {
+      hostWorkspaceDir: hostWs,
+      agentCwd: this.agentCwd,
+      hostAgentCwd: pre ? join(hostWs, pre.repo) : hostWs,
+    };
   }
 
   stageSkills(phaseKey: string, skillPaths: string[] | undefined): string[] | undefined {
@@ -520,7 +549,8 @@ class InProcessSandbox implements Sandbox {
     } else {
       this.agentCwd = workDir;
     }
-    return { hostWorkspaceDir: workDir, agentCwd: this.agentCwd };
+    // In-process: the agent IS the harness process, so the two views coincide.
+    return { hostWorkspaceDir: workDir, agentCwd: this.agentCwd, hostAgentCwd: this.agentCwd };
   }
 
   stageSkills(phaseKey: string, skillPaths: string[] | undefined): string[] | undefined {
@@ -669,6 +699,8 @@ export class FakeSandbox implements Sandbox {
   services?: ServiceSet;
   hostWorkspaceDir = "";
   agentCwd = "";
+  /** Captured from the factory opts — see {@link FakeSandbox.provision}. */
+  repoSubdir?: string;
   stagedSkillDirs?: string[];
   receivedAgentOpts?: RunAgentOpts;
   receivedCommandOpts?: RunCommandOpts;
@@ -688,6 +720,7 @@ export class FakeSandbox implements Sandbox {
       this.egress = opts.egress;
       this.env = opts.env;
       this.services = opts.services;
+      this.repoSubdir = opts.repoSubdir;
       return this;
     };
   }
@@ -697,9 +730,15 @@ export class FakeSandbox implements Sandbox {
     if (this.behavior.throwOnProvision) throw asError(this.behavior.throwOnProvision);
     const dir = mkdtempSync(join(tmpdir(), "fake-sbx-"));
     this.hostWorkspaceDir = dir;
-    this.agentCwd = pre ? join(dir, pre.repo) : dir;
-    if (pre) mkdirSync(this.agentCwd, { recursive: true });
-    return { hostWorkspaceDir: dir, agentCwd: this.agentCwd };
+    // `repoSubdir` is honoured for the same reason {@link InProcessSandbox}
+    // honours it: it is how the EVAL harness nests a pre-seeded checkout under
+    // the workspace root, and that nesting — cwd one level below the workspace
+    // the skill bundle is staged into — is the layout every measured artifact
+    // path bug has lived in. A fake that cannot express it cannot test it.
+    const subdir = pre?.repo ?? this.repoSubdir;
+    this.agentCwd = subdir ? join(dir, subdir) : dir;
+    if (subdir) mkdirSync(this.agentCwd, { recursive: true });
+    return { hostWorkspaceDir: dir, agentCwd: this.agentCwd, hostAgentCwd: this.agentCwd };
   }
 
   stageSkills(phaseKey: string, skillPaths: string[] | undefined): string[] | undefined {

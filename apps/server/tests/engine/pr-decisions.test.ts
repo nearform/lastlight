@@ -1378,7 +1378,9 @@ describe("renderContext — the spec axis", () => {
   it("projects obligations that name both ends", () => {
     const ctx = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOn);
     const block = String(ctx.specObligations);
-    expect(block).toContain("SPEC AXIS");
+    // The family-title line, in the format `renderFamilyBlock` uses for the
+    // other five (`=== CONTRACT — … ===`) rather than a sixth spelling of it.
+    expect(block).toContain("=== SPEC — does this change do what was asked? ===");
     expect(block).toContain('asked:      "Expiry is enforced server-side on every request"');
     expect(block).toContain("candidates: src/server/auth.ts");
     expect(block).toContain("found:      false");

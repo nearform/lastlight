@@ -1,8 +1,52 @@
 /**
- * Mirror of the JSON the harness writes (`src/report.ts` + `src/schema.ts`).
- * The dashboard is a separate Vite app, so these are hand-kept in sync with the
- * harness — the `/api/index` and `/data/.../scorecard.json` contracts.
+ * The JSON contracts the dashboard reads: `/api/index` and
+ * `/data/.../scorecard.json`.
+ *
+ * **Result-shaped types are imported from the harness itself**, not mirrored.
+ * `../../src/schema.ts` is types-only at runtime (its single import is an
+ * `import type`), so Vite erases it entirely and tsc still checks us against the
+ * real definitions. A hand-kept copy is how the dashboard came to be missing
+ * `micro` for the whole life of that field — the copy could drift silently and
+ * did.
+ *
+ * The *report*-shaped types (`ModelSummary`, `RunMeta`, the index) still live
+ * here because their definitions sit in `../../src/report.ts`, which imports
+ * `node:fs`/`node:path` and therefore cannot be pulled into a browser bundle or
+ * type-checked under this package's DOM-only tsconfig. `lib/summarize.test.ts`
+ * is the guard for that remaining copy: it runs the harness's own
+ * `summarizeModels` in Node and asserts field-for-field agreement.
  */
+
+import type {
+  InstanceResult,
+  PhaseMetric,
+  PhaseSession,
+  ReviewGradeResult,
+  TrialSession,
+} from "../../src/schema.js";
+import type { BoundaryMetrics, FamilyFunnel, MicroReview } from "../../src/review-metrics.js";
+
+export type {
+  InstanceResult,
+  PhaseMetric,
+  PhaseSession,
+  ReviewGradeResult,
+  TrialSession,
+  BoundaryMetrics,
+  FamilyFunnel,
+  MicroReview,
+};
+
+/** The judge's inspectable working for one pr-review grade — the harness declares
+ * it inline on {@link ReviewGradeResult}, so name it here rather than re-typing it. */
+export type ReviewTrace = NonNullable<ReviewGradeResult["trace"]>;
+
+/** One behavioral/marker check result. */
+export interface Check {
+  name: string;
+  ok: boolean;
+  detail?: string;
+}
 
 export interface ModelSummary {
   model: string;
@@ -18,121 +62,26 @@ export interface ModelSummary {
   avgFbeta: number;
   /** The β the graded cases used (F1 by default). Undefined when nothing graded. */
   reviewBeta?: number;
+  /**
+   * Micro-aggregated review metrics — **the headline for recall-first work**, and
+   * the number every planning document reasons in. The `avg*` fields above are
+   * means of per-case ratios: they weight a 1-gold case like a 6-gold one and hand
+   * a free 1.00 to a case with no gold at all. Absent on scorecards written before
+   * the field existed — {@link ../lib/summarize} recomputes it from the results.
+   */
+  micro?: MicroReview;
+  /** Internal recall vs. posted vs. inline. Absent for an arm that emits no
+   * evidence packet — a clean degrade, never zeros. */
+  boundaries?: BoundaryMetrics;
+  /** Per-family funnel (obligations → hypotheses → posted → matched). Absent for
+   * an arm that emits no evidence packet. */
+  families?: FamilyFunnel[];
   avgInputTokens: number;
   avgCachedTokens: number;
   avgOutputTokens: number;
   totalCostUsd: number;
   p50DurationMs: number;
   errors: number;
-}
-
-export interface Check {
-  name: string;
-  ok: boolean;
-  detail?: string;
-}
-
-/** One workflow phase's archived session (mirrors harness `schema.ts`). */
-export interface PhaseSession {
-  phase: string;
-  success?: boolean;
-  /** Relative path (under the run dir) of this phase's session jsonl. */
-  log: string;
-}
-
-/** One trial's archived session: per-phase logs + a consolidated `full`. */
-export interface TrialSession {
-  trial: number;
-  full?: string;
-  phases: PhaseSession[];
-}
-
-/** Per-phase metrics (mirrors harness `schema.ts`). `model` is the model the
- * phase resolved to — the forced model in `models` runs, the per-step model the
- * merged config assigned in `config` runs. */
-export interface PhaseMetric {
-  phase: string;
-  success: boolean;
-  model?: string;
-  inputTokens?: number;
-  cachedTokens?: number;
-  outputTokens?: number;
-  costUsd?: number;
-  /** Measured phase window. Absent = never started (skipped), NOT zero. */
-  durationMs?: number;
-  /** Agent + gate time only (summed over the phase's `result` envelopes).
-   * Narrower than {@link durationMs}, which also covers provisioning and skill
-   * staging. This is the one to compare across phases. */
-  agentMs?: number;
-}
-
-/** The judge's inspectable working for one pr-review grade. `matchedGold` /
- * `matchedFinding` are the paired index into the sibling array, or null when
- * unmatched (a false positive / a missed gold). */
-export interface ReviewTrace {
-  judgeModel: string;
-  reviewText: string;
-  findings: { description: string; file?: string; matchedGold: number | null }[];
-  gold: { description: string; severity: string; matchedFinding: number | null }[];
-  rawExtract?: string;
-  rawMatch?: string;
-  /** Whether the PR diff was fed to the judge (`--judge-with-diff`). */
-  usedDiff?: boolean;
-}
-
-export interface InstanceResult {
-  instance_id: string;
-  model: string;
-  tier?: string;
-  workflowSucceeded: boolean;
-  /** Per-phase metrics; carries the per-step model map in `config` runs. */
-  phases?: PhaseMetric[];
-  resolved?: boolean;
-  /** Per-test verdicts from the held-out test run (code-fix). */
-  failToPass?: { id: string; pass: boolean }[];
-  passToPass?: { id: string; pass: boolean }[];
-  /** Run-relative path of the captured held-out test output (setup log + TAP),
-   * shown in the "tests" view for resolved and unresolved cases alike. */
-  executionLog?: string;
-  /** Run-relative path of the agent's diff (`changes.diff`), captured vs the
-   * seeded base (code-fix only). Resolves against the scorecard URL like
-   * `executionLog`; powers the "files" diff viewer. Absent for triage. */
-  modelPatchFile?: string;
-  behavioral?: { ok: boolean; checks: Check[] };
-  /** PR-review grade (pr-review tier): the posted review scored against the gold
-   * set via LLM judge (F-beta; F1 by default).  */
-  review?: {
-    precision: number;
-    recall: number;
-    fbeta: number;
-    beta: number;
-    posted: number;
-    gold: number;
-    matched: number;
-    falsePositives: { description: string; file?: string }[];
-    falseNegatives: { description: string; file?: string; severity: string }[];
-    /** The judge's inspectable working, shown by the "judge" button. */
-    trace?: ReviewTrace;
-  };
-  reviewTrials?: number;
-  trials?: number;
-  trialErrors?: number;
-  behavioralPass?: number;
-  resolvedPass?: number;
-  githubMutations?: number;
-  /** Archived agent sessions — one per trial, each split per workflow phase.
-   * Relative paths resolve against the run's scorecard URL. */
-  sessions?: TrialSession[];
-  inputTokens: number;
-  cachedTokens: number;
-  outputTokens: number;
-  costUsd: number;
-  durationMs: number;
-  /** A real run failure (provider/credit/timeout/crash). */
-  error?: string;
-  /** The workflow stopped on a deliberate gate decision (e.g. guardrails) — a
-   * legitimate "unresolved" outcome, NOT an error. */
-  blocked?: boolean;
 }
 
 export interface PendingCase {
@@ -148,6 +97,22 @@ export interface PendingCase {
  * `config` compares deployment configs (per-step model maps). Absent ⇒ `models`. */
 export type RunType = "models" | "config";
 
+/** Which `lastlight-core` produced a run — a working tree or a published package. */
+export interface CoreProvenance {
+  root?: string;
+  version?: string;
+  published?: boolean;
+}
+
+/** Explicit repeat-group marker: N runs of one arm, deliberately repeated.
+ * Optional — runs measured before it existed are grouped heuristically by
+ * {@link ../lib/repeats}. */
+export interface RepeatMeta {
+  group: string;
+  index?: number;
+  of?: number;
+}
+
 export interface RunMeta {
   runId: string;
   generatedAt: string;
@@ -159,10 +124,22 @@ export interface RunMeta {
    * time is not the sum of its cases; per-case/per-phase timings still are. */
   concurrency?: number;
   gitSha?: string;
+  /** Which core produced the run. `gitSha` is the CWD's repo (often the evals
+   * workspace, not the monorepo), so it does not answer this on its own. */
+  core?: CoreProvenance;
+  /** The overlay whose workflows/prompts/datasets the run used. */
+  overlay?: string;
+  /** Sandbox backend (`none` / `gondolin` / …). */
+  sandbox?: string;
+  /** Resolved analyser/tool versions, so silent version drift is detectable. */
+  toolchain?: Record<string, string>;
+  /** Set when this run is one of a deliberate repeat group. */
+  repeat?: RepeatMeta;
   labels?: Record<string, string>;
   live?: boolean;
   progress?: string;
   pending?: PendingCase[];
+  interrupted?: boolean;
   /** pr-review: this run's rank among Martian's Code Review Bench tools over the
    * PRs it covered (subset-fair). Absent unless the tier ships the sidecar. */
   martian?: MartianRanking;

@@ -52,14 +52,22 @@ export class WorkspaceProvisioner {
   async provision(pre?: PrePopulateSpec): Promise<Provisioned> {
     if (!pre) {
       return {
-        result: { hostWorkspaceDir: WORKSPACE_DIR, agentCwd: WORKSPACE_DIR },
+        // `hostAgentCwd` mirrors `hostWorkspaceDir`'s existing caveat on this
+        // backend: both are IN-POD paths that do not exist on the harness host,
+        // so a harness-side read of either fails and the caller must degrade
+        // rather than conclude the file is absent.
+        result: { hostWorkspaceDir: WORKSPACE_DIR, agentCwd: WORKSPACE_DIR, hostAgentCwd: WORKSPACE_DIR },
         workspace: { kind: "emptyDir" },
       };
     }
     const claimName = pvcNameFor(this.cfg.taskId);
     await this.ensurePvc(claimName, pre.runId ? RunId.from(pre.runId) : undefined);
     return {
-      result: { hostWorkspaceDir: WORKSPACE_DIR, agentCwd: `${WORKSPACE_DIR}/${pre.repo}` },
+      result: {
+        hostWorkspaceDir: WORKSPACE_DIR,
+        agentCwd: `${WORKSPACE_DIR}/${pre.repo}`,
+        hostAgentCwd: `${WORKSPACE_DIR}/${pre.repo}`,
+      },
       workspace: { kind: "pvc", claimName },
       pre,
     };

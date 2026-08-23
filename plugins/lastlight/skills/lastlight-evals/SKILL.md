@@ -119,7 +119,8 @@ lastlight-evals run triage code-fix             # multiple tiers
 lastlight-evals run triage --model haiku        # fuzzy match in models.json
 lastlight-evals run triage --model openai/gpt-5.5,anthropic/claude-opus-4-8
 lastlight-evals run --compare                   # cross-vendor set (only models whose envKey is present)
-lastlight-evals run triage --runs 3             # repeat each case 3× (worst-case verdict, mean metrics)
+lastlight-evals run triage --runs 3             # repeat each CASE 3× (folded into one worst-case verdict, mean metrics)
+lastlight-evals run pr-review --repeats 3       # repeat the whole ARM 3× → 3 sibling runs, read as a BAND (see below)
 lastlight-evals run pr-review --limit 3         # only the first 3 cases of the tier (controlled/cheap run)
 lastlight-evals run triage --instance <id[,id2]> # only these exact instance_id(s), comma-separated (or set EVAL_INSTANCE)
 lastlight-evals run pr-review --f-beta 0.5      # pr-review F-beta β (default 1=F1; 0.5=precision 2×). Or EVAL_F_BETA
@@ -135,6 +136,39 @@ lastlight-evals serve                           # browse past runs in the dashbo
 lastlight-evals clean --dry-run                 # list killed/crashed runs that are stuck "running"
 lastlight-evals clean                           # finalize them (mark interrupted; --delete to remove)
 ```
+
+### `--repeats N` — never report one arm as a number
+
+**One run of an arm is not a measurement of that arm.** Three *identical* runs of
+one pr-review arm scored micro-recall 0.320 / 0.080 / 0.200; `diff-runs` returned
+KEEP on one and REVERT on the other two, from one configuration. Union across the
+three was 0.440 and intersection 0.040 — only 1 gold finding in 25 was found by
+all three.
+
+`--repeats N` runs the whole arm N times, strictly sequentially, and writes N
+**sibling** runs (each its own `runId`/`scorecard.json`, tagged
+`meta.repeat = {group, index, of}` where `group` is the first repeat's `runId`).
+Report the band (min–max), not a point. It implies `--keep-workspace` (you will
+need each repeat's evidence when they disagree) and `--no-open` (a run holds its
+dashboard server open until killed — N of those leak); it prints the standalone
+`serve` command instead. Compose with `--runs` if you want both axes; they are
+different things — `--runs` folds trials into one result and destroys the
+per-trial detail a band is computed from.
+
+Before reading any delta as progress, get the two error bars:
+
+```bash
+lastlight-evals run pr-review --repeats 3            # the ARM's own band
+npx tsx scripts/rescore.ts <scorecard.json> --repeat-judge 3   # the GRADER's band (SPENDS MONEY)
+```
+
+`scripts/rescore.ts --repeat-judge N` re-runs the LLM judge N times over a stored
+scorecard's review text + gold set and reports the spread, which separates grader
+noise from pipeline noise (matching is entirely LLM-judged, and judge/developer
+agreement is only 0.44–0.62). It is the one rescore mode that costs money — 2
+judge calls per case per repeat — so it never runs by default, prints its
+estimate first, and refuses `--write`. A candidate's Δ has to clear **both**
+bands to mean anything.
 
 Each run lands in its own dir `./eval-results/<tiers>/<runId>/`: `scorecard.json`
 + `predictions.jsonl` (SWE-bench format). The report is a **JSON-driven dashboard

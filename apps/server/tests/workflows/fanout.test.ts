@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { AgentWorkflowSchema, PhaseRef } from "lastlight-workflow-engine";
 import type {
   AssetLoader,
@@ -17,8 +19,18 @@ import {
   noopObservability,
 } from "lastlight-workflow-engine/test-support";
 import { FakeSandbox } from "#src/sandbox/sandbox.js";
-import type { RunAgentOpts, RunResult, SandboxEvent } from "#src/sandbox/sandbox.js";
-import { makeFanoutHandler, type FanoutRunScope } from "#src/workflows/handlers/fanout.js";
+import type {
+  PrePopulateSpec,
+  ProvisionResult,
+  RunAgentOpts,
+  RunResult,
+  SandboxEvent,
+} from "#src/sandbox/sandbox.js";
+import {
+  BRANCH_CONTEXT_HEADING,
+  makeFanoutHandler,
+  type FanoutRunScope,
+} from "#src/workflows/handlers/fanout.js";
 import type { SandboxBackend } from "#src/config/config.js";
 
 /**
@@ -173,6 +185,10 @@ async function runFanout(
     sandbox: backend,
     stateDir: "/tmp/fanout-test",
     model: "anthropic/claude-haiku-4-5-20251001",
+    // The EVAL harness's layout, and the one every measured artifact-path bug
+    // has lived in: the checkout is a SUBDIR of the workspace, so the agent's
+    // cwd sits one level below the root the skill bundle is staged into.
+    repoSubdir: "widgets",
   } as unknown as ExecutorConfig;
 
   const scope: FanoutRunScope = {
@@ -427,5 +443,153 @@ describe("fanout — the schema refuses what the shape cannot support", () => {
   it("refuses a branch that can build no prompt", () => {
     const r = parse({ name: "survey", type: "fanout", branches: [{ name: "a" }] });
     expect(r.success).toBe(false);
+  });
+});
+
+// ── `context_file` — the obligations reach the pass, or its absence is loud ───
+
+/**
+ * The defect this whole section exists to close, measured rather than inferred.
+ *
+ * Across the three stored `pr-review` runs of 2026-08-22
+ * (`2026-08-22_{184650,194234,201607}`), 120 non-spec survey branches made 133
+ * attempts to open their family's obligations block. **Every one of the 98
+ * relative reads succeeded and every one of the 27 workspace-root ABSOLUTE
+ * reads failed with ENOENT** — 23 branches never recovered and free-styled off
+ * the diff instead, because the prompt's own escape hatch told them to. Neither
+ * base is wrong; having two is. The model's only absolute anchor by its first
+ * turn is its skill bundle at `<workspaceRoot>/.lastlight-skills/…`, one level
+ * ABOVE the checkout the deterministic phases write in.
+ *
+ * `context_file` removes the resolution from the model: the harness reads the
+ * file at `hostAgentCwd` — the host end of the very `cwd` a `type: bash` phase
+ * runs in — and appends the bytes. What is asserted below is exactly that, plus
+ * the property that makes it safe to ship: an unreadable file appends a LOUD
+ * notice, never silence.
+ */
+class SeedingSandbox extends CountingSandbox {
+  hostAgentCwd = "";
+  constructor(private readonly seeds: Record<string, string> = {}) {
+    super();
+  }
+  override async provision(pre?: PrePopulateSpec): Promise<ProvisionResult> {
+    const prov = await super.provision(pre);
+    this.hostAgentCwd = prov.hostAgentCwd;
+    for (const [rel, body] of Object.entries(this.seeds)) {
+      const abs = join(prov.hostAgentCwd, rel);
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, body);
+    }
+    return prov;
+  }
+}
+
+const seededPhase = (contextFile: string): PhaseDefinition =>
+  AgentWorkflowSchema.parse({
+    name: "wf",
+    phases: [
+      {
+        name: "survey",
+        type: "fanout",
+        skills: ["pr-review"],
+        branches: [{ name: "enforcement", prompt: "prompts/b.md", context_file: contextFile }],
+      },
+    ],
+  }).phases[0];
+
+const OBLIGATIONS = ".lastlight/pr-review/obligations/enforcement.md";
+const BLOCK = "=== ENFORCEMENT ===\n\nO-002  [enforcement]  expects: quote\n";
+
+describe("fanout — `context_file` puts the seed IN the prompt", () => {
+  it("appends the file's bytes, so no path is left for the model to resolve", async () => {
+    const sandbox = new SeedingSandbox({ [OBLIGATIONS]: BLOCK });
+    await runFanout(seededPhase(OBLIGATIONS), sandbox);
+
+    // The base is the CHECKOUT, not the workspace root, and that one level is
+    // the entire defect: the skill bundle lives at the root, so a model joining
+    // this relative path onto the directory its skills came from misses by
+    // exactly this much. `hostAgentCwd` is computed beside `agentCwd` in each
+    // adapter, so the file the harness reads is the file a `type: bash` phase's
+    // shell wrote.
+    expect(sandbox.hostAgentCwd).not.toBe(sandbox.hostWorkspaceDir);
+    expect(existsSync(join(sandbox.hostWorkspaceDir, OBLIGATIONS))).toBe(false);
+
+    expect(sandbox.agentPrompts).toHaveLength(1);
+    const prompt = sandbox.agentPrompts[0];
+    expect(prompt).toContain(BRANCH_CONTEXT_HEADING);
+    expect(prompt).toContain("O-002  [enforcement]  expects: quote");
+    expect(prompt).not.toContain("NOT AVAILABLE");
+    // …and it says so, because a model that re-opens the file is a model that
+    // can still resolve the path against the wrong base.
+    expect(prompt).toContain("do not open it, and do not construct a path to it");
+  });
+
+  it("puts it LAST — §D4's prompt-cache ordering is what makes six branches cheap", () => {
+    // The shared prefix (skills, AGENTS.md, the diff summary) must stay
+    // byte-identical across the branches; everything family-specific comes
+    // after it. The attached block is the most family-specific thing there is.
+    const sandbox = new SeedingSandbox({ [OBLIGATIONS]: BLOCK });
+    return runFanout(seededPhase(OBLIGATIONS), sandbox).then(() => {
+      const prompt = sandbox.agentPrompts[0];
+      expect(prompt.indexOf(BRANCH_CONTEXT_HEADING)).toBeGreaterThan(prompt.indexOf("PROMPT:"));
+      expect(prompt.trimEnd().endsWith("O-002  [enforcement]  expects: quote")).toBe(true);
+    });
+  });
+
+  it("appends a LOUD notice when the file is missing, and still runs the branch", async () => {
+    // The silent version of this is the whole bug: a lost seed used to be
+    // indistinguishable from a family with genuinely nothing to check, so a
+    // seeded pass became an unseeded one with nothing recording that it had.
+    const sandbox = new SeedingSandbox();
+    const { outcome } = await runFanout(seededPhase(OBLIGATIONS), sandbox);
+
+    const prompt = sandbox.agentPrompts[0];
+    expect(prompt).toContain("NOT AVAILABLE");
+    expect(prompt).toContain(OBLIGATIONS);
+    expect(prompt).toContain("NOT_SEEDED");
+    // `NOT_SEEDED` ≠ `NOT_MEASURED`: "its answer never reached you" and "it
+    // looked and could not measure this axis" are different facts, and this
+    // package's founding invariant is that they never collapse.
+    expect(prompt).toContain("`NOT_SEEDED` and `NOT_MEASURED` are DIFFERENT facts");
+    // Loud in the prompt, never fatal to the run: a hard-failing phase records
+    // no `assessedHeadShaByWorkflow` and cron-review re-dispatches forever.
+    expect(outcome.status).toBe("succeeded");
+  });
+
+  it("refuses a path that escapes the agent's cwd rather than resolving it", async () => {
+    // A `..` or an absolute `context_file` would resolve against something the
+    // workflow author did not name — which is the ambiguity this key removes,
+    // not a second spelling of it.
+    const sandbox = new SeedingSandbox({ [OBLIGATIONS]: BLOCK });
+    await runFanout(seededPhase(`../${OBLIGATIONS}`), sandbox);
+    const prompt = sandbox.agentPrompts[0];
+    expect(prompt).toContain("NOT AVAILABLE");
+    expect(prompt).toContain("is not a workspace-relative path");
+    expect(prompt).not.toContain("O-002");
+  });
+
+  it("hands kubernetes the PATH instead — its workspace is not host-readable", async () => {
+    // `hostAgentCwd` is an in-pod path there, the same caveat `hostWorkspaceDir`
+    // already carries. Attempting the read would ENOENT every time and report
+    // "the seeding step failed" for a backend whose workspace this process was
+    // never able to see — a worse lie than the one this key removes. So the
+    // path goes back in the prompt, with the trap it used to hide named.
+    const sandbox = new SeedingSandbox({ [OBLIGATIONS]: BLOCK });
+    await runFanout(seededPhase(OBLIGATIONS), sandbox, "kubernetes");
+    const prompt = sandbox.agentPrompts[0];
+    expect(prompt).toContain(OBLIGATIONS);
+    expect(prompt).toContain("Read it RELATIVE, exactly as written");
+    expect(prompt).not.toContain("NOT AVAILABLE");
+    expect(prompt).not.toContain("O-002");
+  });
+
+  it("leaves a branch without `context_file` byte-identical to before", async () => {
+    // Every other fan-out in the tree, and the `spec` branch of this one, whose
+    // obligations are built harness-side and have no block on disk.
+    const sandbox = new SeedingSandbox({ [OBLIGATIONS]: BLOCK });
+    await runFanout(fanoutPhase(), sandbox);
+    for (const prompt of sandbox.agentPrompts) {
+      expect(prompt).not.toContain(BRANCH_CONTEXT_HEADING);
+    }
   });
 });

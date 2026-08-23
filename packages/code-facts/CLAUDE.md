@@ -443,6 +443,7 @@ parsed one of them. Measured on the real corpus — keycloak `37429` reads
 | `coverage` | changed lines executed by zero tests, read from an **existing** report. It never runs a suite. istanbul · lcov · JaCoCo · Cobertura · Go coverprofile · SimpleCov |
 | `all` | one envelope, every payload — what a workflow phase writes |
 | `prepare` | **not an extractor** — installs dependencies so a probe can be RUN, and writes `probes/env.json`. See below |
+| `discharge` | each `survey` branch's exit gate — every obligation the family owns carries a `QUOTE` / `ABSENT` / `PARTIAL` / `PROBE` discharge in `hypotheses/<family>.jsonl`. See below |
 | `probes` | the `falsify` loop's exit gate — every hypothesis that needed a probe has a verdict, and every claim of execution has a transcript |
 | `findings` | the `adjudicate` loop's exit gate — the **conservation check**. See below |
 | `toolchain` | the manifest and what actually resolved |
@@ -614,6 +615,95 @@ leaves — on every re-review too, since the cross-run refresh is deliberately
 `git clean -fdx -e node_modules`. Peak RSS on an installed tree is **unmeasured**
 for the tsgo engine (the compiler is a child process), so none of the older
 figures in the plan transfer. The shell-level catch is not optional.
+
+### `discharge` — the survey's gate, and the field the contract had no room for
+
+`src/discharge.ts`, WP3. It is each `survey` branch's `until_bash`, so exit 0
+closes that branch's loop and non-zero means iterate — the same contract as
+`probes` and `findings`, and not wrapped by `--never-fail` for the same reason.
+It reads `obligations.json` and `hypotheses/<family>.jsonl` and answers one
+question: **did every obligation this family owns get a recorded discharge —
+`QUOTE`, `ABSENT`, `PARTIAL` or `PROBE`?**
+
+What it replaces is `test -s .lastlight/pr-review/hypotheses/<family>.jsonl`,
+which **one line of any content passes**. Measured on
+`prreview__skillspro-1587-r1` against 31 obligations: `state.jsonl` was a single
+line listing ten obligation ids and discharging none of them, `security.jsonl`
+one free-form line citing no obligation at all against three, `enforcement.jsonl`
+nine rows against thirteen — and the gate passed all of them. Identical
+obligation sets then produced 18 hypotheses on one run and 43 on the next. The
+floor was one line; it should be N discharges. Same shape as the conservation
+gate that passed falsely and the model-minted ids that collided: **an
+instruction is not a mechanism.**
+
+It reads through `src/hypotheses.ts`, exactly as `findings` and `probes` do, so
+no two gates can disagree about which rows exist or which family a row belongs
+to (the FILENAME's, never the row's self-report). A row may discharge one
+obligation (`{"obligation": "O-014", "discharge": "ABSENT"}`) or several
+(`{"obligations": [{"id": "O-014", "status": "QUOTE"}]}` — the shape a survey
+chose on its own); the prose is never read, because scanning a `claim` string
+for `O-014` would restore *"one line of any content passes"* through the back
+door.
+
+`null` ≠ `[]`, three ways, and the exit codes carry the distinction: **no file**
+is *nobody looked* (exit 2, nothing to grade); an **empty file** is *looked,
+recorded nothing* (exit 3 when anything is outstanding); a family marked **NOT
+MEASURED** in `obligations.json` passes, with a note saying why, because failing
+a family for the absence of the thing it audits is how a gate takes a run down.
+A family with zero obligations passes too. Any non-zero means *iterate again* —
+the 2/3 split is for the human reading the phase log, not two instructions.
+
+Four decisions that are decisions:
+
+- **With no readable `obligations.json` it DEGRADES to the `test -s` floor it
+  replaces** — one parsed row passes — and says in its output that it graded
+  nothing. `pr-review.yaml` runs `seed … || true` and a `coverage: "none"`
+  envelope writes no document at all, so a gate demanding one would be
+  unsatisfiable by the agent. That is WP3's original `$LL_FAMILY` bug exactly (a
+  gate testing `hypotheses/.jsonl`, failing forever, burning every iteration),
+  and it is the failure mode this file guards hardest against.
+- **An unknown `--family` is the opposite case and stays fatal.** Nothing an
+  agent writes can fix a misspelled or unset flag, so it breaks loudly at the
+  wiring. An empty `--family` is refused at the CLI door.
+- **The code is read case-insensitively, and `discharge` is accepted beside
+  `status`.** A survey already wrote `status` unprompted; refusing a spelling
+  the model reached for buys nothing but an iteration. The collision this
+  creates is with the obligation's OWN `discharge: quote | probe | either`
+  requirement field — which is why `seed-render.ts` now prints that field as
+  **`expects:`**. The row's `discharge` is an ANSWER (one of the four codes);
+  the obligation's is a REQUIREMENT (what it is *likely* answerable by), and
+  `either` is not one of the four, so a model copying the label it just read
+  landed `bad-code` and could not satisfy the gate however many iterations it
+  spent. One word of separation removes that.
+- **`--ledger` always exits 0.** Same reading, opposite audience: the gate
+  answers the harness (*may the loop stop?*) with an exit code; the ledger
+  answers the SURVEY (*what must I still answer?*) with a `[x]`/`[ ]` checklist
+  of every obligation and its question, and inside an agent's own bash tool the
+  gate's non-zero would read as a tool failure. Nothing in it is capped — a
+  truncated checklist reproduces the omission it exists to prevent — and the
+  outstanding list wraps.
+
+It is **pure**: it reads two artifacts and writes nothing. There is no
+`--repair` analogue here and there must not be — a machine that manufactured
+discharges would be inventing the exact evidence the pipeline exists to demand,
+and a survey's §D12 floor is the loop's own `max_iterations`. What it
+deliberately does not do: read a quote, resolve a `path:line`, judge a claim, or
+check that an `ABSENT` really is absent. It checks that the work was *recorded*,
+per obligation.
+
+The other half of the fix is in `src/seed-render.ts`, because the contract and
+the mechanism must not be separable: the block's prescribed row shape now
+carries `discharge` (and `failureScenario`), lists **every** id that needs one
+(wrapped, never truncated), points the survey at `discharge --ledger`, and ends
+with **one worked exemplar** — a real `PARTIAL` row from a real run, chosen
+because the measured run discharged that obligation `QUOTE` against a line that
+merely *mentions* the constant, looked perfectly discharged, and reported
+nothing. `renderFamilyBlock` also never returns `""` any more: every seedable
+family always gets a block, so a **missing** file means the seeder failed rather
+than being confused with "nothing to say" or "the consumer looked in the wrong
+place". `tests/seed-render.test.ts` parses the rendered exemplar back out and
+feeds it to `checkDischarge`, so the emitted shape cannot drift out of the
+gate's reading.
 
 ### `findings` — conservation, and the floor that makes it a mechanism
 

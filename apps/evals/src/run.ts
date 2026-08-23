@@ -38,6 +38,7 @@ import {
   loadMartianSidecar,
   computeMartianRanking,
   type RunMeta,
+  type RunProvenance,
   type PendingCase,
   type Scorecard,
   type MartianSidecar,
@@ -45,7 +46,20 @@ import {
 import type { SweBenchInstance, InstanceResult, TrialSession } from "./schema.js";
 import { bootstrapAssets, describeCore } from "./bootstrap.js";
 import { discoverTiers, loadInstances, workflowFor, type Tier } from "./discovery.js";
-import { builtinDatasetsRoot, tierResultsDir, makeRunId, gitShortSha, resultsRoot, dashboardDistRoot } from "./paths.js";
+import {
+  builtinDatasetsRoot,
+  tierResultsDir,
+  makeRunId,
+  gitShortSha,
+  resultsRoot,
+  dashboardDistRoot,
+  packageRoot,
+  harnessVersion,
+  resolveFactsBin,
+  factsToolchainStamp,
+} from "./paths.js";
+import { defaultJudgeModel } from "./judge.js";
+import { defaultBeta } from "./grade.js";
 import { startServer, type RunningServer } from "./serve.js";
 import { runInit } from "./init.js";
 import { runAddCase } from "./add-case.js";
@@ -211,7 +225,7 @@ function strFlagAll(name: string): string[] {
 }
 
 /** CLI flags that take a following value (so it isn't read as a tier name). */
-const VALUE_FLAGS = new Set(["--runs", "--model", "--models", "--mode", "--overlay", "--datasets", "--models-file", "--instance", "--limit", "--f-beta", "--sandbox", "--concurrency"]);
+const VALUE_FLAGS = new Set(["--runs", "--repeats", "--model", "--models", "--mode", "--overlay", "--datasets", "--models-file", "--instance", "--limit", "--f-beta", "--sandbox", "--concurrency"]);
 
 async function runEval(): Promise<number> {
   loadDotEnv();
@@ -315,7 +329,25 @@ async function runEval(): Promise<number> {
     return 1;
   }
 
-  const noOpen = process.argv.includes("--no-open") || !!process.env.CI;
+  // `--repeats N` — run the WHOLE arm N times, as N sibling runs, so a result can
+  // be reported as a band rather than a point. Three identical runs of one arm
+  // measured micro-recall 0.320 / 0.080 / 0.200 (union 0.440, intersection 0.040
+  // — 1 of 25 gold findings found by all three), and `diff-runs` returned KEEP on
+  // one and REVERT on the other two FROM ONE CONFIGURATION. A single arm is not
+  // a measurement of that arm.
+  //
+  // Emphatically NOT `--runs N`, which repeats each CASE and folds the trials
+  // into one worst-case result with mean metrics (`aggregateTrials`): that
+  // destroys the per-trial hit vectors, so it can never produce a band. The two
+  // compose (`--repeats 3 --runs 2` = 3 bands of 2-trial cases), they do not
+  // substitute.
+  const repeats = intFlag("repeats", 1);
+  // A repeat loop must never leave a dashboard server behind: `run` holds one open
+  // FOREVER at the end (see the server-hold block), and on 2026-08-23 seven leaked
+  // servers had accumulated overnight from ordinary single runs. N of them would be
+  // worse, and the band is read afterwards anyway — so `--repeats` implies
+  // `--no-open` and prints the standalone `serve` command once instead.
+  const noOpen = process.argv.includes("--no-open") || !!process.env.CI || repeats > 1;
   const runs = intFlag("runs", 1);
 
   // Positional tier names — skip flags AND the values that follow value-flags.
@@ -479,7 +511,11 @@ async function runEval(): Promise<number> {
   // without this flag the only way to read one was to catch a live run
   // mid-flight, which is not an instrument. OFF by default: a kept workspace is
   // a full checkout, plus `node_modules` once `prepare` installs.
-  const keepWorkspace = process.argv.includes("--keep-workspace");
+  //
+  // `--repeats` forces it on: when the repeats disagree, the question is always
+  // *which* evidence each one produced, and a previous repeat was already lost
+  // for want of the flag. A band you cannot open is a band you cannot explain.
+  const keepWorkspace = process.argv.includes("--keep-workspace") || repeats > 1;
 
   // Execution sandbox backend (or EVAL_SANDBOX). Default `none` (in-process, no
   // QEMU dependency — the fast/CI path). `gondolin` isolates the agent's tools
@@ -676,7 +712,20 @@ async function runEval(): Promise<number> {
   const tierKeyFor = (tier: string) => `${tier}${runType === "config" ? "-config" : compare ? "-compare" : ""}`;
   // One shared runId, checked free in the first tier's dir (collisions in the
   // same second across runs are what the suffix guards — rare, one dir suffices).
-  const runId = makeRunId(new Date(), gitSha, tierResultsDir(tierKeyFor(tiers[0])));
+  //
+  // `let`, not `const`, and reassigned once per `--repeats` iteration. Every
+  // closure below that names a run directory — `resultsDirFor`, `baseMetaFor`,
+  // the session paths built from them — reads `runId` at CALL time, so a single
+  // reassignment repoints all of them with no code movement. Repeats are SIBLING
+  // dirs (`<tierKey>/<runId>/`, a fresh id each time): `indexTier` and `clean`
+  // both walk exactly two levels, so a nested `<runId>/rep-2/` would be invisible
+  // to the dashboard AND uncleanable. `makeRunId`'s existing `-2`/`-3` suffix
+  // already handles two repeats finishing inside the same second.
+  let runId = makeRunId(new Date(), gitSha, tierResultsDir(tierKeyFor(tiers[0])));
+  /** The band's id = the FIRST repeat's runId (see `RepeatRef`). */
+  const repeatGroup = runId;
+  /** 1-based position in the band; bumped by the repeat loop. */
+  let repeatIndex = 1;
   const resultsDirFor = (tier: string) => join(tierResultsDir(tierKeyFor(tier)), runId);
   // Each case's session logs live under `sessions/<id>__<model>/trial-<N>/`
   // (relative to the tier run dir) — the model is in the name since several
@@ -690,13 +739,51 @@ async function runEval(): Promise<number> {
   // identity, labels, and live state straight off disk). `live`/`progress`/
   // `pending`/`generatedAt` are layered on per write; `tiers` is the single tier.
   const armLabels = arms.map((a) => labels[a.label] ?? a.label);
+
+  // The invocation, recorded beside the numbers it produced (see `RunProvenance`).
+  // Resolved ONCE — none of it varies per repeat, and the facts-toolchain probe
+  // spawns a process. `judgeModel`/`factsBin` are what this run WOULD use, which
+  // is the point: an arm reporting `coverage: "none"` is explained by a null
+  // `factsBin`, and a scorecard whose judge silently changed between two runs is
+  // otherwise indistinguishable from one where the models changed.
+  const factsBin = resolveFactsBin();
+  let judgeModel: string | undefined;
+  try {
+    judgeModel = defaultJudgeModel();
+  } catch {
+    judgeModel = undefined; // no provider key resolves one; already fatal above for models
+  }
+  const provenance: RunProvenance = {
+    overlay: overlayDir,
+    overlays: overlays.length ? overlays : undefined,
+    datasets: userDatasetsDir,
+    sandbox,
+    fBeta: fBeta ?? defaultBeta(),
+    judgeWithDiff: judge.withDiff,
+    injectContext,
+    keepWorkspace,
+    instances: instanceFilter.length ? instanceFilter : undefined,
+    limit,
+    repeats: repeats > 1 ? repeats : undefined,
+    judgeModel,
+    factsBin,
+    toolchain: factsToolchainStamp(factsBin),
+    harness: { version: harnessVersion(), root: packageRoot() },
+    argv: process.argv.slice(2),
+  };
+
   const baseMetaFor = (tier: string): Omit<RunMeta, "generatedAt"> => ({
+    // Flat on `meta`, exactly like `gitSha`/`concurrency`/`core`.
+    ...provenance,
     runId,
     runType,
     tiers: [tier],
     models: armLabels,
     runs,
     concurrency,
+    // A band of one is not a band — an ordinary run's meta stays exactly as it
+    // was, and `undefined` reads as "not repeated" rather than "repeated once".
+    repeat: repeats > 1 ? { group: repeatGroup, index: repeatIndex, of: repeats } : undefined,
     gitSha,
     labels,
     core: describeCore(builtInRoot),
@@ -736,6 +823,10 @@ async function runEval(): Promise<number> {
         runs > 1
           ? chalk.dim(` × ${runs} trials = ${work.length * runs} runs · worst-case verdict, mean cost`)
           : ""
+      }${
+        repeats > 1
+          ? `\n${chalk.bold("repeats")} ${repeats}${chalk.dim(` × the whole arm, sequentially · ${repeats} sibling runs, read as a band (implies --keep-workspace, --no-open)`)}`
+          : ""
       }`,
     "plan",
   );
@@ -743,22 +834,28 @@ async function runEval(): Promise<number> {
   // `total` counts individual trials so live progress advances per model call.
   const total = work.length * runs;
 
-  // Seed an empty live scorecard per tier so the dashboard has something to poll,
-  // then start the server and open the SPA deep-linked at this run. The server is
-  // skipped entirely when not opening (CI / --no-open) — we only write JSON.
-  for (const tier of tiers) {
-    writeScorecard(
-      resultsDirFor(tier),
-      withMeta(summarize([]), {
-        ...baseMetaFor(tier),
-        generatedAt: new Date().toISOString(),
-        live: true,
-        pid: process.pid,
-        heartbeat: new Date().toISOString(),
-        progress: `0/${total}`,
-      }),
-    );
-  }
+  // Seed an empty live scorecard per tier so the dashboard has something to poll.
+  // Called once per repeat, AFTER `runId` has been repointed, so each sibling run
+  // dir exists from the moment its repeat starts rather than only when it ends.
+  const seedScorecards = () => {
+    for (const tier of tiers) {
+      writeScorecard(
+        resultsDirFor(tier),
+        withMeta(summarize([]), {
+          ...baseMetaFor(tier),
+          generatedAt: new Date().toISOString(),
+          live: true,
+          pid: process.pid,
+          heartbeat: new Date().toISOString(),
+          progress: `0/${total}`,
+        }),
+      );
+    }
+  };
+  // Repeat 1's seed lands BEFORE the server starts (the SPA must have something
+  // to poll the instant it opens deep-linked at this run) and before the possibly
+  // slow prefetch.
+  seedScorecards();
   let server: RunningServer | undefined;
   if (!noOpen) {
     try {
@@ -781,9 +878,18 @@ async function runEval(): Promise<number> {
     return 1;
   }
 
+  // The per-repeat accumulators. Declared ONCE, outside the repeat loop, because
+  // `refresh`/`runItem` close over them — the loop RESETS them in place rather
+  // than rebinding, so every closure keeps pointing at the live objects.
   const all: InstanceResult[] = [];
   let harnessErrors = 0;
   let completed = 0;
+  /** Harness errors across ALL repeats — what the exit code is read from. A band
+   * whose first repeat blew up and whose last was clean is not a clean run. */
+  let totalHarnessErrors = 0;
+  /** Trials + cases summed over every repeat, for the closing line. */
+  let totalCompleted = 0;
+  let totalCases = 0;
 
   // Track in-flight cases so the live report can show running / queued rows.
   const caseKey = (tier: string, model: string, id: string) => `${tier}|${model}|${id}`;
@@ -837,7 +943,11 @@ async function runEval(): Promise<number> {
     }
   };
 
-  const keptWorkspaces: { id: string; trial: number; path: string }[] = [];
+  // NOT reset between repeats: its only consumer is the end-of-run summary, and
+  // the whole reason `--repeats` forces `--keep-workspace` is that you need to
+  // open EVERY repeat's evidence when they disagree. A per-repeat reset would
+  // print only the last one's paths and silently orphan the rest.
+  const keptWorkspaces: { id: string; trial: number; repeat: number; path: string }[] = [];
 
   // Run one case `runs` times and fold the trials into a single result
   // (worst-case verdict, mean metrics). `onTrial` ticks per model call.
@@ -871,7 +981,7 @@ async function runEval(): Promise<number> {
         keepWorkspace,
       });
       r.tier = w.tierName;
-      if (r.workspaceDir) keptWorkspaces.push({ id: w.inst.instance_id, trial: t, path: r.workspaceDir });
+      if (r.workspaceDir) keptWorkspaces.push({ id: w.inst.instance_id, trial: t, repeat: repeatIndex, path: r.workspaceDir });
       trials.push(r);
       completed++;
       onTrial();
@@ -892,176 +1002,217 @@ async function runEval(): Promise<number> {
   // never keeps the process alive on its own.
   const heartbeat = setInterval(() => refresh(), 20_000);
   heartbeat.unref?.();
+  /** Every repeat's per-tier artifact dirs, for the closing summary. */
+  const repeatDirs: string[] = [];
   try {
-    if (parallel) {
-      // Per-family progress for the aggregate spinner line.
-      const fam = new Map<string, { done: number; total: number }>();
-      for (const [f, items] of byFamily) fam.set(f, { done: 0, total: items.length * runs });
-      const status = () => {
-        const segs = [...fam].map(([f, c]) => {
-          const done = c.done === c.total ? chalk.green(`${c.done}/${c.total}`) : `${c.done}/${c.total}`;
-          return `${familyLabel(f)} ${done}`;
-        });
-        return `${chalk.dim(`${completed}/${total}`)}  ${segs.join(chalk.dim(" · "))}`;
-      };
-      const s = makeSpinner();
-      s.start(status());
-      const restoreConsole = silenceConsole();
-      const verdicts: string[] = [];
+    // `--repeats N`: the WHOLE arm, N times, STRICTLY SEQUENTIALLY. Never
+    // overlapped — two repeats at once would be two arms at once, which the
+    // process-global asset root forbids (ADR 0001), and they would contend for
+    // the same provider rate limit, which is one of the things being measured.
+    for (repeatIndex = 1; repeatIndex <= repeats; repeatIndex++) {
+      if (repeatIndex > 1) {
+        // A fresh SIBLING run id. Every closure that names a run dir reads
+        // `runId` at call time, so this one assignment repoints all of them.
+        // `makeRunId`'s `-2`/`-3` suffix covers two repeats landing in the same
+        // second (a `--limit 1` smoke run can).
+        runId = makeRunId(new Date(), gitSha, tierResultsDir(tierKeyFor(tiers[0])));
+        // Reset the accumulators IN PLACE — `refresh`/`runItem` closed over these
+        // objects, so rebinding them would leave the closures on the old ones.
+        // `keptWorkspaces` is deliberately NOT reset (see its declaration).
+        all.length = 0;
+        harnessErrors = 0;
+        completed = 0;
+        running.clear();
+        trialOf.clear();
+        seedScorecards();
+        p.log.step(`${chalk.bold(`repeat ${repeatIndex}/${repeats}`)} ${chalk.dim(runId)}`);
+      }
       try {
-        await Promise.all(
-          [...byFamily].map(async ([f, items]) => {
-            // Within a family, `--concurrency` bounds how many of its cases are
-            // in flight. `models` arms never switch overlays (`activate()` is a
-            // no-op for them), which is why this branch needs no arm grouping —
-            // see the `config`/overlay note in the serial branch below.
-            await mapPool(items, concurrency, async (w) => {
-              const k = caseKey(w.tierName, w.arm.label, w.inst.instance_id);
-              running.add(k);
-              refresh();
-              const result = await runItem(w, () => {
-                fam.get(f)!.done++;
-                s.message(status());
-                refresh();
-              });
-              running.delete(k);
-              all.push(result);
-              if (result.error) harnessErrors++;
-              const mark = result.error ? chalk.red("✗") : result.blocked ? chalk.yellow("■") : chalk.green("✓");
-              verdicts.push(`${mark} ${chalk.dim(familyLabel(f))}  ${verdictLine(w.tierName, w.inst, result)}`);
-              refresh();
+        if (parallel) {
+          // Per-family progress for the aggregate spinner line.
+          const fam = new Map<string, { done: number; total: number }>();
+          for (const [f, items] of byFamily) fam.set(f, { done: 0, total: items.length * runs });
+          const status = () => {
+            const segs = [...fam].map(([f, c]) => {
+              const done = c.done === c.total ? chalk.green(`${c.done}/${c.total}`) : `${c.done}/${c.total}`;
+              return `${familyLabel(f)} ${done}`;
             });
-          }),
-        );
-      } finally {
-        restoreConsole();
-      }
-      s.stop(`${chalk.dim(`${completed}/${total}`)} ${chalk.green("done")}`);
-      p.log.message(verdicts.join("\n"));
-    } else if (concurrency > 1) {
-      // Concurrent WITHIN one arm, strictly serial ACROSS arms.
-      //
-      // The asset root core resolves workflows/skills/prompts from is a module
-      // GLOBAL (ADR 0001), so two overlays can never be live at once — which is
-      // what `activateOverlay`/`releaseOverlayGuard` enforce by throwing. Running
-      // arms concurrently would therefore either throw or, worse, measure one
-      // arm's cases against another arm's prompts. So the pool is opened and
-      // closed inside each arm's overlay window, never across it.
-      //
-      // Cases within one arm have nothing global between them: per-run `mkdtemp`
-      // stateDir, per-run fake-GitHub port, a threaded `cwd` (never
-      // `process.chdir`), and the static-token env installed once for the batch.
-      const groups: { arm: Arm; items: WorkItem[] }[] = [];
-      for (const w of work) {
-        const tail = groups[groups.length - 1];
-        if (tail && tail.arm === w.arm) tail.items.push(w);
-        else groups.push({ arm: w.arm, items: [w] });
-      }
-
-      const s = makeSpinner();
-      const status = () => `${chalk.dim(`${completed}/${total}`)}  ${chalk.dim(`×${concurrency}`)}`;
-      s.start(status());
-      // The per-case `quiet()` swap saves/restores `console` and is NOT
-      // re-entrant, so concurrency drops console for the batch instead — the
-      // same trade the family-parallel branch makes.
-      const restoreConsole = silenceConsole();
-      const verdicts: string[] = [];
-      try {
-        for (const g of groups) {
-          g.arm.activate();
+            return `${chalk.dim(`${completed}/${total}`)}  ${segs.join(chalk.dim(" · "))}`;
+          };
+          const s = makeSpinner();
+          s.start(status());
+          const restoreConsole = silenceConsole();
+          const verdicts: string[] = [];
           try {
-            await mapPool(g.items, concurrency, async (w) => {
-              // The invariant this whole branch is built on, asserted rather
-              // than assumed: one overlay is live and it is this arm's.
-              if (w.arm !== g.arm) throw new Error(`concurrency crossed an arm boundary: ${w.arm.label} in ${g.arm.label}`);
-              const k = caseKey(w.tierName, w.arm.label, w.inst.instance_id);
-              running.add(k);
-              refresh();
-              const result = await runItem(w, () => {
-                s.message(status());
-                refresh();
-              });
-              running.delete(k);
-              all.push(result);
-              if (result.error) harnessErrors++;
-              const mark = result.error ? chalk.red("✗") : result.blocked ? chalk.yellow("■") : chalk.green("✓");
-              verdicts.push(
-                `${mark} ${chalk.dim(labels[w.arm.label] ?? w.arm.label)}  ${verdictLine(w.tierName, w.inst, result)}`,
-              );
-              s.message(status());
-              refresh();
-            });
+            await Promise.all(
+              [...byFamily].map(async ([f, items]) => {
+                // Within a family, `--concurrency` bounds how many of its cases are
+                // in flight. `models` arms never switch overlays (`activate()` is a
+                // no-op for them), which is why this branch needs no arm grouping —
+                // see the `config`/overlay note in the serial branch below.
+                await mapPool(items, concurrency, async (w) => {
+                  const k = caseKey(w.tierName, w.arm.label, w.inst.instance_id);
+                  running.add(k);
+                  refresh();
+                  const result = await runItem(w, () => {
+                    fam.get(f)!.done++;
+                    s.message(status());
+                    refresh();
+                  });
+                  running.delete(k);
+                  all.push(result);
+                  if (result.error) harnessErrors++;
+                  const mark = result.error ? chalk.red("✗") : result.blocked ? chalk.yellow("■") : chalk.green("✓");
+                  verdicts.push(`${mark} ${chalk.dim(familyLabel(f))}  ${verdictLine(w.tierName, w.inst, result)}`);
+                  refresh();
+                });
+              }),
+            );
           } finally {
-            // Release before the next arm activates, or the guard reads the
-            // switch as a second concurrent overlay and throws.
-            releaseOverlayGuard();
+            restoreConsole();
+          }
+          s.stop(`${chalk.dim(`${completed}/${total}`)} ${chalk.green("done")}`);
+          p.log.message(verdicts.join("\n"));
+        } else if (concurrency > 1) {
+          // Concurrent WITHIN one arm, strictly serial ACROSS arms.
+          //
+          // The asset root core resolves workflows/skills/prompts from is a module
+          // GLOBAL (ADR 0001), so two overlays can never be live at once — which is
+          // what `activateOverlay`/`releaseOverlayGuard` enforce by throwing. Running
+          // arms concurrently would therefore either throw or, worse, measure one
+          // arm's cases against another arm's prompts. So the pool is opened and
+          // closed inside each arm's overlay window, never across it.
+          //
+          // Cases within one arm have nothing global between them: per-run `mkdtemp`
+          // stateDir, per-run fake-GitHub port, a threaded `cwd` (never
+          // `process.chdir`), and the static-token env installed once for the batch.
+          const groups: { arm: Arm; items: WorkItem[] }[] = [];
+          for (const w of work) {
+            const tail = groups[groups.length - 1];
+            if (tail && tail.arm === w.arm) tail.items.push(w);
+            else groups.push({ arm: w.arm, items: [w] });
+          }
+
+          const s = makeSpinner();
+          const status = () => `${chalk.dim(`${completed}/${total}`)}  ${chalk.dim(`×${concurrency}`)}`;
+          s.start(status());
+          // The per-case `quiet()` swap saves/restores `console` and is NOT
+          // re-entrant, so concurrency drops console for the batch instead — the
+          // same trade the family-parallel branch makes.
+          const restoreConsole = silenceConsole();
+          const verdicts: string[] = [];
+          try {
+            for (const g of groups) {
+              g.arm.activate();
+              try {
+                await mapPool(g.items, concurrency, async (w) => {
+                  // The invariant this whole branch is built on, asserted rather
+                  // than assumed: one overlay is live and it is this arm's.
+                  if (w.arm !== g.arm) throw new Error(`concurrency crossed an arm boundary: ${w.arm.label} in ${g.arm.label}`);
+                  const k = caseKey(w.tierName, w.arm.label, w.inst.instance_id);
+                  running.add(k);
+                  refresh();
+                  const result = await runItem(w, () => {
+                    s.message(status());
+                    refresh();
+                  });
+                  running.delete(k);
+                  all.push(result);
+                  if (result.error) harnessErrors++;
+                  const mark = result.error ? chalk.red("✗") : result.blocked ? chalk.yellow("■") : chalk.green("✓");
+                  verdicts.push(
+                    `${mark} ${chalk.dim(labels[w.arm.label] ?? w.arm.label)}  ${verdictLine(w.tierName, w.inst, result)}`,
+                  );
+                  s.message(status());
+                  refresh();
+                });
+              } finally {
+                // Release before the next arm activates, or the guard reads the
+                // switch as a second concurrent overlay and throws.
+                releaseOverlayGuard();
+              }
+            }
+          } finally {
+            restoreConsole();
+          }
+          s.stop(`${chalk.dim(`${completed}/${total}`)} ${chalk.green("done")}`);
+          p.log.message(verdicts.join("\n"));
+        } else {
+          // Serial: one spinner per case (updates per trial) + a verdict line. On
+          // each arm change `arm.activate()` repoints the (process-global) asset root
+          // to that arm's overlay (a no-op for models arms); work is arms-outer, so
+          // it fires at most once per arm. `releaseOverlayGuard()` lets the next arm
+          // switch overlays — without it the guard treats the switch as a concurrent
+          // overlay and throws (ADR 0001).
+          let currentArm: Arm | undefined;
+          for (let i = 0; i < work.length; i++) {
+            const w = work[i];
+            if (w.arm !== currentArm) {
+              if (currentArm) releaseOverlayGuard();
+              w.arm.activate();
+              currentArm = w.arm;
+            }
+            const s = makeSpinner();
+            const head = `${chalk.dim(`[${i + 1}/${work.length}]`)} ${chalk.cyan(w.tierName)}/${w.inst.instance_id}  ${chalk.dim(labels[w.arm.label] ?? w.arm.label)}`;
+            s.start(head);
+
+            const k = caseKey(w.tierName, w.arm.label, w.inst.instance_id);
+            running.add(k);
+            refresh();
+            let t = 0;
+            const { value: result, logs } = await quiet(() =>
+              runItem(w, () => {
+                t++;
+                if (runs > 1) s.message(`${head}  ${chalk.dim(`trial ${t}/${runs}`)}`);
+                refresh();
+              }),
+            );
+            running.delete(k);
+            all.push(result);
+            if (result.error) harnessErrors++;
+
+            const mark = result.error ? chalk.red("✗") : result.blocked ? chalk.yellow("■") : chalk.green("✓");
+            s.stop(`${chalk.dim(`[${i + 1}/${work.length}]`)} ${mark} ${verdictLine(w.tierName, w.inst, result)}`);
+            if (result.error) {
+              p.log.error(chalk.dim(result.error));
+              const tail = logs.split("\n").filter(Boolean).slice(-12).join("\n");
+              if (tail) p.log.message(chalk.dim(tail));
+            }
+            refresh();
           }
         }
       } finally {
-        restoreConsole();
+        // Release the overlay guard at the END OF EVERY REPEAT, not just on an
+        // arm change. The serial branch above declares `currentArm` inside itself
+        // and only releases when the arm CHANGES (never after the last one), so
+        // repeat 2 would call `w.arm.activate()` while repeat 1's overlay is
+        // still marked active and `activateOverlay` would THROW (arm.ts). The
+        // concurrent branch already releases per arm in its own `finally`, and a
+        // second release is a harmless no-op — the guard is two booleans.
+        releaseOverlayGuard();
       }
-      s.stop(`${chalk.dim(`${completed}/${total}`)} ${chalk.green("done")}`);
-      p.log.message(verdicts.join("\n"));
-    } else {
-      // Serial: one spinner per case (updates per trial) + a verdict line. On
-      // each arm change `arm.activate()` repoints the (process-global) asset root
-      // to that arm's overlay (a no-op for models arms); work is arms-outer, so
-      // it fires at most once per arm. `releaseOverlayGuard()` lets the next arm
-      // switch overlays — without it the guard treats the switch as a concurrent
-      // overlay and throws (ADR 0001).
-      let currentArm: Arm | undefined;
-      for (let i = 0; i < work.length; i++) {
-        const w = work[i];
-        if (w.arm !== currentArm) {
-          if (currentArm) releaseOverlayGuard();
-          w.arm.activate();
-          currentArm = w.arm;
-        }
-        const s = makeSpinner();
-        const head = `${chalk.dim(`[${i + 1}/${work.length}]`)} ${chalk.cyan(w.tierName)}/${w.inst.instance_id}  ${chalk.dim(labels[w.arm.label] ?? w.arm.label)}`;
-        s.start(head);
 
-        const k = caseKey(w.tierName, w.arm.label, w.inst.instance_id);
-        running.add(k);
-        refresh();
-        let t = 0;
-        const { value: result, logs } = await quiet(() =>
-          runItem(w, () => {
-            t++;
-            if (runs > 1) s.message(`${head}  ${chalk.dim(`trial ${t}/${runs}`)}`);
-            refresh();
-          }),
-        );
-        running.delete(k);
-        all.push(result);
-        if (result.error) harnessErrors++;
-
-        const mark = result.error ? chalk.red("✗") : result.blocked ? chalk.yellow("■") : chalk.green("✓");
-        s.stop(`${chalk.dim(`[${i + 1}/${work.length}]`)} ${mark} ${verdictLine(w.tierName, w.inst, result)}`);
-        if (result.error) {
-          p.log.error(chalk.dim(result.error));
-          const tail = logs.split("\n").filter(Boolean).slice(-12).join("\n");
-          if (tail) p.log.message(chalk.dim(tail));
-        }
-        refresh();
+      // Final, static scorecard + machine artifacts FOR THIS REPEAT. The
+      // run-level metadata is persisted into scorecard.json so the dashboard can
+      // label, order, and (no longer) live-poll the run without re-deriving from
+      // the current config.
+      const generatedAt = new Date().toISOString();
+      for (const tier of tiers) {
+        const tierResults = all.filter((r) => (r.tier ?? "") === tier);
+        writeArtifacts(resultsDirFor(tier), withMeta(summarize(tierResults), { ...baseMetaFor(tier), generatedAt, live: false, martian: martianFor(tier, tierResults) }));
+        repeatDirs.push(resultsDirFor(tier));
       }
+      totalHarnessErrors += harnessErrors;
+      totalCompleted += completed;
+      totalCases += all.length;
     }
   } finally {
     clearInterval(heartbeat);
     restoreEvalEnv();
   }
 
-  // Final, static scorecard + machine artifacts. The run-level metadata is
-  // persisted into scorecard.json so the dashboard can label, order, and (no
-  // longer) live-poll the run without re-deriving from the current config.
-  const generatedAt = new Date().toISOString();
-  for (const tier of tiers) {
-    const tierResults = all.filter((r) => (r.tier ?? "") === tier);
-    writeArtifacts(resultsDirFor(tier), withMeta(summarize(tierResults), { ...baseMetaFor(tier), generatedAt, live: false, martian: martianFor(tier, tierResults) }));
-  }
-
   p.log.success(
-    `Artifacts → ${chalk.cyan(tiers.map((t) => resultsDirFor(t)).join("\n             "))}\n             /{scorecard.json,predictions.jsonl,sessions/}`,
+    `Artifacts → ${chalk.cyan(repeatDirs.join("\n             "))}\n             /{scorecard.json,predictions.jsonl,sessions/}`,
   );
 
   // `--keep-workspace` is only useful if you can find what it kept. The paths
@@ -1072,12 +1223,25 @@ async function runEval(): Promise<number> {
     p.log.warn(
       `Kept ${keptWorkspaces.length} workspace${keptWorkspaces.length === 1 ? "" : "s"} (--keep-workspace) — nothing else will remove them:\n` +
         keptWorkspaces
-          .map((w) => `  ${w.id}${runs > 1 ? ` (trial ${w.trial})` : ""} · ${chalk.cyan(w.path)}`)
+          .map(
+            (w) =>
+              `  ${w.id}${repeats > 1 ? ` (repeat ${w.repeat})` : ""}${runs > 1 ? ` (trial ${w.trial})` : ""} · ${chalk.cyan(w.path)}`,
+          )
           .join("\n"),
     );
   }
 
-  const ran = runs > 1 ? `${completed} runs (${all.length} cases × ${runs})` : `${all.length} runs`;
+  // `--repeats` suppressed the auto-served dashboard (see the flag's note), so
+  // say — once, at the end — how to bring one up over the whole band instead of
+  // leaving N servers running for the length of the run.
+  if (repeats > 1) {
+    p.log.info(
+      `${repeats} repeats written as sibling runs (band ${chalk.cyan(repeatGroup)}). Browse the band:\n` +
+        `  ${chalk.cyan(`cd apps/evals && LASTLIGHT_EVALS_OUT=${resultsRoot()} npx tsx src/run.ts serve --port 4400`)}`,
+    );
+  }
+
+  const ran = runs > 1 ? `${totalCompleted} runs (${totalCases} cases × ${runs})` : `${totalCases} runs`;
 
   // Keep the dashboard server alive so the just-finished run stays viewable —
   // until the user stops it (Ctrl-C, or `kill`/stop for a detached run). The
@@ -1089,20 +1253,21 @@ async function runEval(): Promise<number> {
   if (server) {
     const runUrl = `${server.url}/#/${encodeURIComponent(tierKeyFor(tiers[0]))}/${encodeURIComponent(runId)}`;
     p.log.success(`Dashboard → ${chalk.cyan(runUrl)} ${chalk.dim("(serving · Ctrl-C or kill to stop)")}`);
-    const tail = harnessErrors > 0 ? chalk.yellow(`done — ${ran}, ${harnessErrors} harness error${harnessErrors === 1 ? "" : "s"} (see above)`) : chalk.green(`done — ${ran}`);
+    const tail = totalHarnessErrors > 0 ? chalk.yellow(`done — ${ran}, ${totalHarnessErrors} harness error${totalHarnessErrors === 1 ? "" : "s"} (see above)`) : chalk.green(`done — ${ran}`);
     p.outro(tail);
     await waitForSigint();
     await server.close();
   } else {
-    if (harnessErrors > 0) {
-      p.outro(chalk.yellow(`done — ${ran}, ${harnessErrors} harness error${harnessErrors === 1 ? "" : "s"} (see above)`));
+    if (totalHarnessErrors > 0) {
+      p.outro(chalk.yellow(`done — ${ran}, ${totalHarnessErrors} harness error${totalHarnessErrors === 1 ? "" : "s"} (see above)`));
     } else {
       p.outro(chalk.green(`done — ${ran}`));
     }
   }
 
-  // Non-zero ONLY on harness failure — model quality is the measurement.
-  return harnessErrors > 0 ? 1 : 0;
+  // Non-zero ONLY on harness failure — model quality is the measurement. Summed
+  // over every repeat: a band whose middle repeat blew up did not run clean.
+  return totalHarnessErrors > 0 ? 1 : 0;
 }
 
 /** Resolve on the first SIGINT (Ctrl-C) so `run`/`serve` can keep a server up
@@ -1179,7 +1344,18 @@ Run options:
   --compare            Cross-vendor set (only models whose provider key is present)
   --instance <id[,id]> Only run these instance_id(s) (or set EVAL_INSTANCE). Exact match.
   --limit <n>          Run only the first n instances per tier (after --instance).
-  --runs <n>           Repeat each case n× (worst-case verdict, mean metrics)
+  --runs <n>           Repeat each CASE n× (worst-case verdict, mean metrics).
+                       Folds the trials into one result — no per-trial detail.
+  --repeats <n>        Repeat the whole ARM n×, sequentially, as n SIBLING runs,
+                       so a result reads as a band instead of a point. Three
+                       identical arms measured 0.320/0.080/0.200 micro-recall, so
+                       one arm is not a measurement of that arm. Each repeat is a
+                       normal run (its own runId + scorecard) tagged with
+                       meta.repeat={group,index,of}; scripts/rescore.ts and the
+                       dashboard roll them up. Implies --keep-workspace (you will
+                       want each repeat's evidence) and --no-open (a run holds a
+                       dashboard server open forever; n of them leak). Or
+                       EVAL_REPEATS.
   --f-beta <n>         pr-review F-beta β (default 1 = F1; 0.5 = precision 2×). Or EVAL_F_BETA.
   --judge-with-diff    pr-review: feed the PR diff to the judge (higher fidelity,
                        off by default — Martian's offline judge is diff-blind)

@@ -1,8 +1,9 @@
 # NEXT — start a clean session here
 
 Written 2026-08-22 at the end of the re-baseline day. This is the short,
-self-contained entry point: what we know, what the artifacts say, and five small
-experiments that are worth running before anything ambitious.
+self-contained entry point: what we know, what the artifacts say, and the small
+experiments that are worth running before anything ambitious. Updated 2026-08-23
+with E1's answer, the union/intersection numbers, and finding 9.
 
 [RESTART.md](RESTART.md) remains the operational reference — tree state, the
 commands, and §4's traps (all ten of which have already cost money). Read §2b
@@ -12,13 +13,17 @@ there for the measured numbers. This file is what to *do*.
 
 - The pipeline works end to end and is **off by default**; `false` reproduces the
   shipped review byte-for-byte.
-- It finds gold the shipped reviewer never finds — **15 of 75 gold-instances
-  pooled across three runs, against the baseline's 0 of 25** — and has never lost
-  a baseline hit.
+- It finds gold the shipped reviewer never finds — against the baseline's 0 of 25
+  — and has never lost a baseline hit.
 - **How much it finds on any given run is wildly unstable**: 0.320, 0.080 and
-  0.200 from an identical configuration. The mean is 0.200.
+  0.200 from an identical configuration. The mean is 0.200, the **union across
+  the three runs is 0.440 (11 of 25)** and the **intersection is 0.040 (1 of
+  25)**. One gold in twenty-five is found reliably; ten more are found by
+  *some* run and no run finds the same ten.
 - **The seed layer is deterministic** — obligations are byte-identical across
-  runs. All the variance is in the survey models.
+  runs. All the variance is downstream of it, in the surveys. Not all of it is
+  the *models*, though: about one survey branch in six never receives its
+  obligations at all (finding 9), and which branch loses them is random.
 - Everything is committed. Both repos clean.
 - Nothing here has been validated outside eight `skillspro` cases. Any external
   claim is still [WP9](09-external-validation.md)'s, unmade.
@@ -37,12 +42,18 @@ All in `~/work/nearform-evals/eval-results/pr-review/`.
 `TMPDIR` is purged periodically, so the kept workspaces are **copied out** to:
 
 ```
-~/lastlight-run-artifacts/2026-08-22_184650-00cc469-wp3-run1/    (run 1)
-~/lastlight-run-artifacts/2026-08-22_201607-64862d5-wp3-run3/    (run 3)
+~/lastlight-run-artifacts/2026-08-22_184650-wp3-run1/             (run 1 — note: no sha in this one)
+~/lastlight-run-artifacts/2026-08-22_201607-64862d5-wp3-run3/     (run 3)
   └── <instance_id>/pr-review/
         facts.json  obligations.json  obligations/*.md
         hypotheses/*.jsonl  findings.json  disposition.json
 ```
+
+The **transcripts are not there** — they live beside the scorecards, under
+`eval-results/pr-review/<run-id>/sessions/<instance>__<model>/trial-1/*.jsonl`,
+and they exist for **all three** runs including run 2. The workspace copies and
+the transcripts are separate preservation mechanisms; only the first needs
+`--keep-workspace`.
 
 Run 2 was run without `--keep-workspace` — **a mistake worth not repeating.**
 Always pass it.
@@ -55,8 +66,28 @@ Always pass it.
 | train (13 gold) | 0.462 | 0.000 | 0.154 | 0.205 |
 | blind (12 gold) | 0.167 | 0.167 | 0.250 | 0.194 |
 
-**Pooled: 15 of 75 gold-instances, against the baseline's 0 of 25.** Never a
-baseline hit lost, in any run.
+**The mean is 0.200; the union is 0.440 and the intersection is 0.040.** An
+earlier draft of this file read "15 of 75 gold-instances pooled across three
+runs" — that is 3 × 25 counted as 75 independent slots, which is a *mean* wearing
+a pooled coat. The number that matters is over the 25 gold: **11 of 25 were
+matched by at least one run, 1 of 25 by all three.** Never a baseline hit lost,
+in any run.
+
+Per case, gold matched by ≥1 run over gold:
+
+| Case | union | Case | union |
+|---|---|---|---|
+| `1587-r1` | 1/3 | `1667` | **0/5** |
+| `1587-r2` | 4/5 | `1680-r1` | 2/4 |
+| `1587-r3` | 1/4 | `1680-r2` | 2/3 |
+| `1641-r2` | 1/1 | | |
+
+*Computing this yourself: `review.trace.gold[].matchedFinding` and
+`review.falseNegatives` **agree**, and either reproduces 11/25. Checked on the two
+cases where they were once claimed to diverge — in run 3 `1587-r2` carries
+pointers at gold `[0, 4]` and `1680-r2` at `[0, 2]`, both matching their
+`matched: 2` and both equal to `gold − len(falseNegatives)`. `goldHits()` reads
+the `matchedFinding` field and is sound; `varianceRollup` is built on it.*
 
 ## What the deep scan of runs 1 and 3 found
 
@@ -138,45 +169,253 @@ obligations with `QUOTE` claims. Note that spec obligations do **not** appear in
 families out of that file alone will make the spec axis look dead when it is not.
 It looked exactly like [RESTART.md](RESTART.md) §4 trap 4 for about ten minutes.
 
+**9. A survey branch silently loses its entire seed about one time in six, and
+which branch loses it is random.** Found in the transcripts while answering E1,
+and it is a bug, not a tuning question.
+
+Each survey branch opens by reading `.lastlight/pr-review/obligations/<family>.md`.
+It resolves that relative path against the **sandbox root** rather than the repo
+checkout one level down, and when it does the read is `ENOENT`. Across the three
+runs, **23 of 120 non-`spec` survey branches** read their obligations file and
+got nothing:
+
+```
+ENOENT: no such file or directory, access
+'…/sandboxes/skillspro-1667-pr-review-prreview__skillspro-1667/.lastlight/pr-review/obligations/enforcement.md'
+```
+
+The repo is at `…/sandboxes/<name>/skillspro/`. The *write* in the same branch
+goes to `…/sandboxes/<name>/skillspro/.lastlight/pr-review/hypotheses/…` and
+succeeds — so the read and the write disagree about the base directory, in one
+branch, in one process.
+
+What happens next is worse than the read failing. The branch does not stop; it
+writes a hypothesis line saying **`"claim": "no obligations file was present",
+"status": "NOT_MEASURED"`** and then free-styles the family off the raw diff. In
+`1667` run 3 that is exactly what `enforcement` did — and `O-003`, the obligation
+naming `slackService.ts:90`, which is one of the five gold **to the line**, was
+never put in front of it. The `review` phase then stamped `O-001`/`O-002`/`O-003`
+onto three findings that have nothing to do with `USERS_PAGE_SIZE`,
+`SEND_SLICES` or `MAX_USER_PAGES`. **The `obligation` field on a finding is
+therefore not trustworthy** — it is assigned positionally downstream, not carried
+through.
+
+This is a per-branch coin flip that deletes a whole family's seed, and it lands
+on a different family every run. It is the best available mechanical explanation
+for finding 3's "identical brief, 18 vs 43 hypotheses", and it should be fixed
+before any more money is spent measuring the variance it causes. (`spec` reads no
+`.md` at all — it is seeded inline, per finding 8 — so it is excluded from the
+denominator, not a 24th failure.)
+
 ## Five experiments, cheapest first
 
 Deliberately small. Each answers one question, and **the first two spend nothing** —
 do those before authorising any arm.
 
-### E1 — Why has `1667` never been cracked? ($0)
+### E1 — Why has `1667` never been cracked? — **ANSWERED, $0**
 
-**The replacement for the dead under-seeding question, and still free.** `1667`
-is 5 gold, `0/0/0` matched, 7 obligations, and it posted 3/0/4 — so the surveys
-*are* producing output, it is simply never the right output. Two workspaces hold
-its full evidence chain.
+The prediction held on content: `1667`'s gold *is* the auth-ordering and
+rate-limit material. The prediction about the classification did not. It is
+**split roughly half (1) and half (2), and (3) is zero** — and the half that is
+(2) is the more damning half, because the pipeline *visited the line and cleared
+it*.
 
-Read, in order: its five gold findings; its seven obligations; then
-`hypotheses/*.jsonl` in both runs. The question is which link breaks —
+Gold by gold, against the seven obligations (identical in both preserved runs):
 
-- **no obligation names the right code** → a seeding gap, and the fix is in
-  `code-facts`;
-- **an obligation names it but no hypothesis forms** → the discovery failure
-  [TLDR.md](TLDR.md) is about, and the fix is in the survey briefs;
-- **a hypothesis forms but is not posted** → a tiering/adjudication problem,
-  and `disposition.json` will say so outright.
+| # | Gold | Break |
+|---|---|---|
+| 1 | `notifications.ts:436` — `'dryRun' in body` 500s on a scalar body | **(1)** `security` family: **zero obligations**. Nothing named it. |
+| 2 | `notifications.ts:448` — `bearerTokenAuth` as `preHandler`, so auth runs after validation | **(1)** same: zero security obligations, and no `state` obligation covers hook registration order. |
+| 3 | `slackService.ts:19` — `rejectRateLimitedCalls` removes 429 retry while `SEND_SLICES` goes 1→5 | **(1)** `contract` family: **zero obligations**, because `createSlackClient`'s `consumersOutsideDiff` is `[]`. Both halves were seen separately — `O-002` *is* `SEND_SLICES` — and nothing asked the joint question. |
+| 4 | `notifications.ts:111` — dry run returns before the report/upload path | **(2)** `O-006` anchors `postRunSummary` at `:104` and its changed hunk is `111–121`. The obligation covers the line. Its **question points outward** at the untouched call site at `:577`, so `state-003` answered that instead and closed clean. |
+| 5 | `slackService.ts:90` — the `MAX_USER_PAGES` guard cannot tell truncation from a 25-page workspace | **(2)**, unambiguous. `O-003` lists `slackService.ts:90` as a candidate, **delta 0**. Run 1's `enforcement-003` *quoted line 90* and concluded "enforced as a break condition… preventing runaway pagination". Confidence 0.99. |
 
-Its gold is the auth-ordering and rate-limit material (auth running *after* body
-validation; a rate-limit "fix" that removes 429 retry while raising concurrency
-fivefold) — cross-cutting reasoning rather than anything a single-file fact names.
-That is a prediction worth checking rather than assuming.
+**(3) is zero, and `disposition.json` settles it outright.** Nothing gold-shaped
+was suppressed. Every `internal` entry in both runs is an *anti*-finding — a
+confident CLEAN at the gold's own address:
+
+- run 1, `notifications.ts:436` (gold #1, to the line): *"Security: no injection
+  issues found; input validation is properly enforced"*, confidence 1.0
+- run 1, `notifications.ts:433`: *"Spec obligation S-1 fully implemented: strict
+  dryRun validation…"*, 0.99
+- run 3: *"Security: Type coercion attack on dryRun parameter prevented"*, 1.0 —
+  the exact opposite of gold #1
+- run 1, `slackService.ts:34`: *"Constant MAX_USER_PAGES properly enforced at
+  multiple boundaries"*, 0.99 — covering gold #5 at `:90`
+- run 3, `notifications.ts:110`: *"State: postRunSummary signature extended with
+  dryRun"*, 1.0 — gold #4 is at `:111`
+- run 3: *"Contract: createSlackClient exported"* — gold #3's function, noted for
+  its export surface and not its retry policy
+
+**Six of six gold locations were read, and six of six were cleared.** The
+pipeline is not failing to look. It is looking, asking a question that the code
+answers innocently, and filing the innocent answer.
+
+The reason is legible in the two question templates. Every `enforcement`
+obligation asks *"Quote the line that compares or enforces `X`, or state that no
+such line exists"* — which any use of `X` satisfies. Every `state` obligation
+asks *"Quote the line at each untouched call site that still holds after `S`'s
+change"* — which points away from the changed body, where four of `1667`'s five
+defects live. Neither template can express "the guard exists and cannot
+distinguish two cases", "the check is in the wrong lifecycle phase", or "the
+concurrency went up in the same diff that removed the retry".
+
+**Why the surveys never even saw `O-003` in run 3:** finding 9. That branch went
+obligation-blind. But run 1's `enforcement` branch read the file fine and *still*
+cleared line 90 — so finding 9 is a compounding factor here, not the cause.
+
+**Is `1667` representative?** In kind, yes. Of the **14 gold no run ever
+matched**, the same split holds and **(3) is 0 of 14**:
+
+- **(1), no obligation touches the file at all — 4:** `1587-r1`
+  `users.ts:115` (netsuite fallback returning `200 []`); `1680-r1`
+  `strip-public-photo-permissions.ts:57` and `:58` (both — that case draws
+  exactly **one** obligation, in a different file); `1680-r2` `AGENTS.md:345`
+  (a stale-documentation finding — no extractor produces facts about prose).
+- **(1)/(2) boundary, an obligation is in the file but on a different
+  mechanism — 8**, including all four of `1667`'s.
+- **(2), an obligation names the line and the survey cleared it — 2:** `1667`
+  `slackService.ts:90` (delta 0) and `1587-r3` `users.ts:103` (`O-003` candidate
+  at `:104`).
+
+And the clear-it-and-file-it pattern is not special to `1667`. Sweeping every
+never-matched gold for a finding within ±8 lines in either preserved run turns up
+only CLEANs: `1587-r2` `secureRouteHandler.ts:16` → *"skips token refresh for
+ID-token sessions"* (internal); `1587-r3` `users.ts:103` → *"Spec S-8: Graceful
+degradation **verified**"*; `1587-r3` `auth.ts:141` → *"Spec S-2: Email-keyed
+identity preservation **verified**"*, *"Spec S-4: Same cookie shape
+**verified**"*, *"Spec S-6: Client ID matching **verified**"*.
+
+`1667` is exceptional only in **degree**: it is the one case where all five gold
+land in the blind spots simultaneously, and where the surveys reached every one of
+them and confidently signed it off.
+
+**So the fix is not more obligations. It is better questions on the obligations
+we already mint**, plus two narrow seeding gaps. That is the brief for the
+question-catalogue work; see [E1a](#e1a--the-question-catalogue-0) below.
+
+### E1a — The question catalogue ($0 to draft)
+
+6–10 recurring question shapes per family, each phrased so that a **quoted line**
+is the only honest answer and an innocent quote is not available. Derived
+directly from the 14 misses above; the `state` family carries `1667`'s gold and
+gets the most.
+
+**`state` — ordering, lifecycle, concurrency.** Replaces "quote the line at each
+untouched call site", which produced four clean discharges on `1667` and found
+nothing.
+
+1. *Hook / phase ordering.* "This route registers `<hook>` at `<line>`. Name the
+   framework's phase order, then quote the earliest line that rejects an
+   unauthenticated caller. List every check that runs before it." → gold #2.
+2. *Early return coverage.* "The changed function returns early at `<line>`. List
+   every statement between that return and the end of the function, and quote the
+   line that still runs them on the early path — or name the ones it skips." →
+   gold #4.
+3. *Guard vs natural terminal.* "This loop stops when `<counter> >= <CONST>`.
+   Quote the line that distinguishes *the source was exhausted* from *the cap was
+   hit*, or state that one line is true in both cases." → gold #5, first half.
+4. *What happens after the guard trips.* "When `<guard>` trips, quote the line
+   that propagates it to the caller. If a partial result is returned and the
+   caller's success path is unchanged, quote the response line that reports
+   success on truncated data." → gold #5, the more serious half.
+5. *Concurrency × retry conjunction.* "This diff changes a parallelism constant
+   from `A` to `B`. Quote the line that bounds or retries the resource the extra
+   concurrency contends for. If that line was **removed or weakened in this same
+   diff**, quote both." → gold #3, and the only shape that spans two facts.
+6. *Partial-failure legibility.* "For a run where some items fail: quote the line
+   that makes it a non-2xx, or the line that carries the failed items into the
+   summary. If neither exists, quote the line that returns success with an error
+   count."
+7. *Cross-request lifetime.* "The changed symbol keeps state across requests.
+   Quote the line that invalidates it **and** the line where its clock starts." →
+   this shape already works: `1680-r1`'s TTL-clock finding is the **only gold
+   matched by all three runs**.
+8. *Revalidation ceiling.* "This early return skips revalidation. Quote the line
+   that bounds how long a stale credential stays accepted." → `1587-r2`
+   `secureRouteHandler.ts:16`.
+9. *Two-path divergence.* "This branch selects between two data sources. Quote
+   the line proving both return the same set, or name the field on which they
+   differ." → `1587-r3` `users.ts:103`.
+10. *Failure-path cleanup.* "On the error or null-return path, quote the line
+    that burns the single-use token or nonce, or state that the failure path
+    leaves it replayable." → `1587-r3` `auth.ts:141`.
+
+**`enforcement`** — same disease, one-line cure: stop asking whether the line
+exists, ask what it cannot tell apart.
+
+1. "Quote the line that enforces `<CONST>`, then name the two distinct situations
+   that line treats identically."
+2. "`<CONST>` caps a loop, page or batch. Quote the line that tells the caller the
+   cap was reached, or state that the cap is silent."
+3. "Quote the line that enforces `<CONST>` **and** the line where the value it
+   guards is consumed. If consumption happens first, quote both in order."
+4. "This value is written on one side and read on the other. Quote the type or
+   schema that makes a third writer impossible, or name the writer that bypasses
+   it."
+5. "`<CONST>` changed value in this diff (`A` → `B`). Quote the line elsewhere
+   that still assumes `A`."
+
+**`security`** — owns two of `1667`'s five gold and minted **zero** obligations
+for it, so these need a seeding change as well as a question.
+
+1. "Quote the line that rejects a request body that is not an object. If the only
+   guard is a property test (`'x' in body`, `body.x`), state what it does for a
+   scalar body." → gold #1.
+2. "Order the lifecycle phases this route registers. Quote the earliest phase
+   that rejects an unauthenticated caller." → gold #2.
+3. "Quote the line proving malformed input answers 4xx and not 5xx."
+
+**`contract`** — currently fires only when `consumersOutsideDiff` is non-empty,
+which is why `1667` drew zero.
+
+1. "This symbol is new or changed and every consumer is inside the diff. Quote
+   the line inside it a caller cannot see and would be surprised by — a retry
+   policy, a timeout, a swallowed error class." → gold #3.
+
+**Two seeding changes for `code-facts`**, both narrow, both read straight off
+`facts.json`:
+
+- **Mint for all-in-diff symbols.** Obligations are minted exactly when
+  `referenceCount − referencesInDiff > 0`. `strictDryRun` (declared `:433`, sole
+  reference at `:448` — gold #1 and #2 *are* those two lines) has 1 of 1 in diff
+  and mints nothing. `createSlackClient` has 2 of 2 in diff and mints nothing. A
+  defect entirely inside a new hunk is invisible to the current rule.
+- **Mint on route/hook registration.** Nothing in `facts.json` represents "this
+  handler registers checks in phases, and here is their order", which is the
+  whole of gold #2.
+
+### E1b — Fix the ENOENT before measuring anything else ($0 to fix)
+
+Finding 9. One path resolution, 23 lost seeds in 120 branches, and a plausible
+share of the variance E3 proposes to spend ~$34 characterising. Fix it, then run
+E3, or E3 measures a bug.
 
 ### E2 — Why does one brief produce 18 hypotheses once and 43 the next? ($0 first)
 
-Finding 3 is the sharpest lead in this file, and the first pass costs nothing:
-`1587-r1` has identical obligations in both runs and 18 → 43 hypotheses. Diff the
-two `hypotheses/*.jsonl` sets and the two survey transcripts. Is the extra volume
-*more of the same* (dilution), or genuinely different questions (in which case
-running the surveys twice and unioning is a legitimate, if expensive, recall
-lever)?
+Finding 3 is the sharpest lead in this file. Two halves: whether the extra volume
+is dilution or genuinely different questions, and whether unioning runs would buy
+recall.
 
-**If unioning helps, that is measurable before it is built** — the union of run 1
-and run 3's matched gold per case is already computable from the three
-scorecards, and it is a ceiling on what any sampling strategy could buy.
+**The union half is now measured, and the answer is encouraging.** Over
+the 25 gold: mean 0.200, **union 0.440, intersection 0.040**. Three samples of
+the same configuration more than double the recall of one, and only one gold in
+twenty-five is found reliably — so the runs are near-independent draws, not one
+capability plus noise. That 0.440 is the ceiling a three-way sampling strategy
+would buy *at three times the cost*, and it is a real ceiling: it says the
+capability to find those eleven is already present and is simply not being
+exercised consistently.
+
+What is still open is the mechanism, and finding 9 now offers a cheaper
+explanation than sampling: if a sixth of survey branches lose their seed at
+random, three runs union to more than one run **because between them they manage
+to deliver every seed at least once** — not because the models genuinely
+disagree. Fix E1b first. If the union collapses toward the intersection
+afterwards, sampling was never the lever; if it holds, it is.
+
+The qualitative half is unrun and still free: `1587-r1` has identical obligations
+in both runs and 18 → 43 hypotheses. Diff the two `hypotheses/*.jsonl` sets. Is
+the extra volume *more of the same*, or genuinely different questions?
 
 ### E3 — Put an error bar on the band (~$17 per repeat)
 

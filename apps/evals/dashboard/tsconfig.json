@@ -11,7 +11,24 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "noEmit": true,
     "allowImportingTsExtensions": true,
-    "types": ["vite/client"]
+    // "node" is here because `src/lib/summarize.test.ts` — the drift guard that
+    // runs the harness's OWN `summarizeModels` in Node and asserts field-for-field
+    // agreement with the client copy — necessarily imports `../src/report.ts`,
+    // which reads `node:fs`. That is the whole edge; `include` covers tests, so
+    // the app program and the test program are type-checked as one.
+    //
+    // It is NOT caused by the app's imports of `../src/review-metrics.ts`. That
+    // module deliberately takes a structural `RepeatCard` rather than importing
+    // `Scorecard` from `report.ts`, precisely so the metric arithmetic can be
+    // shared without dragging the harness's Node graph along (see its comment).
+    // Nothing Node-shaped reaches the bundle either way — Vite erases type-only
+    // imports, and the test never ships.
+    //
+    // Consequence to watch: Node globals (`process`, `Buffer`, Node's
+    // `setTimeout` overloads) now type-check inside this browser app, so they
+    // will not be caught here. Don't use them. Splitting a `tsconfig.test.json`
+    // would fix that properly if it ever bites.
+    "types": ["vite/client", "node"]
   },
   "include": ["src/**/*"]
 }

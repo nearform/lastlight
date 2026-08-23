@@ -53,6 +53,14 @@ sibling one level up at `../`). Use `git`/`read`/`grep` from here. To refresh:
 for the reason in §3. If the checkout is somehow missing,
 `git clone https://github.com/{{owner}}/{{repo}}.git .`.
 
+**Every `.lastlight/…` path in this skill and in any prompt is relative to that
+cwd — use it relative, never absolute.** The skill files you were handed are
+absolute paths under `…/.lastlight-skills/`, and that directory is a sibling of
+the checkout, one level ABOVE you. Joining a `.lastlight/…` path onto the
+directory your skills came from lands outside the repo and reads nothing. This
+is measured, not hypothetical: it cost 23 of 120 survey branches their seeded
+obligations across three runs on 2026-08-22.
+
 **Read code from this local checkout, never the API.** Use `git`/`read`/`grep`
 on disk for the diff and file contents. Do **not** call
 `github_get_pull_request_diff`, `github_list_pull_request_files`, or

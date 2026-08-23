@@ -246,12 +246,24 @@ describe("the rendered block carries the rule, not just the data", () => {
     expect(block).toMatch(/NOT a pass/);
   });
 
-  it("returns empty only when there is nothing to say AND nothing degraded", () => {
+  it("never returns empty — a family with nothing to say still says so, in words", () => {
+    // It used to return `""` here, and the caller then wrote no file. That made
+    // a MISSING block mean three different things at once: nothing to say, the
+    // seeder died, or — measured as 27 of 27 failed reads across 120 survey
+    // branches on 2026-08-22 — the consumer resolved the path against the wrong
+    // base. Only the first is benign, and the survey prompts' "if the file does
+    // not exist, work the diff directly" escape hatch treated all three as it.
+    // A block that is always on disk is what makes its absence diagnostic.
     const clean = seedObligations(envelope({}));
-    expect(renderFamilyBlock(clean, "contract")).toBe("");
+    const block = renderFamilyBlock(clean, "contract");
+    expect(block).not.toBe("");
+    expect(block).toMatch(/No contract obligations could be built/);
+    // …and it is still not a licence to call the family clean.
+    expect(block).toMatch(/not a licence to skip the family/);
+
     const degraded = seedObligations(envelope({}, { coverage: "degraded", degraded: [{ extractor: "facts", reason: "x" }] }));
-    // A degraded family still renders: "we could not look" and "we looked and it
-    // is clean" are different facts and an empty block cannot tell them apart.
-    expect(renderFamilyBlock(degraded, "contract")).not.toBe("");
+    // A degraded family renders the same way plus what was missed: "we could not
+    // look" and "we looked and it is clean" are different facts.
+    expect(renderFamilyBlock(degraded, "contract")).toContain("[facts] x");
   });
 });

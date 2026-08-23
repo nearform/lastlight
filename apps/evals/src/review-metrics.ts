@@ -25,6 +25,25 @@
 
 import type { InstanceResult, ReviewGradeResult } from "./schema.js";
 
+/**
+ * The two fields a variance rollup reads off a scorecard — its graded results,
+ * and the run id to label the repeat with.
+ *
+ * Deliberately structural rather than an import of `Scorecard` from
+ * `report.ts`. A `Scorecard` is assignable to this, so every caller passes one
+ * unchanged; what it buys is that this module keeps importing **nothing** from
+ * `report.ts`. That import was type-only and erased at bundle time, but a
+ * type-checker still walks it — `report.ts` → `grade.ts` → `judge.ts` →
+ * `fake-github.ts` — and dragged `node:fs` into the dashboard's browser
+ * program, which had to declare Node globals to compile. Narrowing the
+ * parameter to what the function actually uses is also the more honest
+ * signature: `varianceRollup` has no interest in the other fields.
+ */
+export interface RepeatCard {
+  results: InstanceResult[];
+  meta?: { runId?: string };
+}
+
 // ── The definitions, written down once ──────────────────────────────────────
 
 /**
@@ -397,4 +416,320 @@ export function pairedRecall(baseline: InstanceResult[], candidate: InstanceResu
     }
   }
   return { ...mcnemarExact(gained, lost), gained, lost, compared, approximate };
+}
+
+// ── Run-to-run variance (the instrument's own noise floor) ──────────────────
+
+/**
+ * **The measurement that says how much of a delta is the arm and how much is the
+ * dice.** Three IDENTICAL runs of one `skillspro` arm scored micro-recall
+ * 0.320 / 0.080 / 0.200 — a band of 0.240, which is the entire detection floor
+ * ({@link DETECTION_FLOOR_MICRO_RECALL}) — while the obligations they were
+ * scored against were byte-identical. So the spread is the survey models, not
+ * the pipeline, and **a single run is not a number**.
+ *
+ * The consequence for every gate in the plan: a candidate must beat the
+ * baseline's *measured band*, not the baseline's *last run*. Comparing two
+ * single runs of the same configuration produced KEEP once and REVERT twice.
+ * {@link bandVerdict} exists to make that outcome unreadable as a result.
+ *
+ * Union and intersection are reported beside the mean because they answer two
+ * different questions the mean cannot:
+ *
+ * | Statistic | Question |
+ * |---|---|
+ * | mean (0.200) | what one run is worth in expectation |
+ * | **union** (0.440) | what the pipeline is CAPABLE of surfacing — the ceiling sampling is throwing away |
+ * | **intersection** (0.040) | what it surfaces RELIABLY — the only part a user would actually get every time |
+ *
+ * On the measured three runs that is 11 of 25 gold found by at least one run
+ * and 1 of 25 found by all three: the arm's reliable recall is a fifth of its
+ * mean, and its mean is under half its reach.
+ */
+
+/** One repeat of an identical arm — a single point in the band. */
+export interface RepeatPoint {
+  /** `meta.runId` of the scorecard this point came from; `repeat-N` when the
+   * card carries no meta (a live, in-flight write). */
+  runId: string;
+  microRecall: number | null;
+  microPrecision: number | null;
+  snr: number | null;
+  posted: number;
+  matched: number;
+  gold: number;
+}
+
+/**
+ * Per-gold-item hits for ONE case across every repeat — `rows[goldIndex][repeatIndex]`.
+ *
+ * Gold order is fixed by the dataset, so column *j* is the same gold finding in
+ * every repeat (the same property {@link pairedRecall} rests on). That is what
+ * makes union/intersection meaningful rather than a count comparison: two runs
+ * that each matched 1 of 3 may have matched *different* items, and the mean
+ * cannot tell you which.
+ */
+export interface GoldHitMatrix {
+  instanceId: string;
+  /** `rows[goldIndex][repeatIndex]` — one row per gold finding. */
+  rows: boolean[][];
+  /** Gold findings in this case (= `rows.length`). */
+  gold: number;
+  /** Gold findings matched by AT LEAST ONE repeat. */
+  union: number;
+  /** Gold findings matched by EVERY repeat. */
+  intersection: number;
+}
+
+export interface VarianceRollup {
+  repeats: RepeatPoint[];
+  meanMicroRecall: number | null;
+  minMicroRecall: number | null;
+  maxMicroRecall: number | null;
+  /**
+   * `max − min` — the arm's measured run-to-run spread, and the bar a candidate
+   * has to clear.
+   *
+   * **`null` with fewer than two measured repeats**, deliberately: a single run
+   * would give `max − min = 0`, and a zero band lets *any* delta clear it. "I
+   * did not repeat this" must not read as "this arm has no noise" — that is the
+   * exact misreading this whole roll-up exists to prevent.
+   */
+  band: number | null;
+  /** Gold matched by >= 1 repeat, summed over {@link perInstance}. */
+  unionMatched: number;
+  /** Gold matched by EVERY repeat, summed over {@link perInstance}. */
+  intersectionMatched: number;
+  /** Gold findings the hit matrices cover — the denominator for both recalls
+   * below. Excludes anything in {@link untraced}. */
+  gold: number;
+  unionRecall: number | null;
+  intersectionRecall: number | null;
+  perInstance: GoldHitMatrix[];
+  /**
+   * Cases that could NOT be aligned across the repeats, and are therefore absent
+   * from the hit maths entirely rather than folded in at a guess. Three causes,
+   * all real:
+   *
+   *  - the judge trace was missing in at least one repeat (the judge never ran);
+   *  - the case was absent from at least one repeat's results;
+   *  - the gold arrays differ in LENGTH between repeats — dataset drift, i.e.
+   *    the repeats were not scored against the same gold set at all. That is an
+   *    error to go and fix, never something to pad or truncate into alignment.
+   *
+   * A zero-gold case (the precision canary) is NOT here: it aligned fine, it
+   * simply has no gold to hit, so it contributes an empty matrix's worth of
+   * nothing and is dropped from {@link perInstance}.
+   */
+  untraced: string[];
+}
+
+/**
+ * Roll a set of repeats of ONE arm up into its band.
+ *
+ * **Pass one arm's repeats.** A scorecard with several arms micro-aggregates all
+ * of them together here (there is no arm selector in this signature) — filter
+ * `card.results` by `model` first if a card carries more than one.
+ */
+export function varianceRollup(cards: RepeatCard[]): VarianceRollup {
+  const repeats: RepeatPoint[] = cards.map((card, i) => {
+    const m = microReview(card.results);
+    return {
+      runId: card.meta?.runId ?? `repeat-${i + 1}`,
+      microRecall: m.microRecall,
+      microPrecision: m.microPrecision,
+      snr: m.snr,
+      posted: m.posted,
+      matched: m.matched,
+      gold: m.gold,
+    };
+  });
+
+  const byId = cards.map((c) => new Map(gradedReviews(c.results).map((r) => [r.instance_id, r])));
+  const ids = [...new Set(byId.flatMap((m) => [...m.keys()]))].sort();
+
+  const perInstance: GoldHitMatrix[] = [];
+  const untraced: string[] = [];
+  for (const id of ids) {
+    const vectors = byId.map((m) => {
+      const r = m.get(id);
+      return r ? goldHits(r) : undefined;
+    });
+    // Missing in a repeat, or never judged in one ⇒ not comparable. Name it.
+    if (vectors.some((v) => v === undefined)) {
+      untraced.push(id);
+      continue;
+    }
+    const vecs = vectors as boolean[][];
+    const width = vecs[0].length;
+    // Gold sets of different shapes are two different datasets wearing one id.
+    if (vecs.some((v) => v.length !== width)) {
+      untraced.push(id);
+      continue;
+    }
+    // The zero-gold precision canary: aligned, but nothing to hit.
+    if (width === 0) continue;
+
+    const rows: boolean[][] = [];
+    let union = 0;
+    let intersection = 0;
+    for (let j = 0; j < width; j++) {
+      const row = vecs.map((v) => v[j]);
+      rows.push(row);
+      if (row.some(Boolean)) union++;
+      if (row.every(Boolean)) intersection++;
+    }
+    perInstance.push({ instanceId: id, rows, gold: width, union, intersection });
+  }
+
+  const gold = perInstance.reduce((a, m) => a + m.gold, 0);
+  const unionMatched = perInstance.reduce((a, m) => a + m.union, 0);
+  const intersectionMatched = perInstance.reduce((a, m) => a + m.intersection, 0);
+
+  const measured = repeats.map((r) => r.microRecall).filter((v): v is number => v !== null);
+  const meanMicroRecall = measured.length ? measured.reduce((a, b) => a + b, 0) / measured.length : null;
+  const minMicroRecall = measured.length ? Math.min(...measured) : null;
+  const maxMicroRecall = measured.length ? Math.max(...measured) : null;
+
+  return {
+    repeats,
+    meanMicroRecall,
+    minMicroRecall,
+    maxMicroRecall,
+    // See the field doc: one repeat has no band, it has an unmeasured one.
+    band: measured.length >= 2 ? maxMicroRecall! - minMicroRecall! : null,
+    unionMatched,
+    intersectionMatched,
+    gold,
+    unionRecall: gold > 0 ? unionMatched / gold : null,
+    intersectionRecall: gold > 0 ? intersectionMatched / gold : null,
+    perInstance,
+    untraced,
+  };
+}
+
+/**
+ * `KEEP` / `REVERT` — the candidate cleared the baseline's noise, in that
+ * direction. `INDISTINGUISHABLE` — **the instrument cannot tell**, which is a
+ * measurement and not a failure to produce one.
+ */
+export type BandVerdict = "KEEP" | "REVERT" | "INDISTINGUISHABLE";
+
+const fmt = (n: number) => n.toFixed(3);
+
+/**
+ * Compare two arms **band-first**: a mean delta only counts if it clears the
+ * baseline's measured run-to-run spread.
+ *
+ * `scripts/diff-runs.ts` returned KEEP on one run of a configuration and REVERT
+ * on two others *of that same configuration*, because it differenced single
+ * runs. Every verdict here is gated on {@link VarianceRollup.band} first, so
+ * that outcome comes back as INDISTINGUISHABLE — the honest answer — instead of
+ * as whichever sign the dice landed on.
+ *
+ * When the band IS cleared, the reason carries the exact paired McNemar p from
+ * {@link pairedRecall} over the two arms' union hits (found by >= 1 repeat), so
+ * "cleared the noise" and "is not chance" stay separate claims.
+ */
+export function bandVerdict(
+  baseline: VarianceRollup,
+  candidate: VarianceRollup,
+): { verdict: BandVerdict; reason: string; delta: number | null } {
+  const b = baseline.meanMicroRecall;
+  const c = candidate.meanMicroRecall;
+  if (b === null || c === null) {
+    const which = b === null && c === null ? "neither arm" : b === null ? "the baseline" : "the candidate";
+    return {
+      verdict: "INDISTINGUISHABLE",
+      reason: `no micro-recall measured on ${which} — nothing was compared.`,
+      delta: null,
+    };
+  }
+
+  const delta = c - b;
+  if (baseline.band === null) {
+    const n = baseline.repeats.length;
+    return {
+      verdict: "INDISTINGUISHABLE",
+      reason:
+        `Δ${fmt(delta)} (${fmt(b)} → ${fmt(c)}), but the baseline's band is UNMEASURED ` +
+        `(${n} repeat${n === 1 ? "" : "s"}): a single run cannot bound its own noise, so the whole ` +
+        `delta could be it. Repeat the baseline before reading this.`,
+      delta,
+    };
+  }
+
+  const band = baseline.band;
+  const spread = `baseline band ${fmt(band)} (${fmt(baseline.minMicroRecall!)}–${fmt(baseline.maxMicroRecall!)} over ${baseline.repeats.length} repeats)`;
+  if (Math.abs(delta) <= band) {
+    return {
+      verdict: "INDISTINGUISHABLE",
+      reason: `Δ${fmt(delta)} (${fmt(b)} → ${fmt(c)}) does not clear the ${spread}.`,
+      delta,
+    };
+  }
+
+  const paired = pairedRecall(unionResults(baseline), unionResults(candidate));
+  const caveats: string[] = [
+    `paired McNemar over union hits: +${paired.gained}/−${paired.lost} of ${paired.compared} gold, one-sided p=${fmt(paired.oneSided)}${paired.approximate ? " (APPROXIMATE — a trace was missing)" : ""}`,
+  ];
+  if (candidate.band !== null && candidate.band > band) {
+    caveats.push(`the candidate's OWN band is wider (${fmt(candidate.band)}) — read this against that, not the baseline's`);
+  }
+  const better = delta > 0;
+  if (Math.max(b, c) < DETECTION_FLOOR_MICRO_RECALL) {
+    caveats.push(
+      `both arms sit below the ${fmt(DETECTION_FLOOR_MICRO_RECALL)} detection floor, where this gold set cannot separate a real effect from chance`,
+    );
+  }
+
+  return {
+    verdict: better ? "KEEP" : "REVERT",
+    reason: `Δ${fmt(delta)} (${fmt(b)} → ${fmt(c)}) clears the ${spread}. ${caveats.join("; ")}.`,
+    delta,
+  };
+}
+
+/**
+ * Project a roll-up's per-case UNION hit vectors back into `InstanceResult`
+ * shape so {@link pairedRecall} — the one exact-paired differ — can run over
+ * them unmodified. Deliberately not a second implementation of the diff: the
+ * fallback rules, the `approximate` flag and the McNemar call all stay in one
+ * place, and a change to how discordance is counted cannot diverge between the
+ * two callers.
+ */
+function unionResults(v: VarianceRollup): InstanceResult[] {
+  return v.perInstance.map((m) => {
+    const hits = m.rows.map((row) => row.some(Boolean));
+    const matched = hits.filter(Boolean).length;
+    return {
+      instance_id: m.instanceId,
+      model: "union",
+      tier: "pr-review",
+      workflowSucceeded: true,
+      review: {
+        precision: 0,
+        recall: m.gold ? matched / m.gold : 0,
+        fbeta: 0,
+        beta: 1,
+        posted: matched,
+        gold: m.gold,
+        matched,
+        falsePositives: [],
+        falseNegatives: [],
+        trace: {
+          judgeModel: "union",
+          reviewText: "",
+          findings: [],
+          gold: hits.map((h, j) => ({ description: `gold-${j}`, severity: "unknown", matchedFinding: h ? j : null })),
+        },
+      },
+      inputTokens: 0,
+      cachedTokens: 0,
+      outputTokens: 0,
+      costUsd: 0,
+      durationMs: 0,
+      phases: [],
+    };
+  });
 }

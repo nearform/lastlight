@@ -10,7 +10,7 @@
  * Run OUTPUT, by contrast, is written under the caller's cwd (an installed
  * package dir is read-only), overridable via `LASTLIGHT_EVALS_OUT`.
  */
-import { existsSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -56,6 +56,81 @@ export function resultsRoot(): string {
  */
 export function tierResultsDir(tiersKey: string): string {
   return join(resultsRoot(), tiersKey);
+}
+
+/** This package's own version, read from the resolved `package.json`. `"?"` if
+ * unreadable — a provenance stamp must never abort a run. */
+export function harnessVersion(): string {
+  try {
+    const raw = readFileSync(join(packageRoot(), "package.json"), "utf8");
+    return (JSON.parse(raw) as { version?: string }).version ?? "?";
+  } catch {
+    return "?";
+  }
+}
+
+/**
+ * The `lastlight-facts` binary this run would use, following §D1's order —
+ * `LASTLIGHT_FACTS_BIN` → `lastlight-facts` on `PATH` → the baked
+ * `/opt/lastlight/bin/` path. `null` when nothing resolves.
+ *
+ * Re-implemented here rather than imported from `lastlight-code-facts`: that
+ * package is a CLI dependency, not an evals one, and the eval harness runs
+ * `--sandbox none` on the host where the baked path does not exist. An env var
+ * pointing at a NON-executable path resolves to `null` rather than falling
+ * through — a wrong pointer is a configuration error worth seeing, and a run
+ * that silently used a different binary than the operator named is exactly the
+ * provenance gap this stamp exists to close.
+ */
+export const BAKED_FACTS_BIN = "/opt/lastlight/bin/lastlight-facts";
+
+export function resolveFactsBin(env: NodeJS.ProcessEnv = process.env): string | null {
+  const executable = (p: string): boolean => {
+    try {
+      accessSync(p, constants.X_OK);
+      return statSync(p).isFile();
+    } catch {
+      return false;
+    }
+  };
+  const override = env.LASTLIGHT_FACTS_BIN;
+  if (override) return executable(override) ? override : null;
+  for (const dir of (env.PATH ?? "").split(":").filter(Boolean)) {
+    const cand = join(dir, "lastlight-facts");
+    if (executable(cand)) return cand;
+  }
+  return executable(BAKED_FACTS_BIN) ? BAKED_FACTS_BIN : null;
+}
+
+/**
+ * `lastlight-facts toolchain` → its probed binaries, flattened to
+ * `tool → "<resolved> (<status>)"`.
+ *
+ * Flattened rather than stored raw so it matches the per-case
+ * `ReviewPipelineStats.toolchain` (`Record<string, string>`) — one shape for the
+ * same fact at two levels. `status` rides along because `mismatch` is not an
+ * error and a bare version string would hide it.
+ *
+ * Best-effort and bounded: it spawns the CLI once with a hard timeout and
+ * returns `undefined` on any failure. Called only when {@link resolveFactsBin}
+ * found something, so a host without the binary pays nothing.
+ */
+export function factsToolchainStamp(bin: string | null): Record<string, string> | undefined {
+  if (!bin) return undefined;
+  try {
+    const r = spawnSync(bin, ["toolchain"], { encoding: "utf8", timeout: 30_000 });
+    if (r.status !== 0 || !r.stdout) return undefined;
+    const parsed = JSON.parse(r.stdout) as {
+      resolved?: { bundled?: Record<string, string>; binaries?: Record<string, { resolved?: string | null; status?: string }> };
+    };
+    const out: Record<string, string> = { ...(parsed.resolved?.bundled ?? {}) };
+    for (const [tool, stamp] of Object.entries(parsed.resolved?.binaries ?? {})) {
+      out[tool] = `${stamp?.resolved ?? "—"} (${stamp?.status ?? "unknown"})`;
+    }
+    return Object.keys(out).length ? out : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Short git SHA of HEAD, or `undefined` outside a repo / on any failure. */

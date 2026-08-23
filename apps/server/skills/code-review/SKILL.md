@@ -1,7 +1,7 @@
 ---
 name: code-review
-description: The shared rubric for reviewing a code change — precision-first, high-signal findings only (Critical/Important), plus what to check (correctness, contracts between producer and consumer, security, edge cases, regression risk, test coverage). Use when reviewing a PR or a branch diff.
-version: 2.2.0
+description: The shared rubric for reviewing a code change — precision-first, high-signal findings only (Critical/Important), what to check (correctness, contracts between producer and consumer, security, edge cases, regression risk, test coverage), and what is NOT a finding (pre-existing issues, linter territory, aspirational conventions the repo does not follow). Use when reviewing a PR or a branch diff.
+version: 2.3.0
 tags: [review, code-quality]
 ---
 
@@ -143,6 +143,35 @@ what makes a comment actionable rather than a vague worry.
   second, worse finding: it makes the bug look deliberate to the next reader.
   Say so explicitly, quoting the assertion.
 - **Fit** — does it match the codebase's existing patterns and conventions?
+
+## Not findings
+
+The list above is what *counts*. This is what does **not**, however real it may
+be. It is a **category** rule, not a confidence bar: "I am not certain this is
+enforced" is not on it. Read it with "Where the gate applies" — a survey pass is
+still told to over-produce, and the only thing this removes from that output is
+noise it was never supposed to produce, never a mechanism it could not refute.
+
+- **Pre-existing issues.** The change is adjacent to them; it did not cause them.
+- **Anything a linter, typechecker or compiler would catch.** They already run,
+  and they are right more often than you are. The exception is an assertion that
+  *silences* one — `as any`, `@ts-ignore` — which is by definition something the
+  compiler does not catch (see Type safety).
+- **Real issues on lines this PR did not touch — unless this PR is what makes
+  them wrong.** A consumer the diff never opened, now reading a shape the diff
+  moved, IS a finding and is the highest-value one there is (see Contracts).
+  What is excluded is a defect that was already there and still is.
+- **Changes that are clearly intentional and part of the broader change.** If
+  the diff is doing X on purpose, "this does X" is a restatement, not a finding.
+- **Points already deliberately silenced in the code** — an explicit
+  suppression, an ignore directive, a comment saying why. Someone already
+  decided; re-raising it costs the review's credibility and settles nothing.
+- **Conventions the reviewed repository does not actually follow.** **The
+  repository's conventions govern — not yours, and not the ones it aspires
+  to.** If the merged code does not follow a convention, that convention is
+  aspirational and departing from it is not a finding. Do not flag missing
+  optional or "encouraged" fields. Read the surrounding code and the neighbours
+  of the file you are reviewing; they are the standard, not the style guide.
 
 ## Calibration
 

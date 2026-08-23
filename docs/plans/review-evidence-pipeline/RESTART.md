@@ -20,18 +20,21 @@ and the human sign-off list, [HANDOFF.md](HANDOFF.md).
 
 ## 0. Tree state — READ THIS FIRST
 
-**Everything through WP11 is committed.** Branch `feat/review-evidence-pipeline`,
-HEAD `1cbc1f9d`, working tree **clean**.
+> **2026-08-23: the tree is DIRTY and the work is UNCOMMITTED.** A day of fixes
+> (three measured defects, below) plus the eval-harness `--repeats` work sits in
+> the working tree with several untracked files. `main...HEAD` does not show any
+> of it. Commit or stash deliberately before trusting any `git`-based comparison,
+> and note that `facts`/`contracts` read head off the **filesystem** while the
+> changed set comes from git — so a dirty tree silently invalidates §1's
+> `selfcheck` and makes the base view partly a claim about somebody's edits.
+
+Everything through WP11 is committed at `1cbc1f9d`; four `docs(plan)` commits
+follow it, and everything after that is uncommitted.
 
 ```bash
-git -C ~/work/lastlight status --porcelain | wc -l   # expect 0
-git -C ~/work/lastlight log --oneline -1             # expect 1cbc1f9d
+git -C ~/work/lastlight status --porcelain | wc -l   # expect 0 ONLY on a clean tree
+git -C ~/work/lastlight log --oneline -1
 ```
-
-If the tree is dirty, someone has worked since; read the log and `git status`
-instead of this section. Note that `facts`/`contracts` read head off the
-**filesystem** while the changed set comes from git, so a dirty tree silently
-invalidates §1's `selfcheck`.
 
 ## 1. Prove the tree is sane
 
@@ -189,34 +192,167 @@ across eight PRs carrying 25 real defects**, on clean fixtures, and matched none
 of them. That is lower than the dead 0.040 comparator, and it is the honest floor
 this plan is measured against.
 
+## 2c. 2026-08-23 — three defects, and a REGRESSION that explains the design
+
+**Read this before §3. It changes what the next experiment is.**
+
+### The instrument, first
+
+The union/intersection reading is now the honest one, and it supersedes the
+"pooled 15 of 75" framing above — that was a *mean* wearing a pooled coat.
+Recomputed from the three stored judge traces at zero spend:
+
+| | recall over the 25-gold set |
+|---|---|
+| per-run mean | 0.200 |
+| **union across the three runs** | **0.440** (11 of 25) |
+| **intersection — found by all three** | **0.040** (1 of 25) |
+
+**One gold finding in twenty-five was found by every run.** Discovery is
+near-disjoint run to run. And the measured band (0.240) is the **detection floor**
+(0.24) to two decimals: the noise on three identical runs is exactly the size of
+the smallest effect this gold set can resolve, so no single-arm comparison can
+ever detect anything smaller than the whole band. `varianceRollup`
+(`apps/evals/src/review-metrics.ts`) computes all of it and is pinned against
+these numbers; `--repeats N` runs a whole arm N times as sibling run dirs.
+
+### Three defects, all measured, all in the seed→model path
+
+1. **19–24% of survey branches never read their obligations.** Across 120
+   non-spec branches in the three stored runs, 133 obligation reads split
+   *totally*: 98 relative reads succeeded, **27 workspace-root-absolute reads
+   ENOENT'd, 0 succeeded**, 8 checkout-absolute succeeded. The agent's first turn
+   joins the prompt's relative path onto the only absolute base it has been
+   handed — its skill bundle, one level above the checkout. The branch then took
+   the prompt's *"if the file does not exist, work the diff directly"* escape
+   hatch and free-styled. **A seeded pass silently became an unseeded one.**
+   Fixed by `FanoutBranch.context_file`: the harness reads the block at
+   `hostAgentCwd` and appends it, so the model resolves no path at all.
+   `gondolin` (the production default) is structurally immune; `none`/`docker`/
+   `smol`/`kubernetes` were all affected, so **WP2 is what would have shipped
+   this to production**.
+2. **The discharge contract was never EXPRESSIBLE.** `seed-render.ts` demanded
+   one of QUOTE/ABSENT/PARTIAL/PROBE per obligation and its prescribed row shape
+   **had no field to record one in**. Measured across both preserved runs, all 8
+   cases, every family: **0 of every obligation ever carried a code — 0/31, 0/34,
+   0/40.** Not non-compliance; impossibility. Fixed (a `discharge` field, plus
+   `failureScenario` and a worked exemplar), and an obligation's own requirement
+   label was renamed `discharge:` → `expects:` because a model copying it wrote
+   `either`, which grades `bad-code` and would have made the gate unsatisfiable
+   forever.
+3. **`spec` prescribed no row shape at all**, so the model invented one per run
+   (`verdict` on 2026-08-23, a nested `obligations[]` form before). Unified with
+   its five siblings. Note `discharge --family spec` **passes always** today —
+   `seed.ts` writes a `spec` row at `measured: false`, so the gate takes the NOT
+   MEASURED branch and returns satisfied with no `spec.jsonl` on disk. It is
+   therefore *weaker* than `test -s`, which is why `spec` keeps `test -s`.
+
+### The regression — and it is the most informative result in this plan
+
+One case, `prreview__skillspro-1587-r2`, `--repeats 3`, $7.00:
+
+| | old code (3 runs) | 2026-08-23 (3 repeats) |
+|---|---|---|
+| matched | 3 / 0 / 2 | **0 / 0 / 0** |
+| union | **4 of 5** | **0 of 5** |
+| posted | 15 / 5 / — | 6 / 8 / 7 |
+
+Obligation discharge went from 0/33 to **33/33** and recall went to zero. The
+mechanism is legible in the artifacts:
+
+- **Every gold missed is a *"what does the code fail to check"* question** — a
+  lower-cased key compared against a non-normalised set; `issuedAt` parsed and
+  used only as a sort key, never compared against
+  `SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS` (*the one gold this project has ever
+  converted*); `user?.email` from a decode that never checks expiry.
+- **Every one of the six findings posted instead is a *"where else does this
+  value appear"* question** — a constant fragmented across three modules, a
+  hardcoded `OAUTH_URL`, storage keys redefined in tests.
+
+**The `enforcement` family has become a constant-duplication detector.** It
+answers *"where is this constant referenced?"* — mechanically satisfiable, always
+answerable, never a defect — instead of *"what does the code fail to compare?"*
+It posted "domain constant fragmented across three modules" while the gold
+sitting on the very constant the new exemplar is about went unreported.
+
+**Two causes, and this run cannot separate them, because two variables were
+changed at once — the one-at-a-time rule, broken, with the predicted result.**
+
+- **C1 — the obligations ask the wrong question.** Making a wrong question
+  *mandatory* and mechanically satisfiable reorients the pass from hunting to
+  clearing a checklist. 23 of 33 discharges were `QUOTE` (= "found a line, it is
+  fine").
+- **C2 — the seed itself may suppress discovery.** Uncomfortable, and live: the
+  branches that *lost* their obligations free-styled off the diff, and the old
+  recall may have been coming from exactly the failure that got fixed. Seed loss
+  went ~24% → 0% and union went 4/5 → 0/5 in the same change.
+
+Both are worth fixing and they are not exclusive. C1 is the one the evidence
+names directly; C2 is the one that would overturn the plan's thesis, so it needs
+a control rather than an argument.
+
 ## 3. What to do next
 
-Ordered by what each buys, not by effort.
+**Superseded 2026-08-23.** The old §3a ("more repeats before any lever") is
+discharged — the band exists, and `--repeats` makes it cheap. The ordering below
+replaces it.
 
-### 3a. Learn what is and is not working — the cheap experiments first
+### 3a. The next experiments — in this order, one variable each
 
-The instrument and the concurrency flag exist precisely so these are affordable
-now. An 8-case arm was ~4 hours serial; at `--concurrency 4` it is well under
-one, and per-case ~12 minutes rather than ~30.
+Every one is on `prreview__skillspro-1587-r2` with `--repeats 3` (~$7, ~30 min)
+unless it says otherwise. That case now has a **hard comparator on both sides**:
+old code 3/0/2 with union 4/5, 2026-08-23 code 0/0/0 with union 0/5. A single
+case is normally unreadable; a union that moves 4 → 0 → back is not.
 
-1. ~~**Re-baseline both arms.**~~ ~~**Repeat the wp3 arm.**~~ **BOTH DONE
-   2026-08-22 — §2b, and the repeat is why that section reads as a band rather
-   than a number.** What it bought: 0.320 and 0.080 from one configuration.
-   **The highest-value spend now is more repeats of the same arm** — 3–5 of
-   them, to put an error bar on the band. Every lever in §3b is a smaller effect
-   than the noise currently sitting on the measurement, so measuring one before
-   the band is known cannot come back with an answer. This is the same discipline
-   as the detection floor, arrived at from the variance side instead of the
-   sample-size side.
-2. **Repeat one case 3× unchanged** to size generation variance now that the
-   funnel is honest. Across runs A/B/C the union of matched gold was 3/3 and **no
-   gold was ever found twice** — variance is large and it is the thing that makes
-   single-case readings meaningless.
-3. **Read the per-family funnel** off the re-baseline: obligations → hypotheses →
-   findings → posted, per family, with the spec axis finally contributing. `spec`
-   emitted 12 discharges in run E (6 QUOTE, 1 PARTIAL, **1 ABSENT**, 3 N/A) — the
-   ABSENT is a criterion a human wrote on the issue that the PR did not
-   implement, a class of finding that was structurally unreachable before.
+**X1 — separate C1 from C2. The control, and it comes first.** Run with
+`context_file` ON (branches all receive their obligations) but the obligations
+themselves reverted to the pre-2026-08-23 block — no mandatory discharge, no id
+checklist, no exemplar. That is the seed delivered reliably, asking the OLD
+question.
+- Recovers to ~4/5 union ⇒ **C1 confirmed**: the discharge contract is what cost
+  the recall, and the fix is the question, not the delivery.
+- Stays at 0/5 ⇒ **C2 is live**: reliable seeding itself suppresses discovery,
+  and the free-styling branches were carrying the old recall. That would overturn
+  this plan's thesis and is worth knowing before another lever is built.
+
+**X2 — rewrite what the obligations ASK** (blocked on X1 only if X1 says C2).
+The catalogue is drafted in [NEXT.md](NEXT.md) from the `1667` forensics. The
+shape of the cure, and it is one line per family:
+
+> Stop asking whether the line exists. Ask **which two distinct situations that
+> line treats identically.**
+
+`enforcement` currently asks *"quote the line that enforces THIS constant"* — and
+**any use of the constant satisfies it**, which is exactly how the one converted
+gold in this project's history was discharged `QUOTE` against a line that
+mentions the constant and compares nothing. `state` asks about untouched call
+sites, which points *away* from the changed body where 4 of 5 of `1667`'s gold
+live. Both are answerable without looking at the defect.
+
+**X3 — read the survey prompts as prose, not as plumbing.** Recorded because a
+human read them on 2026-08-23 and judged them *"not well structured"*, and that
+is a distinct claim from any measurement here. The five family prompts are
+57 lines of which ~50 are byte-identical boilerplate; the family-specific content
+is one paragraph, and the actual contract lives in the block emitted by
+`seed-render.ts`. So the prompt is mostly preamble and the load-bearing text is
+somewhere else — worth restructuring on its own merits, but **it must not be
+bundled with X2**: two prompt changes in one arm is candidate v1's
+four-changes-as-one, and this file already carries one instance of that mistake
+made on 2026-08-23.
+
+**X4 — the `1667` question catalogue, applied.** Only after X2 shows the shape
+works on a case that has a comparator. `1667` is 0/5 in every run ever recorded
+and its gold is cross-cutting ordering and rate-limit material; it is the
+hardest case in the set and the wrong one to iterate against.
+
+**X5 — re-establish the 8-case band.** `--repeats 3` on all eight (~$50). Only
+worth spending once a one-case arm has recovered its union; until then it buys a
+precise measurement of a known regression.
+
+**Do NOT run an 8-case arm to decide any of X1–X4.** The one-case comparator is
+~7× cheaper and, for these questions, strictly more informative — the union on
+one case with a known before/after moves; a micro-recall delta on eight cases
+sits inside the 0.24 band.
 
 ### 3b. The quality levers — approved, designed, UNBUILT
 
@@ -414,6 +550,24 @@ pre-write assertion covers it.
 > true`, `post-review` succeeded, a scorecard written. Nothing errored. The only
 > visible symptom was a number — 0 posted — that looks like a model result.
 
+**11. "No build" does NOT freeze a measurement.** Added 2026-08-23, after an
+agent edited `workflows/prompts/survey-spec.md` while an arm was in flight. Core
+is consumed as built `dist`, so *"do not run `build`"* is the instruction people
+give — but **`workflows/*.yaml`, `workflows/prompts/*.md` and `skills/**` are
+read LIVE from source** by the asset loader, and `packages/code-facts/dist` is
+read live too via `LASTLIGHT_FACTS_BIN`. That run escaped contamination by about
+one minute (prompts are loaded when a branch starts, and the edit landed after
+all six had taken their copy) — luck, not design. **Freeze the whole tree for the
+duration of an arm, or run it from a separate checkout.**
+
+**12. The harness logs UTC; your shell prints local time.** Also 2026-08-23, and
+it produced two wrong conclusions inside ten minutes — first "the prompt edit
+did not overlap the run" (right answer, wrong reasoning), then "adjudicate has
+been hung for 64 minutes" (it had been running four). Envelope timestamps are
+`…Z`; `stat`, `ps -o etime` and `date` are BST in summer. Normalise before
+comparing, and prefer `meta.heartbeat` — it is stamped in the same clock as the
+log.
+
 ## 5. Running an arm
 
 Run from source, cwd in the eval workspace. Both matter: `LASTLIGHT_CORE_DIR`
@@ -422,17 +576,44 @@ with *"Workflow not found"*), and a cwd inside `apps/evals` finds no provider ke
 — the `.env` lives in the eval workspace.
 
 ```bash
+# Build BOTH first — core is consumed as built dist, and `discharge` lives in
+# code-facts' dist/cli.js. Then do not touch the tree until the arm is done (§4
+# trap 11 — the YAML, prompts and skills are read LIVE from source).
+pnpm --filter lastlight-code-facts build && pnpm --filter lastlight-core build
+
 cd ~/work/nearform-evals
+EVAL_INSTANCE=prreview__skillspro-1587-r2 \
 LASTLIGHT_FACTS_BIN=~/work/lastlight/packages/code-facts/dist/cli.js \
   ~/work/lastlight/apps/evals/node_modules/.bin/tsx \
   ~/work/lastlight/apps/evals/src/run.ts run pr-review \
   --overlay overlays/wp3 --model anthropic/claude-haiku-4-5-20251001 \
-  --limit 1 --keep-workspace
+  --repeats 3
 ```
 
-It prints `core → 0.27.0-dev (working tree)` when it is reading local source.
-Add `--concurrency 4` for a full 8-case arm. Core is consumed as **built dist**,
-so `pnpm --filter lastlight-core build` first, every time.
+It prints `core → 0.27.0-dev (working tree)` when it is reading local source —
+**check for that line**, it is what distinguishes this from §4 trap 3's
+globally-installed harness silently running the baseline.
+
+**`--repeats N` is how a result is reported now** (§2c): N sequential runs of the
+whole arm as sibling run dirs, tagged `meta.repeat = {group, index, of}`, folded
+into a band with union/intersection recall by `varianceRollup`. It **implies
+`--keep-workspace` and `--no-open`**. Add `--concurrency 4` only for a full
+8-case arm; a one-case arm does not need it.
+
+**Follow it on a standalone dashboard**, started once and left up — a `run`
+without `--no-open` holds its own server open forever, and seven of them
+accumulated overnight on 2026-08-22 before being killed:
+
+```bash
+cd ~/work/lastlight/apps/evals
+LASTLIGHT_EVALS_OUT=~/work/nearform-evals/eval-results \
+  npx tsx src/run.ts serve --port 4400
+```
+
+`resultsRoot()` is cwd-relative, so `LASTLIGHT_EVALS_OUT` is what points it at
+the eval workspace rather than `apps/evals/eval-results`. Discovery is
+on-the-fly, so repeats appear as they land. Pin `--port`: the default is 4319 and
+`EADDRINUSE` falls back **silently** to an ephemeral one.
 
 > **VERIFY THE ARM, DO NOT READ ITS LABEL.** Within the first minute the
 > `--keep-workspace` path must hold `facts.json`, a populated `obligations.json`

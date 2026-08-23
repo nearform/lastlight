@@ -37,10 +37,102 @@ export interface PendingCase {
 }
 
 /**
+ * Which repeat of an arm-level `--repeats N` band this run is.
+ *
+ * Repeats are SIBLING run directories, never nested: `indexTier`/`buildIndex`
+ * below and `clean.ts` both walk exactly `<resultsRoot>/<tierKey>/<runId>/`, so a
+ * `<runId>/rep-2/` would be invisible to the dashboard index AND to `clean`.
+ * Membership of a band is therefore a fact in `meta`, not in the filesystem.
+ *
+ * `group` is the FIRST repeat's `runId` — stable, already unique, and present on
+ * disk, so a consumer can find the band's other members without a manifest.
+ * Absent on an ordinary single run (a band of one is not a band; see
+ * `VarianceRollup.band`, which refuses to report a zero spread for one point).
+ */
+export interface RepeatRef {
+  /** `runId` of the first repeat in this band. */
+  group: string;
+  /** 1-based position in the band. */
+  index: number;
+  /** How many repeats the band was launched with. */
+  of: number;
+}
+
+/**
+ * The invocation this run actually measured — every knob that changes what the
+ * numbers MEAN, recorded beside them.
+ *
+ * `RunMeta` used to stamp the model, git SHA, core provenance and concurrency but
+ * NOT the overlay: for a `models` run the overlay (which carries
+ * `review.analysis.enabled` — the whole evidence-pipeline switch) appeared
+ * nowhere at all, and for a `config` run only indirectly, via the arm label. A
+ * globally-installed harness once ran the *baseline* while reporting itself as
+ * the pipeline arm and nothing in the artifact could contradict it.
+ *
+ * Every field is optional: runs measured before this existed have none of it, and
+ * a missing field must read as "not recorded", never as "off".
+ *
+ * These sit FLAT on {@link RunMeta} (which extends this), matching how `gitSha` /
+ * `concurrency` / `core` already read, and grouped into a named type only so the
+ * documentation has one home.
+ */
+export interface RunProvenance {
+  /** The PRIMARY `--overlay` — the one that wired discovery and the initial asset
+   * bootstrap, and whose `review:` policy every `models` arm carries. */
+  overlay?: string;
+  /** All `--overlay` values in order (a `config` run repeats the flag, one arm per
+   * overlay). `[0]` is {@link overlay}. Absent ⇒ built-in assets only. */
+  overlays?: string[];
+  /** `--datasets` (or `LASTLIGHT_EVALS_DATASETS`, or the auto-detected
+   * `./evals/datasets`) — the extra tier root this run discovered from. */
+  datasets?: string;
+  /** `--sandbox` backend (`none` | `gondolin`). */
+  sandbox?: string;
+  /** The F-beta β the pr-review judge actually used. */
+  fBeta?: number;
+  /** `--judge-with-diff`. */
+  judgeWithDiff?: boolean;
+  /** Repo-context injection was ON (the default). `false` = `--no-inject-context`,
+   * i.e. the clean A/B control — the single biggest silent difference between two
+   * otherwise-identical pr-review arms. */
+  injectContext?: boolean;
+  /** `--keep-workspace`. */
+  keepWorkspace?: boolean;
+  /** `--instance` filter (exact instance_ids). */
+  instances?: string[];
+  /** `--limit` (cases per tier). */
+  limit?: number;
+  /** `--repeats N`, when the run was launched as a band. */
+  repeats?: number;
+  /** The pr-review judge model this run would use (`EVAL_JUDGE_MODEL`, else the
+   * default for whichever provider key is present). Undefined when no key
+   * resolves one. */
+  judgeModel?: string;
+  /** The `lastlight-facts` binary that resolved for this run
+   * (`LASTLIGHT_FACTS_BIN` → `PATH` → the baked path). `null` = nothing resolved,
+   * which is what explains an evidence-pipeline arm reporting `coverage: "none"`.
+   * Absent (vs null) = the run predates this stamp. */
+  factsBin?: string | null;
+  /** `lastlight-facts toolchain` → the probed binaries, flattened to
+   * `tool → "<resolved> (<status>)"`. Same shape and spirit as the per-case
+   * {@link ReviewPipelineStats.toolchain}, at run level: silent version drift
+   * between the host that measured a rung and the image that ships it is
+   * otherwise undetectable. Absent when no binary resolved or the probe failed. */
+  toolchain?: Record<string, string>;
+  /** The eval harness itself — version + resolved package root. `core` answers
+   * "which lastlight-core"; this answers "which lastlight-evals", which is the
+   * half the globally-installed-harness incident turned on. */
+  harness?: { version: string; root: string };
+  /** The command line, verbatim (`argv.slice(2)`). The backstop for every knob
+   * not enumerated above, including ones added after this run was measured. */
+  argv?: string[];
+}
+
+/**
  * Run-level metadata persisted into `scorecard.json` so the dashboard can label,
  * order, and live-poll runs without re-deriving from the current config.
  */
-export interface RunMeta {
+export interface RunMeta extends RunProvenance {
   runId: string;
   generatedAt: string;
   tiers: string[];
@@ -66,6 +158,16 @@ export interface RunMeta {
    * comparable on elapsed time. Per-case and per-phase timings still are.
    */
   concurrency?: number;
+  /**
+   * This run's place in an arm-level `--repeats N` band (sibling run dirs, one
+   * per repeat). Absent on a single run. See {@link RepeatRef}.
+   *
+   * Repeats are NOT `--runs`: `--runs` repeats each CASE and folds the trials
+   * into one worst-case result, destroying the per-trial hit vectors. A band
+   * keeps every repeat as a whole, separate run, which is the only shape
+   * `varianceRollup` can compute union/intersection recall from.
+   */
+  repeat?: RepeatRef;
   /** Short git SHA of the code/workflows under test, when in a repo. */
   gitSha?: string;
   /** Which `lastlight-core` produced this run — a working tree or the published
@@ -344,6 +446,59 @@ export function summarizeModels(results: InstanceResult[]): ModelSummary[] {
 
 export function summarize(results: InstanceResult[]): Scorecard {
   return { models: summarizeModels(results), results };
+}
+
+// ── Repeat bands (`--repeats N`) ────────────────────────────────────────────
+
+/**
+ * The band a scorecard belongs to.
+ *
+ * A run launched WITHOUT `--repeats` is its own band of one — it gets its
+ * `runId` back rather than `undefined`, so a caller can group a mixed pile of
+ * scorecards with one rule instead of two. A card with neither `repeat` nor a
+ * `runId` (an in-flight write with no meta at all) is genuinely ungroupable.
+ */
+export function repeatGroupOf(card: Scorecard): string | undefined {
+  return card.meta?.repeat?.group ?? card.meta?.runId;
+}
+
+/** One `--repeats N` band: its group id and its repeats, in run order. */
+export interface RepeatBand {
+  group: string;
+  /** `meta.repeat.of` from the first card that declares one; `cards.length` for
+   * an implicit band of ungrouped runs. A band with fewer cards than `of` was
+   * INTERRUPTED — a consumer must be able to see that rather than read a
+   * truncated band as a complete one. */
+  of: number;
+  cards: Scorecard[];
+}
+
+/**
+ * Group scorecards into `--repeats` bands, ordered by `meta.repeat.index`.
+ *
+ * Feed the `cards` of one band straight to `varianceRollup` (filter by arm first
+ * if a card carries more than one). Cards with no meta at all are dropped: they
+ * cannot be attributed to a band, and silently folding them into one would
+ * fabricate a repeat that was never run.
+ */
+export function groupRepeats(cards: Scorecard[]): RepeatBand[] {
+  const bands = new Map<string, Scorecard[]>();
+  for (const card of cards) {
+    const group = repeatGroupOf(card);
+    if (!group) continue;
+    const list = bands.get(group);
+    if (list) list.push(card);
+    else bands.set(group, [card]);
+  }
+  return [...bands].map(([group, list]) => {
+    // Index-ordered; a card without an index keeps its arrival order behind the
+    // indexed ones rather than being sorted to a position it never claimed.
+    const sorted = [...list].sort(
+      (a, b) => (a.meta?.repeat?.index ?? Number.MAX_SAFE_INTEGER) - (b.meta?.repeat?.index ?? Number.MAX_SAFE_INTEGER),
+    );
+    const declared = sorted.find((c) => c.meta?.repeat)?.meta?.repeat?.of;
+    return { group, of: declared ?? sorted.length, cards: sorted };
+  });
 }
 
 /** Load a tier's Martian leaderboard sidecar, or undefined if it ships none. */

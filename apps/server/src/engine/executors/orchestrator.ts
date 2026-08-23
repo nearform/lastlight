@@ -211,9 +211,30 @@ export async function withSandbox<T>(
  * upstream, to the value we are handed.
  *
  *   - host-shared backends (docker/gondolin/none/smol): written into the
- *     workspace, a sibling of any checkout. An empty context writes no file, so
- *     the sandbox entrypoint's baked `cat /app/agent-context/*.md` fallback
- *     still applies — a file written here always wins over it.
+ *     workspace ROOT, a sibling of any checkout — never into the checkout, so a
+ *     repo-write phase's `git add -A` can't commit the bot's own persona.
+ *
+ *     **Why the agent still sees it, one level above its cwd.** pi's resource
+ *     loader walks UP from `cwd` collecting `AGENTS.md`/`CLAUDE.md` and INLINES
+ *     each one into the system prompt at session construction (see
+ *     `DefaultResourceLoader.getAgentsFiles`). That walk runs in whichever
+ *     process hosts pi — the harness itself on gondolin/none, the container on
+ *     docker/smol — as a plain `fs.readFileSync`. The agent never reads the file
+ *     with a tool, so **the sandbox's mount boundary is irrelevant to it**. This
+ *     is the whole reason gondolin works despite mounting ONLY `cwd`: `AGENTS.md`
+ *     arrives as prompt text, not as a readable path. Contrast `stageSkills`,
+ *     which DOES have to stage gondolin's bundle under `cwd` — a `SKILL.md` is
+ *     read on demand *by the agent*, through the sandboxed `read` tool, and
+ *     `toGuestPath` throws "path escapes workspace" for anything above `cwd`.
+ *     The invariant this delivery depends on is therefore
+ *     `hostWorkspaceDir` being an ANCESTOR of `hostAgentCwd`
+ *     (`tests/sandbox/agent-context-visibility.test.ts` pins it; the pi-side half
+ *     is pinned by `packages/agentic-pi/test/context-file-walk.test.ts`).
+ *
+ *     An empty context writes no file. The docker sandbox image's entrypoint has
+ *     a baked `cat /app/agent-context/*.md > $WORKSPACE/AGENTS.md` fallback for
+ *     that case — but it covers **docker only** (`deploy/sandbox-entrypoint.sh`
+ *     runs for no other backend), so it is not what makes gondolin work.
  *   - kubernetes: `hostWorkspaceDir` is an in-pod path that doesn't exist on the
  *     harness host, so a write here would always ENOENT. The adapter takes the
  *     text through the {@link provideAgentContext} sink instead and serves it
@@ -729,6 +750,20 @@ export async function runCommandIn(
  * opens and cannot be varied per turn.
  */
 export interface SandboxSession {
+  /**
+   * The agent's working directory, addressed from the HARNESS process — the
+   * host end of {@link ProvisionResult.agentCwd}.
+   *
+   * Exposed because a fan-out branch may need the harness to read a file a
+   * deterministic phase wrote into the checkout (`FanoutBranch.context_file`),
+   * and the harness must resolve it against exactly the base that phase's shell
+   * ran in. `hostWorkspaceDir` is one level too high whenever the workflow
+   * pre-clones — which is the whole class of bug this exists to close.
+   *
+   * On `kubernetes` this is an in-pod path: a read fails, and the caller must
+   * degrade rather than read the failure as "the file is not there".
+   */
+  readonly hostAgentCwd: string;
   runAgent(
     prompt: string,
     config: ExecutorConfig,
@@ -763,6 +798,7 @@ export async function withSandboxSession<T>(
   return withSandbox(ctx, (sandbox, prov) =>
     withWorkspaceArtifacts(sandbox, prov, ctx, () => {
       const session: SandboxSession = {
+        hostAgentCwd: prov.hostAgentCwd,
         runAgent: (prompt, config, opts) =>
           runAgentIn(
             sandbox,

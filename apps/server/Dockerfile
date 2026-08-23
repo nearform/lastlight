@@ -101,7 +101,14 @@ COPY --from=build /app /app
 # pnpm deploy packs per the `files` field — restore what it omits (do NOT
 # widen `files`: the npm tarball file list is a fence).
 COPY --from=build /repo/apps/server/dashboard/dist /app/dashboard/dist
-COPY --from=build /repo/apps/server/CLAUDE.md /app/CLAUDE.md
+# NOTE: `/app` must never hold an `AGENTS.md` or `CLAUDE.md`. `$STATE_DIR` is
+# `/app/data`, so every sandbox workspace lives UNDER this directory — and on the
+# in-process backends (gondolin, the shipped default, and none) pi's resource
+# loader walks up from the agent's cwd to `/` collecting context files and
+# inlines each into the system prompt. A `/app/CLAUDE.md` (this package's
+# ~100 KB dev guide, which nothing at runtime reads) was therefore prepended to
+# every agent prompt. Pinned by
+# `tests/sandbox/agent-context-visibility.test.ts`.
 
 RUN chmod +x /app/deploy/entrypoint.sh
 

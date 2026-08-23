@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import {
   PhaseRef,
   buildPhasePrompt,
@@ -73,6 +75,153 @@ const BACKEND_MAX_CONCURRENT: Record<SandboxBackend, number> = {
 
 /** Absent `on_branch_soft_failure` ⇒ no retry, and one soft branch never fails the phase. */
 const DEFAULT_BRANCH_SOFT_POLICY = { retries: 0, then: "complete" as const };
+
+/**
+ * The heading the appended {@link FanoutBranch.context_file} is filed under. A
+ * constant rather than a literal at the call site because two tests and one
+ * prompt-authoring convention all name it.
+ */
+export const BRANCH_CONTEXT_HEADING = "## Attached: the file this pass was seeded with";
+
+/**
+ * Backends whose workspace the HARNESS can read.
+ *
+ * Every backend but one hands out a `hostAgentCwd` that exists on this machine —
+ * docker and smol as the host end of a bind mount, the two in-process backends
+ * because the agent IS this process. **`kubernetes` does not**: its paths are
+ * in-pod, which is the same caveat `hostWorkspaceDir` already carries there
+ * (`deliverAgentContext` routes around it through a sink for exactly this
+ * reason).
+ *
+ * So a `context_file` read is not even ATTEMPTED there, and the branch is given
+ * the path to open itself — today's behaviour, unchanged. Attempting it would
+ * ENOENT every time and turn "the harness cannot see this workspace" into "the
+ * seeding step failed", which is a worse lie than the one this key removes.
+ */
+const HOST_READABLE_WORKSPACE: Record<SandboxBackend, boolean> = {
+  none: true,
+  docker: true,
+  gondolin: true,
+  smol: true,
+  kubernetes: false,
+};
+
+/**
+ * What a branch is told when the harness cannot read its workspace at all.
+ *
+ * The path goes back in the prompt, because on that backend it is the only
+ * channel there is — but it goes in with the trap named. 27 of 133 measured
+ * reads went to the workspace root; the model has no way to know that is wrong
+ * unless it is told, and a bare path in a fenced block is what it was told
+ * before.
+ */
+function branchContextPointer(relPath: string): string {
+  return [
+    BRANCH_CONTEXT_HEADING,
+    "",
+    `This backend's workspace is not readable from the harness, so the file could not be`,
+    "attached. Open it yourself, **relative to your working directory**:",
+    "",
+    "```",
+    relPath,
+    "```",
+    "",
+    "Read it RELATIVE, exactly as written. Do not build an absolute path from the",
+    "directory your skills came from — the skill bundle is a sibling of your working",
+    "directory, one level up, and joining this path onto it resolves to a file that does",
+    "not exist. If the read fails, that is a path error and not a clean family: say so,",
+    "and do not report an absence you were never in a position to observe.",
+    "",
+  ].join("\n");
+}
+
+/**
+ * Read a branch's `context_file` and return the text to APPEND to its prompt.
+ *
+ * **Why the harness reads it instead of the model.** See
+ * `FanoutBranchSchema.context_file` for the measurement. In one sentence: the
+ * model is handed absolute skill paths rooted at the workspace ROOT and a
+ * relative artifact path rooted at the CHECKOUT, and on ~22% of branches it
+ * resolved the second against the first and got ENOENT. Neither path is wrong;
+ * having two bases is. Reading it here collapses them to one — the same
+ * `hostAgentCwd` a `type: bash` phase's shell ran in, so the phase that WROTE
+ * the file and the branch that CONSUMES it cannot disagree about where it is.
+ *
+ * **Two outcomes, and they are never confused.** Bytes, or a loud notice naming
+ * the path and saying in words that nothing was read. `null` (nobody looked)
+ * must never render as `[]` (looked, found none) — that is this package's
+ * founding invariant, and a branch that silently falls back to free-styling off
+ * the diff is precisely that invariant broken.
+ */
+function branchContextSection(
+  hostAgentCwd: string,
+  relPath: string,
+): { text: string; ok: boolean; reason?: string } {
+  // Workspace-relative only. An absolute path or a `..` escape would resolve
+  // against something the workflow author did not name, which is the failure
+  // this key exists to remove rather than relocate.
+  const unsafe = isAbsolute(relPath) || relPath.split(/[\\/]/).includes("..");
+  const abs = unsafe ? "" : join(hostAgentCwd, relPath);
+
+  let body: string | undefined;
+  let reason: string | undefined;
+  if (unsafe) {
+    reason = `\`${relPath}\` is not a workspace-relative path`;
+  } else {
+    try {
+      body = readFileSync(abs, "utf8");
+    } catch (err: unknown) {
+      reason = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  if (body !== undefined && body.trim().length > 0) {
+    return {
+      ok: true,
+      text: [
+        BRANCH_CONTEXT_HEADING,
+        "",
+        `The contents of \`${relPath}\` are reproduced below **verbatim**. It has`,
+        "already been read for you — do not open it, and do not construct a path to it.",
+        "",
+        body.trimEnd(),
+        "",
+      ].join("\n"),
+    };
+  }
+
+  // The empty-file case is folded in with the unreadable one on purpose: a
+  // zero-byte artifact is not a measurement either, and the seeder never writes
+  // one (`renderFamilyBlock` always emits a block, including a NOT MEASURED one).
+  return {
+    ok: false,
+    reason: reason ?? "the file was empty",
+    text: [
+      BRANCH_CONTEXT_HEADING,
+      "",
+      `**NOT AVAILABLE.** \`${relPath}\` could not be read by the harness` +
+        (reason ? ` (${reason})` : "") +
+        ".",
+      "",
+      "This is a HARNESS failure, not a finding. The deterministic layer is supposed to",
+      "write this file before this pass runs, and it always writes one — including when it",
+      "has nothing to say, in which case the file says so in those words. So its absence",
+      "means the seeding step did not run or did not survive, NOT that there is nothing to",
+      "check on this axis.",
+      "",
+      "Record that fact FIRST, as the first line of your output file:",
+      "",
+      '  {"status": "NOT_SEEDED", "claim": "the obligations file was not delivered to this pass"}',
+      "",
+      "`NOT_SEEDED` and `NOT_MEASURED` are DIFFERENT facts and must not be swapped: the",
+      "second says the deterministic layer looked and could not measure this axis, the first",
+      "says its answer never reached you. Then work the diff for this family's question",
+      "directly, and say in your summary that you did so unseeded. Nothing downstream may",
+      "read this pass as evidence that this family is clean.",
+      "",
+    ].join("\n"),
+  };
+}
 
 /** Run-scoped data the `fanout` handler needs. */
 export interface FanoutRunScope {
@@ -269,9 +418,10 @@ export class FanoutHandler implements PhaseTypeHandler {
     outputs: Readonly<Record<string, unknown>>,
     policy: { retries: number; then: "fail" | "complete" },
   ): Promise<BranchOutcome> {
-    const prompt = buildPhasePrompt(this.branchPhase(phase, branch, label), this.run.ctx, this.run.assets, {
+    const rendered = buildPhasePrompt(this.branchPhase(phase, branch, label), this.run.ctx, this.run.assets, {
       phaseOutputs: outputs,
     });
+    const prompt = this.withBranchContext(session, phase, branch, rendered);
 
     let attempt = 0;
     for (;;) {
@@ -303,6 +453,62 @@ export class FanoutHandler implements PhaseTypeHandler {
       });
       attempt += 1;
     }
+  }
+
+  /**
+   * Append the branch's `context_file` to its rendered prompt, if it declares
+   * one.
+   *
+   * **LAST in the prompt, and that is §D4's ordering rather than convenience.**
+   * Provider-side prompt caching is keyed on the request PREFIX, so the shared
+   * head (skills, AGENTS.md, the diff summary) has to stay byte-identical across
+   * the six branches and everything family-specific has to come after it. The
+   * attached file is the most family-specific thing there is.
+   *
+   * Whether the read succeeded is LOGGED either way. A lost seed used to be
+   * invisible from outside the transcript — it is now one grep on the harness
+   * log, which is what turned a 22%-of-branches defect into something anybody
+   * could have found in a minute.
+   */
+  private withBranchContext(
+    session: SandboxSession,
+    phase: PhaseDefinition,
+    branch: FanoutBranch,
+    prompt: string,
+  ): string {
+    const relPath = branch.context_file?.trim();
+    if (!relPath) return prompt;
+
+    if (!HOST_READABLE_WORKSPACE[this.run.backend]) {
+      log.info("backend has no host-readable workspace — the branch is given the path instead", {
+        phase: phase.name,
+        branch: branch.name,
+        backend: this.run.backend,
+        path: relPath,
+      });
+      return `${prompt.trimEnd()}\n\n${branchContextPointer(relPath)}`;
+    }
+
+    const section = branchContextSection(session.hostAgentCwd, relPath);
+    if (section.ok) {
+      log.debug("attached a fan-out branch's context file", {
+        phase: phase.name,
+        branch: branch.name,
+        path: relPath,
+      });
+    } else {
+      // `warn`, not `info`: on every workflow that declares `context_file` this
+      // is a deterministic phase's artifact failing to reach the pass that was
+      // built to consume it, and the pass will still run.
+      log.warn("fan-out branch context file could not be read — the pass runs UNSEEDED", {
+        phase: phase.name,
+        branch: branch.name,
+        path: relPath,
+        hostAgentCwd: session.hostAgentCwd,
+        reason: section.reason,
+      });
+    }
+    return `${prompt.trimEnd()}\n\n${section.text}`;
   }
 
   /** One ledgered agent turn for a branch, under its own AGENT span. */

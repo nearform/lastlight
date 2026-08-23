@@ -21,13 +21,16 @@ import { describe, expect, it } from "vitest";
 import type { InstanceResult, ReviewGradeResult } from "./schema.js";
 import { summarizeModels, type Scorecard } from "./report.js";
 import {
+  bandVerdict,
   boundaryMetrics,
+  DETECTION_FLOOR_MICRO_RECALL,
   familyFunnels,
   goldHits,
   mcnemarExact,
   microReview,
   pairedRecall,
   snrOf,
+  varianceRollup,
 } from "./review-metrics.js";
 
 // ── fixtures ────────────────────────────────────────────────────────────────
@@ -321,5 +324,268 @@ describe("offline back-fill of an existing scorecard", () => {
     expect(summary.avgFbeta).not.toBeCloseTo(summary.micro!.microF1!, 2);
     // No empty-gold canary in this dataset, so nothing to flag here.
     expect(summary.micro!.emptyGoldCases).toEqual([]);
+  });
+});
+
+// ── run-to-run variance ─────────────────────────────────────────────────────
+
+/** A minimal scorecard around one arm's results. */
+function card(runId: string, results: InstanceResult[]): Scorecard {
+  return {
+    models: [],
+    results,
+    meta: { runId, generatedAt: "1970-01-01T00:00:00.000Z", tiers: ["pr-review"], models: ["arm"], runs: 1 },
+  };
+}
+
+/** N repeats of one case, each repeat's gold-hit vector given explicitly. */
+function repeatsOf(id: string, vectors: boolean[][]): Scorecard[] {
+  return vectors.map((hits, i) =>
+    card(`run-${i}`, [
+      reviewed(id, { posted: hits.length, gold: hits.length, matched: hits.filter(Boolean).length, trace: traceOf(hits) }),
+    ]),
+  );
+}
+
+describe("varianceRollup", () => {
+  it("orders union >= mean >= intersection, always", () => {
+    // Three repeats that each find one of three gold items — a DIFFERENT one
+    // each time. Mean recall 1/3, union 3/3, intersection 0/3: the arm's reach
+    // is three times its expectation and its reliable recall is zero.
+    const v = varianceRollup(repeatsOf("a", [[true, false, false], [false, true, false], [false, false, true]]));
+    expect(v.meanMicroRecall).toBeCloseTo(1 / 3, 10);
+    expect(v.unionRecall).toBe(1);
+    expect(v.intersectionRecall).toBe(0);
+    expect(v.unionRecall!).toBeGreaterThanOrEqual(v.meanMicroRecall!);
+    expect(v.meanMicroRecall!).toBeGreaterThanOrEqual(v.intersectionRecall!);
+    expect(v.band).toBe(0); // all three scored 1/3 — a stable arm with unstable content
+  });
+
+  it("refuses to call a single run's band zero", () => {
+    // max − min over one point is 0, and a zero band lets ANY delta clear it.
+    // "I did not repeat this" must not read as "this arm has no noise".
+    const v = varianceRollup(repeatsOf("a", [[true, false]]));
+    expect(v.band).toBeNull();
+    expect(v.meanMicroRecall).toBeCloseTo(0.5, 10);
+    // One repeat: everything found is also found by "every" repeat.
+    expect(v.unionMatched).toBe(v.intersectionMatched);
+  });
+
+  it("excludes a zero-gold case without crashing, and without calling it untraced", () => {
+    const canary = (i: number) => card(`run-${i}`, [
+      reviewed("1641", { posted: 2, gold: 0, matched: 0, trace: traceOf([]) }),
+      reviewed("real", { posted: 1, gold: 2, matched: 1, trace: traceOf([true, false]) }),
+    ]);
+    const v = varianceRollup([canary(0), canary(1)]);
+    expect(v.perInstance.map((m) => m.instanceId)).toEqual(["real"]);
+    expect(v.untraced).toEqual([]); // it aligned fine — it just has no gold to hit
+    expect(v.gold).toBe(2);
+  });
+
+  it("names a case whose trace is missing in any repeat rather than guessing at it", () => {
+    const v = varianceRollup([
+      card("run-0", [reviewed("a", { posted: 1, gold: 2, matched: 1, trace: traceOf([true, false]) })]),
+      card("run-1", [reviewed("a", { posted: 1, gold: 2, matched: 1 })]), // judge never ran
+    ]);
+    expect(v.untraced).toEqual(["a"]);
+    expect(v.perInstance).toEqual([]);
+    expect(v.gold).toBe(0);
+    expect(v.unionRecall).toBeNull(); // nobody looked — not "found none"
+    // …but the per-run micro numbers are still real: they read the counts.
+    expect(v.repeats.map((r) => r.microRecall)).toEqual([0.5, 0.5]);
+  });
+
+  it("treats a gold set that changed shape as dataset drift, not as alignment", () => {
+    const v = varianceRollup([
+      card("run-0", [reviewed("a", { posted: 1, gold: 2, matched: 1, trace: traceOf([true, false]) })]),
+      card("run-1", [reviewed("a", { posted: 1, gold: 3, matched: 1, trace: traceOf([true, false, false]) })]),
+    ]);
+    expect(v.untraced).toEqual(["a"]);
+    expect(v.perInstance).toEqual([]);
+  });
+
+  it("names a case one repeat never ran at all", () => {
+    const v = varianceRollup([
+      card("run-0", [reviewed("a", { gold: 1, trace: traceOf([true]) }), reviewed("b", { gold: 1, trace: traceOf([true]) })]),
+      card("run-1", [reviewed("a", { gold: 1, trace: traceOf([false]) })]),
+    ]);
+    expect(v.untraced).toEqual(["b"]);
+    expect(v.perInstance.map((m) => m.instanceId)).toEqual(["a"]);
+  });
+
+  it("carries each repeat's runId so a point in the band is traceable to a run", () => {
+    const v = varianceRollup(repeatsOf("a", [[true], [false]]));
+    expect(v.repeats.map((r) => r.runId)).toEqual(["run-0", "run-1"]);
+    expect(v.band).toBe(1);
+  });
+});
+
+describe("bandVerdict", () => {
+  /** An arm whose repeats scored exactly these micro-recalls, over 10 gold. */
+  const arm = (...recalls: number[]) =>
+    varianceRollup(
+      recalls.map((r, i) =>
+        card(`run-${i}`, [
+          reviewed("a", {
+            posted: 10,
+            gold: 10,
+            matched: r * 10,
+            trace: traceOf(Array.from({ length: 10 }, (_, j) => j < r * 10)),
+          }),
+        ]),
+      ),
+    );
+
+  it("returns INDISTINGUISHABLE inside the band — the whole reason it exists", () => {
+    // The measured shape: three identical runs spanning 0.320/0.080/0.200. A
+    // candidate at 0.300 is +0.100 on the mean and still well inside 0.240.
+    const baseline = arm(0.3, 0.1, 0.2);
+    const out = bandVerdict(baseline, arm(0.3, 0.3, 0.3));
+    expect(out.verdict).toBe("INDISTINGUISHABLE");
+    expect(out.delta).toBeCloseTo(0.1, 10);
+    expect(out.reason).toContain("does not clear");
+  });
+
+  it("returns KEEP once the delta clears the band", () => {
+    const out = bandVerdict(arm(0.3, 0.2), arm(0.6, 0.6));
+    expect(out.verdict).toBe("KEEP");
+    expect(out.delta).toBeCloseTo(0.35, 10);
+    expect(out.reason).toContain("McNemar"); // the paired p rides along
+  });
+
+  it("returns REVERT once the delta clears the band downward", () => {
+    const out = bandVerdict(arm(0.6, 0.5), arm(0.2, 0.2));
+    expect(out.verdict).toBe("REVERT");
+    expect(out.delta).toBeCloseTo(-0.35, 10);
+  });
+
+  it("refuses a verdict when the baseline was run once", () => {
+    // This is the failure that produced KEEP/REVERT/REVERT from ONE config.
+    const out = bandVerdict(arm(0.2), arm(0.6));
+    expect(out.verdict).toBe("INDISTINGUISHABLE");
+    expect(out.delta).toBeCloseTo(0.4, 10);
+    expect(out.reason).toContain("UNMEASURED");
+  });
+
+  it("refuses a verdict when an arm has no gold to be recalled against", () => {
+    const empty = varianceRollup([card("run-0", [reviewed("a", { posted: 2, gold: 0, matched: 0 })])]);
+    const out = bandVerdict(empty, arm(0.6, 0.6));
+    expect(out.verdict).toBe("INDISTINGUISHABLE");
+    expect(out.delta).toBeNull();
+  });
+
+  it("says so when a cleared band still sits under the detection floor", () => {
+    const out = bandVerdict(arm(0.0, 0.0), arm(0.2, 0.2));
+    expect(out.verdict).toBe("KEEP");
+    expect(out.reason).toContain("detection floor");
+  });
+
+  it("flags a candidate whose own band is wider than the baseline's", () => {
+    const out = bandVerdict(arm(0.1, 0.1), arm(0.9, 0.5));
+    expect(out.verdict).toBe("KEEP");
+    expect(out.reason).toContain("candidate's OWN band is wider");
+  });
+});
+
+// ── the acceptance fixture: three IDENTICAL runs of one arm ─────────────────
+
+/**
+ * The measured variance, pinned to real artifacts.
+ *
+ * These three scorecards are the same `skillspro` arm run three times with a
+ * byte-identical configuration. They scored micro-recall 0.320 / 0.080 / 0.200.
+ * Every expectation below is a number computed from the stored judge traces —
+ * if the implementation disagrees with one, the implementation is wrong.
+ *
+ * Vendored (reduced: no session paths, no raw judge text, no gold text) so the
+ * test owns its inputs, following the `sample-results/` precedent above.
+ *
+ * They live under `src/__fixtures__/`, NOT beside that precedent in
+ * `sample-results/`, and the reason is `scripts/build-site.ts`: it falls back to
+ * `sample-results/` whenever `eval-results/` is empty, which is exactly the CI
+ * path that publishes evals.lastlight.dev. Every subdirectory there reads as a
+ * tier, so vendoring these beside it put three extra runs on the public demo
+ * site — with hollow judge modals, since the reduction strips `reviewText`,
+ * `findings` and the gold descriptions that a judge modal renders. A test
+ * fixture and a demo artifact are different jobs; `buildIndex` never scans here.
+ */
+describe("the measured run-to-run variance (real artifacts)", () => {
+  const RUNS = ["2026-08-22_184650-00cc469", "2026-08-22_194234-00cc469", "2026-08-22_201607-64862d5"];
+  const cards = RUNS.map(
+    (id) =>
+      JSON.parse(
+        readFileSync(join(import.meta.dirname, "__fixtures__", "repeat-band", id, "scorecard.json"), "utf8"),
+      ) as Scorecard,
+  );
+  const v = varianceRollup(cards);
+
+  it("reproduces each repeat's published micro-recall", () => {
+    expect(v.repeats.map((r) => r.runId)).toEqual(RUNS);
+    expect(v.repeats.map((r) => r.microRecall!.toFixed(3))).toEqual(["0.320", "0.080", "0.200"]);
+    expect(v.repeats.map((r) => r.matched)).toEqual([8, 2, 5]);
+    expect(v.repeats.every((r) => r.gold === 25)).toBe(true);
+  });
+
+  it("measures a band as wide as the entire detection floor", () => {
+    expect(v.meanMicroRecall).toBeCloseTo(0.2, 10);
+    expect(v.minMicroRecall).toBeCloseTo(0.08, 10);
+    expect(v.maxMicroRecall).toBeCloseTo(0.32, 10);
+    expect(v.band).toBeCloseTo(0.24, 10);
+    // …which is DETECTION_FLOOR_MICRO_RECALL itself. The noise on three
+    // identical runs is exactly the size of the smallest effect this gold set
+    // can resolve, so no single-run delta on this instrument means anything.
+    expect(v.band).toBeCloseTo(DETECTION_FLOOR_MICRO_RECALL, 10);
+  });
+
+  it("finds 11 of 25 gold across the three runs and 1 of 25 in all of them", () => {
+    expect(v.gold).toBe(25);
+    expect(v.unionMatched).toBe(11);
+    expect(v.unionRecall).toBeCloseTo(0.44, 10);
+    expect(v.intersectionMatched).toBe(1);
+    expect(v.intersectionRecall).toBeCloseTo(0.04, 10);
+    // The ordering that makes the roll-up worth reading: reach 0.44, expectation
+    // 0.20, reliable 0.04. Sampling is throwing away more than half the reach.
+    expect(v.unionRecall!).toBeGreaterThan(v.meanMicroRecall!);
+    expect(v.meanMicroRecall!).toBeGreaterThan(v.intersectionRecall!);
+  });
+
+  it("pins the per-case union vectors", () => {
+    const got = Object.fromEntries(v.perInstance.map((m) => [m.instanceId.replace("prreview__skillspro-", ""), [m.union, m.gold]]));
+    expect(got).toEqual({
+      "1587-r1": [1, 3],
+      "1587-r2": [4, 5],
+      "1587-r3": [1, 4],
+      "1641-r2": [1, 1],
+      "1667": [0, 5],
+      "1680-r1": [2, 4],
+      "1680-r2": [2, 3],
+    });
+    // The single gold item all three runs found — the arm's whole reliable recall.
+    const reliable = v.perInstance.filter((m) => m.intersection > 0).map((m) => m.instanceId);
+    expect(reliable).toEqual(["prreview__skillspro-1680-r1"]);
+  });
+
+  it("excludes the zero-gold canary, which lost its trace in two of the three runs", () => {
+    // 1641 has gold: 0. Run 1 judged it (an empty trace); runs 2 and 3 recorded
+    // no trace at all. Missing in >= 1 repeat ⇒ untraced, and it must not crash
+    // the hit maths on the way.
+    expect(v.untraced).toEqual(["prreview__skillspro-1641"]);
+    expect(v.perInstance.some((m) => m.instanceId.endsWith("1641"))).toBe(false);
+    // Dropping it costs nothing: it carries no gold, so the denominator is
+    // still the full 25.
+    expect(v.gold).toBe(25);
+  });
+
+  it("calls two halves of this one arm INDISTINGUISHABLE from each other", () => {
+    // The acceptance criterion. Split the three identical runs into the best
+    // one against the other two — the exact comparison `diff-runs` scored as
+    // KEEP on one pairing and REVERT on the others.
+    const best = varianceRollup([cards[0], cards[0]]);
+    const rest = varianceRollup([cards[1], cards[2]]);
+    // Naively this is Δ+0.180, and on a single-run diff it reads as a win.
+    expect(bandVerdict(rest, best).delta).toBeCloseTo(0.18, 10);
+    // Against the arm's OWN measured band it is nothing at all.
+    expect(bandVerdict(v, best).verdict).toBe("INDISTINGUISHABLE");
+    expect(bandVerdict(v, rest).verdict).toBe("INDISTINGUISHABLE");
   });
 });

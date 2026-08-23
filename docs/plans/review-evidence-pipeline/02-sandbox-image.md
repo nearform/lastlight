@@ -23,6 +23,46 @@ possibility of resolving the target repo's own toolchain.
 >    preflight, and **stamped into the facts envelope** so every scorecard records
 >    which toolchain produced it.
 
+## The three-way resolution is a symptom, and this WP should DELETE it
+
+**Added 2026-08-23.** The correction above records the resolution order
+(`LASTLIGHT_FACTS_BIN` → `PATH` → `/opt/lastlight/bin/lastlight-facts`) as the
+answer. It was the right answer while the tools existed in only one of the three
+places; it is the wrong end state, and it has since spread. That shell preamble —
+
+```sh
+FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+```
+
+— is now copy-pasted into **every** deterministic phase in `pr-review.yaml`, into
+each of the five survey branches' `until_bash` gates, into
+`prompts/review-adjudicate.md`, and it is pinned by three separate test files.
+Sixteen files mention `LASTLIGHT_FACTS_BIN`. Every one of them is a place the
+wrong binary can be picked up, and a prompt that carries shell resolution logic
+is a prompt whose instruction and mechanism are separable — the exact property
+[`seed-render.ts`](../../../packages/code-facts/src/seed-render.ts) exists to
+avoid.
+
+**The end state: there is one invocation, `lastlight facts …`, and it works
+everywhere.** `code-facts` already ships inside the `lastlight` CLI (§D1) and the
+subcommand already exists (`packages/cli/src/cli.ts`). What is missing is only
+that the sandbox image does not carry the CLI — which is precisely what this work
+package is for. So this WP's deliverable is not "put `lastlight-facts` on `PATH`
+in the image"; it is:
+
+1. Ship the **`lastlight` CLI** in the sandbox image, not a second bare binary.
+2. Replace every `FACTS="${LASTLIGHT_FACTS_BIN:-…}"` preamble with a plain
+   `lastlight facts …`, and delete the env var and the baked path.
+3. Keep exactly one escape hatch for local development against an unpublished
+   build, if one is still needed after (1) — but it must not be load-bearing for
+   any shipped invocation, and no prompt may mention it.
+
+Two things to preserve while doing it. The eval harness runs `--sandbox none` on
+the host and must keep working, which is what the env var buys today — so (1) has
+to be verified on the host path as well as in-image. And the **toolchain stamp**
+in the facts envelope stays regardless: "which toolchain produced this scorecard"
+is a question the resolution order was never what answered.
+
 ## Why this is its own work package
 
 Three constraints collide here, and getting any of them wrong is silent:

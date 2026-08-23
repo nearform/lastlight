@@ -186,6 +186,24 @@ phases:
         --blocks .lastlight/pr-review/obligations || true
       echo "seed: $(ls .lastlight/pr-review/obligations 2>/dev/null | wc -l) family block(s)"
 
+      # The MANIFEST, and it exists so that "the seeder wrote nothing for this
+      # family" and "the block never reached the pass that consumes it" are two
+      # different lines in the log rather than one silence. `renderFamilyBlock`
+      # always emits a block for all five seedable families — including a NOT
+      # MEASURED one — so a MISSING line here is a seeder failure, full stop, and
+      # a survey branch reporting a family clean on the back of one is reporting
+      # on a measurement that was never taken. The `spec` family is absent by
+      # design: it is built harness-side and has no block on disk.
+      for FAMILY in contract enforcement security state tests; do
+        BLOCK=".lastlight/pr-review/obligations/$FAMILY.md"
+        if [ -s "$BLOCK" ]; then
+          echo "seed: $FAMILY block $(wc -c < "$BLOCK") bytes"
+        else
+          echo "seed: $FAMILY block MISSING — the survey branch for this family will run UNSEEDED"
+        fi
+      done
+      exit 0
+
   # ── The six surveys. ONE phase, six branches, run CONCURRENTLY. ────────────
   #
   # NOT a `generic_loop` over a `families` list, and the reason is measured:
@@ -246,21 +264,87 @@ phases:
     # A distinct key cannot be confused with it; `fanout-policy.test.ts` pins
     # the EFFECTIVE value read off this file rather than the key's presence.
     on_branch_soft_failure: { retries: 1, then: complete }
+    #
+    # `context_file` — WHY THE OBLIGATIONS ARE NOT A PATH IN THE PROMPT ANY MORE.
+    #
+    # They were, and it cost a quarter of the branches their seed. Measured over
+    # the three stored runs of 2026-08-22: across 120 non-spec survey branches,
+    # 27 first-turn reads of `obligations/<family>.md` resolved against the
+    # SANDBOX ROOT rather than the checkout and hit ENOENT; 23 branches never
+    # recovered. The split is total — every one of the 27 failures used the
+    # workspace-root ABSOLUTE form, and all 98 relative reads succeeded — because
+    # the only absolute path a branch has been handed by its first turn is its
+    # skill bundle, `<workspaceRoot>/.lastlight-skills/<phase>/<skill>/SKILL.md`,
+    # which lives one level ABOVE the checkout the deterministic phases write in.
+    # Those branches then took the prompt's "if the file does not exist, work the
+    # diff directly" escape hatch and free-styled, so a SEEDED pass became an
+    # unseeded one with nothing anywhere recording that it had. That is the best
+    # mechanical account there is of identical obligations producing 18
+    # hypotheses on one run and 43 on the next: which branches lose their seed
+    # varies per run, so which questions get asked varies per run.
+    #
+    # The harness now reads the file at `hostAgentCwd` — the host end of the very
+    # `cwd` the `seed` phase's shell ran in — and appends it to the branch's
+    # prompt. The producer and the consumer resolve against ONE base by
+    # construction, and the model resolves nothing at all. When the read fails,
+    # what is appended is a loud NOT AVAILABLE notice instead: a lost seed can
+    # no longer be mistaken for a family with genuinely nothing to check.
+    #
+    # `until_bash` — WHY THE GATE IS NO LONGER `test -s`.
+    #
+    # It was, and `test -s` is passed by ONE LINE OF ANY CONTENT. So the gate a
+    # survey had to clear was "write a byte", while the contract in its
+    # obligations block demanded a QUOTE/ABSENT/PARTIAL/PROBE discharge for every
+    # obligation. Measured over both preserved runs of 2026-08-22 — all 8 cases,
+    # every family — NOT ONE obligation ever carried a discharge code: 0 of 31,
+    # 0 of 34, 0 of 40. That was not the models ignoring the rule; the prescribed
+    # row shape in the same block had no field to record one in, so compliance
+    # was impossible. The shape now carries `discharge`, and this gate reads it.
+    #
+    # It is also what closes the hole the `context_file` note above leaves open:
+    # a branch that lost its seed and free-styled still writes a file, and
+    # `test -s` cannot tell that from a discharged pass. A `NOT_SEEDED` row
+    # discharges nothing, so this gate fails it.
+    #
+    # `discharge` exits 0 (satisfied, or the family has no obligations, or it is
+    # NOT MEASURED), 3 (something outstanding — iterate), or 2 (nothing to
+    # grade). Any non-zero re-runs the branch. With no readable obligations
+    # document it deliberately DEGRADES to the `test -s` floor it replaces
+    # rather than failing forever: `seed` runs with `|| true` and writes nothing
+    # on a `coverage: "none"` envelope, and a gate an agent cannot satisfy burns
+    # every iteration it has — which is the WP3 `$LL_FAMILY` bug, exactly.
+    #
+    # `spec` keeps `test -s`: its obligations are built harness-side and never
+    # reach `obligations.json`, so the gate would be vacuous there. That leaves
+    # it constraining five branches, and meaningfully four until WP4's `prepare`
+    # gives the `tests` family a coverage artifact to be measured against.
     branches:
       - name: contract
         prompt: prompts/survey-contract.md
-        until_bash: test -s .lastlight/pr-review/hypotheses/contract.jsonl
+        context_file: .lastlight/pr-review/obligations/contract.md
+        until_bash: |
+          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+          "$FACTS" discharge --dir .lastlight/pr-review --family contract
       - name: enforcement
         prompt: prompts/survey-enforcement.md
-        until_bash: test -s .lastlight/pr-review/hypotheses/enforcement.jsonl
+        context_file: .lastlight/pr-review/obligations/enforcement.md
+        until_bash: |
+          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+          "$FACTS" discharge --dir .lastlight/pr-review --family enforcement
       - name: security
         prompt: prompts/survey-security.md
         # The one branch with a third skill — the others inherit the phase's two.
         skills: [pr-review, code-review, security-review]
-        until_bash: test -s .lastlight/pr-review/hypotheses/security.jsonl
+        context_file: .lastlight/pr-review/obligations/security.md
+        until_bash: |
+          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+          "$FACTS" discharge --dir .lastlight/pr-review --family security
       - name: state
         prompt: prompts/survey-state.md
-        until_bash: test -s .lastlight/pr-review/hypotheses/state.jsonl
+        context_file: .lastlight/pr-review/obligations/state.md
+        until_bash: |
+          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+          "$FACTS" discharge --dir .lastlight/pr-review --family state
       # `tests` is seeded from `coverage`, which READS a report nothing in the
       # pipeline produces until WP4's `prepare`. Measured: 0 artifacts across 50
       # corpus cases AND all 8 gate cases. The branch ships so the wiring is
@@ -269,7 +353,10 @@ phases:
       # reported as "did not convert".
       - name: tests
         prompt: prompts/survey-tests.md
-        until_bash: test -s .lastlight/pr-review/hypotheses/tests.jsonl
+        context_file: .lastlight/pr-review/obligations/tests.md
+        until_bash: |
+          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+          "$FACTS" discharge --dir .lastlight/pr-review --family tests
       # `spec` is WP0's and is built HARNESS-side from the PR body and linked
       # issues (review-spec.ts), so it reads `{{specObligations}}` from the
       # context rather than a block on disk. It is the only untried axis and it

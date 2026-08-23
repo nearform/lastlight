@@ -34,17 +34,22 @@ guardrail is elsewhere.
 
 A producer's exported shape moved. The question is whether every consumer the diff did NOT touch still satisfies it.
 
-Read your obligations here — the file carries the discharge contract and you
-must follow it exactly:
+Your obligations are **appended to the end of this prompt**, under the heading
+`## Attached: the file this pass was seeded with`. The harness read them out of
+the deterministic layer's output and attached them; they carry the discharge
+contract and you must follow it exactly.
 
-```
-.lastlight/pr-review/obligations/contract.md
-```
+**Do not go looking for them on disk.** There is no path for you to construct
+here, and constructing one is how earlier passes lost their seed: the skill
+bundle you were handed sits one directory ABOVE your working directory, so the
+plausible absolute path is a file that does not exist.
 
-If that file does not exist, the deterministic layer produced nothing for this
-family. That is **not** a clean result: work the diff for this family's question
-directly, and say so in your output. If it exists and says NOT MEASURED, record
-that and stop — do not substitute a judgement for a measurement.
+Read the attachment before anything else. It can say three things and they are
+three different facts:
+
+- **Obligations.** Discharge every one, exactly as its contract says.
+- **NOT MEASURED.** Record that and stop — do not substitute a judgement for a measurement.
+- **NOT AVAILABLE**, or a path for you to open yourself. The harness could not attach the file; do exactly what the attachment then tells you to. Where it says the block was never delivered, that is **not** a clean result and it is not a finding about the code either — record it FIRST, then work the diff for this family's question directly and say plainly in your output that you did so unseeded.
 
 A consumer outside the diff is the one that reads correctly in isolation and is wrong in composition — which is exactly what a file-by-file review cannot see. Open each consumer. Do not infer from the signature alone.
 

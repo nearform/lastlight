@@ -32,29 +32,39 @@ guardrail is elsewhere.
 
 **Does this change do what was asked?**
 
-This is the only family whose obligations do NOT come from the deterministic code
-analysis, so there is no block on disk for it — they are built from the PR body
-and the issues it closes, and they arrive inline below. Every other "what to
-check" item in the review rubric is a STANDARDS check; this is the other axis,
-and it is the one a clean standards review cannot answer.
+Every other "what to check" item in the review rubric is a STANDARDS check; this
+is the other axis, and it is the one a clean standards review cannot answer.
+
+Your obligations are **inline below**. This is the only family whose obligations
+do not come from the deterministic code analysis — they are built by the harness
+from the PR body and the issues this PR closes — so unlike the other five there
+is no file anywhere holding them, and they carry the discharge contract you must
+follow exactly.
+
+**Do not go looking for them on disk.** There is no `obligations/spec.md`, there
+never was, and constructing a path to one is how earlier passes lost their seed:
+the skill bundle you were handed sits one directory ABOVE your working directory,
+so the plausible absolute path is a file that does not exist.
 
 {{#if specObligations}}
 {{specObligations}}
 {{/if}}
 
 {{#if !specObligations}}
-No spec obligations were built for this PR — the body and any linked issues
-yielded no quotable acceptance criterion. That is **not** a pass on this axis.
-Read the PR body and the linked issues yourself, and if they state anything
-checkable, discharge it as an obligation of your own and say where you got it.
-If they genuinely state nothing checkable, record that as your single
-hypothesis — "the change's intent is unstated" is a real review observation.
+The harness attached no obligations block at all. That is **not** a clean result
+and it is not a finding about the code either: it means the spec axis was never
+looked at, not that it is fine. Record that FIRST, then read the PR body and the
+linked issues yourself — if they state anything checkable, discharge it as an
+obligation of your own and say where you got it. If they genuinely state nothing
+checkable, that is a real review observation and it gets a row of its own: the
+change's intent is unstated.
 {{/if}}
 
 ## Output
 
 Append one JSON object per line to `.lastlight/pr-review/hypotheses/spec.jsonl`,
-in the shape the obligations block specifies. Create the file even if you have
-nothing to record — write a single line with `"claim": "no spec hypothesis"` and
-the obligation ids you discharged, so that "surveyed and found nothing" and
-"never ran" stay distinguishable.
+in the shape the obligations block prescribes — one row per obligation, each
+carrying its `obligation` id and exactly one `discharge` code. Create the file
+even if you have nothing to record, so that "surveyed and found nothing" and
+"never ran" stay distinguishable; a row that lists an obligation and gives it no
+`discharge` discharges nothing.

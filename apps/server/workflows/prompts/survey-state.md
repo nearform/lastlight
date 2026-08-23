@@ -34,17 +34,22 @@ guardrail is elsewhere.
 
 A changed symbol is used at sites the diff did not touch. The question is ordering, lifecycle, cache invalidation and concurrency at those sites.
 
-Read your obligations here — the file carries the discharge contract and you
-must follow it exactly:
+Your obligations are **appended to the end of this prompt**, under the heading
+`## Attached: the file this pass was seeded with`. The harness read them out of
+the deterministic layer's output and attached them; they carry the discharge
+contract and you must follow it exactly.
 
-```
-.lastlight/pr-review/obligations/state.md
-```
+**Do not go looking for them on disk.** There is no path for you to construct
+here, and constructing one is how earlier passes lost their seed: the skill
+bundle you were handed sits one directory ABOVE your working directory, so the
+plausible absolute path is a file that does not exist.
 
-If that file does not exist, the deterministic layer produced nothing for this
-family. That is **not** a clean result: work the diff for this family's question
-directly, and say so in your output. If it exists and says NOT MEASURED, record
-that and stop — do not substitute a judgement for a measurement.
+Read the attachment before anything else. It can say three things and they are
+three different facts:
+
+- **Obligations.** Discharge every one, exactly as its contract says.
+- **NOT MEASURED.** Record that and stop — do not substitute a judgement for a measurement.
+- **NOT AVAILABLE**, or a path for you to open yourself. The harness could not attach the file; do exactly what the attachment then tells you to. Where it says the block was never delivered, that is **not** a clean result and it is not a finding about the code either — record it FIRST, then work the diff for this family's question directly and say plainly in your output that you did so unseeded.
 
 Rank your attention by how much of the impact cone lies OUTSIDE the diff. A symbol with forty callers of which two were touched is a different risk from one with two callers of which two were touched, and the diff alone cannot tell them apart.
 

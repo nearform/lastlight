@@ -161,7 +161,7 @@ The release commit is conventionally just the two version-file lines
 | `scripts/mine-failures.ts` | Read-only TRAIN-only failure-signature miner — clusters `review.falseNegatives`/`falsePositives` into ranked recall/precision signatures (the evidence bundle) for the `lastlight-evals-loop` skill's diagnose step. |
 | `scripts/diff-runs.ts` | Read-only two-scorecard F1 diff (per-case + arm delta) + train/held-out keep/revert verdict (opt-in `--symmetric` non-regressive gate; split-partitioned `REGRESSED(...)` line) — the measurement step of the `lastlight-evals-loop` skill. Also prints the MICRO section (micro-recall / SNR / paired McNemar) and refuses a verdict when the two runs graded different case sets. |
 | `scripts/facts-anchors.ts` | Builds `datasets/pr-review/anchors.json` — the **frozen, versioned** deterministic anchor labels (tokenizer `v1`) that give the code-facts evidence-coverage metric its denominator. No model anywhere. Freeze the labels, not the tokenizer: the artifact stamps `tokenizer`, so a better tokenizer ships as `v2` rather than rewriting past numbers. Carries a hand-audit block (seed + verdicts) that is the metric's error bar. Never commits gold text — `instances.json` is gitignored for a reason. |
-| `scripts/rescore.ts` | Read-only (unless `--write`) offline re-score: back-fills micro-recall / SNR / the attention boundaries onto an EXISTING scorecard with no model spend, and refuses to write if a published number changed. |
+| `scripts/rescore.ts` | Read-only (unless `--write`) offline re-score: back-fills micro-recall / SNR / the attention boundaries onto an EXISTING scorecard with no model spend, and refuses to write if a published number changed. Plus `--repeat-judge N` — the ONE mode that spends (2 judge calls per case per repeat): it re-runs the judge N times over the stored review text + gold and reports the spread, separating GRADER noise from pipeline noise. Never runs by default, prints its cost estimate first, and refuses `--write` (a re-judge measures the grader, it does not correct the run). |
 | `src/review-metrics.ts` | The recall-first metrics — micro-aggregation, SNR, the detection floor + exact McNemar, the attention boundaries, per-family attribution. Pure arithmetic over stored fields, which is what makes the back-fill possible. |
 | `src/report.ts` | Scorecard roll-up + JSON/JSONL artifacts + `buildIndex` (filesystem → the SPA's `/api/index`). |
 | `src/serve.ts` | Tiny dependency-free server: `/api/index` (fs scan), `/data/*` (raw artifacts), the SPA + fallback. |
@@ -175,8 +175,35 @@ The release commit is conventionally just the two version-file lines
 - **Run a subset:** `EVAL_INSTANCE=<id[,id2]> lastlight-evals run <tier>` (same as
   `--instance`) filters by **exact** `instance_id` (comma-separated for several) —
   NOT a substring, so pass the full id (e.g. `prreview__discourse-graphite-6`);
-  `--model haiku` (fuzzy) picks one model; `--runs 3` repeats (worst-case verdict,
-  mean metrics).
+  `--model haiku` (fuzzy) picks one model; `--runs 3` repeats each CASE (worst-case
+  verdict, mean metrics).
+- **Never report one arm as a number — `--repeats N`.** Three *identical* runs of
+  one pr-review arm measured micro-recall 0.320 / 0.080 / 0.200 (union 0.440,
+  intersection 0.040), and `diff-runs` returned KEEP on one and REVERT on the other
+  two *from one configuration*. `--repeats N` re-runs the whole ARM N times,
+  strictly sequentially, as N **sibling** run dirs — each a normal run tagged
+  `meta.repeat = {group, index, of}` (`group` = the first repeat's `runId`), which
+  `varianceRollup` (`review-metrics.ts`) folds into a band with union/intersection
+  recall. Repeats are siblings and never nested because `indexTier`/`buildIndex`
+  and `clean.ts` all walk exactly two levels. It implies `--keep-workspace` (when
+  repeats disagree the question is always *which* evidence each produced) and
+  `--no-open` (a finished run holds its dashboard server open forever — a repeat
+  loop would leak one per repeat), printing the standalone `serve` command once
+  instead. Distinct from `--runs`, which folds a case's trials into one worst-case
+  result and destroys the per-trial hit vectors a band is computed from. Pair it
+  with `scripts/rescore.ts --repeat-judge N` for the grader's own band: a
+  candidate's Δ has to clear both.
+- **Run provenance (what the run actually was).** Every scorecard now stamps the
+  invocation beside the numbers, flat on `meta` alongside `gitSha`/`core` (grouped
+  as the `RunProvenance` type, which `RunMeta` extends) — `overlay`/`overlays`,
+  `datasets`, `sandbox`, `fBeta`, `judgeWithDiff`, `injectContext`, `keepWorkspace`,
+  `instances`, `limit`, `repeats`, `judgeModel`, the resolved `factsBin` + its
+  `toolchain` stamp, `harness` (version + root), and raw `argv`. `meta` used to
+  record model/gitSha/core but not
+  the overlay, so a `models` run recorded its `review.analysis.enabled` policy
+  nowhere at all; a globally-installed harness once ran the *baseline* while
+  reporting itself as the pipeline arm and nothing in the artifact could contradict
+  it. Every field is optional — absent means "not recorded", never "off".
 - **Verifying the harness/UI (not a model):** when running an eval just to check
   the plumbing or dashboard works, pick the **cheapest, fastest** model available
   (e.g. `--model haiku`, or the cheapest entry in `models.json`) and the smallest

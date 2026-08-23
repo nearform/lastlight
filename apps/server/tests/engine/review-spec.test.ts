@@ -9,6 +9,7 @@
  * and be read as "the spec axis does not work").
  */
 
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import {
   buildSpecObligations,
@@ -159,7 +160,15 @@ describe("buildSpecObligations", () => {
     });
     expect(set.obligations).toEqual([]);
     expect(set.degraded.join(" ")).toContain("not linked to an issue");
-    expect(renderSpecObligations(set)).toContain('"spec": "unknown"');
+    const text = renderSpecObligations(set);
+    expect(text).toContain("That is NOT a pass and NOT a clean result");
+    // …and it STILL prescribes the row shape. A degraded pass has to record what
+    // it did, and "no obligations were built" was previously the one branch that
+    // told the model to answer in `findings.json` — the file this pass is
+    // explicitly forbidden from writing.
+    expect(text).toContain('"discharge": "QUOTE|ABSENT|PARTIAL|PROBE"');
+    expect(text).toContain("hypotheses/spec.jsonl");
+    expect(text).toContain("Do NOT record it in");
   });
 
   it("prefers what the ISSUE asked over what the PR body claims", () => {
@@ -212,12 +221,38 @@ describe("renderSpecObligations", () => {
     expect(text).toContain("Reading a file is not a discharge");
   });
 
-  it("carries the split verdict's contract and its consequence", () => {
+  /**
+   * The contract this block used to carry INSTEAD of a row shape, and why it is
+   * gone.
+   *
+   * `survey-spec.md`'s own hard limits say *"Do NOT write
+   * `.lastlight/pr-review/findings.json`. A later phase owns it."* — and this
+   * block, delivered into that same prompt, closed by telling the model to
+   * record a split verdict in exactly that file. `review-adjudicate.md` already
+   * owns `"verdict": { "spec": …, "standards": … }` (its Output section), so the
+   * block was duplicating a downstream contract *and* contradicting the prompt
+   * it ships inside.
+   *
+   * It is also where the field-name collision came from. `verdict` means the
+   * findings.json object in this module; the measured `spec.jsonl` rows then
+   * used `verdict` as the per-row discharge field — `{"obligation":"S-1",
+   * "verdict":"QUOTE",…}` — which no gate reads. One word for two concepts is
+   * how that happened.
+   */
+  it("does not instruct the split verdict — the adjudicator owns findings.json", () => {
     const text = renderSpecObligations(set);
-    expect(text).toContain('"verdict"');
-    expect(text).toContain('"spec"');
-    expect(text).toContain('"standards"');
-    expect(text).toContain("stops this review being an APPROVE");
+    expect(text).not.toContain('"standards"');
+    expect(text).not.toContain("stops this review being an APPROVE");
+    // The rule survives as a hard limit, naming who does own it.
+    expect(text).toContain("Do NOT write findings.json");
+    expect(text).toContain("ADJUDICATOR");
+  });
+
+  it("prescribes `discharge`, and never `verdict`, as the row's field", () => {
+    const text = renderSpecObligations(set);
+    expect(text).toContain('"discharge": "QUOTE|ABSENT|PARTIAL|PROBE"');
+    // The measured shape from `prreview__skillspro-1587-r2`, which no gate reads.
+    expect(text).not.toMatch(/"verdict"\s*:\s*"QUOTE/);
   });
 
   it("renders both ends of each obligation verbatim", () => {
@@ -232,6 +267,159 @@ describe("renderSpecObligations", () => {
     // The caller omits the template key entirely on `""`, which is what keeps
     // the disabled path byte-identical.
     expect(renderSpecObligations({ obligations: [], dropped: 0, changedFileCount: 3, degraded: [] })).toBe("");
+  });
+});
+
+/**
+ * The pin between the two renderers — the only thing that stops them diverging
+ * again.
+ *
+ * `spec` is the sixth branch of a six-branch survey, and the other five get
+ * their obligations block from `renderFamilyBlock`
+ * (`packages/code-facts/src/seed-render.ts`). Nothing connected the two: measured
+ * on `prreview__skillspro-1587-r2`, the five produced
+ * `{"obligation":"O-014","discharge":"QUOTE","quotes":[…],…}` with 33 of 33
+ * obligations discharged, and `spec` produced
+ * `{"obligation":"S-1","verdict":"QUOTE","path":…,"line":37,"rationale":…}` — a
+ * different shape, in a field name no gate reads, because this renderer
+ * prescribed no shape at all and the model invented one per run.
+ *
+ * **Asserted against the reference's SOURCE TEXT, not by importing it.**
+ * `lastlight-core` has no dependency edge to `lastlight-code-facts` and must not
+ * grow one — not even a devDependency, which would mean an install. Reading the
+ * file is enough for the property that matters: the two prescribed rows name the
+ * same fields and the same four codes, and neither side can change that alone.
+ */
+describe("the spec block and renderFamilyBlock prescribe ONE contract", () => {
+  const root = new URL("../../../../packages/code-facts/src/", import.meta.url);
+  const seedRender = readFileSync(new URL("seed-render.ts", root), "utf8");
+  const dischargeSrc = readFileSync(new URL("discharge.ts", root), "utf8");
+
+  const specBlock = renderSpecObligations(
+    buildSpecObligations({
+      prBody: "",
+      closes: [{ number: 1587, title: "T", body: "- [ ] Expiry is enforced server-side on every request" }],
+      changedFiles: CHANGED,
+      max: 6,
+    }),
+  );
+
+  /** Every JSON key named between two anchors, as a sorted set. */
+  const fieldsBetween = (text: string, from: string, to: string): string[] => {
+    const start = text.indexOf(from);
+    expect(start, `anchor not found: ${from}`).toBeGreaterThan(-1);
+    const end = text.indexOf(to, start);
+    expect(end, `anchor not found: ${to}`).toBeGreaterThan(start);
+    return [...new Set([...text.slice(start, end).matchAll(/"(\w+)":/g)].map((m) => m[1]!))].sort();
+  };
+
+  it("prescribes the same row FIELDS as the reference renderer", () => {
+    const reference = fieldsBetween(
+      seedRender,
+      "Append one JSON object per obligation to",
+      "names WHICH one",
+    );
+    const spec = fieldsBetween(
+      specBlock,
+      "Append one JSON object per obligation to",
+      "names WHICH one",
+    );
+    // Non-vacuity: the anchors really did select a row shape.
+    expect(reference).toContain("discharge");
+    expect(reference.length).toBeGreaterThan(10);
+    expect(spec).toEqual(reference);
+  });
+
+  it("names exactly the four codes the gate reads — no fifth, no missing one", () => {
+    const codes = [...dischargeSrc.matchAll(/^export const DISCHARGE_CODES = \[(.+?)\]/gm)]
+      .flatMap((m) => [...m[1]!.matchAll(/"(\w+)"/g)].map((c) => c[1]!));
+    expect(codes).toEqual(["QUOTE", "ABSENT", "PARTIAL", "PROBE"]);
+    for (const code of codes) expect(specBlock, code).toContain(code);
+    // The fifth code this block used to carry. `N/A` is not in DISCHARGE_CODES,
+    // so every row using it lands `bad-code` the moment `spec` is graded — an
+    // unsatisfiable gate built out of vocabulary instead of shell.
+    expect(specBlock).not.toContain("N/A");
+    // …and `PROBE`, which it used to lack entirely, is the one this family needs
+    // most: an acceptance criterion is often settled by RUNNING, not reading.
+    expect(specBlock).toContain("PROBE");
+  });
+
+  it("carries an exemplar whose keys ARE the prescribed shape", () => {
+    // The reference feeds its rendered exemplar back through `checkDischarge`.
+    // The equivalent here — no import available — is that the exemplar parses,
+    // and that its key set is the one the block just prescribed.
+    const line = specBlock
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.startsWith('{"id":'));
+    expect(line, "no single-line JSON exemplar in the block").toBeTruthy();
+    const row = JSON.parse(line!) as Record<string, unknown>;
+    const keys = [
+      ...new Set([
+        ...Object.keys(row),
+        ...Object.keys(row.bothEnds as object),
+        ...Object.keys((row.quotes as object[])[0]!),
+      ]),
+    ].sort();
+    expect(keys).toEqual(
+      fieldsBetween(specBlock, "Append one JSON object per obligation to", "names WHICH one"),
+    );
+    // The lesson the reference exemplar exists for, kept: a line that MENTIONS a
+    // value is not a line that enforces it.
+    expect(row.discharge).toBe("PARTIAL");
+    expect(row.failureScenario).toBeTypeOf("string");
+  });
+
+  it("lists every obligation id, wrapped and never truncated", () => {
+    const many = buildSpecObligations({
+      prBody: "",
+      closes: [
+        {
+          number: 9,
+          title: "Many things",
+          body: [
+            "## Requirements",
+            ...Array.from({ length: 12 }, (_, i) => `- Requirement number ${i} must hold for every caller`),
+          ].join("\n"),
+        },
+      ],
+      changedFiles: CHANGED,
+      max: 12,
+    });
+    const text = renderSpecObligations(many);
+    expect(many.obligations).toHaveLength(12);
+    for (const o of many.obligations) expect(text, o.id).toContain(o.id);
+    expect(text).toContain("Every one of the 12 obligations below needs a row of its own");
+    // A truncated checklist reproduces the omission it exists to prevent.
+    expect(text).not.toMatch(/…\s*$/m);
+  });
+
+  it("says why there is no `discharge --ledger` for this family", () => {
+    // The reference points the survey at `lastlight-facts discharge --ledger`.
+    // These obligations never reach `obligations.json`, so there is nothing to
+    // point at — and an unexplained missing pointer reads as an oversight.
+    expect(seedRender).toContain("discharge --ledger");
+    expect(specBlock).toContain("There is no `lastlight-facts discharge --ledger` for this family");
+    expect(specBlock).toContain("obligations.json");
+  });
+
+  /**
+   * The one structural difference from the five siblings, and the one the block
+   * must respect: their blocks reach the model as a `context_file`, appended
+   * verbatim by the fan-out handler. This one is `{{specObligations}}` template
+   * context, so it passes through `renderTemplate` — and
+   * `pr-review-survey.test.ts` asserts no survey prompt leaves an unrendered
+   * `{{`/`}}` behind. A nested object serialised LAST in the exemplar would end
+   * `}}` and fail that, from a file nobody would think to look in.
+   */
+  it("contains no template marker, because unlike its siblings it is rendered", () => {
+    expect(specBlock).not.toMatch(/\{\{|\}\}/);
+    for (const set of [
+      buildSpecObligations({ prBody: "", closes: [], changedFiles: CHANGED, max: 6 }),
+      buildSpecObligations({ prBody: "", closes: [], changedFiles: null, max: 6 }),
+    ]) {
+      expect(renderSpecObligations(set)).not.toMatch(/\{\{|\}\}/);
+    }
   });
 });
 

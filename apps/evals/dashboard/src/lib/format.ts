@@ -31,8 +31,21 @@ export function fmtDate(iso: string): string {
   return m ? `${m[1]} ${m[2]} UTC` : iso;
 }
 
+/** A metric that is legitimately UNDEFINED (no gold, nothing posted, no noise)
+ * renders as an em dash — never as `0`, which reads as a measured failure.
+ * Mirrors the harness `fmtRatio` (`src/report.ts`). */
+export function fmtRatio(x: number | null | undefined, digits = 3): string {
+  return x === null || x === undefined || !Number.isFinite(x) ? "—" : x.toFixed(digits);
+}
+
+/** A 0..1 ratio as a whole percent, or an em dash when undefined. */
+export function fmtPct(x: number | null | undefined): string {
+  return x === null || x === undefined || !Number.isFinite(x) ? "—" : `${(x * 100).toFixed(0)}%`;
+}
+
 /** The primary success metric for a tier (higher = better), matching the
- * harness scorecard semantics: code-fix → resolved%, everything else → behavioral%. */
+ * harness scorecard semantics: code-fix → resolved%, pr-review → micro-recall,
+ * everything else → behavioral%. */
 export interface TierMetric {
   label: string;
   rate: (m: ModelSummary) => number;
@@ -48,14 +61,19 @@ export function tierMetric(tier: string, beta = 1): TierMetric {
     };
   }
   if (tier === "pr-review") {
-    // F-beta is the headline (F1 by default — Martian's leaderboard metric),
-    // shown as a percentage with the underlying precision/recall in the fraction
-    // slot. The label reflects the β the run used (F1, F0.5, …).
+    // **Micro-recall is the headline** — matched ÷ gold summed over cases. The
+    // per-case F-beta mean this used to show is a different number: it weights a
+    // 1-gold case like a 6-gold one and hands a free 1.00 to a case with no gold
+    // at all, so the UI was reporting one quantity while every plan reasoned in
+    // the other. F-beta stays visible as a secondary column (see
+    // {@link fbetaLabel}), which is what the Martian leaderboard comparison needs.
     return {
-      label: `F${beta}`,
-      rate: (m) => (m.reviewTotal ? m.avgFbeta : 0),
+      label: "micro-recall",
+      rate: (m) => m.micro?.microRecall ?? 0,
       frac: (m) =>
-        m.reviewTotal ? `${(m.avgFbeta * 100).toFixed(0)}% · P${m.avgPrecision.toFixed(2)}/R${m.avgRecall.toFixed(2)}` : "—",
+        m.micro && m.micro.gold > 0
+          ? `${fmtPct(m.micro.microRecall)} · ${m.micro.matched}/${m.micro.gold}`
+          : "—",
     };
   }
   return {
@@ -63,6 +81,12 @@ export function tierMetric(tier: string, beta = 1): TierMetric {
     rate: (m) => (m.behavioralTotal ? m.behavioralOk / m.behavioralTotal : 0),
     frac: (m) => (m.behavioralTotal ? `${m.behavioralOk}/${m.behavioralTotal}` : "—"),
   };
+}
+
+/** The label for the secondary per-case F-beta column, reflecting the β the run
+ * graded with (F1 by default; `EVAL_F_BETA` reweights). */
+export function fbetaLabel(beta = 1): string {
+  return `F${beta}`;
 }
 
 /** Rank models by the tier metric (desc), tie-broken by cheaper total cost. */

@@ -15,6 +15,12 @@
  *   lastlight-facts <facts|contracts|constants|deps|patterns|coverage|all> \
  *     --repo <dir> --base <ref> --head <ref> [--out <file>] [--never-fail]
  */
+import {
+  checkDischarge,
+  dischargeExitCode,
+  renderDischargeCheck,
+  renderDischargeLedger,
+} from "./discharge.js";
 import { EXIT_DEGRADED, EXIT_UNAVAILABLE, EXIT_OK } from "./errors.js";
 import {
   buildFindingsLedger,
@@ -52,12 +58,28 @@ Commands:
   all         every extractor, one envelope, one file
   seed        turn an \`all\` envelope into mechanism-complete obligations
   prepare     install deps so a probe can be RUN (WP4's affordance, not CI)
+  discharge   a SURVEY's exit gate — every obligation of one family carries a
+              QUOTE / ABSENT / PARTIAL / PROBE discharge in its .jsonl
   probes      the \`falsify\` loop's exit gate — every hypothesis that needed a
               probe has a verdict, and every claim of execution has a transcript
   findings    the \`adjudicate\` loop's exit gate — the CONSERVATION check: every
               hypothesis has exactly one disposition, and every deletion names a
               transcript that exists
   toolchain   print the pinned manifest and what actually resolved
+
+\`discharge\` options (WP3 — it replaces \`test -s\`, which one line of any content
+passes; it reads no quote and judges no claim):
+  --dir <dir>         the .lastlight/pr-review directory
+                      (default: .lastlight/pr-review)
+  --family <f>        the survey branch's family                   (required)
+  --ledger            print the CHECKLIST instead of grading: every obligation
+                      of the family, \`[x]\`/\`[ ]\`, with its question. For the
+                      SURVEY to run. Reports; never grades — ALWAYS exits 0.
+  Exit 0 = every obligation carries one of QUOTE / ABSENT / PARTIAL / PROBE (or
+  there were none, or the family is NOT MEASURED). 3 = the file exists and
+  something is outstanding. 2 = there was nothing to grade — no
+  hypotheses/<family>.jsonl at all, no readable obligations.json, or a --family
+  the document does not name. ANY non-zero means "iterate again".
 
 \`probes\` options (an existence gate, not a validator — it reads no transcript):
   --dir <dir>         the .lastlight/pr-review directory
@@ -153,6 +175,9 @@ const BOOLEAN_FLAGS = new Set([
   "typecheck",
   "coverage",
   "repair",
+  // Both `findings --ledger` and `discharge --ledger` take no value. Declaring
+  // it keeps `--ledger` from swallowing the next token as one.
+  "ledger",
 ]);
 
 export function parseArgv(argv: string[]): Parsed {
@@ -276,6 +301,39 @@ export function runCli(
     return env.degraded.length > 0 ? EXIT_DEGRADED : EXIT_OK;
   }
 
+  if (command === "discharge") {
+    // A SURVEY branch's `until_bash`, and the same contract as `probes` and
+    // `findings`: its non-zero exit is the LOOP condition, not a failure, so it
+    // is deliberately NOT wrapped by `--never-fail`.
+    const family = stringFlag(flags.family);
+    if (!family) {
+      // The `$LL_FAMILY` bug, refused at the door: WP3's first design gated on
+      // a variable nothing set, so the test read `hypotheses/.jsonl`, failed
+      // forever, and the loop burned every iteration against a condition that
+      // meant nothing. An empty --family must break loudly, never quietly pass.
+      io.err("--family <f> is required (the survey branch's family)");
+      return EXIT_UNAVAILABLE;
+    }
+    const result = checkDischarge({
+      dir: stringFlag(flags.dir) ?? ".lastlight/pr-review",
+      family,
+      log,
+    });
+
+    // `--ledger` is the CHECKLIST mode and its caller is the SURVEY ITSELF
+    // rather than the harness, so it **always exits 0** — the gate's non-zero
+    // "iterate again" would read inside an agent's own bash tool as a tool
+    // failure. Same reading of the same files, two audiences, two exit
+    // contracts. It writes nothing; neither does the gate.
+    if (flags.ledger === true) {
+      io.out(renderDischargeLedger(result));
+      return EXIT_OK;
+    }
+
+    io.out(renderDischargeCheck(result));
+    return dischargeExitCode(result);
+  }
+
   if (command === "probes") {
     // The `falsify` loop's `until_bash`. NOT wrapped by `--never-fail`: its
     // non-zero exit is the loop condition, not a failure — the phase around it
@@ -367,7 +425,7 @@ export function runCli(
 
   if (!EXTRACTORS.includes(command as ExtractorName)) {
     io.err(
-      `unknown command "${command}". One of: ${EXTRACTORS.join(", ")}, seed, prepare, probes, findings, toolchain`,
+      `unknown command "${command}". One of: ${EXTRACTORS.join(", ")}, seed, prepare, discharge, probes, findings, toolchain`,
     );
     return EXIT_UNAVAILABLE;
   }

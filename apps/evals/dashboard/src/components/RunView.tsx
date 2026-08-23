@@ -6,12 +6,14 @@ import { fmtDate, modelLabel } from "../lib/format";
 import { summarizeModels } from "../lib/summarize";
 import { CompareTable } from "./CompareTable";
 import { InstanceTable } from "./InstanceTable";
+import { MetaStrip } from "./MetaStrip";
+import { MicroPanel } from "./MicroPanel";
 import { LiveBadge, RunTypeBadge } from "./ui";
 import { useTheme } from "../hooks/useTheme";
 
 /** One run's full scorecard: tier tabs, each with a model-comparison table and
  * the per-instance detail rows. Live runs poll + show running/queued rows. */
-export function RunView({ run }: { run: IndexRun }) {
+export function RunView({ run, onShowRepeats }: { run: IndexRun; onShowRepeats?: () => void }) {
   const { data: card, isLoading, error } = useScorecard(run.scorecard, run.live);
   const labels = card?.meta?.labels ?? run.labels;
   const results = card?.results ?? [];
@@ -73,6 +75,16 @@ export function RunView({ run }: { run: IndexRun }) {
           )}
           &nbsp;·&nbsp; {fmtDate(card?.meta?.generatedAt ?? run.generatedAt)}
         </div>
+        {onShowRepeats && (
+          <button
+            onClick={onShowRepeats}
+            title="Read this arm as a band across its repeats — mean/min/max, union and intersection recall, and the per-gold hit matrix."
+            className="mt-3 mr-3 inline-flex items-center gap-1.5 rounded-lg border border-info/40 bg-info/10 px-3 py-1.5 font-mono text-xs text-info transition-colors hover:bg-info/20"
+          >
+            <span className="font-bold">repeats</span>
+            <span className="text-info/70">band · union/intersection · hit matrix</span>
+          </button>
+        )}
         {tier === "pr-review" && card?.meta?.martian?.models[0] && (
           <button
             onClick={() => document.getElementById("martian-rank")?.scrollIntoView({ behavior: "smooth", block: "start" })}
@@ -94,6 +106,12 @@ export function RunView({ run }: { run: IndexRun }) {
         <Loading />
       ) : (
         <>
+          <MetaStrip
+            meta={card?.meta}
+            results={results}
+            labels={labels}
+            fallback={{ gitSha: run.gitSha, models: [...new Set(results.map((r) => r.model))] }}
+          />
           {tiers.length > 1 && (
             <nav className="mb-4 flex flex-wrap gap-2">
               {tiers.map((t, i) => (
@@ -129,14 +147,18 @@ export function RunView({ run }: { run: IndexRun }) {
               <p className="mt-2 text-2xs leading-5 text-base-content/50">
                 An LLM judge matches the posted review against a human-verified gold set of real issues, giving{" "}
                 <span className="text-base-content/70">precision</span> (matched ÷ posted) and{" "}
-                <span className="text-base-content/70">recall</span> (matched ÷ gold), combined as{" "}
+                <span className="text-base-content/70">recall</span> (matched ÷ gold). The headline is{" "}
+                <b className="font-semibold text-base-content/70">micro-recall</b> — those counts summed across cases
+                and divided once, guarded by <b className="font-semibold text-base-content/70">SNR</b> rather than
+                precision, because the pipeline is deliberately tuned to over-produce. The per-case mean of{" "}
                 <b className="font-semibold text-base-content/70">F{reviewBeta}</b>
                 {reviewBeta === 1 ? (
-                  <> — the F-beta with <span className="font-mono">β=1</span> (equal weight), matching the benchmark leaderboard</>
+                  <> (β=1, the benchmark leaderboard's metric)</>
                 ) : (
-                  <> — the F-beta with <span className="font-mono">β={reviewBeta}</span> (via <span className="font-mono">EVAL_F_BETA</span>; β&lt;1 weights precision higher)</>
-                )}
-                . Click <b className="font-semibold text-base-content/70">judge</b> on any row to inspect the match. Cases
+                  <> (β={reviewBeta} via <span className="font-mono">EVAL_F_BETA</span>; β&lt;1 weights precision higher)</>
+                )}{" "}
+                is kept beside it as a secondary number: it weights a 1-gold case like a 6-gold one and scores 1.00 on
+                a case with no gold at all. Click <b className="font-semibold text-base-content/70">judge</b> on any row to inspect the match. Cases
                 come from the offline set of{" "}
                 <a
                   href="https://github.com/withmartian/code-review-benchmark"
@@ -151,6 +173,8 @@ export function RunView({ run }: { run: IndexRun }) {
             </details>
           )}
           <CompareTable models={models} tier={tier} labels={labels} axisLabel={isConfig ? "Config" : "Model"} />
+
+          {tier === "pr-review" && <MicroPanel models={models} labels={labels} />}
 
           {isConfig && <PhaseModelPanel results={tierResults} labels={labels} />}
 

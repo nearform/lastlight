@@ -166,6 +166,34 @@ const FanoutBranchSchema = z
     until_bash: z.string().optional(),
     /** Per-branch timeout for `until_bash` (seconds). */
     timeout_seconds: TemplatedNumberSchema.optional(),
+    /**
+     * A workspace file whose CONTENTS are appended to this branch's rendered
+     * prompt — resolved **relative to the agent's own working directory** and
+     * read by the harness, never by the model.
+     *
+     * **This exists because a path in a prompt is not a path.** Measured across
+     * three stored pr-review runs (2026-08-22): of 120 non-spec survey branches,
+     * 27 first-turn reads of the per-family obligations file went to
+     * `<workspaceRoot>/.lastlight/…` instead of `<checkout>/.lastlight/…` and
+     * hit ENOENT; 23 of those branches never recovered. Every single failure
+     * was the workspace-root ABSOLUTE form and every one of the 98 relative
+     * reads succeeded — the model was joining the prompt's relative path onto
+     * the only absolute base it had been handed at that point, the skill bundle
+     * (`<workspaceRoot>/.lastlight-skills/<phase>/<skill>/SKILL.md`), which sits
+     * one level ABOVE the checkout. Those branches then took the prompt's
+     * "if the file does not exist, work the diff directly" escape hatch, so a
+     * SEEDED pass silently became an unseeded one and which questions got asked
+     * varied per run.
+     *
+     * Appending the bytes removes the resolution from the model entirely: the
+     * harness reads the file at the same base the deterministic phases wrote it
+     * (`ProvisionResult.hostAgentCwd`, the host view of the very `cwd` a
+     * `type: bash` phase runs in), so the producer and the consumer cannot
+     * disagree about where the file is. A file the harness cannot read appends a
+     * LOUD notice naming the path instead — "nobody looked" never renders as
+     * "looked and found none".
+     */
+    context_file: z.string().optional(),
   })
   .refine((b) => !(b.skill && b.skills), {
     message: "a fanout branch cannot specify both `skill` and `skills`",

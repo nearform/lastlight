@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { getWorkflow, loadPromptTemplate } from "#src/workflows/loader.js";
+import { BRANCH_CONTEXT_HEADING } from "#src/workflows/handlers/fanout.js";
 import { renderTemplate } from "lastlight-workflow-engine";
 import type { PhaseDefinition, TemplateContext } from "lastlight-workflow-engine";
 import type { PrState } from "#src/engine/pr-state.js";
@@ -98,20 +99,46 @@ describe("AC3 — six survey branches, six disjoint families", () => {
     expect(new Set(prompts).size).toBe(FAMILIES.length);
   });
 
-  it("gates each branch on ITS OWN hypothesis file, and the six gates are pairwise distinct", () => {
+  it("gates each branch on ITS OWN family, and the six gates are pairwise distinct", () => {
     // This is the literal-gate property §D4 was rewritten for: the previous
     // `generic_loop` design templated `$LL_FAMILY` into the gate, `until_bash`
     // rejects template markers, and the gate silently tested
     // `hypotheses/.jsonl` — a condition that could never be true — while the
-    // loop burned every iteration. A literal path per branch is what makes the
+    // loop burned every iteration. A literal family per branch is what makes the
     // gate real rather than decorative.
     const gates = FAMILIES.map((f) => surveyBranch(f).until_bash?.trim());
-    expect(gates).toEqual(
-      FAMILIES.map((f) => `test -s .lastlight/pr-review/hypotheses/${f}.jsonl`),
-    );
     expect(new Set(gates).size).toBe(FAMILIES.length);
     // No templating anywhere in a gate — the failure mode above, pinned.
     for (const g of gates) expect(g).not.toContain("{{");
+    // Each gate names its own family and no other's.
+    for (const f of FAMILIES) {
+      const gate = surveyBranch(f).until_bash ?? "";
+      expect(gate).toContain(f);
+      for (const other of FAMILIES) if (other !== f) expect(gate).not.toContain(other);
+    }
+  });
+
+  it("gates the five SEEDABLE families on `discharge`, not on a file merely existing", () => {
+    // `test -s` is passed by ONE LINE OF ANY CONTENT, while the obligations
+    // block demands a QUOTE/ABSENT/PARTIAL/PROBE discharge per obligation.
+    // Measured across both preserved runs of 2026-08-22, all 8 cases, every
+    // family: not one obligation ever carried a discharge code (0/31, 0/34,
+    // 0/40). It also lets a branch that LOST its seed and free-styled clear the
+    // gate, which is the hole `context_file` cannot close from its end.
+    for (const f of ["contract", "enforcement", "security", "state", "tests"]) {
+      const gate = surveyBranch(f).until_bash ?? "";
+      expect(gate).toContain(`discharge --dir .lastlight/pr-review --family ${f}`);
+      expect(gate).not.toContain("test -s");
+      // §D1's resolution order, in shell — the binary is reached three ways
+      // depending on where this runs and a bare name is not on PATH everywhere.
+      expect(gate).toContain("LASTLIGHT_FACTS_BIN");
+    }
+    // `spec` keeps `test -s`: its obligations are built harness-side and never
+    // reach `obligations.json`, so a discharge gate there grades nothing. If
+    // that ever changes, this expectation is the reminder to wire it.
+    expect(surveyBranch("spec").until_bash?.trim()).toBe(
+      "test -s .lastlight/pr-review/hypotheses/spec.jsonl",
+    );
   });
 
   it("keeps the `security` skill set on the branch that needs it, and only there", () => {
@@ -277,22 +304,63 @@ describe("AC4 — what was NOT analysed reaches the model", () => {
     expect(byName.get("seed")!.command).toContain("|| true");
   });
 
-  it("agrees with the prompts on where the per-family blocks are written", () => {
-    // The seeder's `--blocks <dir>` and the path each prompt tells the model to
-    // open are two independent strings for one location. If they part company
-    // the model finds nothing, reports the family clean, and the run says a
-    // degraded analysis was a passing one.
+  it("agrees with the branches on where the per-family blocks are written", () => {
+    // The seeder's `--blocks <dir>` and the file each branch is seeded FROM are
+    // two independent strings for one location. If they part company the pass
+    // runs unseeded, reports the family clean, and the run says a degraded
+    // analysis was a passing one.
     const seed = byName.get("seed")!.command!;
     const blocksDir = /--blocks\s+(\S+)/.exec(seed)?.[1];
     expect(blocksDir).toBe(".lastlight/pr-review/obligations");
     expect(seed).toContain("--out .lastlight/pr-review/obligations.json");
 
     for (const family of BLOCK_FAMILIES) {
-      expect(promptText(family), `survey-${family}.md`).toContain(`${blocksDir}/${family}.md`);
+      expect(surveyBranch(family).context_file, family).toBe(`${blocksDir}/${family}.md`);
     }
     // The `spec` family is built harness-side from the PR body and the linked
     // issues, so it has no block on disk and must not claim one.
+    expect(surveyBranch("spec").context_file).toBeUndefined();
     expect(promptText("spec")).not.toContain(blocksDir!);
+  });
+
+  /**
+   * The regression guard for the defect this key exists to close.
+   *
+   * Across the three stored pr-review runs of 2026-08-22, 27 of 120 non-spec
+   * survey branches resolved `obligations/<family>.md` against the SANDBOX ROOT
+   * rather than the checkout and hit ENOENT; 23 never recovered. Every failure
+   * used the workspace-root absolute form and all 98 relative reads succeeded —
+   * the model was joining the prompt's relative path onto the one absolute base
+   * it had at that point, the skill bundle, which sits one level above the
+   * checkout. The fix is that there is no path in the prompt to resolve: the
+   * harness reads the file at `hostAgentCwd` and appends it.
+   *
+   * So the assertion is an ABSENCE, and it is deliberately about the artifact
+   * the pass READS, not the one it writes — the hypotheses path stays in the
+   * prompt because the model genuinely has to write it.
+   */
+  it("hands the block to the pass instead of a path — no obligations path survives in a prompt", () => {
+    for (const family of BLOCK_FAMILIES) {
+      const text = promptText(family);
+      expect(text, `survey-${family}.md`).not.toContain(".lastlight/pr-review/obligations");
+      // The pass is told where its obligations actually are — the heading the
+      // fan-out handler files them under — and told not to go looking.
+      expect(text, `survey-${family}.md`).toContain(BRANCH_CONTEXT_HEADING);
+      expect(text, `survey-${family}.md`).toContain("Do not go looking for them on disk");
+    }
+  });
+
+  it("keeps the seeder's per-family manifest, so a missing block is a LOGGED fact", () => {
+    // `renderFamilyBlock` always emits a block, so a family with no line here is
+    // a seeder failure rather than a family with nothing to say — and the two
+    // used to be the same silence.
+    const seed = byName.get("seed")!.command!;
+    for (const family of BLOCK_FAMILIES) expect(seed, family).toContain(family);
+    expect(seed).toContain("block MISSING");
+    expect(seed).toContain("will run UNSEEDED");
+    // …and it still cannot fail the run: a hard-failing phase is re-dispatched
+    // by cron-review.yaml every thirty minutes, forever (§D12).
+    expect(seed).toContain("exit 0");
   });
 
   it("tells each block-reading pass that a missing or unmeasured block is NOT a clean result", () => {
@@ -362,9 +430,26 @@ function renderSurveySpec(state: PrState): string {
 describe("AC4 — the `spec` family's degraded state propagates all the way to the prompt", () => {
   it("carries a full obligation set into the rendered prompt", () => {
     const rendered = renderSurveySpec(prState());
-    expect(rendered).toContain("SPEC AXIS");
+    // The family-title line, in `renderFamilyBlock`'s own format
+    // (`=== CONTRACT — … ===`) rather than a sixth spelling of it.
+    expect(rendered).toContain("=== SPEC — does this change do what was asked? ===");
     expect(rendered).toContain("Expiry is enforced server-side on every request");
     expect(rendered).toContain("src/server/auth.ts");
+  });
+
+  it("delivers the discharge contract and the row shape into the PROMPT, not just the block", () => {
+    // The `spec` branch is the one family with no `context_file`: its
+    // obligations arrive as `{{specObligations}}` template context. So the
+    // contract only reaches the model if the substitution carries it — which is
+    // the half that had no test, and the half that was empty. Measured on
+    // `prreview__skillspro-1587-r2`: `spec.jsonl` rows carried `verdict`, a
+    // field no gate reads, because the block prescribed no row at all.
+    const rendered = renderSurveySpec(prState());
+    expect(rendered).toContain('"discharge": "QUOTE|ABSENT|PARTIAL|PROBE"');
+    expect(rendered).toContain("hypotheses/spec.jsonl");
+    for (const code of ["QUOTE", "ABSENT", "PARTIAL", "PROBE"]) expect(rendered, code).toContain(code);
+    // Its own obligation ids, as the checklist no `discharge --ledger` can print.
+    expect(rendered).toContain("S-1");
   });
 
   it("tells the model what could NOT be looked at when the changed-file read failed", () => {

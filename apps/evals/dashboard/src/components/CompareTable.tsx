@@ -1,5 +1,5 @@
 import type { ModelSummary } from "../types";
-import { fmtMs, fmtTokens, modelLabel, rankModels, tierMetric } from "../lib/format";
+import { fbetaLabel, fmtMs, fmtPct, fmtRatio, fmtTokens, modelLabel, rankModels, tierMetric } from "../lib/format";
 import { Bar } from "./ui";
 
 /** Comparison table for one tier: arms (models, or configs in a `config` run) as
@@ -21,6 +21,7 @@ export function CompareTable({
   const reviewBeta = models.find((m) => m.reviewBeta !== undefined)?.reviewBeta ?? 1;
   const metric = tierMetric(tier, reviewBeta);
   const ranked = rankModels(models, metric);
+  const isReview = tier === "pr-review";
 
   const bestRate = Math.max(0, ...ranked.map(metric.rate));
   const costs = ranked.filter((m) => m.totalCostUsd > 0).map((m) => m.totalCostUsd);
@@ -38,6 +39,25 @@ export function CompareTable({
             <th className="w-8 px-3 py-3 text-center font-semibold">#</th>
             <th className="px-3 py-3 text-left font-semibold">{axisLabel.toLowerCase()}</th>
             <th className="px-3 py-3 text-left font-semibold">{metric.label} →</th>
+            {isReview && (
+              <>
+                <th className="px-3 py-3 text-right font-semibold" title="matched ÷ (posted − matched) — true positives per false positive. The over-generation guardrail that replaces precision.">
+                  snr →
+                </th>
+                <th className="px-3 py-3 text-right font-semibold" title="matched ÷ posted, micro-aggregated">
+                  µ-prec
+                </th>
+                <th className="px-3 py-3 text-right font-semibold" title="Posted findings per graded PR — the attention bill.">
+                  cmts/pr
+                </th>
+                <th
+                  className="px-3 py-3 text-right font-normal text-neutral-content/40"
+                  title="Secondary: the MEAN of per-case F-beta. Weights a 1-gold case like a 6-gold one and scores 1.00 on an empty-gold case; kept for the Martian leaderboard comparison."
+                >
+                  {fbetaLabel(reviewBeta)} mean
+                </th>
+              </>
+            )}
             <th className="px-3 py-3 text-left font-semibold">total cost ↓</th>
             <th className="px-3 py-3 text-left font-semibold">p50 latency ↓</th>
             <th className="px-3 py-3 text-right font-semibold">avg in/cached/out tok</th>
@@ -56,9 +76,23 @@ export function CompareTable({
                 <td className="whitespace-nowrap px-3 py-2.5 font-mono font-semibold text-accent">
                   {modelLabel(labels, m.model)}
                 </td>
-                <td className="w-[22%] min-w-[140px] px-3 py-2.5">
+                <td className="w-[22%] min-w-[160px] px-3 py-2.5">
                   <Bar frac={rate} value={metric.frac(m)} color="accent" best={isBestRate} />
                 </td>
+                {isReview && (
+                  <>
+                    <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono">{fmtRatio(m.micro?.snr, 2)}</td>
+                    <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono text-base-content/70">
+                      {fmtPct(m.micro?.microPrecision)}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono text-base-content/70">
+                      {m.micro ? m.micro.commentsPerPr.toFixed(1) : "—"}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono text-base-content/40">
+                      {m.reviewTotal ? m.avgFbeta.toFixed(3) : "—"}
+                    </td>
+                  </>
+                )}
                 <td className="w-[22%] min-w-[140px] px-3 py-2.5">
                   <Bar frac={maxCost ? m.totalCostUsd / maxCost : 0} value={`$${m.totalCostUsd.toFixed(3)}`} color="info" best={isBestCost} />
                 </td>

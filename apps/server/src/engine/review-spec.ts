@@ -81,7 +81,12 @@ export interface AcceptanceCriterion {
  * could flip would invite a caller to emit a half-verified obligation.
  */
 export interface SpecObligation {
-  /** `S-1`, `S-2`, … — stable within one PR, referenced by the agent's verdict. */
+  /**
+   * `S-1`, `S-2`, … — stable within one PR, and the id a hypothesis row names in
+   * its `obligation` field. Never the row's own id: that is `spec-001`,
+   * `spec-002`, … , assigned from the FILENAME by
+   * `packages/code-facts/src/hypotheses.ts` whatever the model writes.
+   */
   id: string;
   /** END ONE: what was asked, quoted. */
   criterion: string;
@@ -432,6 +437,221 @@ export function buildSpecObligations(inputs: SpecInputs): SpecObligationSet {
 // ---------------------------------------------------------------------------
 
 /**
+ * The discharge contract, and it is `renderFamilyBlock`'s VERBATIM in every part
+ * that is about *how to answer*, not about *what is being asked*.
+ *
+ * `packages/code-facts/src/seed-render.ts` says why in its own words: the
+ * questions differ per family, *the rule for answering one must not*, "or a
+ * family becomes cheaper to discharge than its neighbour and the funnel stops
+ * being comparable". This family had drifted on every clause of that rule at
+ * once — a different code set, no row shape at all, no id checklist, no
+ * exemplar — so `spec` was not a sixth family running the same contract, it was
+ * a second contract wearing the same word.
+ *
+ * ── The four codes, and the fifth one that is gone ──────────────────────────
+ *
+ * This block used to offer **`N/A`** — "the criterion is not about code in this
+ * PR" — in place of `PROBE`. Both halves of that swap were wrong:
+ *
+ *   - `N/A` is not one of `DISCHARGE_CODES` (`packages/code-facts/src/discharge.ts`),
+ *     so the moment `spec` is graded by the same gate as its five siblings every
+ *     `N/A` row lands `bad-code` and the branch burns every iteration it has
+ *     against a gate it cannot satisfy. That is WP3's `$LL_FAMILY` bug rebuilt
+ *     out of vocabulary instead of shell.
+ *   - `PROBE` was missing, and it is the code this family needs MOST. "The
+ *     endpoint returns 429 once the caller exceeds ten requests" is an
+ *     acceptance criterion that cannot be settled by reading and can be settled
+ *     by running — which is precisely what WP4's `falsify` phase exists for. A
+ *     spec pass could not ask for one.
+ *
+ * The out-of-scope case the fifth code served is real and it keeps an answer:
+ * `ABSENT` is *factually* what it is — no changed file implements it — written
+ * at `severity: "Minor"` with `failureScenario: null` and the reason in `claim`.
+ * The code records WHAT WAS FOUND; `severity` records how much it matters, and
+ * the adjudicator decides what is worth posting. That is the same division of
+ * labour the five siblings already run on ("A clean QUOTE gets a row too").
+ */
+const SPEC_DISCHARGE = [
+  "DISCHARGE EVERY OBLIGATION BELOW. Exactly one of:",
+  "",
+  "  QUOTE   — `path:line` and the line's text, in a CHANGED file, that implements the criterion. This is",
+  "            the only clean discharge.",
+  "  ABSENT  — you read every candidate and no changed file implements it. THAT IS A FINDING: raise it,",
+  "            anchored to the closest changed line, and say what was asked.",
+  "  PARTIAL — implemented for some inputs or paths and not others. Quote the line AND name the gap.",
+  "  PROBE   — it cannot be settled by reading, only by RUNNING something. Record it and say what you",
+  '            would run. "returns 429 once the caller exceeds ten requests" is exactly that shape.',
+  "",
+  "Reading a file is not a discharge. Summarising the code is not a discharge. Quote a line, or say it is",
+  "absent. The code goes in the row's `discharge` field — the shape, and every id that needs one, are at",
+  "the end of this block.",
+  "",
+  "THERE IS NO FIFTH CODE. A criterion that turns out not to be about code in this PR — a follow-up, a",
+  "process step, a promise about docs — is still ABSENT: it is factually true that no changed file",
+  'implements it. Write it at `severity: "Minor"` with `failureScenario: null` and say in `claim` why it',
+  "was out of scope. The four codes record WHAT YOU FOUND; `severity` records how much it matters, and a",
+  "later phase decides what is worth posting. A code outside the four puts the row outside every gate.",
+  "",
+  "OVER-PRODUCE. A plausible mechanism you cannot yet refute is a hypothesis, not noise — a later phase runs a",
+  "probe and a stronger model adjudicates, and both can only remove. Nothing downstream can recover a mechanism",
+  "you declined to write down, so the cost of a wrong hypothesis here is far below the cost of a missing one.",
+];
+
+/**
+ * The one worked exemplar, and — as in `renderFamilyBlock` — the only positive
+ * example this family's prompt carries.
+ *
+ * **It is the same real defect the sibling exemplar is built from**
+ * (`prreview__skillspro-1587-r2`: `SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS` reaches
+ * the browser as a cookie `maxAge` and is never compared server-side), restated
+ * on THIS axis — the issue asked for a 5-minute lifetime, and the PR delivers
+ * one only for a client that chooses to honour it. It is a real finding cast
+ * into this family's shape, not a row lifted out of a real `spec` pass; no
+ * measured `spec.jsonl` has ever carried a shape worth copying, which is the
+ * defect this whole block is fixing.
+ *
+ * **It is `PARTIAL` and that is the entire lesson**, for the same measured
+ * reason: the run discharged the underlying obligation `QUOTE` against a line
+ * that MENTIONS the constant and compares nothing, looked perfectly discharged,
+ * and reported nothing.
+ *
+ * Emitted as ONE line via `JSON.stringify`, because that is the shape a JSONL
+ * file wants. Key order is load-bearing in one small way: no nested object may
+ * be LAST, or the serialised row ends `}}` — and unlike its five siblings this
+ * block is substituted into a prompt through `renderTemplate`, whose leftover-
+ * marker guard scans the rendered output for exactly that. `review-spec.test.ts`
+ * pins it.
+ */
+const SPEC_EXAMPLE_ROW = {
+  id: "spec-001",
+  obligation: "S-1",
+  discharge: "PARTIAL",
+  family: "spec",
+  claim:
+    "the issue asks for a 5-minute nonce lifetime enforced server-side; the change sets it as a cookie maxAge and never compares issuedAt against it",
+  bothEnds: {
+    introducedAt: "issue #1587",
+    enforcedAt: "packages/backend/src/routes/auth.ts:95",
+  },
+  path: "packages/backend/src/routes/auth.ts",
+  quotes: [
+    {
+      path: "packages/backend/src/routes/auth.ts",
+      line: 95,
+      text: "      maxAge: SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS",
+    },
+  ],
+  existingCode: "maxAge: SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS",
+  failureScenario:
+    "a scripted client, a browser with clock skew or a proxy replaying the header keeps the cookie past its stated expiry; nothing server-side compares issuedAt, so the criterion is met only by a client that chooses to honour it and the replay window is unbounded rather than 5 minutes",
+  needsProbe: false,
+  severity: "Critical",
+  confidence: 0.6,
+};
+
+/** The outstanding-id list, wrapped rather than truncated. `seed-render.ts`'s. */
+const IDS_LINE_WIDTH = 100;
+
+/**
+ * Every id, WRAPPED — never capped.
+ *
+ * A second copy of `seed-render.ts`'s `wrapIds` rather than an import, because
+ * `lastlight-core` has no dependency edge to `lastlight-code-facts` and must not
+ * grow one for a string helper. The property it exists for is *not* the wrapping
+ * — it is that a truncated checklist reproduces the exact omission it exists to
+ * prevent.
+ */
+function wrapIds(ids: string[]): string[] {
+  const lines: string[] = [];
+  let row: string[] = [];
+  let width = 0;
+  for (const id of ids) {
+    if (row.length > 0 && width + 1 + id.length > IDS_LINE_WIDTH) {
+      lines.push(`  ${row.join(" ")}`);
+      row = [];
+      width = 0;
+    }
+    width += (row.length > 0 ? 1 : 0) + id.length;
+    row.push(id);
+  }
+  if (row.length > 0) lines.push(`  ${row.join(" ")}`);
+  return lines;
+}
+
+/**
+ * The prescribed row shape — the half of the contract that did not exist.
+ *
+ * `renderSpecObligations` named the four codes and then prescribed **no row at
+ * all**: `survey-spec.md` said *"in the shape the obligations block specifies"*
+ * and the block specified none. Measured on `prreview__skillspro-1587-r2`, the
+ * five seedable families produced
+ * `{"obligation":"O-014","discharge":"QUOTE","quotes":[…],…}` and 33 of 33
+ * obligations discharged; `spec` invented `{"obligation":"S-1","verdict":"QUOTE",
+ * "path":…,"line":37,"rationale":…}` — a field name no gate reads — and a
+ * differently-invented nested shape on the preserved runs of the day before.
+ * A model asked for a shape nothing describes writes a new one per run.
+ *
+ * It is emitted from BOTH branches of the renderer (obligations, and none) for
+ * the reason the module header gives: the instruction and the mechanism it
+ * governs must not be separable, and a degraded pass still has to record what it
+ * did in a shape something can read.
+ *
+ * **`discharge`, never `verdict`.** It is the spelling `checkDischarge` reads,
+ * and `verdict` is already this file's name for the `findings.json` `{spec,
+ * standards}` object — one word for two concepts, one of which the survey is
+ * explicitly forbidden from writing, is how the measured row got its field name.
+ */
+function rowShape(family = "spec"): string[] {
+  return [
+    `Append one JSON object per obligation to .lastlight/pr-review/hypotheses/${family}.jsonl — one line each:`,
+    "",
+    `  { "id": "${family}-001", "obligation": "S-1", "discharge": "QUOTE|ABSENT|PARTIAL|PROBE",`,
+    `    "family": "${family}", "claim": "…",`,
+    '    "bothEnds": { "introducedAt": "issue #1587" | "the PR body", "enforcedAt": "path:line" | null },',
+    '    "path": "the changed file this row is about",',
+    '    "quotes": [ { "path": "…", "line": 12, "text": "the line, verbatim" } ],',
+    '    "existingCode": "the verbatim excerpt this is about",',
+    '    "failureScenario": "what input or state makes this behave wrongly, and what it does then" | null,',
+    '    "needsProbe": false, "severity": "Critical|Important|Minor", "confidence": 0.0-1.0 }',
+    "",
+    "`obligation` names WHICH one and `discharge` is its ANSWER — one of the four codes, uppercase. Listing",
+    "an obligation without a `discharge` discharges nothing. `bothEnds` names both ends the same way the",
+    "obligation does: end one is WHERE THE CRITERION WAS ASKED (an issue, or the PR body — this family's",
+    "first end is a document, not a code site), end two is `path:line` in a changed file, or `null` when",
+    "there is none. `path` is the changed file the row is about, and it is what makes a recorded claim",
+    "navigable when the first end is not a path.",
+  ];
+}
+
+/** The rules that travel with the row shape, in `renderFamilyBlock`'s words. */
+const ROW_RULES = [
+  "A clean QUOTE gets a row too. That row is the RECORD that the criterion was answered, not a finding you",
+  'are proposing — write it at `severity: "Minor"` and let a later phase decide what is worth posting.',
+  "",
+  "`failureScenario` is REQUIRED on every row that claims a defect — ABSENT, PARTIAL, PROBE, or a QUOTE you",
+  "are raising: *what input or state makes this behave wrongly, and what does it do then?* A finding with no",
+  "concrete failure scenario is an opinion. On a clean QUOTE write `null`: a criterion that IS implemented",
+  "has no failure scenario, and demanding prose there manufactures fiction. It is a SHAPE requirement and",
+  "NOT a bar — nothing anywhere drops a hypothesis for a thin scenario, so write the weakest honest one",
+  "rather than dropping the row, because a row you decline to write is the one thing no later phase can",
+  "recover.",
+];
+
+/** The hard limits, identical in substance to every other family's block. */
+const HARD_LIMITS = [
+  "`id` is `spec-001`, `spec-002`, … — numbered within THIS family. Six passes append to six files and none",
+  "of them can see another's, so a bare `H-001` collides with whatever another family minted and credits",
+  "neither claim. The id is namespaced so that cannot happen.",
+  "",
+  "`quotes` must be REAL text at REAL lines — a later phase checks that they resolve, and a claim whose quote",
+  "does not resolve is discarded whatever its reasoning. `existingCode` is how the finding gets anchored:",
+  "quote the code, do not count the lines. Do NOT write findings.json, do NOT post a review, and do NOT",
+  "reason about any family other than spec — another pass owns each of the others. The SPLIT VERDICT that",
+  "findings.json carries per axis is the ADJUDICATOR's to write, off the rows you leave behind; a survey",
+  "that wrote it would be writing the one file it was explicitly told not to own.",
+];
+
+/**
  * Render the block the reviewing agent reads as `{{specObligations}}`.
  *
  * **Emitted from code, not from a prompt template**, for the same reason
@@ -442,24 +662,65 @@ export function buildSpecObligations(inputs: SpecInputs): SpecObligationSet {
  * completed, zero findings — and the arm would read as "the spec axis does not
  * work".
  *
+ * ── What this family legitimately does differently, and what it does not ────
+ *
+ * It is the sixth branch of a six-branch survey and everything about *how a
+ * question is answered* is now `renderFamilyBlock`'s, verbatim where it can be:
+ * the four codes, the prescribed row and its field names, `failureScenario`
+ * REQUIRED but `null` on a clean QUOTE, the un-truncated id checklist, one
+ * worked exemplar, the id namespacing, and the hard limits. Three things stay
+ * different **because the inputs are**:
+ *
+ *   1. The obligations come from the PR body and the linked issues, not from
+ *      `facts.json` — so an obligation carries a `criterion` + `source` rather
+ *      than a `mechanism` + `introducedAt`, and there is no `expects:` line
+ *      (nothing predicts whether a criterion is quote- or probe-answerable).
+ *   2. They are built harness-side and never reach `obligations.json`, so there
+ *      is no `lastlight-facts discharge --ledger` to point at. The block says
+ *      that in those words — otherwise the missing pointer reads as an
+ *      oversight — and the id list below IS the checklist.
+ *   3. It is delivered as `{{specObligations}}` template context rather than a
+ *      `context_file`, because there is no file on disk to attach. That is why
+ *      nothing in this block may contain `{{` or `}}`: unlike its five siblings
+ *      it goes through `renderTemplate`, whose leftover-marker guard would flag
+ *      them.
+ *
  * Returns `""` when there is nothing to say AND nothing degraded, so the caller
  * can omit the key entirely; a degraded set still renders, because
  * "we could not look" and "we looked and it is fine" are different facts
- * (locked decision 6).
+ * (locked decision 6). This is the one place `renderFamilyBlock`'s never-empty
+ * rule is not copied, and the reason is that its purpose is served elsewhere: a
+ * family block's ABSENCE is ambiguous because it is a FILE, while this key's
+ * absence fires `survey-spec.md`'s own fallback. **It is also unreachable from
+ * {@link buildSpecObligations}**, which pushes a `degraded[]` reason on every
+ * path that returns no obligation.
  */
 export function renderSpecObligations(set: SpecObligationSet): string {
   if (set.obligations.length === 0 && set.degraded.length === 0) return "";
 
   const lines: string[] = [];
-  lines.push("=== SPEC AXIS — does this change do what was asked? ===");
+  lines.push("=== SPEC — does this change do what was asked? ===");
   lines.push("");
 
   if (set.obligations.length === 0) {
     lines.push(`No spec obligations could be built: ${set.degraded.join("; ")}.`);
     lines.push("");
     lines.push(
-      "That is NOT a pass. Nothing has been checked on this axis, so record " +
-        '`"verdict": { "spec": "unknown", "standards": … }` in findings.json and say in one clause why.',
+      "That is NOT a pass and NOT a clean result. Nothing has been checked on this axis, so nothing here",
+      'may be read as "the change does what was asked". Read the PR body and the linked issues yourself:',
+      "if they state anything checkable, discharge it as an obligation of your own and say where you got",
+      "it. If they genuinely state nothing checkable, that is itself a review observation and it gets a",
+      "row — the change's intent is unstated.",
+      "",
+      "Record what you did either way, in the same shape a seeded pass uses. Do NOT record it in",
+      "findings.json: a later phase owns that file and writes the split verdict off these rows.",
+      "",
+      ...rowShape(),
+      "",
+      "No `S-` id exists for you to name, because none was built. Put the criterion you quoted for",
+      "yourself in `obligation` — or `null` when the row is about the absence of any criterion at all.",
+      "",
+      ...ROW_RULES,
     );
     return lines.join("\n");
   }
@@ -469,6 +730,8 @@ export function renderSpecObligations(set: SpecObligationSet): string {
     "axis, and it is the one a clean standards review cannot answer. Each obligation below names BOTH ends",
     "of the mechanism: an acceptance criterion quoted verbatim from the source that asked for it, and the",
     "changed files it could have landed in — with `found: false`, because nothing has been verified yet.",
+    "A seed naming one end measures WORSE than no seed at all (IRIS ablation: -3 against a baseline of 0),",
+    "which is why every entry below carries two ends and why none carries a verdict.",
     "",
     `Scope: this PR changes ${set.changedFileCount} file(s); each obligation lists the best-matching subset.`,
   );
@@ -480,18 +743,7 @@ export function renderSpecObligations(set: SpecObligationSet): string {
   }
   if (set.degraded.length > 0) lines.push(`Degraded: ${set.degraded.join("; ")}.`);
 
-  lines.push("", "DISCHARGE EVERY OBLIGATION. Exactly one of:", "");
-  lines.push(
-    "  QUOTE   — `path:line` and the line's text, in a CHANGED file, that implements the criterion.",
-    "  ABSENT  — you read the candidates and no changed file implements it. That is a finding: raise it",
-    "            (Critical or Important), anchored to the closest changed line, and say what was asked.",
-    "  PARTIAL — implemented for some inputs/paths and not others. Quote the line AND name the gap.",
-    "  N/A     — the criterion is not about code in this PR (docs, a follow-up, a process step). Say which.",
-    "",
-    "Reading a file is not a discharge, and neither is a summary. Quote a line, or say it is absent.",
-    "An obligation you cannot settle from the diff is `PARTIAL` with the reason — never a silent skip.",
-    "",
-  );
+  lines.push("", ...SPEC_DISCHARGE, "");
 
   for (const o of set.obligations) {
     lines.push(`${o.id}  (from ${o.source})`);
@@ -503,19 +755,29 @@ export function renderSpecObligations(set: SpecObligationSet): string {
   }
 
   lines.push(
-    "Then record the SPLIT VERDICT in .lastlight/pr-review/findings.json, beside `event`:",
+    ...rowShape(),
     "",
-    '  "verdict": { "spec": "pass" | "fail" | "unknown",',
-    '               "standards": "pass" | "fail" | "unknown" }',
+    `Every one of the ${set.obligations.length} obligations below needs a row of its own. None is optional:`,
+    ...wrapIds(set.obligations.map((o) => o.id)),
     "",
-    "  spec       — `fail` if any obligation above discharged ABSENT or PARTIAL; `pass` only when every",
-    "               one is QUOTE or N/A; `unknown` if you could not settle them from the diff.",
-    "  standards  — `fail` if you raised any Critical/Important finding from the code-review rubric;",
-    "               `pass` when you did the cross-file pass and found none.",
+    "There is no `lastlight-facts discharge --ledger` for this family and that is not an oversight: these",
+    "obligations are built by the harness from the PR body and the linked issues, so they never reach",
+    "`obligations.json` and no tool can tick them off for you. The list above IS your checklist. Count it.",
     "",
-    "A `fail` on EITHER axis stops this review being an APPROVE, whatever `event` says. That is the point:",
-    "a blended verdict lets the passing axis hide the failing one, and a change that is clean by every",
-    "standards check but does not do what was asked is exactly the case one event cannot express.",
+    ...ROW_RULES,
+    "",
+    "WORKED EXAMPLE — one row, in the shape yours must take. Copy the SHAPE, not the content: your rows",
+    "carry the `S-` ids listed above and this PR's criteria. It answers \"Quote the line that enforces the",
+    'five-minute nonce lifetime the issue asked for, or state that no changed file does.":',
+    "",
+    `  ${JSON.stringify(SPEC_EXAMPLE_ROW)}`,
+    "",
+    "PARTIAL, not QUOTE: `auth.ts:95` MENTIONS the constant and compares nothing against it — the cookie is",
+    "the only thing enforcing the lifetime, and a client is free not to honour it. A line that names a value",
+    "is not a line that enforces it, and that gap IS the finding. A run that called this one QUOTE looked",
+    "perfectly discharged and reported nothing.",
+    "",
+    ...HARD_LIMITS,
   );
 
   return lines.join("\n");

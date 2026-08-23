@@ -214,7 +214,15 @@ Phase kinds the runner recognises:
   backend it exists to speed up. No `approval_gate` (a fan-out cannot
   pause mid-flight) and no `loop:`/`generic_loop:` (the branches are the
   iteration shape). Isolation is by **disjoint output paths**, not
-  separate checkouts.
+  separate checkouts. A branch may also declare **`context_file`** — a
+  path relative to the AGENT'S CWD whose contents the harness reads and
+  appends to that branch's prompt, so the model resolves no path at all
+  (measured: 27 of 133 obligation reads across three stored `pr-review`
+  runs resolved against the workspace root instead of the checkout and
+  hit ENOENT). It resolves against `ProvisionResult.hostAgentCwd` — the
+  host end of the `cwd` a `type: bash` phase runs in — and an unreadable
+  path appends a loud NOT AVAILABLE notice rather than nothing. See
+  `spec/06-workflow-engine.md` → "`fanout`".
 - **loop-phase** — any phase with `loop:` set. Always executes as an
   agent phase internally, but repeated in `reviewer → fix → reviewer`
   pairs up to `max_cycles`. See loop iteration naming below.
