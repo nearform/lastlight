@@ -563,6 +563,10 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       maxInlineComments: analysis.maxInlineComments,
       thresholds: analysis.thresholds ?? {},
       internalFloor: analysis.internalFloor,
+      // Nullable on purpose — `null` is the documented "unlimited body
+      // overflow" value, so it must survive this projection rather than be
+      // defaulted away. `??` here would erase the operator's explicit choice.
+      maxBodyComments: analysis.maxBodyComments,
     };
   }
 

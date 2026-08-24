@@ -1573,6 +1573,11 @@ function shapeReviewAnalysis(raw: unknown, d: ReviewAnalysisConfig): ReviewAnaly
     // means "no bar for this family" rather than zero.
     thresholds: shapeThresholds(node.thresholds, d.thresholds),
     internalFloor: num(node.internalFloor, d.internalFloor),
+    // Nullable like `fix.maxCostUsd`: an explicit `null` is the documented
+    // "unlimited body overflow" value, distinct from an absent key (the
+    // shipped `0`). Operator-only like the rest of `review.analysis`, so this
+    // only ever projects the operator's answer into the merged view.
+    maxBodyComments: node.maxBodyComments === null ? null : num(node.maxBodyComments, d.maxBodyComments ?? 0),
   };
 }
 

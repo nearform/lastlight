@@ -211,7 +211,7 @@ Four families mint from the envelope, under four different conditions:
   scanner hit is **corroboration on an obligation that already exists, never
   the reason one exists** — the sink half comes from the impact cone exactly
   as `state`'s does.
-Two further rules are **opt-in via `review.analysis.mint`** (a comma-list;
+Two further rules are governed by **`review.analysis.mint`** — **both on by default** since the 2026-08-24 campaign measured them KEEP (a comma-list; `""` = the pre-D2 baseline four rules;
 threaded to the CLI as `seed --mint <spec>`, refused on any unknown token, and
 stamped into `obligations.json` as `minting: {allInDiff, registrations}`).
 They exist because every rule above requires references *outside* the diff, so
@@ -636,7 +636,7 @@ stale range paired with a fresh end line is a comment GitHub rejects.
 ### The boundary
 
 The `AttentionBoundary` — `maxInlineComments`, per-family confidence
-`thresholds`, `internalFloor` — exists **only** when the pipeline is on;
+`thresholds`, `internalFloor`, `maxBodyComments` — exists **only** when the pipeline is on;
 `undefined` routes `buildReview` through its no-boundary branch
 (anchorability is the only question, no cap, no `internal` tier). Preserving
 internal recall and spending a human's attention are two different budgets;
@@ -685,6 +685,20 @@ a different question:
    so a document with no confidences degenerates to severity order rather
    than being silently re-ranked under every scored finding), the top
    `maxInlineComments` go inline, the rest to the body.
+8. **The body budget** (`InternalReason: "body-budget"`): `maxBodyComments`
+   caps the FINAL body list — applied last, after the inline overflow has
+   landed there, so inline excess competes for body slots like everything
+   else and under a cap of 0 goes `internal` rather than to a body the cap
+   just closed. Same rank as step 7 (absent confidence = 1.0), sorted over a
+   copy so survivors keep document order, ties across the cut falling to
+   document order. This is the one budget that DOES filter — the excess is
+   recorded in `disposition.json`, never posted, never deleted. `null` (or an
+   absent field on the boundary) = unlimited, the legacy funnel; the shipped
+   config default is `0` (measured: under the production Sonnet-adjudicator
+   shape, no-overflow keeps 29/36 matched gold and lifts precision
+   0.263 → 0.492 / F1 0.362 → 0.479 on the Martian external set; under
+   Haiku-everywhere the body carries most matched gold, so eval overlays pin
+   the key explicitly).
 
 The review body renders demotions **grouped by reason**, each group under its
 own lead-in — off-diff, below the family bar, adjudicated to the body, beyond
@@ -726,7 +740,8 @@ When a boundary applied, the handler writes
 `.lastlight/pr-review/disposition.json` — the boundary itself plus one row
 per finding: `{ tier, reason, finding }`, with `reason` the machine token
 (`off-diff` / `below-threshold` / `overflow` / `adjudicated` /
-`clean-discharge` / `below-floor`, `null` for inline), never prose. It is
+`clean-discharge` / `below-floor` / `body-budget`, `null` for inline), never
+prose. It is
 what makes the `internal` tier an attention boundary rather than a
 suppressor: *"what did we know and not say, and why?"* is answerable from the
 run's own workspace. Best-effort — a failure here never stops a review
@@ -758,7 +773,7 @@ repo's `.lastlight/` may not set any of it):
 | `maxObligations` | 40 | Budget for the five facts-derived families pooled — a safety bound the ranking should never let bind; truncation is counted, never silent. |
 | `maxSpecObligations` | 40 | The same bound for the harness-built `spec` family. |
 | `obligationContract` | **`minimal`** (shipped) | Which block the six families are handed — `minimal` \| `full`. Stamped into `obligations.json` so renderer, gate and artifact read one field. Under `minimal` the discharge gate degrades to the `test -s` floor. |
-| `mint` | `""` | The two D2 seeding rules, comma-list over `all-in-diff` \| `registrations` (see "The six families"). Empty = the baseline four rules. Appended to `seed` as `--mint` only when non-empty; the CLI refuses unknown tokens with exit 2 (a typo'd arm must not silently measure the baseline); the choice is stamped into `obligations.json`. Measured KEEP on the 8-case confirm (internal paired +10/−1, p=0.006). |
+| `mint` | **`all-in-diff,registrations`** (both on) | The two D2 seeding rules, comma-list over `all-in-diff` \| `registrations` (see "The six families"). `""` = the pre-D2 baseline four rules. Appended to `seed` as `--mint` only when non-empty; the CLI refuses unknown tokens with exit 2 (a typo'd arm must not silently measure the baseline); the choice is stamped into `obligations.json`. Measured KEEP on the 8-case confirm (internal paired +10/−1, p=0.006). |
 | `surveyPasses` | 6 | Carried on config; the fan-out's branch list in the workflow definition is the authority and is fixed at five (`tests` has no branch). |
 | `surveyConcurrency` | 6 | Ceiling for concurrent survey branches, clamped per backend (gondolin/smol/kubernetes → 1; none/docker as written). Bounds rate-limit and memory pressure, not spend. |
 | `probes` | `false` | The second gate: `prepare` + `falsify`. What it buys is a workspace with dependencies installed — tier-1 `contract` seeding on monorepos, a coverage artifact for `tests`, and executable probes. |
@@ -771,6 +786,7 @@ repo's `.lastlight/` may not set any of it):
 | `maxInlineComments` | 8 | The inline budget; everything past it goes to the body, never away. |
 | `thresholds` | contract .35 · enforcement .35 · security .30 · state .50 · tests .60 · spec .45 | Per-family confidence bar for an inline comment; below it, the body. Tuning values, recorded per retune. |
 | `internalFloor` | 0.15 | Below it, recorded in `findings.json` / `disposition.json` and not posted — the one tier that costs recall, so it is low. An absent confidence is never affected. |
+| `maxBodyComments` | 0 (`null` = unlimited) | Cap on the FINAL body list, applied after the inline overflow lands there — the one budget that DOES filter: excess is tiered `internal` with reason `body-budget`, ranked severity × confidence like the inline budget. `0` (shipped) = no body overflow at all; explicit `null` restores the legacy unlimited funnel. Measured under the production adjudicator shape: precision 0.263→0.492 / F1 0.362→0.479, 29/36 matched gold kept. |
 
 Model and variant keys:
 

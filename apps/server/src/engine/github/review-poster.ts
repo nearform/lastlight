@@ -550,8 +550,14 @@ export interface DemotedFinding {
  * - `clean-discharge` — every supporting hypothesis is a clean QUOTE, so the
  *   finding is an ANTI-finding. See {@link tierFindings}.
  * - `below-floor` — under {@link AttentionBoundary.internalFloor}.
+ * - `body-budget` — demoted to the body and then past
+ *   {@link AttentionBoundary.maxBodyComments}. The only reason applied to a
+ *   finding the boundary had already ROUTED somewhere visible, which is why it
+ *   must stay its own token: folded into any of the other three it would read
+ *   as a judgement about the finding's content, when it is a judgement about
+ *   the reader's attention.
  */
-export type InternalReason = "adjudicated" | "clean-discharge" | "below-floor";
+export type InternalReason = "adjudicated" | "clean-discharge" | "below-floor" | "body-budget";
 
 /** One recorded-not-posted finding, carrying the reason it was withheld. */
 export interface InternalFinding {
@@ -571,6 +577,23 @@ export interface AttentionBoundary {
   thresholds: Record<string, number>;
   /** Below this, recorded but not posted. See {@link TieredFindings.internal}. */
   internalFloor: number;
+  /**
+   * Cap on the FINAL body list — applied last, after every other rule has
+   * routed findings there (including the inline overflow), because it governs
+   * what the "Additional findings" section may cost a reader, not how any
+   * single finding was judged.
+   *
+   * Unlike `maxInlineComments` this budget DOES filter: the excess is tiered
+   * `internal` with reason `body-budget` — recorded in the disposition, never
+   * posted. `null` or absent = unlimited, the legacy funnel; `0` = nothing
+   * tiers to body at all. Ranked by {@link rankOf} — the same severity ×
+   * confidence rank the inline budget spends, so an absent confidence ranks
+   * as 1.0 (severity order), never as low confidence. Shipped default is `0`
+   * (see `ReviewAnalysisConfig.maxBodyComments` in lastlight-shared for the
+   * measurements); optional here so every existing constructor keeps today's
+   * behaviour.
+   */
+  maxBodyComments?: number | null;
 }
 
 /** The three destinations. Nothing is dropped; `internal` is recorded, not posted. */
@@ -634,8 +657,10 @@ function allHypothesesClean(f: ReviewFinding, clean: ReadonlySet<string> | undef
  * Order matters and each step is a different question: does this SAY anything
  * (the clean-discharge rule) · is it worth a human's attention at all (the
  * floor) · can it even be anchored (GitHub's constraint) · is it confident
- * enough for an inline comment (the family threshold) · and is there room (the
- * budget).
+ * enough for an inline comment (the family threshold) · is there room (the
+ * budget) · and, last, may the body still grow (the body budget,
+ * {@link AttentionBoundary.maxBodyComments} — the one step that moves a
+ * finding OUT of the posted review, to `internal` with reason `body-budget`).
  *
  * **A missing `confidence` never demotes and never suppresses.** Both bars are
  * `confidence !== undefined && confidence < bar`, so a finding that declines to
@@ -736,7 +761,29 @@ export function tierFindings(
   for (const f of candidates.slice(Math.max(0, boundary.maxInlineComments))) {
     body.push({ finding: f, reason: "overflow" });
   }
-  return { inline, body, internal };
+
+  // The body budget — LAST, over the FINAL body list, so the inline overflow
+  // has already landed there and competes for body slots like everything else
+  // (under a cap of 0 the inline excess therefore goes `internal`, not to a
+  // body the cap just closed). Ranked by the same severity × confidence rank
+  // the inline budget spends — {@link rankOf}, absent confidence = 1.0 — and
+  // the sort is over a COPY: the survivors keep their document order, so the
+  // grouped rendering and the disposition rows read as before. Ties across
+  // the cut fall to document order (stable sort), the same tie-break the
+  // inline budget uses. `null`/absent = unlimited, the legacy funnel.
+  const cap = boundary.maxBodyComments;
+  if (cap === null || cap === undefined || body.length <= Math.max(0, cap)) {
+    return { inline, body, internal };
+  }
+  const keep = new Set(
+    [...body].sort((a, b) => rankOf(b.finding) - rankOf(a.finding)).slice(0, Math.max(0, cap)),
+  );
+  const kept: DemotedFinding[] = [];
+  for (const e of body) {
+    if (keep.has(e)) kept.push(e);
+    else internal.push({ finding: e.finding, reason: "body-budget" });
+  }
+  return { inline, body: kept, internal };
 }
 
 function commentBody(f: ReviewFinding): string {

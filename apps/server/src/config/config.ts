@@ -1043,6 +1043,16 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
       },
       internalFloor:
         nonNegativeNumber(analysisRaw.internalFloor) ?? reviewDefaults.analysis.internalFloor,
+      // The body-side budget. Nullable exactly like `fix.maxCostUsd` above: an
+      // explicit `null` is the documented "unlimited body overflow" value (the
+      // legacy funnel), distinct from an absent/typo'd key, which falls back
+      // to the shipped `0` — no overflow, everything that would have gone to
+      // the body recorded `internal` (reason `body-budget`) instead. `0` is
+      // meaningful, so `nonNegativeNumber` + `??`, never `||`.
+      maxBodyComments:
+        analysisRaw.maxBodyComments === null
+          ? null
+          : nonNegativeNumber(analysisRaw.maxBodyComments) ?? reviewDefaults.analysis.maxBodyComments,
     },
   };
 

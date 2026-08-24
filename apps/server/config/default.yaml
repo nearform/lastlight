@@ -390,15 +390,18 @@ review:
     # boundary), at the cost of the verification-report volume above.
     obligationContract: minimal
 
-    # Which D2 minting arms `lastlight-facts seed` runs. A comma-list; the
-    # valid tokens are `all-in-diff` (contract obligations for symbols whose
-    # every reference is inside the diff) and `registrations` (security
-    # obligations for route/hook registration order). Empty = NEITHER, the
-    # baseline obligation set. It reaches the sandbox as `--mint <spec>` on
-    # the seed phase's command line — appended only when non-empty — and the
-    # CLI refuses any unknown token with exit 2, so a typo'd arm is loud
-    # rather than silently running baseline.
-    mint: ""
+    # Which D2 minting rules `lastlight-facts seed` runs beyond the original
+    # four. A comma-list; the valid tokens are `all-in-diff` (contract
+    # obligations for symbols whose every reference is inside the diff) and
+    # `registrations` (security obligations for route/hook registration
+    # order). BOTH ON by default — the measured shipped shape (8-case confirm:
+    # internal paired +10/−1, p=0.006, the only lever measured to GROW the
+    # recall union rather than rotate it; external validation +7/−0, p=0.008).
+    # Empty string = the pre-D2 baseline set. It reaches the sandbox as
+    # `--mint <spec>` on the seed phase's command line — appended only when
+    # non-empty — and the CLI refuses any unknown token with exit 2, so a
+    # typo'd arm is loud rather than silently running baseline.
+    mint: all-in-diff,registrations
 
     # RECORDED, NOT CONSUMED. The fan-out's branch list in `pr-review.yaml` is
     # the authority (five branches; `tests` has no seeder and no branch), and
@@ -485,6 +488,19 @@ review:
     # comments): concise, hunk-level, actionable findings are substantially
     # likelier to cause a change. Twenty inline comments is a muted bot.
     maxInlineComments: 8
+    # The BODY budget — how many findings the review body's "Additional
+    # findings" list may carry. 0 (the default) = NO overflow: nothing tiers
+    # to body, and anything that would have is recorded in disposition.json at
+    # `internal` with reason `body-budget` — capped attention, never a lost
+    # record. N > 0 keeps the top N ranked by severity × confidence; null =
+    # unlimited (the pre-2026-08-24 funnel). Measured on the external set
+    # under the production model shape: 0 keeps 29 of 36 matched gold while
+    # precision goes 0.263 → 0.492 (F1 0.362 → 0.479, above the two-phase
+    # baseline). CAVEAT: with a weak ADJUDICATOR model the body tier carries
+    # most of the recall (Haiku-everywhere: 0.42 → 0.12 under this cap), so an
+    # eval overlay measuring that shape must pin `null` explicitly. Eight
+    # high-value comments beat fifty and a wall of body text.
+    maxBodyComments: 0
     # Per-family confidence bar for an INLINE comment; below it, the body.
     # Per-family and not global because AutoCommenter (Google Critique) measured
     # a global threshold as catastrophic — at t=0.98, ~80% of below-threshold

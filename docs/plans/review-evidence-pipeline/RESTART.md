@@ -887,6 +887,50 @@ is the F1 lever on Martian.** G3-class discovery is bought; question-shape for
 the two never-found skillspro gold (1587-r2 #4/#5 class) and WP9 tier 2 (fresh
 private cases via `add-case`) remain open.
 
+## 2m. 2026-08-24, late — the body tier gets a budget (`maxBodyComments`), and
+the $0 sweep that sized it
+
+**The Martian pipeline arms posted 70 and 64 findings across 10 PRs (~2× the
+leaderboard field), and the question "don't we have constraints?" had an
+uncomfortable answer: the constraints are PLACEMENT rules, not volume rules.**
+`maxInlineComments` (8) caps inline only — measured inline was 1–5/PR, the cap
+never bound — and everything past it goes to the body *"still posted, never
+dropped"*. `internalFloor` (0.15) is the only rule that stops a posting and it
+is inert at any plausible value. **Body had no cap at all**, a deliberate early
+decision (locked decision 1's "no adjudicator beat keeping everything") whose
+price was first measured by the Martian F1 rank.
+
+**The sweep** (`internalFloor` × `bodyCap`, recomputed from the stored
+`disposition.json` + judge traces of four runs, all matched-gold joins clean,
+$0):
+
+| | Martian (Sonnet adjudicator) | skillspro (Haiku everywhere) |
+|---|---|---|
+| unlimited body (today) | rec 0.581 / prec 0.263 / F1 0.362 | rec 0.420 / prec 0.169 |
+| **bodyCap 0** | rec 0.468 / **prec 0.492 / F1 0.479** | **rec 0.120** / prec 0.333 |
+| bodyCap 4 | 0.548 / 0.286 | 0.300 / 0.214 |
+| bodyCap 8 | 0.581 / 0.267 | 0.380 / 0.184 |
+| any `internalFloor` change | ~inert | ~inert |
+
+Two facts to hold together. **Under the production shape the body tier is
+mostly noise**: the Sonnet adjudicator puts real findings inline, no-overflow
+keeps 29 of 36 matched gold, and F1 0.479 would beat the shipped baseline's
+0.462 on the leaderboard. **Under Haiku-everywhere the body tier IS the
+recall**: only 6 of 21 matched findings sat inline, so a hard no-overflow
+would crater that shape 0.42 → 0.12. The knob is therefore config, not
+constant, and its default is a claim about the production adjudicator only.
+
+**The key: `review.analysis.maxBodyComments`** — `0` (**the new shipped
+default**: no overflow, nothing tiers to body), `N` (at most N body findings,
+ranked severity × confidence), `null` (the legacy unlimited funnel). Every
+finding the cap demotes is recorded in `disposition.json` at `internal` with
+reason `body-budget` — the cap filters attention, never the record. **Eval
+overlays must now pin the key explicitly** (`null` for Haiku measurement arms,
+or the sweep above is the regression you will rediscover); the wp3 overlays
+carry it. `internalFloor` stays 0.15 — the sweep shows no value of it worth
+buying. Spec surfaces: `spec/02-configuration.md` + PIPELINE-SPEC §Config /
+§post-review.
+
 ## 3. What to do next
 
 **Superseded 2026-08-23.** The old §3a ("more repeats before any lever") is

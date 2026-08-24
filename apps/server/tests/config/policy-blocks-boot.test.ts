@@ -158,3 +158,63 @@ describe("loadConfig — the fix policy block", () => {
     });
   });
 });
+
+/**
+ * `review.analysis.maxBodyComments` — the body-side attention budget. The
+ * nullable idiom is `fix.maxCostUsd`'s: an explicit `null` is the documented
+ * "unlimited body overflow" value (the legacy funnel), distinct from an
+ * absent/typo'd key, which falls back to the shipped `0` (no overflow).
+ */
+describe("loadConfig — review.analysis.maxBodyComments", () => {
+  beforeEach(() => {
+    for (const k of ["GITHUB_APP_ID", "SLACK_BOT_TOKEN", "LASTLIGHT_MODEL", "LASTLIGHT_MODELS"]) {
+      vi.stubEnv(k, "");
+    }
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetRuntimeConfigForTests();
+  });
+
+  it("defaults to 0 when the key is absent — no body overflow", () => {
+    vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlayWith("review:\n  analysis:\n    enabled: true\n"));
+
+    expect(loadConfig().review.analysis.maxBodyComments).toBe(0);
+  });
+
+  it("keeps an explicit null — the documented 'unlimited' value, not a fallback trigger", () => {
+    vi.stubEnv(
+      "LASTLIGHT_OVERLAY_DIR",
+      overlayWith("review:\n  analysis:\n    maxBodyComments: null\n"),
+    );
+
+    expect(loadConfig().review.analysis.maxBodyComments).toBeNull();
+  });
+
+  it("keeps an explicit 0 and a positive cap", () => {
+    vi.stubEnv(
+      "LASTLIGHT_OVERLAY_DIR",
+      overlayWith("review:\n  analysis:\n    maxBodyComments: 3\n"),
+    );
+    expect(loadConfig().review.analysis.maxBodyComments).toBe(3);
+
+    resetRuntimeConfigForTests();
+    vi.stubEnv(
+      "LASTLIGHT_OVERLAY_DIR",
+      overlayWith("review:\n  analysis:\n    maxBodyComments: 0\n"),
+    );
+    expect(loadConfig().review.analysis.maxBodyComments).toBe(0);
+  });
+
+  it("falls back to the shipped 0 on garbage — a typo must not open the funnel", () => {
+    for (const bad of ["unlimited", "-2"]) {
+      resetRuntimeConfigForTests();
+      vi.stubEnv(
+        "LASTLIGHT_OVERLAY_DIR",
+        overlayWith(`review:\n  analysis:\n    maxBodyComments: ${bad}\n`),
+      );
+      expect(loadConfig().review.analysis.maxBodyComments, bad).toBe(0);
+    }
+  });
+});

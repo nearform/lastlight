@@ -595,7 +595,11 @@ describe("post-review action (runPostReview)", () => {
       it("caps inline, keeps the rest in the BODY, and records every disposition", async () => {
         withReviewConfig({
           trigger: "on-request",
-          analysis: { ...defaultReviewConfig().analysis, enabled: true, maxInlineComments: 2 },
+          // `maxBodyComments: null` pins the LEGACY unlimited funnel — the
+          // shipped default is now `0` (no body overflow), which would empty
+          // the body this test exists to inspect. The shipped default has its
+          // own test below.
+          analysis: { ...defaultReviewConfig().analysis, enabled: true, maxInlineComments: 2, maxBodyComments: null },
         });
         const taskId = "widget-42-boundary-on";
         seedFindings(taskId, "widget", { summary: "ok", event: "COMMENT", findings: findings() });
@@ -625,6 +629,42 @@ describe("post-review action (runPostReview)", () => {
           ["off-diff E", "off-diff"],
           ["on-diff C", "overflow"],
           ["on-diff D", "overflow"],
+        ]);
+      });
+
+      it("the shipped default (maxBodyComments: 0) closes the body — excess is recorded `body-budget`, not posted", async () => {
+        // Same shape as the test above, but WITHOUT pinning `maxBodyComments`:
+        // the spread carries the shipped default of 0, so nothing may tier to
+        // the body — the inline overflow and the off-diff finding all land
+        // `internal` with the machine reason `body-budget`, auditable on disk.
+        withReviewConfig({
+          trigger: "on-request",
+          analysis: { ...defaultReviewConfig().analysis, enabled: true, maxInlineComments: 2 },
+        });
+        const taskId = "widget-42-body-budget";
+        seedFindings(taskId, "widget", { summary: "ok", event: "COMMENT", findings: findings() });
+
+        const { executor } = makeExecutor(taskId);
+        expect((await executor.execute(NODE, {})).status).toBe("succeeded");
+        const posted = reviews[0]!.body as { comments: { line: number }[]; body: string };
+
+        // The inline budget is untouched by the body cap.
+        expect(posted.comments.map((c) => c.line)).toEqual([7, 8]);
+        // No overflow section at all: the body is the summary, byte-for-byte.
+        expect(posted.body).toBe("ok");
+
+        // Nothing is deleted — the withheld three are on disk with the reason.
+        const record = JSON.parse(readFileSync(dispositionPath(taskId), "utf8")) as {
+          findings: { tier: string; reason: string | null; finding: { title: string } }[];
+        };
+        expect(record.findings).toHaveLength(5);
+        expect(record.findings.filter((r) => r.tier === "body")).toHaveLength(0);
+        expect(
+          record.findings.filter((r) => r.tier === "internal").map((r) => [r.finding.title, r.reason]),
+        ).toEqual([
+          ["off-diff E", "body-budget"],
+          ["on-diff C", "body-budget"],
+          ["on-diff D", "body-budget"],
         ]);
       });
 

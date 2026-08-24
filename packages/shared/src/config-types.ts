@@ -300,8 +300,11 @@ export interface ReviewAnalysisConfig {
    * inside the diff) and `registrations` (security obligations for route/hook
    * registration order).
    *
-   * `""` (the default) is NEITHER — the baseline obligation set, byte-identical
-   * to a run before the toggle existed. Reaches the seeder as `--mint <spec>`
+   * BOTH ON by default — the measured shipped shape (8-case confirm: internal
+   * paired +10/−1, p=0.006, the only lever measured to GROW the recall union
+   * rather than rotate it; external validation +7/−0, p=0.008). `""` is
+   * NEITHER — the pre-D2 baseline set, byte-identical to a run before the
+   * toggle existed. Reaches the seeder as `--mint <spec>`
    * on the seed phase's command line, appended ONLY when non-empty, and the
    * seeder stamps what it was asked into `obligations.json` (`minting`) so an
    * artifact answers "which arm produced this". Kept a plain string rather
@@ -443,6 +446,31 @@ export interface ReviewAnalysisConfig {
    * finding from any prompt that has not been taught to self-score.
    */
   internalFloor: number;
+  /**
+   * Cap on findings rendered into the review BODY (the "Additional findings"
+   * section) — the body-side sibling of `maxInlineComments`, and the one
+   * budget that DOES filter: everything past it is recorded `internal` with
+   * the machine reason `body-budget` in `disposition.json`, never posted.
+   * Nothing is deleted — the demotion stays auditable like every other
+   * `internal` entry.
+   *
+   * - `null` — unlimited: the legacy funnel, where everything demoted from
+   *   inline lands in the body.
+   * - `0` — no overflow at all: nothing tiers to body; anything that would
+   *   have gone there is recorded `internal` instead.
+   * - `N > 0` — at most N body findings, ranked by severity × confidence
+   *   exactly as the inline overflow ranks (an absent confidence ranks as
+   *   1.0, so an unscored document degenerates to severity order).
+   *
+   * **`0` is the shipped default, and it is measured rather than assumed**:
+   * under the production Sonnet-adjudicator shape, no-overflow keeps 29/36
+   * matched gold and lifts precision 0.263 → 0.492 / F1 0.362 → 0.479 on the
+   * Martian external set. The caveat that keeps `null` a first-class value:
+   * under Haiku-everywhere the body carries most of the matched gold, which
+   * is why eval overlays pin this key explicitly instead of inheriting the
+   * default.
+   */
+  maxBodyComments: number | null;
 }
 
 /**
@@ -557,8 +585,8 @@ export function defaultReviewConfig(): ReviewConfig {
       // remains the opt-in telemetry arm (discharge codes + the
       // clean-discharge demotion at the posting boundary).
       obligationContract: "minimal",
-      // Neither D2 arm — the baseline obligation set. See the field's doc.
-      mint: "",
+      // Both D2 rules — the measured shipped shape. See the field's doc.
+      mint: "all-in-diff,registrations",
       surveyPasses: 6,
       surveyConcurrency: 6,
       probes: false,
@@ -578,6 +606,10 @@ export function defaultReviewConfig(): ReviewConfig {
         spec: 0.45,
       },
       internalFloor: 0.15,
+      // No body overflow — measured under the production adjudicator shape
+      // (precision 0.263→0.492 / F1 0.362→0.479, 29/36 matched gold kept).
+      // `null` restores the legacy unlimited funnel. See the field's doc.
+      maxBodyComments: 0,
     },
   };
 }

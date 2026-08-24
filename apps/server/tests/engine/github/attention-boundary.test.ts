@@ -332,6 +332,134 @@ describe("tierFindings — findings whose evidence is entirely clean discharges"
   });
 });
 
+/**
+ * The body budget (`maxBodyComments`) — the one budget that DOES filter.
+ *
+ * It is applied LAST, over the FINAL body list, so the inline overflow has
+ * already landed there and competes for body slots like everything else. The
+ * excess is not dropped: it is tiered `internal` with its own machine reason,
+ * `body-budget`, so the disposition record can still answer "what did we know
+ * and not say, and why?".
+ */
+describe("tierFindings — the body budget (maxBodyComments)", () => {
+  it("absent and explicit null both leave the legacy body list untouched", () => {
+    const findings = Array.from({ length: 12 }, (_, i) => f({ line: i + 1 }));
+    for (const boundary of [BOUNDARY, { ...BOUNDARY, maxBodyComments: null }]) {
+      const t = tierFindings(findings, COMMENTABLE, boundary);
+      expect(t.inline).toHaveLength(8);
+      expect(t.body).toHaveLength(4);
+      expect(t.internal).toHaveLength(0);
+    }
+  });
+
+  it("a cap of 0 sends nothing to the body — every demotion is recorded `body-budget` instead", () => {
+    const t = tierFindings(
+      [
+        f({ line: 999, title: "off" }),
+        f({ line: 1, family: "tests", confidence: 0.4, title: "under" }),
+        f({ line: 2, title: "in" }),
+      ],
+      COMMENTABLE,
+      { ...BOUNDARY, maxBodyComments: 0 },
+    );
+    expect(t.inline.map((x) => x.title)).toEqual(["in"]);
+    expect(t.body).toHaveLength(0);
+    expect(t.internal.map((x) => [x.finding.title, x.reason])).toEqual([
+      ["off", "body-budget"],
+      ["under", "body-budget"],
+    ]);
+    // Conservation: re-routed, never dropped.
+    expect(t.inline.length + t.body.length + t.internal.length).toBe(3);
+  });
+
+  it("a cap of 2 keeps the top 2 by severity × confidence, in document order", () => {
+    // Ranks: critHigh 0.9×3=2.7 · imp (no confidence → 1.0)×2=2.0 ·
+    // critLow 0.5×3=1.5 · minor 1.0×1=1.0. Keep critHigh + imp; the kept
+    // entries keep their document order rather than being re-sorted.
+    const t = tierFindings(
+      [
+        f({ line: 999, severity: "Minor", title: "minor" }),
+        f({ line: 999, severity: "Critical", confidence: 0.9, title: "critHigh" }),
+        f({ line: 999, severity: "Important", title: "imp" }),
+        f({ line: 999, severity: "Critical", confidence: 0.5, title: "critLow" }),
+      ],
+      COMMENTABLE,
+      { ...BOUNDARY, maxBodyComments: 2 },
+    );
+    expect(t.body.map((d) => d.finding.title)).toEqual(["critHigh", "imp"]);
+    expect(t.internal.map((x) => [x.finding.title, x.reason])).toEqual([
+      ["minor", "body-budget"],
+      ["critLow", "body-budget"],
+    ]);
+  });
+
+  it("ranks an absent confidence as 1.0 — severity order, exactly as the inline overflow does", () => {
+    // Same rule as `rankOf` for the inline budget: absence is not low
+    // confidence. An unscored Important (2.0) outranks a scored one (1.8).
+    const t = tierFindings(
+      [
+        f({ line: 999, severity: "Important", title: "unscored" }),
+        f({ line: 999, severity: "Important", confidence: 0.9, title: "scored" }),
+      ],
+      COMMENTABLE,
+      { ...BOUNDARY, maxBodyComments: 1 },
+    );
+    expect(t.body.map((d) => d.finding.title)).toEqual(["unscored"]);
+    expect(t.internal.map((x) => [x.finding.title, x.reason])).toEqual([["scored", "body-budget"]]);
+  });
+
+  it("inline overflow under a cap of 0 goes internal, not to a body the cap just closed", () => {
+    const findings = Array.from({ length: 3 }, (_, i) => f({ line: i + 1, title: `t${i}` }));
+    const t = tierFindings(findings, COMMENTABLE, {
+      ...BOUNDARY,
+      maxInlineComments: 1,
+      maxBodyComments: 0,
+    });
+    expect(t.inline).toHaveLength(1);
+    expect(t.body).toHaveLength(0);
+    expect(t.internal).toHaveLength(2);
+    expect(t.internal.every((x) => x.reason === "body-budget")).toBe(true);
+  });
+
+  it("does not relabel findings that were internal for a more specific reason", () => {
+    const t = tierFindings(
+      [f({ line: 1, confidence: 0.01, title: "dark" }), f({ line: 999, title: "off" })],
+      COMMENTABLE,
+      { ...BOUNDARY, maxBodyComments: 0 },
+    );
+    expect(t.internal.map((x) => [x.finding.title, x.reason])).toEqual([
+      ["dark", "below-floor"],
+      ["off", "body-budget"],
+    ]);
+  });
+});
+
+describe("buildReview + the 422 retry — the body budget's withholding is real", () => {
+  it("renders no 'Additional findings' section at all under a cap of 0", () => {
+    const doc = {
+      summary: "s",
+      findings: [f({ line: 999, title: "capped", body: "SHOULD NOT APPEAR" }), f({ line: 1, title: "in" })],
+    };
+    const r = buildReview(doc, COMMENTABLE, { ...BOUNDARY, maxBodyComments: 0 });
+    expect(r.body).toBe("s");
+    expect(r.inlineCount).toBe(1);
+    expect(r.demotedCount).toBe(0);
+    expect(r.internalCount).toBe(1);
+    expect(r.tiered?.internal.map((x) => x.reason)).toEqual(["body-budget"]);
+  });
+
+  it("the body-only retry cannot republish what the body budget withheld", () => {
+    const doc = {
+      summary: "s",
+      findings: [f({ line: 1, title: "posted" }), f({ line: 999, title: "capped" })],
+    };
+    const tiered = tierFindings(doc.findings, COMMENTABLE, { ...BOUNDARY, maxBodyComments: 0 });
+    const retry = buildBodyOnlyReview(doc, tiered);
+    expect(retry.body).toContain("posted");
+    expect(retry.body).not.toContain("capped");
+  });
+});
+
 describe("buildReview — an anti-finding never reaches the review text", () => {
   it("keeps it out of both the comments and the body", () => {
     const doc = {
