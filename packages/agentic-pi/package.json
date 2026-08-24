@@ -49,9 +49,9 @@
   },
   "dependencies": {
     "@earendil-works/gondolin": "^0.12.0",
-    "@earendil-works/pi-ai": "^0.84.1",
-    "@earendil-works/pi-coding-agent": "^0.84.1",
-    "@ff-labs/pi-fff": "^0.10.3",
+    "@earendil-works/pi-ai": "^0.84.2",
+    "@earendil-works/pi-coding-agent": "^0.84.2",
+    "@ff-labs/pi-fff": "^0.10.5",
     "@octokit/auth-app": "^8.3.0",
     "@octokit/rest": "^22.0.1",
     "@opentelemetry/api": "^1.9.0",
