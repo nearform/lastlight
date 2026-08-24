@@ -410,7 +410,14 @@ review:
     enabled: false             # the review evidence pipeline — off, and inert
     maxSpecObligations: 40     # SAFETY BOUND for the `spec` family — should never bind
     maxObligations: 40         # …and for the five facts-derived families pooled
-    surveyPasses: 6            # how many of the six survey families actually run
+    obligationContract: minimal  # minimal | full — how much each survey records
+                               # per obligation. minimal is the measured default
+    mint: all-in-diff,registrations  # extra seeding rules beyond the original
+                               # four; "" = the pre-D2 baseline set
+    surveyPasses: 6            # RECORDED, not consumed — the fan-out branch list
+                               # is the authority
+    surveyConcurrency: 6       # survey families running at once (a ceiling,
+                               # clamped per sandbox backend)
     probes: false              # install deps so a probe can be RUN. Its own switch
     probeLifecycleScripts: false  # let the PR's own postinstall run. Off: it is the
                                # author's code, on your machine
@@ -419,6 +426,18 @@ review:
     prepareTimeoutSeconds: 300
     coverageTimeoutSeconds: 900
     probeRounds: 2
+    maxInlineComments: 8       # the attention boundary — findings past this go
+                               # to the review body, never dropped
+    maxBodyComments: 0         # body-tier budget. 0 = no overflow (default);
+                               # N = top N by severity × confidence; null = unlimited
+    thresholds:                # per-family confidence bar for an INLINE comment;
+      contract: 0.35           # below it, the body
+      enforcement: 0.35
+      security: 0.30
+      state: 0.50
+      tests: 0.60
+      spec: 0.45
+    internalFloor: 0.15        # below this, recorded in findings.json, not posted
 
 fix:                           # every PR-fixing workflow: pr-fix, dependabot-ci-fix
   maxAttempts: 3               # attempts ACROSS runs for one PR, then a human is asked

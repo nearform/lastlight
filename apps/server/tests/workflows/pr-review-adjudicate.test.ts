@@ -228,6 +228,22 @@ describe("the adjudicate prompt carries the constraints that have money on them"
     expect(raw).toMatch(/You own this file now/i);
   });
 
+  it("runs the conservation ledger — at the start, and again as the self-check", () => {
+    // Backlog #9: nothing else pins the `--ledger` instruction, so a prompt
+    // edit could silently drop the checklist the conservation gate is built on.
+    const ledger = raw.match(/"\$FACTS" findings --dir \.lastlight\/pr-review --ledger/g);
+    expect(ledger?.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("carries the three measured calibration rules", () => {
+    // §2l (`b2e63961`): the 1641 canary's false positives went 7/5 → 0/1/3 on
+    // exactly these lines. The headline precision claim of the pipeline rests
+    // on them staying in the prompt.
+    expect(raw).toMatch(/A VERIFICATION REPORT is always `internal`, whatever its\s+confidence/);
+    expect(raw).toMatch(/A SPECULATIVE HAZARD is always `internal`, whatever its\s+confidence/);
+    expect(raw).toMatch(/Confidence prices the defect, not your certainty/);
+  });
+
   it("renders with no leftover template marker", () => {
     const rendered = renderTemplate(raw, {
       owner: "acme",
