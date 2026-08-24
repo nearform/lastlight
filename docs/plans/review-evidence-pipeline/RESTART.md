@@ -637,6 +637,97 @@ defect-priced confidence).**
 **Decision: 2.1′ KEEPS (provisional), 2.2′ (E1a question catalogues in the
 survey prompts) is next, then the 8-case confirm of whatever stands.**
 
+## 2h. 2026-08-24 — arm 2.2′ RAN. The catalogues widened the union; G1 found for the first time ever.
+
+**~$7, same case, `--repeats 3 --repeat-concurrency 3` (first overlapped band —
+13 min wall), runs `2026-08-24_073342/073343/073344`. One variable vs 2.1′: the
+E1a question catalogues in the four survey prompts (`e6816dd4`).**
+
+| | 2.1′ | 2.2′ (catalogues) |
+|---|---|---|
+| posted recall per repeat | 0.400 / 0.400 / 0.400 | 0.200 / 0.400 / 0.400 |
+| band | 0.000 | 0.200 |
+| posted union / intersection | 3/5 / 1/5 | **4/5** / 0/5 |
+| internal union | 3/5 | **4/5** |
+| SNR (best) | 0.400 | 0.286 |
+
+- **G1 (lower-cased key vs non-normalised set) was found AND POSTED in two of
+  three repeats — no arm had ever found it.** That is the catalogue doing
+  exactly what E1a designed it to do (the two-path-divergence / what-can't-the-
+  line-tell-apart shapes).
+- G3 (email off an unexpired decode) remains unfound by every arm — 0 for 12
+  repeats across four arms. It needs either the `security` seeding change
+  (H-D2 — no obligation reaches it) or a differently shaped question.
+- The apparent G5 regression decomposes: rep1's internal credit is a LOOSE
+  match on a neutral description the adjudicator correctly buried (the strict
+  judge's margin, auditable via `internalGold`); rep2 posted a genuinely
+  G5-adjacent claim (*"Directory API can return empty array, marking all
+  profiles archived"*, body tier) the posted judge fairly scored as a
+  different issue. Not withholding.
+- Guardrail: precision moved DOWN with the recall dip (no ranking-trade
+  signature); the union widening is a discovery gain, the band reopening to
+  0.200 is question-draw variance the catalogue added.
+
+**Decision: both prompt changes ride to the 8-case confirm (union is the
+ceiling and it moved; per-repeat noise is what the 8-case gold mass exists to
+absorb). Contract default (minimal vs full) is decided AFTER that read.**
+
+## 2i. 2026-08-24 — the 8-case confirm. Precision is real; recall rotated rather than rose.
+
+**~$34, all 8 cases, minimal + both prompt revisions, `--repeats 2
+--repeat-concurrency 2 --concurrency 4`, runs `2026-08-24_074944/074945`.
+Comparator: the keeper runs `184650`/`201607` (old prompts). Checksum verified
+3,5,0,4,3,5,4,1 = 25.**
+
+| | keepers | this arm |
+|---|---|---|
+| micro-recall | 0.320 / 0.200 (mean 0.260, band 0.120) | 0.360 / 0.280 (mean **0.320**, band **0.080**) |
+| posted | 47 / 44 | 41 / 39 |
+| precision | 0.170 / 0.114 | **0.220 / 0.179** |
+| SNR | 0.205 / 0.128 | **0.281 / 0.219** |
+| posted union / intersection | 12/25 / — | 12/25 / 4/25 |
+| internal union / intersection | — (no vectors) | 12/25 / **7/25** |
+
+`bandVerdict`: INDISTINGUISHABLE (Δ+0.060 does not clear the 0.080 band).
+`pairedBand` posted union: **gained +8, lost −10, net −2, p=0.760** — the
+union did not grow; it ROTATED.
+
+**What is robust — precision.** Fewer findings posted (−13%), more of them
+right, SNR up 37–71% in both repeats, and the arm band halved even with the
+repeats overlapped. This is 2.1′'s verification-report rule paying at scale.
+
+**What is honest about recall.**
+1. **The blind split is contaminated for the catalogue claim.** Train 3/13 in
+   both repeats; blind 6/12 and 4/12 — blind looks like the stronger half,
+   but E1a's questions were DERIVED from the never-matched gold, which
+   includes the blind cases' (`security` Q1 is `1667` gold #1 almost
+   verbatim). `1667`'s 3/5 posted union (its first hits ever, two at
+   intersection) is the catalogue answering questions written from its own
+   answer key. Real improvement on those cases; NOT generalization evidence.
+   WP9 remains the unmade claim it always was.
+2. **`1587-r2` inverted.** 0/5 posted union across both band repeats
+   (internal 1/5) against 2.2′'s one-case 4/5 union an hour earlier, same
+   config. Case-level draw variance is alive and well; the one-case bands
+   overstated the catalogue's reliability on the case they were tuned on.
+3. **The canary split.** `074944` promoted 8 of an identical 29-internal set
+   to body on the zero-gold case (precision 0); `074945` promoted 0
+   (precision 1). Boundary/adjudicator promotion variance persists under
+   `minimal`, where the clean-discharge demotion is structurally inert. Both
+   repeats also missed the §2b prior-review ledger (2/2) — `1641`'s actual
+   question, now failed cleanly visible as the split `review-body` check.
+
+**Instrument fixes from the read** (`1641` investigation): the zero-gold grade
+path now carries a `trace` (false positives were rendering with no review text
+behind them — which read as "posted nothing, logged false positives"), and
+`review-submitted` split into `review-submitted` + `review-body`.
+
+**Where this leaves the config decision:** minimal + both prompt revisions is
+the measured best: same recall union as the keepers with meaningfully better
+precision/SNR and half the variance. The next recall points are NOT in more
+prompt work: they are the `security`/all-in-diff seeding changes (H-D2 — G3
+and `1667` #2 live in files no obligation reaches) and external validation
+(WP9). Both are post-merge work.
+
 ## 3. What to do next
 
 **Superseded 2026-08-23.** The old §3a ("more repeats before any lever") is

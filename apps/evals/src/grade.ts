@@ -99,14 +99,23 @@ export function gradeBehavioral(
   if (expect.review_submitted) {
     const reviews = fake.submittedReviews(ctx.issueNumber);
     const r = reviews[0];
-    let ok = reviews.length > 0;
+    // Two checks, not one: "a review exists (with the right event)" and "its
+    // body matches" are different failures, and folding them under one name
+    // made a body_matches miss read as "failed to post a review" — while the
+    // detail string (`event=… bodyLen=6365`) was proving a review existed
+    // (the 1641 misread, 2026-08-24).
+    let submitted = reviews.length > 0;
     let detail = `${reviews.length} review(s)`;
     if (r) {
-      if (expect.review_submitted.event) ok = ok && r.event === expect.review_submitted.event;
-      if (expect.review_submitted.body_matches) ok = ok && new RegExp(expect.review_submitted.body_matches, "i").test(r.body);
+      if (expect.review_submitted.event) submitted = submitted && r.event === expect.review_submitted.event;
       detail = `event=${r.event} bodyLen=${r.body.length}`;
     }
-    checks.push({ name: "review-submitted", ok, detail });
+    checks.push({ name: "review-submitted", ok: submitted, detail });
+    if (expect.review_submitted.body_matches) {
+      const pattern = expect.review_submitted.body_matches;
+      const bodyOk = !!r && new RegExp(pattern, "i").test(r.body);
+      checks.push({ name: "review-body", ok: bodyOk, detail: `body ~ /${pattern}/i` });
+    }
   }
 
   return { ok: checks.every((c) => c.ok), checks };
@@ -462,7 +471,11 @@ export async function gradeReview(opts: {
     return gold.length === 0 ? perfect(trace) : empty({ trace });
   }
   if (gold.length === 0) {
-    // Findings on a PR with no gold issues are all noise.
+    // Findings on a PR with no gold issues are all noise. Trace it like every
+    // other exit: this was the ONE path that returned no trace, so a canary
+    // case's false positives rendered with no review text behind them — which
+    // read as "false positives on a review that was never posted" (the 1641
+    // misread, 2026-08-24).
     return {
       precision: 0,
       recall: 1,
@@ -473,6 +486,7 @@ export async function gradeReview(opts: {
       matched: 0,
       falsePositives: findings.map((f) => ({ description: f.description, file: f.file ?? undefined })),
       falseNegatives: [],
+      trace: bareTrace({ judgeModel: model, reviewText: text, findings, rawExtract }),
     };
   }
 
