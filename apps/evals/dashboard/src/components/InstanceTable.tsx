@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import type { InstanceResult, PendingCase, ReviewTrace } from "../types";
-import { fmtMs, modelLabel } from "../lib/format";
+import { fmtMs, isPrReviewTier, modelLabel } from "../lib/format";
 import { Chip, Frac, Pill } from "./ui";
 import { SessionModal, type SessionSource } from "./SessionModal";
 import { DiffModal } from "./DiffModal";
@@ -39,7 +39,7 @@ export function InstanceTable({
   scorecardUrl?: string;
 }) {
   const showCodeFix = tier === "code-fix";
-  const showReview = tier === "pr-review";
+  const showReview = isPrReviewTier(tier);
   // The β the graded cases used (F1 by default) — labels the review column.
   const reviewBeta = results.find((r) => r.review)?.review?.beta ?? 1;
   const cols = 6 + (showCodeFix ? 1 : 0) + (showReview ? 1 : 0);

@@ -52,6 +52,18 @@ export interface TierMetric {
   frac: (m: ModelSummary) => string;
 }
 
+/**
+ * Every pr-review-shaped tier, not just the literal one. Tier KEYS grow
+ * suffixes (`pr-review-config`, `pr-review-compare` — see run.ts `tierKeyFor`)
+ * and datasets may ship sibling tiers (`pr-review-martian`), and all of them
+ * grade with the review judge. The literal `===` this replaces silently
+ * dropped the REVIEW column, the F1 panel and the Martian ranking from every
+ * suffixed tier.
+ */
+export function isPrReviewTier(tier: string): boolean {
+  return tier === "pr-review" || tier.startsWith("pr-review-");
+}
+
 export function tierMetric(tier: string, beta = 1): TierMetric {
   if (tier === "code-fix") {
     return {
@@ -60,7 +72,7 @@ export function tierMetric(tier: string, beta = 1): TierMetric {
       frac: (m) => (m.codeFixTotal ? `${m.codeFixResolved}/${m.codeFixTotal}` : "—"),
     };
   }
-  if (tier === "pr-review") {
+  if (isPrReviewTier(tier)) {
     // **Micro-recall is the headline** — matched ÷ gold summed over cases. The
     // per-case F-beta mean this used to show is a different number: it weights a
     // 1-gold case like a 6-gold one and hands a free 1.00 to a case with no gold

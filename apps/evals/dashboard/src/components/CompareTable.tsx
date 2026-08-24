@@ -1,5 +1,5 @@
 import type { ModelSummary } from "../types";
-import { fbetaLabel, fmtMs, fmtPct, fmtRatio, fmtTokens, modelLabel, rankModels, tierMetric } from "../lib/format";
+import { fbetaLabel, fmtMs, fmtPct, fmtRatio, fmtTokens, isPrReviewTier, modelLabel, rankModels, tierMetric } from "../lib/format";
 import { Bar } from "./ui";
 
 /** Comparison table for one tier: arms (models, or configs in a `config` run) as
@@ -21,7 +21,7 @@ export function CompareTable({
   const reviewBeta = models.find((m) => m.reviewBeta !== undefined)?.reviewBeta ?? 1;
   const metric = tierMetric(tier, reviewBeta);
   const ranked = rankModels(models, metric);
-  const isReview = tier === "pr-review";
+  const isReview = isPrReviewTier(tier);
 
   const bestRate = Math.max(0, ...ranked.map(metric.rate));
   const costs = ranked.filter((m) => m.totalCostUsd > 0).map((m) => m.totalCostUsd);

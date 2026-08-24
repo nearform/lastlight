@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import type { IndexRun, InstanceResult, MartianRanking, PendingCase } from "../types";
 import { useScorecard } from "../lib/api";
-import { fmtDate, modelLabel } from "../lib/format";
+import { fmtDate, isPrReviewTier, modelLabel } from "../lib/format";
 import { summarizeModels } from "../lib/summarize";
 import { CompareTable } from "./CompareTable";
 import { InstanceTable } from "./InstanceTable";
@@ -85,7 +85,7 @@ export function RunView({ run, onShowRepeats }: { run: IndexRun; onShowRepeats?:
             <span className="text-info/70">band · union/intersection · hit matrix</span>
           </button>
         )}
-        {tier === "pr-review" && card?.meta?.martian?.models[0] && (
+        {isPrReviewTier(tier) && card?.meta?.martian?.models[0] && (
           <button
             onClick={() => document.getElementById("martian-rank")?.scrollIntoView({ behavior: "smooth", block: "start" })}
             className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-accent/40 bg-accent/10 px-3 py-1.5 font-mono text-xs text-accent transition-colors hover:bg-accent/20"
@@ -131,11 +131,11 @@ export function RunView({ run, onShowRepeats }: { run: IndexRun; onShowRepeats?:
             </nav>
           )}
 
-          <h2 className={(tier === "pr-review" ? "mb-2" : "mb-3.5") + " mt-2 text-lg font-semibold text-base-content"}>
+          <h2 className={(isPrReviewTier(tier) ? "mb-2" : "mb-3.5") + " mt-2 text-lg font-semibold text-base-content"}>
             {isConfig ? "Config comparison" : "Model comparison"}{" "}
             <span className="font-normal text-base-content/50">— {tier}</span>
           </h2>
-          {tier === "pr-review" && (
+          {isPrReviewTier(tier) && (
             <details className="group mb-4 max-w-2xl">
               <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 text-2xs text-base-content/50 transition-colors hover:text-base-content/80 [&::-webkit-details-marker]:hidden">
                 <span className="flex h-4 w-4 items-center justify-center rounded-full border border-base-content/30 font-mono text-[10px] leading-none">
@@ -174,7 +174,7 @@ export function RunView({ run, onShowRepeats }: { run: IndexRun; onShowRepeats?:
           )}
           <CompareTable models={models} tier={tier} labels={labels} axisLabel={isConfig ? "Config" : "Model"} />
 
-          {tier === "pr-review" && <MicroPanel models={models} labels={labels} />}
+          {isPrReviewTier(tier) && <MicroPanel models={models} labels={labels} />}
 
           {isConfig && <PhaseModelPanel results={tierResults} labels={labels} />}
 
@@ -183,7 +183,7 @@ export function RunView({ run, onShowRepeats }: { run: IndexRun; onShowRepeats?:
           <h2 className="mb-3.5 mt-8 text-lg font-semibold text-base-content">Per-instance results</h2>
           <InstanceTable tier={tier} results={tierResults} pending={tierPending} labels={labels} scorecardUrl={run.scorecard} />
 
-          {tier === "pr-review" && card?.meta?.martian && (
+          {isPrReviewTier(tier) && card?.meta?.martian && (
             <MartianRankPanel ranking={card.meta.martian} labels={labels} />
           )}
         </>
