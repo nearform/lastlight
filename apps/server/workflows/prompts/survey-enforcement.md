@@ -53,6 +53,27 @@ three different facts:
 
 This is the family that produced the only gold match this project has ever recorded, and it produced it from one question: *quote the line that enforces THIS constant, or state that no such line exists*. `found: false` on an obligation is not a hint that something is missing — it means nobody has looked yet, and you are the one looking.
 
+## The questions an innocent quote cannot answer
+
+Phrase every discharge so that a QUOTED LINE is the only honest answer and an
+innocent quote is not available. Stop asking whether the enforcing line EXISTS —
+ask what it cannot tell apart. Measured on this pipeline's own runs, every
+never-matched real defect within reach of an obligation was read, quoted, and
+signed off as *properly enforced*; the enforcement was a cookie parameter and
+the defect was that nothing server-side ever compared. The recurring shapes:
+
+1. "Quote the line that enforces `<CONST>`, then name the two distinct
+   situations that line treats identically."
+2. "`<CONST>` caps a loop, page or batch. Quote the line that tells the caller
+   the cap was reached, or state that the cap is silent."
+3. "Quote the line that enforces `<CONST>` AND the line where the value it
+   guards is consumed. If consumption happens first, quote both in order."
+4. "This value is written on one side and read on the other. Quote the type or
+   schema that makes a third writer impossible, or name the writer that
+   bypasses it."
+5. "`<CONST>` changed value in this diff (`A` → `B`). Quote the line elsewhere
+   that still assumes `A`."
+
 ## Output
 
 Append one JSON object per line to `.lastlight/pr-review/hypotheses/enforcement.jsonl`,

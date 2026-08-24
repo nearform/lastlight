@@ -179,3 +179,36 @@ export function makeRunId(date: Date, gitSha?: string, parentDir?: string): stri
   for (let n = 2; existsSync(join(parentDir, id)); n++) id = `${base}-${n}`;
   return id;
 }
+
+/**
+ * Pre-assign `count` sibling run ids for a `--repeat-concurrency` batch, BEFORE
+ * any repeat launches.
+ *
+ * {@link makeRunId} alone cannot serve concurrent repeats: it dedupes against
+ * what is already ON DISK, and a pre-assigned id has no dir yet — so N
+ * simultaneous launches inside one second would all resolve to the same id.
+ * This walks the clock forward one second per id (and keeps walking past any
+ * collision, on disk or within the batch), so every id keeps the plain
+ * `<YYYY-MM-DD_HHMMSS>[-<sha>]` shape the dashboard's two-level walk and
+ * `clean.ts` expect, AND a timestamp stamp unique within the batch — which
+ * `backfill-pipeline.ts`'s `runStampOf` archive-matching treats as a per-run
+ * key. The ids are in launch order; index 0 doubles as the band's
+ * `meta.repeat.group`. The later stamps run up to `count-1` seconds ahead of
+ * the wall clock, which is the price of collision-free pre-assignment.
+ */
+export function assignRunIds(count: number, start: Date, gitSha?: string, parentDir?: string): string[] {
+  const ids: string[] = [];
+  const taken = new Set<string>();
+  let at = start;
+  for (let i = 0; i < count; i++) {
+    let id = makeRunId(at, gitSha, parentDir);
+    while (taken.has(id)) {
+      at = new Date(at.getTime() + 1000);
+      id = makeRunId(at, gitSha, parentDir);
+    }
+    taken.add(id);
+    ids.push(id);
+    at = new Date(at.getTime() + 1000); // the next repeat starts at least a second later
+  }
+  return ids;
+}

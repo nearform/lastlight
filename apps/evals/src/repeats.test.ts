@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { groupRepeats, repeatGroupOf, writeScorecard, summarize, type RunMeta, type Scorecard } from "./report.js";
-import { BAKED_FACTS_BIN, makeRunId, resolveFactsBin } from "./paths.js";
+import { BAKED_FACTS_BIN, assignRunIds, makeRunId, resolveFactsBin } from "./paths.js";
 import { configArm, releaseOverlayGuard } from "./arm.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -105,6 +105,98 @@ describe("the overlay guard across a repeat boundary (the trap --repeats has to 
   });
 });
 
+describe("--repeat-concurrency — the CLI surface (pinned against run.ts's source)", () => {
+  it("is in VALUE_FLAGS, so `--repeat-concurrency 3 pr-review` does not read 3 as a tier", () => {
+    const valueFlags = /const VALUE_FLAGS = new Set\((\[[^\]]*\])\)/.exec(runSource);
+    expect(valueFlags, "VALUE_FLAGS declaration not found in run.ts").toBeTruthy();
+    expect(JSON.parse(valueFlags![1]) as string[]).toContain("--repeat-concurrency");
+  });
+
+  it("defaults to sequential — the concurrent branch is gated on BOTH flags", () => {
+    // `--repeat-concurrency 1` (or no `--repeats`) must take the exact repeat
+    // loop that always existed; the overlap is opt-in twice over.
+    expect(runSource).toMatch(/const repeatsConcurrent = repeats > 1 && repeatConcurrency > 1;/);
+    // …and the sequential loop still assigns each sibling id lazily, unchanged.
+    expect(runSource).toMatch(/runId = makeRunId\(new Date\(\), gitSha, tierResultsDir\(tierKeyFor\(tiers\[0\]\)\)\)/);
+  });
+
+  it("clamps to 1 on --sandbox gondolin and on multi-overlay config runs", () => {
+    // gondolin: one QEMU micro-VM at a time — same policy as --concurrency.
+    expect(runSource).toMatch(/sandbox === "gondolin" && repeatConcurrency > 1/);
+    // Multi-overlay config: there is no single overlay for the batch-wide
+    // asset-root window to hold (ADR 0001), so repeats must stay sequential.
+    expect(runSource).toMatch(/runType === "config" && arms\.length > 1 && repeatConcurrency > 1/);
+  });
+
+  it("pre-assigns every sibling runId before launch, from assignRunIds", () => {
+    // Lazy per-repeat assignment cannot work overlapped: N launches inside one
+    // second would all resolve the same id (nothing is on disk yet to dedupe
+    // against). The whole band's ids are assigned up front instead.
+    expect(runSource).toMatch(/assignRunIds\(repeats, new Date\(\), gitSha, tierResultsDir\(tierKeyFor\(tiers\[0\]\)\)\)/);
+  });
+
+  it("holds the overlay guard across the whole batch and releases it exactly once", () => {
+    const start = runSource.indexOf("if (repeatsConcurrent) {");
+    expect(start, "concurrent-repeats branch not found in run.ts").toBeGreaterThan(-1);
+    const branch = runSource.slice(start, runSource.indexOf("for (repeatIndex = 1;"));
+    // Activated once, batch-wide, before any repeat launches…
+    expect(branch).toContain("for (const arm of arms) arm.activate();");
+    // …run through the shared pool at the repeat level…
+    expect(branch).toContain("mapPool(states, repeatConcurrency");
+    // …and released in a finally, whatever happened.
+    expect(branch).toMatch(/finally \{[^}]*releaseOverlayGuard\(\);/s);
+    // Console is silenced once for the batch (quiet() is not concurrency-safe).
+    expect(branch).toContain("silenceConsole()");
+  });
+
+  it("stamps meta.repeat.concurrency only when the repeats actually overlapped", () => {
+    // The latency caveat must be legible on every repeat of an overlapped band,
+    // and ABSENT (not 1) on a sequential band — absent reads as "not overlapped".
+    expect(runSource).toMatch(/\.\.\.\(repeatsConcurrent \? \{ concurrency: repeatConcurrency \} : \{\}\)/);
+  });
+});
+
+describe("assignRunIds — pre-assigned sibling ids for concurrent repeats", () => {
+  const at = new Date("2026-08-23T14:30:52.123Z");
+
+  it("assigns unique, <timestamp>-<sha>-shaped ids from one instant", () => {
+    const ids = assignRunIds(4, at, "abc1234");
+    expect(ids).toHaveLength(4);
+    expect(new Set(ids).size).toBe(4);
+    for (const id of ids) expect(id).toMatch(/^\d{4}-\d{2}-\d{2}_\d{6}-abc1234$/);
+    // Batch-unique STAMPS, not just ids: backfill-pipeline's runStampOf treats
+    // the YYYY-MM-DD_HHMMSS prefix as a per-run key when matching archives.
+    const stamps = ids.map((id) => id.slice(0, 17));
+    expect(new Set(stamps).size).toBe(4);
+    // Launch order is preserved and sortable.
+    expect([...ids].sort()).toEqual(ids);
+  });
+
+  it("index 0 is exactly what a plain run would have been named — the band's group", () => {
+    // `meta.repeat.group` = the first repeat's runId; pre-assignment must not
+    // change what that first id would have been.
+    expect(assignRunIds(3, at, "abc1234")[0]).toBe(makeRunId(at, "abc1234"));
+  });
+
+  it("steps over ids already on disk, keeping the run-dir shape", () => {
+    const dir = tmp();
+    try {
+      mkdirSync(join(dir, "2026-08-23_143052-abc1234"), { recursive: true });
+      const ids = assignRunIds(2, at, "abc1234", dir);
+      // The colliding first id takes makeRunId's usual on-disk suffix…
+      expect(ids[0]).toBe("2026-08-23_143052-abc1234-2");
+      // …and the second moves to the next second, exactly as with no collision.
+      expect(ids[1]).toBe("2026-08-23_143053-abc1234");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a band of one degenerates to makeRunId", () => {
+    expect(assignRunIds(1, at, "abc1234")).toEqual([makeRunId(at, "abc1234")]);
+  });
+});
+
 describe("sibling run ids — two repeats in the same second must not collide", () => {
   it("suffixes -2/-3 when the parent dir already holds the id", () => {
     const dir = tmp();
@@ -147,6 +239,29 @@ describe("meta.repeat — the band lives in meta, not the filesystem", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("round-trips the overlap stamp (repeat.concurrency) — the latency caveat must survive to disk", () => {
+    const dir = tmp();
+    try {
+      const card: Scorecard = summarize([]);
+      card.meta = meta({ runId: "r2", repeat: { group: "r1", index: 2, of: 3, concurrency: 3 } });
+      const back = JSON.parse(readFileSync(writeScorecard(dir, card), "utf8")) as Scorecard;
+      expect(back.meta?.repeat).toEqual({ group: "r1", index: 2, of: 3, concurrency: 3 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still groups repeats that carry the overlap stamp", () => {
+    const card = (runId: string, index: number): Scorecard => ({
+      models: [],
+      results: [],
+      meta: meta({ runId, repeat: { group: "r1", index, of: 2, concurrency: 2 } }),
+    });
+    const [band] = groupRepeats([card("r2", 2), card("r1", 1)]);
+    expect(band.group).toBe("r1");
+    expect(band.cards.map((c) => c.meta!.runId)).toEqual(["r1", "r2"]);
   });
 
   it("is optional — an ordinary run carries none and still groups as a band of one", () => {

@@ -602,6 +602,41 @@ the clean-discharge demotion is built and unmeasured) and **H-A5**
 (confidence is decorative). Both are precision/attention questions. The
 Sonnet-adjudicator rungs (old A3a/A3b) lose their recall question entirely.
 
+## 2g. 2026-08-24 — arm 2.1′ RAN. The prompt revision made the saying deterministic.
+
+**~$7, `prreview__skillspro-1587-r2`, `--repeats 3`, minimal contract, Haiku,
+runs `2026-08-24_063919/065307/070634`. One variable vs the X1 band: the
+revised adjudicator prompt (`a5cdbc4c` — verification-report tier rule +
+defect-priced confidence).**
+
+| | X1 (old prompt) | 2.1′ (new prompt) |
+|---|---|---|
+| posted recall per repeat | 0.000 / 0.000 / 0.600 | **0.400 / 0.400 / 0.400** |
+| band (max − min) | 0.600 | **0.000** |
+| posted union / intersection | 3/5 / **0/5** | 3/5 / **1/5** |
+| precision / SNR (best) | 0.231 / 0.300 | 0.286 / 0.400 |
+| found vs said | said only when found (rep3) | **found = said, every repeat** |
+
+- **Discovery did not move** — union 3/5 in both arms, the same three gold
+  ({2, 4, 5}), and G1 (lower-cased key) and G3 (email from unexpired decode)
+  have still never been found by any arm. That is question-shape (H-D3/E1a),
+  exactly 2.2′'s target.
+- **Reliability is the result.** The old arm said gold only on the repeat that
+  happened to; the new prompt says two of the three findable gold on EVERY
+  repeat. `internalGold` (recorded natively for the first time) shows nothing
+  defect-shaped withheld — the internal tier is pure verification-report bulk.
+- **Guardrail clean**: precision and SNR both up alongside recall; no
+  locked-decision-1 signature.
+- **H-A5 only half-landed**: tiers obey the new rule, but confidence is still
+  min 0.0 / median 1.0 — the calibration rubric did not move the numbers. The
+  thresholds still never bind; parked unless the 8-case confirm shows tier
+  noise.
+- n = 1 case, 5 gold: direction, not magnitude. The 8-case confirm is where
+  this either holds or doesn't.
+
+**Decision: 2.1′ KEEPS (provisional), 2.2′ (E1a question catalogues in the
+survey prompts) is next, then the 8-case confirm of whatever stands.**
+
 ## 3. What to do next
 
 **Superseded 2026-08-23.** The old §3a ("more repeats before any lever") is

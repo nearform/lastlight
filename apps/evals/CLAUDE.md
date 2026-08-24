@@ -183,7 +183,8 @@ The release commit is conventionally just the two version-file lines
   one pr-review arm measured micro-recall 0.320 / 0.080 / 0.200 (union 0.440,
   intersection 0.040), and `diff-runs` returned KEEP on one and REVERT on the other
   two *from one configuration*. `--repeats N` re-runs the whole ARM N times,
-  strictly sequentially, as N **sibling** run dirs — each a normal run tagged
+  sequentially by default (`--repeat-concurrency N` overlaps up to N repeats —
+  see "Parallelism"), as N **sibling** run dirs — each a normal run tagged
   `meta.repeat = {group, index, of}` (`group` = the first repeat's `runId`), which
   `varianceRollup` (`review-metrics.ts`) folds into a band with union/intersection
   recall — read it with `npx tsx scripts/band.ts <run> <run> <run>` (pass the runs
@@ -202,7 +203,9 @@ The release commit is conventionally just the two version-file lines
   as the `RunProvenance` type, which `RunMeta` extends) — `overlay`/`overlays`,
   `datasets`, `sandbox`, `fBeta`, `judgeWithDiff`, `injectContext`, `keepWorkspace`,
   `instances`, `limit`, `repeats`, `judgeModel`, the resolved `factsBin` + its
-  `toolchain` stamp, `harness` (version + root), and raw `argv`. `meta` used to
+  `toolchain` stamp, `harness` (version + root), and raw `argv` (an overlapped
+  band additionally stamps `meta.repeat.concurrency` — see "Parallelism").
+  `meta` used to
   record model/gitSha/core but not
   the overlay, so a `models` run recorded its `review.analysis.enabled` policy
   nowhere at all; a globally-installed harness once ran the *baseline* while
@@ -520,7 +523,7 @@ When pointing the harness at a new real workflow, check:
   workflow itself must be resolvable by core's `getWorkflow` (a built-in, or an
   overlay workflow under `<overlay>/workflows/`).
 
-## Parallelism (two axes)
+## Parallelism (three axes)
 
 **Across provider families** — `run.ts` runs provider families (OpenAI /
 Anthropic / Fireworks — keyed by each model's `envKey`) **concurrently**.
@@ -531,6 +534,23 @@ at once, via the shared order-preserving `mapPool` in `src/pool.ts` (also used b
 rate-limit choice, never a correctness constraint — every case is already
 isolated (see the list below). This is what makes an 8-case `pr-review` arm
 affordable: serial it is hours, because a pipeline-on case is ~30 minutes.
+
+**Across repeats** — `--repeat-concurrency N` (default `1` = the sequential
+repeat loop, untouched) runs up to N of a `--repeats` band's repeats at once,
+through the same `mapPool`. Safe for the same reason case concurrency is: every
+repeat runs the same arm(s) over ONE overlay, so the asset-root guard window is
+taken once for the whole batch (multi-overlay `config` runs and
+`--sandbox gondolin` clamp to 1). Sibling runIds are **pre-assigned** before
+launch (`assignRunIds` in `src/paths.ts` bumps the second per id, so
+simultaneous launches never collide and each `YYYY-MM-DD_HHMMSS` stamp stays
+unique — which `backfill-pipeline.ts`'s archive matching keys on);
+`meta.repeat.group` stays the first pre-assigned id. The accepted cost is the
+**latency instrument**: overlapped repeats contend for CPU/network, so per-phase
+`durationMs`/`agentMs` are contaminated — each repeat stamps
+`meta.repeat.concurrency` so latency reads can be discounted (verdicts, cost,
+recall are unaffected). Composes with `--concurrency`: total in-flight cases =
+repeat-concurrency × concurrency, uncapped — size the product against the
+provider's rate limit.
 
 Two hard limits, both enforced in code:
 

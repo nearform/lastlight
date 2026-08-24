@@ -56,6 +56,14 @@ export interface RepeatRef {
   index: number;
   /** How many repeats the band was launched with. */
   of: number;
+  /**
+   * `--repeat-concurrency N` when the band's repeats ran OVERLAPPED (absent =
+   * sequential, the default). Stamped because overlap contaminates the latency
+   * instrument: per-phase `durationMs`/`agentMs` on such a run include
+   * contention from sibling repeats, so latency reads must be discounted.
+   * Verdicts, cost, and recall/precision are unaffected.
+   */
+  concurrency?: number;
 }
 
 /**
@@ -74,7 +82,9 @@ export interface RepeatRef {
  *
  * These sit FLAT on {@link RunMeta} (which extends this), matching how `gitSha` /
  * `concurrency` / `core` already read, and grouped into a named type only so the
- * documentation has one home.
+ * documentation has one home. (`--repeat-concurrency` is the one knob recorded
+ * elsewhere — on `meta.repeat.concurrency`, beside the band it contaminates; see
+ * {@link RepeatRef}.)
  */
 export interface RunProvenance {
   /** The PRIMARY `--overlay` — the one that wired discovery and the initial asset

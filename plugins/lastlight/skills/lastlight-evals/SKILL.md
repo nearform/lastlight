@@ -145,7 +145,10 @@ KEEP on one and REVERT on the other two, from one configuration. Union across th
 three was 0.440 and intersection 0.040 — only 1 gold finding in 25 was found by
 all three.
 
-`--repeats N` runs the whole arm N times, strictly sequentially, and writes N
+`--repeats N` runs the whole arm N times, sequentially by default
+(`--repeat-concurrency M` overlaps up to M repeats at once — recall/cost are
+unaffected, but per-phase latency contends and each repeat stamps
+`meta.repeat.concurrency` so timing reads can be discounted), and writes N
 **sibling** runs (each its own `runId`/`scorecard.json`, tagged
 `meta.repeat = {group, index, of}` where `group` is the first repeat's `runId`).
 Report the band (min–max), not a point. It implies `--keep-workspace` (you will

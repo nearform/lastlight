@@ -50,6 +50,7 @@ import {
   builtinDatasetsRoot,
   tierResultsDir,
   makeRunId,
+  assignRunIds,
   gitShortSha,
   resultsRoot,
   dashboardDistRoot,
@@ -225,7 +226,7 @@ function strFlagAll(name: string): string[] {
 }
 
 /** CLI flags that take a following value (so it isn't read as a tier name). */
-const VALUE_FLAGS = new Set(["--runs", "--repeats", "--model", "--models", "--mode", "--overlay", "--datasets", "--models-file", "--instance", "--limit", "--f-beta", "--sandbox", "--concurrency"]);
+const VALUE_FLAGS = new Set(["--runs", "--repeats", "--model", "--models", "--mode", "--overlay", "--datasets", "--models-file", "--instance", "--limit", "--f-beta", "--sandbox", "--concurrency", "--repeat-concurrency"]);
 
 async function runEval(): Promise<number> {
   loadDotEnv();
@@ -566,6 +567,50 @@ async function runEval(): Promise<number> {
     concurrency = 1;
   }
 
+  // `--repeat-concurrency N`: how many of the `--repeats` REPEATS run at once.
+  // Default 1 = today's strictly-sequential repeat loop, untouched. With N>1 the
+  // repeats of the arm overlap — safe because every repeat runs the SAME arm(s)
+  // over ONE overlay, so the process-global asset-root guard (ADR 0001) is taken
+  // once for the whole batch, exactly as `--concurrency` holds it per arm.
+  //
+  // What overlap costs is the LATENCY instrument: concurrent repeats contend for
+  // CPU/network, so per-phase `durationMs`/`agentMs` on such runs are
+  // contaminated. That trade is accepted and made legible — each repeat's
+  // `meta.repeat.concurrency` records it so latency reads can be discounted.
+  // Verdicts, cost, and recall/precision are unaffected.
+  //
+  // Composes with `--concurrency` (case-level): total in-flight cases =
+  // repeatConcurrency × concurrency. No cap — size the product against the
+  // provider's rate limit.
+  const repeatConcurrencyRaw = strFlag("repeat-concurrency");
+  let repeatConcurrency = repeatConcurrencyRaw !== undefined ? Number(repeatConcurrencyRaw) : 1;
+  if (!Number.isFinite(repeatConcurrency) || !Number.isInteger(repeatConcurrency) || repeatConcurrency < 1) {
+    p.log.error(`--repeat-concurrency must be a positive integer, got "${repeatConcurrencyRaw}".`);
+    return 1;
+  }
+  // Same clamp-not-refuse policy as --concurrency: one QEMU micro-VM at a time.
+  if (sandbox === "gondolin" && repeatConcurrency > 1) {
+    p.log.warn(`--repeat-concurrency ${repeatConcurrency} ignored: --sandbox gondolin runs a QEMU micro-VM per case. Using 1.`);
+    repeatConcurrency = 1;
+  }
+  // A multi-overlay `config` run switches the process-global asset root between
+  // arms, so its repeats cannot overlap: two repeats in different arms would be
+  // two overlays at once (the guard would throw — ADR 0001). One overlay per
+  // batch is the invariant the concurrent branch is built on.
+  if (runType === "config" && arms.length > 1 && repeatConcurrency > 1) {
+    p.log.warn(
+      `--repeat-concurrency ${repeatConcurrency} ignored: a multi-overlay config run switches the ` +
+        `process-global asset root between arms (ADR 0001), so repeats must stay sequential. Using 1.`,
+    );
+    repeatConcurrency = 1;
+  }
+  if (repeats === 1 && repeatConcurrency > 1) {
+    p.log.warn(`--repeat-concurrency ${repeatConcurrency} has nothing to overlap without --repeats N>1 — ignored.`);
+    repeatConcurrency = 1;
+  }
+  /** True when the repeat loop actually overlaps (the concurrent branch below). */
+  const repeatsConcurrent = repeats > 1 && repeatConcurrency > 1;
+
   // Instances per tier, resolved ONCE — the case set is identical across arms
   // (arms vary only the model selection / assets, never the cases).
   const tierInstances = new Map<string, SweBenchInstance[]>();
@@ -721,12 +766,24 @@ async function runEval(): Promise<number> {
   // both walk exactly two levels, so a nested `<runId>/rep-2/` would be invisible
   // to the dashboard AND uncleanable. `makeRunId`'s existing `-2`/`-3` suffix
   // already handles two repeats finishing inside the same second.
-  let runId = makeRunId(new Date(), gitSha, tierResultsDir(tierKeyFor(tiers[0])));
-  /** The band's id = the FIRST repeat's runId (see `RepeatRef`). */
+  //
+  // CONCURRENT repeats (`--repeat-concurrency N>1`) can't assign lazily — N
+  // launches inside one second would all resolve the same id, because the ids
+  // exist nowhere on disk yet for `makeRunId` to dedupe against. So the whole
+  // band's ids are PRE-ASSIGNED here (`assignRunIds` bumps the second per id,
+  // keeping every id `<timestamp>-<sha>`-shaped with a batch-unique stamp) and
+  // each repeat's state carries its own. The sequential path keeps lazy
+  // assignment, one fresh id per repeat, exactly as before.
+  const preassignedRunIds = repeatsConcurrent
+    ? assignRunIds(repeats, new Date(), gitSha, tierResultsDir(tierKeyFor(tiers[0])))
+    : undefined;
+  let runId = preassignedRunIds?.[0] ?? makeRunId(new Date(), gitSha, tierResultsDir(tierKeyFor(tiers[0])));
+  /** The band's id = the FIRST repeat's runId (see `RepeatRef`) — pre-assigned
+   * before any repeat launches, so the group label never depends on run order. */
   const repeatGroup = runId;
-  /** 1-based position in the band; bumped by the repeat loop. */
+  /** 1-based position in the band; bumped by the (sequential) repeat loop. */
   let repeatIndex = 1;
-  const resultsDirFor = (tier: string) => join(tierResultsDir(tierKeyFor(tier)), runId);
+  const resultsDirFor = (tier: string, rid: string = runId) => join(tierResultsDir(tierKeyFor(tier)), rid);
   // Each case's session logs live under `sessions/<id>__<model>/trial-<N>/`
   // (relative to the tier run dir) — the model is in the name since several
   // models share a run dir; per-trial keeps every `--runs N` trial. `full.jsonl`
@@ -772,10 +829,12 @@ async function runEval(): Promise<number> {
     argv: process.argv.slice(2),
   };
 
-  const baseMetaFor = (tier: string): Omit<RunMeta, "generatedAt"> => ({
+  // `rid`/`idx` default to the sequential loop's shared `runId`/`repeatIndex`;
+  // a CONCURRENT repeat passes its own (two repeats in flight cannot share one).
+  const baseMetaFor = (tier: string, rid: string = runId, idx: number = repeatIndex): Omit<RunMeta, "generatedAt"> => ({
     // Flat on `meta`, exactly like `gitSha`/`concurrency`/`core`.
     ...provenance,
-    runId,
+    runId: rid,
     runType,
     tiers: [tier],
     models: armLabels,
@@ -783,7 +842,18 @@ async function runEval(): Promise<number> {
     concurrency,
     // A band of one is not a band — an ordinary run's meta stays exactly as it
     // was, and `undefined` reads as "not repeated" rather than "repeated once".
-    repeat: repeats > 1 ? { group: repeatGroup, index: repeatIndex, of: repeats } : undefined,
+    // `repeat.concurrency` is stamped only when the repeats actually overlapped
+    // (`--repeat-concurrency N>1`) — the flag that contaminates per-phase
+    // latency, recorded so `durationMs`/`agentMs` reads can be discounted.
+    repeat:
+      repeats > 1
+        ? {
+            group: repeatGroup,
+            index: idx,
+            of: repeats,
+            ...(repeatsConcurrent ? { concurrency: repeatConcurrency } : {}),
+          }
+        : undefined,
     gitSha,
     labels,
     core: describeCore(builtInRoot),
@@ -825,7 +895,13 @@ async function runEval(): Promise<number> {
           : ""
       }${
         repeats > 1
-          ? `\n${chalk.bold("repeats")} ${repeats}${chalk.dim(` × the whole arm, sequentially · ${repeats} sibling runs, read as a band (implies --keep-workspace, --no-open)`)}`
+          ? `\n${chalk.bold("repeats")} ${repeats}${chalk.dim(
+              ` × the whole arm, ${
+                repeatsConcurrent
+                  ? `up to ${repeatConcurrency} at once (per-phase latency contends — stamped meta.repeat.concurrency)`
+                  : "sequentially"
+              } · ${repeats} sibling runs, read as a band (implies --keep-workspace, --no-open)`,
+            )}`
           : ""
       }`,
     "plan",
@@ -837,12 +913,12 @@ async function runEval(): Promise<number> {
   // Seed an empty live scorecard per tier so the dashboard has something to poll.
   // Called once per repeat, AFTER `runId` has been repointed, so each sibling run
   // dir exists from the moment its repeat starts rather than only when it ends.
-  const seedScorecards = () => {
+  const seedScorecards = (rid: string = runId, idx: number = repeatIndex) => {
     for (const tier of tiers) {
       writeScorecard(
-        resultsDirFor(tier),
+        resultsDirFor(tier, rid),
         withMeta(summarize([]), {
-          ...baseMetaFor(tier),
+          ...baseMetaFor(tier, rid, idx),
           generatedAt: new Date().toISOString(),
           live: true,
           pid: process.pid,
@@ -898,14 +974,41 @@ async function runEval(): Promise<number> {
   // the right `trial-<N>/full.jsonl` (matters only for `--runs N>1`).
   const trialOf = new Map<string, number>();
 
+  /**
+   * One CONCURRENT repeat's private accumulators (`--repeat-concurrency N>1`).
+   * The sequential path keeps using the module-of-`runEval` accumulators above
+   * — `refresh()`/`runItem()` fall back to them when no state is passed, so the
+   * default `--repeat-concurrency 1` run takes the exact code path it always
+   * did. Each concurrent repeat carries its own state instead: two repeats in
+   * flight cannot share one `all`/`running`/`completed` without writing each
+   * other's scorecards.
+   */
+  interface RepeatState {
+    /** This repeat's pre-assigned sibling runId (see `assignRunIds`). */
+    runId: string;
+    /** 1-based position in the band (`meta.repeat.index`). */
+    index: number;
+    all: InstanceResult[];
+    harnessErrors: number;
+    completed: number;
+    running: Set<string>;
+    trialOf: Map<string, number>;
+  }
+  /** The concurrent repeats currently in flight — what the heartbeat re-stamps. */
+  const activeStates = new Set<RepeatState>();
+
   // writeScorecard/summarize/all.push run synchronously to completion inside one
   // event-loop turn, so even with concurrent families they never interleave; the
   // temp-file+rename keeps a polling dashboard from reading a half-written file.
-  const refresh = () => {
-    const done = new Set(all.map((r) => caseKey(r.tier ?? "", r.model, r.instance_id)));
+  const refresh = (st?: RepeatState) => {
+    // A concurrent repeat's own accumulators, else the sequential shared ones.
+    const results = st?.all ?? all;
+    const inFlight = st?.running ?? running;
+    const trialNo = st?.trialOf ?? trialOf;
+    const done = new Set(results.map((r) => caseKey(r.tier ?? "", r.model, r.instance_id)));
     const now = new Date().toISOString();
     for (const tier of tiers) {
-      const tierResults = all.filter((r) => (r.tier ?? "") === tier);
+      const tierResults = results.filter((r) => (r.tier ?? "") === tier);
       const pending: PendingCase[] = work
         .filter((w) => w.tierName === tier)
         .map((w) => ({ w, k: caseKey(w.tierName, w.arm.label, w.inst.instance_id) }))
@@ -914,20 +1017,20 @@ async function runEval(): Promise<number> {
           tier: w.tierName,
           model: w.arm.label,
           instance_id: w.inst.instance_id,
-          status: running.has(k) ? "running" : "pending",
+          status: inFlight.has(k) ? "running" : "pending",
           // Only a running case has a (live-updating) transcript to follow —
           // point at the current trial's consolidated `full.jsonl`.
-          sessionLog: running.has(k)
-            ? `${trialRelFor(w.inst.instance_id, w.arm.label, trialOf.get(k) ?? 1)}/full.jsonl`
+          sessionLog: inFlight.has(k)
+            ? `${trialRelFor(w.inst.instance_id, w.arm.label, trialNo.get(k) ?? 1)}/full.jsonl`
             : undefined,
         }));
       // Per-tier progress (cases), not the global trial count — each tier's
       // scorecard stands alone, so "0/5" across both tiers was misleading.
       const tierCases = work.filter((w) => w.tierName === tier).length;
       writeScorecard(
-        resultsDirFor(tier),
+        resultsDirFor(tier, st?.runId),
         withMeta(summarize(tierResults), {
-          ...baseMetaFor(tier),
+          ...baseMetaFor(tier, st?.runId, st?.index),
           generatedAt: now,
           live: true,
           // Liveness signals: a `live` run whose heartbeat goes stale (writer
@@ -950,15 +1053,17 @@ async function runEval(): Promise<number> {
   const keptWorkspaces: { id: string; trial: number; repeat: number; path: string }[] = [];
 
   // Run one case `runs` times and fold the trials into a single result
-  // (worst-case verdict, mean metrics). `onTrial` ticks per model call.
-  const runItem = async (w: WorkItem, onTrial: () => void): Promise<InstanceResult> => {
+  // (worst-case verdict, mean metrics). `onTrial` ticks per model call. `st` is
+  // a concurrent repeat's own state (`--repeat-concurrency N>1`); absent, the
+  // sequential shared accumulators are used, unchanged.
+  const runItem = async (w: WorkItem, onTrial: () => void, st?: RepeatState): Promise<InstanceResult> => {
     const k = caseKey(w.tierName, w.arm.label, w.inst.instance_id);
     const trials: InstanceResult[] = [];
     // Collected per TRIAL, not off the aggregate: `aggregateTrials` carries
     // trial 1's fields through, so with `--runs 3` the other two workspaces
     // would still be on disk and named nowhere.
     for (let t = 1; t <= runs; t++) {
-      trialOf.set(k, t); // so the live "follow" link targets this trial
+      (st?.trialOf ?? trialOf).set(k, t); // so the live "follow" link targets this trial
       const trialRel = trialRelFor(w.inst.instance_id, w.arm.label, t);
       const r = await runInstance(w.inst, {
         // The arm carries all model selection (forced model / merged config) +
@@ -973,7 +1078,7 @@ async function runEval(): Promise<number> {
         defaultWorkflow: w.defaultWorkflow,
         manageEnv: false,
         // Per-trial dir: `full.jsonl` (consolidated, live) + `NN-<phase>.jsonl`.
-        sessionTrialDir: join(resultsDirFor(w.tierName), trialRel),
+        sessionTrialDir: join(resultsDirFor(w.tierName, st?.runId), trialRel),
         sessionTrialRel: trialRel,
         trial: t,
         judge,
@@ -981,9 +1086,11 @@ async function runEval(): Promise<number> {
         keepWorkspace,
       });
       r.tier = w.tierName;
-      if (r.workspaceDir) keptWorkspaces.push({ id: w.inst.instance_id, trial: t, repeat: repeatIndex, path: r.workspaceDir });
+      if (r.workspaceDir)
+        keptWorkspaces.push({ id: w.inst.instance_id, trial: t, repeat: st?.index ?? repeatIndex, path: r.workspaceDir });
       trials.push(r);
-      completed++;
+      if (st) st.completed++;
+      else completed++;
       onTrial();
     }
     const agg = aggregateTrials(trials);
@@ -999,16 +1106,133 @@ async function runEval(): Promise<number> {
   // Heartbeat: re-stamp the live scorecard every 20s so a long-running single
   // phase keeps its `heartbeat` fresh; if the process dies the stamp goes stale
   // and the index reclassifies the run as interrupted. `unref` so the timer
-  // never keeps the process alive on its own.
-  const heartbeat = setInterval(() => refresh(), 20_000);
+  // never keeps the process alive on its own. With concurrent repeats each
+  // in-flight repeat's OWN scorecard is re-stamped (never the shared one — its
+  // accumulators are unused there, and a shared refresh would overwrite repeat
+  // 1's card with an empty live one).
+  const heartbeat = setInterval(() => {
+    if (repeatsConcurrent) for (const st of activeStates) refresh(st);
+    else refresh();
+  }, 20_000);
   heartbeat.unref?.();
   /** Every repeat's per-tier artifact dirs, for the closing summary. */
   const repeatDirs: string[] = [];
   try {
-    // `--repeats N`: the WHOLE arm, N times, STRICTLY SEQUENTIALLY. Never
-    // overlapped — two repeats at once would be two arms at once, which the
-    // process-global asset root forbids (ADR 0001), and they would contend for
-    // the same provider rate limit, which is one of the things being measured.
+    if (repeatsConcurrent) {
+      // ── `--repeat-concurrency N>1`: up to N whole-arm repeats in flight ──
+      //
+      // Everything the repeats share is BATCH-scoped, the same shape as the
+      // case-concurrent branch below, widened to span the repeats:
+      //
+      //  - ONE overlay for the whole batch. Every repeat runs the same arm
+      //    list, so the process-global asset root (ADR 0001) is activated once
+      //    here and released once in the finally — the guard window covers the
+      //    entire batch. (Multi-overlay config runs clamped the flag to 1 up
+      //    top: they have no single overlay for the window to hold.
+      //    `activate()` is a no-op for models arms.)
+      //  - Console is silenced ONCE (the per-run `quiet()` swap is not
+      //    concurrency-safe) and one spinner reports every repeat — the same
+      //    trade the parallel branches below make.
+      //  - RunIds were pre-assigned (`preassignedRunIds`), so simultaneous
+      //    launches cannot collide on the second; each repeat's `RepeatState`
+      //    carries its own id, index, and accumulators.
+      //
+      // Within a repeat, cases run through the same arms-outer work list with
+      // `--concurrency` bounding cases in flight — so the total is
+      // repeatConcurrency × concurrency. In models mode several arms' cases
+      // interleave here (no overlay is at stake, only the provider rate limit);
+      // the per-family grouping of the parallel branch is deliberately not
+      // reproduced — repeat-level parallelism is the throughput lever.
+      const states: RepeatState[] = preassignedRunIds!.map((rid, i) => ({
+        runId: rid,
+        index: i + 1,
+        all: [],
+        harnessErrors: 0,
+        completed: 0,
+        running: new Set<string>(),
+        trialOf: new Map<string, number>(),
+      }));
+      p.log.step(
+        `${chalk.bold(`repeats ×${repeats}, up to ${repeatConcurrency} at once`)}\n` +
+          chalk.dim(states.map((st) => `  ${st.index}/${repeats} ${st.runId}`).join("\n")),
+      );
+      for (const arm of arms) arm.activate();
+      const grandTotal = total * repeats;
+      const grand = () => states.reduce((n, st) => n + st.completed, 0);
+      const s = makeSpinner();
+      const status = () =>
+        `${chalk.dim(`${grand()}/${grandTotal}`)}  ${states
+          .map((st) => {
+            const seg = `r${st.index} ${st.completed}/${total}`;
+            return st.completed === total ? chalk.green(seg) : seg;
+          })
+          .join(chalk.dim(" · "))}`;
+      s.start(status());
+      const restoreConsole = silenceConsole();
+      const verdicts: string[] = [];
+      try {
+        await mapPool(states, repeatConcurrency, async (st) => {
+          // Repeat 1's live scorecard was seeded before the server started /
+          // the prefetch ran, like any run's; a later repeat seeds its sibling
+          // dir the moment it LAUNCHES here, so the dashboard sees it live.
+          if (st.index > 1) seedScorecards(st.runId, st.index);
+          activeStates.add(st);
+          try {
+            await mapPool(work, concurrency, async (w) => {
+              const k = caseKey(w.tierName, w.arm.label, w.inst.instance_id);
+              st.running.add(k);
+              refresh(st);
+              const result = await runItem(
+                w,
+                () => {
+                  s.message(status());
+                  refresh(st);
+                },
+                st,
+              );
+              st.running.delete(k);
+              st.all.push(result);
+              if (result.error) st.harnessErrors++;
+              const mark = result.error ? chalk.red("✗") : result.blocked ? chalk.yellow("■") : chalk.green("✓");
+              verdicts.push(`${mark} ${chalk.dim(`r${st.index}/${repeats}`)}  ${verdictLine(w.tierName, w.inst, result)}`);
+              s.message(status());
+              refresh(st);
+            });
+          } finally {
+            activeStates.delete(st);
+          }
+          // Finalize THIS repeat as it lands — its siblings may still be running.
+          const generatedAt = new Date().toISOString();
+          for (const tier of tiers) {
+            const tierResults = st.all.filter((r) => (r.tier ?? "") === tier);
+            writeArtifacts(
+              resultsDirFor(tier, st.runId),
+              withMeta(summarize(tierResults), {
+                ...baseMetaFor(tier, st.runId, st.index),
+                generatedAt,
+                live: false,
+                martian: martianFor(tier, tierResults),
+              }),
+            );
+            repeatDirs.push(resultsDirFor(tier, st.runId));
+          }
+          totalHarnessErrors += st.harnessErrors;
+          totalCompleted += st.completed;
+          totalCases += st.all.length;
+        });
+      } finally {
+        restoreConsole();
+        // The batch-wide overlay window closes exactly once, whatever happened.
+        releaseOverlayGuard();
+      }
+      s.stop(`${chalk.dim(`${grand()}/${grandTotal}`)} ${chalk.green("done")}`);
+      p.log.message(verdicts.join("\n"));
+    } else
+    // `--repeats N` (sequential, the default): the WHOLE arm, N times, one
+    // after another. Overlapping is opt-in (`--repeat-concurrency`, the branch
+    // above) because concurrent repeats contend for CPU/network and the same
+    // provider rate limit — which contaminates the per-phase latency this
+    // sequential path keeps clean.
     for (repeatIndex = 1; repeatIndex <= repeats; repeatIndex++) {
       if (repeatIndex > 1) {
         // A fresh SIBLING run id. Every closure that names a run dir reads
@@ -1357,6 +1581,18 @@ Run options:
                        want each repeat's evidence) and --no-open (a run holds a
                        dashboard server open forever; n of them leak). Or
                        EVAL_REPEATS.
+  --repeat-concurrency <n>  Run up to n of the --repeats repeats at once
+                       (default 1 = sequential, the exact path above). RunIds are
+                       pre-assigned so simultaneous launches never collide; each
+                       repeat stays a normal sibling run. Repeats share ONE
+                       overlay, so multi-overlay --mode config runs clamp to 1
+                       (as does --sandbox gondolin). Composes with --concurrency:
+                       total in-flight cases = repeat-concurrency × concurrency
+                       (no cap — size the product against your rate limit).
+                       CAVEAT: concurrent repeats contend for CPU/network, so
+                       per-phase durationMs/agentMs are contaminated; each
+                       repeat's meta.repeat.concurrency records n so latency
+                       reads can be discounted. Verdicts/cost/recall unaffected.
   --f-beta <n>         pr-review F-beta β (default 1 = F1; 0.5 = precision 2×). Or EVAL_F_BETA.
   --judge-with-diff    pr-review: feed the PR diff to the judge (higher fidelity,
                        off by default — Martian's offline judge is diff-blind)

@@ -53,6 +53,16 @@ three different facts:
 
 A consumer outside the diff is the one that reads correctly in isolation and is wrong in composition — which is exactly what a file-by-file review cannot see. Open each consumer. Do not infer from the signature alone.
 
+## The questions an innocent quote cannot answer
+
+Phrase every discharge so that a QUOTED LINE is the only honest answer and an
+innocent quote is not available. "The signature matches" is not a discharge.
+The recurring shape this family keeps missing:
+
+1. "This symbol is new or changed and every consumer is inside the diff. Quote
+   the line inside it a caller cannot see and would be surprised by — a retry
+   policy, a timeout, a swallowed error class."
+
 ## Output
 
 Append one JSON object per line to `.lastlight/pr-review/hypotheses/contract.jsonl`,

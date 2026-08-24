@@ -53,6 +53,20 @@ three different facts:
 
 The scanner hit is CORROBORATION, not the finding. Measured across fifty real PRs, the scanners produced thirteen hits and not one pointed at a place a human reviewer's finding was about. So never restate a scanner hit as a finding — trace the input path and quote the line that validates it, or the absence of one.
 
+## The questions an innocent quote cannot answer
+
+Phrase every discharge so that a QUOTED LINE is the only honest answer and an
+innocent quote is not available. "The check exists" is not a discharge — ask
+what runs before it, what it does with the input it was not written for, and
+how a caller learns it fired. The recurring shapes:
+
+1. "Quote the line that rejects a request body that is not an object. If the
+   only guard is a property test (`'x' in body`, `body.x`), state what it does
+   for a scalar body."
+2. "Order the lifecycle phases this route registers. Quote the earliest phase
+   that rejects an unauthenticated caller."
+3. "Quote the line proving malformed input answers 4xx and not 5xx."
+
 ## Output
 
 Append one JSON object per line to `.lastlight/pr-review/hypotheses/security.jsonl`,

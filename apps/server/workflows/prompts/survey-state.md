@@ -53,6 +53,48 @@ three different facts:
 
 Rank your attention by how much of the impact cone lies OUTSIDE the diff. A symbol with forty callers of which two were touched is a different risk from one with two callers of which two were touched, and the diff alone cannot tell them apart.
 
+## The questions an innocent quote cannot answer
+
+Phrase every discharge so that a QUOTED LINE is the only honest answer and an
+innocent quote is not available. "The line exists" is not a discharge: measured
+on this pipeline's own runs, every never-matched real defect within reach of an
+obligation was read, quoted, and signed off as fine. Ask what the quoted line
+cannot tell apart, what runs before it, and what happens after it trips. The
+recurring shapes for THIS family:
+
+1. **Hook / phase ordering.** "This route registers `<hook>` at `<line>`. Name
+   the framework's phase order, then quote the earliest line that rejects an
+   unauthenticated caller. List every check that runs before it."
+2. **Early return coverage.** "The changed function returns early at `<line>`.
+   List every statement between that return and the end of the function, and
+   quote the line that still runs them on the early path — or name the ones it
+   skips."
+3. **Guard vs natural terminal.** "This loop stops when `<counter> >= <CONST>`.
+   Quote the line that distinguishes *the source was exhausted* from *the cap
+   was hit*, or state that one line is true in both cases."
+4. **What happens after the guard trips.** "When `<guard>` trips, quote the
+   line that propagates it to the caller. If a partial result is returned and
+   the caller's success path is unchanged, quote the response line that reports
+   success on truncated data."
+5. **Concurrency × retry conjunction.** "This diff changes a parallelism
+   constant from `A` to `B`. Quote the line that bounds or retries the resource
+   the extra concurrency contends for. If that line was removed or weakened in
+   this same diff, quote both."
+6. **Partial-failure legibility.** "For a run where some items fail: quote the
+   line that makes it a non-2xx, or the line that carries the failed items into
+   the summary. If neither exists, quote the line that returns success with an
+   error count."
+7. **Cross-request lifetime.** "The changed symbol keeps state across requests.
+   Quote the line that invalidates it AND the line where its clock starts."
+8. **Revalidation ceiling.** "This early return skips revalidation. Quote the
+   line that bounds how long a stale credential stays accepted."
+9. **Two-path divergence.** "This branch selects between two data sources.
+   Quote the line proving both return the same set, or name the field on which
+   they differ."
+10. **Failure-path cleanup.** "On the error or null-return path, quote the line
+    that burns the single-use token or nonce, or state that the failure path
+    leaves it replayable."
+
 ## Output
 
 Append one JSON object per line to `.lastlight/pr-review/hypotheses/state.jsonl`,
