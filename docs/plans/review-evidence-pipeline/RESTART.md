@@ -104,13 +104,15 @@ prepare → facts → seed → survey (6 branches, CONCURRENT) → falsify
 | WP0 spec axis, WP1/1b code-facts, WP8 the eval instrument | landed earlier |
 | WP3 seed + six surveys · WP4 prepare + falsify · WP6 adjudicate | landed earlier |
 | **WP11 speed + the correctness defects it uncovered** | landed 2026-08-22, committed `1cbc1f9d` — [11-speed.md](11-speed.md) |
-| WP2 sandbox image | not started — **blocks production, not measurement** |
+| WP2 sandbox image | **DONE** (`e83059e3` — the CLI bundle vendored at `/opt/lastlight`, `lastlight-facts` on `/usr/local/bin` + the baked fallback, scanners pinned from `toolchain.json` as build ARGs) |
 | WP5 parallel phases | **PARKED**, and its carve-out was taken — [05-parallel-phases.md](05-parallel-phases.md) |
 | WP7 review memory · WP1c grammars · WP9 external validation | not started |
 
-**WP2 is what stops this reaching production at all**: `lastlight-facts` is not
-in the sandbox image, so the pipeline can be *measured* (the eval runs
-`--sandbox none` on the host) but not *switched on*.
+**WP2 no longer blocks production** (stale here until 2026-08-24): the sandbox
+image vendors the CLI bundle, so `lastlight-facts` resolves in-sandbox. What
+remains before a deployment can switch the pipeline on is ordinary release
+mechanics — cut a release (publishes the GHCR sandbox images), deploy it, and
+set `review.analysis.enabled: true` in the instance overlay.
 
 ### What WP11 changed, in one list
 
