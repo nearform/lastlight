@@ -19,6 +19,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { renderTemplate, type TemplateContext } from "lastlight-workflow-engine";
 import { parse as parseYaml } from "yaml";
 
 /** Maps a workflow task/phase key → model id. `default` is always present. */
@@ -114,23 +115,25 @@ export function loadOverlayReview(overlayDir?: string): Record<string, unknown> 
   return isPlainObject(review) && Object.keys(review).length ? review : undefined;
 }
 
-/** Walk a dotted key (e.g. `models.guardrails`) over a context object. */
-function walkKey(ctx: Record<string, unknown>, key: string): unknown {
-  let cur: unknown = ctx;
-  for (const seg of key.split(".")) {
-    if (!isPlainObject(cur)) return undefined;
-    cur = cur[seg];
-  }
-  return cur;
-}
-
-/** Render a `{{models.X}}`-style template against the models map (the subset of
- * core's renderTemplate that phase `model:` fields ever use). */
+/**
+ * Render a phase `model:` template against the models map — by calling CORE'S
+ * OWN template engine (`lastlight-workflow-engine`'s `renderTemplate`, the
+ * exact function `resolveModelVariant` feeds these templates through), not a
+ * local subset of it.
+ *
+ * This used to be a bare-variable regex copy, and the divergence was a real
+ * defect: pr-review.yaml's `adjudicate` model is an `{{#if}}`/`{{#if !x}}`
+ * conditional pair, which the copy left un-rendered — so with
+ * `models.review-adjudicate` unset the recorded PhaseMetric.model was the
+ * literal `{{#if …}}` residue instead of what `models.review` resolves to.
+ *
+ * The cast is safe for this call: `TemplateContext`'s required fields feed the
+ * `{{slugify}}`/`{{branchUrl}}`/`{{artifactUrl}}` helpers, which no `model:`
+ * template uses — a model template only ever reads `models.*` (and `{{#if}}`
+ * over them), and `lookupContextKey` walks whatever context it's handed.
+ */
 function renderModelTemplate(template: string, models: ModelConfig): string {
-  return template.replace(/\{\{([\w-]+(?:\.[\w-]+)*)\}\}/g, (_m, key: string) => {
-    const val = walkKey({ models }, key);
-    return val === undefined || val === null ? "" : String(val);
-  });
+  return renderTemplate(template, { models } as unknown as TemplateContext);
 }
 
 /**
@@ -139,16 +142,25 @@ function renderModelTemplate(template: string, models: ModelConfig): string {
  * (`PhaseMetric.model`). Core does the real selection; this just lets the
  * dashboard show the per-step assignment without a round-trip.
  *
- *   rendered `{{models.X}}` template  →  models[phaseName]  →  models.default
+ *   rendered `{{models.X}}` template  →  models[phaseName]
+ *     →  models[fallbackPhase]  →  models.default
  *
- * @param template  the phase's raw `model:` field (e.g. `"{{models.executor}}"`),
- *   or undefined for phases that name no model.
+ * `fallbackPhase` mirrors core's `fallbackTask` parameter (both resolvers:
+ * `phase-executor.ts resolveModelVariant` and `fanout.ts`'s copy) — for a
+ * fan-out branch row the task name is the branch LABEL
+ * (`survey_branch_contract`) and the fallback task is the parent phase name,
+ * so a branch resolves `models[<label>]` → `models[<parent>]` → default.
+ *
+ * @param template  the raw `model:` field governing the row — for a branch,
+ *   `branch.model ?? phase.model` (see `fanout.ts branchConfig`) — or
+ *   undefined for phases that name no model.
  */
 export function resolvePhaseModel(
   template: string | undefined,
   phaseName: string,
   models: ModelConfig,
+  fallbackPhase?: string,
 ): string {
   const rendered = template ? renderModelTemplate(template, models).trim() : "";
-  return rendered || models[phaseName] || models.default;
+  return rendered || models[phaseName] || (fallbackPhase ? models[fallbackPhase] : "") || models.default;
 }

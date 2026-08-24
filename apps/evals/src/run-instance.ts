@@ -35,6 +35,7 @@ import {
 
 import type { SweBenchInstance, InstanceResult, PhaseSession } from "./schema.js";
 import type { Arm } from "./arm.js";
+import { modelTemplateForRow } from "./phase-models.js";
 import { startFakeGitHub } from "./fake-github.js";
 import { appliedRepoConfigKeys, loadRepoConfigFixture, resolveEvalRepoConfig, type RepoConfigClient } from "./repo-config.js";
 import { seedWorkspace, seedWorkspaceFromGit, seedWorkspacePrReview, prFilesFromGit, isRealSha, injectRepoContext, type SeedResult } from "./seed.js";
@@ -578,13 +579,18 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     result.workflowSucceeded = wf.success;
     // Record the model each phase resolved to — the arm forced id in `models`
     // mode, or the per-step model the merged config assigned in `config` mode
-    // (mirrors core's selection for display; see config.ts).
-    const phaseModelTemplates = new Map(def.phases.map((p) => [p.name, p.model]));
-    result.phases = wf.phases.map((p) => ({
-      phase: p.phase,
-      success: p.success,
-      model: opts.arm.recordPhaseModel(phaseModelTemplates.get(p.phase), p.phase),
-    }));
+    // (mirrors core's selection for display; see config.ts). `wf.phases` rows
+    // carry ledger labels (`survey_branch_contract`), not YAML names, so the
+    // template lookup goes through modelTemplateForRow (phase-models.ts), which
+    // parses branch rows back to their declaration via core's PhaseRef.
+    result.phases = wf.phases.map((p) => {
+      const { template, fallbackPhase } = modelTemplateForRow(def.phases, p.phase);
+      return {
+        phase: p.phase,
+        success: p.success,
+        model: opts.arm.recordPhaseModel(template, p.phase, fallbackPhase),
+      };
+    });
 
     // A workflow can end un-successful for two very different reasons:
     //   - a DELIBERATE gate decision (guardrails `on_output` BLOCKED — the agent

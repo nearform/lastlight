@@ -31,6 +31,7 @@ import { defaultFixConfig, resolveReviewGitHubClient } from "lastlight-core/eval
 import { computeMartianRanking, type MartianSidecar } from "./report.js";
 import type { InstanceResult } from "./schema.js";
 import { loadMergedConfig, resolvePhaseModel } from "./config.js";
+import { modelTemplateForRow } from "./phase-models.js";
 import { modelsArm, configArm, releaseOverlayGuard } from "./arm.js";
 import { collectMetrics } from "./metrics.js";
 
@@ -683,6 +684,82 @@ describe("config run type — per-step model resolution (config.ts)", () => {
     // 5. Template referencing an unset key → falls through to phase/default.
     expect(resolvePhaseModel("{{models.missing}}", "executor", models)).toBe("m-default");
   });
+
+  it("renders {{#if}} conditional templates via core's engine (the adjudicate fallback pair)", () => {
+    // pr-review.yaml's `adjudicate` model — an {{#if}}/{{#if !x}} pair that
+    // falls back to models.review when models.review-adjudicate is unset. The
+    // old bare-variable regex left the {{#if}} blocks un-rendered, so the
+    // recorded PhaseMetric.model was literal template residue, not a model id.
+    const tpl =
+      "{{#if models.review-adjudicate}}{{models.review-adjudicate}}{{/if}}" +
+      "{{#if !models.review-adjudicate}}{{models.review}}{{/if}}";
+    const models = { default: "m-default", review: "m-review" };
+    // Unset → the {{#if !x}} branch renders models.review.
+    expect(resolvePhaseModel(tpl, "adjudicate", models)).toBe("m-review");
+    // Set → the pinned value wins and the negated branch renders empty.
+    expect(resolvePhaseModel(tpl, "adjudicate", { ...models, "review-adjudicate": "m-pinned" })).toBe("m-pinned");
+    // Both unset → both branches render empty → falls through to the default
+    // (matching core: an empty render is falsy, resolver → fallback).
+    expect(resolvePhaseModel(tpl, "adjudicate", { default: "m-default" })).toBe("m-default");
+  });
+
+  it("resolvePhaseModel branch precedence: template → models[label] → models[parent] → default", () => {
+    const models = {
+      default: "m-default",
+      survey: "m-survey",
+      survey_branch_contract: "m-contract-pin",
+    };
+    // Core's fanout resolver (`fanout.ts resolveModelVariant`) tries the branch
+    // LABEL as the task name, then the parent phase as fallbackTask.
+    expect(resolvePhaseModel(undefined, "survey_branch_contract", models, "survey")).toBe("m-contract-pin");
+    expect(resolvePhaseModel(undefined, "survey_branch_tests", models, "survey")).toBe("m-survey");
+    expect(resolvePhaseModel(undefined, "other_branch_x", models, "other")).toBe("m-default");
+    // A rendered template beats both map lookups.
+    expect(resolvePhaseModel("{{models.survey}}", "survey_branch_contract", models, "survey")).toBe("m-survey");
+  });
+});
+
+describe("modelTemplateForRow — ledger label → YAML model template (phase-models.ts)", () => {
+  // A pr-review-shaped def: a fanout phase whose `model:` template must govern
+  // every `<parent>_branch_<name>` row, plus one branch with its own override.
+  const phases = [
+    { name: "seed" },
+    {
+      name: "survey",
+      model: "{{models.review-survey}}",
+      branches: [{ name: "contract" }, { name: "tests", model: "{{models.survey-tests}}" }],
+    },
+    { name: "review", model: "{{models.review}}" },
+  ];
+
+  it("maps declared phase names to their own template (old behaviour)", () => {
+    expect(modelTemplateForRow(phases, "survey")).toEqual({
+      template: "{{models.review-survey}}",
+      fallbackPhase: undefined,
+    });
+    expect(modelTemplateForRow(phases, "seed")).toEqual({ template: undefined, fallbackPhase: undefined });
+  });
+
+  it("maps branch rows to the parent's template with the parent as fallback task", () => {
+    for (const label of ["survey_branch_contract", "survey_branch_contract_retry", "survey_branch_contract_check"]) {
+      expect(modelTemplateForRow(phases, label)).toEqual({
+        template: "{{models.review-survey}}",
+        fallbackPhase: "survey",
+      });
+    }
+  });
+
+  it("a branch-level model: override beats the parent template (forward-looking)", () => {
+    expect(modelTemplateForRow(phases, "survey_branch_tests")).toEqual({
+      template: "{{models.survey-tests}}",
+      fallbackPhase: "survey",
+    });
+  });
+
+  it("loop-derived and unknown labels keep the old no-template behaviour", () => {
+    expect(modelTemplateForRow(phases, "review_fix_1")).toEqual({ template: undefined, fallbackPhase: undefined });
+    expect(modelTemplateForRow(phases, "nonexistent")).toEqual({ template: undefined, fallbackPhase: undefined });
+  });
 });
 
 describe("Arm seam — model-selection adapters (arm.ts)", () => {
@@ -802,6 +879,71 @@ describe("Arm seam — model-selection adapters (arm.ts)", () => {
         const desc = arm.describe();
         expect(desc).toContain("default→openai/gpt-5.4-mini");
         expect(desc).toContain("architect→openai/gpt-5.5");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it("records fan-out BRANCH rows with the survey model, not models.default (RESTART.md §2j)", () => {
+      const { root, overlay } = makeRoots();
+      try {
+        // A wp-shaped overlay: surveys pinned to haiku, review to sonnet.
+        writeFileSync(
+          join(overlay, "config.yaml"),
+          [
+            "models:",
+            "  default: anthropic/claude-sonnet-4-6",
+            "  review-survey: anthropic/claude-haiku-4-5",
+            "  survey-tests: openai/gpt-5.5-mini",
+            "  review: anthropic/claude-sonnet-4-6",
+          ].join("\n") + "\n",
+        );
+        const arm = configArm(root, overlay);
+        const phases = [
+          {
+            name: "survey",
+            model: "{{models.review-survey}}",
+            branches: [{ name: "contract" }, { name: "tests", model: "{{models.survey-tests}}" }],
+          },
+        ];
+        // The exact recording path run-instance.ts takes for a wf.phases row:
+        // ledger label → modelTemplateForRow → arm.recordPhaseModel.
+        const record = (label: string) => {
+          const { template, fallbackPhase } = modelTemplateForRow(phases, label);
+          return arm.recordPhaseModel(template, label, fallbackPhase);
+        };
+        // Branch rows inherit the parent's template — the measured bug recorded
+        // these as models.default (sonnet) while the sessions ran haiku.
+        expect(record("survey_branch_contract")).toBe("anthropic/claude-haiku-4-5");
+        expect(record("survey_branch_contract_retry")).toBe("anthropic/claude-haiku-4-5");
+        // A branch-level `model:` override wins over the parent's (forward-looking).
+        expect(record("survey_branch_tests")).toBe("openai/gpt-5.5-mini");
+        // The parent row itself is unchanged.
+        expect(record("survey")).toBe("anthropic/claude-haiku-4-5");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it("records the adjudicate {{#if}} fallback pair as a real model id, never template residue", () => {
+      const { root, overlay } = makeRoots();
+      try {
+        // The literal template from apps/server/workflows/pr-review.yaml.
+        const tpl =
+          "{{#if models.review-adjudicate}}{{models.review-adjudicate}}{{/if}}" +
+          "{{#if !models.review-adjudicate}}{{models.review}}{{/if}}";
+        // review-adjudicate UNSET → falls back to models.review.
+        writeFileSync(
+          join(overlay, "config.yaml"),
+          "models:\n  default: openai/gpt-5.4-mini\n  review: anthropic/claude-sonnet-4-6\n",
+        );
+        expect(configArm(root, overlay).recordPhaseModel(tpl, "adjudicate")).toBe("anthropic/claude-sonnet-4-6");
+        // review-adjudicate SET → the pinned value.
+        writeFileSync(
+          join(overlay, "config.yaml"),
+          "models:\n  default: openai/gpt-5.4-mini\n  review: anthropic/claude-sonnet-4-6\n  review-adjudicate: openai/gpt-5.5\n",
+        );
+        expect(configArm(root, overlay).recordPhaseModel(tpl, "adjudicate")).toBe("openai/gpt-5.5");
       } finally {
         rmSync(root, { recursive: true, force: true });
       }

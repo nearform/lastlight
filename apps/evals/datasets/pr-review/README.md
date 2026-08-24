@@ -19,7 +19,14 @@ holds 50 PRs across Sentry / Grafana / Cal.com / Discourse / Keycloak:
 npx tsx scripts/import-martian.ts            # full 50
 npx tsx scripts/import-martian.ts --limit 3  # a quick subset first
 npx tsx scripts/import-martian.ts --dry-run  # preview without writing
+npx tsx scripts/import-martian.ts --tier pr-review-heldout  # import into a sibling tier dir
 ```
+
+`--tier <name>` (default `pr-review`) picks the tier directory the import writes
+(`datasets/<name>/`) and the `name` stamped into a freshly-created `tier.json`,
+so a held-out split can live beside this tier under its own name. The tier's
+`defaultWorkflow` stays `pr-review` either way — every imported case runs the
+pr-review workflow.
 
 Then run the tier (heavy — clones the real repos, calls a judge model):
 

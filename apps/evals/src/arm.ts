@@ -96,8 +96,11 @@ export interface Arm {
    * invoked together. */
   prepare(ctx: MutableContext): PreparedModels;
   /** The model a phase resolved to, for `PhaseMetric.model` (the forced id for
-   * `models`; core's resolve precedence for `config`). */
-  recordPhaseModel(template: string | undefined, phase: string): string;
+   * `models`; core's resolve precedence for `config`). `phase` is the LEDGER
+   * label (`survey_branch_contract`, not `survey`); for a fan-out branch row
+   * `fallbackPhase` names the parent phase — core's `fallbackTask` — so the
+   * branch falls back `models[<label>]` → `models[<parent>]` → default. */
+  recordPhaseModel(template: string | undefined, phase: string, fallbackPhase?: string): string;
   /** Per-step `k→v` model-map summary for the plan note (config arms);
    * undefined for `models` arms (one model = the label). */
   describe(): string | undefined;
@@ -167,8 +170,8 @@ export function configArm(builtInRoot: string, overlayDir: string | undefined, d
       ctx.variants = merged.variants;
       return { model: merged.models.default, models: merged.models, variants: merged.variants };
     },
-    recordPhaseModel(template, phase) {
-      return resolvePhaseModel(template, phase, merged.models);
+    recordPhaseModel(template, phase, fallbackPhase) {
+      return resolvePhaseModel(template, phase, merged.models, fallbackPhase);
     },
     describe() {
       return Object.entries(merged.models)

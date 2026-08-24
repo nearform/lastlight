@@ -17,9 +17,16 @@
  *
  * Usage:
  *   npx tsx scripts/import-martian.ts [--repo <clone>] [--out <datasetsDir>]
- *                                     [--limit N] [--dry-run]
+ *                                     [--tier <name>] [--limit N] [--dry-run]
  * Needs `gh` (authenticated) + network. With no --repo it shallow-clones
  * withmartian/code-review-benchmark into .eval-cache/.
+ *
+ * `--tier <name>` (default `pr-review`) picks the tier DIRECTORY the import
+ * lands in (`<out>/<name>/`) and the `name` stamped into a freshly-written
+ * `tier.json`, so e.g. a held-out split can live beside the main tier and be
+ * addressed by its own name (`discovery.ts` keys tiers on `tier.json`'s
+ * `name`, falling back to the dir name). The tier's `defaultWorkflow` stays
+ * `pr-review` regardless — every import runs the pr-review workflow.
  */
 
 import { execFileSync } from "node:child_process";
@@ -141,6 +148,7 @@ async function main(): Promise<number> {
   const dryRun = process.argv.includes("--dry-run");
   const limit = flag("limit") ? Number(flag("limit")) : Infinity;
   const outRoot = resolve(flag("out") ?? "datasets");
+  const tier = flag("tier") ?? "pr-review";
 
   // Locate (or clone) the benchmark repo.
   let repoPath = flag("repo");
@@ -210,14 +218,17 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  const tierDir = join(outRoot, "pr-review");
+  const tierDir = join(outRoot, tier);
   mkdirSync(tierDir, { recursive: true });
   const tierJson = join(tierDir, "tier.json");
   if (!existsSync(tierJson)) {
+    // `name` follows --tier so the tier is discoverable under the chosen name;
+    // `defaultWorkflow` is ALWAYS pr-review — the workflow the cases exercise
+    // doesn't change with the directory they live in.
     writeFileSync(
       tierJson,
       JSON.stringify(
-        { name: "pr-review", defaultWorkflow: "pr-review", description: "Martian Code Review Bench — pr-review precision (F0.5)." },
+        { name: tier, defaultWorkflow: "pr-review", description: "Martian Code Review Bench — pr-review precision (F0.5)." },
         null,
         2,
       ) + "\n",
