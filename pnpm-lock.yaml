@@ -106,6 +106,9 @@ importers:
       daisyui:
         specifier: ^5.7.19
         version: 5.7.19
+      lastlight-core:
+        specifier: workspace:*
+        version: link:../../server
       postcss:
         specifier: ^8.5.26
         version: 8.5.26
