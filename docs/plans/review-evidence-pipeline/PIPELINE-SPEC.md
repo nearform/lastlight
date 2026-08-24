@@ -504,6 +504,14 @@ In both modes the agent submits nothing; it writes review *content* —
 mode: `post-review` depends on it with `all_success`, and a skipped node is
 not `succeeded`.
 
+Measured (2026-08-24, `1587-r2` ×3 on the shipped-shape overlay, Haiku,
+$8.32): the phase went $0.42 → $0.21 mean (−50%) and 182s → 137s against the
+same case's D2-confirm rows, with the slim brief confirmed in the session
+transcripts; posted recall held 0.200 on every repeat (band 0.000), G2 posted
+2/3 and internal 3/3, G5 internally found 3/3 — no prior arm had ever found
+it — and adjudicate was not starved (53–56 disposition entries per repeat).
+n=3 on one case: a gross-regression check, not a magnitude claim.
+
 ## `adjudicate` — one ranked, tiered review
 
 Agent phase, prompt `prompts/review-adjudicate.md`, `generic_loop` with
