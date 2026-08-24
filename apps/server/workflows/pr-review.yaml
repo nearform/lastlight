@@ -471,6 +471,21 @@ phases:
     # findings (content only: skip? / summary / event / findings[]) to
     # .lastlight/pr-review/findings.json. The first-class `post-review` action
     # below reads that file and posts one formal review.
+    #
+    # §3b lever f4: a TWO-MODE brief. With the pipeline off, the prompt is the
+    # old skill nudge plus a curated Context section (this phase used to have no
+    # `prompt:` at all and rode `buildPhasePrompt`'s skills fallback, which
+    # serialises the ENTIRE render context — the byte-for-byte guarantee on that
+    # dump is deliberately retired; golden-pr-review.test.ts pins the new
+    # contract). With the pipeline on, the brief collapses to one fast
+    # INDEPENDENT pass — PR-level judgment only, no per-hunk re-derivation, no
+    # reading hypotheses/ (adjudicate is the fresh-context reader) — because six
+    # survey families + falsify have already done the deep work and a full
+    # second review here was measured pure waste (137s / $0.30 per case on
+    # Haiku, an APPROVE with zero findings while 41 hypotheses sat unread).
+    # It still writes findings.json: adjudicate seeds from it and post-review
+    # fails loudly without it.
+    prompt: prompts/review.md
     skills: [pr-review, code-review]
     model: "{{models.review}}"
     variant: "{{variants.review}}"

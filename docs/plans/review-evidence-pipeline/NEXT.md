@@ -511,15 +511,15 @@ family is dead. Turning it on is the only change that could plausibly move a
 family from "structurally silent" to "contributing". Measure it as its own arm,
 one variable.
 
-### E5 — Reshape `review` when the pipeline is on (~1 arm)
+### E5 — Reshape `review` when the pipeline is on — **BUILT 2026-08-24, pre-PR**
 
-[RESTART.md](RESTART.md) §3b lever f4, still unbuilt and still the most obviously
-wasteful thing in the DAG: `review` runs a full independent review costing ~$2.30
-per arm while 40+ hypotheses sit unread beside it. It cannot simply be skipped —
-`post-review` depends on it with `all_success` — so change its brief under
-`{{#if analysisEnabled}}`.
-
-**Do E5 after E3.** It is the one most likely to be swamped by variance.
+[RESTART.md](RESTART.md) §3b lever f4, discharged: `review` now declares
+`prompt: prompts/review.md`, a two-mode template gated on
+`{{#if analysisEnabled}}` — off = the old skill nudge over a curated Context
+section, on = one fast independent pass that never reads `hypotheses/` and
+still writes `findings.json`. The byte-for-byte context-dump guarantee is
+retired; `golden-pr-review.test.ts` pins the new contract, and PIPELINE-SPEC
+§`review` is the reference.
 
 ## The guardrails that still apply
 

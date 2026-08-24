@@ -1307,10 +1307,11 @@ describe("renderContext", () => {
  *
  * Two properties, and the first is a LOCKED DECISION (README #8): with
  * `review.analysis.enabled: false` the reviewing agent's context must be the one
- * it has always had, key for key. `pr-review`'s review phase has no prompt
- * template — `buildPhasePrompt`'s skills branch renders the WHOLE context as
- * `key: value` lines — so a key present-but-empty is a prompt change, not a
- * no-op, and the inert path has to omit rather than blank.
+ * it has always had, key for key. The omit-rather-than-blank rule is still
+ * load-bearing after f4 gave `review` a real prompt: `skip_if` coercion and the
+ * template's `{{#if}}` both read absence as off, and any OTHER skills-only phase
+ * still gets `buildPhasePrompt`'s whole-context dump, where present-but-empty
+ * IS a prompt change.
  */
 describe("renderContext — the spec axis", () => {
   const analysisOff = defaultReviewConfig();
@@ -1338,9 +1339,9 @@ describe("renderContext — the spec axis", () => {
     expect(off.specObligations).toBeUndefined();
     // WP3's gate key. ABSENT, not `false` — `evalUntilExpression` coerces a
     // missing variable to false, so `analysisEnabled != true` matches and all
-    // eight evidence-pipeline phases skip. Present-but-empty would also be a
-    // prompt change, because `buildPhasePrompt`'s skills branch dumps the whole
-    // context (see `golden-pr-review.test.ts`).
+    // eight evidence-pipeline phases skip, and the review prompt's
+    // `{{#if analysisEnabled}}` brief stays collapsed (see
+    // `golden-pr-review.test.ts`).
     expect(off.analysisEnabled).toBeUndefined();
     expect(Object.prototype.hasOwnProperty.call(off, "analysisEnabled")).toBe(false);
 

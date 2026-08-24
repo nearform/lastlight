@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { getWorkflow } from "#src/workflows/loader.js";
+import { getWorkflow, loadPromptTemplate } from "#src/workflows/loader.js";
 import {
   buildDag,
   getReadyNodes,
@@ -9,7 +9,6 @@ import {
   buildPhasePrompt,
   phaseSkipIfExpressions,
   runWorkflowCore,
-  AgentWorkflowSchema,
   PhaseRef,
 } from "lastlight-workflow-engine";
 import type {
@@ -568,19 +567,26 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
   });
 });
 
-// ── The review phase itself is byte-for-byte what it was ─────────────────────
+// ── The review phase's two-mode brief (§3b lever f4) ─────────────────────────
 
 /**
- * `pr-review`'s `review` phase exactly as it stood at `caa9d58e`, immediately
- * before WP3. Pinned as a literal rather than read from git so the guarantee is
- * a fact in this file rather than a property of the working tree.
+ * The `review` phase as it stands after f4: the pre-WP3 shape PLUS a
+ * `prompt:`. Until f4 it had no prompt at all and rode `buildPhasePrompt`'s
+ * skills fallback, which serialises the ENTIRE render context as `key: value`
+ * lines — that byte-for-byte dump guarantee is deliberately retired (an
+ * analysis-mode review needs a different brief, and a template cannot
+ * reproduce a dynamic dump). What replaces it is pinned below: the OFF
+ * rendering keeps the skill nudge + a curated Context section and leaks
+ * nothing pipeline-shaped; the ON rendering is the abbreviated independent
+ * pass.
  */
-const PRE_WP3_REVIEW_PHASE = {
+const F4_REVIEW_PHASE = {
   name: "review",
   label: "Review",
   // `type` is the schema's default, not YAML text — it is here because the
   // comparison below is against the PARSED definition.
   type: "agent",
+  prompt: "prompts/review.md",
   skills: ["pr-review", "code-review"],
   model: "{{models.review}}",
   variant: "{{variants.review}}",
@@ -592,51 +598,83 @@ const PRE_WP3_POST_REVIEW_PHASE = {
   type: "post-review",
 };
 
-describe("golden — the `review` phase's rendered prompt is unchanged", () => {
+describe("golden — the `review` phase's two-mode brief", () => {
   const def = getWorkflow("pr-review");
   const review = def.phases.find((p) => p.name === "review")!;
   const postReview = def.phases.find((p) => p.name === "post-review")!;
 
-  it("adds only the two scheduling keys to the review phase, and nothing else", () => {
+  // The real template, rendered through the same `buildPhasePrompt` path the
+  // engine uses — via a stub loader that serves the packaged file, so a
+  // template edit fails HERE rather than in production.
+  const assets = new StubAssetLoader({
+    "prompts/review.md": loadPromptTemplate("prompts/review.md"),
+  });
+  const baseCtx = {
+    owner: "acme",
+    repo: "widgets",
+    prNumber: 7,
+    branch: "feature/x",
+    baseBranch: "main",
+    headSha: "deadbeef",
+    prTitle: "Fix the widget",
+    checksState: "passing",
+  } as unknown as TemplateContext;
+
+  it("adds only the scheduling keys and the f4 prompt to the review phase", () => {
     const { depends_on, trigger_rule, ...rest } = review as Record<string, unknown>;
     expect(depends_on).toEqual(["falsify"]);
     expect(trigger_rule).toBe("all_done");
-    // Everything a prompt is built from is untouched: no `prompt:`, no
-    // `skip_if:`, the same two skills, the same model/variant templates.
-    expect(rest).toEqual(PRE_WP3_REVIEW_PHASE);
+    // No `skip_if:` — the phase RUNS in both modes (post-review depends on it
+    // with all_success; a skipped node is not `succeeded`). The mode switch is
+    // inside the prompt, never in the DAG.
+    expect(rest).toEqual(F4_REVIEW_PHASE);
 
     const { depends_on: pDeps, ...pRest } = postReview as Record<string, unknown>;
     expect(pDeps).toEqual(["review"]);
     expect(pRest).toEqual(PRE_WP3_POST_REVIEW_PHASE);
   });
 
-  it("renders the identical prompt the pre-WP3 phase definition would have", () => {
-    // `review` has no prompt template, so `buildPhasePrompt` takes the SKILLS
-    // branch — which serialises the entire render context as `key: value` lines.
-    // That is why a context key present-but-empty is a prompt change and why
-    // `specContext()` has to OMIT rather than blank (see `pr-decisions.test.ts`).
-    const assets = new StubAssetLoader();
-    const ctx = {
-      owner: "acme",
-      repo: "widgets",
-      prNumber: 7,
-      branch: "main",
-      baseBranch: "main",
-      headSha: "deadbeef",
-    } as unknown as TemplateContext;
+  it("analysis OFF: the skill nudge and the curated context, nothing pipeline-shaped", () => {
+    const off = buildPhasePrompt(review, baseCtx, assets, { phaseOutputs: {} });
 
-    const before = buildPhasePrompt(
-      AgentWorkflowSchema.parse({ name: "x", phases: [PRE_WP3_REVIEW_PHASE] }).phases[0],
-      ctx,
+    expect(off).toContain("Use the **pr-review** skill to handle this request.");
+    expect(off).toContain("Other skills available if you need them: code-review.");
+    // The curated Context section carries the keys the skill's procedure
+    // names (§1 target, §3 diff range, §4 CI evidence).
+    expect(off).toContain("repository: acme/widgets");
+    expect(off).toContain("prNumber: 7");
+    expect(off).toContain("baseBranch: main");
+    expect(off).toContain("headSha: deadbeef");
+    expect(off).toContain("checksState: passing");
+    // Nothing from the analysis brief leaks into the off-mode prompt.
+    expect(off).not.toContain("analysisEnabled");
+    expect(off).not.toContain("obligations");
+    expect(off).not.toContain("hypotheses");
+    expect(off).not.toContain("abbreviated");
+    // Every marker consumed.
+    expect(off).not.toContain("{{");
+  });
+
+  it("analysis ON: the abbreviated independent pass replaces the full procedure", () => {
+    const on = buildPhasePrompt(
+      review,
+      { ...baseCtx, analysisEnabled: "true" } as unknown as TemplateContext,
       assets,
       { phaseOutputs: {} },
     );
-    const after = buildPhasePrompt(review, ctx, assets, { phaseOutputs: {} });
 
-    expect(after).toBe(before);
-    // And it is the shape we think it is — a skills nudge plus the context dump.
-    expect(after).toContain("Use the **pr-review** skill to handle this request.");
-    expect(after).not.toContain("analysisEnabled");
-    expect(after).not.toContain("obligations");
+    // The brief collapses — the full-procedure nudge is gone…
+    expect(on).not.toContain("Use the **pr-review** skill to handle this request.");
+    expect(on).toContain("abbreviated");
+    // …independence from the pipeline's own artifacts is explicit (adjudicate
+    // is the fresh-context reader; a review that read the hypotheses is one it
+    // cannot cross-check)…
+    expect(on).toMatch(/Do \*\*not\*\* read `\.lastlight\/pr-review\/hypotheses\/`/);
+    // …and the contract that keeps the DAG sound survives: findings.json is
+    // still written (post-review fails loudly without it, adjudicate seeds
+    // from it), and an empty findings array is a legal outcome.
+    expect(on).toContain(".lastlight/pr-review/findings.json");
+    expect(on).toMatch(/empty `findings` array is a valid outcome/i);
+    expect(on).not.toContain("{{");
   });
 });

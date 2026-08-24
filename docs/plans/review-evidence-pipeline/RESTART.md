@@ -88,7 +88,11 @@ contributes nothing. `lastlight-facts toolchain` prints what actually resolved.
 ## 2. What is built
 
 The whole pipeline is **off by default** (`review.analysis.enabled: false`), and
-`false` reproduces the shipped two-phase review byte-for-byte.
+`false` reproduces the shipped two-phase review. (Until f4 landed — 2026-08-24,
+pre-PR — that guarantee was byte-for-byte on the skills-fallback context dump;
+`review` now carries the two-mode `prompts/review.md`, the off path is the same
+skill nudge over a curated Context section, and the pinned contract lives in
+`golden-pr-review.test.ts`.)
 
 ```
 prepare → facts → seed → survey (6 branches, CONCURRENT) → falsify
@@ -1029,7 +1033,7 @@ time.
 | # | Lever | Why it is worth it |
 |---|---|---|
 | **f1** | **Stage the diff once** | 93 bash calls across the six surveys, ~30 re-deriving one fixed range that `facts.json` (137 KB) already holds. `survey_branch_contract` at 234s **is** the whole survey span, and it is the branch doing the most re-derivation. Cuts turns, which cuts latency *and* spend |
-| **f4** | **Reshape `review` when the pipeline is on** | It still runs a full independent review — 137s and $0.30 — and in run A produced `APPROVE` with **zero findings while 41 hypotheses sat unread beside it**. **It cannot simply be skipped**: `post-review` depends on it with `all_success`, and a skipped node is not `succeeded`. **Note the `review` node declares no `prompt:` at all** (`pr-review.yaml`), so it hits the skill-only fallback in `phase-executor.ts` — f4 means ADDING a prompt (or editing `skills/pr-review/SKILL.md`), not editing one. `{{#if analysisEnabled}}` does not exist anywhere in the repo either; the gating idiom here is `skip_if: "analysisEnabled != true"` |
+| **f4** | **Reshape `review` when the pipeline is on** — **BUILT 2026-08-24, pre-PR.** `review` now declares `prompt: prompts/review.md`, a two-mode template: off = the old skill nudge over a curated Context section (the byte-for-byte dump guarantee is retired; `golden-pr-review.test.ts` pins the new contract), on = one fast INDEPENDENT pass (PR-level judgment only, no per-hunk re-derivation, hypotheses/ explicitly off-limits — adjudicate stays the fresh-context reader), still writing `findings.json`. | The founding observation stands in history: a full independent review — 137s and $0.30 — produced `APPROVE` with **zero findings while 41 hypotheses sat unread beside it**, and it could not simply be skipped (`post-review` `all_success`) |
 | **f3** | **A stronger adjudicator** — **PROMOTED 2026-08-23 to the next arm, see §3a′** | `models.review-adjudicate`, falling through to `models.review`. Haiku-beats-Sonnet is a *recall* result about *discovery*; adjudication is ranking over an already-generated set, a different task. X1 turned this from a nice-to-have into the critical path: the adjudicator withholds 70–80% under `minimal` and posts anti-findings under `full`, and **it has been Haiku in every arm ever run** because `--mode models` forces one model across every phase |
 | **f2** | **Thinking effort** | The survey phases declare **no `variant:` at all**, so they inherit agentic-pi's default. Wire `{{variants.review-survey}}` through and measure |
 

@@ -10,8 +10,10 @@ boundary** prices what a maintainer actually sees, recording — never dropping 
 everything it withholds. The whole pipeline is off by default: every analysis
 phase is gated on `review.analysis.enabled`, the gate key is *absent* (not
 false) on a deployment that has not opted in, and with the pipeline off the
-review that posts is byte-identical to the two-phase reviewer — no cap, no
-thresholds, no `internal` tier, no split verdict.
+review that posts is the two-phase reviewer's — full-procedure brief, no cap,
+no thresholds, no `internal` tier, no split verdict. (The off-path prompt is
+now a curated template rather than the historical whole-context dump — see
+`review` below.)
 
 ## The DAG
 
@@ -31,7 +33,7 @@ prepare → facts → seed → survey (fanout ×5) → falsify → review ─┬
 | `seed` | bash | `analysisEnabled` | `all_done` on `facts` | 120 s |
 | `survey` | fanout | `analysisEnabled` | `all_done` on `seed` | per branch |
 | `falsify` | agent + `generic_loop` | `analysisEnabled`, `probesEnabled` | `all_done` on `survey` | — |
-| `review` | agent | — | `all_done` on `falsify` | — |
+| `review` | agent | — (runs in both modes; the PROMPT is two-mode, f4) | `all_done` on `falsify` | — |
 | `adjudicate` | agent + `generic_loop` | `analysisEnabled` | `all_success` on `review` | — |
 | `reconcile` | bash | `analysisEnabled` | `all_done` on `adjudicate` | 120 s |
 | `post-review` | post-review | — | `all_success` on `review` | — |
@@ -470,13 +472,37 @@ the claim forward to adjudication at lowered confidence. `unprobed` is not a
 refutation and nothing downstream may treat it as one. Malformed lines are
 counted, never silently skipped.
 
-## `review` — the shipped reviewer
+## `review` — the shipped reviewer, on a two-mode brief
 
-The unchanged two-phase reviewer's first half: skills `pr-review` +
-`code-review`, model `{{models.review}}`, variant `{{variants.review}}`. The
-agent does not submit anything; it writes review *content* — `{ skip?,
-summary, event, findings[] }` — to `.lastlight/pr-review/findings.json`. With
-the pipeline off, this phase and `post-review` are the entire workflow.
+The two-phase reviewer's first half: skills `pr-review` + `code-review`,
+model `{{models.review}}`, variant `{{variants.review}}`, and — since §3b
+lever f4 landed — `prompt: prompts/review.md`, a two-mode template. Until f4
+the phase had no `prompt:` at all and rode `buildPhasePrompt`'s skills
+fallback (the whole render context serialised as `key: value` lines); the
+template replaces that dump with a curated Context section, and the pinned
+guarantee moved from "byte-identical dump" to the two-mode contract in
+`golden-pr-review.test.ts`.
+
+**Pipeline off** (`{{#if !analysisEnabled}}`): the classic skill nudge — the
+full pr-review procedure — plus the curated context. With the pipeline off,
+this phase and `post-review` are the entire workflow.
+
+**Pipeline on** (`{{#if analysisEnabled}}`): the brief collapses to one fast
+**independent** pass — PR-level judgment, intent/diff coherence, test
+coverage, nothing per-hunk — because a full second review beside five seeded
+surveys was measured pure waste (137s / $0.30 per case on Haiku for an
+`APPROVE` with zero findings while 41 hypotheses sat unread beside it — f4's
+founding observation). The brief forbids reading `hypotheses/` and
+`obligations/`: adjudicate is the fresh-context reader, and a finding copied
+from a hypothesis is one it can no longer cross-check. An empty `findings[]`
+is a legal outcome.
+
+In both modes the agent submits nothing; it writes review *content* —
+`{ skip?, summary, event, findings[] }` — to
+`.lastlight/pr-review/findings.json`, which `adjudicate` seeds from and
+`post-review` fails loudly without. The phase cannot be skipped in analysis
+mode: `post-review` depends on it with `all_success`, and a skipped node is
+not `succeeded`.
 
 ## `adjudicate` — one ranked, tiered review
 

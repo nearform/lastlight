@@ -95,10 +95,10 @@ const ON: AnalysisOverrides = { enabled: true, probes: true };
 describe("the four switches reach the phase, and absence means off", () => {
   it("projects nothing at all when probes are off", () => {
     const ctx = contextFor({ enabled: true });
-    // ABSENT, not `false`. `pr-review`'s review phase has no prompt template,
-    // so `buildPhasePrompt`'s skills branch dumps the WHOLE context as
-    // `key: value` lines — a key present-but-empty is a prompt change on a
-    // deployment that opted into WP3 and not WP4.
+    // ABSENT, not `false`. `skip_if` coercion reads absence as off, and any
+    // skills-only phase gets `buildPhasePrompt`'s whole-context dump, where a
+    // key present-but-empty is a prompt change on a deployment that opted into
+    // WP3 and not WP4.
     for (const key of [
       "probesEnabled",
       "probeLifecycleScripts",
