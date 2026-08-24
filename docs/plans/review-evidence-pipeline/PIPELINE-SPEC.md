@@ -211,6 +211,37 @@ Four families mint from the envelope, under four different conditions:
   scanner hit is **corroboration on an obligation that already exists, never
   the reason one exists** — the sink half comes from the impact cone exactly
   as `state`'s does.
+Two further rules are **opt-in via `review.analysis.mint`** (a comma-list;
+threaded to the CLI as `seed --mint <spec>`, refused on any unknown token, and
+stamped into `obligations.json` as `minting: {allInDiff, registrations}`).
+They exist because every rule above requires references *outside* the diff, so
+a defect wholly inside a new hunk was invisible to all four — 4 of 14
+never-matched gold in the 8-case set sat in files no obligation touched:
+
+- **`all-in-diff`** (mints into `contract`) — a changed **runtime** symbol
+  (`function` | `method` | `variable` | `class`; a pure type has no runtime
+  line a caller can be surprised by) whose every reference is also inside the
+  diff, predicated on the **uncapped counts**
+  (`referencesInDiff === referenceCount`, never the capped `references[]`
+  array, where `.every(inDiff)` can be vacuously true). Candidates are the
+  in-diff reference sites; zero-reference symbols mint nothing (the validation
+  gate enforces the second end). Rank base 45 — between `security` and
+  `state`, far below `contract`'s 90 — so the budget truncates this family
+  first and displacement is auditable in `dropped[]`. The question carries its
+  own anti-speculation clause: a hazard that requires a future edit is a clean
+  discharge, not a finding (measured in — see the adjudicate section).
+- **`registrations`** (mints into `security`) — a symbol whose body registers
+  routes/hooks in a fixed order, from the tier-1-only `registrations` fact
+  (`SymbolFact.registrations`; `null` = nobody looked — tier 2 and every
+  pre-D2 document — and `null ≠ []` as everywhere in the package). Extraction
+  is deliberately conservative: hook methods (`addHook`/`on`/…) need a
+  string-literal first argument, route verbs need a `/`-prefixed literal path,
+  `use`/`register` are unconstrained — so `map.get("x")` and
+  `emitter.on(handler)` never mint. Module-level registrations outside any
+  declaration attach to no symbol (documented limitation). The obligation
+  orders the registrations and asks for the earliest line that rejects an
+  unauthenticated caller.
+
 - **`tests`** has **no mint rule**. The family is enumerated in
   `SEEDABLE_FAMILIES` and always receives a rendered block, but no seeder
   function contributes obligations for it: its evidence is the `coverage`
@@ -485,6 +516,14 @@ phases append. Its contract:
   never earn a high confidence by being certainly true. The recall rule is
   untouched: a claim that something is *wrong*, however thin, reaches the
   review.
+- **A speculative hazard is always `internal`, whatever its confidence.** A
+  finding whose defect exists only after a hypothetical future change —
+  *"nothing prevents a future developer from…"*, *"if this is later
+  renamed…"* — asserts no misbehaviour of the code in this PR; the defect
+  must be reachable by the code as it stands. Measured in: the zero-gold
+  canary's false positives went 7/5 → 0/1/3 when this rule (plus the
+  matching clause in the all-in-diff question) landed, with the 1667 recall
+  guard holding internal union 5/5.
 - **An `unprobed` hypothesis reaches the review** at lowered confidence; it
   was not disproved, nobody could run anything. When `verdicts.jsonl` is
   absent, no probe ran and nothing may be dropped at all.
@@ -719,6 +758,7 @@ repo's `.lastlight/` may not set any of it):
 | `maxObligations` | 40 | Budget for the five facts-derived families pooled — a safety bound the ranking should never let bind; truncation is counted, never silent. |
 | `maxSpecObligations` | 40 | The same bound for the harness-built `spec` family. |
 | `obligationContract` | **`minimal`** (shipped) | Which block the six families are handed — `minimal` \| `full`. Stamped into `obligations.json` so renderer, gate and artifact read one field. Under `minimal` the discharge gate degrades to the `test -s` floor. |
+| `mint` | `""` | The two D2 seeding rules, comma-list over `all-in-diff` \| `registrations` (see "The six families"). Empty = the baseline four rules. Appended to `seed` as `--mint` only when non-empty; the CLI refuses unknown tokens with exit 2 (a typo'd arm must not silently measure the baseline); the choice is stamped into `obligations.json`. Measured KEEP on the 8-case confirm (internal paired +10/−1, p=0.006). |
 | `surveyPasses` | 6 | Carried on config; the fan-out's branch list in the workflow definition is the authority and is fixed at five (`tests` has no branch). |
 | `surveyConcurrency` | 6 | Ceiling for concurrent survey branches, clamped per backend (gondolin/smol/kubernetes → 1; none/docker as written). Bounds rate-limit and memory pressure, not spend. |
 | `probes` | `false` | The second gate: `prepare` + `falsify`. What it buys is a workspace with dependencies installed — tier-1 `contract` seeding on monorepos, a coverage artifact for `tests`, and executable probes. |
@@ -804,4 +844,25 @@ empty.
 
 ## Measured results
 
-Attached after each measurement campaign.
+Attached after each measurement campaign. The running record is
+[RESTART.md](RESTART.md) §2b–§2l; the state of play after the 2026-08-24
+campaign (§2l):
+
+- **skillspro (8 cases, 25 gold), shipped config** (`minimal` + both prompt
+  revisions + `mint: all-in-diff,registrations` + anti-speculation): posted
+  micro-recall mean 0.400 (band 0.080), posted union 17/25, internal union
+  21/25, vs the shipped two-phase reviewer's 0/25. The D2 mints are the one
+  lever measured to GROW the union rather than rotate it (internal paired
+  +10/−1, p=0.006).
+- **Martian TS slice (10 cal.com cases, 31 gold), production model shape**:
+  pipeline recall 0.581 both repeats vs baseline 0.484, paired +7/−0
+  (p=0.008) — the recall claim generalised to gold the prompts were never
+  tuned on. F1 ranks the pipeline 17–20 of 23 vs the baseline's 12: the
+  posted volume (6.4–7.0/PR vs 3.4) is priced by F1 and the attention
+  boundary is untuned — that is where the next precision work lives.
+  Contamination caveat: public repo; the baseline's own 0.484-vs-0/25 gap
+  against skillspro carries the classic signature.
+- **Cost, production shape** (`--mode config`, Haiku surveys / Sonnet
+  review+adjudicate, host sandbox): ~$2.50/case, wall clock 8–17 min at
+  concurrency 2. On gondolin the survey fan-out clamps to a chain; expect
+  the branch sum, not the span.
