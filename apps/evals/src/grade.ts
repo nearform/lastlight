@@ -320,6 +320,36 @@ const MATCH_SYSTEM =
   "Each gold issue matches AT MOST ONE finding, and each finding matches at most one gold issue (choose the best pairing). " +
   'Output ONLY JSON: {"matches":[{"finding":<finding index>,"gold":<gold index>}]}';
 
+/**
+ * The internal-recall MATCH prompt — {@link MATCH_SYSTEM} plus a
+ * claim-direction requirement, as its OWN constant on purpose.
+ *
+ * The posted path never needed the clause because EXTRACT filters praise and
+ * approvals before MATCH sees them. The internal path has no EXTRACT —
+ * `findings.json` is fed to MATCH directly — and the pipeline's findings
+ * include VERIFICATION REPORTS: *"Enforcement check passed:
+ * SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS — properly enforced"*, confidence 1.00.
+ * Measured on the stored X1 repeats (RESTART.md §2f), the shared prompt
+ * credited exactly those against gold whose entire point is the opposite claim
+ * ("nothing compares `issuedAt` against the max-age constant") — same
+ * constant, same file, opposite verdict, scored as "found". Every
+ * "found-but-withheld" credit on the audited one-case repeats traced to an
+ * opposite-direction or neutral-description match, which is what H-A1 was
+ * standing on.
+ *
+ * Kept separate rather than editing {@link MATCH_SYSTEM}: the posted-side
+ * numbers are published and pinned by the rescore/backfill drift refusals, and
+ * `--repeat-judge` measures THAT grader — its prompt must not move under it.
+ */
+const INTERNAL_MATCH_SYSTEM =
+  MATCH_SYSTEM.replace("Output ONLY JSON:", "") +
+  "A finding matches a gold issue ONLY if it asserts the same DEFECT or RISK — the same thing being wrong. " +
+  "A finding that asserts the mechanism is correctly handled, properly enforced, satisfied, unchanged, or merely " +
+  "DESCRIBES the code's behaviour without claiming anything is wrong is a NON-match for every gold issue, even when " +
+  "it names the same constant, file, or mechanism: a verification report about the right location is still not a " +
+  "report of the defect. " +
+  'Output ONLY JSON: {"matches":[{"finding":<finding index>,"gold":<gold index>}]}';
+
 /** Cap on the PR diff fed to the judge (diff-aware mode). */
 const DIFF_CAP = 20_000;
 /** Prefix a judge user turn with the PR diff for context, when provided. */
@@ -582,7 +612,7 @@ export async function gradeInternalRecall(opts: {
 
   let matches: { finding: number; gold: number }[];
   try {
-    const raw = await judge(model, MATCH_SYSTEM, withDiffContext(diff, "resolve whether a finding and a gold issue point at the same code", user));
+    const raw = await judge(model, INTERNAL_MATCH_SYSTEM, withDiffContext(diff, "resolve whether a finding and a gold issue point at the same code", user));
     const parsed = parseJudgeJson<{ matches?: { finding: number; gold: number }[] }>(raw);
     if (!parsed?.matches) return { goldToFinding: gold.map(() => null), matched: 0, error: "judge: unparseable match reply" };
     matches = parsed.matches;

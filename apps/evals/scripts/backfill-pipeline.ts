@@ -42,8 +42,9 @@
  * answers.
  *
  * `--no-judge` therefore re-reads the artifacts, rewrites ONLY the mechanism
- * fields, and carries `internalMatched` / `inlineMatched` / `internalUngraded`
- * and the per-family `matched` / `internalMatched` across untouched
+ * fields, and carries `internalMatched` / `internalGold` / `inlineMatched` /
+ * `internalUngraded` and the per-family `matched` / `internalMatched` across
+ * untouched
  * ({@link mergePreservedJudgement}). It makes zero model calls, so there is no
  * estimate and no confirmation — there is nothing to consent to. Two rules make
  * it safe to point at an already-published scorecard:
@@ -270,10 +271,11 @@ export function goldFor(r: InstanceResult): GoldComment[] | null {
  *
  * The split is not cosmetic. `withInternalRecall` builds the judged fields by
  * walking `internal.goldToFinding` back into `readout.findings` — it needs the
- * judge's reply, which a scorecard does not store. So the fields it produced
- * (`internalMatched`, `inlineMatched`, and the per-family `matched` /
- * `internalMatched`) can only be CARRIED, never recomputed, and this merge is
- * the carry.
+ * judge's reply, which only `internalGold` (the stored copy of that reply)
+ * preserves, and only on runs measured after it existed. So the fields it
+ * produced (`internalMatched`, `internalGold`, `inlineMatched`, and the
+ * per-family `matched` / `internalMatched`) can only be CARRIED, never
+ * recomputed, and this merge is the carry.
  *
  * Everything else on `fresh` wins outright: that is the point of re-reading.
  * Three rules earn their keep:
@@ -308,6 +310,9 @@ export function mergePreservedJudgement(
   return {
     ...fresh,
     ...(prev.internalMatched !== undefined ? { internalMatched: prev.internalMatched } : {}),
+    // The judge's per-gold reply — as unrecomputable as the count it sums to,
+    // so it is carried on exactly the same terms.
+    ...(prev.internalGold !== undefined ? { internalGold: prev.internalGold } : {}),
     ...(prev.inlineMatched !== undefined ? { inlineMatched: prev.inlineMatched } : {}),
     ...(prev.internalUngraded !== undefined ? { internalUngraded: prev.internalUngraded } : {}),
     // Not produced by `readPipelineArtifacts` at all (no artifact records it
@@ -338,6 +343,9 @@ export function judgedHalf(stats: ReviewPipelineStats | undefined): string {
   }
   return JSON.stringify({
     internalMatched: stats.internalMatched ?? null,
+    // `null` here means ABSENT; a stored all-null vector serialises as
+    // `[null, …]`, so "not recorded" and "found nothing" cannot collide.
+    internalGold: stats.internalGold ?? null,
     inlineMatched: stats.inlineMatched ?? null,
     internalUngraded: stats.internalUngraded ?? null,
     families,
@@ -627,7 +635,7 @@ async function main(): Promise<number> {
     }
   }
   if (args.noJudge) {
-    console.log(`  judge calls   ${chalk.bold("0")}   (the stored internalMatched / inlineMatched / per-family matched are CARRIED, not recomputed)`);
+    console.log(`  judge calls   ${chalk.bold("0")}   (the stored internalMatched / internalGold / inlineMatched / per-family matched are CARRIED, not recomputed)`);
     console.log(`  rewrites      obligations, hypotheses, discharge codes, clean discharges, unprovenanced,`);
     console.log(`                tiers, per-family obligations/hypotheses/posted, coverage, degraded, toolchain`);
   } else {

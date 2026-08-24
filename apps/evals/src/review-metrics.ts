@@ -481,6 +481,72 @@ export interface GoldHitMatrix {
   intersection: number;
 }
 
+/**
+ * Per-gold-item INTERNAL hits for one case across every repeat — the
+ * generated-side counterpart of {@link GoldHitMatrix}, read off
+ * `pipeline.internalGold` instead of the judge trace.
+ *
+ * Cells are three-valued on purpose: `true`/`false` where the repeat recorded a
+ * vector, `null` where it did not (a run measured before the vector was
+ * persisted, a judge failure, a repeat that never graded the case). The posted
+ * side untraces the whole case on one missing trace; that rule HERE would let a
+ * single pre-vector repeat erase the internal surface of every repeat that has
+ * it, so a `null` column is simply absent from the union/intersection maths —
+ * absent, never a column of misses.
+ */
+export interface InternalHitMatrix {
+  instanceId: string;
+  /** `rows[goldIndex][repeatIndex]` — `null` = that repeat recorded no vector. */
+  rows: (boolean | null)[][];
+  /** Gold findings in this case (= `rows.length`). */
+  gold: number;
+  /** Indices into {@link VarianceRollup.repeats} with no vector for this case. */
+  missingRepeats: number[];
+  /** Gold matched by ≥ 1 vector-carrying repeat. */
+  union: number;
+  /** Gold matched by EVERY vector-carrying repeat. */
+  intersection: number;
+}
+
+/**
+ * The INTERNAL union/intersection surface — gold matched by anything the
+ * pipeline GENERATED, posted or withheld — parallel to the posted-side fields
+ * on {@link VarianceRollup}.
+ *
+ * The posted numbers answer "what did the reviewer SAY, reliably?"; these
+ * answer "what did the pipeline KNOW, reliably?" — and the gap between the two
+ * unions is the adjudicator's bill, which a posted-only band cannot even see.
+ */
+export interface InternalVariance {
+  unionMatched: number;
+  intersectionMatched: number;
+  /** Gold the internal matrices cover — the denominator for both recalls.
+   * Excludes anything in `untraced`. */
+  gold: number;
+  unionRecall: number | null;
+  intersectionRecall: number | null;
+  perInstance: InternalHitMatrix[];
+  /** Cases with no usable vector in ANY repeat, or whose vectors drifted in
+   * length — excluded from the maths and named, exactly as the posted
+   * `untraced` is. */
+  untraced: string[];
+  /** runIds of repeats that recorded no vector for any case at all — the mark
+   * a renderer prints so a mixed (vector + pre-vector) repeat set reads as
+   * exactly that. */
+  unvectoredRepeats: string[];
+}
+
+/**
+ * A case's internal hit vector: `internalGold[j] !== null` ⇔ gold *j* was found
+ * by something the pipeline generated. `undefined` when the run recorded no
+ * vector — historical scorecards, baseline arms, an ungraded internal pass —
+ * which is ABSENT, never a row of zeros.
+ */
+export function internalGoldHits(r: InstanceResult): boolean[] | undefined {
+  const vec = r.review?.pipeline?.internalGold;
+  return vec?.map((v) => v !== null);
+}
+
 export interface VarianceRollup {
   repeats: RepeatPoint[];
   meanMicroRecall: number | null;
@@ -522,6 +588,11 @@ export interface VarianceRollup {
    * nothing and is dropped from {@link perInstance}.
    */
   untraced: string[];
+  /** The internal-side band, when at least one repeat carries an
+   * `internalGold` vector. `undefined` otherwise — a repeat set measured
+   * before the vector existed has an UNRECORDED internal surface, not an
+   * empty one. */
+  internal?: InternalVariance;
 }
 
 /**
@@ -591,6 +662,8 @@ export function varianceRollup(cards: RepeatCard[]): VarianceRollup {
   const minMicroRecall = measured.length ? Math.min(...measured) : null;
   const maxMicroRecall = measured.length ? Math.max(...measured) : null;
 
+  const internal = internalVariance(byId, ids, repeats);
+
   return {
     repeats,
     meanMicroRecall,
@@ -605,6 +678,86 @@ export function varianceRollup(cards: RepeatCard[]): VarianceRollup {
     intersectionRecall: gold > 0 ? intersectionMatched / gold : null,
     perInstance,
     untraced,
+    ...(internal ? { internal } : {}),
+  };
+}
+
+/**
+ * The internal-side roll-up, or `undefined` when NO repeat carries a vector.
+ *
+ * The alignment rule deliberately differs from the posted loop above: a repeat
+ * without the vector contributes `null` cells rather than untracing the case,
+ * because the vector shipped mid-history and every mixed (vector + pre-vector)
+ * repeat set would otherwise report NO internal surface at all. Length drift
+ * among the vectors that ARE present is still dataset drift — untraced, named,
+ * never padded.
+ */
+function internalVariance(
+  byId: Map<string, InstanceResult>[],
+  ids: string[],
+  repeats: RepeatPoint[],
+): InternalVariance | undefined {
+  // Absent everywhere ⇒ the surface was never recorded, not empty.
+  if (!byId.some((m) => [...m.values()].some((r) => internalGoldHits(r)))) return undefined;
+
+  const perInstance: InternalHitMatrix[] = [];
+  const untraced: string[] = [];
+  for (const id of ids) {
+    const vectors = byId.map((m) => {
+      const r = m.get(id);
+      return r ? internalGoldHits(r) : undefined;
+    });
+    const present = vectors.filter((v): v is boolean[] => v !== undefined);
+    if (!present.length) {
+      untraced.push(id);
+      continue;
+    }
+    const width = present[0].length;
+    // Same rule as the posted side: gold sets of different shapes are two
+    // different datasets wearing one id.
+    if (present.some((v) => v.length !== width)) {
+      untraced.push(id);
+      continue;
+    }
+    // The zero-gold precision canary: recorded, but nothing to hit.
+    if (width === 0) continue;
+
+    const rows: (boolean | null)[][] = [];
+    let union = 0;
+    let intersection = 0;
+    for (let j = 0; j < width; j++) {
+      const row = vectors.map((v) => (v ? v[j] : null));
+      rows.push(row);
+      if (row.some((h) => h === true)) union++;
+      // Every vector-carrying repeat hit it. At least one cell is non-null
+      // (present.length >= 1), so "no false cells" cannot pass vacuously.
+      if (row.every((h) => h !== false)) intersection++;
+    }
+    perInstance.push({
+      instanceId: id,
+      rows,
+      gold: width,
+      missingRepeats: vectors.flatMap((v, i) => (v === undefined ? [i] : [])),
+      union,
+      intersection,
+    });
+  }
+
+  const gold = perInstance.reduce((a, m) => a + m.gold, 0);
+  const unionMatched = perInstance.reduce((a, m) => a + m.union, 0);
+  const intersectionMatched = perInstance.reduce((a, m) => a + m.intersection, 0);
+
+  return {
+    unionMatched,
+    intersectionMatched,
+    gold,
+    unionRecall: gold > 0 ? unionMatched / gold : null,
+    intersectionRecall: gold > 0 ? intersectionMatched / gold : null,
+    perInstance,
+    untraced,
+    unvectoredRepeats: repeats
+      .filter((_, i) => ![...byId[i].values()].some((r) => internalGoldHits(r)))
+      .map((r) => r.runId),
   };
 }
 
@@ -669,7 +822,7 @@ export function bandVerdict(
     };
   }
 
-  const paired = pairedRecall(unionResults(baseline), unionResults(candidate));
+  const paired = pairedRecall(unionResults(baseline.perInstance), unionResults(candidate.perInstance));
   const caveats: string[] = [
     `paired McNemar over union hits: +${paired.gained}/−${paired.lost} of ${paired.compared} gold, one-sided p=${fmt(paired.oneSided)}${paired.approximate ? " (APPROXIMATE — a trace was missing)" : ""}`,
   ];
@@ -691,16 +844,59 @@ export function bandVerdict(
 }
 
 /**
- * Project a roll-up's per-case UNION hit vectors back into `InstanceResult`
- * shape so {@link pairedRecall} — the one exact-paired differ — can run over
- * them unmodified. Deliberately not a second implementation of the diff: the
+ * The per-gold paired comparison of two repeat GROUPS, one {@link PairedRecall}
+ * per surface.
+ *
+ * {@link bandVerdict} gates a mean delta on the baseline's `max − min` — a
+ * RANGE, not a test, and ~3× more conservative than the repeats warrant. This
+ * is the exact test to read beside it (never instead of it: the band is the
+ * guard against single-run dice, this is the evidence once the repeats exist):
+ * for each gold slot, hit = matched by ≥ 1 of the arm's repeats (the same union
+ * `varianceRollup` already builds), and the discordant slots go to the exact
+ * one-sided McNemar.
+ */
+export interface PairedBand {
+  /** The posted surface — read off the judge traces, which every graded run
+   * carries. */
+  posted: PairedRecall;
+  /**
+   * The internal surface — what the pipeline GENERATED, posted or withheld —
+   * read off `pipeline.internalGold`.
+   *
+   * Absent when either arm's roll-up carries no internal side at all (no repeat
+   * recorded a vector): that surface was not RECORDED on that arm, and pairing
+   * a measured arm against fabricated zeros would report every internal hit as
+   * a gain. A renderer must say "not recorded", never print zeros.
+   */
+  internal?: PairedRecall;
+}
+
+/** Compare two arms per gold slot, on both surfaces. See {@link PairedBand}. */
+export function pairedBand(baseline: VarianceRollup, candidate: VarianceRollup): PairedBand {
+  const posted = pairedRecall(unionResults(baseline.perInstance), unionResults(candidate.perInstance));
+  if (!baseline.internal || !candidate.internal) return { posted };
+  return {
+    posted,
+    internal: pairedRecall(unionResults(baseline.internal.perInstance), unionResults(candidate.internal.perInstance)),
+  };
+}
+
+/**
+ * Project per-case UNION hit vectors back into `InstanceResult` shape so
+ * {@link pairedRecall} — the one exact-paired differ — can run over them
+ * unmodified. Deliberately not a second implementation of the diff: the
  * fallback rules, the `approximate` flag and the McNemar call all stay in one
  * place, and a change to how discordance is counted cannot diverge between the
- * two callers.
+ * callers.
+ *
+ * Takes the matrices rather than the roll-up so BOTH surfaces go through it —
+ * `perInstance` (posted, boolean cells) and `internal.perInstance` (three-valued
+ * cells, where a `null` "no vector" cell is not a hit and therefore cannot
+ * inflate a union any more than it can a miss).
  */
-function unionResults(v: VarianceRollup): InstanceResult[] {
-  return v.perInstance.map((m) => {
-    const hits = m.rows.map((row) => row.some(Boolean));
+function unionResults(matrices: { instanceId: string; gold: number; rows: (boolean | null)[][] }[]): InstanceResult[] {
+  return matrices.map((m) => {
+    const hits = m.rows.map((row) => row.some((h) => h === true));
     const matched = hits.filter(Boolean).length;
     return {
       instance_id: m.instanceId,

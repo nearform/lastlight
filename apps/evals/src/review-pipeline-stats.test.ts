@@ -281,6 +281,50 @@ describe("readPipelineStats", () => {
     expect(r.stats.byFamily!.tests.obligations).toBe(0);
   });
 
+  it("does not mark a family NOT MEASURED when its survey produced live rows (H-I2)", () => {
+    // Two different claims share the `measured` field. code-facts writes
+    // `measured: false` for `spec` meaning "I cannot see the PR body" — its
+    // obligation COUNT is unknown — while the spec survey still runs and its
+    // jsonl carries a full pass. Marking that family notMeasured reported a
+    // live instrument as a dead one on every run that carried it.
+    const root = workspace({
+      obligations: {
+        // No `obligations` field at all: the count is UNKNOWN, and unknown ≠ 0.
+        families: [{ family: "spec", measured: false, notMeasuredReason: "code-facts cannot read the PR body" }],
+      },
+      hypotheses: {
+        spec: Array.from({ length: 11 }, (_, i) => ({ obligation: `S-${i + 1}`, path: "a.ts", line: i, verdict: "implemented" })),
+      },
+    });
+    const r = readPipelineArtifacts(join(root, ".lastlight", "pr-review"))!;
+    expect(r.stats.byFamily!.spec.notMeasured).toBeUndefined();
+    expect(r.stats.byFamily!.spec.obligations).toBeUndefined();
+    expect(r.stats.byFamily!.spec.hypotheses).toBe(11);
+  });
+
+  it("keeps NOT MEASURED for a measured:false family with no rows — or only the tombstone", () => {
+    const root = workspace({
+      obligations: {
+        families: [
+          // No jsonl at all: the survey never ran.
+          { family: "security", obligations: 0, measured: false, notMeasuredReason: "opengrep not on PATH" },
+          // Only the dead-family `{status:"notMeasured"}` line: a tombstone is
+          // the family saying it did not run, not evidence that it did.
+          { family: "tests", measured: false, notMeasuredReason: "no coverage artifact" },
+        ],
+      },
+      hypotheses: { tests: [{ status: "notMeasured", claim: "no coverage artifact" }] },
+    });
+    const r = readPipelineArtifacts(join(root, ".lastlight", "pr-review"))!;
+    expect(r.stats.byFamily!.security.notMeasured).toBe(true);
+    expect(r.stats.byFamily!.security.obligations).toBe(0); // an explicit 0 is a count, and it survives
+    expect(r.stats.byFamily!.tests.notMeasured).toBe(true);
+    expect(r.stats.byFamily!.tests.obligations).toBeUndefined(); // no count given ⇒ absent, not 0
+    // The tombstone still counts as a row everywhere else — ordinals and the
+    // histogram must not move because the notMeasured rule learned to skip it.
+    expect(r.stats.byFamily!.tests.hypotheses).toBe(1);
+  });
+
   it("survives a torn final line without losing the rows before it", () => {
     const root = workspace({ hypotheses: { state: [{ id: "state-001", discharge: "QUOTE" }] } });
     const path = join(root, ".lastlight", "pr-review", "hypotheses", "state.jsonl");
@@ -298,6 +342,22 @@ describe("withInternalRecall", () => {
     expect(stats.inlineMatched).toBe(1);
     expect(stats.byFamily!.enforcement.matched).toBe(1);
     expect(stats.byFamily!.state.matched).toBeUndefined();
+  });
+
+  it("persists the judge's goldToFinding vector VERBATIM", () => {
+    // The count alone collapses "found but withheld" into "never found", and
+    // the per-gold internal union/intersection across repeats needs the vector
+    // itself — which nothing else stores, so losing it here loses it forever.
+    const readout = readPipelineStats(measuredShape())!;
+    const stats = withInternalRecall(readout, { goldToFinding: [3, null, 0], matched: 2 });
+    expect(stats.internalGold).toEqual([3, null, 0]);
+  });
+
+  it("records an all-null vector for a pipeline that found nothing — distinct from no vector", () => {
+    const readout = readPipelineStats(measuredShape())!;
+    const stats = withInternalRecall(readout, { goldToFinding: [null, null], matched: 0 });
+    expect(stats.internalGold).toEqual([null, null]);
+    expect(stats.internalMatched).toBe(0);
   });
 
   it("counts a match on a WITHHELD finding as discovery, not as contribution", () => {
@@ -319,6 +379,9 @@ describe("withInternalRecall", () => {
     const stats = withInternalRecall(readout, { goldToFinding: [null], matched: 0, error: "judge: unparseable" });
     expect(stats.internalMatched).toBeUndefined();
     expect(stats.internalUngraded).toBe("judge: unparseable");
+    // The failed judge's all-null vector is a placeholder, not a measurement —
+    // persisting it would make an outage read as "found nothing" downstream.
+    expect(stats.internalGold).toBeUndefined();
   });
 
   it("does not mutate the readout it was given", () => {

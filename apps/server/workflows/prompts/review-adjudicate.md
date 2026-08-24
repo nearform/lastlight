@@ -104,6 +104,18 @@ this run at all.
      spend anyone's attention on. This is the only tier that costs recall, so it
      is the one to justify to yourself before using.
 
+   **A VERIFICATION REPORT is always `internal`, whatever its confidence.** A
+   finding whose claim is that something is correctly handled, properly
+   enforced, satisfied, or unchanged — or that merely describes what the diff
+   does without asserting a defect or risk — exists to discharge its hypothesis
+   id, not to spend a maintainer's attention. It is not a weaker finding; it is
+   not a finding. Measured on this pipeline's own runs, seventeen such reports
+   reached one pull request at confidence 1.00 (*"Constants for silent sign-in
+   nonce lifecycle are imported and enforced at boundaries"*), and every one was
+   attention cost with nothing in it to act on. Posting one at `body` or
+   `inline` is a defect of this pass. The recall rule above is untouched: a
+   claim that something is WRONG, however thin, still reaches the review.
+
 4. **Demote, do not delete.** Deleting requires naming the refuting transcript,
    by path, and that path must exist.
 
@@ -115,6 +127,25 @@ this run at all.
    over an open human `CHANGES_REQUESTED`; never `APPROVE` while one of our own
    prior findings is still open; on a re-review, open the summary with the §2b
    ledger (Fixed / Still open / Pinned by a test / Withdrawn).
+
+## Confidence prices the defect, not your certainty
+
+`confidence` is the probability that a maintainer who investigates will conclude
+something is **genuinely wrong** — never how sure you are of an observation. A
+verification report has no defect to price, so it can never earn a high number
+by being certainly true. Calibrate:
+
+- **0.90+** — a `reproduced` transcript, or the defect visible end-to-end in
+  quoted code (the write AND the missing check, both quoted).
+- **0.60–0.85** — the mechanism is concrete and one end is quoted.
+- **0.30–0.55** — plausible, but inferred rather than shown.
+- **below 0.30** — speculative; `unprobed` claims with thin evidence live here.
+
+The downstream posting thresholds READ this number (family bars 0.30–0.60,
+floor 0.15). A document whose every row sits at 0.75+ has silently disabled
+them — and measured runs did exactly that (median 0.95–1.00, minimum 0.75,
+with 1.00 spent on statements like *"buildServer signature unchanged"*). If
+your confidences do not spread, they are not confidences.
 
 ## Anchoring: quote the code, do not count the lines
 

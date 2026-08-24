@@ -1,9 +1,12 @@
 # RESTART — pick this plan up in a new session
 
-> **Starting fresh? Read §2e and §3a of this file first, in that order.** X1 ran
-> on 2026-08-23 and moved the target: **C2 is dead, discovery is not the binding
-> constraint, and the adjudicator is.** §3a is the hypothesis register — what is
-> still open and what would settle each one. §3a′ is the next arm.
+> **Starting fresh? Read §2e, §2f and §3a of this file first, in that order.**
+> X1 ran on 2026-08-23 and moved the target to the adjudicator — and then §2f
+> (2026-08-24) found the instrument that said so was crediting
+> opposite-direction matches: **H-A1 currently has no uncompromised evidence,
+> and the corrected internal recall must be read before any adjudicator arm.**
+> §3a is the hypothesis register — what is still open and what would settle
+> each one. §3a′ is the next arm.
 >
 > [NEXT.md](NEXT.md) carries the artifact-level forensics and the question
 > catalogue. This file stays the operational reference — tree state, the
@@ -493,6 +496,111 @@ And the contract flips the adjudicator's posture between two wrong ones:
 - Old code — which lost ~24% of seeds — scored union 4/5. `minimal`, delivering
   every seed, scored 3/5. Within noise, but **there is still no evidence that
   reliable delivery helped anything.**
+
+## 2f. 2026-08-24 — the internal-recall judge matches on TOPIC, not on CLAIM.
+H-A1's evidence base is compromised.
+
+**Found at zero spend, off the stored X1 dispositions, while preparing the
+adjudicator-prompt review.** The internal-recall judge (`gradeInternalRecall`,
+`apps/evals/src/grade.ts`) shares `MATCH_SYSTEM` with the posted-review judge.
+That prompt asks for "the SAME underlying issue — the same root cause or the
+same required fix", and on the posted path it works, because EXTRACT filters
+praise and approvals before MATCH ever sees them. The internal path has no
+EXTRACT — `findings.json` is fed to MATCH directly — and the pipeline's
+findings include **verification reports**: *"Enforcement check passed:
+SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS — properly enforced at auth.ts:95"*,
+confidence 1.00. The judge credits them against gold **whose entire point is
+the opposite claim** (gold G2: *"nothing compares `issuedAt` against
+`SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS`"*). Same constant, same file, opposite
+verdict — scored as "found".
+
+The tell is mechanical, not interpretive. X1 rep1's scorecard credits
+`internalMatched: 2`, both in `byFamily.enforcement` — and rep1's enforcement
+family contains **only** five posted constant-duplication findings (no gold
+overlap) and five internal `Enforcement check passed: …` reports. There is no
+finding in that family that asserts any gold defect. Rep2 is the same shape
+(`enforcement=1`; its candidates are `Nonce max age constant properly
+enforced` and friends, 0.95 across the board). The full band repeats it:
+053348 rep1's credits are `enforcement=1, state=1`, where the enforcement
+candidate is *"Constants for silent sign-in nonce lifecycle are imported and
+enforced at boundaries"* (posted at body, conf 1.00 — an anti-finding on the
+PR) and the state candidate is *"secureRouteHandler checks for missing
+googleToken on ID-token sessions; returns early without refresh"* — gold G4's
+mechanism **described as a feature**, posted, then correctly uncredited by the
+posted judge. That last pair also explains part of H-A4's
+"tiered-posted-but-uncredited" channel: the posted judge refuses the neutral
+phrasing the internal judge accepted.
+
+**What this does to §2e and §3a:**
+
+- **"Found 10, said 3" does not survive.** The only repeats whose internal
+  credits are corroborated by a defect-direction finding are the ones that also
+  SAID them (X1 rep3: `maxAge set, no application-level enforcement` posted
+  inline = G2; `secureRouteHandler early-returns` posted = G4). On the audited
+  one-case repeats, everything "found but withheld" traces to an
+  opposite-direction or neutral-description credit. **H-A1 — "the adjudicator
+  withholds discovered gold" — currently has no uncompromised supporting
+  evidence.** The 8-case "found 12, said 8/5" used the same judge and is
+  suspect for the same reason.
+- **The adjudicator's minimal-contract behaviour was likely CORRECT.** The
+  33/35/29 tiered `internal` are dominated by verification reports and neutral
+  diff descriptions (audited: rep1/rep2 internal tiers are ~all "check passed
+  / contract satisfied / type changed" shapes). Burying those is the job.
+- **H-A2 stands and sharpens**: under `full` (pre-demotion) those same
+  verification reports were *posted* — body/inline at conf 1.00. The
+  clean-discharge demotion targets exactly this; still unmeasured (needs the
+  full-contract arm).
+- **H-A5 confirmed on the artifacts**: confidence is decorative — 1.00 across
+  entire `state` families of pure descriptions, 0.95 uniform under minimal.
+- **C1's mechanism deepens**: the surveys convert gold-adjacent obligations
+  into affirmative "check passed" claims instead of forming the failure
+  question. When the question IS formed, it gets posted AND credited (rep3).
+  The binding constraint looks like generation/question-shape again, not
+  adjudication.
+
+**The fix (instrument, built 2026-08-24):** `gradeInternalRecall` now uses its
+OWN match prompt (`INTERNAL_MATCH_SYSTEM`, `apps/evals/src/grade.ts`)
+requiring claim-direction agreement — a finding that asserts the mechanism is
+correctly handled, or merely describes behaviour without claiming anything is
+wrong, is a NON-match. The shared `MATCH_SYSTEM` is untouched: the posted
+path's numbers are pinned by drift refusals and EXTRACT already protects it.
+
+**The re-audit ran the same day (report-only; scorecards not rewritten —
+the judged-half drift refusal stands between the old numbers and a silent
+overwrite).** Corrected internal recall, strict prompt:
+
+| | old found | corrected found | said |
+|---|---|---|---|
+| X1 minimal rep1/2/3 | 2 / 1 / 3 | **1 / 1–2 / 3** | 0 / 0 / 3 |
+| full rep1/2/3 | 2 / 2 / 0 | **1 / 2 / 0** | 0 / 0 / 0 |
+| 8-case run1 `184650` | 12 | **12** | 8 |
+| 8-case run3 `201607` | 12 | **7** | 5 |
+
+And the per-gold PAIR audit (`scripts/audit-internal-pairs.ts`, over all six
+one-case repeats): **exactly ONE credited match across all six sits on the
+`internal` tier** — X1 rep2's *"secureRouteHandler early return for missing
+token"*, a neutral description. Every other credit, genuine or loose, was
+POSTED (inline or body). Rep3's three finds were posted inline/body and
+credited by the posted judge. The residual found-not-said decomposes into
+(a) still-loose topic matches the strict judge accepts (*"Domain constant
+value hardcoded in test files"* credited against the `issuedAt` gold — flatly
+wrong; the MATCH judge remains generous, and every future credit is now
+auditable via `internalGold`), and (b) posted-body findings the posted judge
+declines (adjacent-but-different claims like *"domain enforcement
+asymmetry"*) — H-A4's channel, which is judge disagreement over near-misses,
+not a lost true finding.
+
+**Verdict: H-A1 is DEAD.** The adjudicator is not withholding discovered
+gold; on the audited repeats it posted essentially everything defect-shaped
+it was given and buried the verification reports, which is the job. The
+recall bottleneck moves back to DISCOVERY QUESTION-SHAPE (C1/H-D1/H-D3): the
+surveys convert gold-adjacent obligations into *"check passed"* assertions
+instead of forming the failure question, and when the question IS formed
+(rep3) it is posted inline and credited. What survives for the adjudicator:
+**H-A2** (under `full` it posted 17 verification reports at conf 1.00 —
+the clean-discharge demotion is built and unmeasured) and **H-A5**
+(confidence is decorative). Both are precision/attention questions. The
+Sonnet-adjudicator rungs (old A3a/A3b) lose their recall question entirely.
 
 ## 3. What to do next
 

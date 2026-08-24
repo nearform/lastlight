@@ -129,6 +129,20 @@ function dischargeOf(row: Record<string, unknown>): DischargeCode {
 const VALID_CODES = new Set(["QUOTE", "ABSENT", "PARTIAL", "PROBE"]);
 
 /**
+ * The single line a DEAD family writes into its jsonl — `{status:"notMeasured",
+ * …}` — a tombstone, not a hypothesis.
+ *
+ * It still consumes an ordinal like any parsed row (identity must not shift)
+ * and still lands in the `bad-code` histogram bucket, exactly as before. What
+ * it must NOT do is count as evidence the family ran: it is the family saying
+ * it did not, and the deferred notMeasured mark keys on the absence of any row
+ * that is not this one.
+ */
+function isNotMeasuredMarker(row: Record<string, unknown>): boolean {
+  return typeof row.status === "string" && row.status.trim().toLowerCase() === "notmeasured";
+}
+
+/**
  * Parse a `hypotheses/<family>.jsonl`.
  *
  * **Mirrors `code-facts`' own `readJsonlRows` exactly**, because the ordinal a
@@ -258,10 +272,24 @@ export function readPipelineArtifacts(dir: string): PipelineReadout | undefined 
   // from `obligations[]`: that is where `measured` / `notMeasuredReason` live,
   // and a family with zero obligations because its extractor was unavailable is
   // a different row from one that genuinely had nothing to say.
+  //
+  // `obligations` stays ABSENT when the document carries no count — unknown is
+  // not 0. code-facts writes `measured: false` for `spec` to mean "I cannot see
+  // the PR body", i.e. its obligation count is UNKNOWN, and filling in a zero
+  // there reports "nothing to check" where the truth is "could not count".
+  //
+  // `measured: false` alone must NOT mark the family notMeasured either: the
+  // same field carries two different claims. For `security` it means the
+  // scanner was absent (dead family); for `spec` it means only that the
+  // extractor could not COUNT — the survey still runs and `hypotheses/spec.jsonl`
+  // carries live rows. A family whose survey produced rows was plainly measured,
+  // so the mark is deferred until the hypotheses are read (below) and applied
+  // only to families that produced none.
+  const declaredNotMeasured: string[] = [];
   for (const f of obligationsDoc?.families ?? []) {
     const stats = family(f.family);
-    stats.obligations = f.obligations ?? 0;
-    if (f.measured === false) stats.notMeasured = true;
+    if (f.obligations !== undefined) stats.obligations = f.obligations;
+    if (f.measured === false) declaredNotMeasured.push(f.family);
   }
   const obligations = obligationsDoc?.obligations?.length;
 
@@ -275,6 +303,9 @@ export function readPipelineArtifacts(dir: string): PipelineReadout | undefined 
   const cleanById = new Map<string, boolean>();
   /** An unambiguous model-declared id → the canonical id it names. */
   const declaredClaims = new Map<string, string[]>();
+  /** Per family: rows that are NOT the dead-family tombstone — the evidence the
+   * deferred notMeasured mark (below) is decided on. */
+  const liveRows = new Map<string, number>();
   let hypotheses = 0;
   let cleanDischarges = 0;
   for (const file of hypothesisFiles) {
@@ -284,6 +315,7 @@ export function readPipelineArtifacts(dir: string): PipelineReadout | undefined 
     hypotheses += rows.length;
     rows.forEach((raw, index) => {
       const row = asRecord(raw);
+      if (!isNotMeasuredMarker(row)) liveRows.set(name, (liveRows.get(name) ?? 0) + 1);
       const id = hypothesisId(name, index + 1);
       const code = dischargeOf(row);
       dischargeCodes[code] = (dischargeCodes[code] ?? 0) + 1;
@@ -298,6 +330,15 @@ export function readPipelineArtifacts(dir: string): PipelineReadout | undefined 
       if (declared && declared !== id) declaredClaims.set(declared, [...(declaredClaims.get(declared) ?? []), id]);
     });
   }
+  // Deferred from the families loop: `measured: false` marks a family NOT
+  // MEASURED only when its survey also produced no live rows. `spec` is live on
+  // exactly this shape (`measured: false` from code-facts + a populated
+  // `hypotheses/spec.jsonl`), and marking it notMeasured reported a working
+  // instrument as a dead one on every run.
+  for (const name of declaredNotMeasured) {
+    if ((liveRows.get(name) ?? 0) === 0) family(name).notMeasured = true;
+  }
+
   const aliases = new Map<string, string>();
   for (const [declared, claimedBy] of declaredClaims) {
     if (cleanById.has(declared) || claimedBy.length !== 1) continue;
@@ -450,6 +491,11 @@ export function withInternalRecall(
   return {
     ...stats,
     internalMatched: internal.matched,
+    // The judge's reply, verbatim. The count above is this vector's non-null
+    // count; without the vector itself, per-gold internal union/intersection
+    // across repeats cannot be computed and can never be back-filled — the
+    // MATCH call is spent, and nothing else stores what it answered.
+    internalGold: internal.goldToFinding,
     inlineMatched,
     ...(Object.keys(byFamily).length ? { byFamily } : {}),
   };

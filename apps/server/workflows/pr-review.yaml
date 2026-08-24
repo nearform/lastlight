@@ -498,10 +498,15 @@ phases:
     label: Adjudicate
     skills: [pr-review, code-review]
     prompt: prompts/review-adjudicate.md
-    # The STRONG model, and the only phase in the pipeline that gets it besides
-    # `review` itself. The surveys over-produce on a cheap model precisely so
-    # that one strong pass can rank what they found.
-    model: "{{models.review}}"
+    # Its OWN key, `models.review-adjudicate`, because this is a RANKING pass
+    # over an already-generated set — a different task from survey discovery
+    # (where Haiku beats Sonnet on recall) — so an overlay must be able to move
+    # it without also moving `review`. Unset, it falls through to
+    # `models.review`, preserving the old single-key behaviour byte-for-byte.
+    # The {{#if}} pair is load-bearing: a bare `{{models.review-adjudicate}}`
+    # renders EMPTY when unset, and `resolveModelVariant` then falls back to
+    # the DEFAULT model — not to `models.review`.
+    model: "{{#if models.review-adjudicate}}{{models.review-adjudicate}}{{/if}}{{#if !models.review-adjudicate}}{{models.review}}{{/if}}"
     variant: "{{variants.review}}"
     skip_if: "analysisEnabled != true"
     depends_on: [review]

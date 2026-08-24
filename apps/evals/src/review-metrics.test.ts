@@ -28,6 +28,7 @@ import {
   goldHits,
   mcnemarExact,
   microReview,
+  pairedBand,
   pairedRecall,
   snrOf,
   varianceRollup,
@@ -417,6 +418,148 @@ describe("varianceRollup", () => {
     const v = varianceRollup(repeatsOf("a", [[true], [false]]));
     expect(v.repeats.map((r) => r.runId)).toEqual(["run-0", "run-1"]);
     expect(v.band).toBe(1);
+  });
+});
+
+// ── the internal side of the band ───────────────────────────────────────────
+
+describe("varianceRollup — internal union/intersection over pipeline.internalGold", () => {
+  /** One repeat of one case with the internal vector given explicitly (or
+   * omitted — a pre-vector run, a judge failure). Posted trace rides along so
+   * the posted side stays measured either way. */
+  const repeat = (runId: string, internalGold?: (number | null)[]) =>
+    card(runId, [
+      reviewed("a", {
+        posted: 1,
+        gold: 3,
+        matched: 1,
+        trace: traceOf([true, false, false]),
+        ...(internalGold ? { pipeline: { internalMatched: internalGold.filter((g) => g !== null).length, internalGold } } : {}),
+      }),
+    ]);
+
+  it("is ABSENT when no repeat carries a vector — an unrecorded surface, not an empty one", () => {
+    expect(varianceRollup([repeat("run-0"), repeat("run-1")]).internal).toBeUndefined();
+    expect(varianceRollup(repeatsOf("a", [[true], [false]])).internal).toBeUndefined();
+  });
+
+  it("computes internal union/intersection parallel to the posted side", () => {
+    // Two repeats, three gold: repeat 0 found gold 0+1, repeat 1 found gold 1+2.
+    const v = varianceRollup([repeat("run-0", [4, 0, null]), repeat("run-1", [null, 2, 7])]);
+    const i = v.internal!;
+    expect(i.gold).toBe(3);
+    expect(i.unionMatched).toBe(3); // every gold found by ≥ 1 repeat
+    expect(i.intersectionMatched).toBe(1); // only gold 1 found by both
+    expect(i.unionRecall).toBe(1);
+    expect(i.intersectionRecall).toBeCloseTo(1 / 3, 10);
+    expect(i.perInstance[0].rows).toEqual([[true, false], [true, true], [false, true]]);
+    expect(i.unvectoredRepeats).toEqual([]);
+    // …and the posted side is untouched by any of it.
+    expect(v.unionMatched).toBe(1);
+  });
+
+  it("degrades a vector-less repeat to ABSENT columns that cannot poison the rest", () => {
+    // run-1 predates the vector. Its column is null — not misses — so the
+    // intersection is over the repeats that measured, and the union cannot
+    // shrink. Folding it in as zeros would zero the intersection of every
+    // mixed repeat set, which is most of history.
+    const v = varianceRollup([repeat("run-0", [0, null, 2]), repeat("run-1")]);
+    const i = v.internal!;
+    expect(i.unvectoredRepeats).toEqual(["run-1"]);
+    expect(i.perInstance[0].missingRepeats).toEqual([1]);
+    expect(i.perInstance[0].rows).toEqual([[true, null], [false, null], [true, null]]);
+    expect(i.unionMatched).toBe(2);
+    expect(i.intersectionMatched).toBe(2); // over the one vector-carrying repeat
+    expect(i.untraced).toEqual([]);
+  });
+
+  it("an all-null vector is a MEASURED nothing — it zeroes the intersection where absence must not", () => {
+    const v = varianceRollup([repeat("run-0", [0, 1, 2]), repeat("run-1", [null, null, null])]);
+    expect(v.internal!.unionMatched).toBe(3);
+    expect(v.internal!.intersectionMatched).toBe(0);
+    expect(v.internal!.unvectoredRepeats).toEqual([]);
+  });
+
+  it("names a case whose vectors drifted in length instead of padding them", () => {
+    const v = varianceRollup([repeat("run-0", [0, null, 2]), repeat("run-1", [0, null])]);
+    expect(v.internal!.untraced).toEqual(["a"]);
+    expect(v.internal!.perInstance).toEqual([]);
+    expect(v.internal!.gold).toBe(0);
+    expect(v.internal!.unionRecall).toBeNull(); // nothing aligned — not "found none"
+  });
+
+  it("names a case with no vector in ANY repeat once another case has one", () => {
+    const withB = (runId: string, vec?: (number | null)[]) =>
+      card(runId, [
+        ...repeat(runId, vec).results,
+        reviewed("b", { posted: 0, gold: 2, matched: 0, trace: traceOf([false, false]) }),
+      ]);
+    const v = varianceRollup([withB("run-0", [0, null, null]), withB("run-1", [0, null, null])]);
+    expect(v.internal!.untraced).toEqual(["b"]);
+    expect(v.internal!.perInstance.map((m) => m.instanceId)).toEqual(["a"]);
+    // "b" still counts on the posted side — the two surfaces degrade separately.
+    expect(v.perInstance.map((m) => m.instanceId)).toEqual(["a", "b"]);
+  });
+});
+
+// ── the per-gold paired comparison across two repeat GROUPS ─────────────────
+
+describe("pairedBand", () => {
+  /** One repeat of one case: posted hits per gold slot, internal vector
+   * optional (omitted = a pre-vector run — an UNRECORDED internal surface). */
+  const rep = (runId: string, hits: boolean[], internalGold?: (number | null)[]) =>
+    card(runId, [
+      reviewed("a", {
+        posted: hits.filter(Boolean).length,
+        gold: hits.length,
+        matched: hits.filter(Boolean).length,
+        trace: traceOf(hits),
+        ...(internalGold ? { pipeline: { internalMatched: internalGold.filter((g) => g !== null).length, internalGold } } : {}),
+      }),
+    ]);
+
+  it("pairs the POSTED unions per gold slot — a slot hit by ANY repeat of an arm counts", () => {
+    // Baseline hits only slot 0, in both repeats. The candidate hits slot 1 in
+    // one repeat and slot 2 in the other — its union is {1, 2}. Per-slot that
+    // is +2/−1; a matched-count diff of the same runs reads "1 vs 1, nothing
+    // changed" and hides all three discordant slots.
+    const baseline = varianceRollup([rep("b0", [true, false, false]), rep("b1", [true, false, false])]);
+    const candidate = varianceRollup([rep("c0", [false, true, false]), rep("c1", [false, false, true])]);
+    const p = pairedBand(baseline, candidate);
+    expect(p.posted.gained).toBe(2);
+    expect(p.posted.lost).toBe(1);
+    expect(p.posted.compared).toBe(3);
+    expect(p.posted.approximate).toBe(false);
+    // Exact one-sided McNemar on 2-of-3 discordant in the candidate's favour.
+    expect(p.posted.oneSided).toBeCloseTo(0.5, 10);
+  });
+
+  it("pairs the INTERNAL unions when both arms recorded vectors", () => {
+    // Baseline generated gold 0 (repeat 0) and gold 2 (repeat 1) — union {0, 2}.
+    // Candidate generated gold 1 and 2 — union {1, 2}. A `null` cell (that
+    // repeat's judge saw nothing for the slot) is a miss for that repeat, but
+    // the union across the arm's repeats is what gets paired.
+    const baseline = varianceRollup([rep("b0", [true, false, false], [0, null, null]), rep("b1", [true, false, false], [null, null, 2])]);
+    const candidate = varianceRollup([rep("c0", [false, true, false], [null, 1, 2]), rep("c1", [false, true, false], [null, 1, null])]);
+    const p = pairedBand(baseline, candidate);
+    expect(p.internal).toBeDefined();
+    expect(p.internal!.gained).toBe(1); // gold 1
+    expect(p.internal!.lost).toBe(1); // gold 0
+    expect(p.internal!.compared).toBe(3);
+    expect(p.internal!.approximate).toBe(false);
+  });
+
+  it("reports the internal surface ABSENT — never zeros — when either arm has no vector", () => {
+    // The baseline predates the vector. Pairing its unrecorded surface against
+    // the candidate's measured one would count every candidate internal hit as
+    // a gain — fabricated evidence, in the flattering direction.
+    const preVector = varianceRollup([rep("b0", [true, false]), rep("b1", [true, false])]);
+    const vectored = varianceRollup([rep("c0", [true, true], [0, 1]), rep("c1", [true, false], [0, null])]);
+    expect(pairedBand(preVector, vectored).internal).toBeUndefined();
+    expect(pairedBand(vectored, preVector).internal).toBeUndefined();
+    // …while the posted surface, which every run records, is still paired.
+    expect(pairedBand(preVector, vectored).posted.compared).toBe(2);
+    expect(pairedBand(preVector, vectored).posted.gained).toBe(1);
   });
 });
 

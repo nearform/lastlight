@@ -458,6 +458,22 @@ export interface ReviewPipelineStats {
    * of internal recall. */
   internalMatched?: number;
   /**
+   * The internal-recall judge's `goldToFinding` reply, verbatim: index *i* is
+   * gold finding *i* (in `review_gold` order — the same order `trace.gold`
+   * carries), the value is an index into the run's generated findings array
+   * (the order `internalJudgeInputs` built), and `null` means that gold was
+   * never found.
+   *
+   * `internalMatched` is this vector's non-null count, and storing only the
+   * count was the defect: "found but withheld by the adjudicator" and "never
+   * found" collapsed into one number, and internal union/intersection across
+   * repeats could not be computed at all (the posted side has `trace.gold` for
+   * that; this is its internal counterpart). ABSENT means the vector was not
+   * recorded — historical runs, a judge failure — never "found nothing": a
+   * pipeline that found nothing records `[null, …]`.
+   */
+  internalGold?: (number | null)[];
+  /**
    * The internal-recall judge did not run or did not parse, and why.
    *
    * Present ⇒ `internalMatched` is deliberately ABSENT rather than 0. An

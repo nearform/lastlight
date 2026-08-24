@@ -16,11 +16,21 @@
  *     and **intersection** recall (found by EVERY repeat — what a user actually
  *     gets each time),
  *   - the per-gold hit matrix, one row per gold finding, one column per repeat,
+ *   - the same union/intersection + matrix over the INTERNAL side
+ *     (`pipeline.internalGold` — what the pipeline GENERATED, posted or not),
+ *     when at least one repeat recorded the vector; repeats without it are
+ *     marked and their columns are absent from the maths, never misses,
  *   - and every case that could not be aligned across the repeats, BY NAME.
  *
  * With a `--vs` group it runs {@link bandVerdict}: the first group is the
  * BASELINE and the group after `--vs` is the CANDIDATE, the same order as
  * `diff-runs.ts`. A delta only counts if it clears the baseline's measured band.
+ * Beside the verdict it prints the PER-GOLD PAIRED comparison (`pairedBand`):
+ * gained/lost/net + the exact one-sided McNemar p over each arm's union hits,
+ * on both surfaces — posted (every run has a trace) and internal
+ * (`pipeline.internalGold`; an arm without the vector reads "not recorded",
+ * never zeros). The verdict gates on a RANGE and is deliberately conservative;
+ * the paired test is the exact evidence to read beside it.
  *
  * ── The arm→run mapping is an INPUT, never an inference ──────────────────────
  *
@@ -64,7 +74,9 @@ import { groupRepeats, type Scorecard } from "../src/report.js";
 import {
   DETECTION_FLOOR_MICRO_RECALL,
   bandVerdict,
+  pairedBand,
   varianceRollup,
+  type PairedRecall,
   type RepeatCard,
   type VarianceRollup,
 } from "../src/review-metrics.js";
@@ -291,6 +303,9 @@ const ratio = (x: number | null | undefined): string =>
 
 const HIT = "●";
 const MISS = "·";
+/** An internal-matrix cell for a repeat that recorded no `internalGold` vector
+ * — absent, rendered as its own glyph so it can never be misread as a miss. */
+const NO_VECTOR = "○";
 
 function clip(s: string, n: number): string {
   const flat = s.replace(/\s+/g, " ").trim();
@@ -362,6 +377,39 @@ function renderArm(
       chalk.dim("found by EVERY repeat — what a user would actually get each time"),
   );
 
+  // ── The internal side, when any repeat recorded it ────────────────────────
+  // Same two questions over what the pipeline GENERATED (posted or withheld) —
+  // the gap between the two unions is the adjudicator's bill. Absent entirely
+  // for a pre-vector repeat set: an unrecorded surface, not an empty one.
+  const internal = roll.internal;
+  if (internal) {
+    console.log("");
+    const iCases = internal.perInstance.length;
+    console.log(
+      chalk.bold(`  INTERNAL UNION / INTERSECTION`) +
+        chalk.dim(`  (generated, posted or not — over ${internal.gold} gold in ${iCases} case${iCases === 1 ? "" : "s"} with a vector)`),
+    );
+    console.log(
+      `    union         ${chalk.bold(ratio(internal.unionRecall))}   (${internal.unionMatched} of ${internal.gold})   ` +
+        chalk.dim("found by ≥ 1 vector-carrying repeat"),
+    );
+    console.log(
+      `    intersection  ${chalk.bold(ratio(internal.intersectionRecall))}   (${internal.intersectionMatched} of ${internal.gold})   ` +
+        chalk.dim("found by EVERY vector-carrying repeat"),
+    );
+    if (internal.unvectoredRepeats.length) {
+      console.log(
+        chalk.yellow(
+          `    ⚠ no internalGold vector on: ${internal.unvectoredRepeats.join(", ")} — those columns are ABSENT (${NO_VECTOR}) ` +
+            `from the internal maths, not misses.`,
+        ),
+      );
+    }
+    if (internal.untraced.length) {
+      console.log(chalk.yellow(`    internal-untraced (no usable vector in any repeat): ${internal.untraced.join(", ")}`));
+    }
+  }
+
   // ── Per-gold hit matrix ───────────────────────────────────────────────────
   if (showMatrix && roll.perInstance.length) {
     console.log("");
@@ -371,6 +419,24 @@ function renderArm(
       console.log(chalk.dim(`\n    ${m.instanceId}   ${m.union}/${m.gold} union, ${m.intersection}/${m.gold} intersection`));
       m.rows.forEach((row, j) => {
         const cells = row.map((h) => (h ? chalk.green(HIT) : chalk.dim(MISS))).join(" ");
+        const label = descs[j] ? clip(descs[j], 78) : `gold #${j + 1}`;
+        console.log(`      ${String(j + 1).padStart(2)}  ${cells}   ${label}`);
+      });
+    }
+  }
+
+  // ── Per-gold INTERNAL hit matrix ──────────────────────────────────────────
+  if (showMatrix && internal?.perInstance.length) {
+    console.log("");
+    console.log(
+      chalk.bold(`  INTERNAL HIT MATRIX`) +
+        chalk.dim(`  (generated, posted or not — ${HIT} found, ${MISS} not found, ${NO_VECTOR} no vector recorded)`),
+    );
+    for (const m of internal.perInstance) {
+      const descs = descriptions.get(m.instanceId) ?? [];
+      console.log(chalk.dim(`\n    ${m.instanceId}   ${m.union}/${m.gold} union, ${m.intersection}/${m.gold} intersection`));
+      m.rows.forEach((row, j) => {
+        const cells = row.map((h) => (h === null ? chalk.yellow(NO_VECTOR) : h ? chalk.green(HIT) : chalk.dim(MISS))).join(" ");
         const label = descs[j] ? clip(descs[j], 78) : `gold #${j + 1}`;
         console.log(`      ${String(j + 1).padStart(2)}  ${cells}   ${label}`);
       });
@@ -476,8 +542,42 @@ export function main(argv: string[] = process.argv.slice(2)): number {
   console.log(chalk.bold(`\nBAND VERDICT  (baseline = the first group, candidate = --vs)`));
   console.log(`  ${colour.bold(verdict)}${delta === null ? "" : chalk.dim(`   Δ ${delta >= 0 ? "+" : ""}${delta.toFixed(3)}`)}`);
   console.log(`  ${reason}`);
+
+  // ── The per-gold paired comparison, beside the verdict ────────────────────
+  // The verdict above gates on the RANGE (max − min) — deliberately blunt, and
+  // ~3× more conservative than the repeats warrant. This is the exact test:
+  // per gold slot, union across each arm's repeats, McNemar over the discordant
+  // slots. Two surfaces, because "said it" and "knew it" are different claims
+  // and the adjudicator sits between them.
+  renderPaired(pairedBand(base.roll, cand.roll), base.roll, cand.roll);
   console.log("");
   return 0;
+}
+
+function renderPaired(paired: ReturnType<typeof pairedBand>, base: VarianceRollup, cand: VarianceRollup): void {
+  const one = (p: PairedRecall): string => {
+    const net = p.gained - p.lost;
+    return (
+      `gained ${chalk.green(`+${p.gained}`)}  lost ${chalk.red(`−${p.lost}`)}  net ${net >= 0 ? `+${net}` : `−${-net}`}  ` +
+      `of ${p.compared} gold   one-sided McNemar p=${chalk.bold(p.oneSided.toFixed(3))}` +
+      (p.approximate ? chalk.yellow("   (APPROXIMATE — a trace was missing, discordance is a lower bound)") : "")
+    );
+  };
+  console.log(
+    chalk.bold(`\nPAIRED PER-GOLD  (union across each arm's repeats — the exact test the band verdict is conservative about)`),
+  );
+  console.log(`  posted surface     ${one(paired.posted)}`);
+  if (paired.internal) {
+    console.log(`  internal surface   ${one(paired.internal)}`);
+  } else {
+    // Absent ≠ 0: an arm measured before the vector shipped has an UNRECORDED
+    // internal surface, and pairing it against zeros would call every internal
+    // hit on the other arm a gain.
+    const missing = [...(base.internal ? [] : ["the baseline"]), ...(cand.internal ? [] : ["the candidate"])];
+    console.log(
+      chalk.dim(`  internal surface   not recorded — no internalGold vector on ${missing.join(" or on ")}; nothing to pair, and zeros would be a lie.`),
+    );
+  }
 }
 
 // Only when run as a script — so the pure helpers above stay importable from a

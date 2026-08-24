@@ -36,11 +36,38 @@ if (!adjudicate) throw new Error("pr-review.yaml has no `adjudicate` phase");
 if (!reconcile) throw new Error("pr-review.yaml has no `reconcile` phase");
 
 describe("adjudicate — the phase", () => {
-  it("runs on the STRONG model, unlike every other pipeline phase", () => {
-    // The surveys over-produce on `models.review-survey` precisely so that one
-    // strong pass can rank what they found.
-    expect(adjudicate!.model).toBe("{{models.review}}");
+  it("has its own model key, guarded so unset falls through to `models.review`", () => {
+    // Lever f3. The adjudicator is a RANKING pass over an already-generated
+    // set — a different task from survey discovery — so an overlay must be
+    // able to move it without also moving `review`. The {{#if}} pair is
+    // load-bearing: a bare `{{models.review-adjudicate}}` renders EMPTY when
+    // the key is unset, and `resolveModelVariant` then falls back to the
+    // DEFAULT model, not to `models.review`.
+    expect(adjudicate!.model).toBe(
+      "{{#if models.review-adjudicate}}{{models.review-adjudicate}}{{/if}}" +
+        "{{#if !models.review-adjudicate}}{{models.review}}{{/if}}"
+    );
     expect(adjudicate!.model).not.toBe("{{models.review-survey}}");
+  });
+
+  it("renders `models.review-adjudicate` when the key is set", () => {
+    // Rendered from the REAL YAML, so an edit to the template breaks this.
+    const rendered = renderTemplate(adjudicate!.model!, {
+      models: {
+        review: "anthropic/claude-haiku-4-5-20251001",
+        "review-adjudicate": "anthropic/claude-sonnet-4-6",
+      },
+    } as unknown as TemplateContext);
+    // Exactly — the phase executor treats any non-empty render as
+    // authoritative, so stray whitespace would become part of the model id.
+    expect(rendered).toBe("anthropic/claude-sonnet-4-6");
+  });
+
+  it("falls through to `models.review` when the key is unset", () => {
+    const rendered = renderTemplate(adjudicate!.model!, {
+      models: { review: "anthropic/claude-haiku-4-5-20251001" },
+    } as unknown as TemplateContext);
+    expect(rendered).toBe("anthropic/claude-haiku-4-5-20251001");
   });
 
   it("reads with a FRESH context", () => {

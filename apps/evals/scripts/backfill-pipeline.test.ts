@@ -58,6 +58,8 @@ const stored: ReviewPipelineStats = {
     state: { obligations: 4, hypotheses: 9, internalMatched: 1 },
   },
   internalMatched: 4,
+  // The judge's per-gold reply the count was summed from — 5 gold, 4 found.
+  internalGold: [0, 2, null, 5, 1],
   inlineMatched: 1,
 };
 
@@ -75,6 +77,7 @@ describe("mergePreservedJudgement — the mechanism half moves, the judged half 
 
   it("carries the judged fields across untouched", () => {
     expect(merged.internalMatched).toBe(4);
+    expect(merged.internalGold).toEqual([0, 2, null, 5, 1]);
     expect(merged.inlineMatched).toBe(1);
     expect(judgedHalf(merged)).toBe(judgedHalf(stored));
   });
@@ -158,8 +161,19 @@ describe("judgedHalf — the assertion the write is gated on", () => {
     ).not.toBe(judgedHalf(stored));
   });
 
+  it("notices a vector that moved even when its non-null COUNT did not", () => {
+    // The same 4 matches attributed to different findings is a changed judgement
+    // — exactly what a count-only guard cannot see.
+    expect(judgedHalf({ ...stored, internalGold: [0, 2, null, 5, 3] })).not.toBe(judgedHalf(stored));
+    // …and a dropped vector is a loss, not a no-op.
+    const { internalGold: _dropped, ...withoutVector } = stored;
+    expect(judgedHalf(withoutVector)).not.toBe(judgedHalf(stored));
+  });
+
   it("distinguishes an absent judged number from a zero", () => {
     expect(judgedHalf({ ...fresh, internalMatched: 0 })).not.toBe(judgedHalf(fresh));
+    // Same rule for the vector: "not recorded" and "found nothing" differ.
+    expect(judgedHalf({ ...fresh, internalGold: [null, null] })).not.toBe(judgedHalf(fresh));
   });
 });
 
@@ -248,6 +262,7 @@ function writeScorecardFixture(resultsRoot: string): string {
         byFamily: { contract: { obligations: 2, hypotheses: 3, posted: 1, internalMatched: 2, matched: 2 } },
         coverage: "degraded",
         internalMatched: 2,
+        internalGold: [1, 0],
         inlineMatched: 2,
       },
     },
@@ -296,6 +311,7 @@ describe("--no-judge --write, end to end through the script", () => {
 
   it("preserves the judged half byte for byte", () => {
     expect(pipeline.internalMatched).toBe(2);
+    expect(pipeline.internalGold).toEqual([1, 0]);
     expect(pipeline.inlineMatched).toBe(2);
     expect(pipeline.byFamily!.contract.matched).toBe(2);
     expect(pipeline.byFamily!.contract.internalMatched).toBe(2);

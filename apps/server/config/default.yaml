@@ -25,6 +25,7 @@ models:
   #   diagnose: anthropic/claude-haiku-4-5-20251001     # the CI-failure classifier
   #   pr-fix-retry: anthropic/claude-opus-4-8           # used above fix.escalateModelAfterAttempt
   #   review-survey: anthropic/claude-haiku-4-5-20251001  # the six survey passes
+  #   review-adjudicate: anthropic/claude-sonnet-4-6      # the adjudication pass
   # A per-task entry wins over `default`. `classifier`/`screener` are the cheap
   # one-shot helpers (src/engine/llm.ts); when unset they fall back to the first
   # configured provider's fast model, NOT `default`.
@@ -47,6 +48,12 @@ models:
   # name Anthropic models, and a deployment that overrode only `default` to
   # another provider would find six phases reaching for a provider it has no key
   # for. Unset, all six fall through to `default` — correct, and dearer.
+  #
+  # `review-adjudicate` is the adjudicate phase's own key in `pr-review.yaml` —
+  # the RANKING pass over what the surveys found, a different task from survey
+  # discovery, so it can be moved independently of `models.review`. Unset, it
+  # falls through to `models.review` (the phase's template guards it), so a
+  # deployment that never sets it keeps today's behaviour exactly.
 
 variants: {}
 
