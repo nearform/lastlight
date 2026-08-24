@@ -71,6 +71,49 @@ RUN pnpm --filter agentic-pi build \
 # crash here as well as a broken npm tarball.
 RUN pnpm --filter lastlight-core deploy --prod /app
 
+# ── lastlight CLI build stage ────────────────────────────────────────────────
+# WHY THE AGENT IMAGE CARRIES THE CLI: on the in-process sandbox backends
+# (gondolin — the shipped default — and none), a workflow `type: bash` phase is
+# NOT executed in the sandbox image at all. `InProcessSandbox.runCommand`
+# (src/sandbox/sandbox.ts) spawns it on the host worktree via
+# `spawnSync("sh", ["-c", …])` — i.e. inside THIS container. pr-review.yaml's
+# deterministic phases resolve `command -v lastlight-facts`, so the bin must be
+# on PATH here or the review evidence pipeline silently degrades in prod.
+#
+# We vendor the WHOLE `lastlight` CLI bundle (user rule: no standalone facts
+# binary distribution — `lastlight facts` is a CLI subcommand and the
+# `lastlight-facts` bin exists only as the CLI's dependency bin, from
+# `lastlight-code-facts`). Same pattern as the sandbox images' vendored
+# agentic-pi: workspace build → `pnpm deploy` bundle → content-addressed COPY,
+# so the whole tree is exactly what the lockfile resolved and CI tested. The
+# bundle also carries its own pinned `typescript`, enforcing WP1's
+# pinned-compiler rule (never the target repo's).
+FROM node:22-slim AS lastlight-cli-build
+RUN corepack enable
+WORKDIR /repo
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
+# The CLI's `prepare` script (scripts/copy-plugin.mjs) stages the repo-root
+# plugin dirs into the package and pnpm runs it during install — so the script
+# and both source dirs must be present BEFORE the frozen install.
+COPY plugins/ plugins/
+COPY .claude-plugin/ .claude-plugin/
+COPY packages/cli/package.json packages/cli/package.json
+COPY packages/cli/scripts/ packages/cli/scripts/
+COPY packages/code-facts/package.json packages/code-facts/package.json
+COPY packages/shared/package.json packages/shared/package.json
+COPY packages/workflow-engine/package.json packages/workflow-engine/package.json
+RUN pnpm install --frozen-lockfile --filter lastlight...
+COPY packages/cli/ packages/cli/
+COPY packages/code-facts/ packages/code-facts/
+COPY packages/shared/ packages/shared/
+COPY packages/workflow-engine/ packages/workflow-engine/
+# Build in dependency order: code-facts + engine (leaves) → shared → cli.
+RUN pnpm --filter lastlight-code-facts build \
+ && pnpm --filter lastlight-workflow-engine build \
+ && pnpm --filter lastlight-shared build \
+ && pnpm --filter lastlight build \
+ && pnpm --filter lastlight deploy --prod /cli-bundle
+
 # ── Runtime stage ────────────────────────────────────────────────────────────
 FROM node:22-slim
 
@@ -82,6 +125,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git ripgrep curl jq ca-certificates gosu \
     && curl -fsSL https://get.docker.com | sh \
     && rm -rf /var/lib/apt/lists/*
+
+# Analysis scanners for the review evidence pipeline's `patterns` family —
+# without them in THIS image, gondolin/none `type: bash` phases (which run here,
+# see the lastlight-cli-build stage note) report the family silently `missing`.
+# Version defaults MUST match `packages/code-facts/toolchain.json` (the pinned
+# manifest the facts envelope stamps). Fetched per-ARCH — both tools publish
+# linux arm64 assets at these exact versions, so an arm64 dev-host build works;
+# CI publishes amd64.
+ARG TARGETARCH
+ARG GITLEAKS_VERSION=8.21.2
+ARG OPENGREP_VERSION=1.27.1
+RUN case "${TARGETARCH:-amd64}" in \
+      arm64) GITLEAKS_ARCH=arm64; OPENGREP_ARCH=aarch64 ;; \
+      amd64|"") GITLEAKS_ARCH=x64; OPENGREP_ARCH=x86 ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+ && curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${GITLEAKS_ARCH}.tar.gz" \
+    | tar -xz -C /usr/local/bin gitleaks \
+ && curl -sSfL -o /usr/local/bin/opengrep \
+    "https://github.com/opengrep/opengrep/releases/download/v${OPENGREP_VERSION}/opengrep_manylinux_${OPENGREP_ARCH}" \
+ && chmod +x /usr/local/bin/opengrep \
+ && gitleaks version && opengrep --version
 
 # Create non-root user. Add to docker group so the harness can spawn
 # sibling sandbox containers via socket when LASTLIGHT_SANDBOX=docker.
@@ -96,6 +161,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd -m -s /bin/bash -u 10001 lastlight && usermod -aG docker lastlight
 
 WORKDIR /app
+
+# The vendored `lastlight` CLI bundle (see the lastlight-cli-build stage note).
+# Placed at /opt/lastlight, with /opt/lastlight/bin also being the baked
+# fallback path pr-review.yaml echoes when `command -v lastlight-facts` fails —
+# with the /usr/local/bin symlinks it never should. The wrappers pin this
+# image's node explicitly rather than `#!/usr/bin/env node`, mirroring the
+# sandbox images (where fnm can swap the PATH node per repo pin).
+COPY --from=lastlight-cli-build /cli-bundle /opt/lastlight
+RUN mkdir -p /opt/lastlight/bin \
+ && printf '#!/bin/sh\nexec /usr/local/bin/node /opt/lastlight/dist/cli.js "$@"\n' \
+      > /opt/lastlight/bin/lastlight \
+ && printf '#!/bin/sh\nexec /usr/local/bin/node /opt/lastlight/node_modules/lastlight-code-facts/dist/cli.js "$@"\n' \
+      > /opt/lastlight/bin/lastlight-facts \
+ && chmod +x /opt/lastlight/bin/lastlight /opt/lastlight/bin/lastlight-facts \
+ && ln -sf /opt/lastlight/bin/lastlight /usr/local/bin/lastlight \
+ && ln -sf /opt/lastlight/bin/lastlight-facts /usr/local/bin/lastlight-facts
 
 COPY --from=build /app /app
 # pnpm deploy packs per the `files` field — restore what it omits (do NOT
@@ -113,10 +194,12 @@ COPY --from=build /repo/apps/server/dashboard/dist /app/dashboard/dist
 RUN chmod +x /app/deploy/entrypoint.sh
 
 # Let lastlight user write to /app (for mcp-config.json at startup) and own
-# the frequently-read asset dirs (previously COPY --chown'd).
+# the frequently-read asset dirs (previously COPY --chown'd). No /app/CLAUDE.md
+# here — the COPY that produced it was removed on purpose (see the NOTE above),
+# and the stale chown of it made this stage unbuildable.
 # Only chown /app itself, not node_modules — read-only and fine as root.
 RUN chown lastlight:lastlight /app \
-    && chown -R lastlight:lastlight /app/config /app/skills /app/agent-context /app/workflows /app/CLAUDE.md
+    && chown -R lastlight:lastlight /app/config /app/skills /app/agent-context /app/workflows
 
 # State directory — mount as Docker volume
 # Entrypoint handles chown on /app/data at runtime

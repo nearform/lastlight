@@ -16,15 +16,15 @@ import {
  * `docs/plans/review-evidence-pipeline/03-seed-and-survey.md`.
  *
  * **AC3 — each survey pass writes only its own family's file.** The union is
- * append-only and collapse is meant to be impossible *by construction*: six
+ * append-only and collapse is meant to be impossible *by construction*: five
  * disjoint paths, and no pass ever opening another's. There is no harness code
  * to assert that on — the enforcement lives in the `until_bash` gate and the
  * prompt text — so what is checked here is what is actually enforceable: every
- * survey phase names ITS OWN family path and no other, and the six gates are
+ * survey phase names ITS OWN family path and no other, and the five gates are
  * pairwise distinct.
  *
  * The assertions are on **paths**, never on words, and that distinction is the
- * whole test. Every one of the six prompts contains the word "contract" (the
+ * whole test. Every one of the five prompts contains the word "contract" (the
  * *discharge* contract); `survey-enforcement.md` contains the word "state" ("or
  * state that no such line exists"). A word-level scan would pass while proving
  * nothing at all — so a non-vacuity control below pins that fact, and will fail
@@ -40,22 +40,38 @@ import {
  * in-process propagation from a degraded `PrState` to the rendered prompt.
  */
 
-const FAMILIES = ["contract", "enforcement", "security", "state", "tests", "spec"] as const;
-type Family = (typeof FAMILIES)[number];
+/**
+ * The SEEDER's universe. `lastlight-facts seed` still emits a per-family block
+ * and an `obligations.json` row for every one of these — `tests` included, as
+ * `measured: false` — so the eval instrument keeps reporting that family as
+ * `notMeasured`, never as "did not convert".
+ */
+const SEEDED_FAMILIES = ["contract", "enforcement", "security", "state", "tests"] as const;
 
-/** The five families whose obligations come from `lastlight-facts seed`. */
-const BLOCK_FAMILIES = FAMILIES.filter((f) => f !== "spec");
+/**
+ * The FAN-OUT's universe: the five survey branches. `tests` deliberately has
+ * no branch — the family is dead at both ends (no seeder function exists in
+ * `code-facts`, and its `coverage` source needs the probes-gated `prepare`
+ * artifact), so running it paid a sixth of the fan-out to write NOT MEASURED.
+ * Reinstating it is the branch entry in `pr-review.yaml` plus a seeder.
+ */
+const BRANCH_FAMILIES = ["contract", "enforcement", "security", "state", "spec"] as const;
+type Family = (typeof BRANCH_FAMILIES)[number];
+
+/** The four branches seeded from a `lastlight-facts seed` block on disk. */
+const BLOCK_FAMILIES = BRANCH_FAMILIES.filter((f) => f !== "spec");
 
 const def = getWorkflow("pr-review");
 const byName = new Map(def.phases.map((p) => [p.name, p]));
 
 /**
  * WP11c moved the six families from six chained PHASES to six BRANCHES of one
- * `type: fanout` phase. Everything AC3 pins is unchanged by that — the six
- * prompts, the six literal gates, the six disjoint paths — so the assertions
- * below read a branch where they used to read a phase, and nothing else moved.
- * That is the property the change is claiming: a latency change, not a
- * behaviour change.
+ * `type: fanout` phase. Everything AC3 pins was unchanged by that — the
+ * prompts, the literal gates, the disjoint paths — so the assertions below
+ * read a branch where they used to read a phase. That was a latency change,
+ * not a behaviour change. The `tests` branch was then REMOVED outright (see
+ * `BRANCH_FAMILIES` above), which is why the fan-out's universe here is five
+ * while the seeder's is still the five in `SEEDED_FAMILIES`.
  */
 const surveyPhase = (): PhaseDefinition => {
   const phase = byName.get("survey");
@@ -86,46 +102,53 @@ function familiesReferenced(text: string): Set<string> {
 
 // ── AC3 ──────────────────────────────────────────────────────────────────────
 
-describe("AC3 — six survey branches, six disjoint families", () => {
-  it("declares exactly one branch per family, in the seeder's family order", () => {
-    expect(surveyPhase().branches?.map((b) => b.name)).toEqual([...FAMILIES]);
+describe("AC3 — five survey branches, five disjoint families", () => {
+  it("declares exactly one branch per surveyed family, and NONE for `tests`", () => {
+    // The exact-list assertion is the pin on the removal: `tests` sat between
+    // `state` and `spec` until 2026-08-24 and must not quietly come back
+    // without its seeder.
+    expect(surveyPhase().branches?.map((b) => b.name)).toEqual([...BRANCH_FAMILIES]);
     // …and the six phases they replaced are gone, so nothing can run twice.
     expect(def.phases.filter((p) => p.name.startsWith("survey_"))).toEqual([]);
   });
 
-  it("points each branch at its own prompt file, and the six are distinct", () => {
-    const prompts = FAMILIES.map((f) => surveyBranch(f).prompt);
-    expect(prompts).toEqual(FAMILIES.map((f) => `prompts/survey-${f}.md`));
-    expect(new Set(prompts).size).toBe(FAMILIES.length);
+  it("points each branch at its own prompt file, and the five are distinct", () => {
+    const prompts = BRANCH_FAMILIES.map((f) => surveyBranch(f).prompt);
+    expect(prompts).toEqual(BRANCH_FAMILIES.map((f) => `prompts/survey-${f}.md`));
+    expect(new Set(prompts).size).toBe(BRANCH_FAMILIES.length);
   });
 
-  it("gates each branch on ITS OWN family, and the six gates are pairwise distinct", () => {
+  it("gates each branch on ITS OWN family, and the five gates are pairwise distinct", () => {
     // This is the literal-gate property §D4 was rewritten for: the previous
     // `generic_loop` design templated `$LL_FAMILY` into the gate, `until_bash`
     // rejects template markers, and the gate silently tested
     // `hypotheses/.jsonl` — a condition that could never be true — while the
     // loop burned every iteration. A literal family per branch is what makes the
     // gate real rather than decorative.
-    const gates = FAMILIES.map((f) => surveyBranch(f).until_bash?.trim());
-    expect(new Set(gates).size).toBe(FAMILIES.length);
+    const gates = BRANCH_FAMILIES.map((f) => surveyBranch(f).until_bash?.trim());
+    expect(new Set(gates).size).toBe(BRANCH_FAMILIES.length);
     // No templating anywhere in a gate — the failure mode above, pinned.
     for (const g of gates) expect(g).not.toContain("{{");
-    // Each gate names its own family and no other's.
-    for (const f of FAMILIES) {
+    // Each gate names its own family and no other's — `tests` included in the
+    // "other" set, so no gate can quietly grade the branchless family.
+    for (const f of BRANCH_FAMILIES) {
       const gate = surveyBranch(f).until_bash ?? "";
       expect(gate).toContain(f);
-      for (const other of FAMILIES) if (other !== f) expect(gate).not.toContain(other);
+      for (const other of [...BRANCH_FAMILIES, "tests"])
+        if (other !== f) expect(gate).not.toContain(other);
     }
   });
 
-  it("gates the five SEEDABLE families on `discharge`, not on a file merely existing", () => {
+  it("gates the four block-seeded branches on `discharge`, not on a file merely existing", () => {
     // `test -s` is passed by ONE LINE OF ANY CONTENT, while the obligations
     // block demands a QUOTE/ABSENT/PARTIAL/PROBE discharge per obligation.
     // Measured across both preserved runs of 2026-08-22, all 8 cases, every
     // family: not one obligation ever carried a discharge code (0/31, 0/34,
     // 0/40). It also lets a branch that LOST its seed and free-styled clear the
     // gate, which is the hole `context_file` cannot close from its end.
-    for (const f of ["contract", "enforcement", "security", "state", "tests"]) {
+    // (`tests` was the fifth discharge-gated branch until it was removed —
+    // there is nothing left to gate.)
+    for (const f of BLOCK_FAMILIES) {
       const gate = surveyBranch(f).until_bash ?? "";
       expect(gate).toContain(`discharge --dir .lastlight/pr-review --family ${f}`);
       expect(gate).not.toContain("test -s");
@@ -142,37 +165,39 @@ describe("AC3 — six survey branches, six disjoint families", () => {
   });
 
   it("keeps the `security` skill set on the branch that needs it, and only there", () => {
-    // Five families inherit the phase's two skills; `security` adds a third.
-    // A fan-out that flattened the six onto one skill catalogue would hand
+    // Four families inherit the phase's two skills; `security` adds a third.
+    // A fan-out that flattened the five onto one skill catalogue would hand
     // `security-review` to every family — cheap-looking, and a change to what
-    // five of the six models see.
+    // four of the five models see.
     expect(surveyPhase().skills).toEqual(["pr-review", "code-review"]);
     expect(surveyBranch("security").skills).toEqual(["pr-review", "code-review", "security-review"]);
-    for (const f of FAMILIES.filter((x) => x !== "security")) {
+    for (const f of BRANCH_FAMILIES.filter((x) => x !== "security")) {
       expect(surveyBranch(f).skills, f).toBeUndefined();
     }
   });
 
   it("names only its own family's files in its prompt — no pass opens another's", () => {
-    for (const family of FAMILIES) {
+    for (const family of BRANCH_FAMILIES) {
       const reached = familiesReferenced(promptText(family));
       expect([...reached].sort(), `survey-${family}.md`).toEqual([family]);
     }
   });
 
-  it("writes to six pairwise-disjoint hypothesis paths", () => {
-    const outputs = FAMILIES.map((f) => `.lastlight/pr-review/hypotheses/${f}.jsonl`);
-    expect(new Set(outputs).size).toBe(FAMILIES.length);
+  it("writes to five pairwise-disjoint hypothesis paths", () => {
+    const outputs = BRANCH_FAMILIES.map((f) => `.lastlight/pr-review/hypotheses/${f}.jsonl`);
+    expect(new Set(outputs).size).toBe(BRANCH_FAMILIES.length);
     // Each prompt actually instructs the write, and the gate then tests the
     // same path. Gate and instruction disagreeing is the shape that produced a
     // loop with a meaningless exit condition.
-    for (const family of FAMILIES) {
-      expect(promptText(family), `survey-${family}.md`).toContain(outputs[FAMILIES.indexOf(family)]);
+    for (const family of BRANCH_FAMILIES) {
+      expect(promptText(family), `survey-${family}.md`).toContain(
+        outputs[BRANCH_FAMILIES.indexOf(family)],
+      );
     }
   });
 
   it("carries the cross-family prohibition in every prompt", () => {
-    for (const family of FAMILIES) {
+    for (const family of BRANCH_FAMILIES) {
       const text = promptText(family);
       expect(text, `survey-${family}.md`).toContain(
         "Do NOT read or write any other family's file",
@@ -185,7 +210,7 @@ describe("AC3 — six survey branches, six disjoint families", () => {
   });
 
   it("names its own family in the `## Your family:` heading, once", () => {
-    for (const family of FAMILIES) {
+    for (const family of BRANCH_FAMILIES) {
       const headings = [...promptText(family).matchAll(/^## Your family: `([a-z]+)`$/gm)].map(
         (m) => m[1],
       );
@@ -199,7 +224,7 @@ describe("AC3 — six survey branches, six disjoint families", () => {
    * separate nothing.
    */
   it("is asserting on paths because the words do not separate the families", () => {
-    const texts = FAMILIES.map((f) => promptText(f));
+    const texts = BRANCH_FAMILIES.map((f) => promptText(f));
     for (const word of ["contract", "state"]) {
       // Each family's own WORD appears in more than one family's prompt — so a
       // word-level assertion would be satisfied by prompts that all talk about
@@ -353,9 +378,11 @@ describe("AC4 — what was NOT analysed reaches the model", () => {
   it("keeps the seeder's per-family manifest, so a missing block is a LOGGED fact", () => {
     // `renderFamilyBlock` always emits a block, so a family with no line here is
     // a seeder failure rather than a family with nothing to say — and the two
-    // used to be the same silence.
+    // used to be the same silence. This is the SEEDER's universe, not the
+    // fan-out's: `tests` still gets a block (and a `measured: false` row) even
+    // though no branch reads it, so the manifest keeps logging it.
     const seed = byName.get("seed")!.command!;
-    for (const family of BLOCK_FAMILIES) expect(seed, family).toContain(family);
+    for (const family of SEEDED_FAMILIES) expect(seed, family).toContain(family);
     expect(seed).toContain("block MISSING");
     expect(seed).toContain("will run UNSEEDED");
     // …and it still cannot fail the run: a hard-failing phase is re-dispatched
@@ -417,9 +444,14 @@ const analysisOn = (() => {
   return { ...base, analysis: { ...base.analysis, enabled: true } };
 })();
 
+// The shipped default is `obligationContract: minimal`, whose block carries no
+// row shape by design — the discharge-contract delivery test below pins the
+// `full` contract's mechanism, so it asks for `full` by name.
+const analysisOnFull = { ...analysisOn, analysis: { ...analysisOn.analysis, obligationContract: "full" as const } };
+
 /** Render `survey-spec.md` exactly as the phase would, off a PrState. */
-function renderSurveySpec(state: PrState): string {
-  const ctx = renderContext(state, defaultFixConfig(), defaultDependenciesConfig(), analysisOn);
+function renderSurveySpec(state: PrState, review = analysisOn): string {
+  const ctx = renderContext(state, defaultFixConfig(), defaultDependenciesConfig(), review);
   return renderTemplate(loadPromptTemplate("prompts/survey-spec.md"), {
     owner: "acme",
     repo: "widgets",
@@ -444,7 +476,9 @@ describe("AC4 — the `spec` family's degraded state propagates all the way to t
     // the half that had no test, and the half that was empty. Measured on
     // `prreview__skillspro-1587-r2`: `spec.jsonl` rows carried `verdict`, a
     // field no gate reads, because the block prescribed no row at all.
-    const rendered = renderSurveySpec(prState());
+    // Rendered under `full` explicitly: the shipped `minimal` default omits
+    // the row shape by design, and what this test pins is the delivery path.
+    const rendered = renderSurveySpec(prState(), analysisOnFull);
     expect(rendered).toContain('"discharge": "QUOTE|ABSENT|PARTIAL|PROBE"');
     expect(rendered).toContain("hypotheses/spec.jsonl");
     for (const code of ["QUOTE", "ABSENT", "PARTIAL", "PROBE"]) expect(rendered, code).toContain(code);
@@ -500,7 +534,7 @@ describe("AC4 — regression: the `spec` prompt must not contradict its own bloc
       defaultDependenciesConfig(),
       analysisOn,
     );
-    for (const family of FAMILIES) {
+    for (const family of BRANCH_FAMILIES) {
       const rendered = renderTemplate(promptText(family), {
         owner: "acme",
         repo: "widgets",

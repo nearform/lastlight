@@ -24,7 +24,7 @@ models:
   #   screener: anthropic/claude-haiku-4-5-20251001     # the prompt-injection screener
   #   diagnose: anthropic/claude-haiku-4-5-20251001     # the CI-failure classifier
   #   pr-fix-retry: anthropic/claude-opus-4-8           # used above fix.escalateModelAfterAttempt
-  #   review-survey: anthropic/claude-haiku-4-5-20251001  # the six survey passes
+  #   review-survey: anthropic/claude-haiku-4-5-20251001  # the five survey passes
   #   review-adjudicate: anthropic/claude-sonnet-4-6      # the adjudication pass
   # A per-task entry wins over `default`. `classifier`/`screener` are the cheap
   # one-shot helpers (src/engine/llm.ts); when unset they fall back to the first
@@ -38,12 +38,12 @@ models:
   # for a provider it has no key for. Unset, it falls through to `default`, so
   # each fix run costs one extra call at the default model until you pin it.
   #
-  # `review-survey` is the key the six survey phases of `pr-review.yaml` declare
+  # `review-survey` is the key the five survey branches of `pr-review.yaml` declare
   # (`model: "{{models.review-survey}}"`, one per obligation family). Pinning it
   # to Haiku 4.5 is NOT a cost downgrade, and that is the unusual part: on review
   # RECALL, Haiku 4.5 BEATS Sonnet 4.6 on two independent evals — 41.2% vs 22.1%
   # on the Martian corpus. It is the better model for this phase, and its price
-  # is merely what makes a six-way fan-out affordable inside the pipeline's 2–3x
+  # is merely what makes a five-way fan-out affordable inside the pipeline's 2–3x
   # budget. Left UNSET for exactly the `diagnose` reason above: these examples
   # name Anthropic models, and a deployment that overrode only `default` to
   # another provider would find six phases reaching for a provider it has no key
@@ -326,7 +326,7 @@ review:
   #   - a `facts` phase writing .lastlight/pr-review/facts.json (no model spend)
   #   - a `seed` phase turning it into obligations.json + one rendered block per
   #     family, each naming BOTH ENDS of a mechanism
-  #   - six survey phases, one per family, each appending to its OWN
+  #   - five survey branches, one per live family, each appending to its OWN
   #     hypotheses/<family>.jsonl — no pass ever reads or rewrites another's,
   #     which makes consensus collapse impossible by construction rather than
   #     by instruction
@@ -375,20 +375,28 @@ review:
     # itself suppresses discovery — the same commit stopped ~24% of survey
     # branches losing their seed entirely.
     #
-    # `minimal` is the control: the block exactly as it stood before that commit,
-    # with the delivery fix HELD CONSTANT. Same obligations, delivered just as
-    # reliably, asking the old question. Under it `lastlight-facts discharge`
-    # degrades to the `test -s` floor it replaces — measured compliance under
-    # that block was 0/31, 0/34 and 0/40, so grading it would fail every family
-    # of every run over a field the survey was never told to write.
+    # `minimal` is the SHIPPED default, and it was measured in, not assumed:
+    # under `full`, half to two-thirds of everything the surveys produce is a
+    # clean quote — "I looked, the line is fine" — and those verification
+    # reports reached real pull requests as posted findings. Under `minimal`
+    # the same pipeline posted the same recall union with 37–71% better
+    # signal-to-noise and half the run-to-run variance. Under `minimal`,
+    # `lastlight-facts discharge` degrades to the `test -s` floor it replaces —
+    # the block does not ask for discharge codes, so grading them would fail
+    # every family over a field the survey was never told to write.
     #
-    # Leave this at `full` unless you are running that arm.
-    obligationContract: full
+    # `full` remains available for deployments that want the discharge-code
+    # telemetry (and the clean-discharge demotion it enables at the posting
+    # boundary), at the cost of the verification-report volume above.
+    obligationContract: minimal
 
-    # How many of the six families actually run. SIX. A previous design defaulted
-    # this to 3 against six families and never recorded which three ran, so half
-    # never executed and `enforcement` — the only family that has produced a gold
-    # match — could have been among them.
+    # RECORDED, NOT CONSUMED. The fan-out's branch list in `pr-review.yaml` is
+    # the authority (five branches; `tests` has no seeder and no branch), and
+    # nothing reads this key to pick or drop branches — it exists so the value
+    # an operator believed they set is on the record. A previous design DID
+    # consume a count (defaulted to 3 against six families, never recording
+    # which three ran), which is exactly why the branch list is now the one
+    # authority.
     surveyPasses: 6
 
     # How many of those families run AT ONCE (WP11c).

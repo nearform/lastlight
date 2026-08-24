@@ -191,12 +191,14 @@ phases:
       set -u
       FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
       CONTRACT="{{obligationContract}}"
+      MAX_OBLIGATIONS="{{maxObligations}}"
       mkdir -p .lastlight/pr-review/hypotheses
       "$FACTS" seed --facts .lastlight/pr-review/facts.json \
         --out .lastlight/pr-review/obligations.json \
-        --contract "${CONTRACT:-full}" \
+        --contract "${CONTRACT:-minimal}" \
+        --max-obligations "${MAX_OBLIGATIONS:-40}" \
         --blocks .lastlight/pr-review/obligations || true
-      echo "seed: contract ${CONTRACT:-full}"
+      echo "seed: contract ${CONTRACT:-minimal} budget ${MAX_OBLIGATIONS:-40}"
       echo "seed: $(ls .lastlight/pr-review/obligations 2>/dev/null | wc -l) family block(s)"
 
       # The MANIFEST, and it exists so that "the seeder wrote nothing for this
@@ -375,18 +377,16 @@ phases:
         until_bash: |
           FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
           "$FACTS" discharge --dir .lastlight/pr-review --family state
-      # `tests` is seeded from `coverage`, which READS a report nothing in the
-      # pipeline produces until WP4's `prepare`. Measured: 0 artifacts across 50
-      # corpus cases AND all 8 gate cases. The branch ships so the wiring is
-      # exercised and so its funnel row exists; the block it reads says NOT
-      # MEASURED in those words, and a `notMeasured` family must never be
-      # reported as "did not convert".
-      - name: tests
-        prompt: prompts/survey-tests.md
-        context_file: .lastlight/pr-review/obligations/tests.md
-        until_bash: |
-          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
-          "$FACTS" discharge --dir .lastlight/pr-review --family tests
+      # There is deliberately NO `tests` branch. The family is dead at both
+      # ends — no seeder function exists for it in `code-facts`, and the
+      # `coverage` extractor it would read from needs a report that only
+      # `prepare` (probes-gated, skipped on every measured run) can produce.
+      # Measured: 0 artifacts across 50 corpus cases AND all 8 gate cases, in
+      # every run ever taken. Running the branch paid a sixth of the survey
+      # fan-out to write NOT MEASURED. The seeder still emits the family's
+      # block and `obligations.json` row (`measured: false`), so the eval
+      # instrument keeps reporting it as `notMeasured` — never as "did not
+      # convert" — and reinstating the branch is this entry plus a seeder.
       # `spec` is WP0's and is built HARNESS-side from the PR body and linked
       # issues (review-spec.ts), so it reads `{{specObligations}}` from the
       # context rather than a block on disk. It is the only untried axis and it

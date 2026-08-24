@@ -1,12 +1,17 @@
 # RESTART — pick this plan up in a new session
 
-> **Starting fresh? Read §2e, §2f and §3a of this file first, in that order.**
-> X1 ran on 2026-08-23 and moved the target to the adjudicator — and then §2f
-> (2026-08-24) found the instrument that said so was crediting
-> opposite-direction matches: **H-A1 currently has no uncompromised evidence,
-> and the corrected internal recall must be read before any adjudicator arm.**
-> §3a is the hypothesis register — what is still open and what would settle
-> each one. §3a′ is the next arm.
+> **Starting fresh? The ladder is DONE — read §2f, then §2g–§2j, in order.**
+> The 2026-08-24 campaign: §2f killed H-A1 (the internal judge was crediting
+> opposite-direction matches), §2g's adjudicator prompt revision collapsed the
+> posting variance (band 0.600 → 0.000), §2h's question catalogues widened the
+> union, §2i's 8-case confirm showed precision/SNR up 37–71% with recall
+> statistically unchanged, and §2j validated the production model shape. The
+> shipped configuration: `obligationContract: minimal` + both prompt
+> revisions, five survey branches (`tests` dropped), `models.review-adjudicate`
+> fallthrough unpinned. The clean final-design reference is
+> [PIPELINE-SPEC.md](PIPELINE-SPEC.md). §3's register is now historical
+> except: H-D2 seeding gaps (G3-class gold in unreachable files) and WP9
+> external validation are the open post-merge recall work.
 >
 > [NEXT.md](NEXT.md) carries the artifact-level forensics and the question
 > catalogue. This file stays the operational reference — tree state, the
@@ -727,6 +732,30 @@ precision/SNR and half the variance. The next recall points are NOT in more
 prompt work: they are the `security`/all-in-diff seeding changes (H-D2 — G3
 and `1667` #2 live in files no obligation reaches) and external validation
 (WP9). Both are post-merge work.
+
+## 2j. 2026-08-24 — rung 2.5. The production shape resolves correctly; the ladder is done.
+
+**~$20, all 8 cases, `--mode config --overlay overlays/wp3-minimal`, run
+`pr-review-config/2026-08-24_082540` (config runs land in their own tier
+dir).** First `--mode config` run this pipeline has ever had.
+
+- **The model map resolves as production would**: surveys AND `falsify` on
+  Haiku (both declare `{{models.review-survey}}`), `review` + `adjudicate` on
+  Sonnet 4.6 via the f3 fallthrough → `models.default`, verified against the
+  session envelopes (not the scorecard — see the bug below). 8/8 workflows
+  succeeded; 9/25 posted-matched, in family with the models-mode arms — the
+  Sonnet adjudicator collapsed nothing.
+- **Instrument bug found (the rung's payment):** config-mode
+  `recordPhaseModel` stamps fanout BRANCH rows with the arm's default model
+  instead of the branch template's resolution — the scorecard said the
+  surveys ran Sonnet while the envelopes prove Haiku. Execution correct,
+  recording wrong. Tracked as a follow-up; read config-run models off the
+  envelopes until it lands.
+
+**Phase 2 of the final push is complete.** Shipped configuration: `minimal`
+contract + both prompt revisions; adjudicator model unpinned (falls through
+to `models.review` → `default`); the measured character: same recall union as
+the old best with 37–71% better SNR and half the variance.
 
 ## 3. What to do next
 

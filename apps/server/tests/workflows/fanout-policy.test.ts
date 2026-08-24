@@ -26,9 +26,12 @@ const def = getWorkflow("pr-review");
 const survey = def.phases.find((p) => p.name === "survey");
 
 describe("the survey fan-out's soft-failure policy survives parsing", () => {
-  it("is a fanout phase with six branches", () => {
+  it("is a fanout phase with five branches", () => {
+    // Five, not six: the `tests` branch was removed from the fan-out — the
+    // family has no seeder and no coverage source, so its branch only ever
+    // paid a sixth of the survey spend to write NOT MEASURED.
     expect(survey?.type).toBe("fanout");
-    expect(survey?.branches).toHaveLength(6);
+    expect(survey?.branches).toHaveLength(5);
   });
 
   it("carries `{ retries: 1, then: complete }` AFTER the schema has had it", () => {

@@ -103,8 +103,13 @@ const WP6_PHASES = ["adjudicate", "reconcile"];
 /** The two phases that existed before WP3 and must still EXECUTE when it is off. */
 const LEGACY_PHASES = ["review", "post-review"];
 
-/** The six obligation families, in the order their survey phases are chained. */
-const FAMILIES = ["contract", "enforcement", "security", "state", "tests", "spec"] as const;
+/**
+ * The five survey-branch families. `tests` is deliberately absent: its branch
+ * was removed from the fan-out (no seeder exists for the family and its
+ * `coverage` source needs the probes-gated `prepare` artifact) — the seeder
+ * still writes its block and `measured: false` row, but nothing dispatches it.
+ */
+const FAMILIES = ["contract", "enforcement", "security", "state", "spec"] as const;
 
 /**
  * Replay the scheduler's node-selection loop over a DAG, applying the same
@@ -199,7 +204,7 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
 
   it("gives every phase downstream of a skippable one `all_done`, and post-review `all_success`", () => {
     // A skipped node is not `succeeded`, so the default `all_success` would
-    // cascade the eight analysis skips straight through `review` — i.e. the
+    // cascade the seven analysis skips straight through `review` — i.e. the
     // inert configuration would post no review at all. `all_done` is the rule
     // the schema names for exactly this.
     const byName = new Map(def.phases.map((p) => [p.name, p]));
@@ -458,7 +463,7 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
     expect(postReview.calls).toEqual(["post-review"]);
   });
 
-  it("records all fourteen phases — twelve skipped, two done — so the dashboard is not silent", async () => {
+  it("records all nine phases — seven skipped, two done — so the dashboard is not silent", async () => {
     const { result, reporter } = await runPrReview({ owner: "acme", repo: "widgets", prNumber: 7 });
 
     expect(result.phases.map((p) => p.phase)).toEqual(DECLARED);
@@ -485,9 +490,10 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
       probesEnabled: "true",
     });
 
-    // A generic-loop node reports under its ITERATION label
-    // (`survey_contract_iter_1`), never its own name — so the six surveys are
-    // present as iterations, and the five non-loop phases under their own names.
+    // A node with sub-units reports under the sub-unit's label, never its own
+    // name — generic loops under `<phase>_iter_N`, fan-out branches under
+    // `<phase>_branch_<name>` — so the six phases with no sub-units report
+    // under their own names and everything else appears as its sub-units.
     const seen = result.phases.map((p) => p.phase);
     expect(seen.filter((n) => DECLARED.includes(n))).toEqual([
       "prepare",
@@ -500,22 +506,26 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
     // `adjudicate` is a generic_loop, so it reports under its iteration label
     // rather than its own name.
     expect(seen).toContain("adjudicate_iter_1");
-    // The six families are BRANCHES of one node now (WP11c), so they report
+    // The five families are BRANCHES of one node (WP11c), so they report
     // under `<phase>_branch_<name>` — the same "a node with sub-units reports
     // under the sub-unit's label" rule the loops follow, which is what keeps the
-    // dashboard's longest-prefix grouping nesting them under `survey`.
+    // dashboard's longest-prefix grouping nesting them under `survey`. No
+    // `survey_branch_tests`: the branch was removed along with the family's
+    // sixth of the fan-out spend.
     for (const family of FAMILIES) {
       expect(seen, family).toContain(`survey_branch_${family}`);
     }
     expect(seen).not.toContain("survey");
+    expect(seen).not.toContain("survey_branch_tests");
     // `falsify` is a generic_loop too, so it reports under its iteration label.
     expect(seen).toContain("falsify_iter_1");
     expect(result.phases.every((p) => p.success)).toBe(true);
 
-    // Four deterministic bash phases + eight generic-loop `until_bash` gates.
+    // Four deterministic bash phases + seven `until_bash` gates (five branch
+    // gates + the falsify and adjudicate loops).
     expect(agent.calls.filter((c) => c.kind === "command").length).toBeGreaterThanOrEqual(4);
-    // Six survey passes + the oracle + the review + the adjudicator.
-    expect(agent.calls.filter((c) => c.kind === "agent")).toHaveLength(9);
+    // Five survey passes + the oracle + the review + the adjudicator.
+    expect(agent.calls.filter((c) => c.kind === "agent")).toHaveLength(8);
   });
 
   it("posts the review even when the ADJUDICATOR hard-fails — the money property", async () => {

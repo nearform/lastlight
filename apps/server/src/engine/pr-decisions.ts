@@ -1440,10 +1440,21 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      * five siblings move.
      *
      * A string like every other key here: the render context is projected to
-     * strings, and the phase's shell defaults an empty value back to `full` —
+     * strings, and the phase's shell defaults an empty value back to `minimal` —
      * the direction every switch in this block fails in.
      */
     obligationContract: review.analysis.obligationContract,
+    /**
+     * The obligation BUDGET — `--max-obligations` on the same `seed`
+     * invocation `obligationContract` rides. Projected for the same reason:
+     * the seeder is a CLI in the sandbox, and until this key was threaded the
+     * operator's value never reached it — `code-facts`' own default applied,
+     * and only the accident of both defaults being 40 kept that inert rather
+     * than wrong (issue #24 in the review-evidence-pipeline backlog). Same
+     * string projection, same fail-direction: the phase's shell defaults an
+     * empty render back to the seeder's own default.
+     */
+    maxObligations: String(review.analysis.maxObligations),
     /**
      * WP4's gate, and a SEPARATE one — `skip_if: "probesEnabled != true"`.
      *

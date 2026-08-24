@@ -304,6 +304,13 @@ keys**, so they are alphanumeric-with-hyphens (no underscores, which
 `PhaseRef` uses as its separator), must be unique, and may not end in
 the reserved `-retry` / `-check` suffixes.
 
+(The `model:` line above is why `pr-review.yaml`'s downstream `adjudicate`
+phase carries its own key the guarded way —
+`model: "{{#if models.review-adjudicate}}{{models.review-adjudicate}}{{/if}}{{#if !models.review-adjudicate}}{{models.review}}{{/if}}"`.
+The `{{#if}}` pair is load-bearing: a bare unset key renders *empty*, and an
+empty `model:` resolves to the **default** model — not to `models.review`,
+which is the fallback the phase actually wants.)
+
 **`context_file` — a path in a prompt is not a path.** A branch may name a
 workspace file, relative to the AGENT'S OWN CWD, whose contents the harness
 reads and appends to that branch's rendered prompt. The model never resolves

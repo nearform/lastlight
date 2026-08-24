@@ -91,23 +91,39 @@ ENV BASH_ENV=/etc/bash.bashrc.fnm
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable
 
-# gitleaks is fetched per-ARCH. It was hardcoded to the linux_x64 asset, which
-# made an arm64 build of this image either fail outright or bake an x86 binary
-# that cannot exec — and gitleaks publishes linux_arm64 at this exact version
-# (as does opengrep, and as do both for darwin; see
-# `packages/code-facts/toolchain.json`, whose `sources` map is the source of
-# truth for all of them). `TARGETARCH` is set for us by BuildKit.
+# Scanners, fetched per-ARCH and PINNED. The version defaults below MUST match
+# `packages/code-facts/toolchain.json` — the single source of truth the facts
+# envelope stamps and the eval preflight refuses on (WP2 of
+# docs/plans/review-evidence-pipeline). gitleaks was hardcoded to the linux_x64
+# asset, which made an arm64 build of this image either fail outright or bake an
+# x86 binary that cannot exec — gitleaks publishes linux_arm64 at this exact
+# version (as does opengrep, and as do both for darwin; see toolchain.json's
+# `sources` map). `TARGETARCH` is set for us by BuildKit.
+#
+# Two scanners on purpose: semgrep belongs to the separate `security-review`
+# workflow; OPENGREP is the engine slot for the pr-review `patterns` family
+# (locked decision 7 — Semgrep's registry-rules licence plausibly excludes a
+# review product; the `opengrep` npm name is an empty stub, so it is fetched as
+# a release binary, never from npm). semgrep used to float
+# (`pipx install semgrep`) — now pinned so the image stops drifting (§D3/§E4).
 ARG TARGETARCH
+ARG SEMGREP_VERSION=1.174.0
+ARG GITLEAKS_VERSION=8.21.2
+ARG OPENGREP_VERSION=1.27.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip pipx \
-    && PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install semgrep \
+    && PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install "semgrep==${SEMGREP_VERSION}" \
     && case "${TARGETARCH:-amd64}" in \
-         arm64) GITLEAKS_ARCH=arm64 ;; \
-         amd64|"") GITLEAKS_ARCH=x64 ;; \
+         arm64) GITLEAKS_ARCH=arm64; OPENGREP_ARCH=aarch64 ;; \
+         amd64|"") GITLEAKS_ARCH=x64; OPENGREP_ARCH=x86 ;; \
          *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
        esac \
-    && curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_${GITLEAKS_ARCH}.tar.gz" \
+    && curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${GITLEAKS_ARCH}.tar.gz" \
        | tar -xz -C /usr/local/bin gitleaks \
+    && curl -sSfL -o /usr/local/bin/opengrep \
+       "https://github.com/opengrep/opengrep/releases/download/v${OPENGREP_VERSION}/opengrep_manylinux_${OPENGREP_ARCH}" \
+    && chmod +x /usr/local/bin/opengrep \
+    && gitleaks version && opengrep --version \
     && apt-get purge -y python3-pip \
     # Drop the pip/pipx download + build caches semgrep's install leaves behind
     # (~tens of MB baked into this layer otherwise).
@@ -117,7 +133,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Single static binary; `uv run script.py` honours PEP 723 inline dependency
 # blocks and resolves them into a cached venv (UV_CACHE_DIR is pointed at the
 # shared /cache volume at runtime, mirroring the npm/pnpm/yarn cache wiring).
-RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
+# Pinned via the versioned install URL — default matches toolchain.json.
+ARG UV_VERSION=0.12.5
+RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | env UV_INSTALL_DIR=/usr/local/bin sh \
  && uv --version
 
 # Create non-root agent user, UID/GID pinned to 10001 to MATCH the harness

@@ -534,9 +534,13 @@ export function defaultReviewConfig(): ReviewConfig {
       // capping generation truncates discovery, which is the measured ceiling.
       maxSpecObligations: 40,
       maxObligations: 40,
-      // `full` — today's block, byte-for-byte. `minimal` is an experiment arm and
-      // has to be asked for by name.
-      obligationContract: "full",
+      // `minimal` ships, measured in: under `full`, half to two-thirds of
+      // survey output arrives as clean-quote verification reports that reached
+      // real PRs as posted findings; under `minimal` the same recall union
+      // posts with 37–71% better SNR and half the run-to-run variance. `full`
+      // remains the opt-in telemetry arm (discharge codes + the
+      // clean-discharge demotion at the posting boundary).
+      obligationContract: "minimal",
       surveyPasses: 6,
       surveyConcurrency: 6,
       probes: false,
