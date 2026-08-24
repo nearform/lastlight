@@ -935,6 +935,20 @@ carry it. `internalFloor` stays 0.15 — the sweep shows no value of it worth
 buying. Spec surfaces: `spec/02-configuration.md` + PIPELINE-SPEC §Config /
 §post-review.
 
+**2026-08-24, evening — the pin was INERT in eval runs, found by the reviewer
+on the pipeline's own PR (#360).** `attentionBoundary()` read its four budget
+values off `getRuntimeConfig()` only, which the eval harness never populates —
+so every eval arm ran the packaged defaults (cap 0) whatever the overlay
+declared, and the f4 validation arm's three repeats each recorded 5–14
+`body-budget` demotions against a `null` pin. Fixed the same evening: the four
+keys (`maxInlineComments`, `internalFloor`, `maxBodyComments` — `"null"` is
+the unlimited literal — and `boundaryThresholds` as JSON) now project through
+`specContext` onto the run context, and `post-review` reads the context first,
+global config as fallback — the same wire and the same reason as
+`analysisEnabled` (§4 trap 5's lesson, relearned one layer down). Production
+is unchanged: the context projects from the same runtime config the fallback
+reads.
+
 ## 3. What to do next
 
 **Superseded 2026-08-23.** The old §3a ("more repeats before any lever") is
@@ -1033,7 +1047,7 @@ time.
 | # | Lever | Why it is worth it |
 |---|---|---|
 | **f1** | **Stage the diff once** | 93 bash calls across the six surveys, ~30 re-deriving one fixed range that `facts.json` (137 KB) already holds. `survey_branch_contract` at 234s **is** the whole survey span, and it is the branch doing the most re-derivation. Cuts turns, which cuts latency *and* spend |
-| **f4** | **Reshape `review` when the pipeline is on** — **BUILT 2026-08-24, pre-PR.** `review` now declares `prompt: prompts/review.md`, a two-mode template: off = the old skill nudge over a curated Context section (the byte-for-byte dump guarantee is retired; `golden-pr-review.test.ts` pins the new contract), on = one fast INDEPENDENT pass (PR-level judgment only, no per-hunk re-derivation, hypotheses/ explicitly off-limits — adjudicate stays the fresh-context reader), still writing `findings.json`. **Validated same day, $8.32**: `1587-r2` ×3 on `wp3-minimal-d2ab` (runs `163146/163147/163148`) — review phase $0.42→$0.21 mean (−50%), 182→137s, slim brief confirmed in the transcripts; posted 0.200 every repeat (band 0.000), G2 posted 2/3 + internal 3/3, **G5 internally found 3/3 (no prior arm ever found it)**, adjudicate not starved (53–56 disposition entries), `disposition.json` present ×3. G3 unfound in 3 draws where the D2 confirm found it 2/2 — noise-compatible at n=3, and the comparator predates the anti-speculation rule, so that comparison is two-variable; the 8-case re-baseline after merge is the honest read. | The founding observation stands in history: a full independent review — 137s and $0.30 — produced `APPROVE` with **zero findings while 41 hypotheses sat unread beside it**, and it could not simply be skipped (`post-review` `all_success`) |
+| **f4** | **Reshape `review` when the pipeline is on** — **BUILT 2026-08-24, pre-PR.** `review` now declares `prompt: prompts/review.md`, a two-mode template: off = the old skill nudge over a curated Context section (the byte-for-byte dump guarantee is retired; `golden-pr-review.test.ts` pins the new contract), on = one fast INDEPENDENT pass (PR-level judgment only, no per-hunk re-derivation, hypotheses/ explicitly off-limits — adjudicate stays the fresh-context reader), still writing `findings.json`. **Validated same day, $8.32**: `1587-r2` ×3 on `wp3-minimal-d2ab` (runs `163146/163147/163148`) — review phase $0.42→$0.21 mean (−50%), 182→137s, slim brief confirmed in the transcripts; posted 0.200 every repeat (band 0.000), G2 posted 2/3 + internal 3/3, **G5 internally found 3/3 (no prior arm ever found it)**, adjudicate not starved (53–56 disposition entries), `disposition.json` present ×3. G3 unfound in 3 draws where the D2 confirm found it 2/2 — noise-compatible at n=3, and the comparator predates the anti-speculation rule, so that comparison is two-variable; the 8-case re-baseline after merge is the honest read. **NB (found post-hoc, §2m):** the arm ran at `maxBodyComments: 0` — the overlay's `null` pin was inert until the boundary-context fix landed the same evening — so its posted-side numbers are cap-0 numbers and the funnel differs from the comparator's; the internal-side reads are pre-boundary and unaffected. | The founding observation stands in history: a full independent review — 137s and $0.30 — produced `APPROVE` with **zero findings while 41 hypotheses sat unread beside it**, and it could not simply be skipped (`post-review` `all_success`) |
 | **f3** | **A stronger adjudicator** — **PROMOTED 2026-08-23 to the next arm, see §3a′** | `models.review-adjudicate`, falling through to `models.review`. Haiku-beats-Sonnet is a *recall* result about *discovery*; adjudication is ranking over an already-generated set, a different task. X1 turned this from a nice-to-have into the critical path: the adjudicator withholds 70–80% under `minimal` and posts anti-findings under `full`, and **it has been Haiku in every arm ever run** because `--mode models` forces one model across every phase |
 | **f2** | **Thinking effort** | The survey phases declare **no `variant:` at all**, so they inherit agentic-pi's default. Wire `{{variants.review-survey}}` through and measure |
 

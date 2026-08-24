@@ -510,7 +510,11 @@ same case's D2-confirm rows, with the slim brief confirmed in the session
 transcripts; posted recall held 0.200 on every repeat (band 0.000), G2 posted
 2/3 and internal 3/3, G5 internally found 3/3 — no prior arm had ever found
 it — and adjudicate was not starved (53–56 disposition entries per repeat).
-n=3 on one case: a gross-regression check, not a magnitude claim.
+n=3 on one case: a gross-regression check, not a magnitude claim. NB: the arm
+ran at `maxBodyComments: 0` — the overlay's `null` pin was inert until the
+boundary-context fix (below) landed the same evening — so the posted-side
+numbers are cap-0 numbers; the internal-side reads are pre-boundary and
+unaffected.
 
 ## `adjudicate` — one ranked, tiered review
 
@@ -733,6 +737,20 @@ a different question:
    0.263 → 0.492 / F1 0.362 → 0.479 on the Martian external set; under
    Haiku-everywhere the body carries most matched gold, so eval overlays pin
    the key explicitly).
+
+**Where the four budgets come from:** the RUN CONTEXT first — `specContext`
+projects `maxInlineComments`, `internalFloor`, `maxBodyComments` (`"null"` is
+the unlimited literal; garbage degrades to `0`, the direction `config.ts`
+coerces) and `boundaryThresholds` (JSON — the one non-scalar key; nothing
+renders it into a prompt) whenever the pipeline is on — and
+`getRuntimeConfig()` only as the fallback. The context is the authority for
+the same measured reason `analysisEnabled` reads it: the eval harness threads
+the arm's `review:` policy through the context and never populates the
+process-global config, so a boundary read only off the global silently applied
+the packaged defaults to every eval arm (found by the reviewer on the
+pipeline's own PR — three repeats against a `null` pin each carried 5–14
+`body-budget` demotions). Production is unchanged by construction: the context
+projects from the same runtime config the fallback reads.
 
 The review body renders demotions **grouped by reason**, each group under its
 own lead-in — off-diff, below the family bar, adjudicated to the body, beyond

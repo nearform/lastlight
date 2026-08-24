@@ -585,6 +585,42 @@ describe("post-review action (runPostReview)", () => {
         expect(existsSync(dispositionPath(taskId))).toBe(true);
       });
 
+      it("takes the boundary VALUES from the run context — the wire an eval overlay rides", async () => {
+        // Found by the reviewer on this pipeline's own PR: `attentionBoundary()`
+        // read only `getRuntimeConfig()` for its four budget values, and the
+        // eval harness never populates that — so an arm overlay pinning
+        // `maxBodyComments: null` (the measurement funnel) silently ran the
+        // shipped `0`, and three repeats each recorded 5–14 `body-budget`
+        // demotions the overlay had asked not to happen. The values now ride
+        // the same context wire `analysisEnabled` does; runtime config is the
+        // fallback, not the authority.
+        withReviewConfig({
+          trigger: "on-request",
+          analysis: { ...defaultReviewConfig().analysis, enabled: false },
+        });
+        const taskId = "widget-42-boundary-ctx-values";
+        seedFindings(taskId, "widget", { summary: "ok", event: "COMMENT", findings: findings() });
+
+        const { executor } = makeExecutor(taskId, {
+          analysisEnabled: "true",
+          maxInlineComments: "2",
+          // The literal `specContext` writes for the documented "unlimited
+          // body overflow" value — it must survive the string projection.
+          maxBodyComments: "null",
+          internalFloor: "0.15",
+          boundaryThresholds: "{}",
+        });
+        expect((await executor.execute(NODE, {})).status).toBe("succeeded");
+        const posted = reviews[0]!.body as { comments: { line: number }[]; body: string };
+
+        // The ctx inline budget bound (2, not the packaged 8)…
+        expect(posted.comments.map((c) => c.line)).toEqual([7, 8]);
+        // …and the ctx `null` opened the body funnel the packaged default
+        // (`maxBodyComments: 0`) would have closed.
+        expect(posted.body).toContain("### Additional findings");
+        for (const t of ["on-diff C", "on-diff D", "off-diff E"]) expect(posted.body, t).toContain(t);
+      });
+
       it("stays inert when NEITHER authority says the pipeline is on", () => {
         // The guarantee that must survive the fallback: `specContext` returns
         // `{}` when analysis is off, so `analysisEnabled` is ABSENT — not

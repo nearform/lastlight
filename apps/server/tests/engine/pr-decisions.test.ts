@@ -1367,6 +1367,31 @@ describe("renderContext — the spec axis", () => {
     expect(ctx.analysisEnabled).toBe("true");
   });
 
+  it("projects the attention boundary — the wire that lets an eval overlay reach post-review", () => {
+    // `attentionBoundary()` reads the run context first and the process-global
+    // runtime config only as a fallback, because the eval harness threads the
+    // arm's `review:` policy through the context and never populates the
+    // global — an overlay pinning `maxBodyComments: null` had no wire to the
+    // boundary at all (found by the reviewer on the pipeline's own PR).
+    const ctx = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOn);
+    expect(ctx.maxInlineComments).toBe("8");
+    expect(ctx.internalFloor).toBe("0.15");
+    // The shipped default is 0; the STRING "null" is the documented
+    // "unlimited body overflow" value and must survive the projection.
+    expect(ctx.maxBodyComments).toBe("0");
+    const nullCap = {
+      ...analysisOn,
+      analysis: { ...analysisOn.analysis, maxBodyComments: null },
+    };
+    expect(
+      renderContext(reviewable(), fix, defaultDependenciesConfig(), nullCap).maxBodyComments,
+    ).toBe("null");
+    // The one JSON-valued key — a per-family map has no scalar form.
+    expect(JSON.parse(String(ctx.boundaryThresholds))).toEqual(
+      defaultReviewConfig().analysis.thresholds,
+    );
+  });
+
   it("projects the PR body and the linked issue once the axis is on (§E2's missing plumbing)", () => {
     const ctx = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOn);
     expect(ctx.prBody).toContain("Fixes #1587");

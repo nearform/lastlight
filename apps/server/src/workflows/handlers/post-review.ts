@@ -192,6 +192,39 @@ export function readCleanDischarges(dir: string): ReadonlySet<string> | undefine
 }
 
 /**
+ * Parse one context-projected boundary number back off its string form.
+ * The projection is `specContext`'s (`pr-decisions.ts`); garbage degrades to
+ * the caller's default — the direction `config.ts` coerces the same keys.
+ */
+function toBudget(v: unknown, fallback: number): number {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
+}
+
+/** Like {@link toBudget} but fractional — `internalFloor` is a 0..1 bar. */
+function toFloor(v: unknown, fallback: number): number {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+/** The one JSON-valued context key; an unparseable value means "no bars". */
+function parseThresholds(v: unknown): Record<string, number> {
+  if (typeof v !== "string" || v === "") return {};
+  try {
+    const parsed: unknown = JSON.parse(v);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: Record<string, number> = {};
+    for (const [k, val] of Object.entries(parsed)) {
+      const n = Number(val);
+      if (Number.isFinite(n)) out[k] = n;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/**
  * The `type: post-review` phase — the one workflow body genuinely coupled to
  * GitHub, lifted out of the engine into an app-registered {@link PhaseTypeHandler}.
  *
@@ -558,6 +591,29 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
    */
   private attentionBoundary(): AttentionBoundary | undefined {
     if (!this.analysisEnabled()) return undefined;
+    // The RUN CONTEXT is the first authority, for the same reason
+    // `analysisEnabled()` reads it: the eval harness threads the arm's
+    // `review:` policy through the context and never populates the
+    // process-global runtime config, so a boundary read only off
+    // `getRuntimeConfig()` silently applies the packaged defaults to every
+    // eval arm — found on this pipeline's own PR after three repeats of an
+    // arm that pinned `maxBodyComments: null` each recorded 5–14
+    // `body-budget` demotions. `specContext` projects all four fields
+    // together, so their presence is atomic; production projects them from
+    // the same runtime config this fallback reads, so the two authorities
+    // cannot disagree there.
+    const ctx = this.run.ctx as Record<string, unknown>;
+    if (typeof ctx.maxInlineComments === "string") {
+      return {
+        maxInlineComments: toBudget(ctx.maxInlineComments, defaultReviewConfig().analysis.maxInlineComments),
+        thresholds: parseThresholds(ctx.boundaryThresholds),
+        internalFloor: toFloor(ctx.internalFloor, defaultReviewConfig().analysis.internalFloor),
+        // `"null"` is the literal the projection writes for the documented
+        // "unlimited body overflow" value; anything else degrades to `0`, the
+        // same direction `config.ts` coerces garbage.
+        maxBodyComments: ctx.maxBodyComments === "null" ? null : toBudget(ctx.maxBodyComments, 0),
+      };
+    }
     const analysis = getRuntimeConfig()?.review?.analysis ?? defaultReviewConfig().analysis;
     return {
       maxInlineComments: analysis.maxInlineComments,

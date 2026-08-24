@@ -1466,6 +1466,31 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      */
     maxObligations: String(review.analysis.maxObligations),
     /**
+     * The ATTENTION BOUNDARY, projected so it reaches `post-review` on the
+     * run's own context — the same wire `analysisEnabled` rides, and for the
+     * same measured reason: the eval harness threads the arm's `review:`
+     * policy through the context and never populates the process-global
+     * runtime config, so a boundary read only off `getRuntimeConfig()` applies
+     * the packaged defaults to every eval arm regardless of what the overlay
+     * declares. Found by the reviewer on the pipeline's own PR: three repeats
+     * of an arm that pinned `maxBodyComments: null` each carried 5–14
+     * `body-budget` demotions — the shipped `0` had applied. Production is
+     * unchanged by construction: these project from the run's effective review
+     * config, which for an operator-only block IS the runtime config.
+     *
+     * `maxBodyComments` serialises `null` as the literal string `"null"` —
+     * null is the documented "unlimited" value and must survive a string
+     * projection; the consumer parses it back and degrades garbage to `0`,
+     * the same direction `config.ts` coerces. `boundaryThresholds` is the one
+     * JSON-valued key (a per-family map has no scalar form); nothing renders
+     * it into a prompt — `post-review` is its only reader.
+     */
+    maxInlineComments: String(review.analysis.maxInlineComments),
+    internalFloor: String(review.analysis.internalFloor),
+    maxBodyComments:
+      review.analysis.maxBodyComments === null ? "null" : String(review.analysis.maxBodyComments),
+    boundaryThresholds: JSON.stringify(review.analysis.thresholds ?? {}),
+    /**
      * WP4's gate, and a SEPARATE one — `skip_if: "probesEnabled != true"`.
      *
      * Present only when the operator asked for both, so the absence rule above
