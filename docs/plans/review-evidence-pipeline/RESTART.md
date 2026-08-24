@@ -9,9 +9,10 @@
 > shipped configuration: `obligationContract: minimal` + both prompt
 > revisions, five survey branches (`tests` dropped), `models.review-adjudicate`
 > fallthrough unpinned. The clean final-design reference is
-> [PIPELINE-SPEC.md](PIPELINE-SPEC.md). §3's register is now historical
-> except: H-D2 seeding gaps (G3-class gold in unreachable files) and WP9
-> external validation are the open post-merge recall work.
+> [PIPELINE-SPEC.md](PIPELINE-SPEC.md). **The PR is HELD: §2k is the next
+> campaign** — the D2 seeding changes (all-in-diff minting + route/hook
+> registration facts) and WP9 external validation, both pre-merge. §3's
+> register is otherwise historical.
 >
 > [NEXT.md](NEXT.md) carries the artifact-level forensics and the question
 > catalogue. This file stays the operational reference — tree state, the
@@ -756,6 +757,44 @@ dir).** First `--mode config` run this pipeline has ever had.
 contract + both prompt revisions; adjudicator model unpinned (falls through
 to `models.review` → `default`); the measured character: same recall union as
 the old best with 37–71% better SNR and half the variance.
+
+## 2k. The NEXT campaign — recall, pre-PR (decided 2026-08-24)
+
+**The PR is deliberately held.** §2i's "post-merge" framing is retracted: the
+measured recall (union 12/25, mean 0.320) is not yet good enough to ship, and
+the next points are NOT in prompt work. Two work items, in order:
+
+### D2 — the seeding gaps (H-D2, designs in NEXT.md §E1a "Two seeding changes")
+
+4 of 14 never-matched gold sit in files **no obligation touches**, and a
+defect wholly inside a new hunk is invisible to **all four** mint rules
+(four different conditions, not one — §3b):
+
+- **D2a — mint for all-in-diff symbols.** Every minting family requires
+  references OUTSIDE the diff (`contract`: `consumersOutsideDiff > 0 &&
+  change !== "added"`; `state`: the capped `references[]` filter +
+  `changedHunks > 0`; …). `1667`'s `strictDryRun` (declared `:433`, sole
+  reference `:448`, both inside the diff) mints nothing; G3
+  (`user?.email` off an unexpired decode, `AuthContext.tsx`) is the same
+  class — 0-for-14 repeats across five arms. The E1a `contract` question
+  shape ("every consumer is inside the diff — quote the line a caller cannot
+  see") already exists and has nothing to attach to.
+- **D2b — mint on route/hook registration.** Nothing in `facts.json`
+  represents "this handler registers checks in phases, with an order" —
+  the whole of `1667` gold #2.
+
+Each is its own arm (one variable): build → 1-case repeats on the case that
+carries the target gold → 8-case confirm if it moves. Mind locked decision 2:
+these widen GENERATION, the direction that has actually bought recall before.
+
+### WP9 — external validation ([09-external-validation.md](09-external-validation.md))
+
+The blind split is contaminated for the catalogue claim (§2i): E1a's
+questions were derived from gold that includes the blind cases'. Every recall
+number this plan now produces needs gold the prompts were NOT tuned on:
+fresh cases via `add-case --pr --review` from real reviewed PRs the
+investigation has never touched, gold human-verified (HANDOFF sign-off),
+held blind. This is what makes any D2 gain a claim rather than a fit.
 
 ## 3. What to do next
 
