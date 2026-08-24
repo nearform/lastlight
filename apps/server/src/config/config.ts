@@ -1003,6 +1003,12 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
         analysisRaw.obligationContract === "minimal"
           ? "minimal"
           : reviewDefaults.analysis.obligationContract,
+      // The D2 minting arms. A plain string, passed through: the CLI is the
+      // loud gate (`lastlight-facts seed --mint` exits 2 on any unknown
+      // token), so validating here would only add a second, quieter copy of
+      // the same rule. A non-string falls back to the default (""), which is
+      // the baseline arm — the direction every switch in this block fails.
+      mint: typeof analysisRaw.mint === "string" ? analysisRaw.mint.trim() : reviewDefaults.analysis.mint,
       surveyPasses: nonNegativeNumber(analysisRaw.surveyPasses) ?? reviewDefaults.analysis.surveyPasses,
       // WP11c. A CEILING the run clamps again per backend, so an overlay that
       // asks for six on gondolin still gets one — the operator's ask is not the

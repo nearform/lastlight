@@ -37,6 +37,7 @@ import {
   OBLIGATION_CONTRACTS,
   SEEDABLE_FAMILIES,
   seedObligations,
+  type MintOptions,
 } from "./seed.js";
 import { renderFamilyBlock } from "./seed-render.js";
 import { loadManifest, resolveFactsBin, toolchainStamp } from "./toolchain.js";
@@ -140,6 +141,15 @@ passes; it reads no quote and judges no claim):
                       \`test -s\` floor when it reads \`minimal\` — a gate must
                       never grade a contract the block did not ask for. A value
                       that is neither is a WIRING bug and exits 2.
+  --mint <spec>       which D2 minting arms run, as a comma-list over
+                      \`all-in-diff\` (contract obligations for symbols whose
+                      every reference is inside the diff) and \`registrations\`
+                      (security obligations for route/hook registration order).
+                      Absent = neither — the baseline document, byte-identical.
+                      Stamped into obligations.json as \`minting\`. Any unknown
+                      token is a WIRING bug and exits 2 before the document is
+                      read — a typo'd arm silently running baseline would
+                      report a number for an experiment that never happened.
 
 Options:
   --repo <dir>        the checkout to analyse            (default: cwd)
@@ -415,6 +425,30 @@ export function runCli(
       return EXIT_UNAVAILABLE;
     }
 
+    // `--mint` is validated the same way, for the same reason, and BEFORE the
+    // document is read: a typo'd arm that silently ran baseline would report a
+    // number for an experiment that never happened, and a flag nobody can fix
+    // from inside the run should not cost a document parse first.
+    const mint: MintOptions = { allInDiff: false, registrations: false };
+    if (flags.mint !== undefined) {
+      const spec = stringFlag(flags.mint);
+      const tokens = (spec ?? "").split(",").map((t) => t.trim()).filter((t) => t.length > 0);
+      if (tokens.length === 0) {
+        io.err(`--mint needs at least one of all-in-diff | registrations (comma-separated)`);
+        return EXIT_UNAVAILABLE;
+      }
+      for (const token of tokens) {
+        if (token === "all-in-diff") mint.allInDiff = true;
+        else if (token === "registrations") mint.registrations = true;
+        else {
+          io.err(
+            `--mint must be a comma-list over all-in-diff | registrations (got "${token}")`,
+          );
+          return EXIT_UNAVAILABLE;
+        }
+      }
+    }
+
     let document: AllDocument;
     try {
       document = AllDocumentSchema.parse(JSON.parse(readFileSync(factsPath, "utf8")));
@@ -430,6 +464,7 @@ export function runCli(
     const obligations = seedObligations(document, {
       maxObligations: numberFlag(flags["max-obligations"]),
       contract: contractFlag,
+      mint,
       log,
     });
 

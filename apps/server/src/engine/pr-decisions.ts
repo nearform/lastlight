@@ -1445,6 +1445,16 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      */
     obligationContract: review.analysis.obligationContract,
     /**
+     * The D2 minting arms — `--mint` on the same `seed` invocation, appended
+     * by the phase's shell ONLY when non-empty (an empty `--mint` must never
+     * reach the CLI, which refuses it). Projected for the same reason as its
+     * two siblings: the seeder is a CLI in the sandbox, and the phase's
+     * command line is the only way the operator's answer reaches it. The
+     * default `""` renders as the empty string, which the shell guard turns
+     * into "no flag at all" — the baseline arm.
+     */
+    mint: String(review.analysis.mint),
+    /**
      * The obligation BUDGET — `--max-obligations` on the same `seed`
      * invocation `obligationContract` rides. Projected for the same reason:
      * the seeder is a CLI in the sandbox, and until this key was threaded the

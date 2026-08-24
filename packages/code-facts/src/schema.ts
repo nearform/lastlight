@@ -172,6 +172,30 @@ export const ReferenceSchema = z.object({
 export const ResolutionSchema = z.enum(["type-aware", "name-match"]);
 export type Resolution = z.infer<typeof ResolutionSchema>;
 
+/**
+ * One route/hook registration observed INSIDE a symbol's body (D2b).
+ *
+ * Deterministic and conservative: only a property-access callee (`recv.m`)
+ * whose method name is in the extractor's HOOK / ROUTE / MOUNT sets, with the
+ * argument constraints that kill `map.get("key")`, `headers.delete("id")`,
+ * `emitter.on(handler)` and `http.get(url)`. `phase` is the string-literal
+ * first argument (the hook name or the route path) or `null` when the
+ * registration has none (`app.use(auth)`); `ordinal` is the 0-based index in
+ * source-position order within the symbol — the order IS the fact this exists
+ * to record.
+ */
+export const RegistrationSchema = z.object({
+  /** `path:line` of the call expression. */
+  at: z.string(),
+  /** The callee text, e.g. `app.get` — calleesOf's hygiene rules apply. */
+  call: z.string(),
+  /** The string-literal hook name / route path, or `null` (an `app.use(auth)`). */
+  phase: z.string().nullable(),
+  /** 0-based index in source-position order within the symbol. */
+  ordinal: z.number().int(),
+});
+export type Registration = z.infer<typeof RegistrationSchema>;
+
 export const SymbolFactSchema = z.object({
   name: z.string(),
   kind: z.string(),
@@ -199,6 +223,19 @@ export const SymbolFactSchema = z.object({
    * invisible in the diff because each file reads correctly alone.
    */
   referencesInDiff: z.number().int(),
+  /**
+   * Route/hook registrations inside the symbol's body (D2b).
+   *
+   * `null` = NOBODY LOOKED — the tier-2 name-match engine has no reliable
+   * callee/argument view and says so explicitly; `[]` = the tier-1 extractor
+   * looked and found none. The field is `.optional()` ONLY so that a document
+   * written before D2 still parses: absent (a pre-D2 document) reads as `null`
+   * — nobody looked — never as `[]`. Consumers normalise with
+   * `s.registrations ?? null` and must never collapse the two. No envelope
+   * version bump: an old reader that ignores the field loses nothing, and a
+   * new reader of an old document gets the honest "nobody looked".
+   */
+  registrations: z.array(RegistrationSchema).nullable().optional(),
   /** How `references` was obtained. See `ResolutionSchema`. */
   resolution: ResolutionSchema,
   /**

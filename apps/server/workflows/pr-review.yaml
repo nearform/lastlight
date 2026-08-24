@@ -192,13 +192,20 @@ phases:
       FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
       CONTRACT="{{obligationContract}}"
       MAX_OBLIGATIONS="{{maxObligations}}"
+      # The D2 minting arms (review.analysis.mint) — same shell-variable rule
+      # as CONTRACT above: never interpolate {{key}} straight into the arg
+      # list. Appended as `--mint "$MINT"` ONLY when non-empty, because the
+      # CLI refuses an empty --mint value; absent flag = the baseline arm.
+      MINT="{{mint}}"
       mkdir -p .lastlight/pr-review/hypotheses
-      "$FACTS" seed --facts .lastlight/pr-review/facts.json \
+      set -- seed --facts .lastlight/pr-review/facts.json \
         --out .lastlight/pr-review/obligations.json \
         --contract "${CONTRACT:-minimal}" \
         --max-obligations "${MAX_OBLIGATIONS:-40}" \
-        --blocks .lastlight/pr-review/obligations || true
-      echo "seed: contract ${CONTRACT:-minimal} budget ${MAX_OBLIGATIONS:-40}"
+        --blocks .lastlight/pr-review/obligations
+      if [ -n "$MINT" ]; then set -- "$@" --mint "$MINT"; fi
+      "$FACTS" "$@" || true
+      echo "seed: contract ${CONTRACT:-minimal} budget ${MAX_OBLIGATIONS:-40} mint ${MINT:-none}"
       echo "seed: $(ls .lastlight/pr-review/obligations 2>/dev/null | wc -l) family block(s)"
 
       # The MANIFEST, and it exists so that "the seeder wrote nothing for this
@@ -262,7 +269,7 @@ phases:
   # Six passes then share one cached prefix — which is worth MORE under a
   # fan-out, not less, since the six now hit the provider inside one window.
   - name: survey
-    label: Survey · six families
+    label: Survey · five families
     type: fanout
     skills: [pr-review, code-review]
     model: "{{models.review-survey}}"

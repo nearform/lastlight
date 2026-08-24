@@ -238,6 +238,33 @@ export function makeConstantFixture(): Fixture {
 }
 
 /**
+ * D2b — a function that registers hooks / routes / middleware, beside a
+ * function full of NEAR-MISSES that must yield zero registrations: `map.get`
+ * (a string arg that is not a path), `headers.delete` (same), `emitter.on`
+ * (no string-literal phase at all) and `http.get(url)` (no literal). The head
+ * commit rewrites both bodies so both symbols carry changed hunks.
+ */
+export function makeRegistrationFixture(): Fixture {
+  return makeFixture(
+    "registrations",
+    {
+      message: "base",
+      files: {
+        "tsconfig.json": TSCONFIG,
+        "package.json": JSON.stringify({ name: "fixture-registrations", version: "1.0.0" }, null, 2),
+        "src/server.ts": `export function buildServer(app: any, auth: any, h: any) {\n  return app;\n}\n\nexport function nearMisses(map: Map<string, string>, headers: any, emitter: any, handler: any, http: any) {\n  return headers;\n}\n`,
+      },
+    },
+    {
+      message: "head",
+      files: {
+        "src/server.ts": `export function buildServer(app: any, auth: any, h: any) {\n  app.addHook("onRequest", h);\n  app.get("/users", h);\n  app.use(auth);\n  return app;\n}\n\nexport function nearMisses(map: Map<string, string>, headers: any, emitter: any, handler: any, http: any) {\n  const url = "https://example.com";\n  map.get("key");\n  headers.delete("x");\n  emitter.on(handler);\n  http.get(url);\n  return headers;\n}\n`,
+      },
+    },
+  );
+}
+
+/**
  * The cross-file contract change: `getUser` goes from `User | null` to `User`
  * plus a thrown `NotFoundError`, and the ONLY consumer is outside the diff.
  */

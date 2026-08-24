@@ -79,6 +79,7 @@
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import type {
+  CallExpression,
   ClassLikeBase,
   InterfaceDeclaration,
   JSDoc,
@@ -107,7 +108,9 @@ import {
   isMethodDeclaration,
   isMethodSignatureDeclaration,
   isNewExpression,
+  isPropertyAccessExpression,
   isPropertyDeclaration,
+  isStringLiteral,
   isTypeAliasDeclaration,
   isVariableStatement,
 } from "typescript/unstable/ast";
@@ -124,6 +127,7 @@ import type {
   ContractsPayload,
   DegradedEntry,
   FactsPayload,
+  Registration,
   SymbolFact,
 } from "./schema.js";
 import { openSnapshot, type EngineFile, type EngineSnapshot, type Overlay } from "./tsgo.js";
@@ -669,6 +673,90 @@ function calleesOf(body: Node): string[] {
   return [...names].sort();
 }
 
+// ── registrations (D2b) ──────────────────────────────────────────────────────
+
+/**
+ * Method names that read as a HOOK registration. The first argument MUST be a
+ * string literal (the hook/event name) — which is what kills
+ * `emitter.on(handler)`: an `on` with no literal phase is any event emitter.
+ */
+const HOOK_METHODS = new Set(["addHook", "on", "once", "addEventListener"]);
+
+/**
+ * Method names that read as a ROUTE registration. The first argument MUST be a
+ * string literal starting with `/` — which is what kills `map.get("x")`,
+ * `headers.delete("id")` and `http.get(url)`.
+ */
+const ROUTE_METHODS = new Set([
+  "get",
+  "post",
+  "put",
+  "delete",
+  "patch",
+  "options",
+  "head",
+  "all",
+  "route",
+]);
+
+/**
+ * Method names that read as a MOUNT — no argument constraint, because
+ * `app.use(auth)` is precisely the anonymous middleware whose ORDER the D2b
+ * question is about. `phase` is the first argument's string literal when there
+ * is one (`app.use("/admin", guard)`), else `null`.
+ */
+const MOUNT_METHODS = new Set(["use", "register"]);
+
+/**
+ * Every route/hook registration inside `body`, in SOURCE-POSITION order (D2b).
+ *
+ * The same CallExpression walk as {@link calleesOf}, with its hygiene rules on
+ * the callee text (≤ 80 chars, no newline, no parens), narrowed to a
+ * property-access callee `recv.m` with `m` in one of the three sets above.
+ * Deterministic and conservative on purpose: a false registration would seed a
+ * false ordering obligation, and a missed one merely leaves the survey where it
+ * already was. `ordinal` is the 0-based index in source order within the
+ * symbol — `forEachDescendant` visits pre-order, which IS source order.
+ *
+ * Tier-1 only. The tier-2 name-match engine sets `registrations: null` —
+ * nobody looked — because it has no callee/argument view reliable enough for
+ * an ordering claim.
+ */
+function registrationsOf(body: Node, file: SourceFile, path: string): Registration[] {
+  const out: Registration[] = [];
+  for (const node of descendantsOfKind(body, SyntaxKind.CallExpression)) {
+    if (!isCallExpression(node)) continue;
+    const call = node as CallExpression;
+    const callee = call.expression;
+    if (!isPropertyAccessExpression(callee)) continue;
+    const text = callee.getText();
+    if (text.length > 80 || /[\n()]/.test(text)) continue;
+    const method = callee.name.getText();
+    const arg0 = call.arguments.length > 0 ? call.arguments[0] : undefined;
+
+    let phase: string | null;
+    if (HOOK_METHODS.has(method)) {
+      if (!arg0 || !isStringLiteral(arg0)) continue;
+      phase = arg0.text;
+    } else if (ROUTE_METHODS.has(method)) {
+      if (!arg0 || !isStringLiteral(arg0) || !arg0.text.startsWith("/")) continue;
+      phase = arg0.text;
+    } else if (MOUNT_METHODS.has(method)) {
+      phase = arg0 && isStringLiteral(arg0) ? arg0.text : null;
+    } else {
+      continue;
+    }
+
+    out.push({
+      at: locationOf(path, file, call.getStart()),
+      call: text,
+      phase,
+      ordinal: out.length,
+    });
+  }
+  return out;
+}
+
 // ── `facts` ──────────────────────────────────────────────────────────────────
 
 /**
@@ -776,6 +864,9 @@ export function extractFactsTsgo(options: ExtractFactsTsgoOptions): ExtractFacts
         // implementers anywhere", which is a claim this run cannot make.
         implementations: null,
         callees: calleesOf(candidate.body),
+        // `[]` here is a CLAIM — this engine walked the body and found no
+        // registration — as opposed to tier 2's `null` (nobody looked).
+        registrations: registrationsOf(candidate.body, source, changed.path),
         tests: [...testFiles].sort(),
         referenceCount,
         referencesInDiff,

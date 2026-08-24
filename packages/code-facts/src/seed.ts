@@ -151,6 +151,20 @@ export function isObligationContract(value: unknown): value is ObligationContrac
   return typeof value === "string" && (OBLIGATION_CONTRACTS as readonly string[]).includes(value);
 }
 
+/**
+ * Which of the two D2 minting arms were asked for — the `--mint` toggle,
+ * `review.analysis.mint` operator-side.
+ *
+ * Both default FALSE: the baseline document is byte-identical with the flag
+ * absent, which is what makes an arm's number attributable to the arm.
+ */
+export interface MintOptions {
+  /** D2a — `seedAllInDiff`: contract obligations for all-in-diff symbols. */
+  allInDiff: boolean;
+  /** D2b — `seedRegistrations`: security obligations for route/hook order. */
+  registrations: boolean;
+}
+
 export interface ObligationsDocument {
   version: 1;
   generatedAt: string;
@@ -160,6 +174,13 @@ export interface ObligationsDocument {
    * before the switch existed, which reads as `full` (see {@link ObligationContract}).
    */
   contract: ObligationContract;
+  /**
+   * PROVENANCE, exactly as `contract` above — which D2 minting arms produced
+   * this document, stamped so the artifact answers "which arm produced this"
+   * months later. Absent on a document written before the toggle existed,
+   * which reads as both false.
+   */
+  minting: MintOptions;
   repo: string;
   baseSha: string;
   headSha: string;
@@ -187,6 +208,12 @@ export interface SeedOptions {
    * byte-identical. See {@link ObligationContract}.
    */
   contract?: ObligationContract;
+  /**
+   * `review.analysis.mint` → `--mint`. Default both false, so the baseline
+   * document is untouched unless an arm is asked for by name. See
+   * {@link MintOptions}.
+   */
+  mint?: MintOptions;
   log?: LoggerPort;
 }
 
@@ -475,6 +502,139 @@ function seedSecurity(symbols: SymbolFact[], patternFiles: Map<string, number[]>
   return out;
 }
 
+/**
+ * D2a's rank base. Between security (40) and state (50), far below contract
+ * (90): an all-in-diff symbol has NO consumer outside the change constraining
+ * it, which is a weaker mechanism class than a contract a known outside
+ * consumer depends on, and weaker than a state cone reaching outside the diff.
+ */
+const ALL_IN_DIFF_WEIGHT = 45;
+
+/**
+ * The kinds a caller can be SURPRISED by at runtime. Pure types, interfaces
+ * and enums have no runtime line a caller cannot see — a retry policy, a
+ * timeout, a swallowed error class lives in a function body, a method body, a
+ * class or a variable initialiser, nowhere else.
+ */
+const RUNTIME_KINDS = new Set(["function", "method", "variable", "class"]);
+
+/**
+ * D2a — `contract` obligations for symbols whose EVERY reference is inside the
+ * diff.
+ *
+ * NOT an extension of {@link seedContract}, which reads ContractDelta exports
+ * and needs a consumer OUTSIDE the diff; and NOT {@link seedState}, whose
+ * predicate (`outside.length > 0` — at least one reference site outside the
+ * diff) is the exact COMPLEMENT of this one: a symbol whose uncapped counts
+ * say every reference is in-diff cannot show an outside site in the capped
+ * array, so the two seeders structurally cannot double-mint on one symbol.
+ *
+ * The predicate reads the UNCAPPED counts (`referencesInDiff === referenceCount`),
+ * never the capped `references[]` array: on a capped array
+ * `.every(r => r.inDiff)` can be vacuously true while uncounted references sit
+ * outside the diff, which would mint a "no consumer outside the change" claim
+ * over references nobody recorded. `tests/seed.test.ts` pins that regression.
+ *
+ * A zero-reference symbol builds an obligation with no candidates and is
+ * dropped — COUNTED, never silent — by `validateObligation`'s ≥1-candidate
+ * gate: "no consumer constrains this" with nowhere to look is one-ended.
+ */
+function seedAllInDiff(symbols: SymbolFact[]): Obligation[] {
+  const out: Obligation[] = [];
+  for (const [index, s] of symbols.entries()) {
+    if (s.changedHunks.length === 0) continue;
+    // The UNCAPPED counts — see the doc comment. `referenceCount > 0` is NOT
+    // an early filter here: a zero-reference symbol falls through to the
+    // validation gate, whose drop is counted in `dropped[]`.
+    if (s.referencesInDiff !== s.referenceCount) continue;
+    if (!RUNTIME_KINDS.has(s.kind)) continue;
+    const site = splitSite(s.declaredAt);
+    if (!site) continue;
+
+    const candidates = s.references.map((r) => r.at).slice(0, 8);
+    out.push({
+      id: "",
+      family: "contract",
+      mechanism: `${s.name} is changed in this diff and every one of its ${s.referenceCount} reference(s) is also inside the diff — no consumer outside the change constrains it, and a caller-side surprise is invisible file-by-file`,
+      introducedAt: { path: site.path, line: site.line, quote: `${s.kind} ${s.name}` },
+      enforcedAt: { candidates, found: false },
+      question: `Every consumer of ${s.name} is inside this diff. Quote the line inside ${s.name} a caller cannot see and would be surprised by — a retry policy, a timeout, a swallowed error class, a partial result returned as success — or state that no such line exists.`,
+      evidence: [{ type: "symbol", ref: `facts.symbols[${index}]` }],
+      // `name-match` sites are HYPOTHESES, not a resolved reference set — the
+      // same rule seedState applies.
+      discharge: s.resolution === "name-match" ? "either" : "quote",
+      rank:
+        ALL_IN_DIFF_WEIGHT +
+        (s.exported ? 5 : 0) +
+        Math.min(s.referenceCount, 5) -
+        (whollyInTests(site.path, candidates) ? TEST_ONLY_PENALTY : 0),
+    });
+  }
+  return out;
+}
+
+/**
+ * D2b — `security` obligations for a changed symbol that REGISTERS routes,
+ * hooks or middleware: whether a caller is rejected before the handler body
+ * runs depends on the registration ORDER, and no single file shows it.
+ *
+ * `family: "security"` on purpose — no new family: SEEDABLE_FAMILIES, the
+ * survey branch list and the pr-review.yaml family loop all stay untouched,
+ * and an ordering-of-rejection question is the security family's question.
+ *
+ * Co-firing with {@link seedState} and {@link seedSecurity} on one symbol is
+ * DELIBERATE, not a dedupe bug: they ask different questions of the same
+ * symbol (untouched call sites; scanner-corroborated input paths; registration
+ * order), and deleting one because another fired would delete a question
+ * nothing downstream could recover.
+ *
+ * KNOWN LIMITATION, by construction of the extractor: a module-level
+ * `app.get(...)` outside any named declaration attaches to no symbol, so a
+ * file that registers its routes at the top level mints nothing here. The
+ * registration walk is tier-1 only — tier 2 carries `registrations: null`
+ * (nobody looked), which this predicate distinguishes from `[]` (looked,
+ * found none): neither mints, for opposite reasons.
+ */
+function seedRegistrations(symbols: SymbolFact[]): Obligation[] {
+  const out: Obligation[] = [];
+  for (const [index, s] of symbols.entries()) {
+    // `?? null` — a pre-D2 document has no field at all, which reads as
+    // "nobody looked", exactly as tier 2's explicit `null` does.
+    const regs = s.registrations ?? null;
+    if (regs === null || regs.length === 0) continue;
+    if (s.changedHunks.length === 0) continue;
+    if (!splitSite(s.declaredAt)) continue;
+    const first = splitSite(regs[0].at);
+    if (!first) continue;
+
+    const ordered = [...regs].sort((a, b) => a.ordinal - b.ordinal);
+    const candidates = ordered.map((r) => r.at).slice(0, 8);
+    const phases = ordered.map((r) => r.phase ?? "unnamed").join(" → ");
+    out.push({
+      id: "",
+      family: "security",
+      mechanism: `${s.name} registers ${ordered.length} handler(s)/hook(s) in a fixed order (${phases}) — whether a caller is rejected before the handler runs depends on that order, and no single file shows it`,
+      introducedAt: {
+        path: first.path,
+        line: first.line,
+        quote: `${ordered[0].call}(${ordered[0].phase ?? "…"})`,
+      },
+      enforcedAt: { candidates, found: false },
+      question: `Order the phases ${s.name} registers. Quote the EARLIEST registered line that rejects an unauthenticated or malformed caller, and name every registration that runs before it — or state that no registration rejects one before the handler body runs.`,
+      evidence: [{ type: "symbol", ref: `facts.symbols[${index}]` }],
+      // Ordering may be readable (quote the earliest rejecting line) or need a
+      // run to settle — the same `either` the security family already uses.
+      discharge: "either",
+      rank:
+        FAMILY_WEIGHT.security +
+        Math.min(ordered.length, 8) +
+        (s.exported ? 2 : 0) -
+        (whollyInTests(first.path, candidates) ? TEST_ONLY_PENALTY : 0),
+    });
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // the seeder
 // ---------------------------------------------------------------------------
@@ -498,11 +658,20 @@ export function seedObligations(doc: AllDocument, options: SeedOptions = {}): Ob
     patternFiles.set(f.file, list);
   });
 
+  // The D2 arms run ONLY when asked for by name: with the toggle absent the
+  // candidate list — and therefore the document — is byte-identical baseline.
+  const mint: MintOptions = {
+    allInDiff: options.mint?.allInDiff ?? false,
+    registrations: options.mint?.registrations ?? false,
+  };
+
   const candidates: Obligation[] = [
     ...seedEnforcement(x.constants?.constants ?? []),
     ...seedContract(x.contracts?.contracts ?? []),
     ...seedState(x.facts?.symbols ?? []),
     ...seedSecurity(x.facts?.symbols ?? [], patternFiles),
+    ...(mint.allInDiff ? seedAllInDiff(x.facts?.symbols ?? []) : []),
+    ...(mint.registrations ? seedRegistrations(x.facts?.symbols ?? []) : []),
   ];
 
   const dropCounts = new Map<string, number>();
@@ -565,12 +734,14 @@ export function seedObligations(doc: AllDocument, options: SeedOptions = {}): Ob
     kept: kept.length,
     coverage: doc.coverage,
     contract,
+    minting: mint,
   });
 
   return {
     version: 1,
     generatedAt: new Date().toISOString(),
     contract,
+    minting: mint,
     repo: doc.repo,
     baseSha: doc.baseSha,
     headSha: doc.headSha,

@@ -431,6 +431,29 @@ describe("`seed --contract`", () => {
     expect(err.join(" ")).toMatch(/--contract must be one of full \| minimal/);
     expect(existsSync(join(dir, "obligations.json"))).toBe(false);
   });
+
+  it("`--mint bogus` exits 2, names the valid tokens, and reads no document", () => {
+    // Same rule as `--contract` above: a typo'd arm silently running baseline
+    // would report a number for an experiment that never happened.
+    const { dir, facts } = factsTree();
+    const { code, err } = seedInto(dir, facts, ["--mint", "bogus"]);
+    expect(code).toBe(EXIT_UNAVAILABLE);
+    expect(err.join(" ")).toMatch(/--mint must be a comma-list over all-in-diff \| registrations/);
+    expect(existsSync(join(dir, "obligations.json"))).toBe(false);
+    // A known token dragging a typo along fails identically.
+    expect(seedInto(dir, facts, ["--mint", "all-in-diff,registartions"]).code).toBe(EXIT_UNAVAILABLE);
+  });
+
+  it("absent `--mint` stamps both arms false; a spec stamps what was asked", () => {
+    const { dir, facts } = factsTree();
+    expect(seedInto(dir, facts, []).code).toBe(EXIT_OK);
+    const baseline = JSON.parse(readFileSync(join(dir, "obligations.json"), "utf8"));
+    expect(baseline.minting).toEqual({ allInDiff: false, registrations: false });
+
+    expect(seedInto(dir, facts, ["--mint", "all-in-diff,registrations"]).code).toBe(EXIT_OK);
+    const minted = JSON.parse(readFileSync(join(dir, "obligations.json"), "utf8"));
+    expect(minted.minting).toEqual({ allInDiff: true, registrations: true });
+  });
 });
 
 afterEach(() => {

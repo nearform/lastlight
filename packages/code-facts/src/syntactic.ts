@@ -900,6 +900,11 @@ export function extractFactsByName(
       // implementers", which is the exact absence claim this tier cannot make.
       implementations: null,
       callees: [...site.callees].sort(),
+      // `null` = NOBODY LOOKED AT TIER 2. The registration walk (D2b) needs a
+      // callee + argument view this name-match engine does not reliably have,
+      // and `[]` would claim "walked the body, found no registration" — an
+      // absence claim this tier cannot make.
+      registrations: null,
       tests: [...testFiles].sort(),
       referenceCount,
       referencesInDiff,

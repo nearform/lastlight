@@ -13,6 +13,7 @@ import {
   makeBarrelFixture,
   makeConstantFixture,
   makeContractFixture,
+  makeRegistrationFixture,
   makeSymbolKindsFixture,
   type Fixture,
 } from "./helpers.js";
@@ -99,6 +100,35 @@ describe("facts — the impact cone", () => {
       "src/config.ts",
       "src/legacy/auth.ts",
     ]);
+  });
+});
+
+/**
+ * D2b — `registrations`, on a real fixture. Deterministic and conservative:
+ * the three shapes that ARE registrations record phase + ordinal in source
+ * order, and the four near-misses record nothing — `[]`, which on tier 1 is
+ * the claim "walked the body, found none" (tier 2 says `null` instead).
+ */
+describe("facts — registrations (D2b)", () => {
+  it("records HOOK / ROUTE / MOUNT registrations with phases and ordinals, and none for the near-misses", () => {
+    const fixture = makeRegistrationFixture();
+    try {
+      const document = facts(fixture);
+      const server = document.symbols.find((s) => s.name === "buildServer");
+      expect(server?.registrations).toEqual([
+        { at: "src/server.ts:2", call: "app.addHook", phase: "onRequest", ordinal: 0 },
+        { at: "src/server.ts:3", call: "app.get", phase: "/users", ordinal: 1 },
+        { at: "src/server.ts:4", call: "app.use", phase: null, ordinal: 2 },
+      ]);
+
+      // `map.get("key")`, `headers.delete("x")`, `emitter.on(handler)` and
+      // `http.get(url)` are the exact shapes the argument constraints exist to
+      // kill. `[]`, never `null`: this engine looked.
+      const misses = document.symbols.find((s) => s.name === "nearMisses");
+      expect(misses?.registrations).toEqual([]);
+    } finally {
+      fixture.cleanup();
+    }
   });
 });
 

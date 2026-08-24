@@ -390,6 +390,16 @@ review:
     # boundary), at the cost of the verification-report volume above.
     obligationContract: minimal
 
+    # Which D2 minting arms `lastlight-facts seed` runs. A comma-list; the
+    # valid tokens are `all-in-diff` (contract obligations for symbols whose
+    # every reference is inside the diff) and `registrations` (security
+    # obligations for route/hook registration order). Empty = NEITHER, the
+    # baseline obligation set. It reaches the sandbox as `--mint <spec>` on
+    # the seed phase's command line — appended only when non-empty — and the
+    # CLI refuses any unknown token with exit 2, so a typo'd arm is loud
+    # rather than silently running baseline.
+    mint: ""
+
     # RECORDED, NOT CONSUMED. The fan-out's branch list in `pr-review.yaml` is
     # the authority (five branches; `tests` has no seeder and no branch), and
     # nothing reads this key to pick or drop branches — it exists so the value

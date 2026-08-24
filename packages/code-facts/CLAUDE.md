@@ -755,6 +755,37 @@ is refused rather than defaulted on an unrecognised value**: a typo'd control ar
 that fell back to `full` would run, produce a number, and report it for an
 experiment that never happened, which nothing downstream could detect.
 
+#### `seed --mint` — the two D2 rules for defects the original rules cannot see
+
+Every original minting rule requires references **outside** the diff, so a
+defect wholly inside a new hunk is invisible to all four (the D2 finding:
+`1667`'s `strictDryRun`, declared and solely referenced inside the diff, minted
+nothing across five arms). `--mint <spec>` is a comma-list enabling two
+additional rules, both **off when the flag is absent**:
+
+- **`all-in-diff`** — `seedAllInDiff`: a `contract`-family obligation for a
+  changed **runtime** symbol (`function|method|variable|class`; a pure type has
+  no runtime line a caller can be surprised by) whose every reference is also
+  inside the diff. The predicate compares the **uncapped counts**
+  (`referencesInDiff === referenceCount`), never the capped `references[]`
+  array, where `.every(r => r.inDiff)` can be vacuously true. Candidates are
+  the in-diff reference sites; rank base `ALL_IN_DIFF_WEIGHT = 45` sits below
+  `state` so the budget truncates this family first, auditable in `dropped[]`.
+- **`registrations`** — `seedRegistrations`: a `security`-family obligation
+  ordering the route/hook registrations a symbol makes, from the
+  `registrations` fact (**tier-1 tsgo only**; tier 2 writes `null` = nobody
+  looked, and `null ≠ []` as everywhere in this package). The extractor is
+  deliberately conservative: `addHook`/`on`-style needs a string-literal arg,
+  route verbs need a `/`-prefixed literal path, so `map.get("x")` and
+  `emitter.on(handler)` never mint. Module-level registrations outside any
+  declaration attach to no symbol — a known, documented limitation.
+
+Like `--contract`, an unknown token is **refused (exit 2), never defaulted**,
+and what was asked is stamped into the document (`minting: {allInDiff,
+registrations}`) so an artifact read months later answers "which arm produced
+this". Both rules widen GENERATION — the direction that has bought recall
+before (locked decision 2) — and neither touches `seed-render.ts`.
+
 ### `findings` — conservation, and the floor that makes it a mechanism
 
 `src/findings.ts`, WP6c. It is the `adjudicate` phase's `until_bash`, so **exit 0

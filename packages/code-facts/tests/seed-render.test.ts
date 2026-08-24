@@ -60,6 +60,7 @@ function doc(over: Partial<ObligationsDocument> = {}): ObligationsDocument {
     version: 1,
     generatedAt: "2026-08-23T00:00:00.000Z",
     contract: "full",
+    minting: { allInDiff: false, registrations: false },
     repo: "acme/widgets",
     baseSha: "b".repeat(40),
     headSha: "h".repeat(40),

@@ -1554,6 +1554,9 @@ function shapeReviewAnalysis(raw: unknown, d: ReviewAnalysisConfig): ReviewAnaly
     // Operator-only like the rest of `review.analysis`, so this only ever
     // projects the operator's answer into the merged view. `minimal` or nothing.
     obligationContract: node.obligationContract === "minimal" ? "minimal" : d.obligationContract,
+    // Operator-only projection too. A plain string — the CLI (`--mint`) is the
+    // loud validator, exactly as for obligationContract above.
+    mint: typeof node.mint === "string" ? node.mint : d.mint,
     surveyPasses: num(node.surveyPasses, d.surveyPasses),
     surveyConcurrency: num(node.surveyConcurrency, d.surveyConcurrency),
     probes: node.probes === true,

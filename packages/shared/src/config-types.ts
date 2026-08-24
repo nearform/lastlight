@@ -295,6 +295,22 @@ export interface ReviewAnalysisConfig {
    */
   obligationContract: "full" | "minimal";
   /**
+   * Which D2 minting arms `lastlight-facts seed` runs, as a comma-list over
+   * `all-in-diff` (contract obligations for symbols whose every reference is
+   * inside the diff) and `registrations` (security obligations for route/hook
+   * registration order).
+   *
+   * `""` (the default) is NEITHER — the baseline obligation set, byte-identical
+   * to a run before the toggle existed. Reaches the seeder as `--mint <spec>`
+   * on the seed phase's command line, appended ONLY when non-empty, and the
+   * seeder stamps what it was asked into `obligations.json` (`minting`) so an
+   * artifact answers "which arm produced this". Kept a plain string rather
+   * than a validated union because the CLI is the loud gate: any unknown token
+   * exits 2 before the document is read — a typo'd arm can never silently run
+   * baseline and report a number for an experiment that never happened.
+   */
+  mint: string;
+  /**
    * How many of the six survey families actually run.
    *
    * **Six, and the default is not negotiable down without saying which.** The
@@ -541,6 +557,8 @@ export function defaultReviewConfig(): ReviewConfig {
       // remains the opt-in telemetry arm (discharge codes + the
       // clean-discharge demotion at the posting boundary).
       obligationContract: "minimal",
+      // Neither D2 arm — the baseline obligation set. See the field's doc.
+      mint: "",
       surveyPasses: 6,
       surveyConcurrency: 6,
       probes: false,

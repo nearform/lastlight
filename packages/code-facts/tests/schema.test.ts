@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeConstantFixture, makeNonTsFixture, type Fixture } from "./helpers.js";
 import { runExtractor, runWrapped, writeDocument } from "../src/run.js";
-import { DOCUMENT_SCHEMAS, type ExtractorName } from "../src/schema.js";
+import { DOCUMENT_SCHEMAS, SymbolFactSchema, type ExtractorName } from "../src/schema.js";
 import { runCli } from "../src/cli.js";
 
 const EXTRACTORS: ExtractorName[] = [
@@ -139,6 +139,40 @@ describe("schema (WP1 AC5)", () => {
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
+  });
+
+  /**
+   * D2b is additive: a document written BEFORE the `registrations` field
+   * existed must still parse, and its absence reads as `null` — nobody looked
+   * — never as `[]`. No envelope version bump, so this is the compatibility
+   * contract in executable form.
+   */
+  it("a symbol without `registrations` (a pre-D2 document) still parses, reading as nobody-looked", () => {
+    const preD2 = {
+      name: "MAX_TOKEN_AGE",
+      kind: "variable",
+      exported: true,
+      declaredAt: "src/config.ts:1",
+      changedHunks: ["src/config.ts:1-1"],
+      references: [],
+      implementations: null,
+      callees: [],
+      tests: [],
+      referenceCount: 0,
+      referencesInDiff: 0,
+      resolution: "type-aware",
+      nameAmbiguity: null,
+    };
+    const parsed = SymbolFactSchema.parse(preD2);
+    expect(parsed.registrations ?? null).toBeNull();
+    // …and both explicit states still parse as themselves.
+    expect(SymbolFactSchema.parse({ ...preD2, registrations: null }).registrations).toBeNull();
+    expect(
+      SymbolFactSchema.parse({
+        ...preD2,
+        registrations: [{ at: "src/app.ts:6", call: "app.get", phase: "/users", ordinal: 0 }],
+      }).registrations,
+    ).toHaveLength(1);
   });
 
   it("writeDocument creates missing directories rather than throwing", () => {
