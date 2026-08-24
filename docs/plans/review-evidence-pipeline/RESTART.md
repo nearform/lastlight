@@ -1,10 +1,17 @@
 # RESTART — pick this plan up in a new session
 
-> **Starting fresh on 2026-08-23 or later? Read [NEXT.md](NEXT.md) first.** It is
-> two pages: the four run ids that are now the comparators, what a no-spend deep
-> scan of the artifacts found, and five small experiments in cost order. This
-> file stays the operational reference — tree state, the commands, and §4's ten
-> traps — and §2b below carries the measured numbers.
+> **Starting fresh? Read §2e and §3a of this file first, in that order.** X1 ran
+> on 2026-08-23 and moved the target: **C2 is dead, discovery is not the binding
+> constraint, and the adjudicator is.** §3a is the hypothesis register — what is
+> still open and what would settle each one. §3a′ is the next arm.
+>
+> [NEXT.md](NEXT.md) carries the artifact-level forensics and the question
+> catalogue. This file stays the operational reference — tree state, the
+> commands, §4's traps, and the measured numbers in §2b–§2e.
+>
+> **The one number to hold in your head:** over six repeats of two arms the
+> pipeline **found 10 gold-instances and said 3**; over eight cases it **found 12
+> and said 8 and 5**. Read internal recall before posted recall, always.
 
 Say *"restart the plan in `docs/plans/review-evidence-pipeline/`"* and start
 here. This file is the operational entry point: what state the tree is in, what
@@ -245,6 +252,14 @@ these numbers; `--repeats N` runs a whole arm N times as sibling run dirs.
 
 ### The regression — and it is the most informative result in this plan
 
+> **SUPERSEDED 2026-08-23 by §2e. X1 ran and separated C1 from C2: C2 is dead
+> and C1 is only a direction.** Two specific claims below did not survive.
+> *"Every gold missed"* was read off posted recall alone — the instrument could
+> not see internal recall yet, and two of these three repeats in fact FOUND 2 of
+> 5 gold and posted none of them, so this is not purely a discovery regression.
+> And *"union 4/5 → 0/5"* is a posted union; the discovery union behind it never
+> collapsed that far. Read §2e before acting on anything here.
+
 One case, `prreview__skillspro-1587-r2`, `--repeats 3`, $7.00:
 
 | | old code (3 runs) | 2026-08-23 (3 repeats) |
@@ -418,113 +433,155 @@ Two claims, and only one of them generalises:
    renderer unification landed in `5fa06da1` at 07:21, after those runs at
    05:33–05:54. No measured run has ever used the unified spec row.
 
+## 2e. 2026-08-23 — X1 RAN. Both candidate causes were the wrong question.
+
+**$8.10, `prreview__skillspro-1587-r2`, `--repeats 3`, `--contract minimal`,
+runs `2026-08-23_073029` / `074302` / `075354`.** Verified as the real control
+before it spent: `obligations.json` stamped `contract: "minimal"`, and the
+rendered block carried no exemplar, no id checklist, no `failureScenario`, and
+the pre-rename `discharge:` label.
+
+| | `full` (053348 band) | `minimal` (X1) |
+|---|---|---|
+| hypotheses | 45 / 48 / 46 | 45 / 50 / 45 |
+| clean discharges | 23 / 25 / 23 | **0 / 0 / 0** |
+| findings | 32 / 25 / 16 | 41 / 40 / 45 |
+| tiered `internal` | 2 / 17 / 9 | **33 / 35 / 29** |
+| posted | 6 / 8 / 7 | 8 / 5 / 13 |
+| **gold FOUND** (internal recall) | **2 / 2 / 0** | **2 / 1 / 3** |
+| **gold SAID** (posted) | **0 / 0 / 0** | **0 / 0 / 3** |
+| posted union | 0 of 5 | **3 of 5** |
+
+### C2 is dead
+
+C2 was *"reliable seeding itself suppresses discovery"*, and it would have
+overturned this plan's thesis. It is false. **Under `full` the pipeline found 2,
+2 and 0** — it was discovering the whole time, with the seed delivered reliably.
+Discovery was never what broke.
+
+### C1 is supported in DIRECTION, and it is not the story
+
+Posted union recovered 0/5 → 3/5, which is what C1 predicts. But discovery barely
+moved — 4 gold-instances found under `full` against 6 under `minimal`, on 15
+slots each. **What recovered was the saying, not the finding.**
+
+### The actual result: the losses are downstream of discovery, in BOTH arms
+
+**Across both arms, 10 gold-instances were discovered and 3 were said.** That
+reproduces the 8-case back-fill exactly (found 12, said 8 and 5). The pipeline is
+not failing to see defects.
+
+And the contract flips the adjudicator's posture between two wrong ones:
+
+- **`full`** — half the hypotheses are confident clean quotes; the adjudicator
+  withholds almost nothing (2 of 32) and what reaches the PR is anti-findings.
+  Found 4, said 0.
+- **`minimal`** — no clean quotes at all; the adjudicator **explicitly withholds
+  70–80%**. Not the conservation floor sweeping up leftovers: every one of those
+  33 / 35 / 29 carries `reason: "adjudicated"`, a deliberate model decision.
+  Found 6, said 3.
+
+### What must NOT be read out of this
+
+- **n = 3, 5 gold, one case, and X1's band is 0.600** — well above the 0.24
+  detection floor. Repeat 3 does all the work; repeats 1 and 2 posted zero. This
+  is a direction, not a magnitude.
+- **"10 found" is a POOLED COUNT, not a union.** `internalMatched` is stored as a
+  count and not a per-gold vector, so union/intersection is computable on the
+  posted side only. That is the *"mean wearing a pooled coat"* error this plan
+  already caught once, and closing it is [H-I1](#the-hypothesis-register) below.
+- Old code — which lost ~24% of seeds — scored union 4/5. `minimal`, delivering
+  every seed, scored 3/5. Within noise, but **there is still no evidence that
+  reliable delivery helped anything.**
+
 ## 3. What to do next
 
 **Superseded 2026-08-23.** The old §3a ("more repeats before any lever") is
 discharged — the band exists, and `--repeats` makes it cheap. The ordering below
 replaces it.
 
-### 3a. The next experiments — in this order, one variable each
+### 3a. The hypothesis register
 
-Every one is on `prreview__skillspro-1587-r2` with `--repeats 3` (~$7, ~30 min)
-unless it says otherwise. That case now has a **hard comparator on both sides**:
-old code 3/0/2 with union 4/5, 2026-08-23 code 0/0/0 with union 0/5. A single
-case is normally unreadable; a union that moves 4 → 0 → back is not.
+**X1 discharged the question this section used to be organised around.** C2 is
+dead, C1 is a direction, and the measured bottleneck moved. Everything still open
+is below, with what would settle it. The ordering rule is unchanged: one variable
+per arm, and read internal recall before posted recall.
 
-**X1 — separate C1 from C2. The control, and it comes first.** Run with
-`context_file` ON (branches all receive their obligations) but the obligations
-themselves rendered as the pre-2026-08-23 block: `--contract minimal`. That is
-the seed delivered reliably, asking the OLD question.
+**The one-line summary of where the evidence now points.** Over six repeats of
+two arms the pipeline **found 10 gold-instances and said 3**; over eight cases it
+**found 12 and said 8 and 5**. Discovery is not the binding constraint any more.
+**The adjudicate → post path is.**
 
-**`minimal` is NOT "no discharge contract", and describing it that way will make
-you misread the arm.** The four codes and *"Reading a file is not a discharge"*
-are older than the regression — `5fa06da1` added exactly **three lines** to that
-block. What `minimal` removes is those three lines (the pointer to the row's
-`discharge` field and to the id checklist), the un-truncated id checklist itself,
-the `failureScenario` requirement, and the worked exemplar. The block still
-demands a discharge and gives the survey nowhere to record one, which is exactly
-why compliance measured 0/31, 0/34 and 0/40 under it — and reproducing that
-faithfully is the point. `DISCHARGE_MINIMAL` is byte-identical to `5fa06da1^`,
-verified both directions; `full` is byte-identical to today.
+#### A. The adjudicator — the critical zone
 
-The selection travels as a field on `obligations.json`, not as a render
-argument, so the block a survey was handed, the contract `checkDischarge` graded
-it against, and the artifact read three weeks later cannot disagree.
-`checkDischarge` degrades to the `test -s` floor under `minimal` — grading a
-field nobody was told to write would make five of six branches record
-`condition_not_met` on every run of the control arm, a pipeline-failure
-signature the arm would then have to be read around.
-- Recovers to ~4/5 union ⇒ **C1 confirmed**: the discharge contract is what cost
-  the recall, and the fix is the question, not the delivery.
-- Stays at 0/5 ⇒ **C2 is live**: reliable seeding itself suppresses discovery,
-  and the free-styling branches were carrying the old recall. That would overturn
-  this plan's thesis and is worth knowing before another lever is built.
+| id | Hypothesis | Evidence for it | What settles it |
+|---|---|---|---|
+| **H-A1** | **The adjudicator withholds discovered gold.** | `minimal`: 33 / 35 / 29 of 41 / 40 / 45 findings tiered `internal`, every one `reason: "adjudicated"` — a deliberate model decision, not the conservation floor. Found 6, said 3. | An arm that varies only the adjudicator, read on `tiers` + internal-vs-posted recall. Needs **H-I1** first, or "withheld" and "never found" stay one number. |
+| **H-A2** | **The adjudicator posts anti-findings.** | `full`: 2 of 32 withheld while 23 of 45 hypotheses were clean quotes; rep1 put 17 of them on the PR at `confidence: 1.00`. | The clean-discharge demotion is built and is a **verified no-op under `minimal`**, so it is UNMEASURED. Needs a `full`-contract arm. |
+| **H-A3** | **The adjudicator has never been a strong model, or a separate one.** | Every measured run was `runType: "models"` with Haiku **forced on every phase**. And `review` (`pr-review.yaml:468`) and `adjudicate` (`:504`) BOTH read `{{models.review}}` — they are welded to one model, so no overlay can currently vary one without the other. `models.review-adjudicate` does not exist. | Below — it is the next arm, and the cheapest of these three. |
+| **H-A4** | **A true finding is lost between "tiered for posting" and "recognised in the review text".** | 8-case runs: 9 matched findings on a posted tier in both, credited 8 and 5. In run 3 this channel is larger than the boundary. | `scripts/rescore.ts --repeat-judge N` — it measures grader noise directly and is nearly free. Do this before believing the channel is real. |
+| **H-A5** | **The confidence bars never bind, so the tier is close to arbitrary.** | Finding confidence is uniformly ≥ 0.7 (median 0.95–1.00, min 0.75), against `internalFloor: 0.15` and family thresholds 0.30–0.60. Posted went 30 / 8 / 7 from near-identical generation. | Recalibrate what `confidence` means in the row contract, or tier on evidence shape rather than on a self-reported number. |
 
-**Read X1 on INTERNAL recall, not posted recall** (§2d). Posted recall on this
-case now runs through a boundary that put 30 findings on the PR in one repeat and
-7 in the next from near-identical generation; reading a discovery question
-through that much attention-layer noise is how the last three arms got their
-spread. Internal recall — gold matched by anything the pipeline *generated*,
-tiered or not — is the discovery number, and it is what C1-vs-C2 is actually
-about. Both are now on the scorecard.
+#### B. Discovery — real, but no longer the binding constraint
 
-**A clean-discharge rule is structurally inert under `minimal`, so anything
-bundled into X1 that keys on discharge is NOT measured by X1 and must not be
-reported as if it were.** The mechanism is not "no row carries a code": of 447
-minimal-era rows, **74 carry a `discharge`/`status` string and 43 of those are
-one of the four codes**. It is that a clean discharge requires `failureScenario`
-present and `null`, and the minimal row shape has no such field — measured,
-`cleanIds` is **0 across all sixteen** minimal-era instances and the tiering is
-byte-identical. The demotion needs a **`full`-contract arm** to be measured at
-all.
+| id | Hypothesis | Status |
+|---|---|---|
+| **H-D1** | The model's question set does not contain the human's questions ([TLDR.md](TLDR.md)'s thesis). | **Still true and still the ceiling on the union** — 6 of 6 of `1667`'s gold were read and cleared. But internal recall is 0.400–0.480 while posted is 0.200–0.320, so it is no longer where the next point of recall is cheapest. |
+| **H-D2** | Seeding coverage gaps. | 4 of 14 never-matched gold sit in files no obligation touches. A defect wholly inside a new hunk is invisible to **all four** mint rules, which are four different conditions and not one. |
+| **H-D3** | The question shape is answerable innocently (X2, the E1a catalogue). | Drafted in [NEXT.md](NEXT.md). Unblocked by X1 — C2 is dead, so seeding harder is not counter-indicated. |
+| **H-D4** | `tests` is dead at both ends. | **Confirmed, not a hypothesis.** No `seedTests` exists and `prepare` is skipped 8/8. One of six fan-out branches cannot produce anything. Build it or drop it. |
 
-**And the other 31 invented a fifth code.** `N/A` ×11, `enforced` ×6,
-`needs_investigation` ×4, `hypothesis` ×3, `met_with_caveat`, `backend_only`,
-`enforced_by_http`, `potential_future_issue`. So the minimal block fails in two
-ways at once — it asks for a discharge with nowhere to write one, *and* the
-models that do answer largely answer off-vocabulary. `N/A` being the most common
-is why `SPEC_DISCHARGE` carries a *"THERE IS NO FIFTH CODE"* paragraph. Read
-X1's discharge histogram with that in mind: `none` there is two different
-failures added together.
+#### C. The instrument — fix before spending
 
-**X2 — rewrite what the obligations ASK** (blocked on X1 only if X1 says C2).
-The catalogue is drafted in [NEXT.md](NEXT.md) from the `1667` forensics. The
-shape of the cure, and it is one line per family:
+| id | Gap | Why it blocks a decision |
+|---|---|---|
+| **H-I1** | **Internal recall is a COUNT, not a per-gold vector.** | So there is no internal union or intersection, and "found 10" is a pooled count. Every adjudicator hypothesis above is read on exactly this axis. **Fix first — it is free.** Store `internal.goldToFinding` beside `internalMatched`, and teach `band.ts` to report both surfaces. |
+| **H-I2** | **`spec` reports NOT MEASURED while it is live.** | `code-facts` writes `measured: false` for `spec` meaning *"I cannot see the PR body"*, and the extractor reads it as *"this family was not measured"* — while `spec.jsonl` carries 11 rows. Two claims sharing one field. Leave `obligations` ABSENT (unknown ≠ 0) and only mark `notMeasured` when the family produced no rows. [NEXT.md](NEXT.md) finding 8 predicted this exact trap. |
+| **H-I3** | The gold set cannot resolve what we are now measuring. | 5 gold on one case; X1's band is 0.600. `bandVerdict` compares a mean delta to `max − min`, which is a RANGE and not a test — roughly 3× more conservative than the repeats warrant. A per-gold paired comparison across repeat groups is the more powerful instrument and is $0 over stored traces. |
 
-> Stop asking whether the line exists. Ask **which two distinct situations that
-> line treats identically.**
+### 3a′. The next arm: give the adjudicator its own model
 
-`enforcement` currently asks *"quote the line that enforces THIS constant"* — and
-**any use of the constant satisfies it**, which is exactly how the one converted
-gold in this project's history was discharged `QUOTE` against a line that
-mentions the constant and compares nothing. `state` asks about untouched call
-sites, which points *away* from the changed body where 4 of 5 of `1667`'s gold
-live. Both are answerable without looking at the defect.
+**This is H-A3, it is the cheapest thing that could move the measured
+bottleneck, and the harness can nearly do it already.**
 
-**X3 — read the survey prompts as prose, not as plumbing.** Recorded because a
-human read them on 2026-08-23 and judged them *"not well structured"*, and that
-is a distinct claim from any measurement here. The five family prompts are
-57 lines of which ~50 are byte-identical boilerplate; the family-specific content
-is one paragraph, and the actual contract lives in the block emitted by
-`seed-render.ts`. So the prompt is mostly preamble and the load-bearing text is
-somewhere else — worth restructuring on its own merits, but **it must not be
-bundled with X2**: two prompt changes in one arm is candidate v1's
-four-changes-as-one, and this file already carries one instance of that mistake
-made on 2026-08-23.
+`lastlight-evals` has two run types. Every measurement in this plan used
+`--mode models`, which **forces one model across every step** — so the
+adjudicator has been Haiku in every arm ever run, by construction rather than by
+choice. The other, `--mode config`, runs *"an overlay's real per-step model
+config (what ships)"*: the arm becomes the overlay, and core picks the model per
+phase exactly as production does. **It has never been used on this pipeline.**
 
-**X4 — the `1667` question catalogue, applied.** Only after X2 shows the shape
-works on a case that has a comparator. `1667` is 0/5 in every run ever recorded
-and its gold is cross-cutting ordering and rate-limit material; it is the
-hardest case in the set and the wrong one to iterate against.
+Under `--mode config` with the existing `wp3` overlay that would already give
+surveys Haiku (`models.review-survey`) and everything else Sonnet 4.6 (via
+`models.default`) — which is what a real deployment runs, and is the answer to
+*"can the evals work like production?"*: **yes, today, with a flag.**
 
-**X5 — re-establish the 8-case band.** `--repeats 3` on all eight (~$50). Only
-worth spending once a one-case arm has recovered its union; until then it buys a
-precise measurement of a known regression.
+**One thing must be built first, and it is small.** `review` and `adjudicate`
+both read `{{models.review}}`, so `--mode config` would change **both** at once
+and the arm would not be one variable. Add `models.review-adjudicate` to
+`pr-review.yaml`'s `adjudicate` node, falling through to `{{models.review}}` when
+unset — lever **f3** as already designed in §3b, and it is a one-line template
+change plus a config key.
 
-**Do NOT run an 8-case arm to decide any of X1–X4.** The one-case comparator is
-~7× cheaper and, for these questions, strictly more informative — the union on
-one case with a known before/after moves; a micro-recall delta on eight cases
-sits inside the 0.24 band.
+Then the ladder, one variable each:
+
+1. **H-I1** (free) — per-gold internal vectors, so the arms below are readable at
+   all.
+2. **A3a** — `--contract full`, adjudicator on Sonnet 4.6, everything else
+   unchanged. Does a stronger adjudicator stop posting anti-findings?
+3. **A3b** — `--contract minimal`, adjudicator on Sonnet 4.6. Does a stronger
+   adjudicator stop withholding 70–80%? This is the direct test of **H-A1** and
+   the single most informative arm available.
+4. **`--mode config`** as a production-shape check once both are read — not as a
+   measurement, because it moves several phases at once.
+
+**The guardrail, and it is the one this plan has reproduced four times.** A
+stronger adjudicator is a *ranking* intervention over an already-generated set,
+and every ranking intervention measured in this space has bought precision with
+recall (v2: micro-recall 1/25 → 2/25 with F1 halved; BitsAI-CR: precision
+54.5 → 67.1 for recall 45.5 → 39.8). **If A3a or A3b shows posted precision up and
+internal recall flat while posted recall falls, that is locked decision 1 for the
+fifth time, not a tuning success.** Read internal recall first, every time.
 
 ### 3b. The quality levers — approved, designed, UNBUILT
 
@@ -536,7 +593,7 @@ time.
 |---|---|---|
 | **f1** | **Stage the diff once** | 93 bash calls across the six surveys, ~30 re-deriving one fixed range that `facts.json` (137 KB) already holds. `survey_branch_contract` at 234s **is** the whole survey span, and it is the branch doing the most re-derivation. Cuts turns, which cuts latency *and* spend |
 | **f4** | **Reshape `review` when the pipeline is on** | It still runs a full independent review — 137s and $0.30 — and in run A produced `APPROVE` with **zero findings while 41 hypotheses sat unread beside it**. **It cannot simply be skipped**: `post-review` depends on it with `all_success`, and a skipped node is not `succeeded`. **Note the `review` node declares no `prompt:` at all** (`pr-review.yaml`), so it hits the skill-only fallback in `phase-executor.ts` — f4 means ADDING a prompt (or editing `skills/pr-review/SKILL.md`), not editing one. `{{#if analysisEnabled}}` does not exist anywhere in the repo either; the gating idiom here is `skip_if: "analysisEnabled != true"` |
-| **f3** | **A stronger adjudicator** | `models.review-adjudicate`, falling through to `models.review`. Haiku-beats-Sonnet is a *recall* result about *discovery*; adjudication is ranking over an already-generated set, a different task |
+| **f3** | **A stronger adjudicator** — **PROMOTED 2026-08-23 to the next arm, see §3a′** | `models.review-adjudicate`, falling through to `models.review`. Haiku-beats-Sonnet is a *recall* result about *discovery*; adjudication is ranking over an already-generated set, a different task. X1 turned this from a nice-to-have into the critical path: the adjudicator withholds 70–80% under `minimal` and posts anti-findings under `full`, and **it has been Haiku in every arm ever run** because `--mode models` forces one model across every phase |
 | **f2** | **Thinking effort** | The survey phases declare **no `variant:` at all**, so they inherit agentic-pi's default. Wire `{{variants.review-survey}}` through and measure |
 
 **The guardrail on all four.** If any shows precision up and recall down, that is
@@ -569,19 +626,38 @@ by accident.
 
 ### 3c. Where the evidence says quality actually lives
 
-**Seeding, not tiering.** Forensics on run C traced all three gold end to end:
-both misses were **discovery failures**. `dropped: []`; no gold-bearing finding
-was demoted, tiered `internal`, or deleted. The filters demonstrably kept their
-hands off gold.
+> **REWRITTEN 2026-08-23. This section said "seeding, not tiering" and was
+> wrong** — not by reasoning badly, but by generalising from three gold on one
+> run at a time when internal recall could not be measured at all. The
+> superseded claim is kept below because how it went wrong is the reusable part.
 
-The sharpest single data point in this whole plan: for gold G2, the survey agent
-**read the code containing the exact asymmetry the finding is about** — two maps,
-one lowercased and one not — and never formed the question. That is not an
-affordance gap and not a filter problem. It is [TLDR.md](TLDR.md)'s thesis at
-close range: *the model's question set does not contain the human's questions.*
+**It lives in BOTH, and the second half was invisible until the instrument
+existed.** Measured over 25 gold: the pipeline **found 12 and said 8 and 5**.
+Measured over 5 gold across two arms and six repeats: it **found 10 and said 3**.
+Roughly a third to a half of what it discovers never reaches the pull request.
 
-Tiering is not exonerated (run A cannot be read on it — see §4 trap 5), but it is
-not implicated either.
+So there are two ceilings, and they need different work:
+
+- **Discovery** caps the union. 6 of 6 of `1667`'s gold were read and *cleared*,
+  and for gold G2 the survey agent **read the code containing the exact asymmetry
+  the finding is about** — two maps, one lowercased and one not — and never
+  formed the question. That remains the sharpest single data point in this plan
+  and it is [TLDR.md](TLDR.md)'s thesis at close range: *the model's question set
+  does not contain the human's questions.* [H-D1](#b-discovery--real-but-no-longer-the-binding-constraint).
+- **Adjudication caps what a maintainer actually sees**, and on today's numbers
+  it is the cheaper point of leverage, because the finding already exists and
+  something downstream is deciding against it.
+  [H-A1](#a-the-adjudicator--the-critical-zone).
+
+**Why the old claim was wrong, which is the part worth keeping.** It rested on
+`dropped: []` and on no gold-bearing finding being tiered `internal` — a true
+observation about **three gold on one case**. It could not have been checked more
+widely, because internal recall had never been computed: `boundaryMetrics()`
+filtered for a `review.pipeline` packet that nothing produced (§2d). So "the
+filters kept their hands off gold" was not a measurement of the filters. It was
+the absence of a measurement, read as a clean bill of health — the same shape as
+the conservation gate that passed falsely and the discharge contract that was
+never expressible. **An instrument that cannot fail is not evidence.**
 
 ### 3d. Open backlog
 
