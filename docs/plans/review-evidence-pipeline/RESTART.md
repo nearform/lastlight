@@ -9,10 +9,14 @@
 > shipped configuration: `obligationContract: minimal` + both prompt
 > revisions, five survey branches (`tests` dropped), `models.review-adjudicate`
 > fallthrough unpinned. The clean final-design reference is
-> [PIPELINE-SPEC.md](PIPELINE-SPEC.md). **The PR is HELD: §2k is the next
-> campaign** — the D2 seeding changes (all-in-diff minting + route/hook
-> registration facts) and WP9 external validation, both pre-merge. §3's
-> register is otherwise historical.
+> [PIPELINE-SPEC.md](PIPELINE-SPEC.md). **§2k RAN on 2026-08-24 — read §2l**:
+> D2 seeding is a measured KEEP (8-case internal paired +10/−1, p=0.006, the
+> plan's first significant result), the speculation FP genre is closed, and
+> WP9 tier 1 ran once on the Martian TS slice (+7/−0 posted gold vs the
+> shipped baseline, p=0.008; F1 ranks below baseline on posted volume — the
+> attention boundary is untuned). Shipped config adds
+> `review.analysis.mint: all-in-diff,registrations` + the anti-speculation
+> rules. §3's register is otherwise historical.
 >
 > [NEXT.md](NEXT.md) carries the artifact-level forensics and the question
 > catalogue. This file stays the operational reference — tree state, the
@@ -760,6 +764,9 @@ the old best with 37–71% better SNR and half the variance.
 
 ## 2k. The NEXT campaign — recall, pre-PR (decided 2026-08-24)
 
+> **RAN the same day — results in §2l.** D2a and D2b both landed behind
+> `review.analysis.mint`; WP9 ran as the tier-1 Martian TypeScript slice.
+
 **The PR is deliberately held.** §2i's "post-merge" framing is retracted: the
 measured recall (union 12/25, mean 0.320) is not yet good enough to ship, and
 the next points are NOT in prompt work. Two work items, in order:
@@ -795,6 +802,90 @@ number this plan now produces needs gold the prompts were NOT tuned on:
 fresh cases via `add-case --pr --review` from real reviewed PRs the
 investigation has never touched, gold human-verified (HANDOFF sign-off),
 held blind. This is what makes any D2 gain a claim rather than a fit.
+
+## 2l. 2026-08-24, evening — §2k RAN. D2 is a KEEP with the first significant
+result in the plan; WP9 tier 1 ran; the speculation genre is closed.
+
+**The whole campaign in one day, ~$131: D2a/D2b built behind
+`review.analysis.mint` (fail-loud `--mint`, stamped provenance), validated on
+one-case arms, confirmed on 8 cases, a new anti-speculation rule measured in,
+and the first external validation ever run.** Commits `0a72bffa`..`9561cdca`.
+
+### The 8-case D2 confirm — KEEP, and the internal paired test is p=0.006
+
+vs the §2i arm (`074944/074945`), runs `114322/114323`, minimal + both prompt
+revisions + `mint: all-in-diff,registrations`:
+
+| 25 gold | §2i | D2 combined |
+|---|---|---|
+| micro-recall mean | 0.320 | **0.400** (0.360/0.440, band 0.080 — `bandVerdict` KEEP) |
+| posted union | 12/25 | **17/25** |
+| internal union | 12/25 | **21/25** |
+| paired internal | — | **+10 / −1, p=0.006** — the first significant result this plan has produced |
+| paired posted | — | +9 / −4, p=0.133 |
+
+Every prior lever ROTATED the union (§2i: net −2, p=0.760); D2 GREW it. Both
+one-case arms had moved their designed targets first (1667 #1 and 1587-r2 G3
+each found for the first time in 14–15 repeats; 1667 internal union 3/5 → 5/5).
+Cost: precision 0.22 → 0.16/0.18 on higher posted volume, concentrated in one
+genre —
+
+### — which is closed: a speculative hazard is not a finding (`b2e63961`)
+
+The 1641 canary posted 7 and 5 FPs in the confirm, all *"nothing prevents a
+future developer from…"* — the all-in-diff escape hatch answered as what-ifs.
+Fixed at both ends (question text: a future-edit hazard is a clean discharge;
+adjudicator: third calibration rule, speculative hazard ⇒ `internal` always).
+Measured ×3: canary FPs **7/5 → 0/1/3** (one repeat posted nothing and
+APPROVEd); the 1667 guard held internal union **5/5**, min posted recall
+0 → 0.200, precision per repeat 0/0.375/0 → **0.333/1.000/0.400**.
+
+### WP9 tier 1 — the Martian TypeScript slice, run once, frozen config
+
+10 cal.com cases / 31 gold (tier `pr-review-martian`, **pinned** to upstream
+`949e4a1` — a fresh clone imports a regrouped 173-gold set that desyncs the
+committed sidecar/anchors; see the tier README). `--mode config`: baseline =
+shipped two-phase reviewer (Sonnet); pipeline = `wp3-minimal-d2ab` (Haiku
+surveys, Sonnet review+adjudicate — the production shape).
+
+| | baseline `121400` | pipeline `132218/132219` |
+|---|---|---|
+| micro-recall | 0.484 (15/31) | **0.581 / 0.581** (18/31 both repeats) |
+| posted union / intersection | 15/31 | **22/31** / 14/31 |
+| paired posted vs baseline | — | **+7 / −0, p=0.008** |
+| precision | 0.441 | 0.257 / 0.281 |
+| F1 / leaderboard rank | 0.462 / **12 of 23** | 0.356–0.379 / 17–20 of 23 |
+| posted per PR / cost | 3.4 / $8.37 | 6.4–7.0 / ~$25 per repeat |
+
+Three honest readings. **(1) The recall claim generalises**: +7 gold found,
+none lost, p=0.008, on gold the prompts were never tuned on — the D2/discovery
+thesis survives contact with an external repo. **(2) The shipped baseline is
+NOT bad here** — 0.484 recall and rank 12, against 0/25 on skillspro. Suspect
+contamination first (public cal.com PRs + review threads), or skillspro's gold
+is simply harder; either way the per-tier gap is the WP9 protocol's point.
+**(3) F1 currently ranks the pipeline BELOW the baseline on this leaderboard**
+— the pipeline buys recall with posted volume, and Martian's F1 prices that
+volume. The attention boundary (thresholds, inline budget) has never been
+tuned; that is where the F1 points are, and it is a *ranking* lever, so mind
+locked decision 1 when touching it.
+
+### Also landed on the way
+
+- Config-mode model recording told the truth for the first time (`0a72bffa`):
+  fanout branch rows resolved through core's own PhaseRef/renderTemplate
+  (branch rows had recorded `models.default`; the adjudicate `{{#if}}` template
+  had recorded literal template garbage).
+- The evals dashboard showed no review panels for ANY suffixed pr-review tier
+  (`tier === "pr-review"` literal, 7 sites) — every config-mode run ever made
+  was affected; fixed with `isPrReviewTier()` (`9561cdca`).
+- `import-martian.ts --tier` + the pinned `pr-review-martian` tier dir with
+  sidecar/anchors staged and a README stating the pin.
+
+**Where the next point is: the found→said gap is still the cheapest recall**
+(skillspro internal union 21/25 vs posted 17/25) **and the attention boundary
+is the F1 lever on Martian.** G3-class discovery is bought; question-shape for
+the two never-found skillspro gold (1587-r2 #4/#5 class) and WP9 tier 2 (fresh
+private cases via `add-case`) remain open.
 
 ## 3. What to do next
 

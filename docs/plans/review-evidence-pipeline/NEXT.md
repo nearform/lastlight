@@ -445,6 +445,10 @@ which is why `1667` drew zero.
    the line inside it a caller cannot see and would be surprised by — a retry
    policy, a timeout, a swallowed error class." → gold #3.
 
+> **BUILT 2026-08-24** as `seedAllInDiff` + `seedRegistrations` behind
+> `review.analysis.mint` (`46ef88ee`), measured KEEP on the 8-case confirm
+> (internal paired +10/−1, p=0.006) — RESTART.md §2l is the record.
+
 **Two seeding changes for `code-facts`**, both narrow, both read straight off
 `facts.json`:
 

@@ -68,6 +68,26 @@ Two caveats, both already recorded in that dataset's README and both binding:
   do not "fix" it.
 - `instances.json` is gitignored and generated locally by
   `scripts/import-martian.ts`. Regenerate rather than assuming it is present.
+  **And PIN the import** (`--repo` at upstream `949e4a1`): upstream regrouped
+  its gold after PR #44 (137 → 173 findings), and an unpinned import silently
+  desyncs the committed sidecar and anchors. The pinned tier lives in the eval
+  workspace as `pr-review-martian` (importer `--tier`, added 2026-08-24), with
+  a README stating the pin.
+
+**Tier 1 RAN 2026-08-24 — the TypeScript slice (10 cal.com cases, 31 gold),
+once, on the frozen §2l configuration.** The full record is RESTART.md §2l;
+the headline: baseline (shipped reviewer, Sonnet) recall 0.484 / F1 0.462 /
+rank 12 of 23; pipeline (Haiku surveys, Sonnet review+adjudicate, D2 mints +
+anti-speculation) recall **0.581 in both repeats**, paired **+7/−0 gold,
+p=0.008** — the recall claim generalised — at precision 0.26–0.28, F1
+0.356–0.379, rank 17–20. The contamination caveat applies in full: the
+baseline's 0.484 against its 0/25 on skillspro is exactly the "public result
+dramatically better than private" signature §"The threat" warns about.
+**AC5's cost re-derivation, measured**: the 10-case TS slice costs ~$8.40
+(baseline) / ~$25 per pipeline repeat — call it **~$2.50/case for a pipeline
+arm**, so the full 50-case tier-1 gate is ~$125/arm, not the stale $35–120
+range (it lands mid-range, and the deterministic half stays free via
+`facts-corpus.ts`).
 
 ### Tier 2 — a second private repository
 
