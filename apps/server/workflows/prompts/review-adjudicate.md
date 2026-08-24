@@ -116,6 +116,18 @@ this run at all.
    `inline` is a defect of this pass. The recall rule above is untouched: a
    claim that something is WRONG, however thin, still reaches the review.
 
+   **A SPECULATIVE HAZARD is always `internal`, whatever its confidence.** A
+   finding whose defect exists only after a hypothetical future change —
+   *"nothing prevents a future developer from…"*, *"if this constant is later
+   renamed…"*, *"there is no mechanism stopping someone from re-enabling…"* —
+   asserts no misbehaviour of the code in this pull request. It is a design
+   observation, not a defect, and the maintainer it interrupts can do nothing
+   about it in this diff. Measured on this pipeline's own runs, twelve such
+   findings reached one clean pull request across two repeats — every one a
+   false positive. The line to hold: the defect must be reachable by the code
+   **as it stands in this PR**. A missing check on a live path is a finding; a
+   missing guard against an edit nobody has made is not.
+
 4. **Demote, do not delete.** Deleting requires naming the refuting transcript,
    by path, and that path must exist.
 

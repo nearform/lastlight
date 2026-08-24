@@ -558,7 +558,12 @@ function seedAllInDiff(symbols: SymbolFact[]): Obligation[] {
       mechanism: `${s.name} is changed in this diff and every one of its ${s.referenceCount} reference(s) is also inside the diff — no consumer outside the change constrains it, and a caller-side surprise is invisible file-by-file`,
       introducedAt: { path: site.path, line: site.line, quote: `${s.kind} ${s.name}` },
       enforcedAt: { candidates, found: false },
-      question: `Every consumer of ${s.name} is inside this diff. Quote the line inside ${s.name} a caller cannot see and would be surprised by — a retry policy, a timeout, a swallowed error class, a partial result returned as success — or state that no such line exists.`,
+      // The last sentence is load-bearing: the 8-case D2 confirm measured this
+      // question's escape hatch being answered with FUTURE hypotheticals
+      // ("nothing prevents a maintainer from…") — 7 and 5 of them posted on the
+      // zero-gold canary at precision 0. A hazard that needs a future edit is
+      // a clean discharge, not a finding, and the question must say so itself.
+      question: `Every consumer of ${s.name} is inside this diff. Quote the line inside ${s.name} a caller cannot see and would be surprised by — a retry policy, a timeout, a swallowed error class, a partial result returned as success — or state that no such line exists. Only what the code as written does TODAY counts: a hazard that requires a future edit ("nothing prevents someone from…", "if this is later renamed…") is NOT a finding — record the clean discharge instead.`,
       evidence: [{ type: "symbol", ref: `facts.symbols[${index}]` }],
       // `name-match` sites are HYPOTHESES, not a resolved reference set — the
       // same rule seedState applies.
