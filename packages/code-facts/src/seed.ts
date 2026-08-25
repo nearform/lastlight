@@ -33,7 +33,8 @@
  * ## What the families are built FROM, and why not from what you would guess
  *
  * Measured 2026-08-22 on the eight `skillspro` cases the gates are read on
- * (`03-seed-and-survey.md` §"Measured 2026-08-22"):
+ * (the retired WP3 doc §"Measured 2026-08-22", in git history; see
+ * `docs/plans/deterministic-pr-levers.md` §"Seed and survey (WP3)"):
  *
  * - **`enforcement` is built from the SUBTRACTION, never from `sides`.** `sides`
  *   is a heuristic path partition and it is **inert** on the gate repo — all 14
@@ -201,7 +202,12 @@ export interface ObligationsDocument {
 }
 
 export interface SeedOptions {
-  /** `review.analysis.maxObligations`. A BUDGET, so the seeder ranks. */
+  /**
+   * `review.analysis.maxObligations`. A TOTAL BACKSTOP applied **after**
+   * {@link FAMILY_CAPS}, never the primary mechanism: the ceilings are what
+   * bound each survey branch, and this only binds if an operator raises one.
+   * Its default is the caps' sum for exactly that reason.
+   */
   maxObligations?: number;
   /**
    * `review.analysis.obligationContract`. Default `full` — today's block,
@@ -217,7 +223,13 @@ export interface SeedOptions {
   log?: LoggerPort;
 }
 
-const DEFAULT_MAX_OBLIGATIONS = 40;
+/**
+ * The TOTAL backstop's default — the sum of {@link FAMILY_CAPS}
+ * (12 + 12 + 8 + 8 + 8), so on a shipped configuration the ceilings are the
+ * only thing that ever binds and this number is inert. It exists so that
+ * raising one cap cannot silently unbound the whole document.
+ */
+const DEFAULT_MAX_OBLIGATIONS = 48;
 
 /**
  * Mechanism class, strongest first. `contract` and `enforcement` are the two
@@ -283,6 +295,96 @@ function whollyInTests(introduced: string, candidates: string[]): boolean {
 
 /** How much a wholly-in-tests mechanism gives up. Enough to lose every tie. */
 const TEST_ONLY_PENALTY = 60;
+
+/**
+ * How many obligations each family may carry — **the** truncation mechanism.
+ *
+ * A pooled budget ranked mechanism-class-first is a budget the strongest class
+ * eats. Measured across the eight gate cases: `contract` minted **89**
+ * obligations and `security` minted **3**, and 35 obligations were dropped
+ * `over the per-PR budget … These are NOT "checked"` — so a family's questions
+ * went unasked because a *different* family had a lot to say, which is not what
+ * a ranking is supposed to mean. Two of `1667`'s five gold findings are
+ * security-family.
+ *
+ * Reserving slots inside the pool (the floors this replaces) was the wrong
+ * shape for two reasons, and both are about what the number BUYS:
+ *
+ * 1. **Cross-family ranking prices incommensurable things against each other.**
+ *    A `contract` rank of 91 and a `security` rank of 41 are not two points on
+ *    one scale — the weights are a mechanism CLASS ordering, not a probability,
+ *    and subtracting one family's questions from another's on the strength of
+ *    them is arithmetic nobody has evidence for.
+ * 2. **The cost is PER BRANCH, not per document.** Each family's obligations
+ *    feed exactly one survey branch, so a pooled cap bounds the sum while the
+ *    thing that actually costs money and context is the fattest single branch.
+ *    A ceiling bounds that directly; a pool never did.
+ *
+ * So each family keeps its own top obligations in the existing global-rank
+ * order, truncated at its own ceiling, and no family's excess can displace
+ * another's — which is what the floors were reaching for and did not reach.
+ * Replayed over the eight gate cases' stored `facts.json` (2026-08-25, $0, the
+ * `wp3-run3` artifacts): under the pooled budget plus floors, `contract` got
+ * **17, 15 and 8** slots on the three near-identical `1587` envelopes — the
+ * SAME family, on the same PR, swinging by a factor of two on where the other
+ * families' ranks happened to fall — while `enforcement` took 16 and `state`
+ * 13 of `1587-r3`'s forty. Under ceilings all three cases read 12/12/3/8.
+ * A budget whose per-family split moves like that is a budget no result can be
+ * attributed to, which is the other half of why this changed.
+ *
+ * The numbers are the two converting classes at 12 (`contract`, `enforcement`)
+ * and the rest at 8, summing to {@link DEFAULT_MAX_OBLIGATIONS}. Nothing here
+ * is tuned — when a family's ceiling is measured to bind on something that
+ * converts, this is the table that moves.
+ *
+ * The sixth family, `spec`, is not here: it is seeded harness-side by WP0's
+ * `review-spec.ts` under its own `review.analysis.maxSpecObligations` bound.
+ * Same shape, different owner — a per-family ceiling on a per-branch cost —
+ * and it is deliberately not folded into this table, because this package
+ * cannot see the PR body or the linked issue it is built from.
+ */
+export const FAMILY_CAPS: Record<SeedFamily, number> = {
+  contract: 12,
+  enforcement: 12,
+  state: 8,
+  security: 8,
+  tests: 8,
+};
+
+/** What a per-family ceiling refused, so `dropped[]` can name the family. */
+interface CappedResult {
+  kept: Obligation[];
+  /** family → how many of ITS obligations fell past its own ceiling. */
+  over: Map<SeedFamily, number>;
+}
+
+/**
+ * Truncate each family at its own {@link FAMILY_CAPS} entry.
+ *
+ * Three properties, each of which a test pins:
+ *
+ * 1. **A family's excess costs only that family.** `contract` minting 89 with
+ *    `security` minting 3 yields 12 and 3 — the starvation case, gone by
+ *    construction rather than by a reserve competing inside a pool.
+ * 2. **Deterministic, and the ids still ascend with rank.** `ranked` arrives in
+ *    global rank order and one pass keeps each family's first `cap` entries, so
+ *    the survivors come back in that same global order and one input yields a
+ *    byte-identical document.
+ * 3. **An under-cap family is untouched.** No slot is reserved, so a family
+ *    with two obligations gets two and gives nothing up to anyone.
+ */
+function applyFamilyCaps(ranked: Obligation[]): CappedResult {
+  const seen = new Map<SeedFamily, number>();
+  const over = new Map<SeedFamily, number>();
+  const kept: Obligation[] = [];
+  for (const o of ranked) {
+    const rank = (seen.get(o.family) ?? 0) + 1;
+    seen.set(o.family, rank);
+    if (rank <= FAMILY_CAPS[o.family]) kept.push(o);
+    else over.set(o.family, (over.get(o.family) ?? 0) + 1);
+  }
+  return { kept, over };
+}
 
 /** `path:line` → the pair, or `null` for anything that is not one. */
 function splitSite(site: string): { path: string; line: number } | null {
@@ -647,9 +749,12 @@ function seedRegistrations(symbols: SymbolFact[]): Obligation[] {
 /**
  * Build the obligation document from an `all` envelope.
  *
- * Ordering is by rank descending, then by id for stability, and the budget
- * truncates the TAIL — so what survives is what the ranking says converts, and
- * what was dropped is counted rather than vanished.
+ * Ordering is by rank descending, then by family for stability. Truncation is
+ * then {@link applyFamilyCaps} — each family keeps its own top questions in
+ * that same global order, up to its own ceiling — followed by
+ * `maxObligations` as a TOTAL backstop over what the ceilings left. So what
+ * survives is what each family's ranking says converts, no family displaces
+ * another, and what was dropped is counted rather than vanished.
  */
 export function seedObligations(doc: AllDocument, options: SeedOptions = {}): ObligationsDocument {
   const log = options.log ?? noopLogger;
@@ -691,16 +796,29 @@ export function seedObligations(doc: AllDocument, options: SeedOptions = {}): Ob
   });
 
   valid.sort((a, b) => b.rank - a.rank || a.family.localeCompare(b.family));
-  const kept = valid.slice(0, max);
-  if (valid.length > max) {
-    drop(
-      `over the per-PR budget of ${max} (review.analysis.maxObligations) — ranked by mechanism class then by how much of the impact cone lies outside the diff. These are NOT "checked"`,
-    );
-    // Count the truncation once per dropped obligation so the number is the
-    // number, not the number of reasons.
+
+  // The per-family ceilings first, counted ONE REASON PER FAMILY: a reader
+  // comparing two families' counts has to be able to tell "this family had
+  // little to say" from "this family was truncated at its own ceiling", and a
+  // pooled reason cannot say which.
+  const capped = applyFamilyCaps(valid);
+  for (const family of SEEDABLE_FAMILIES) {
+    const count = capped.over.get(family);
+    if (!count) continue;
     dropCounts.set(
-      `over the per-PR budget of ${max} (review.analysis.maxObligations) — ranked by mechanism class then by how much of the impact cone lies outside the diff. These are NOT "checked"`,
-      valid.length - max,
+      `over the per-family ceiling of ${FAMILY_CAPS[family]} for ${family} — that family's own obligations, ranked by how much of the impact cone lies outside the diff, past its ceiling. No other family lost a slot to them. These are NOT "checked"`,
+      count,
+    );
+  }
+
+  // …then the TOTAL backstop, which on a shipped configuration cannot bind
+  // (the default IS the ceilings' sum). It exists so that raising one ceiling
+  // is a bounded act rather than an unbounded one.
+  const kept = capped.kept.slice(0, max);
+  if (capped.kept.length > kept.length) {
+    dropCounts.set(
+      `over the total backstop of ${max} (review.analysis.maxObligations), applied AFTER the per-family ceilings — the lowest-ranked across every family. These are NOT "checked"`,
+      capped.kept.length - kept.length,
     );
   }
 

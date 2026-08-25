@@ -225,7 +225,7 @@ export interface PrState {
   /**
    * The issues this PR declares it will close, with their bodies — **what was
    * asked for**, and the first end of every `spec` obligation
-   * (`docs/plans/review-evidence-pipeline/`, §D7).
+   * (`docs/plans/deterministic-pr-levers.md` §Decisions, D7).
    *
    * `[]` on every dispatch until {@link resolveSpecContext} fills it, which
    * happens only when `review.analysis.enabled` is on. That is not laziness: it

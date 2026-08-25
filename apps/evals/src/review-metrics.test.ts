@@ -4,7 +4,7 @@
  * Two of these are load-bearing rather than incidental:
  *
  *  - **the back-fill reproduces published history exactly.** Every gate in
- *    `docs/plans/review-evidence-pipeline/` compares a candidate against the
+ *    `docs/plans/deterministic-pr-levers.md` compares a candidate against the
  *    already-measured shipped reviewer. If adding micro-recall silently changed
  *    what an old run scored, the comparator would be fiction. Run against the
  *    vendored `sample-results/pr-review` scorecard, so it is a real artifact and

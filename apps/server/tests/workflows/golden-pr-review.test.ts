@@ -35,7 +35,7 @@ import {
 /**
  * Golden test: WP3's evidence pipeline must be INERT.
  *
- * Acceptance criterion 1 of `docs/plans/review-evidence-pipeline/03-seed-and-survey.md`:
+ * Acceptance criterion 1 of `docs/plans/deterministic-pr-levers.md` §WP3:
  * with `review.analysis.enabled: false`, `pr-review` behaves exactly as it did
  * before the eight new phases existed. That is locked decision 8, and the
  * mechanism it rests on is a single context key — `analysisEnabled`, set ONLY by

@@ -49,7 +49,7 @@ export interface BootstrapResult {
  * So an arm measuring unreleased engine work, run through the globally-installed
  * CLI by mistake, would load published core, find none of the new phases, and
  * report that the change did nothing — with nothing anywhere erroring. Since
- * every gate in `docs/plans/review-evidence-pipeline/` is a delta against a
+ * every gate in `docs/plans/deterministic-pr-levers.md` is a delta against a
  * stored baseline, that failure is indistinguishable from a real negative
  * result. Recording the resolved path makes it checkable after the fact instead
  * of resting on whoever typed the command.

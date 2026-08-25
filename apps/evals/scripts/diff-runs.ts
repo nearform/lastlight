@@ -110,7 +110,7 @@ const ratio = (x: number | null | undefined) => (x === null || x === undefined |
 /**
  * Micro-recall, SNR and the paired significance for one slice.
  *
- * Micro-recall is the headline (`docs/plans/review-evidence-pipeline/08-evals.md`)
+ * Micro-recall is the headline (`docs/plans/deterministic-pr-levers.md` §WP8)
  * because the per-case F1 mean weights a 1-gold case like a 6-gold one and hands
  * an empty-gold case a free 1.00. The McNemar line is the detection floor made
  * mechanical: on a 25-finding gold set ONE extra hit is p = 0.50, and without

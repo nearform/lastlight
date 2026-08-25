@@ -293,7 +293,8 @@ export type RunPhaseResult =
  * it bypasses {@link AgentPort} (it drives one already-provisioned sandbox
  * directly) but each of its branches must still get an `executions` row, or the
  * fan-out silently loses resume, dedup and per-branch cost attribution — the
- * exact price `05-parallel-phases.md` warned an in-agent fan-out would pay.
+ * exact price WP5 warned an in-agent fan-out would pay
+ * (`docs/plans/deterministic-pr-levers.md` §"Parked: parallel phases (WP5)").
  */
 export async function runLedgeredPhase(
   attrs: Record<string, unknown>,

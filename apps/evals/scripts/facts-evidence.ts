@@ -80,7 +80,8 @@
  * partitions the same two bars by the payload each family is seeded FROM, on
  * TS/JS only — the split WP3's gates are read on.
  *
- * It is a **precondition, not a gate** (`03-seed-and-survey.md`): an arm that
+ * It is a **precondition, not a gate** (`docs/plans/deterministic-pr-levers.md`
+ * §"Seed and survey (WP3)"): an arm that
  * reports a family converting at zero must be able to say whether that family's
  * evidence coverage was ever above zero, so "did not convert" and "was never
  * nameable" stay distinguishable. `tests` and `spec` print **notMeasured** by
@@ -227,7 +228,8 @@ const STRICT_SURFACES: readonly Surface[] = ["facts.symbols", "contracts", "cons
 
 /**
  * WP3's six obligation families, mapped to the payloads each is seeded FROM
- * (`03-seed-and-survey.md` §"The families", as corrected on 2026-08-21).
+ * (the retired WP3 doc §"The families", as corrected on 2026-08-21 — git
+ * history; `docs/plans/deterministic-pr-levers.md` §"Seed and survey (WP3)").
  *
  * **Three of them read the same surface, and this instrument cannot separate
  * them.** `contract`, `security` and `state` all seed off `facts`, so a gold
@@ -701,7 +703,7 @@ function printFamilies(s: Scored): void {
   console.log(
     `    all three. Naming cannot say WHICH mechanism you would have asked about — read the \`only\` column for that.`,
   );
-  console.log(`  · notMeasured is never 0. A missing analyser is not a null result (08-evals.md §"a missing analyser…").`);
+  console.log(`  · notMeasured is never 0. A missing analyser is not a null result (deterministic-pr-levers.md §"The instrument (WP8)").`);
 }
 
 function printDelta(before: Scored, after: Scored): void {

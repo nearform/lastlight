@@ -1,7 +1,7 @@
 /**
  * `prepare` — the probe affordance.
  *
- * WP4 (`docs/plans/review-evidence-pipeline/04-probe-oracle.md`). It installs
+ * WP4 (`docs/plans/deterministic-pr-levers.md` §WP4). It installs
  * dependencies if they are absent, optionally typechecks, optionally produces a
  * coverage artifact, and writes `.lastlight/pr-review/probes/env.json` so every
  * downstream phase reads a FACT instead of grepping stdout.
@@ -34,7 +34,7 @@
  *    and EXCLUDES the project, so the case drops to tier 2 and `contracts`
  *    emits nothing. Measured across the 50-PR corpus: tier-1 cases 21 → 5,
  *    contract deltas 73 → 19, one cause, all 16 demoted cases
- *    ([03](../../../docs/plans/review-evidence-pipeline/03-seed-and-survey.md)).
+ *    ([WP3](../../../docs/plans/deterministic-pr-levers.md#seed-and-survey-wp3)).
  * 2. **It is what makes the `tests` family measurable at all.** The `coverage`
  *    extractor READS a report and never runs a suite; across all 50 corpus
  *    cases and all 8 gate cases it found **zero artifacts**. Until this phase

@@ -613,10 +613,10 @@ describe("post-review action (runPostReview)", () => {
         expect((await executor.execute(NODE, {})).status).toBe("succeeded");
         const posted = reviews[0]!.body as { comments: { line: number }[]; body: string };
 
-        // The ctx inline budget bound (2, not the packaged 8)…
+        // The ctx inline budget bound (2, not the packaged 10)…
         expect(posted.comments.map((c) => c.line)).toEqual([7, 8]);
-        // …and the ctx `null` opened the body funnel the packaged default
-        // (`maxBodyComments: 0`) would have closed.
+        // …and the ctx `null` opened the funnel wider than the packaged
+        // default (`maxBodyComments: 5`) would have.
         expect(posted.body).toContain("### Additional findings");
         for (const t of ["on-diff C", "on-diff D", "off-diff E"]) expect(posted.body, t).toContain(t);
       });
@@ -631,10 +631,10 @@ describe("post-review action (runPostReview)", () => {
       it("caps inline, keeps the rest in the BODY, and records every disposition", async () => {
         withReviewConfig({
           trigger: "on-request",
-          // `maxBodyComments: null` pins the LEGACY unlimited funnel — the
-          // shipped default is now `0` (no body overflow), which would empty
-          // the body this test exists to inspect. The shipped default has its
-          // own test below.
+          // `maxBodyComments: null` pins the LEGACY unlimited funnel, so this
+          // test inspects the demotion routing alone and never the body cap.
+          // The shipped default (`5`) is a real budget with its own test
+          // below; pinning here keeps the two questions apart.
           analysis: { ...defaultReviewConfig().analysis, enabled: true, maxInlineComments: 2, maxBodyComments: null },
         });
         const taskId = "widget-42-boundary-on";
@@ -668,17 +668,38 @@ describe("post-review action (runPostReview)", () => {
         ]);
       });
 
-      it("the shipped default (maxBodyComments: 0) closes the body — excess is recorded `body-budget`, not posted", async () => {
+      it("the shipped default (maxBodyComments: 5) bounds the body — the top five post, the excess is recorded `body-budget`", async () => {
         // Same shape as the test above, but WITHOUT pinning `maxBodyComments`:
-        // the spread carries the shipped default of 0, so nothing may tier to
-        // the body — the inline overflow and the off-diff finding all land
-        // `internal` with the machine reason `body-budget`, auditable on disk.
+        // the spread carries the shipped default of 5, which is a real budget
+        // rather than a closed door — so this needs MORE than five body
+        // candidates to bind at all. Six here: four off-diff plus the two the
+        // inline budget of 2 pushed over. The five best rank through; the
+        // sixth lands `internal` with the machine reason `body-budget`,
+        // auditable on disk.
         withReviewConfig({
           trigger: "on-request",
           analysis: { ...defaultReviewConfig().analysis, enabled: true, maxInlineComments: 2 },
         });
         const taskId = "widget-42-body-budget";
-        seedFindings(taskId, "widget", { summary: "ok", event: "COMMENT", findings: findings() });
+        seedFindings(taskId, "widget", {
+          summary: "ok",
+          event: "COMMENT",
+          findings: [
+            // Anchorable (PR_DIFF makes exactly RIGHT:7..10 commentable).
+            { path: "src/foo.ts", line: 7, severity: "Critical", title: "on-diff A", body: "b" },
+            { path: "src/foo.ts", line: 8, severity: "Critical", title: "on-diff B", body: "b" },
+            { path: "src/foo.ts", line: 9, severity: "Important", title: "on-diff C", body: "b" },
+            // Ranked last of everything (Minor × 0.2, still above the 0.15
+            // floor), so the one finding the cap cuts is unambiguous rather
+            // than a tie broken by document order.
+            { path: "src/foo.ts", line: 10, severity: "Minor", title: "on-diff D", body: "b", confidence: 0.2 },
+            // Off-diff: body-bound whatever the inline budget is.
+            { path: "src/other.ts", line: 99, severity: "Important", title: "off-diff E", body: "b" },
+            { path: "src/other.ts", line: 100, severity: "Important", title: "off-diff F", body: "b" },
+            { path: "src/other.ts", line: 101, severity: "Minor", title: "off-diff G", body: "b" },
+            { path: "src/other.ts", line: 102, severity: "Minor", title: "off-diff H", body: "b" },
+          ],
+        });
 
         const { executor } = makeExecutor(taskId);
         expect((await executor.execute(NODE, {})).status).toBe("succeeded");
@@ -686,22 +707,23 @@ describe("post-review action (runPostReview)", () => {
 
         // The inline budget is untouched by the body cap.
         expect(posted.comments.map((c) => c.line)).toEqual([7, 8]);
-        // No overflow section at all: the body is the summary, byte-for-byte.
-        expect(posted.body).toBe("ok");
+        // Five of the six body candidates are posted, ranked by severity ×
+        // confidence — and the sixth is simply absent from the review.
+        expect(posted.body).toContain("### Additional findings");
+        for (const t of ["off-diff E", "off-diff F", "off-diff G", "off-diff H", "on-diff C"]) {
+          expect(posted.body, t).toContain(t);
+        }
+        expect(posted.body).not.toContain("on-diff D");
 
-        // Nothing is deleted — the withheld three are on disk with the reason.
+        // Nothing is deleted — the withheld one is on disk with the reason.
         const record = JSON.parse(readFileSync(dispositionPath(taskId), "utf8")) as {
           findings: { tier: string; reason: string | null; finding: { title: string } }[];
         };
-        expect(record.findings).toHaveLength(5);
-        expect(record.findings.filter((r) => r.tier === "body")).toHaveLength(0);
+        expect(record.findings).toHaveLength(8);
+        expect(record.findings.filter((r) => r.tier === "body")).toHaveLength(5);
         expect(
           record.findings.filter((r) => r.tier === "internal").map((r) => [r.finding.title, r.reason]),
-        ).toEqual([
-          ["off-diff E", "body-budget"],
-          ["on-diff C", "body-budget"],
-          ["on-diff D", "body-budget"],
-        ]);
+        ).toEqual([["on-diff D", "body-budget"]]);
       });
 
       /**

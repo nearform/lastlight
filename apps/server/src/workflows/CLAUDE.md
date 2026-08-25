@@ -422,7 +422,7 @@ in the `executions` ledger), and runs the earliest-declared ready node — **one
 at a time, sequentially, in declaration order**.
 
 **Concurrency across DAG nodes is still deferred** (it needs per-phase git
-worktrees; see `docs/plans/review-evidence-pipeline/05-parallel-phases.md` for
+worktrees; see `docs/plans/deterministic-pr-levers.md` §WP5 for
 the four blockers). **Concurrency *within* a node exists today** — `type:
 fanout` runs N agent sessions against the one provisioned workspace. See "Phase
 types" above.

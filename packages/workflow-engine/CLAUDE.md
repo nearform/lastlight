@@ -20,7 +20,7 @@ core/
   scheduler.ts       The one scheduler — every workflow is a DAG. Drives phase
                      order, readiness, and loop iteration. Runs ONE ready node
                      at a time, in declaration order; concurrency across nodes
-                     is parked (see the review-evidence-pipeline plan).
+                     is parked (see the deterministic-pr-levers plan, §WP5).
   dag.ts             DAG construction + topological readiness. `getReadyNodes`
                      and `topoSort` are concurrency-correct and return every
                      ready node — the scheduler is what takes `ready[0]`.

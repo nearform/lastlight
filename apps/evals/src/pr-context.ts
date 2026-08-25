@@ -132,7 +132,7 @@ export interface PrStateSeed {
   cost_baseline_usd?: number;
   /**
    * The issues the PR says it closes, with their bodies — the FIRST end of every
-   * `spec` obligation (`docs/plans/review-evidence-pipeline/` §D7).
+   * `spec` obligation (`docs/plans/deterministic-pr-levers.md` §Decisions, D7).
    *
    * Seeded rather than read, for the same reason the whole snapshot is: in
    * production `resolveSpecContext` fetches it from

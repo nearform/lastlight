@@ -53,6 +53,7 @@
  * rule below is DELIVERY and is kept under both, and the obligation line goes
  * back to `discharge:` under `minimal` (see {@link renderOne}).
  */
+import type { StagedDiff } from "./schema.js";
 import type { Obligation, ObligationContract, ObligationsDocument, SeedFamily } from "./seed.js";
 
 const FAMILY_TITLE: Record<SeedFamily, string> = {
@@ -228,6 +229,156 @@ function renderOne(o: Obligation, contract: ObligationContract): string[] {
   ];
 }
 
+/** How many of a family's own files the section names before deferring to the index. */
+const STAGED_FILES_SHOWN = 12;
+
+/** `src/server/auth.ts:73` → `src/server/auth.ts`; a bare path is left alone. */
+function pathOf(candidate: string): string {
+  return candidate.replace(/:\d+(?:-\d+)?$/, "");
+}
+
+/**
+ * The f1 lever's half of the brief: **the diff is already on disk; do not
+ * re-derive the range.**
+ *
+ * Measured, and it is two costs in one. Across the five survey branches a case
+ * spends ~93 bash calls, ~30 of which re-derive ONE fixed merge-base range that
+ * `facts.json` already holds — and surveys are ~75% of a case's spend. That is
+ * the money. The other cost is correctness: every re-derivation is a fresh
+ * chance to write `git diff base..HEAD` instead of `base...HEAD`, and two-dot
+ * reports every commit the base branch picked up since the fork as though the
+ * author wrote it (50 real PRs, 9 diverge, one 6,125 files against 3).
+ *
+ * ── It is an AFFORDANCE, and the framing is measured ─────────────────────────
+ *
+ * The first cut said *"read the staged patch INSTEAD OF running `git diff`"* and
+ * over-suppressed: total survey bash calls fell 848 → 399, but the eliminated
+ * range re-derivation accounts for only ~276 of that — ~170 non-derivation calls
+ * (greps, file reads, reference tracing) went with it, and internal recall fell
+ * 21/25 → 12/25. Access was never reduced: the staged diff sits INSIDE the full
+ * checkout. A prohibition plus patch-anchoring narrowed the *behaviour*.
+ *
+ * So exactly one thing is forbidden — re-deriving the range — and the section
+ * says out loud that the patch is a starting point rather than a scope. That
+ * half is not decoration; it is the half the measurement says was missing.
+ *
+ * ── It is NEVER silently omitted ─────────────────────────────────────────────
+ *
+ * Three states and three different paragraphs, because they are three different
+ * facts and locked decision 6 is that they must never collapse:
+ *
+ *   - staged        — here is the index, here are your family's files, read them
+ *   - staging FAILED — `files: null`; the affordance is missing and you must
+ *                      derive the range yourself, three-dot
+ *   - never staged   — no record in the envelope at all; same instruction, and
+ *                      it says so rather than leaving the section out
+ *
+ * A missing section would read to a survey as *"this deployment has no staged
+ * diff"*, which is precisely the *"we could not look"* / *"we looked and it is
+ * clean"* conflation the rest of this pipeline is built to prevent.
+ *
+ * ── Every path here is CHECKOUT-RELATIVE, and that is measured too ───────────
+ *
+ * Across three stored runs, 98 of 98 relative first-turn reads from a survey
+ * branch succeeded and 0 of 27 workspace-root-absolute ones did: the only
+ * absolute path a branch has been handed by its first turn is its skill bundle,
+ * which lives one directory ABOVE the checkout the deterministic phases write
+ * in. So this section never prints an absolute path and says out loud not to
+ * build one.
+ */
+function renderStagedDiff(staged: StagedDiff | null | undefined, mine: Obligation[]): string[] {
+  const missing = (why: string): string[] => [
+    "STAGED DIFF: NOT AVAILABLE.",
+    "",
+    why,
+    "",
+    "That is a MISSING AFFORDANCE, not an empty diff, and nothing below may be read as though this PR",
+    "changed nothing. Derive the range yourself and use THREE DOTS —",
+    "`git diff origin/<baseBranch>...HEAD`. Two-dot additionally contains every commit that landed on",
+    "the base branch after this PR forked, and the author wrote none of it (50 real PRs, 9 diverge,",
+    "one of them 6,125 files against 3).",
+    "",
+    "You are in the FULL CHECKOUT either way, and once you have the range that patch is your STARTING",
+    "POINT, not your scope: open the changed files whole, grep for the callers and references it does",
+    "not show you, follow a changed symbol out into files this PR never touched.",
+  ];
+
+  if (!staged) {
+    return missing(
+      "The deterministic layer was not asked to stage this PR's diff, so there are no per-file patches.",
+    );
+  }
+  if (staged.files === null) {
+    return missing(
+      `The deterministic layer TRIED to stage this PR's diff and could not — see \`${staged.index}\`, and the` +
+        "\n`degraded[]` entry for `stage-diff` in the facts envelope, for what went wrong.",
+    );
+  }
+
+  const byPath = new Map(staged.files.map((f) => [f.path, f]));
+  const relevant = [
+    ...new Set(
+      mine.flatMap((o) => [o.introducedAt.path, ...o.enforcedAt.candidates.map(pathOf)]),
+    ),
+  ]
+    .filter((p) => byPath.has(p))
+    .sort();
+
+  const lines = [
+    `STAGED DIFF: this PR's patch is already on disk, at \`${staged.dir}/\`.`,
+    "",
+    `  ${staged.index}`,
+    "      the index — every changed file, its status (A/M/D/R), its changed line ranges at head, and",
+    "      the patch file that holds its diff. Read this first.",
+    `  ${staged.dir}/<file>.patch`,
+    "      the unified diff for ONE file, over the same MERGE-BASE range this whole brief is about.",
+    "      The deterministic layer resolved that range once, and this is it written down.",
+    "",
+    "DO NOT RE-DERIVE THE RANGE with `git diff` or `git show`. It is already settled; re-deriving it",
+    "is where a two-dot diff creeps back in, and a two-dot diff attributes other people's commits to",
+    "this author (50 real PRs, 9 diverge, one 6,125 files against 3).",
+    "",
+    "THE PATCH IS YOUR STARTING POINT, NOT YOUR SCOPE. You are in the FULL CHECKOUT, not in a patch",
+    "file: open the changed files whole, read the code on either side of every hunk, grep for the",
+    "callers and references the patch does not show you, follow a changed symbol out into files this",
+    "PR never touched. The defects worth finding live in the code the diff touches but does not",
+    "display.",
+    "",
+    "These paths are relative to your working directory — the repository checkout. Open them exactly",
+    "as written. Do NOT prefix them with anything: the only absolute path you have been handed is your",
+    "skill bundle, which sits one directory ABOVE the checkout, and joining onto it lands on a file",
+    "that does not exist.",
+  ];
+
+  if (relevant.length > 0) {
+    lines.push("", "The files THIS family's obligations name, and their patches:");
+    for (const path of relevant.slice(0, STAGED_FILES_SHOWN)) {
+      const file = byPath.get(path)!;
+      lines.push(
+        file.patch === null
+          ? `  ${path}   → NOT STAGED (it is in the index with no patch; read it at head)`
+          : `  ${path}   → ${staged.dir}/${file.patch}`,
+      );
+    }
+    if (relevant.length > STAGED_FILES_SHOWN) {
+      lines.push(
+        `  …and ${relevant.length - STAGED_FILES_SHOWN} more — the index lists every one of them.`,
+      );
+    }
+  }
+
+  const unstaged = staged.files.filter((f) => f.patch === null).length;
+  if (unstaged > 0) {
+    lines.push(
+      "",
+      `${unstaged} of the ${staged.files.length} changed file(s) are listed in the index with NO patch (a bound was hit;`,
+      "the envelope says which). They are still part of this PR — read them at head. A missing patch is",
+      "not an unchanged file.",
+    );
+  }
+  return lines;
+}
+
 /**
  * The tail of the block as it stood at `5fa06da1^`, restored from the diff.
  *
@@ -297,8 +448,18 @@ function minimalTail(family: SeedFamily): string[] {
  * seeder stamps it, this renders it, and `checkDischarge` grades against it, so
  * the three cannot disagree. A document written before the field existed reads
  * as `full`.
+ *
+ * `staged` is the ONE thing that does come as an argument, because it is not the
+ * seeder's to stamp: it belongs to the `facts` envelope (`stagedDiff`), which
+ * the seeder reads and does not own. The caller (`cli.ts`'s `seed`) passes it
+ * straight through from the document it just parsed. Omitting it is not the
+ * same as `null` and neither is silent — see {@link renderStagedDiff}.
  */
-export function renderFamilyBlock(doc: ObligationsDocument, family: SeedFamily): string {
+export function renderFamilyBlock(
+  doc: ObligationsDocument,
+  family: SeedFamily,
+  staged?: StagedDiff | null,
+): string {
   const contract: ObligationContract = doc.contract === "minimal" ? "minimal" : "full";
   const mine = doc.obligations.filter((o) => o.family === family);
   const row = doc.families.find((f) => f.family === family);
@@ -329,6 +490,10 @@ export function renderFamilyBlock(doc: ObligationsDocument, family: SeedFamily):
       lines.push("", `The analysis ran ${doc.coverage}. What was not analysed:`);
       for (const d of doc.degraded.slice(0, 10)) lines.push(`  - [${d.extractor}] ${d.reason}`);
     }
+    // The branch this section is worth MOST to: "work the diff directly" is
+    // exactly the instruction that sends an unseeded pass off to re-derive the
+    // range by hand.
+    lines.push("", ...renderStagedDiff(staged, []));
     return lines.join("\n");
   }
 
@@ -356,6 +521,12 @@ export function renderFamilyBlock(doc: ObligationsDocument, family: SeedFamily):
       `${truncation.count} further obligation(s) were built and dropped to stay inside the per-PR budget. They are NOT "checked".`,
     );
   }
+
+  // Per-run context, and it goes ABOVE the discharge contract deliberately: it
+  // is about how to READ the diff, which every obligation below then asks a
+  // question about. It is rendered under BOTH contracts — it is delivery, like
+  // the never-empty rule, not the question `minimal` exists to hold constant.
+  lines.push("", ...renderStagedDiff(staged, mine));
 
   lines.push("", ...(contract === "minimal" ? DISCHARGE_MINIMAL : DISCHARGE), "");
   for (const o of mine) lines.push(...renderOne(o, contract));

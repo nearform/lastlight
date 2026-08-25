@@ -113,6 +113,54 @@ export const LanguageStatSchema = z.object({
 });
 export type LanguageStat = z.infer<typeof LanguageStatSchema>;
 
+// ── the staged diff — the range, written down once ───────────────────────────
+
+/**
+ * One changed file, as it was staged under `.lastlight/pr-review/diff/`.
+ *
+ * `patch` is a FILENAME inside that directory, never a path — the consumer
+ * joins it onto `dir`, and a document that carried a host path would leak the
+ * workspace root into a model's prompt (`selfcheck.ts`, `no-absolute-paths`).
+ * `null` means the row is an INVENTORY entry with no body on disk: the ceiling
+ * bound, the patch was too large, or git produced no hunk for it. The row is
+ * still here, because the alternative is a file silently missing from an index
+ * that claims to be complete.
+ */
+export const StagedDiffFileSchema = z.object({
+  path: z.string(),
+  status: z.enum(["added", "modified", "deleted", "renamed", "other"]),
+  /** The path this file had at BASE when `status` is `renamed`; `null` otherwise. */
+  renamedFrom: z.string().nullable(),
+  /** `start-end`, 1-based and inclusive, in HEAD coordinates. Empty for a pure deletion. */
+  hunks: z.array(z.string()),
+  /** The patch's filename inside `dir`, or `null` when no body was written. */
+  patch: z.string().nullable(),
+  /** Bytes actually written. `0` beside a `null` patch. */
+  bytes: z.number().int(),
+});
+export type StagedDiffFile = z.infer<typeof StagedDiffFileSchema>;
+
+/**
+ * What the run staged, so a consumer can point a model at it without guessing
+ * whether it is there.
+ *
+ * `files: null` is *staging could not run* — never `[]`, which is the honest
+ * answer for a range that genuinely changed nothing and would otherwise be
+ * indistinguishable from a git call that died. The field's ABSENCE from an
+ * envelope is a third fact again: this run was never asked to stage.
+ */
+export const StagedDiffSchema = z.object({
+  /** Repo-relative, always: `.lastlight/pr-review/diff`. */
+  dir: z.string(),
+  /** Repo-relative path of the index a model reads first. */
+  index: z.string(),
+  /** `null` when staging failed outright. `[]` only when the diff is empty. */
+  files: z.array(StagedDiffFileSchema).nullable(),
+  /** Anything git emitted that could not be attributed to a changed path. */
+  skipped: z.array(z.object({ path: z.string(), reason: z.string() })),
+});
+export type StagedDiff = z.infer<typeof StagedDiffSchema>;
+
 export const EnvelopeSchema = z.object({
   /**
    * **2** since the TS 7 migration (`docs/plans/fact-engine/`): `engine` lost
@@ -141,6 +189,17 @@ export const EnvelopeSchema = z.object({
   coverage: z.enum(["full", "degraded", "none"]),
   degraded: z.array(DegradedEntrySchema),
   toolchain: ToolchainStampSchema,
+  /**
+   * OPTIONAL, and the optionality is the point: absent means this run was never
+   * asked to stage the diff, which is a different fact from asking and failing
+   * (`files: null`) and from asking and finding nothing (`files: []`).
+   *
+   * It sits on the envelope rather than under `extractors` because it describes
+   * the RANGE, not an extractor's answer about it — every extractor in the
+   * document is about the same two commits, and this is where they were written
+   * down for a reader.
+   */
+  stagedDiff: StagedDiffSchema.optional(),
 });
 export type Envelope = z.infer<typeof EnvelopeSchema>;
 
@@ -516,7 +575,7 @@ export type AllDocument = z.infer<typeof AllDocumentSchema>;
 /**
  * `.lastlight/pr-review/probes/env.json` — what WP4's `prepare` phase did to the
  * tree, as a FACT rather than a substring of stdout
- * (`docs/plans/review-evidence-pipeline/04-probe-oracle.md`).
+ * (`docs/plans/deterministic-pr-levers.md` §"Probes (WP4)").
  *
  * It is not an {@link EnvelopeSchema} document and deliberately so: `prepare`
  * makes no claim about `baseSha..headSha`, resolves no tier and runs no parser,
@@ -611,7 +670,8 @@ export type ProbeEnv = z.infer<typeof ProbeEnvSchema>;
 /**
  * `.lastlight/pr-review/findings.json`, as far as the WP6c **conservation
  * gate** cares — and no further
- * (`docs/plans/review-evidence-pipeline/06-adjudicate.md` §"The phase").
+ * (`docs/plans/deterministic-pr-levers.md` §"Adjudication and the attention
+ * boundary (WP6)").
  *
  * Two properties are deliberate and both are load-bearing.
  *

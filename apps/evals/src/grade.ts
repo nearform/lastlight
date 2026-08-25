@@ -30,6 +30,29 @@ import type { ExpectGithub, ExpectMarkers, GoldComment } from "./schema.js";
 import type { FakeGitHub, SubmittedReview } from "./fake-github.js";
 import { judge, parseJudgeJson, defaultJudgeModel } from "./judge.js";
 
+/**
+ * One judge call with a single retry on an UNPARSEABLE reply. Temp-0 judges
+ * still occasionally return truncated/malformed JSON (three cases in one day,
+ * 2026-08-25 — each erroring a fully-run case as ungraded), and a fresh call
+ * almost always parses. Retries parse failures only: a thrown HTTP/key error
+ * keeps its existing meaning and path. Returns the LAST raw reply for the
+ * trace either way.
+ */
+async function judgeParsed<T>(
+  model: string,
+  system: string,
+  user: string,
+  valid: (parsed: T | null) => boolean,
+): Promise<{ raw: string; parsed: T | null }> {
+  let raw = await judge(model, system, user);
+  let parsed = parseJudgeJson<T>(raw);
+  if (!valid(parsed)) {
+    raw = await judge(model, system, user);
+    parsed = parseJudgeJson<T>(raw);
+  }
+  return { raw, parsed };
+}
+
 export interface Check {
   name: string;
   ok: boolean;
@@ -338,7 +361,8 @@ const MATCH_SYSTEM =
  * `findings.json` is fed to MATCH directly — and the pipeline's findings
  * include VERIFICATION REPORTS: *"Enforcement check passed:
  * SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS — properly enforced"*, confidence 1.00.
- * Measured on the stored X1 repeats (RESTART.md §2f), the shared prompt
+ * Measured on the stored X1 repeats (journal §2f, git history; summarised in
+ * `docs/plans/deterministic-pr-levers.md` §"The instrument (WP8)"), the shared prompt
  * credited exactly those against gold whose entire point is the opposite claim
  * ("nothing compares `issuedAt` against the max-age constant") — same
  * constant, same file, opposite verdict, scored as "found". Every
@@ -455,8 +479,13 @@ export async function gradeReview(opts: {
   // 1. Extract distinct findings from the review.
   let findings: ExtractedFinding[];
   try {
-    rawExtract = await judge(model, EXTRACT_SYSTEM, withDiffContext(diff, "context only — extract findings ONLY from the reviewer's writeup below", `REVIEWER'S WRITEUP:\n${text}`));
-    const parsed = parseJudgeJson<{ findings?: ExtractedFinding[] }>(rawExtract);
+    const { raw, parsed } = await judgeParsed<{ findings?: ExtractedFinding[] }>(
+      model,
+      EXTRACT_SYSTEM,
+      withDiffContext(diff, "context only — extract findings ONLY from the reviewer's writeup below", `REVIEWER'S WRITEUP:\n${text}`),
+      (p) => !!p?.findings,
+    );
+    rawExtract = raw;
     if (!parsed?.findings) return empty({ error: "judge: unparseable extraction reply" });
     findings = parsed.findings.filter((f) => f && typeof f.description === "string" && f.description.trim());
   } catch (err) {
@@ -497,8 +526,13 @@ export async function gradeReview(opts: {
   });
   let matches: { finding: number; gold: number }[];
   try {
-    rawMatch = await judge(model, MATCH_SYSTEM, withDiffContext(diff, "resolve whether a finding and a gold issue point at the same code", matchUser));
-    const parsed = parseJudgeJson<{ matches?: { finding: number; gold: number }[] }>(rawMatch);
+    const { raw, parsed } = await judgeParsed<{ matches?: { finding: number; gold: number }[] }>(
+      model,
+      MATCH_SYSTEM,
+      withDiffContext(diff, "resolve whether a finding and a gold issue point at the same code", matchUser),
+      (p) => !!p?.matches,
+    );
+    rawMatch = raw;
     if (!parsed?.matches) return empty({ error: "judge: unparseable match reply", posted });
     matches = parsed.matches;
   } catch (err) {
@@ -592,7 +626,7 @@ export interface InternalRecallGrade {
  * generated. Those are completely different failures: the first is an attention
  * problem with a threshold to turn, the second is the discovery ceiling this
  * plan's whole thesis is about
- * (`docs/plans/review-evidence-pipeline/TLDR.md`). Measuring them as one number
+ * (`docs/plans/deterministic-pr-levers.md`). Measuring them as one number
  * is how "the filters kept their hands off gold" and "the boundary is inert"
  * were both believed at once.
  *
@@ -626,8 +660,12 @@ export async function gradeInternalRecall(opts: {
 
   let matches: { finding: number; gold: number }[];
   try {
-    const raw = await judge(model, INTERNAL_MATCH_SYSTEM, withDiffContext(diff, "resolve whether a finding and a gold issue point at the same code", user));
-    const parsed = parseJudgeJson<{ matches?: { finding: number; gold: number }[] }>(raw);
+    const { parsed } = await judgeParsed<{ matches?: { finding: number; gold: number }[] }>(
+      model,
+      INTERNAL_MATCH_SYSTEM,
+      withDiffContext(diff, "resolve whether a finding and a gold issue point at the same code", user),
+      (p) => !!p?.matches,
+    );
     if (!parsed?.matches) return { goldToFinding: gold.map(() => null), matched: 0, error: "judge: unparseable match reply" };
     matches = parsed.matches;
   } catch (err) {

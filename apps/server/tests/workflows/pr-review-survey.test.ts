@@ -13,7 +13,7 @@ import {
 
 /**
  * WP3 acceptance criteria 3 and 4 of
- * `docs/plans/review-evidence-pipeline/03-seed-and-survey.md`.
+ * `docs/plans/deterministic-pr-levers.md` §WP3.
  *
  * **AC3 — each survey pass writes only its own family's file.** The union is
  * append-only and collapse is meant to be impossible *by construction*: five
@@ -329,6 +329,73 @@ describe("AC4 — what was NOT analysed reaches the model", () => {
     expect(byName.get("seed")!.command).toContain("|| true");
   });
 
+  /**
+   * f1 — the diff is staged ONCE, by the phase that already owns the range.
+   *
+   * Measured: the five branches make ~93 bash calls per case and ~30 of them
+   * re-derive this one fixed merge-base range, while surveys are ~75% of a
+   * case's spend. The correctness half matters more — every re-derivation is a
+   * fresh chance to write two dots, and the same corpus that motivates the
+   * `merge-base` assertion above says what that costs (6125 files against 3).
+   *
+   * Three strings, one location: the flag on the `facts` invocation, the
+   * directory `code-facts` writes into, and the path every prompt points at. If
+   * they part company the branches look for a diff nobody staged and quietly go
+   * back to `git diff`.
+   */
+  it("stages the diff once, in the phase that resolved the range", () => {
+    expect(FACTS_COMMAND).toContain("--stage-diff");
+    // On the SAME invocation as the range, not a second command with its own
+    // idea of the base — that would be the two-dot bug with extra steps.
+    expect(FACTS_COMMAND).toMatch(/"\$FACTS" all --repo \. --base "\$BASE" --head HEAD .*--stage-diff/);
+    // Loud either way: a phase that staged nothing must say so, or "the layer
+    // wrote no patches" and "the branches never looked" become one silence.
+    expect(FACTS_COMMAND).toContain(".lastlight/pr-review/diff/index.md");
+    expect(FACTS_COMMAND).toContain("NO staged diff");
+  });
+
+  it("points every survey prompt at the staged diff, by RELATIVE path", () => {
+    // The relative form is not a style choice: across three stored runs, 98 of
+    // 98 relative first-turn reads from a survey branch resolved and 0 of 27
+    // workspace-root-absolute ones did, because the only absolute path a branch
+    // holds is its skill bundle — one directory ABOVE the checkout.
+    for (const family of BRANCH_FAMILIES) {
+      const text = promptText(family);
+      expect(text, `survey-${family}.md`).toContain(".lastlight/pr-review/diff/index.md");
+      expect(text, `survey-${family}.md`).toContain(
+        "**Do NOT re-derive this PR's range with `git diff` or `git show`.**",
+      );
+      // Three dots, in the one escape hatch the prompt still offers.
+      expect(text, `survey-${family}.md`).toContain("git diff origin/{{baseBranch}}...HEAD");
+      // Non-vacuity for the assertion above: no prompt may hand the branch an
+      // absolute path to join onto.
+      expect(text, `survey-${family}.md`).not.toContain("/.lastlight/pr-review/diff");
+    }
+  });
+
+  /**
+   * …and the other half of it, which is what a measured arm cost us.
+   *
+   * The staged diff landed as a prohibition ("do NOT run `git diff` … it is
+   * already staged") under `## Hard limits`, and it over-suppressed: total
+   * survey bash calls fell 848 → 399 while the eliminated range re-derivation
+   * accounts for only ~276 of that. The other ~170 were greps, whole-file reads
+   * and reference tracing — and internal recall fell 21/25 → 12/25. Access was
+   * never reduced (the staged diff sits INSIDE the full checkout); the framing
+   * narrowed the behaviour. So the prompt now forbids exactly one thing and says
+   * out loud that the patch is a starting point rather than a scope.
+   */
+  it("tells every survey branch it has the whole checkout, not just the patch", () => {
+    for (const family of BRANCH_FAMILIES) {
+      const text = promptText(family);
+      expect(text, `survey-${family}.md`).toContain("## What you have: the whole checkout");
+      expect(text, `survey-${family}.md`).toContain("STARTING POINT, not your scope");
+      // The affordance must not read as an exception to a ban: nothing may
+      // survive that forbids reading beyond the patch.
+      expect(text, `survey-${family}.md`).not.toContain("to obtain this PR's diff");
+    }
+  });
+
   it("agrees with the branches on where the per-family blocks are written", () => {
     // The seeder's `--blocks <dir>` and the file each branch is seeded FROM are
     // two independent strings for one location. If they part company the pass
@@ -373,6 +440,37 @@ describe("AC4 — what was NOT analysed reaches the model", () => {
       expect(text, `survey-${family}.md`).toContain(BRANCH_CONTEXT_HEADING);
       expect(text, `survey-${family}.md`).toContain("Do not go looking for them on disk");
     }
+  });
+
+  /**
+   * Backlog item #24, closed: `review.analysis.maxObligations` was DEAD config
+   * on the workflow path.
+   *
+   * It is validated in `config.ts`, clamped by the repo layer and documented in
+   * the spec — and the `seed` phase invoked `lastlight-facts seed` without
+   * `--max-obligations`, so the CLI's own default (also 40) applied to every
+   * run. The wrong value and the right one were the same number, which is why
+   * nothing measured it.
+   *
+   * The key is now the TOTAL BACKSTOP over the seeder's per-family ceilings
+   * (contract 12, enforcement 12, state 8, security 8, tests 8), and its
+   * default is their sum — so it cannot bind unless an operator raises a
+   * ceiling. The two defaults are *still* equal, deliberately, which is why
+   * this test pins the number on both sides rather than trusting the accident.
+   */
+  it("passes the obligation BACKSTOP to the seeder, defaulted in the shell", () => {
+    const seed = byName.get("seed")!.command!;
+    // Read into a shell variable and defaulted there — never interpolated
+    // straight into the arg list, because `renderTemplate` substitutes an
+    // ABSENT key with the empty string and `--max-obligations --blocks` would
+    // then swallow the next flag. The same rule `CONTRACT` follows.
+    expect(seed).toContain('MAX_OBLIGATIONS="{{maxObligations}}"');
+    expect(seed).toContain('--max-obligations "${MAX_OBLIGATIONS:-48}"');
+    expect(seed).not.toMatch(/--max-obligations\s+\{\{/);
+    // The shell default matches `code-facts`' own DEFAULT_MAX_OBLIGATIONS — and
+    // that number is the per-family ceilings' sum — so an unprojected key
+    // reproduces today's behaviour rather than seeding zero or unbounding it.
+    expect(seed).toContain("--contract \"${CONTRACT:-minimal}\"");
   });
 
   it("keeps the seeder's per-family manifest, so a missing block is a LOGGED fact", () => {

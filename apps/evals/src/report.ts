@@ -722,6 +722,25 @@ export interface IndexRun {
   /** Comparison axis (see {@link RunMeta.runType}) — lets the SPA badge a run
    * without fetching its scorecard. Absent ⇒ `"models"`. */
   runType?: "models" | "config";
+  /**
+   * The ARM labels under test (`meta.models`) — model ids in a `models` run,
+   * config/overlay names in a `config` run.
+   *
+   * `byTier` already carries a per-arm summary, but only for arms that have
+   * FINISHED a case: a run that is still live with nothing graded yet has an
+   * empty `byTier` and would otherwise be an unnamed row. Carried here so the
+   * overview can name a run's arm from the index alone. */
+  models?: string[];
+  /** The primary `--overlay` (`meta.overlay`) — the other half of the arm's
+   * identity, and the one that carries the `review:` policy. Absent ⇒ not
+   * recorded (built-in assets, or a run measured before the stamp existed). */
+  overlay?: string;
+  /** Set when this run is one repeat of a deliberate band (`meta.repeat`). This
+   * is what lets the overview fold N sibling runs into ONE row instead of
+   * showing a band as N unrelated results; `group` is the first repeat's
+   * `runId` and `of` says how many repeats to expect, so a band that is still
+   * in flight is distinguishable from a short one. */
+  repeat?: RepeatRef;
   tiers: string[];
   /** Display labels keyed by model id, carried for the SPA. */
   labels: Record<string, string>;
@@ -793,6 +812,9 @@ function indexRun(tierKey: string, dir: string, card: Scorecard, nowMs: number):
     generatedAt: meta?.generatedAt ?? dir ?? "",
     gitSha: meta?.gitSha,
     runType: meta?.runType,
+    models: meta?.models,
+    overlay: meta?.overlay,
+    repeat: meta?.repeat,
     tiers: meta?.tiers ?? tierOrder,
     labels: meta?.labels ?? {},
     byTier,

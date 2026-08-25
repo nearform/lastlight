@@ -693,7 +693,8 @@ async function main() {
     if (prState) {
       const reviewConfig = repoConfig?.review ?? config.review;
       // The `spec` axis's two live reads — the issues this PR closes, and its
-      // changed-file list (`docs/plans/review-evidence-pipeline/` §D7). Gated on
+      // changed-file list (`docs/plans/deterministic-pr-levers.md` §Decisions,
+      // D7). Gated on
       // `review.analysis.enabled`, which is operator-only, so a repo can neither
       // buy itself the extra reads nor opt out of the operator's pipeline.
       //

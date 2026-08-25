@@ -239,7 +239,7 @@ const PhaseDefinitionSchema = z
      * `{{phaseOutputs.<name>.output}}`). A non-zero exit fails the phase.
      *
      * **Why `fanout` is one node rather than N parallel phases.** Real DAG
-     * concurrency is parked (`docs/plans/review-evidence-pipeline/05-parallel-phases.md`)
+     * concurrency is parked (`docs/plans/deterministic-pr-levers.md` §WP5)
      * behind four hard blockers and seven design changes, and that doc records
      * why: *"every hard blocker exists because each phase provisions its own
      * sandbox against a shared workspace"*. A fan-out INSIDE one phase has none

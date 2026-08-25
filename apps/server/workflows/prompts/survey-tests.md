@@ -29,6 +29,24 @@ guardrail is elsewhere.
 - **Do NOT read or write any other family's file.** Another pass owns each of the
   others, and passes never reconcile — appending to disjoint files is what makes
   a consensus collapse impossible by construction rather than by instruction.
+- **Do NOT re-derive this PR's range with `git diff` or `git show`.** The
+  deterministic layer resolved the merge-base range once and staged it:
+  `.lastlight/pr-review/diff/index.md` lists every changed file with its status,
+  its changed line ranges and the per-file patch that holds its diff, all under
+  `.lastlight/pr-review/diff/`. Read those. The paths are relative to your
+  working directory — open them exactly as written and never join them onto an
+  absolute path. Re-deriving the range is how a two-dot diff creeps back in and
+  claims commits the author never wrote; if the index says NOT AVAILABLE, derive
+  it yourself as `git diff origin/{{baseBranch}}...HEAD`, three dots.
+
+## What you have: the whole checkout
+
+You are sitting in the complete repository at head, not in a patch file. The
+staged diff is your STARTING POINT, not your scope. Open the changed files
+whole, read the code on either side of every hunk, grep for the callers and
+references the patch never shows you, follow a changed symbol out into the files
+this PR did not touch. That is the work, not a licence: **the defects worth
+finding live in the code the diff touches but does not display.**
 
 ## Your family: `tests`
 

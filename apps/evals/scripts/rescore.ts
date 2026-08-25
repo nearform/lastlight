@@ -8,7 +8,7 @@
  * and the per-family funnel are all arithmetic over those, so a run measured
  * before those metrics existed can gain them without being re-run. That is what
  * makes the shipped `pr-review` baseline usable as the comparator for every gate
- * in `docs/plans/review-evidence-pipeline/` instead of costing a fresh arm.
+ * in `docs/plans/deterministic-pr-levers.md` instead of costing a fresh arm.
  *
  * It also **verifies history was not rewritten**: the per-case means are
  * recomputed from the stored results and compared against the summary already on

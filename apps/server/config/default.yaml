@@ -18,13 +18,20 @@ botName: last-light
 
 models:
   default: anthropic/claude-sonnet-4-6
+  # The five `pr-review.yaml` survey branches and `falsify`. SET, not an
+  # example — see the note below: this is the measured RECALL winner for
+  # hypothesis generation, not a cost downgrade, and leaving it unset silently
+  # ran six Sonnet phases under every number the pipeline was tuned on. A
+  # deployment whose `models.default` points at a non-Anthropic provider MUST
+  # override this in its overlay `config.yaml`, or these six phases reach for a
+  # provider it has no key for.
+  review-survey: anthropic/claude-haiku-4-5-20251001
   # Per-task overrides keyed by phase or helper name, e.g.:
   #   architect: anthropic/claude-opus-4-8
   #   classifier: anthropic/claude-haiku-4-5-20251001   # the intent-routing helper
   #   screener: anthropic/claude-haiku-4-5-20251001     # the prompt-injection screener
   #   diagnose: anthropic/claude-haiku-4-5-20251001     # the CI-failure classifier
   #   pr-fix-retry: anthropic/claude-opus-4-8           # used above fix.escalateModelAfterAttempt
-  #   review-survey: anthropic/claude-haiku-4-5-20251001  # the five survey passes
   #   review-adjudicate: anthropic/claude-sonnet-4-6      # the adjudication pass
   # A per-task entry wins over `default`. `classifier`/`screener` are the cheap
   # one-shot helpers (src/engine/llm.ts); when unset they fall back to the first
@@ -38,16 +45,33 @@ models:
   # for a provider it has no key for. Unset, it falls through to `default`, so
   # each fix run costs one extra call at the default model until you pin it.
   #
-  # `review-survey` is the key the five survey branches of `pr-review.yaml` declare
-  # (`model: "{{models.review-survey}}"`, one per obligation family). Pinning it
-  # to Haiku 4.5 is NOT a cost downgrade, and that is the unusual part: on review
-  # RECALL, Haiku 4.5 BEATS Sonnet 4.6 on two independent evals — 41.2% vs 22.1%
-  # on the Martian corpus. It is the better model for this phase, and its price
-  # is merely what makes a five-way fan-out affordable inside the pipeline's 2–3x
-  # budget. Left UNSET for exactly the `diagnose` reason above: these examples
-  # name Anthropic models, and a deployment that overrode only `default` to
-  # another provider would find six phases reaching for a provider it has no key
-  # for. Unset, all six fall through to `default` — correct, and dearer.
+  # `review-survey` is SET above, and it is the one entry in this block that is
+  # not an example. It is the key the five survey branches of `pr-review.yaml`
+  # declare (`model: "{{models.review-survey}}"`, one per obligation family)
+  # and, since it has no key of its own, the `falsify` phase too — six phases.
+  #
+  # Pinning it to Haiku 4.5 is NOT a cost downgrade, and that is the unusual
+  # part: on review RECALL, Haiku 4.5 BEATS Sonnet 4.6 on two independent evals
+  # — 41.2% vs 22.1% on the Martian corpus. It is the better model for
+  # HYPOTHESIS GENERATION, which is what a survey branch does; its price is
+  # merely what makes a five-way fan-out affordable inside the pipeline's 2–3x
+  # budget. It is a different question from the SAYING phases (`review`,
+  # `adjudicate`), which are not pinned here.
+  #
+  # It was deliberately left unset for a long time, for the `diagnose` reason
+  # above — these are Anthropic model ids, and a deployment that overrode only
+  # `default` to another provider would find six phases reaching for a provider
+  # it has no key for. That reason has not gone away; it is now handled the
+  # other way round, because the cost of the unset default turned out to be
+  # worse. Unset, all six fell through to `default` (Sonnet) SILENTLY, so an
+  # operator who enabled the pipeline ran a configuration no measurement in
+  # `docs/plans/deterministic-pr-levers.md` describes — every recall, cost and
+  # latency number on record assumes Haiku surveys. A wrong-provider failure is
+  # loud on the first run; a quietly-different model is not.
+  #
+  # SO: a non-Anthropic deployment must override this key in its overlay
+  # `config.yaml` (a cheap, fast model of its own provider), exactly as it
+  # already overrides `models.default`.
   #
   # `review-adjudicate` is the adjudicate phase's own key in `pr-review.yaml` —
   # the RANKING pass over what the surveys found, a different task from survey
@@ -299,7 +323,7 @@ review:
     - "*.min.css"
     - "*.generated.*"
     - "**/__generated__/**"
-  # The review evidence pipeline (docs/plans/review-evidence-pipeline/).
+  # The review evidence pipeline (docs/plans/deterministic-pr-levers.md).
   #
   # OFF by default and that is a locked decision: `enabled: false` reproduces
   # today's two-phase review BYTE-FOR-BYTE — every variable this block governs
@@ -353,10 +377,18 @@ review:
     # (maxInlineComments + the family thresholds) do the narrowing. Truncating
     # obligations truncates DISCOVERY, and discovery is the measured ceiling.
     maxSpecObligations: 40
-    # The same, for the five facts-derived families pooled. Ranked by mechanism
-    # class (`enforcement` and `contract` are the two that have ever converted)
-    # then by how much of the impact cone lies outside the diff.
-    maxObligations: 40
+    # The five facts-derived families are bounded PER FAMILY, not pooled:
+    # contract 12, enforcement 12, state 8, security 8, tests 8 (FAMILY_CAPS in
+    # packages/code-facts/src/seed.ts). Each family's obligations feed exactly
+    # ONE survey branch, so the cost is per branch and a pooled cap never bound
+    # the fattest one; and cross-family ranking prices incommensurable mechanism
+    # classes against each other — measured, `contract` minted 89 across the
+    # eight gate cases while `security` minted 3, and the pool went to contract.
+    #
+    # This key is the TOTAL BACKSTOP applied after those ceilings, and it is
+    # their sum — so it cannot bind on a shipped configuration. It exists so
+    # that raising one ceiling is a bounded act rather than an unbounded one.
+    maxObligations: 48
 
     # Which obligation BLOCK the six families are handed. `full` | `minimal`.
     #
@@ -484,23 +516,32 @@ review:
     # for being noisy: this is an attention boundary, not the v2 suppressor that
     # was built, measured and reverted.
     #
-    # Eight, from "Does AI Code Review Lead to Code Changes?" (22k+ real review
+    # Ten, from "Does AI Code Review Lead to Code Changes?" (22k+ real review
     # comments): concise, hunk-level, actionable findings are substantially
-    # likelier to cause a change. Twenty inline comments is a muted bot.
-    maxInlineComments: 8
+    # likelier to cause a change, and the wall the paper warns about is TWENTY.
+    # A ceiling rather than a budget that bites — measured inline volume is 1–5
+    # per PR, so this has never bound, and the overflow goes to the body.
+    maxInlineComments: 10
     # The BODY budget — how many findings the review body's "Additional
-    # findings" list may carry. 0 (the default) = NO overflow: nothing tiers
-    # to body, and anything that would have is recorded in disposition.json at
+    # findings" list may carry. N (the default is 5) keeps the top N ranked by
+    # severity × confidence and records the rest in disposition.json at
     # `internal` with reason `body-budget` — capped attention, never a lost
-    # record. N > 0 keeps the top N ranked by severity × confidence; null =
-    # unlimited (the pre-2026-08-24 funnel). Measured on the external set
-    # under the production model shape: 0 keeps 29 of 36 matched gold while
-    # precision goes 0.263 → 0.492 (F1 0.362 → 0.479, above the two-phase
-    # baseline). CAVEAT: with a weak ADJUDICATOR model the body tier carries
-    # most of the recall (Haiku-everywhere: 0.42 → 0.12 under this cap), so an
-    # eval overlay measuring that shape must pin `null` explicitly. Eight
-    # high-value comments beat fifty and a wall of body text.
-    maxBodyComments: 0
+    # record. 0 = NO overflow at all (nothing tiers to body); null = unlimited
+    # (the pre-2026-08-24 funnel).
+    #
+    # Why 5 and not the 0 this shipped with: 0 measured better on the external
+    # set under the production SONNET-adjudicator shape (29 of 36 matched gold
+    # kept, precision 0.263 → 0.492, F1 0.362 → 0.479, above the two-phase
+    # baseline) — but the same sweep showed that win is adjudicator-shape-
+    # conditional. With a weak adjudicator the body tier carries most of the
+    # recall (Haiku-everywhere: posted recall 0.42 → 0.12 at cap 0), while mid
+    # caps kept nearly all of it (skillspro cap 4: 0.300, cap 8: 0.380 vs 0.420
+    # unlimited; Martian cap 4: 0.548, cap 8: 0.581 vs 0.581 unlimited at
+    # slightly better precision). 5 is the recall-preserving compromise pending
+    # a real boundary tune — so an eval overlay measuring a particular shape
+    # should still pin this key (`null` for the open funnel) explicitly rather
+    # than inherit it.
+    maxBodyComments: 5
     # Per-family confidence bar for an INLINE comment; below it, the body.
     # Per-family and not global because AutoCommenter (Google Critique) measured
     # a global threshold as catastrophic — at t=0.98, ~80% of below-threshold

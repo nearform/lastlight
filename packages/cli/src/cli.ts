@@ -1338,7 +1338,8 @@ async function cmdOAuth(): Promise<void> {
  * `lastlight facts <extractor>` — deterministic program analysis of a diff.
  *
  * `code-facts` ships INSIDE this CLI rather than only in the sandbox image
- * (review-evidence-pipeline §D1). The reason is measurement, not convenience:
+ * (`docs/plans/deterministic-pr-levers.md` §Decisions, D1). The reason is
+ * measurement, not convenience:
  * the eval harness defaults to `--sandbox none` — in-process, on the host —
  * rejects `docker`/`smol`, and needs `/dev/kvm` for `gondolin`, so no eval
  * configuration on a Mac can see `/opt/lastlight/`. An image-only toolchain

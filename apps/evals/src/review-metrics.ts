@@ -5,7 +5,7 @@
  * averages them across cases. That is the right instrument for comparing models
  * on Martian's leaderboard and the WRONG one for steering a recall-first
  * architecture, for two reasons
- * (`docs/plans/review-evidence-pipeline/08-evals.md`):
+ * (`docs/plans/deterministic-pr-levers.md` §WP8):
  *
  *  1. **The arm mean flatters an empty-gold case.** A PR with no gold findings
  *     scores 1.00 for posting nothing, so it contributes a free point to every
@@ -69,7 +69,7 @@ export function snrOf(matched: number, posted: number): number | null {
 }
 
 /**
- * The six obligation families ([WP3](../../../docs/plans/review-evidence-pipeline/03-seed-and-survey.md)).
+ * The six obligation families ([WP3](../../../docs/plans/deterministic-pr-levers.md#seed-and-survey-wp3)).
  * The fan-out partition: one survey phase per family, and the axis per-family
  * attribution groups on.
  */
@@ -77,7 +77,7 @@ export const OBLIGATION_FAMILIES = ["contract", "enforcement", "security", "stat
 export type ObligationFamily = (typeof OBLIGATION_FAMILIES)[number];
 
 /**
- * Where an adjudicated finding lands ([WP6](../../../docs/plans/review-evidence-pipeline/06-adjudicate.md)).
+ * Where an adjudicated finding lands ([WP6](../../../docs/plans/deterministic-pr-levers.md#adjudication-and-the-attention-boundary-wp6)).
  * `internal` is recorded to `review_findings` and never posted — recall and user
  * attention are separate budgets, so they are separate numbers here too.
  */

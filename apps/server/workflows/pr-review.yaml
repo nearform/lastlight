@@ -160,10 +160,28 @@ phases:
       # §D12, and the reason this is a shell-level catch rather than trust in
       # `--never-fail`: that flag is an in-process try/catch and cannot cover a
       # process that DIES.
-      if ! "$FACTS" all --repo . --base "$BASE" --head HEAD --out "$OUT" --never-fail; then
+      #
+      # `--stage-diff` is the f1 lever, and it is HERE rather than in a phase of
+      # its own because this is where the range already exists: the merge base
+      # above is resolved once and `all` writes the patch down beside the facts
+      # it derived from the same commit pair. Measured: the five survey branches
+      # make ~93 bash calls per case and ~30 of them re-derive this one fixed
+      # range — surveys are ~75% of a case's spend — and every re-derivation is
+      # another chance to spell it two-dot, which attributes 6125 files to an
+      # author who wrote 3. Staging cannot fail the run: a failure is a
+      # `degraded[]` entry plus an index.md that says so in words.
+      if ! "$FACTS" all --repo . --base "$BASE" --head HEAD --out "$OUT" --stage-diff --never-fail; then
         fallback "the analysis process died without writing an envelope (OOM, a segfault in the native parser, or a compiler binary that cannot exec) — NOTHING here may be read as 'no findings'"
       fi
       echo "facts: $(wc -c < "$OUT" 2>/dev/null || echo 0) bytes, base $BASE"
+      # The staged diff gets its own line for the same reason the seed phase
+      # prints a per-family block manifest: "the layer staged nothing" and "the
+      # branches never found it" must be two lines in the log, not one silence.
+      if [ -s .lastlight/pr-review/diff/index.md ]; then
+        echo "facts: staged $(ls .lastlight/pr-review/diff/*.patch 2>/dev/null | wc -l) per-file patch(es) under .lastlight/pr-review/diff/"
+      else
+        echo "facts: NO staged diff — every survey branch will have to derive the range itself"
+      fi
 
   - name: seed
     label: Seed · obligations
@@ -201,11 +219,11 @@ phases:
       set -- seed --facts .lastlight/pr-review/facts.json \
         --out .lastlight/pr-review/obligations.json \
         --contract "${CONTRACT:-minimal}" \
-        --max-obligations "${MAX_OBLIGATIONS:-40}" \
+        --max-obligations "${MAX_OBLIGATIONS:-48}" \
         --blocks .lastlight/pr-review/obligations
       if [ -n "$MINT" ]; then set -- "$@" --mint "$MINT"; fi
       "$FACTS" "$@" || true
-      echo "seed: contract ${CONTRACT:-minimal} budget ${MAX_OBLIGATIONS:-40} mint ${MINT:-none}"
+      echo "seed: contract ${CONTRACT:-minimal} backstop ${MAX_OBLIGATIONS:-48} mint ${MINT:-none}"
       echo "seed: $(ls .lastlight/pr-review/obligations 2>/dev/null | wc -l) family block(s)"
 
       # The MANIFEST, and it exists so that "the seeder wrote nothing for this
@@ -247,8 +265,9 @@ phases:
   # the absence of one.
   #
   # `type: fanout` is ONE node running the six sessions in one provisioned
-  # workspace, which is the carve-out `05-parallel-phases.md` names in its own
-  # words: *"every hard blocker exists BECAUSE each phase provisions its own
+  # workspace, which is the carve-out the retired WP5 doc names in its own words
+  # (deterministic-pr-levers.md §"Parked: parallel phases (WP5)"; full text in
+  # git history): *"every hard blocker exists BECAUSE each phase provisions its own
   # sandbox against a shared workspace. A fan-out inside one agent has none of
   # them."* Six branches, one clone, one AGENTS.md, one artifact harvest, one
   # dispose — and still one `executions` row per branch, so per-family cost,

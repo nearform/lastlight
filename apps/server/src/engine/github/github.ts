@@ -1462,7 +1462,7 @@ export class GitHubClient {
   /**
    * The paths this pull request changes — the CANDIDATE SET that forms the
    * second end of every `spec` obligation
-   * (`docs/plans/review-evidence-pipeline/`, §D7).
+   * (`docs/plans/deterministic-pr-levers.md` §Decisions, D7).
    *
    * The same set `git diff --name-only origin/<base>...HEAD` yields, read from
    * the API because the snapshot is resolved at the dispatch choke point, before

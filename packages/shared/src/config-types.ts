@@ -217,7 +217,7 @@ export function reviewTriggerRank(trigger: ReviewTrigger): number {
 
 /**
  * The `review.analysis:` sub-block — the evidence pipeline
- * (`docs/plans/review-evidence-pipeline/`).
+ * (`docs/plans/deterministic-pr-levers.md`).
  *
  * **OFF by default, and that is a locked decision** (README locked decision 8):
  * `enabled: false` must reproduce today's two-phase review byte-for-byte, so
@@ -253,16 +253,25 @@ export interface ReviewAnalysisConfig {
    */
   maxSpecObligations: number;
   /**
-   * How many **facts-derived** obligations one PR may carry, across all five
-   * families `lastlight-facts seed` produces (`contract`, `enforcement`,
-   * `security`, `state`, `tests`). The `spec` family has its own budget above,
-   * because it is built harness-side from the issue text and shares no ranking
-   * axis with these.
+   * A TOTAL BACKSTOP over the **facts-derived** obligations one PR may carry,
+   * across all five families `lastlight-facts seed` produces (`contract`,
+   * `enforcement`, `security`, `state`, `tests`). The `spec` family has its own
+   * bound above, because it is built harness-side from the issue text and
+   * shares no ranking axis with these.
    *
-   * A budget, so the seeder RANKS: mechanism class first — `enforcement` and
-   * `contract` are the two that have ever converted — then by how much of the
-   * impact cone lies outside the diff. What it drops is counted in
-   * `obligations.json` with the reason, never truncated silently.
+   * **Truncation is per FAMILY, not here.** The seeder caps each family at its
+   * own ceiling — `contract` 12, `enforcement` 12, `state` 8, `security` 8,
+   * `tests` 8 (`FAMILY_CAPS` in `packages/code-facts/src/seed.ts`) — because
+   * each family's obligations feed exactly ONE survey branch, so the cost is
+   * per branch rather than per document, and cross-family ranking prices
+   * incommensurable mechanism classes against each other. Measured: `contract`
+   * minted 89 across the eight gate cases while `security` minted 3, and the
+   * pooled budget went to `contract`.
+   *
+   * This number is applied AFTER those ceilings and defaults to their sum, so
+   * it cannot bind on a shipped configuration — it is there so that raising one
+   * ceiling is a bounded act. What it drops is counted in `obligations.json`
+   * with the reason (naming the ceiling or the backstop), never silently.
    */
   maxObligations: number;
   /**
@@ -418,10 +427,13 @@ export interface ReviewAnalysisConfig {
    * becomes unreadable. Everything past this rank goes to the review BODY —
    * still posted, still visible, just not an inline comment. Nothing is dropped.
    *
-   * Eight, on the evidence in *"Does AI Code Review Lead to Code Changes?"*
+   * Ten, on the evidence in *"Does AI Code Review Lead to Code Changes?"*
    * (22k+ real review comments): concise, hunk-level, actionable findings are
-   * substantially likelier to lead to a change. Twenty inline comments is not
-   * twenty times the signal of eight; it is a muted bot.
+   * substantially likelier to lead to a change, and the wall the paper warns
+   * about is TWENTY — twenty inline comments is not twice the signal of ten,
+   * it is a muted bot. Ten is a ceiling, not a budget that bites: measured
+   * inline volume is 1–5 per PR, so this has never bound, and anything past it
+   * goes to the body rather than away.
    */
   maxInlineComments: number;
   /**
@@ -462,13 +474,19 @@ export interface ReviewAnalysisConfig {
    *   exactly as the inline overflow ranks (an absent confidence ranks as
    *   1.0, so an unscored document degenerates to severity order).
    *
-   * **`0` is the shipped default, and it is measured rather than assumed**:
-   * under the production Sonnet-adjudicator shape, no-overflow keeps 29/36
-   * matched gold and lifts precision 0.263 → 0.492 / F1 0.362 → 0.479 on the
-   * Martian external set. The caveat that keeps `null` a first-class value:
-   * under Haiku-everywhere the body carries most of the matched gold, which
-   * is why eval overlays pin this key explicitly instead of inheriting the
-   * default.
+   * **`5` is the shipped default, and the number it replaced is the reason.**
+   * `0` was measured rather than assumed: under the production
+   * Sonnet-adjudicator shape no-overflow keeps 29/36 matched gold and lifts
+   * precision 0.263 → 0.492 / F1 0.362 → 0.479 on the Martian external set.
+   * But the same $0 sweep showed that result is
+   * **adjudicator-shape-conditional** — under Haiku-everywhere the body tier
+   * carries most of the matched gold and cap 0 costs posted recall 0.42 →
+   * 0.12, while MID caps keep nearly all of it (skillspro cap 4: 0.300, cap 8:
+   * 0.380 against 0.420 unlimited; Martian cap 4: 0.548, cap 8: 0.581 against
+   * 0.581 unlimited, at slightly better precision). `5` is the
+   * recall-preserving compromise pending a real boundary tune, not a measured
+   * optimum — which is also why eval overlays keep pinning this key
+   * explicitly instead of inheriting whatever it currently is.
    */
   maxBodyComments: number | null;
 }
@@ -577,7 +595,9 @@ export function defaultReviewConfig(): ReviewConfig {
       // 40 rather than the 6 it shipped with. It must not bind on a real PR:
       // capping generation truncates discovery, which is the measured ceiling.
       maxSpecObligations: 40,
-      maxObligations: 40,
+      // The TOTAL backstop, and it is the per-family ceilings' sum
+      // (12 + 12 + 8 + 8 + 8) so it cannot bind unless an operator raises one.
+      maxObligations: 48,
       // `minimal` ships, measured in: under `full`, half to two-thirds of
       // survey output arrives as clean-quote verification reports that reached
       // real PRs as posted findings; under `minimal` the same recall union
@@ -596,7 +616,7 @@ export function defaultReviewConfig(): ReviewConfig {
       prepareTimeoutSeconds: 300,
       coverageTimeoutSeconds: 900,
       probeRounds: 2,
-      maxInlineComments: 8,
+      maxInlineComments: 10,
       thresholds: {
         contract: 0.35,
         enforcement: 0.35,
@@ -606,10 +626,14 @@ export function defaultReviewConfig(): ReviewConfig {
         spec: 0.45,
       },
       internalFloor: 0.15,
-      // No body overflow — measured under the production adjudicator shape
-      // (precision 0.263→0.492 / F1 0.362→0.479, 29/36 matched gold kept).
-      // `null` restores the legacy unlimited funnel. See the field's doc.
-      maxBodyComments: 0,
+      // A bounded body overflow. Cap 0 measured better under the production
+      // Sonnet adjudicator (precision 0.263→0.492 / F1 0.362→0.479) but that
+      // win is adjudicator-shape-conditional — under Haiku-everywhere the body
+      // tier carries most of the matched gold (posted recall 0.42→0.12 at 0),
+      // and mid caps kept nearly all of it. 5 is the recall-preserving
+      // compromise; `null` restores the legacy unlimited funnel. See the
+      // field's doc.
+      maxBodyComments: 5,
     },
   };
 }

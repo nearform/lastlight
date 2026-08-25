@@ -14,7 +14,8 @@
  * breaks on every repo whose own compiler is a different major; a toolchain
  * whose compiler can float breaks something quieter — a different compiler is a
  * different TYPE PRINTER, and `contracts` compares type text, which is the
- * phantom-delta class (`01b-code-facts-hardening.md`, bugs 1 and 2).
+ * phantom-delta class (WP1b bugs 1 and 2 — `docs/plans/deterministic-pr-levers.md`
+ * §"Code-facts (WP1) and hardening (WP1b)").
  *
  * A rule stated in a comment is a rule that lasts until the next refactor, so
  * this file is the gate — modelled on
@@ -171,7 +172,8 @@ describe("compiler isolation (WP1 AC4)", () => {
    * the other half — the shipped pin must be EXACT. A range would let a
    * consumer's install float the compiler underneath us, and a different
    * compiler is a different type printer, which is the phantom-delta class
-   * (`01b-code-facts-hardening.md`, bug 1 and bug 2).
+   * (WP1b bug 1 and bug 2 — `docs/plans/deterministic-pr-levers.md`
+   * §"Code-facts (WP1) and hardening (WP1b)").
    */
   it("ships `typescript` as an EXACT-pinned runtime dependency", () => {
     const pkg = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8")) as {

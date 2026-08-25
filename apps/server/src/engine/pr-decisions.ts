@@ -1370,7 +1370,7 @@ export function renderContext(
 
 /**
  * The `spec`-axis half of {@link renderContext} — the review evidence pipeline's
- * WP0 (`docs/plans/review-evidence-pipeline/` §D7).
+ * WP0 (`docs/plans/deterministic-pr-levers.md` §Decisions, D7).
  *
  * Returns `{}` unless `review.analysis.enabled`, and that empty object IS the
  * inertness guarantee (locked decision 8): with the axis off, the reviewing
@@ -1455,14 +1455,25 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      */
     mint: String(review.analysis.mint),
     /**
-     * The obligation BUDGET — `--max-obligations` on the same `seed`
+     * The obligation TOTAL BACKSTOP — `--max-obligations` on the same `seed`
      * invocation `obligationContract` rides. Projected for the same reason:
      * the seeder is a CLI in the sandbox, and until this key was threaded the
-     * operator's value never reached it — `code-facts`' own default applied,
-     * and only the accident of both defaults being 40 kept that inert rather
-     * than wrong (issue #24 in the review-evidence-pipeline backlog). Same
-     * string projection, same fail-direction: the phase's shell defaults an
-     * empty render back to the seeder's own default.
+     * operator's value never reached it at all — `code-facts`' own default
+     * applied, and only the accident of both defaults being 40 kept that
+     * inert rather than wrong. That was backlog item #24 (now
+     * `docs/plans/deterministic-pr-levers.md`), and it is CLOSED: the key is
+     * projected here, the phase reads it into `MAX_OBLIGATIONS` and passes it
+     * on the command line, and `pr-review-survey.test.ts` pins that path.
+     *
+     * Truncation itself is PER FAMILY (`FAMILY_CAPS` in
+     * `packages/code-facts/src/seed.ts` — contract 12, enforcement 12, state
+     * 8, security 8, tests 8), because each family feeds exactly one survey
+     * branch and the cost is per branch. This key is applied after those
+     * ceilings and defaults to their sum, so an operator moving it only ever
+     * matters once they have raised one.
+     *
+     * Same string projection, same fail-direction: the phase's shell defaults
+     * an empty render back to the seeder's own default.
      */
     maxObligations: String(review.analysis.maxObligations),
     /**

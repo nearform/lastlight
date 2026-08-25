@@ -333,7 +333,7 @@ branch is handed the path to open itself, with the mis-anchoring trap named.
 
 **Why one node instead of N parallel phases.** Real DAG concurrency is
 parked behind four hard blockers, and
-[`05-parallel-phases.md`](../../../docs/plans/review-evidence-pipeline/05-parallel-phases.md)
+[the WP5 parking rationale](../../../docs/plans/deterministic-pr-levers.md#parked-parallel-phases-wp5)
 records why it can be sidestepped: *"every hard blocker exists because
 each phase provisions its own sandbox against a shared workspace."* A
 fan-out inside one phase has none of them — one node, one provision,
@@ -436,7 +436,7 @@ schedulers into one and deferred real concurrency ("via git worktrees")
 to a later issue. That issue is still open and parked behind four hard
 blockers, of which the worst silently overwrites a `paused` run with
 `succeeded`: see
-[`docs/plans/review-evidence-pipeline/05-parallel-phases.md`](../../../docs/plans/review-evidence-pipeline/05-parallel-phases.md).
+[the WP5 parking rationale in `docs/plans/deterministic-pr-levers.md`](../../../docs/plans/deterministic-pr-levers.md#parked-parallel-phases-wp5).
 
 **Concurrency exists in exactly one place, and it is inside a node:**
 `type: fanout` (below).

@@ -1367,6 +1367,31 @@ describe("renderContext — the spec axis", () => {
     expect(ctx.analysisEnabled).toBe("true");
   });
 
+  it("projects the three keys the `seed` phase's command line is built from", () => {
+    // The seeder is a CLI in the sandbox: the phase's command line is the ONLY
+    // way an operator's answer reaches it, so a key that is not projected here
+    // is dead config however carefully it is validated. `maxObligations` was
+    // exactly that (backlog item #24) and it was invisible because
+    // `code-facts`' own default is also 40 — the wrong value and the right one
+    // were the same number. The two are still equal (now 48, the seeder's
+    // per-family ceilings summed), so the pin is on the number itself. Pinned
+    // as strings, because the render context is projected to strings and the
+    // phase's shell defaults an empty render.
+    const ctx = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOn);
+    expect(ctx.maxObligations).toBe("48");
+    expect(ctx.obligationContract).toBe(defaultReviewConfig().analysis.obligationContract);
+    expect(ctx.mint).toBe(String(defaultReviewConfig().analysis.mint));
+
+    // …and the operator's value, not the packaged one, is what travels.
+    const budgeted = {
+      ...analysisOn,
+      analysis: { ...analysisOn.analysis, maxObligations: 12 },
+    };
+    expect(
+      renderContext(reviewable(), fix, defaultDependenciesConfig(), budgeted).maxObligations,
+    ).toBe("12");
+  });
+
   it("projects the attention boundary — the wire that lets an eval overlay reach post-review", () => {
     // `attentionBoundary()` reads the run context first and the process-global
     // runtime config only as a fallback, because the eval harness threads the
@@ -1374,11 +1399,11 @@ describe("renderContext — the spec axis", () => {
     // global — an overlay pinning `maxBodyComments: null` had no wire to the
     // boundary at all (found by the reviewer on the pipeline's own PR).
     const ctx = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOn);
-    expect(ctx.maxInlineComments).toBe("8");
+    expect(ctx.maxInlineComments).toBe("10");
     expect(ctx.internalFloor).toBe("0.15");
-    // The shipped default is 0; the STRING "null" is the documented
+    // The shipped default is 5; the STRING "null" is the documented
     // "unlimited body overflow" value and must survive the projection.
-    expect(ctx.maxBodyComments).toBe("0");
+    expect(ctx.maxBodyComments).toBe("5");
     const nullCap = {
       ...analysisOn,
       analysis: { ...analysisOn.analysis, maxBodyComments: null },

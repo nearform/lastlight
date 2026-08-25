@@ -130,8 +130,14 @@ passes; it reads no quote and judges no claim):
   --facts <file>      the \`all\` document to seed from            (required)
   --out <file>        write obligations.json here                (default: stdout)
   --blocks <dir>      also write one rendered block per family, \`<family>.md\`
-  --max-obligations <n>  per-PR budget (default 40). The seeder RANKS and the
-                      drop is counted in the document — never silent.
+  --max-obligations <n>  TOTAL backstop (default 48). Truncation is per-FAMILY
+                      first — contract 12, enforcement 12, state 8, security 8,
+                      tests 8 — because each family feeds one survey branch, so
+                      the cost is per branch and one family's excess must never
+                      unask another's questions. This bound is applied after
+                      those ceilings and, at the default (their sum), cannot
+                      bind. Every drop is counted in the document, naming the
+                      ceiling or the backstop — never silent.
   --contract <mode>   which obligation BLOCK the families get: \`full\` (default —
                       the mandatory discharge contract, the un-truncated id
                       checklist and the worked exemplar) or \`minimal\` (the block
@@ -170,6 +176,14 @@ Options:
   --rules <file>      opengrep ruleset (default: the local one in rules/)
   --report <file>     coverage artifact instead of the usual candidates
   --stage             npm pack changed runtime deps into .lastlight/ (NETWORK)
+  --stage-diff        ALSO write the diff to disk once — an index plus one
+                      unified patch per changed file, under
+                      .lastlight/pr-review/diff/. No network. The f1 lever: five
+                      survey branches re-derived ONE fixed merge-base range ~30
+                      times across ~93 bash calls per case, and every
+                      re-derivation is a fresh chance to spell it two-dot.
+                      Failing to stage is DEGRADED at most — never a failed run
+  --stage-diff-dir <d>  where those patches go (default .lastlight/pr-review/diff)
   --never-fail        the phase wrapper: on failure write a coverage:"none"
                       envelope and exit 0 (see §D12 — a failed run is
                       re-dispatched every 30 minutes, forever)
@@ -189,6 +203,12 @@ interface Parsed {
 const BOOLEAN_FLAGS = new Set([
   "never-fail",
   "stage",
+  // `--stage-diff` takes no value — its directory is `--stage-diff-dir`. Without
+  // this it would swallow the next token, so `--stage-diff --out x` would stage
+  // into a directory called `--out`… except it wouldn't, because the parser
+  // refuses a `-`-prefixed next token; what it WOULD swallow is
+  // `--stage-diff all`, silently.
+  "stage-diff",
   "help",
   "h",
   "version",
@@ -471,7 +491,12 @@ export function runCli(
     const blocksDir = stringFlag(flags.blocks);
     if (blocksDir) {
       for (const family of SEEDABLE_FAMILIES) {
-        const block = renderFamilyBlock(obligations, family);
+        // `stagedDiff` rides the FACTS envelope, not the obligations document —
+        // the seeder reads it and does not own it — so it is threaded here
+        // rather than stamped. Passing `undefined` when the field is absent is
+        // load-bearing: the brief says "nobody staged" in different words from
+        // "staging failed", and both out loud.
+        const block = renderFamilyBlock(obligations, family, document.stagedDiff);
         // An empty block means "nothing to say AND nothing degraded". Writing an
         // empty file would make a phase's `test -s` gate pass on silence.
         if (block) writeDocument(join(blocksDir, `${family}.md`), block, { raw: true });
@@ -513,6 +538,8 @@ export function runCli(
     rulesPath: stringFlag(flags.rules),
     reportPath: stringFlag(flags.report),
     stage: flags.stage === true,
+    stageDiff: flags["stage-diff"] === true,
+    diffStageDir: stringFlag(flags["stage-diff-dir"]),
     log,
   };
 

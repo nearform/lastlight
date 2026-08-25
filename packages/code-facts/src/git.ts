@@ -275,6 +275,38 @@ export function diffHunks(repo: string, base: string, head: string): FileHunks[]
   return [...byPath.values()];
 }
 
+/**
+ * The PR's whole patch, in ONE git call, over the SAME range as everything else
+ * in this file.
+ *
+ * It exists so that `stage-diff.ts` never re-derives the range. `diffRange` is
+ * private on purpose — the merge-base resolution is the one thing in this
+ * package nobody may reimplement (WP1b bug 3: a two-dot diff attributed 6,125
+ * files to an author who wrote three) — so a caller that wants the patch asks
+ * for the patch, not for the range.
+ *
+ * Full context (`-U3`, git's default) rather than `diffHunks`'s `-U0`: this
+ * output is read by a MODEL, and a hunk with no surrounding lines is a hunk
+ * whose meaning has to be reconstructed by opening the file, which is the
+ * affordance staging exists to remove. `-M` matches {@link changedPaths}, so a
+ * rename appears once, as a rename, under the path that exists at head.
+ *
+ * `core.quotePath=false` keeps a non-ASCII path spelled the way the rest of
+ * this package spells it; the C-style `"\303\251"` form would silently fail to
+ * match its own `changedPaths` entry.
+ */
+export function unifiedDiff(repo: string, base: string, head: string): string {
+  return git(repo, [
+    "-c",
+    "core.quotePath=false",
+    "diff",
+    "--no-color",
+    "--no-ext-diff",
+    "-M",
+    diffRange(repo, base, head),
+  ]);
+}
+
 /** `git show <ref>:<path>`, or `null` when the path does not exist at `ref`. */
 export function showFile(repo: string, ref: string, path: string): string | null {
   const result = tryGit(repo, ["show", `${ref}:${path}`]);

@@ -884,7 +884,7 @@ describe("Arm seam — model-selection adapters (arm.ts)", () => {
       }
     });
 
-    it("records fan-out BRANCH rows with the survey model, not models.default (RESTART.md §2j)", () => {
+    it("records fan-out BRANCH rows with the survey model, not models.default (money trap 12, deterministic-pr-levers.md)", () => {
       const { root, overlay } = makeRoots();
       try {
         // A wp-shaped overlay: surveys pinned to haiku, review to sonnet.
@@ -905,6 +905,7 @@ describe("Arm seam — model-selection adapters (arm.ts)", () => {
             model: "{{models.review-survey}}",
             branches: [{ name: "contract" }, { name: "tests", model: "{{models.survey-tests}}" }],
           },
+          { name: "adjudicate", model: "{{models.review-survey}}" },
         ];
         // The exact recording path run-instance.ts takes for a wf.phases row:
         // ledger label → modelTemplateForRow → arm.recordPhaseModel.
@@ -920,6 +921,12 @@ describe("Arm seam — model-selection adapters (arm.ts)", () => {
         expect(record("survey_branch_tests")).toBe("openai/gpt-5.5-mini");
         // The parent row itself is unchanged.
         expect(record("survey")).toBe("anthropic/claude-haiku-4-5");
+        // A generic-loop iteration re-runs ITS OWN phase — `adjudicate_iter_1`
+        // is the adjudicate phase, template and all. The measured bug (say-side
+        // ladder, 2026-08-25): the row stamped models.default while the session
+        // envelope ran the template's answer.
+        expect(record("adjudicate_iter_1")).toBe("anthropic/claude-haiku-4-5");
+        expect(record("adjudicate_iter_1_check")).toBe("anthropic/claude-haiku-4-5");
       } finally {
         rmSync(root, { recursive: true, force: true });
       }

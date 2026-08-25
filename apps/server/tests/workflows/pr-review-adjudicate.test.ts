@@ -4,7 +4,7 @@ import { renderTemplate } from "lastlight-workflow-engine";
 import type { TemplateContext } from "lastlight-workflow-engine";
 
 /**
- * WP6c — `docs/plans/review-evidence-pipeline/06-adjudicate.md`.
+ * WP6c — `docs/plans/deterministic-pr-levers.md` §WP6.
  *
  * The conservation gate's own logic is unit-tested where it lives
  * (`packages/code-facts/tests/findings.test.ts`, against real files). What this

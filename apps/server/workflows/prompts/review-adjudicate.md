@@ -116,6 +116,18 @@ this run at all.
    `inline` is a defect of this pass. The recall rule above is untouched: a
    claim that something is WRONG, however thin, still reaches the review.
 
+   **The test is the claim's DIRECTION, never its wording.** A finding that
+   CONFIRMS a defect is a defect finding however it is phrased — *"the spec
+   asked for a 503 and the implementation returns a 500; verified against the
+   current diff, this discharges S-8"* asserts something is WRONG and must be
+   tiered like any other defect, discharge language and all. Only a claim that
+   NO defect exists is a verification report. Measured on this pipeline's own
+   runs, both gold-matching findings one adjudication buried were confirmed
+   defects written in discharge phrasing; the rule above fired on the wording
+   and cost the review its two real findings. Before tiering anything
+   `internal` under that rule, ask: if this sentence is true, is the code
+   wrong? If yes, it is a finding.
+
    **A SPECULATIVE HAZARD is always `internal`, whatever its confidence.** A
    finding whose defect exists only after a hypothetical future change —
    *"nothing prevents a future developer from…"*, *"if this constant is later
@@ -239,3 +251,12 @@ discovering it after you stop costs a whole second pass over the same evidence.
 
 Keeping the findings the review pass already wrote is expected: they carry no
 `hypotheses` array and the gate does not ask them to.
+
+One boundary on how you read that pass: the reviewer saw only the PR
+description and the diff — never the hypotheses, never the obligations. Its
+corroboration of a hypothesis may raise your confidence; its **silence is not
+evidence**. Most defects the surveys find live in code the diff touches but
+does not display, structurally invisible to a diff-level pass — a measured
+adjudication demoted a real spec violation with *"since the prior reviewer
+didn't block it, the issue might be acceptable"*, which is exactly the
+inference this paragraph exists to forbid.

@@ -1,7 +1,7 @@
 /**
  * `probes` — the `falsify` loop's exit gate.
  *
- * WP4 (`docs/plans/review-evidence-pipeline/04-probe-oracle.md`). It answers one
+ * WP4 (`docs/plans/deterministic-pr-levers.md` §WP4). It answers one
  * question: **has every hypothesis that needed a probe been given a verdict, and
  * does every verdict that claims execution have a transcript to show for it?**
  *

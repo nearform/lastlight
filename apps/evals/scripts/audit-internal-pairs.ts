@@ -1,8 +1,9 @@
 /**
  * One-off audit: print WHICH finding the internal-recall judge credits for each
  * gold, with its tier — over preserved artifact dirs. Read-only; spends one
- * MATCH call per dir (~$0.01). Written for the 2026-08-24 §2f re-audit
- * (RESTART.md): the counts alone cannot distinguish "withheld defect claim"
+ * MATCH call per dir (~$0.01). Written for the 2026-08-24 §2f re-audit (journal
+ * in git history; `docs/plans/deterministic-pr-levers.md` §"The instrument
+ * (WP8)"): the counts alone cannot distinguish "withheld defect claim"
  * (H-A1) from "posted but uncredited by the review judge" (H-A4).
  *
  * Usage: npx tsx scripts/audit-internal-pairs.ts <instances.json> <instance_id> <artifactDir> [...]

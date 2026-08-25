@@ -79,7 +79,7 @@ Adjudication takes the **comment text plus its metadata** and nothing else. No
 repo is cloned, no sha is resolved, `gh` is never invoked, and the two commit
 fields are recorded for provenance only. That is why this instrument could be
 built before any of the review-reconstruction work in
-[`docs/plans/review-evidence-pipeline/`](../../../../docs/plans/review-evidence-pipeline/) —
+[`docs/plans/deterministic-pr-levers.md`](../../../../docs/plans/deterministic-pr-levers.md) —
 it has no dependency on WP1–WP5.
 
 ## The three things that will mislead you
@@ -98,7 +98,7 @@ The published leaderboard scores review **generation** against the 1,505 label=1
 rows as a gold set to be found — Open Code Review v1.3.1 at 20.0% recall
 (301/1505), Claude Code v2.1.169 at 28.9% (435/1505). Different task, different
 denominator. Per the `01b` house rule and
-[WP9 AC9](../../../../docs/plans/review-evidence-pipeline/09-external-validation.md),
+[WP9 AC9](../../../../docs/plans/deterministic-pr-levers.md#external-validation-wp9),
 our number and theirs are never averaged, pooled, or put in the same column.
 
 The 640 label=0 rows are, as far as the leaderboard is concerned, not part of the
@@ -121,7 +121,7 @@ pooled with it either.
 
 ## What a result here means for WP6
 
-[WP6](../../../../docs/plans/review-evidence-pipeline/06-adjudicate.md)'s
+[WP6](../../../../docs/plans/deterministic-pr-levers.md#adjudication-and-the-attention-boundary-wp6)'s
 adjudicator **may re-rank, re-tier and demote, but may not delete a finding
 without a probe transcript refuting it.** Every time a filter has been measured
 against a conservative reviewer it has cost recall — our own candidate v2

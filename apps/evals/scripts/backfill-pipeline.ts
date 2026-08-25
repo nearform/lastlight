@@ -65,7 +65,7 @@
  *    above `--max-spend` (default $1.00).
  *  - It REFUSES to write if any already-published number moved. Back-filling
  *    adds columns; it must not be able to rewrite the comparator every gate in
- *    `docs/plans/review-evidence-pipeline/` is read against.
+ *    `docs/plans/deterministic-pr-levers.md` is read against.
  *  - An errored judge call is EXCLUDED and NAMED, never folded in as 0.000. A
  *    judge outage and a pipeline that found nothing produce the same number, and
  *    that number is the most dangerous one this script could print.
@@ -505,8 +505,9 @@ function skipReason(skip: Skip, r: InstanceResult): string {
   }
 }
 
-/** The mechanism metrics, summed over a run — the numbers 08-evals.md says the
- * WP gates are actually read on (n in the hundreds, not 25). */
+/** The mechanism metrics, summed over a run — the numbers the retired WP8 doc
+ * says the WP gates are actually read on (n in the hundreds, not 25;
+ * `docs/plans/deterministic-pr-levers.md` §"The instrument (WP8)"). */
 function mechanismSummary(plans: CasePlan[]): {
   obligations: number;
   hypotheses: number;

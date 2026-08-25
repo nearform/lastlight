@@ -8,7 +8,8 @@
  * authority for those labels). A naive `def.phases`-by-name lookup therefore
  * missed every branch row, and `recordPhaseModel(undefined, <label>)` fell all
  * the way through to `models.default` — the scorecard said surveys ran the
- * default model while the session envelopes proved otherwise (RESTART.md §2j).
+ * default model while the session envelopes proved otherwise (money trap 12
+ * in `docs/plans/deterministic-pr-levers.md`; journal §2j in git history).
  * Execution was always correct (`fanout.ts:776` resolves
  * `branch.model ?? phase.model`); only the recording lied.
  *
@@ -55,7 +56,19 @@ export function modelTemplateForRow(phases: readonly PhaseModelSource[], label: 
     return { template: branch?.model ?? parent?.model, fallbackPhase: ref.base };
   }
 
-  // Loop-derived rows (`_fix_N` / `_recheck_N` / `_iter_N`…): no template, as
-  // before — recordPhaseModel then resolves models[<label>] → models.default.
+  // A generic-loop iteration re-runs ITS OWN phase — `adjudicate_iter_1` is the
+  // `adjudicate` phase, template and all — so it resolves the base phase's
+  // `model:` exactly like the plain row. Without this, the one workflow phase
+  // that always runs as `_iter_N` (adjudicate) stamped `models.default` while
+  // the session envelope proved it ran the `{{#if models.review-adjudicate}}`
+  // template's answer — the same lie as the branch rows, one label shape over.
+  if (ref.kind === "iter" || ref.kind === "retry" || ref.kind === "check") {
+    const parent = phases.find((p) => p.name === ref.base);
+    return { template: parent?.model, fallbackPhase: ref.base };
+  }
+
+  // Reviewer-loop rows (`_fix_N` / `_recheck_N`): no template, as before —
+  // those run `fix_model`/the loop's own config, which this recorder has never
+  // modelled; recordPhaseModel then resolves models[<label>] → models.default.
   return { template: undefined, fallbackPhase: undefined };
 }

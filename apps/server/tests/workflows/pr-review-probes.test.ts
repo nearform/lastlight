@@ -11,7 +11,7 @@ import {
 } from "lastlight-shared/config-types";
 
 /**
- * WP4 — `docs/plans/review-evidence-pipeline/04-probe-oracle.md`, the `prepare`
+ * WP4 — `docs/plans/deterministic-pr-levers.md` §WP4, the `prepare`
  * half.
  *
  * The branching inside `lastlight-facts prepare` is unit-tested where it lives

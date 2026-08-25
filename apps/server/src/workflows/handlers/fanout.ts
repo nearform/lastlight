@@ -288,7 +288,7 @@ async function mapPool<T, R>(
  * provisioned workspace, as a single DAG node.
  *
  * **Why this exists rather than parallel phases.** Real DAG concurrency is
- * parked (`docs/plans/review-evidence-pipeline/05-parallel-phases.md`) behind
+ * parked (`docs/plans/deterministic-pr-levers.md` §WP5) behind
  * four hard blockers and seven design changes, and that document says why in one
  * sentence: *"Every hard blocker below — B1, D1, D2, D7 — exists because each
  * phase provisions its own sandbox against a shared workspace. A fan-out inside
@@ -305,7 +305,8 @@ async function mapPool<T, R>(
  * per-branch `executions` row — each branch goes through the same
  * {@link runLedgeredPhase} every other phase does, keyed
  * `<phase>_branch_<name>`, so resume, dedup, cost attribution and the
- * dashboard's longest-prefix grouping all keep working. `05-parallel-phases.md`
+ * dashboard's longest-prefix grouping all keep working. WP5
+ * (`docs/plans/deterministic-pr-levers.md` §"Parked: parallel phases (WP5)")
  * listed exactly those as the price of an in-agent fan-out; the ledger key is
  * how it goes unpaid.
  */

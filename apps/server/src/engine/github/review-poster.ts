@@ -588,10 +588,10 @@ export interface AttentionBoundary {
    * posted. `null` or absent = unlimited, the legacy funnel; `0` = nothing
    * tiers to body at all. Ranked by {@link rankOf} — the same severity ×
    * confidence rank the inline budget spends, so an absent confidence ranks
-   * as 1.0 (severity order), never as low confidence. Shipped default is `0`
+   * as 1.0 (severity order), never as low confidence. Shipped default is `5`
    * (see `ReviewAnalysisConfig.maxBodyComments` in lastlight-shared for the
-   * measurements); optional here so every existing constructor keeps today's
-   * behaviour.
+   * measurements, and for why the measured-best `0` is not the shipped one);
+   * optional here so every existing constructor keeps today's behaviour.
    */
   maxBodyComments?: number | null;
 }
@@ -907,7 +907,9 @@ export function worstAxis(verdict: SplitVerdict | undefined): AxisVerdict | unde
  * choice.
  *
  * **Why the downgrade also applies to an EXPLICIT `APPROVE`**, which is the one
- * judgement call in this function. `06-adjudicate.md` says `resolveEvent` "takes
+ * judgement call in this function. The retired WP6 doc (git history; condensed
+ * in `docs/plans/deterministic-pr-levers.md` §"Adjudication and the attention
+ * boundary (WP6)") says `resolveEvent` "takes
  * the worse of the two axes" while `event` "remains explicit-wins". Read
  * strictly, those contradict: today's skill makes `event` a REQUIRED field, so
  * an always-present explicit event would make the split verdict inert by

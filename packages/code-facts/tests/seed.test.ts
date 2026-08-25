@@ -197,7 +197,12 @@ describe("ranking", () => {
     expect(ids[0]).toBe("src/utils/constants.ts");
   });
 
-  it("truncates to the budget and counts EVERY dropped obligation, not every reason", () => {
+  it("truncates to the TOTAL backstop and counts EVERY dropped obligation, not every reason", () => {
+    // Ten `enforcement` obligations — under that family's ceiling of 12, so
+    // nothing here is a per-family drop and the backstop is the only mechanism
+    // under test. (Before the ceilings landed this same fixture measured the
+    // pooled budget; the number of survivors is the same and the REASON is
+    // not, which is the honest way to keep the case.)
     const constants = Array.from({ length: 10 }, (_, i) =>
       constant({ constant: `C${i}`, declaredAt: `src/c${i}.ts:1`, references: [`src/use${i}.ts:2`] }),
     );
@@ -206,12 +211,178 @@ describe("ranking", () => {
     });
 
     expect(seeded.obligations).toHaveLength(4);
-    const budget = seeded.dropped.find((d) => d.reason.includes("budget"));
-    expect(budget?.count).toBe(6);
+    expect(seeded.dropped.filter((d) => d.reason.includes("per-family ceiling of"))).toEqual([]);
+    const backstop = seeded.dropped.find((d) => d.reason.includes("total backstop"));
+    expect(backstop?.count).toBe(6);
+    expect(backstop?.reason).toMatch(/NOT "checked"/);
     // The sealed set is what SURVIVED — a denominator that counted the dropped
     // ones would report work nobody was ever going to do.
     expect(seeded.coverageSet.selected).toHaveLength(4);
     expect(seeded.coverageSet.sealed).toBe(true);
+  });
+});
+
+/**
+ * The ceilings, and the measurement that bought them.
+ *
+ * A pooled budget ranked mechanism-class-first is a budget the strongest class
+ * eats: across the eight gate cases `contract` minted 89 obligations and
+ * `security` minted 3, and 35 obligations were dropped over the budget — so a
+ * family's questions went unasked because a DIFFERENT family had a lot to say.
+ * Two of `1667`'s five gold findings are security-family.
+ *
+ * Reserving floors INSIDE that pool did not fix it: the reserve still competes
+ * for one budget, so it displaced `contract` slots on exactly the heavy-mint
+ * cases, and cross-family ranking was still pricing a mechanism CLASS ordering
+ * as though it were one scale. Per-family ceilings remove the competition
+ * rather than arbitrating it — which is also the right shape for the cost,
+ * since each family's obligations feed exactly ONE survey branch and it is the
+ * fattest branch that is expensive, not the sum.
+ */
+describe("per-family obligation ceilings", () => {
+  /** N `contract` deltas — rank 91 each, so they outrank everything below. */
+  const contractDeltas = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      symbol: `getThing${i}`,
+      file: `src/thing${i}.ts`,
+      change: "changed" as const,
+      before: null,
+      after: null,
+      consumersOutsideDiff: [`src/api/handler${i}.ts:4`],
+    }));
+
+  /**
+   * `c` contract obligations and `s` security ones, and nothing else.
+   *
+   * Every security symbol's single reference is IN the diff, so `seedState` —
+   * whose predicate needs a reference outside it — cannot co-fire and turn a
+   * two-family fixture into a three-family one.
+   */
+  const mixed = (c: number, s: number) =>
+    envelope({
+      ...factsOf(
+        ...Array.from({ length: s }, (_, i) =>
+          symbol({ name: `handle${i}`, declaredAt: `src/sec${i}.ts:3` }),
+        ),
+      ),
+      patterns: {
+        findings: Array.from({ length: s }, (_, i) => ({
+          file: `src/sec${i}.ts`,
+          line: 3,
+          rule: "weak-random",
+          severity: "warning",
+          message: "m",
+          tool: "opengrep",
+        })),
+      },
+      contracts: { contracts: contractDeltas(c) },
+    } as unknown as AllDocument["extractors"]);
+
+  const familyCounts = (doc: ReturnType<typeof seedObligations>) => {
+    const counts: Record<string, number> = {};
+    for (const o of doc.obligations) counts[o.family] = (counts[o.family] ?? 0) + 1;
+    return counts;
+  };
+
+  it("truncates a family at ITS OWN ceiling, and says so per family in dropped[]", () => {
+    // Thirty contract obligations at rank 91 against a ceiling of 12.
+    const seeded = seedObligations(mixed(30, 0));
+    expect(familyCounts(seeded)).toEqual({ contract: 12 });
+
+    const ceiling = seeded.dropped.find((d) => d.reason.includes("per-family ceiling of"));
+    expect(ceiling?.count).toBe(18);
+    // The reason names the CEILING and the FAMILY — a reader comparing two
+    // families' counts has to be able to tell "little to say" from "truncated",
+    // and a pooled reason could not say which family it was about.
+    expect(ceiling?.reason).toMatch(/per-family ceiling of 12 for contract/);
+    expect(ceiling?.reason).toMatch(/No other family lost a slot/);
+    expect(ceiling?.reason).toMatch(/NOT "checked"/);
+  });
+
+  it("THE STARVATION CASE: contract 89 + security 3 → contract 12, security 3", () => {
+    // The measured shape, in the numbers it was measured in. Under the pooled
+    // budget this asked ZERO security questions; under the floors it asked five
+    // and took those five out of `contract`'s share. Under ceilings neither
+    // family pays for the other: security keeps everything it minted because it
+    // is nowhere near its own ceiling of 8.
+    expect(familyCounts(seedObligations(mixed(89, 3)))).toEqual({ contract: 12, security: 3 });
+  });
+
+  it("one family's excess costs no other family a slot, however large it is", () => {
+    // The same security count survives whether `contract` mints 4 or 400 — the
+    // property the floors approximated with a reserve and this makes structural.
+    const small = familyCounts(seedObligations(mixed(4, 6)));
+    const huge = familyCounts(seedObligations(mixed(400, 6)));
+    expect(small.security).toBe(6);
+    expect(huge.security).toBe(6);
+    expect(small.contract).toBe(4);
+    expect(huge.contract).toBe(12);
+  });
+
+  it("an under-cap family passes through untouched — no slot is reserved from it", () => {
+    const seeded = seedObligations(mixed(10, 2));
+    expect(familyCounts(seeded)).toEqual({ contract: 10, security: 2 });
+    expect(seeded.dropped.filter((d) => d.reason.includes("per-family ceiling of"))).toEqual([]);
+  });
+
+  it("the TOTAL backstop binds only when the post-ceiling total still exceeds it", () => {
+    // Post-ceiling this document is 12 contract + 3 security = 15.
+    const doc = mixed(30, 3);
+    const roomy = seedObligations(doc, { maxObligations: 20 });
+    expect(roomy.obligations).toHaveLength(15);
+    expect(roomy.dropped.find((d) => d.reason.includes("total backstop"))).toBeUndefined();
+
+    // …and when it does bind it takes the LOWEST-RANKED across families, which
+    // is the one place cross-family ranking still decides anything.
+    const tight = seedObligations(doc, { maxObligations: 13 });
+    expect(familyCounts(tight)).toEqual({ contract: 12, security: 1 });
+    const backstop = tight.dropped.find((d) => d.reason.includes("total backstop"));
+    expect(backstop?.count).toBe(2);
+    expect(backstop?.reason).toMatch(/applied AFTER the per-family ceilings/);
+    expect(backstop?.reason).toMatch(/NOT "checked"/);
+    expect(tight.coverageSet.selected).toHaveLength(13);
+  });
+
+  it("the shipped default cannot bind — it IS the ceilings' sum", () => {
+    // 12 + 12 + 8 + 8 + 8 = 48, so on a shipped configuration the ceilings are
+    // the only mechanism and the backstop is inert. It exists so that raising
+    // one ceiling is a bounded act rather than an unbounded one.
+    const seeded = seedObligations(mixed(400, 400));
+    expect(seeded.obligations).toHaveLength(20); // 12 contract + 8 security
+    expect(seeded.dropped.find((d) => d.reason.includes("total backstop"))).toBeUndefined();
+  });
+
+  it("emits in rank order, so the ids still ascend with the ranking", () => {
+    // The ceiling decides WHICH obligations survive; it never reorders them.
+    const seeded = seedObligations(mixed(4, 2));
+    expect(seeded.obligations.map((o) => o.family)).toEqual([
+      "contract",
+      "contract",
+      "contract",
+      "contract",
+      "security",
+      "security",
+    ]);
+    expect(seeded.obligations.map((o) => o.id)).toEqual([
+      "O-001",
+      "O-002",
+      "O-003",
+      "O-004",
+      "O-005",
+      "O-006",
+    ]);
+  });
+
+  it("is byte-identical across runs on the same input", () => {
+    // The seed is the one part of the pipeline with no measured variance
+    // (`docs/plans/deterministic-pr-levers.md`), and a truncation allocated by
+    // anything set-ordered rather than rank-ordered would end that.
+    const doc = mixed(30, 20);
+    const once = seedObligations(doc, { maxObligations: 16 });
+    const twice = seedObligations(doc, { maxObligations: 16 });
+    expect(JSON.stringify(twice.obligations)).toBe(JSON.stringify(once.obligations));
+    expect(twice.coverageSet.selected).toEqual(once.coverageSet.selected);
+    expect(twice.dropped).toEqual(once.dropped);
   });
 });
 

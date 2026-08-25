@@ -220,7 +220,7 @@ jobs:
           # `agentic-pi-npm.yml` stream (trusted-publisher scoped to that
           # workflow). See the header comment.
           # `lastlight-code-facts` must precede `lastlight`: the CLI ships the
-          # deterministic analysis layer (review-evidence-pipeline §D1), so it
+          # deterministic analysis layer (deterministic-pr-levers §Decisions, D1), so it
           # carries a `workspace:*` edge that `pnpm pack` rewrites to a concrete
           # version — which has to exist on npm before the CLI that pins it.
           # FIRST PUBLISH NEEDS A TRUSTED-PUBLISHER ENTRY on npmjs.com for

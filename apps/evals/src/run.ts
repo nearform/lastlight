@@ -296,7 +296,7 @@ async function runEval(): Promise<number> {
   // Say WHICH core is about to run, at the top, every time. A published core and
   // a working tree can report the same version, so an arm measuring unreleased
   // engine work would otherwise look identical to one that never loaded it —
-  // and every gate in the review-evidence-pipeline plan is a delta against a
+  // and every gate in the deterministic-pr-levers plan is a delta against a
   // stored baseline, where that reads as a real negative result.
   const core = describeCore(builtInRoot);
   p.log.info(

@@ -88,7 +88,7 @@ export interface PullSeed {
   files?: PullFile[];
   /**
    * The issues this PR closes, with their bodies — the FIRST end of every `spec`
-   * obligation (`docs/plans/review-evidence-pipeline/` §D7).
+   * obligation (`docs/plans/deterministic-pr-levers.md` §Decisions, D7).
    *
    * Content only. The LINKAGE is derived by the fake from the body's closing
    * keywords, exactly as GitHub's `closingIssuesReferences` does, so a case
@@ -422,7 +422,8 @@ export interface ReviewPipelineStats {
   discharged?: number;
   /**
    * How each hypothesis discharged its obligation — the **discharge rate**
-   * 08-evals.md asks every rung to be gated on.
+   * the retired WP8 doc asks every rung to be gated on
+   * (`docs/plans/deterministic-pr-levers.md` §"The instrument (WP8)").
    *
    * `none` is a column and not an omission. Across both preserved 2026-08-22
    * runs, every case and every family, **no obligation carried a code at all**

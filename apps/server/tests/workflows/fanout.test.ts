@@ -38,7 +38,7 @@ import type { SandboxBackend } from "#src/config/config.js";
  *
  * The property under test is the one that makes the fan-out safe at all, and it
  * is a COUNTING property: N agent turns, ONE provision, ONE dispose. Every hard
- * blocker in `docs/plans/review-evidence-pipeline/05-parallel-phases.md` — B1
+ * blocker in `docs/plans/deterministic-pr-levers.md` §WP5 — B1
  * (one workspace), D1/D2 (concurrent `git fetch` into one `.git`), D3 (two
  * artifact harvests racing) — is a consequence of provisioning per unit of work.
  * So `provisionCalls === 1` is not a detail of this implementation; it is the
@@ -372,7 +372,8 @@ describe("fanout — the ledger", () => {
     const sandbox = new CountingSandbox();
     await runFanout(fanoutPhase(), sandbox, "none", store);
 
-    // Per-branch rows are what `05-parallel-phases.md` warned an in-agent
+    // Per-branch rows are what WP5 (deterministic-pr-levers.md §"Parked:
+    // parallel phases (WP5)") warned an in-agent
     // fan-out would GIVE UP (resume, dedup, cost attribution). Going through the
     // same dedup ledger under a `<phase>_branch_<name>` key is how it doesn't.
     for (const family of ["contract", "enforcement", "security"]) {

@@ -93,8 +93,9 @@ RUN corepack enable
 
 # Scanners, fetched per-ARCH and PINNED. The version defaults below MUST match
 # `packages/code-facts/toolchain.json` — the single source of truth the facts
-# envelope stamps and the eval preflight refuses on (WP2 of
-# docs/plans/review-evidence-pipeline). gitleaks was hardcoded to the linux_x64
+# envelope stamps and the eval preflight refuses on (WP2 of the retired
+# review-evidence-pipeline plan; see docs/plans/deterministic-pr-levers.md).
+# gitleaks was hardcoded to the linux_x64
 # asset, which made an arm64 build of this image either fail outright or bake an
 # x86 binary that cannot exec — gitleaks publishes linux_arm64 at this exact
 # version (as does opengrep, and as do both for darwin; see toolchain.json's

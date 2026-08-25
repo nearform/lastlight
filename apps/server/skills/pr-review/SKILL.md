@@ -133,6 +133,16 @@ contains a problem you raised, the correct `event` is still
 
 ### 3. Get the diff
 
+**First, check whether it is already staged.** When the review evidence pipeline
+is on, the deterministic `facts` phase resolves this range once and writes it
+down: `.lastlight/pr-review/diff/index.md` lists every changed file with its
+status, its changed line ranges and a per-file patch beside it under
+`.lastlight/pr-review/diff/`. If that index is there, read it and the patches
+instead of running the commands below — the range is already settled, and every
+re-derivation is another chance to spell it two-dot. Those paths are relative to
+this checkout; open them exactly as written. (If the index says NOT AVAILABLE, or
+there is no `.lastlight/pr-review/diff/` at all, carry on here.)
+
 From inside `<repo>/`:
 ```
 # The harness already materialized origin/<baseRef>, deepening base AND head

@@ -61,6 +61,7 @@ import { extractDeps } from "./deps.js";
 import { extractPatterns } from "./patterns.js";
 import { extractCoverage } from "./coverage.js";
 import { hasAnalysableExtension, languageBreakdown } from "./project.js";
+import { stageDiff } from "./stage-diff.js";
 import {
   abandonedByBrokenTsConfig,
   collectBaseContracts,
@@ -80,6 +81,7 @@ import {
   type Envelope,
   type ExtractorName,
   type LanguageStat,
+  type StagedDiff,
   type Tier,
 } from "./schema.js";
 import type { LoggerPort } from "./log.js";
@@ -111,6 +113,19 @@ export interface RunOptions {
   rulesPath?: string;
   stage?: boolean;
   stageDir?: string;
+  /**
+   * The f1 lever: ALSO write the diff to disk, once, as an index plus one patch
+   * per changed file (`stage-diff.ts`). Opt-in for the same reason `--stage` is
+   * — this is the only thing in a run that touches the repository under review,
+   * and a tool that writes into a tree nobody asked it to write into is a
+   * surprise the `deps` staging precedent already settled.
+   *
+   * A staging failure never fails the run and never changes the exit-code
+   * contract beyond `degraded`.
+   */
+  stageDiff?: boolean;
+  /** Where the staged patches go. Repo-relative; defaults to `.lastlight/pr-review/diff`. */
+  diffStageDir?: string;
   reportPath?: string;
   maxReferences?: number;
   env?: NodeJS.ProcessEnv;
@@ -150,6 +165,12 @@ export function buildEnvelope(input: {
   degraded: DegradedEntry[];
   tools: string[];
   env?: NodeJS.ProcessEnv;
+  /**
+   * ABSENT means this run was never asked to stage the diff. A run that WAS
+   * asked and failed carries the record with `files: null` — the two must not
+   * collapse onto one shape (`null` ≠ `[]`, one layer up).
+   */
+  stagedDiff?: StagedDiff;
 }): Envelope {
   return {
     version: 2,
@@ -164,6 +185,7 @@ export function buildEnvelope(input: {
     coverage: input.coverage,
     degraded: input.degraded,
     toolchain: toolchainStamp(input.tools, input.env ?? process.env),
+    ...(input.stagedDiff ? { stagedDiff: input.stagedDiff } : {}),
   };
 }
 
@@ -268,6 +290,32 @@ export function runExtractor(raw: RunOptions): RunResult {
   // and `coverage` is derived from this list.
   const degraded: DegradedEntry[] = [...context.degraded];
   const tools: string[] = [];
+
+  /**
+   * The f1 lever, and it runs FIRST on purpose.
+   *
+   * Staging needs nothing but the range `prepare()` just resolved, so doing it
+   * before the compiler opens means the patches are on disk even when an
+   * extractor later throws and `runWrapped` writes a `coverage: "none"`
+   * envelope. The affordance survives the analysis failing, which is exactly
+   * when a survey most needs the diff without re-deriving it.
+   *
+   * `stageDiff` never throws; see its module header.
+   */
+  let staged: StagedDiff | undefined;
+  if (options.stageDiff) {
+    const result = stageDiff({
+      repo: options.repo,
+      baseSha: context.baseSha,
+      headSha: context.headSha,
+      changed: context.changed,
+      hunks: context.hunks,
+      ...(options.diffStageDir ? { dir: options.diffStageDir } : {}),
+      log,
+    });
+    staged = result.payload;
+    degraded.push(...result.degraded);
+  }
 
   const wants = (name: ExtractorName): boolean =>
     options.extractor === "all" || options.extractor === name;
@@ -463,6 +511,7 @@ export function runExtractor(raw: RunOptions): RunResult {
       degraded,
       tools,
       env,
+      ...(staged ? { stagedDiff: staged } : {}),
     });
 
     const document =

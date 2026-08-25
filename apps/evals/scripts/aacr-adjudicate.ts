@@ -6,7 +6,7 @@
  *
  * This is a **measurement script**, not a test: it never asserts, never tunes,
  * and writes nothing unless `--out` is passed. It exists BEFORE
- * [WP6](docs/plans/review-evidence-pipeline/06-adjudicate.md) so WP6 has an
+ * [WP6](docs/plans/deterministic-pr-levers.md#adjudication-and-the-attention-boundary-wp6) so WP6 has an
  * external target to hit, rather than being graded only by the instrument it
  * was designed against.
  *
@@ -49,7 +49,7 @@
  * It is also **not comparable to AACR-Bench's own leaderboard**. That board
  * scores review *generation* — Open Code Review at 20.0% recall (301/1505),
  * Claude Code at 28.9% (435/1505), see
- * [09-external-validation.md](docs/plans/review-evidence-pipeline/09-external-validation.md).
+ * [external validation (WP9)](docs/plans/deterministic-pr-levers.md#external-validation-wp9).
  * Those denominators are the 1,505 label=1 rows treated as a gold set to be
  * *found*. Ours is a classification over rows already handed to us. Never put
  * the two in the same column (`01b` house rule: our number and theirs are never
@@ -100,7 +100,7 @@
  * Note the floors this pins, and they are the reason the deterministic arms are
  * not filler. A bound is only a guard if the number it would be WITHOUT the
  * intervention is pinned too
- * ([08-evals.md](docs/plans/review-evidence-pipeline/08-evals.md)):
+ * ([the instrument, WP8](docs/plans/deterministic-pr-levers.md#the-instrument-wp8)):
  *
  *   keep-all   retention 100%  interception   0%   precision = the base rate
  *   drop-all   retention   0%  interception 100%   precision = undefined (0/0)
@@ -776,8 +776,9 @@ function priceOf(model: string): { input: number; output: number } | null {
 }
 
 /**
- * The spend gate. Model spend needs human sign-off in this project (HANDOFF.md
- * §"What needs human sign-off", item 1), and a sub-agent must never do it
+ * The spend gate. Model spend needs human sign-off in this project ("every
+ * eval arm is human-authorised spend" — `docs/plans/deterministic-pr-levers.md`
+ * §"Money traps"), and a sub-agent must never do it
  * unprompted — so this REFUSES rather than prompting, and `--yes` is the
  * acknowledgement. Refusal exits 2 so a script can tell it from a real failure.
  */
@@ -803,7 +804,7 @@ function spendGate(arm: Arm, rows: Row[], model: string): void {
     return;
   }
   console.log("");
-  console.log(`   REFUSING. Model spend needs human sign-off (HANDOFF.md §"What needs human sign-off", item 1).`);
+  console.log(`   REFUSING. Model spend needs human sign-off (deterministic-pr-levers.md: every eval arm is human-authorised spend).`);
   console.log(`   Re-run with --yes to authorise, or --dry-run to exercise the pipeline for free.`);
   console.log("");
   process.exit(2);

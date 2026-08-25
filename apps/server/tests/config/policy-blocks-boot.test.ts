@@ -163,7 +163,7 @@ describe("loadConfig — the fix policy block", () => {
  * `review.analysis.maxBodyComments` — the body-side attention budget. The
  * nullable idiom is `fix.maxCostUsd`'s: an explicit `null` is the documented
  * "unlimited body overflow" value (the legacy funnel), distinct from an
- * absent/typo'd key, which falls back to the shipped `0` (no overflow).
+ * absent/typo'd key, which falls back to the shipped `5` (a bounded overflow).
  */
 describe("loadConfig — review.analysis.maxBodyComments", () => {
   beforeEach(() => {
@@ -177,10 +177,10 @@ describe("loadConfig — review.analysis.maxBodyComments", () => {
     resetRuntimeConfigForTests();
   });
 
-  it("defaults to 0 when the key is absent — no body overflow", () => {
+  it("defaults to 5 when the key is absent — a bounded body overflow", () => {
     vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlayWith("review:\n  analysis:\n    enabled: true\n"));
 
-    expect(loadConfig().review.analysis.maxBodyComments).toBe(0);
+    expect(loadConfig().review.analysis.maxBodyComments).toBe(5);
   });
 
   it("keeps an explicit null — the documented 'unlimited' value, not a fallback trigger", () => {
@@ -207,14 +207,14 @@ describe("loadConfig — review.analysis.maxBodyComments", () => {
     expect(loadConfig().review.analysis.maxBodyComments).toBe(0);
   });
 
-  it("falls back to the shipped 0 on garbage — a typo must not open the funnel", () => {
+  it("falls back to the shipped 5 on garbage — a typo must not open the funnel", () => {
     for (const bad of ["unlimited", "-2"]) {
       resetRuntimeConfigForTests();
       vi.stubEnv(
         "LASTLIGHT_OVERLAY_DIR",
         overlayWith(`review:\n  analysis:\n    maxBodyComments: ${bad}\n`),
       );
-      expect(loadConfig().review.analysis.maxBodyComments, bad).toBe(0);
+      expect(loadConfig().review.analysis.maxBodyComments, bad).toBe(5);
     }
   });
 });

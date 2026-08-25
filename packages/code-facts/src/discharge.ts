@@ -2,7 +2,7 @@
  * `discharge` — the SURVEY loop's exit gate, and the third "an instruction is
  * not a mechanism" in this package.
  *
- * WP3 (`docs/plans/review-evidence-pipeline/03-seed-and-survey.md`). It answers
+ * WP3 (`docs/plans/deterministic-pr-levers.md` §WP3). It answers
  * one question: **did every obligation this family owns get a recorded
  * discharge — QUOTE, ABSENT, PARTIAL or PROBE — in
  * `hypotheses/<family>.jsonl`?**

@@ -26,6 +26,7 @@ import { join } from "node:path";
 
 import { checkDischarge, DISCHARGE_CODES, renderDischargeCheck } from "../src/discharge.js";
 import { renderFamilyBlock } from "../src/seed-render.js";
+import type { StagedDiff } from "../src/schema.js";
 import type { Obligation, ObligationsDocument, SeedFamily } from "../src/seed.js";
 
 const dirs: string[] = [];
@@ -454,5 +455,173 @@ describe("the discharge gate degrades under `minimal`", () => {
     const result = checkDischarge({ dir, family: "enfrocement" });
     expect(result.satisfied).toBe(false);
     expect(result.familyError).toMatch(/WIRING bug/);
+  });
+});
+
+/**
+ * THE STAGED DIFF SECTION — the f1 lever's half of the brief.
+ *
+ * The five survey branches spend ~30 of ~93 bash calls per case re-deriving ONE
+ * fixed merge-base range that `facts.json` already holds, and surveys are ~75%
+ * of a case's spend. The section tells the branch the patch is already on disk.
+ *
+ * Three states and three different paragraphs, because they are three different
+ * facts: staged, staging FAILED, never staged. What is asserted hardest is that
+ * the section is NEVER SILENTLY OMITTED — an absent section reads to a survey as
+ * "this deployment has no staged diff", which is the *"we could not look"* /
+ * *"we looked and it is clean"* conflation the whole pipeline is built against.
+ */
+describe("the staged-diff section", () => {
+  const stagedRecord = (over: Partial<StagedDiff> = {}): StagedDiff => ({
+    dir: ".lastlight/pr-review/diff",
+    index: ".lastlight/pr-review/diff/index.md",
+    files: [
+      {
+        path: "src/config.ts",
+        status: "modified",
+        renamedFrom: null,
+        hunks: ["12-18"],
+        patch: "src__config.ts.patch",
+        bytes: 300,
+      },
+      {
+        path: "src/server/auth.ts",
+        status: "modified",
+        renamedFrom: null,
+        hunks: ["70-76"],
+        patch: "src__server__auth.ts.patch",
+        bytes: 400,
+      },
+      {
+        path: "src/unrelated.ts",
+        status: "added",
+        renamedFrom: null,
+        hunks: ["1-9"],
+        patch: "src__unrelated.ts.patch",
+        bytes: 100,
+      },
+    ],
+    skipped: [],
+    ...over,
+  });
+
+  it("points at the index and the patch directory, and forbids re-deriving the range", () => {
+    const block = renderFamilyBlock(doc(), "enforcement", stagedRecord());
+    expect(block).toContain(".lastlight/pr-review/diff/index.md");
+    expect(block).toMatch(/DO NOT RE-DERIVE THE RANGE with `git diff` or `git show`/);
+    // The reason, not just the rule — a rule without its reason is the first
+    // thing a fork drops.
+    expect(block).toMatch(/two-dot diff creeps back in/);
+  });
+
+  it("frames the patch as a STARTING POINT, not a scope", () => {
+    // The over-suppression result: the first cut said "read the staged patch
+    // INSTEAD OF running `git diff`" and total survey bash calls fell 848 → 399
+    // while the eliminated range re-derivation accounts for only ~276 of it —
+    // ~170 greps, file reads and reference traces went with it, and internal
+    // recall fell 21/25 → 12/25. Access never changed; the framing did. So the
+    // affordance is asserted beside the one surviving prohibition.
+    const block = renderFamilyBlock(doc(), "enforcement", stagedRecord());
+    expect(block).toMatch(/STARTING POINT, NOT YOUR SCOPE/);
+    expect(block).toMatch(/FULL CHECKOUT/);
+    expect(block).toMatch(/callers and references the patch does not show/);
+    // Nothing may read as a ban on looking beyond the patch.
+    expect(block).not.toMatch(/INSTEAD OF RUNNING/);
+  });
+
+  it("names the files THIS family's obligations point at, with their patches", () => {
+    // `ob()` builds every obligation over `src/config.ts` → `src/server/auth.ts`.
+    const block = renderFamilyBlock(doc(), "enforcement", stagedRecord());
+    expect(block).toContain("src/config.ts   → .lastlight/pr-review/diff/src__config.ts.patch");
+    expect(block).toContain(
+      "src/server/auth.ts   → .lastlight/pr-review/diff/src__server__auth.ts.patch",
+    );
+    // …and only those. A file no obligation of this family names is in the
+    // index, which the section points at; listing it here is noise in a block a
+    // cheap model reads.
+    expect(block).not.toContain("src__unrelated.ts.patch");
+  });
+
+  it("never prints an ABSOLUTE path, and says why not to build one", () => {
+    // Measured across three stored runs: 98 of 98 relative first-turn reads from
+    // a survey branch resolved and 0 of 27 workspace-root-absolute ones did,
+    // because the only absolute path a branch holds is its skill bundle — one
+    // directory ABOVE the checkout the deterministic phases write in.
+    const block = renderFamilyBlock(doc(), "enforcement", stagedRecord());
+    expect(block).not.toMatch(/\s\/[\w/.-]*\.lastlight/);
+    expect(block).toMatch(/relative to your working directory/);
+    expect(block).toMatch(/skill bundle, which sits one directory ABOVE the checkout/);
+  });
+
+  it("says NOT AVAILABLE, loudly, when nobody staged — it is never omitted", () => {
+    const block = renderFamilyBlock(doc(), "enforcement", undefined);
+    expect(block).toContain("STAGED DIFF: NOT AVAILABLE");
+    expect(block).toContain("was not asked to stage");
+    // MISSING AFFORDANCE, not an empty diff — and the escape hatch spelled with
+    // three dots, since sending a model back to git without them re-opens the
+    // exact bug staging closes.
+    expect(block).toMatch(/MISSING AFFORDANCE, not an empty diff/);
+    expect(block).toContain("git diff origin/<baseBranch>...HEAD");
+    // A branch that has to derive its own range needs the affordance MORE, not
+    // less: the checkout is whole either way.
+    expect(block).toMatch(/FULL CHECKOUT either way/);
+  });
+
+  it("distinguishes `files: null` (tried and failed) from nobody having tried", () => {
+    // `null` ≠ `[]` ≠ absent, at the layer where the difference reaches a model.
+    const failed = renderFamilyBlock(doc(), "enforcement", stagedRecord({ files: null }));
+    expect(failed).toContain("STAGED DIFF: NOT AVAILABLE");
+    expect(failed).toContain("TRIED to stage");
+    expect(failed).toContain(".lastlight/pr-review/diff/index.md");
+    // The two notices are not the same words — a reader can tell which happened.
+    expect(failed).not.toContain("was not asked to stage");
+  });
+
+  it("keeps an over-ceiling file readable as PRESENT-but-unstaged", () => {
+    const block = renderFamilyBlock(
+      doc(),
+      "enforcement",
+      stagedRecord({
+        files: [
+          {
+            path: "src/config.ts",
+            status: "modified",
+            renamedFrom: null,
+            hunks: ["12-18"],
+            patch: null,
+            bytes: 0,
+          },
+        ],
+      }),
+    );
+    expect(block).toContain("src/config.ts   → NOT STAGED");
+    expect(block).toMatch(/A missing patch is\nnot an unchanged file/);
+  });
+
+  it("reaches the family with NO obligations too — the branch that needs it most", () => {
+    // That block's own instruction is "work the diff for this family's question
+    // directly", which is precisely what sends an unseeded pass off to re-derive
+    // the range by hand.
+    const block = renderFamilyBlock(doc(), "security", stagedRecord());
+    expect(block).toContain("No security obligations could be built");
+    expect(block).toContain("STAGED DIFF: this PR's patch is already on disk");
+  });
+
+  it("renders under BOTH contracts — it is delivery, not the question", () => {
+    // `minimal` exists to hold DELIVERY constant while the question changes
+    // (the same reason the never-empty rule holds under both). A control arm
+    // that also withheld the diff would be measuring two variables.
+    for (const contract of ["full", "minimal"] as const) {
+      const block = renderFamilyBlock(doc({ contract }), "enforcement", stagedRecord());
+      expect(block, contract).toContain("STAGED DIFF: this PR's patch is already on disk");
+    }
+  });
+
+  it("does not disturb the discharge round trip", () => {
+    // The exemplar is still the only JSON object line in the block, and it still
+    // satisfies the gate. A section that introduced a second parseable line
+    // would break `exampleRowIn`'s premise ("one line each").
+    const block = renderFamilyBlock(doc(), "enforcement", stagedRecord());
+    expect(exampleRowIn(block).discharge).toBe("PARTIAL");
   });
 });

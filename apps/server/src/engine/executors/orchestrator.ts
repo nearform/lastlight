@@ -781,7 +781,7 @@ export interface SandboxSession {
  * run any number of agent turns and commands in it — concurrently if it wants.
  *
  * This is the whole mechanism behind `type: fanout`, and the reason the fan-out
- * dodges the blocker list in `docs/plans/review-evidence-pipeline/05-parallel-phases.md`:
+ * dodges the blocker list in `docs/plans/deterministic-pr-levers.md` §WP5:
  * every one of B1 / D1 / D2 / D3 / D7 exists because each PHASE provisions its
  * own sandbox against a shared workspace. Here there is exactly one provision,
  * one `AGENTS.md` write, one artifact stage/harvest and one dispose, no matter

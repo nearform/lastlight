@@ -6,7 +6,7 @@
  * cases, security, complexity, duplication, type safety, regression risk, test
  * coverage, fit) are STANDARDS checks, and candidates v1, v2 and v3 all
  * targeted that same axis between them for a total movement of one gold finding
- * (`docs/plans/review-evidence-pipeline/00-evidence.md` §7).
+ * (`docs/plans/deterministic-pr-levers.md` §"Evidence base").
  *
  * ## The rule that shapes every line below
  *

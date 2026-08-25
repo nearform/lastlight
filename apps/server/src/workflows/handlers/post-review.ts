@@ -609,9 +609,14 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
         thresholds: parseThresholds(ctx.boundaryThresholds),
         internalFloor: toFloor(ctx.internalFloor, defaultReviewConfig().analysis.internalFloor),
         // `"null"` is the literal the projection writes for the documented
-        // "unlimited body overflow" value; anything else degrades to `0`, the
-        // same direction `config.ts` coerces garbage.
-        maxBodyComments: ctx.maxBodyComments === "null" ? null : toBudget(ctx.maxBodyComments, 0),
+        // "unlimited body overflow" value; anything else degrades to the
+        // shipped default, the same direction `config.ts` coerces garbage —
+        // and read from the same authority, so the two cannot drift apart when
+        // the default moves.
+        maxBodyComments:
+          ctx.maxBodyComments === "null"
+            ? null
+            : toBudget(ctx.maxBodyComments, defaultReviewConfig().analysis.maxBodyComments ?? 0),
       };
     }
     const analysis = getRuntimeConfig()?.review?.analysis ?? defaultReviewConfig().analysis;
@@ -660,9 +665,9 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
   /**
    * Write what happened to each finding — its tier, and why.
    *
-   * [WP6](../../../../docs/plans/review-evidence-pipeline/06-adjudicate.md)'s
+   * [WP6](../../../../../docs/plans/deterministic-pr-levers.md#adjudication-and-the-attention-boundary-wp6)'s
    * AC1b asks for this in a `review_findings` table, and that table is
-   * [WP7](../../../../docs/plans/review-evidence-pipeline/07-review-memory.md)'s
+   * [WP7](../../../../../docs/plans/deterministic-pr-levers.md#review-memory-wp7)'s
    * — which depends on WP6, so it does not exist yet. **Decided deliberately
    * (2026-08-22): scope the record to the run's own workspace for now** rather
    * than pull a schema change forward for a consumer that has not been written,

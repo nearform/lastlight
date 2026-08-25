@@ -210,9 +210,22 @@ export {
   resolveDiffBase,
   resolveSha,
   showFile,
+  unifiedDiff,
   withWorktree,
 } from "./git.js";
 export type { DiffBase, FileListing, ListedFile, ListFilesOptions, ListingSource } from "./git.js";
+
+/** The staged diff — lever f1. `stageDiff` never throws; see its module header. */
+export {
+  splitPatches,
+  stageDiff,
+  stagedPatchName,
+  DEFAULT_DIFF_STAGE_DIR,
+  DIFF_INDEX_NAME,
+  MAX_PATCH_BYTES,
+  MAX_STAGED_FILES,
+} from "./stage-diff.js";
+export type { StageDiffOptions, StageDiffResult } from "./stage-diff.js";
 
 export {
   MAX_TYPECHECK_DIAGNOSTICS,

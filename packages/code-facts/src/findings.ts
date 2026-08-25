@@ -1,7 +1,8 @@
 /**
  * `findings` — the `adjudicate` loop's exit gate, and the conservation check.
  *
- * WP6c (`docs/plans/review-evidence-pipeline/06-adjudicate.md` §"The phase").
+ * WP6c (`docs/plans/deterministic-pr-levers.md` §"Adjudication and the
+ * attention boundary (WP6)").
  * It answers one question: **did every hypothesis the surveys produced reach
  * `findings.json` with exactly one recorded disposition, and is every deletion
  * backed by a probe transcript that exists?**

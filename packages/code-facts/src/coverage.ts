@@ -18,7 +18,7 @@
  *
  * WHAT THIS DOES AND DOES NOT DO. It READS an existing coverage artifact and
  * intersects it with the diff. It does not install anything and it does not run
- * a test suite — that is [WP4](../../docs/plans/review-evidence-pipeline/04-probe-oracle.md)'s
+ * a test suite — that is [WP4](../../../docs/plans/deterministic-pr-levers.md#probes-wp4)'s
  * `prepare`, and running a suite here would smuggle the wall-clock item §D13
  * deleted back into the pipeline. When there is no report, the document says so
  * in `degraded[]`. "No uncovered lines" and "nobody measured coverage" must

@@ -4,9 +4,9 @@ Program analysis of a pull request, emitted as JSON. No model spend, no network
 (unless you ask for `--stage`), and no dependency on the rest of the workspace.
 It is the substrate every later phase of the PR-review evidence pipeline reasons
 over — see
-[`docs/plans/review-evidence-pipeline/01-code-facts.md`](../../docs/plans/review-evidence-pipeline/01-code-facts.md)
+[`docs/plans/deterministic-pr-levers.md` → code-facts](../../docs/plans/deterministic-pr-levers.md#code-facts-wp1-and-hardening-wp1b)
 (WP1) and
-[`10-design-review.md`](../../docs/plans/review-evidence-pipeline/10-design-review.md).
+[its design-review decisions](../../docs/plans/deterministic-pr-levers.md#decisions).
 
 ```bash
 lastlight-facts all --repo . --base main --head HEAD --out facts.json
@@ -232,7 +232,7 @@ Neither engine is wrong about the tree it was shown; they were shown different
 trees.
 
 This **inherits and widens** the backlog item in
-[`RESTART.md`](../../docs/plans/review-evidence-pipeline/RESTART.md) —
+[the `deterministic-pr-levers.md` backlog](../../docs/plans/deterministic-pr-levers.md#backlog) —
 *"`facts`/`contracts` read head from the filesystem while the changed set comes
 from git"*. That caveat was about head; the overlay makes it true of the **base**
 view as well, for every file the diff did not touch.
@@ -441,7 +441,7 @@ parsed one of them. Measured on the real corpus — keycloak `37429` reads
 | `deps` | manifest delta, import sites, and (with `--stage`) `npm pack` of changed runtime deps into `.lastlight/pr-review/deps/`. **The staging is the affordance fix, not a nicety** — the review workspace has no `node_modules`, so "open the library source" was structurally impossible. **Six ecosystems**, not one — see below |
 | `patterns` | opengrep + gitleaks, scoped to the diff, normalised into `skills/security-review/SKILL.md`'s finding shape. **Evidence, not findings** — never posted directly |
 | `coverage` | changed lines executed by zero tests, read from an **existing** report. It never runs a suite. istanbul · lcov · JaCoCo · Cobertura · Go coverprofile · SimpleCov |
-| `all` | one envelope, every payload — what a workflow phase writes |
+| `all` | one envelope, every payload — what a workflow phase writes. With `--stage-diff` it also writes the **staged diff** (`.lastlight/pr-review/diff/`), an index plus one patch per changed file. See below |
 | `prepare` | **not an extractor** — installs dependencies so a probe can be RUN, and writes `probes/env.json`. See below |
 | `discharge` | each `survey` branch's exit gate — every obligation the family owns carries a `QUOTE` / `ABSENT` / `PARTIAL` / `PROBE` discharge in `hypotheses/<family>.jsonl`. Degrades to the `test -s` floor on an unreadable `obligations.json` **or** on `contract: "minimal"`. See below |
 | `probes` | the `falsify` loop's exit gate — every hypothesis that needed a probe has a verdict, and every claim of execution has a transcript |
@@ -567,6 +567,73 @@ shows the `tests` family converts at all, mutation seeding becomes a
 well-motivated follow-on** — a deferral with a trigger, not a rejection.
 
 `coverage` here READS an artifact; producing one is WP4's `prepare`.
+
+### `--stage-diff` — the range, written down once (lever f1)
+
+`src/stage-diff.ts`. `all --stage-diff` writes `.lastlight/pr-review/diff/`:
+`index.md` — one row per changed file with its status (A/M/D/R, and the base-side
+path of a rename), its changed line ranges **in head coordinates**, and the patch
+that holds its diff — plus one unified patch per changed file. The envelope
+records what it did, on `stagedDiff`.
+
+**It is a spend result and a correctness result, and the second is the bigger
+one.** The five survey fan-out branches make ~93 bash calls per case; ~30 of them
+re-derive ONE fixed merge-base range `facts.json` already holds, and surveys are
+~75% of a case's spend. But each of those thirty is also a fresh chance to spell
+the range two-dot, which is WP1b's bug 3 — the corpus number is 6,125 changed
+files against 3 (`tests/merge-base.test.ts`). Writing it down converts a repeated
+judgement into a read.
+
+- **The range is not re-derived here either.** `stageDiff` is handed the
+  `changed`/`hunks` the run already computed and calls `git.unifiedDiff`, which
+  goes through the same private `diffRange` as `changedPaths` and `diffHunks`.
+  One `git diff` per run, full context (`-U3`, not `diffHunks`'s `-U0`) because a
+  model reads it, `-M` so a rename stays a rename.
+- **The filename escape is INJECTIVE, and it had to be.** `/` → `__` alone
+  collides `src/auth/x.ts` with `src__auth/x.ts` — one patch overwrites the other
+  and the index points two rows at one file. So `_` is escaped too (`_5f_`), as
+  is everything outside `[A-Za-z0-9.-]`; a path long enough to overrun a 255-byte
+  name limit truncates onto a `~<hash>` tail. `src/auth/index.ts` still reads as
+  `src__auth__index.ts.patch`.
+- **The index is never truncated; the patch BODIES are.** `MAX_STAGED_FILES`
+  (400) and `MAX_PATCH_BYTES` bound bytes on disk. Every changed file still gets
+  a row, with `patch: null` and a **NOT STAGED** cell, plus one aggregate
+  `degraded[]` entry — a file missing from an index that claims to be complete is
+  the omission this package exists to prevent.
+- **Staging failure is `degraded` at MOST.** `stageDiff` never throws: a throw
+  would reach `runWrapped` and turn a complete analysis into a `coverage: "none"`
+  envelope saying nothing was analysed. It records a `degraded[]` entry naming
+  what half of the document is unaffected, and it writes a **loud `index.md` at
+  the same path**, because the brief points a survey there and a 404 reads as a
+  deployment without the pipeline. It runs BEFORE the compiler opens, so the
+  patches survive an extractor that later fails.
+- **`null` ≠ `[]` ≠ absent**, one more time: `stagedDiff.files` is `null` when
+  staging could not run, `[]` only when the range genuinely changed nothing, and
+  the whole field is ABSENT when nobody asked.
+
+The consumer side is `src/seed-render.ts`, which gives every family brief a
+**Staged diff** section — the index, the patches this family's own obligations
+point at, and exactly one prohibition — *"do not re-derive the range"* — beside
+the affordance it is useless without: *"the patch is your STARTING POINT, not
+your scope; you are in the FULL CHECKOUT"*. That second half is measured, not
+manners. The first cut said *"read the staged patch INSTEAD OF running `git
+diff`"* and over-suppressed: total survey bash calls fell **848 → 399** while the
+eliminated range re-derivation accounts for only ~276 of it — ~170 greps,
+whole-file reads and reference traces went with it, and internal recall fell
+**21/25 → 12/25**. Access never changed (the staged diff sits INSIDE the
+checkout); the framing narrowed the behaviour. Three
+states, three paragraphs, and the section is **never silently omitted**: an
+absent section reads to a survey as *"this deployment has no staged diff"*, which
+is the *we could not look* / *we looked and it is clean* conflation everything
+else here is built against. Every path it prints is **checkout-relative**, and
+that is measured rather than stylistic — across three stored runs, 98 of 98
+relative first-turn reads from a survey branch resolved and **0 of 27**
+workspace-root-absolute ones did, because the only absolute path a branch holds
+is its skill bundle, one directory ABOVE the checkout.
+
+Opt-in, like `--stage` and for the same reason: this is one of the few things
+here that touches the repository under review, and `pr-review.yaml`'s `facts`
+phase is where the flag belongs — on the same invocation that resolved the base.
 
 ### `prepare` — the one command that WRITES to the tree
 
@@ -770,7 +837,8 @@ additional rules, both **off when the flag is absent**:
   (`referencesInDiff === referenceCount`), never the capped `references[]`
   array, where `.every(r => r.inDiff)` can be vacuously true. Candidates are
   the in-diff reference sites; rank base `ALL_IN_DIFF_WEIGHT = 45` sits below
-  `state` so the budget truncates this family first, auditable in `dropped[]`.
+  `state` so these rank last inside the `contract` family and its ceiling
+  truncates them first, auditable in `dropped[]`.
 - **`registrations`** — `seedRegistrations`: a `security`-family obligation
   ordering the route/hook registrations a symbol makes, from the
   `registrations` fact (**tier-1 tsgo only**; tier 2 writes `null` = nobody
@@ -785,6 +853,76 @@ and what was asked is stamped into the document (`minting: {allInDiff,
 registrations}`) so an artifact read months later answers "which arm produced
 this". Both rules widen GENERATION — the direction that has bought recall
 before (locked decision 2) — and neither touches `seed-render.ts`.
+
+#### Per-family ceilings — a pooled budget is a budget the loudest family eats
+
+Truncation is **per family**, and `--max-obligations` is only the total
+backstop over it:
+
+| family | ceiling |
+|---|---|
+| `contract` | 12 |
+| `enforcement` | 12 |
+| `state` | 8 |
+| `security` | 8 |
+| `tests` | 8 |
+| **`--max-obligations` (`review.analysis.maxObligations`)** | **48 — their sum** |
+
+`FAMILY_CAPS` in `src/seed.ts`. Each family keeps its own obligations in the
+existing global-rank order, truncated at its own ceiling; the backstop is
+applied afterwards and drops the lowest-ranked across families only if the
+post-cap total still exceeds it. At the shipped default it **cannot bind**, and
+that is the point of the number — raising one ceiling stays a bounded act
+instead of an unbounded one.
+
+What a single pool did wrong, measured across the eight gate cases: `contract`
+minted **89** obligations while `security` minted **3**, and 35 obligations went
+into `dropped[]` carrying the words *"These are NOT 'checked'"* — so a family's
+questions went unasked because a **different** family had a lot to say, which is
+not what a ranking is supposed to mean. Two of `1667`'s five gold findings are
+security-family.
+
+`FAMILY_FLOOR = 5` / `applyFamilyFloors` was the first attempt and is
+**superseded**: a reserve still competes inside one budget, so it displaced
+`contract` slots on exactly the heavy-mint cases, and it is a suspect in the
+recall regression measured after it landed. Two things make ceilings the right
+shape rather than a bigger floor:
+
+- **The cost is PER BRANCH, not per document.** Each family's obligations feed
+  exactly one survey branch, so a pooled cap bounds the *sum* while the thing
+  that actually costs money and context is the fattest single branch. A ceiling
+  bounds that directly; a pool never did.
+- **Cross-family ranking prices incommensurable things against each other.** A
+  `contract` rank of 91 and a `security` rank of 41 are two points on a
+  mechanism-CLASS ordering, not on one scale. Ranking *within* a family is
+  meaningful; subtracting one family's questions from another's on the strength
+  of those numbers is arithmetic nobody has evidence for.
+
+Four properties, each pinned by `tests/seed.test.ts`:
+
+- **A family's excess costs only that family.** `contract` 89 + `security` 3
+  → 12 and 3. The same `security` count survives whether its neighbour minted 4
+  or 400 — structural, not arbitrated.
+- **An under-cap family is untouched.** No slot is reserved from anyone, so a
+  family minting two gets two and gives up nothing.
+- **Deterministic, ids still ascending with rank.** One pass over the
+  globally-ranked list keeping each family's first `cap` entries, so the
+  survivors come back in that same global order and one input yields a
+  byte-identical document.
+- **The backstop binds only after the ceilings**, taking the lowest-ranked
+  across families — the one place cross-family ranking still decides anything.
+
+Nothing here is tuned; when a ceiling is measured to bind on something that
+converts, this is the table that moves. The truncation is still counted once per
+dropped obligation in `dropped[]` — **one reason per family**, naming that
+family's ceiling, plus one for the backstop, so a reader comparing two families'
+counts can tell *"little to say"* from *"truncated at its own ceiling"* — and the
+coverage set is still sealed before any model call.
+
+The sixth family, `spec`, has the same shape under a different owner: it is
+seeded harness-side by WP0's `review-spec.ts` under its own
+`review.analysis.maxSpecObligations`, and it is deliberately not in this table
+because this package cannot see the PR body or the linked issue it comes from.
 
 ### `findings` — conservation, and the floor that makes it a mechanism
 
