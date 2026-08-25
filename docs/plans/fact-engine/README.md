@@ -17,12 +17,12 @@
 > "The measurements" below has been run; G1, G3, G4, G5 and G-impl are unread.
 
 This is a standalone companion to
-[`docs/plans/review-evidence-pipeline/`](../review-evidence-pipeline/README.md).
+[`docs/plans/deterministic-pr-levers.md`](../deterministic-pr-levers.md).
 It changes **one tier of one package**: the type-aware TS/JS engine inside
 `packages/code-facts`. It does not change the pipeline's thesis, its locked
 decisions (except #5, below, whose premise expired), or any work package.
 
-**Read [01b-code-facts-hardening.md](../review-evidence-pipeline/01b-code-facts-hardening.md)
+**Read [the code-facts hardening record (WP1b)](../deterministic-pr-levers.md#code-facts-wp1-and-hardening-wp1b)
 first if you have not.** It is the measurement record this document stands on,
 and its house rules are the ones used here: quote a number with the command that
 produced it, say which half of a contaminated measurement you are standing on,
@@ -58,7 +58,7 @@ prefer the symbol name over the number if the two disagree.
 | `tests/oom.test.ts` | pins a hole that cannot be closed from inside: an OOM is **exit 134, no envelope**, and `--never-fail` provably cannot catch it | `tests/oom.test.ts` |
 
 Nothing in that list is wrong. Every one of them was measured into existence,
-several of them by [01b](../review-evidence-pipeline/01b-code-facts-hardening.md)
+several of them by [WP1b](../deterministic-pr-levers.md#code-facts-wp1-and-hardening-wp1b)
 after a bug. They are all *cost management for one engine*.
 
 ### What that cost actually is, quoted honestly
@@ -80,7 +80,7 @@ diff-scoped lever reaches it**.
 The `1022–4430 MB` range that appears elsewhere in the plan is a **different
 measurement**: the five-commit, two-condition, five-tier resolution sweep on an
 *installed* tree of this monorepo
-([01b](../review-evidence-pipeline/01b-code-facts-hardening.md) → "Where the
+([WP1b](../deterministic-pr-levers.md#code-facts-wp1-and-hardening-wp1b) → "Where the
 memory actually goes"). Do not pool the two. That sweep's **wall-clock** numbers
 are contaminated (it ran beside a full test gate; one `bare/none` run recorded
 1933 s) and must never be quoted; its **RSS** numbers stand.
@@ -97,7 +97,7 @@ not exist.
 
 The truth is more useful. The cap was raised **because holding 2 GB required
 going blind**: the only lever that reached the corpus's worst cases was cutting
-`--max-files` far enough to re-open [WP1b bug 4](../review-evidence-pipeline/01b-code-facts-hardening.md)'s
+`--max-files` far enough to re-open [WP1b bug 4](../deterministic-pr-levers.md#code-facts-wp1-and-hardening-wp1b)'s
 monorepo blindness — trading a measured number for an unmeasurable one. Lever
 two (raise the cap) was the honest answer and it was taken.
 
@@ -136,7 +136,8 @@ more memory than `changed` on every installed commit measured, for no fidelity
 > programmatic compiler API"** (`tsgo` is CLI+LSP only). `ts-morph@28` vendors
 > its own compiler and has no `typescript` dependency.
 
-The same claim appears in `HANDOFF.md`'s trap list, in
+The same claim appears in the retired review-evidence-pipeline plan's
+`HANDOFF.md` trap list (git history), in
 `packages/code-facts/CLAUDE.md` ("The TS 7 landmine"), and in the header of
 `packages/code-facts/src/project.ts:1-24`.
 
@@ -493,7 +494,7 @@ interface JSDocTagInfo { readonly name: string; readonly text?: string | undefin
 ```
 
 — a flat rendered string with **no separate type expression**. That is precisely
-the shape that caused [WP1b bug 5](../review-evidence-pipeline/01b-code-facts-hardening.md):
+the shape that caused [WP1b bug 5](../deterministic-pr-levers.md#code-facts-wp1-and-hardening-wp1b):
 `@throws {ValidationError} when the id is empty` recorded `"when"`, because the
 old code read the type off the comment text and regex-unwrapped `{X}`. Adopting
 `getJsDocTagsOfSymbol` re-introduces that bug in the same file.
@@ -581,7 +582,7 @@ free.
 
 It is a **new field**, not a replacement. Add it beside `referenceCount` /
 `referencesInDiff`; do not redefine either, or every number in
-[01b](../review-evidence-pipeline/01b-code-facts-hardening.md) stops being
+[WP1b](../deterministic-pr-levers.md#code-facts-wp1-and-hardening-wp1b) stops being
 comparable.
 
 ## What stays, untouched
@@ -632,7 +633,7 @@ Each of these was decided with reasoning that this work does not change.
 | **`node_modules` cost is unmeasured on the new engine** | Every measurement above is on this monorepo, which is installed. Whether the Go compiler's `.d.ts` cost tracks ts-morph's is **not known**. `--resolution changed` exists because the JS checker followed bare specifiers below the API the budget was expressed in | G4 measures corpus peak RSS on **bare** trees; an installed-tree run is a separate, explicit spike item |
 | **The base-side overlay is proved on a two-file fixture** | `engine-overlay-probe.mjs` is 50 lines and one type. It has never been run against a real PR with renames, deletions, added packages, or an added tsconfig | The spike runs `contracts` end to end on the corpus, not on the probe |
 | **CLI size** | `typescript` ≈ 3.5 MB + one ~26 MB platform binary, minus 13.4 MB of `ts-morph` — call it 21 MB → ~38 MB installed. **Estimated, not measured** | Measure it in the spike (`npm pack` / `du` on a clean install) before quoting it anywhere |
-| **The platform binary arrives via `optionalDependencies`** | 20 of them; only the matching one installs. This checkout has exactly `@typescript+typescript-darwin-arm64@7.0.2`. A linux image that does not install its own gets a `typescript` that resolves and a `tsgo` that does not exist | **The same hazard class WP1c already wrote the `existsSync` guard for** (`09-external-validation.md:163` — *"`registerLanguages()` MUST `existsSync(libraryPath)` before the native load"*). Same guard, same reason: a native asset missing on a platform must fail loud at probe time, not at first use |
+| **The platform binary arrives via `optionalDependencies`** | 20 of them; only the matching one installs. This checkout has exactly `@typescript+typescript-darwin-arm64@7.0.2`. A linux image that does not install its own gets a `typescript` that resolves and a `tsgo` that does not exist | **The same hazard class WP1c already wrote the `existsSync` guard for** ([external validation (WP9)](../deterministic-pr-levers.md#external-validation-wp9); full text in git history — *"`registerLanguages()` MUST `existsSync(libraryPath)` before the native load"*). Same guard, same reason: a native asset missing on a platform must fail loud at probe time, not at first use |
 | **A subprocess, not a library** | The compiler is a child process over a pipe. New failure modes: spawn failure, a killed child, a hung pipe | `dispose()` in a `finally`; the §D12 shell-level catch stays regardless. **And see the three silent-failure rows below** |
 | **A tsconfig that will not parse does NOT throw** | `updateSnapshot` returns a project built from a *recovered* configuration and demotes the parse failure to `Program.getConfigFileParsingDiagnostics()`. Unchecked, that is a broken build config silently promoted to tier 1 — exactly what `makeBrokenTsConfigFixture` exists to prevent | Detected in `src/tsgo.ts`, which **excludes** the project rather than degrading it, and records `tsconfig-unparsable` in `failures[]`. `getConfigFileParsingDiagnostics` is verified to exist (`api.d.ts:205`); the "20 error diagnostics against 0" measurement is the concurrent implementation's and is **not independently verified here** |
 | **A tsconfig that does not exist is dropped silently** | It simply does not appear in `getProjects()`, and a shorter `getProjects()` looks like nothing at all. This is locked decision 6's exact shape — an empty result indistinguishable from an unavailable analyser | `failures[]` carries `tsconfig-absent`. The count of projects asked for must be compared against the count returned, every run |
@@ -647,7 +648,7 @@ Each of these was decided with reasoning that this work does not change.
 verified 2026-08-22; the only matches are a doc comment in
 `src/engine/review-spec.ts` and the CLI's dynamic import at
 `packages/cli/src/cli.ts:1356`. Nothing consumes the facts yet.
-[WP3](../review-evidence-pipeline/03-seed-and-survey.md) is still where review
+[WP3](../deterministic-pr-levers.md#seed-and-survey-wp3) is still where review
 quality comes from.
 
 This work makes WP3 and WP4 safe and cheap to build on, deletes roughly half of

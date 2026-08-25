@@ -125,7 +125,7 @@ the replacement, because both were bought with a bug:
   answer must not.**
 
 The inferred-project path is the structural repair of
-[WP1b bug 4](../review-evidence-pipeline/01b-code-facts-hardening.md):
+[WP1b bug 4](../deterministic-pr-levers.md#code-facts-wp1-and-hardening-wp1b):
 *"1 of 31 analysable changed files"*, fixed once by one-program-per-tsconfig and
 removed at the root here, since `openFiles` gets a working checker for a file
 under no tsconfig at all.
@@ -201,7 +201,7 @@ does not get to call this one closed.
 | Today | After |
 |---|---|
 | `findReferences(nameNode)` → `nameNode.findReferencesAsNodes()` (`:317–324`), wrapped in `try`/`catch` so one odd declaration does not take the extractor down | `Checker.getReferencedSymbolsForNode(node, position)` → `ReferencedSymbolEntry[]`, each with `references: NodeHandle[]`. **Keep the `try`/`catch` and keep it returning `[]` for that symbol only** |
-| — | **adopt `Checker.getSignatureUsage(signatureDecl)`** — `SignatureUsage { name: NodeHandle; call?: NodeHandle }` — as a **new** field beside `referenceCount` / `referencesInDiff`. Do not redefine either, or nothing in [01b](../review-evidence-pipeline/01b-code-facts-hardening.md) stays comparable |
+| — | **adopt `Checker.getSignatureUsage(signatureDecl)`** — `SignatureUsage { name: NodeHandle; call?: NodeHandle }` — as a **new** field beside `referenceCount` / `referencesInDiff`. Do not redefine either, or nothing in [WP1b](../deterministic-pr-levers.md#code-facts-wp1-and-hardening-wp1b) stays comparable |
 | `implementationsOf()` (`:353–376`): a kind filter, a duck-typed narrow (`asImplementationGetable`, `:335`), and `getImplementations()` at `:361` | **`implementations: null` plus a `degraded[]` entry**, unless G-impl came back yes |
 
 **The trap is `[]`.** `implementations` is
@@ -272,7 +272,7 @@ key sets on this repo before trusting the count.
 
 `:89` reads `node.getJsDocs()`, and `:127–131` reads
 `getTypeExpression()?.getTypeNode()?.getText()` — the fix for
-[WP1b bug 5](../review-evidence-pipeline/01b-code-facts-hardening.md).
+[WP1b bug 5](../deterministic-pr-levers.md#code-facts-wp1-and-hardening-wp1b).
 
 `Checker.getJsDocTagsOfSymbol` returns `JSDocTagInfo { name, text? }` — a **flat
 rendered string with no separate type expression**. Adopting it re-creates bug 5
@@ -289,7 +289,7 @@ throw that is documented in the source.
 
 ### The structural win, stated precisely
 
-[WP1](../review-evidence-pipeline/01-code-facts.md)'s **227 deltas of which one
+[WP1](../deterministic-pr-levers.md#code-facts-wp1-and-hardening-wp1b)'s **227 deltas of which one
 was real** had three causes. Two are removed **by construction** here, because
 both sides now come from one snapshot over one tree:
 
@@ -389,8 +389,10 @@ does not exist. So:
   "which compiler produced this document?" stays answerable;
 - the package **probes at startup** that the executable exists and fails loud if
   it does not — the same guard, for the same reason, as WP1c's
-  `registerLanguages()` rule (`09-external-validation.md:163`: *"MUST
-  `existsSync(libraryPath)` before the native load"*);
+  `registerLanguages()` rule
+  ([external validation (WP9)](../deterministic-pr-levers.md#external-validation-wp9),
+  full text in git history: *"MUST `existsSync(libraryPath)` before the native
+  load"*);
 - `apps/server/sandbox-base.Dockerfile` gets whatever it needs from the
   lockfile-driven `pnpm deploy` bundle it already builds, not from a URL.
 

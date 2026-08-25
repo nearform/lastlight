@@ -23,9 +23,9 @@ lived, so a spike that skipped it would prove the cheap half.
 
 **Read before starting:**
 [README.md](README.md) (the contract and the API-surface mapping),
-[01b-code-facts-hardening.md](../review-evidence-pipeline/01b-code-facts-hardening.md)
+[the code-facts hardening record (WP1b)](../deterministic-pr-levers.md#code-facts-wp1-and-hardening-wp1b)
 (the measurement record and the house rules for quoting numbers),
-[HANDOFF.md](../review-evidence-pipeline/HANDOFF.md) (traps + human sign-off),
+[the money traps](../deterministic-pr-levers.md#money-traps) (traps + human sign-off),
 and `packages/code-facts/CLAUDE.md` in full.
 
 ## The baseline
@@ -193,7 +193,7 @@ unknown.** `--resolution changed` exists because the JS checker followed bare
 specifiers one layer below the API the file budget was expressed in; whether the
 Go compiler's `node_modules` `.d.ts` cost behaves the same way has not been
 measured on any tree. Run five commits of this monorepo installed, as
-[01b](../review-evidence-pipeline/01b-code-facts-hardening.md) did, and record
+[WP1b](../deterministic-pr-levers.md#code-facts-wp1-and-hardening-wp1b) did, and record
 the answer — it is what decides whether `--resolution` survives the migration
 at all.
 
@@ -211,7 +211,7 @@ npx tsx apps/evals/scripts/facts-evidence.ts \
 
 Report the discovery ceiling (EC-loose / all gold), the evidence coverage
 (EC-strict / anchored), and the TS/JS split, with the candidate pool beside
-them — per [08-evals.md](../review-evidence-pipeline/08-evals.md). Quoting one
+them — per [the instrument (WP8)](../deterministic-pr-levers.md#the-instrument-wp8). Quoting one
 number without its denominator is how the 35.52% / 2.80% mistake gets made.
 
 Anchors are frozen and hand-audited (`apps/evals/datasets/pr-review/anchors.json`,
@@ -231,10 +231,12 @@ item 2.** A spike that moves EC by editing the labels has measured nothing.
 - **No LSP build.** G-impl is a probe that answers a question. Building an
   LSP-backed reference provider is a follow-on with its own trigger.
 
-## Traps, carried over verbatim from `HANDOFF.md`
+## Traps, carried over verbatim from the retired plan's `HANDOFF.md`
 
-Each of these has already cost someone a session. They are reproduced rather
-than summarised because the summary is what gets ignored.
+(The source doc lives in git history; the surviving condensed list is
+[money traps](../deterministic-pr-levers.md#money-traps).) Each of these has
+already cost someone a session. They are reproduced rather than summarised
+because the summary is what gets ignored.
 
 > **A measurement must never overlap a rebuild of what it measures.**
 > *Generalised 2026-08-21 — it has now happened to two different instruments.*
@@ -246,7 +248,7 @@ than summarised because the summary is what gets ignored.
 > run a measuring agent concurrently with an agent that rebuilds. Same principle
 > as `meta.core` on an eval scorecard — provenance is recorded, not remembered.
 > **Contention counts as overlap, too:** the resolution-tier sweep in
-> [01b](../review-evidence-pipeline/01b-code-facts-hardening.md) ran beside a
+> [WP1b](../deterministic-pr-levers.md#code-facts-wp1-and-hardening-wp1b) ran beside a
 > full test gate and its peak-RSS numbers survived while its wall-clock numbers
 > did not — one `bare/none` run that should take seconds recorded **1933 s**.
 > Say which half of a contaminated measurement you are standing on, or re-run it
