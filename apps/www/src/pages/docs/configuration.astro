@@ -210,6 +210,27 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 		</tbody>
 	</table>
 
+	<div class="docs-callout">
+		<div class="docs-callout-body">
+			<strong>One per-task model key ships <em>set</em>.</strong> Every entry in
+			the <code>models:</code> block of <code>config/default.yaml</code> is a
+			commented-out example except <code>review-survey</code>, which is pinned to
+			<code>anthropic/claude-haiku-4-5-20251001</code>. It is the key the five
+			survey branches of the <a href="#workflow-policy">review evidence
+			pipeline</a> declare, and — having no key of its own — its
+			<code>falsify</code> phase too, so six phases resolve through it. Pinning
+			it is not a cost downgrade: on review <em>recall</em> Haiku 4.5 beats
+			Sonnet 4.6 on two independent evals, and its price is merely what makes a
+			five-way fan-out affordable. The consequence for you: if your
+			<code>models.default</code> points at a <strong>non-Anthropic</strong>
+			provider, override <code>models.review-survey</code> in your overlay
+			<code>config.yaml</code> as well, or those six phases reach for a provider
+			you have no key for. Nothing happens either way until
+			<code>review.analysis.enabled</code> is on — those phases skip while it is
+			off.
+		</div>
+	</div>
+
 	<div class="docs-callout tip">
 		<div class="docs-callout-body">
 			<strong>Legacy env vars.</strong> All <code>OPENCODE_*</code> names from the
@@ -409,7 +430,11 @@ review:
   analysis:
     enabled: false             # the review evidence pipeline — off, and inert
     maxSpecObligations: 40     # SAFETY BOUND for the `spec` family — should never bind
-    maxObligations: 40         # …and for the five facts-derived families pooled
+    maxObligations: 48         # TOTAL backstop over the five facts-derived
+                               # families, which are capped PER FAMILY (contract
+                               # 12, enforcement 12, state 8, security 8, tests
+                               # 8). 48 is their sum, so it cannot bind unless
+                               # you raise one of those ceilings
     obligationContract: minimal  # minimal | full — how much each survey records
                                # per obligation. minimal is the measured default
     mint: all-in-diff,registrations  # extra seeding rules beyond the original
@@ -426,10 +451,11 @@ review:
     prepareTimeoutSeconds: 300
     coverageTimeoutSeconds: 900
     probeRounds: 2
-    maxInlineComments: 8       # the attention boundary — findings past this go
+    maxInlineComments: 10      # the attention boundary — findings past this go
                                # to the review body, never dropped
-    maxBodyComments: 0         # body-tier budget. 0 = no overflow (default);
-                               # N = top N by severity × confidence; null = unlimited
+    maxBodyComments: 5         # body-tier budget. N = top N by severity ×
+                               # confidence (default 5); 0 = no overflow at all;
+                               # null = unlimited
     thresholds:                # per-family confidence bar for an INLINE comment;
       contract: 0.35           # below it, the body
       enforcement: 0.35
