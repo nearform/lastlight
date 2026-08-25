@@ -248,6 +248,11 @@ function ColumnPicker({
  * miss are different facts, and collapsing them would inflate the apparent
  * agreement between repeats.
  */
+/** Repeats where this gold was actually judged — `undefined` cells excluded. */
+function measuredOf(r: { hits: readonly (boolean | undefined)[] }): number {
+  return r.hits.filter((h) => h !== undefined).length;
+}
+
 function HitMatrix({ band }: { band: ReturnType<typeof buildRepeatBand> }) {
   // Sort so the reproducible findings sit at the top and the never-found at the
   // bottom; within a tier, keep dataset order (grouped by case).
@@ -301,17 +306,28 @@ function HitMatrix({ band }: { band: ReturnType<typeof buildRepeatBand> }) {
                     )}
                   </td>
                 ))}
+                {/* The denominator is MEASURED repeats only — a repeat with no
+                    judge trace is unknown, not a miss, and counting it would
+                    read a judge flake (or an in-flight repeat) as "missed". */}
                 <td
                   className={
                     "px-3 py-2 text-center font-mono text-2xs tabular-nums " +
-                    (r.hitCount === 0
-                      ? "text-error/70"
-                      : r.hitCount === r.hits.length
-                        ? "font-bold text-success"
-                        : "text-warning")
+                    (measuredOf(r) === 0
+                      ? "text-base-content/40"
+                      : r.hitCount === 0
+                        ? "text-error/70"
+                        : r.hitCount === measuredOf(r)
+                          ? "font-bold text-success"
+                          : "text-warning")
+                  }
+                  title={
+                    measuredOf(r) < r.hits.length
+                      ? `${r.hits.length - measuredOf(r)} repeat(s) unmeasured (no judge trace) — excluded from the denominator`
+                      : undefined
                   }
                 >
-                  {r.hitCount}/{r.hits.length}
+                  {measuredOf(r) === 0 ? "—" : `${r.hitCount}/${measuredOf(r)}`}
+                  {measuredOf(r) < r.hits.length ? <span className="text-base-content/40"> +?</span> : null}
                 </td>
               </tr>
             ))}

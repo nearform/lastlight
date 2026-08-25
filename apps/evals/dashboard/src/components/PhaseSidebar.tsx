@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { SessionLane } from "../lib/session";
-import { fmtMsExact } from "../lib/format";
+import { fmtDuration } from "../lib/format";
 
 /** Ticks once a second while `on`, so a running session's duration counts up
  * instead of freezing at whatever the last poll happened to fetch. Parked
@@ -112,7 +112,7 @@ function LaneRow({
         </span>
       </div>
       <div className="flex items-center gap-2 font-mono text-2xs text-base-content/35">
-        <span>{clock.ms === undefined ? "—" : fmtMsExact(clock.ms)}</span>
+        <span>{clock.ms === undefined ? "—" : fmtDuration(clock.ms)}</span>
         <span>·</span>
         <span>{lane.turns}t</span>
         <span className="truncate opacity-60">{lane.sessionId ? shortId(lane.sessionId) : "harness"}</span>
@@ -295,7 +295,7 @@ export function PhaseSidebar({
                   <span className="italic opacity-70">skipped</span>
                 ) : (
                   <>
-                    <span>{ms === undefined ? (p.loading ? "…" : "—") : fmtMsExact(ms)}</span>
+                    <span>{ms === undefined ? (p.loading ? "…" : "—") : fmtDuration(ms)}</span>
                     {measured.turns > 0 && (
                       <>
                         <span>·</span>

@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import type { InstanceResult, PendingCase, ReviewTrace } from "../types";
-import { fmtMs, isPrReviewTier, modelLabel } from "../lib/format";
+import { fmtDuration, isPrReviewTier, modelLabel } from "../lib/format";
 import { Chip, Frac, Pill } from "./ui";
 import { SessionModal, type SessionSource } from "./SessionModal";
 import { DiffModal } from "./DiffModal";
@@ -203,7 +203,9 @@ export function InstanceTable({
                   )}
                 </td>
                 <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono">${r.costUsd.toFixed(4)}</td>
-                <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono">{fmtMs(r.durationMs)}</td>
+                <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono">
+                  {r.durationMs ? fmtDuration(r.durationMs) : "—"}
+                </td>
               </tr>
             );
           })}

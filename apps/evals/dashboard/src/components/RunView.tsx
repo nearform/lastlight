@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import type { IndexRun, InstanceResult, MartianRanking, PendingCase } from "../types";
 import { useScorecard } from "../lib/api";
-import { fmtDate, isPrReviewTier, modelLabel } from "../lib/format";
+import { fmtDate, fmtDuration, isPrReviewTier, modelLabel } from "../lib/format";
 import { summarizeModels } from "../lib/summarize";
 import { CompareTable } from "./CompareTable";
 import { InstanceTable } from "./InstanceTable";
@@ -279,8 +279,6 @@ function PhaseTimingPanel({
   const arms = [...byArm].filter(([, phases]) => phases.size);
   if (!arms.length) return null;
 
-  const fmt = (ms: number) => (ms >= 60_000 ? `${Math.floor(ms / 60_000)}m${String(Math.round((ms % 60_000) / 1000)).padStart(2, "0")}` : `${(ms / 1000).toFixed(1)}s`);
-
   return (
     <div className="mt-8">
       <h3 className="mb-1 text-lg font-semibold text-base-content">Where the time went</h3>
@@ -302,7 +300,9 @@ function PhaseTimingPanel({
             <div key={arm} className="rounded-xl border border-base-300 bg-base-200 px-4 py-3">
               <div className="mb-2 flex items-baseline gap-2">
                 <span className="font-mono text-xs font-semibold text-base-content">{modelLabel(labels, arm)}</span>
-                <span className="font-mono text-2xs text-base-content/40">{fmt(totalMs)} of model + gate time</span>
+                <span className="font-mono text-2xs text-base-content/40">
+                  {fmtDuration(totalMs)} of model + gate time
+                </span>
               </div>
               <div className="flex flex-col gap-1">
                 {rows.map(([phase, v]) => {
@@ -315,7 +315,7 @@ function PhaseTimingPanel({
                       <div className="h-1.5 flex-1 overflow-hidden rounded bg-base-300">
                         <div className="h-full rounded bg-info/70" style={{ width: `${Math.max(share * 100, 0.5)}%` }} />
                       </div>
-                      <span className="w-14 shrink-0 text-right text-base-content/70">{fmt(v.ms)}</span>
+                      <span className="w-14 shrink-0 text-right text-base-content/70">{fmtDuration(v.ms)}</span>
                       <span className="w-10 shrink-0 text-right text-base-content/40">{(share * 100).toFixed(0)}%</span>
                       <span className="w-16 shrink-0 text-right text-base-content/40">
                         {v.cost > 0 ? `$${v.cost.toFixed(2)}` : ""}

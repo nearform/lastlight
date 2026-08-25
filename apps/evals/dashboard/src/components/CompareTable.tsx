@@ -1,5 +1,5 @@
 import type { ModelSummary } from "../types";
-import { fbetaLabel, fmtMs, fmtPct, fmtRatio, fmtTokens, isPrReviewTier, modelLabel, rankModels, tierMetric } from "../lib/format";
+import { fbetaLabel, fmtDuration, fmtPct, fmtRatio, fmtTokens, isPrReviewTier, modelLabel, rankModels, tierMetric } from "../lib/format";
 import { Bar } from "./ui";
 
 /** Comparison table for one tier: arms (models, or configs in a `config` run) as
@@ -97,7 +97,14 @@ export function CompareTable({
                   <Bar frac={maxCost ? m.totalCostUsd / maxCost : 0} value={`$${m.totalCostUsd.toFixed(3)}`} color="info" best={isBestCost} />
                 </td>
                 <td className="w-[22%] min-w-[140px] px-3 py-2.5">
-                  <Bar frac={maxLat ? m.p50DurationMs / maxLat : 0} value={fmtMs(m.p50DurationMs)} color="primary" best={isBestLat} />
+                  {/* No p50 at all is an em dash, never `0ms` — an unmeasured
+                      latency must not read as an instant one. */}
+                  <Bar
+                    frac={maxLat ? m.p50DurationMs / maxLat : 0}
+                    value={m.p50DurationMs ? fmtDuration(m.p50DurationMs) : "—"}
+                    color="primary"
+                    best={isBestLat}
+                  />
                 </td>
                 <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono">
                   {fmtTokens(m.avgInputTokens)}

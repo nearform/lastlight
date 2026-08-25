@@ -111,6 +111,9 @@ export interface RepeatMeta {
   group: string;
   index?: number;
   of?: number;
+  /** `--repeat-concurrency` when the band's repeats ran OVERLAPPED. Latency
+   * reads on such a run are contaminated by contention; scores are not. */
+  concurrency?: number;
 }
 
 export interface RunMeta {
@@ -188,6 +191,15 @@ export interface IndexRun {
   generatedAt: string;
   gitSha?: string;
   runType?: RunType;
+  /** Arm labels under test (`meta.models`). Present even when `byTier` is still
+   * empty (a live run with nothing graded yet), which is why the overview names
+   * an arm from this rather than from the summaries. */
+  models?: string[];
+  /** The primary `--overlay` — the other half of the arm's identity. */
+  overlay?: string;
+  /** Set when this run is one repeat of a deliberate band; the key the overview
+   * folds sibling runs into one row on. */
+  repeat?: RepeatMeta;
   tiers: string[];
   labels: Record<string, string>;
   byTier: TierSummary[];

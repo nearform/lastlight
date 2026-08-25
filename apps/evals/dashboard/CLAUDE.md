@@ -45,6 +45,32 @@ So:
   reaches `node:fs`). Node globals consequently type-check in this browser app;
   don't use them.
 
+## The runs table is grouped by ARM, not by model column
+
+`src/lib/runGroups.ts` turns `/api/index` runs into the overview's table rows.
+Two rules it exists to enforce:
+
+- **A model is not a column.** The table used to grow one column per model id
+  seen anywhere in the folder, so most cells were `—` and the *same* model
+  appeared twice — `Claude Haiku 4.5` (the `models.json` label) and the raw
+  `anthropic/claude-haiku-4-5-20251001` the runs were actually launched against.
+  `modelDisplay`/`modelKey` (`src/lib/format.ts`) collapse a pinned snapshot id
+  onto its registry label and keep the full id in a `title`. The arm — overlay
+  basename + model — is one cell of the run's own row.
+- **A repeat band is one row.** Runs fold on `meta.repeat.group`; each repeat is
+  a chip, and the mean ± band appears only once `of` repeats have landed (an
+  in-flight band shows its landed chips plus an `n of m` spinner). `band` is
+  `max − min`, the same definition as the harness's `VarianceRollup.band`.
+  Nothing is grouped heuristically — the stamp is the only evidence, and
+  guessing would fold a baseline in with the candidates it is the control for
+  (the preserved 2026-08-22 runs carry no `repeat`/`overlay` meta at all and
+  must stay ungrouped single rows).
+
+`IndexRun` carries `models` / `overlay` / `repeat` for this, straight off
+`meta` in the harness's `buildIndex` (`../src/report.ts`) — so the live `serve`
+index and the baked static manifest (`../scripts/build-site.ts`) are the same
+shape and the same component renders both.
+
 ## Testing
 
 `vitest.config.ts`, `environment: "node"` — everything worth testing here is pure

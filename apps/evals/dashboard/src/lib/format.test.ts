@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ModelSummary } from "../types";
-import { fmtPct, fmtRatio, tierMetric } from "./format";
+import { fmtDuration, fmtPct, fmtRatio, tierMetric } from "./format";
 
 /** An arm whose micro-recall and per-case F-beta mean are deliberately far
  * apart, so a test can tell which one the UI is reading. */
@@ -80,6 +80,41 @@ describe("the other tiers are untouched", () => {
     const m = summary({ behavioralTotal: 4, behavioralOk: 1 });
     expect(tierMetric("triage").label).toBe("behavioral");
     expect(tierMetric("triage").rate(m)).toBe(0.25);
+  });
+});
+
+describe("durations are human readable", () => {
+  it.each([
+    // The bug this guards: the sessions sidebar rendered `284,391ms · 60t`.
+    [284_391, "4m 44s"],
+    [110_421, "1m 50s"],
+    [842, "842ms"],
+    [12_400, "12.4s"],
+    [4_320_000, "1h 12m"],
+  ])("renders %ims as %s", (ms, expected) => {
+    expect(fmtDuration(ms)).toBe(expected);
+  });
+
+  it("drops a zero-valued smaller unit, like the trailing .0 on seconds", () => {
+    expect(fmtDuration(1000)).toBe("1s");
+    expect(fmtDuration(240_000)).toBe("4m");
+    expect(fmtDuration(3_600_000)).toBe("1h");
+  });
+
+  it("carries at every boundary rather than printing a unit's ceiling", () => {
+    expect(fmtDuration(999)).toBe("999ms");
+    expect(fmtDuration(1000)).toBe("1s");
+    // Rounded to tenths this is 60.0s, which is not a thing.
+    expect(fmtDuration(59_970)).toBe("1m");
+    expect(fmtDuration(59_940)).toBe("59.9s");
+    expect(fmtDuration(3_599_400)).toBe("59m 59s");
+    expect(fmtDuration(3_599_600)).toBe("1h");
+  });
+
+  it("renders a measured zero as 0ms — a caller with no measurement shows its own dash", () => {
+    expect(fmtDuration(0)).toBe("0ms");
+    expect(fmtDuration(-5)).toBe("0ms");
+    expect(fmtDuration(NaN)).toBe("0ms");
   });
 });
 
