@@ -259,6 +259,18 @@ export interface SweBenchInstance {
    * against (LLM judge → precision/recall/F-beta). */
   review_gold?: GoldComment[];
   /**
+   * Real defects that are NOT this case's gold but are known-true of this PR —
+   * typically the gold of a SIBLING ROUND of the same PR (the `-r2`/`-r3`
+   * cases), which shares most of its head tree with this one. A posted finding
+   * that matches one is scored NEUTRAL: excluded from `posted`, never a false
+   * positive, never a match. Without this, a reviewer that catches the
+   * hardest defect in the PR one round early is punished twice — an FP here
+   * and an FN on the sibling case it never ran (measured on the 2026-08-25
+   * ladder: 9 of 190 FPs were sibling-round gold, concentrated on the
+   * strongest arms).
+   */
+  review_gold_neutral?: GoldComment[];
+  /**
    * The `PrState` snapshot a dispatch would have resolved for this case
    * (issues #251, #252). Present ⇒ the harness projects it through core's own
    * `renderContext` into the run context, exactly as `dispatchWorkflow` does —
@@ -371,9 +383,28 @@ export interface ReviewGradeResult {
   recall: number;
   fbeta: number;
   beta: number;
+  /** Findings scored against gold. Under a neutral set this EXCLUDES the
+   * neutralized findings — see {@link postedRaw}. */
   posted: number;
   gold: number;
+  /** Gold comments the review caught (recall's numerator). */
   matched: number;
+  /**
+   * Findings that matched at least one gold — precision's numerator. Absent on
+   * grades from the one-to-one `match-v1` judge, where it always equals
+   * {@link matched}; the many-to-one `match-v2` judge lets one posted comment
+   * legitimately carry two gold defects, and there the two counts diverge.
+   * Every consumer reads `matchedFindings ?? matched`, so v1 scorecards
+   * re-score bit-identically.
+   */
+  matchedFindings?: number;
+  /** Findings as extracted, before neutral-set exclusion. Absent when nothing
+   * was neutralized ({@link posted} is then the raw count too). */
+  postedRaw?: number;
+  /** Findings excluded from scoring because they matched the case's
+   * `review_gold_neutral` set (sibling-round gold) — real defects of this PR
+   * that this case's gold doesn't credit. Neither matched nor false positives. */
+  neutralized?: { description: string; file?: string }[];
   /** Findings the agent raised that matched no gold comment. */
   falsePositives: { description: string; file?: string }[];
   /** Gold comments the agent missed. */
@@ -384,10 +415,17 @@ export interface ReviewGradeResult {
   trace?: {
     judgeModel: string;
     reviewText: string;
-    findings: { description: string; file?: string; matchedGold: number | null }[];
+    findings: { description: string; file?: string; matchedGold: number | null; matchedGolds?: number[] }[];
     gold: { description: string; severity: string; matchedFinding: number | null }[];
+    /** The neutral set and which finding (if any) each entry absorbed. */
+    neutral?: { description: string; matchedFinding: number | null }[];
     rawExtract?: string;
     rawMatch?: string;
+    rawNeutralMatch?: string;
+    /** Which MATCH prompt graded this case (absent = the original one-to-one
+     * `match-v1`). Comparisons across versions measure the grader, not the
+     * arm — `diff-runs` warns on a mismatch. */
+    matchPrompt?: string;
     /** Whether the PR diff was fed to the judge (`--judge-with-diff`). */
     usedDiff?: boolean;
   };

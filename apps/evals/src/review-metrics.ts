@@ -160,9 +160,14 @@ export interface MicroReview {
   gold: number;
   /** Posted findings that matched a gold finding, summed. */
   matched: number;
+  /** Findings that matched ≥1 gold, summed — precision's numerator. Equals
+   * {@link MicroReview.matched} on `match-v1` grades; diverges under `match-v2`,
+   * where one posted comment may carry two gold defects. Optional because
+   * persisted scorecards predate it — absent means "equal to `matched`". */
+  matchedFindings?: number;
   /** matched ÷ gold. **The headline.** `null` when no case carried gold. */
   microRecall: number | null;
-  /** matched ÷ posted. `null` when nothing was posted. */
+  /** matchedFindings ÷ posted. `null` when nothing was posted. */
   microPrecision: number | null;
   /** F1 over the micro precision/recall. Reported beside micro-recall, never
    * instead of it — the Martian comparison still needs an F1. */
@@ -173,26 +178,36 @@ export interface MicroReview {
    * in the arm mean for posting nothing, so they are precision canaries and are
    * named rather than silently averaged in (AC2). */
   emptyGoldCases: string[];
+  /** Cases EXCLUDED from this roll-up because their run carries an error
+   * (typically a judge failure — ungraded, never a silent zero). Named so a
+   * `cases` count smaller than the run's case list is visible in the artifact
+   * instead of silently shrinking the denominator: a 2026-08-25 run reported
+   * micro over 3 of its 4 cases and nothing in the scorecard said so.
+   * Optional because persisted scorecards predate it. */
+  ungradedCases?: string[];
   /** The attention bill: posted findings per graded PR. Graphite scored 100%
    * precision at 8.8% recall — a reviewer that says nothing looks perfect on
    * precision alone, and this is the number that catches the opposite failure. */
   commentsPerPr: number;
 }
 
-/** The gold/posted/matched triple a micro roll-up needs from one case. */
-type Counted = Pick<ReviewGradeResult, "posted" | "gold" | "matched">;
+/** The gold/posted/matched counts a micro roll-up needs from one case.
+ * `matchedFindings` is absent on `match-v1` grades, where it equals `matched`. */
+type Counted = Pick<ReviewGradeResult, "posted" | "gold" | "matched" | "matchedFindings">;
 
-function microOf(counted: Counted[], emptyGoldCases: string[]): MicroReview {
+function microOf(counted: Counted[], emptyGoldCases: string[], ungradedCases: string[] = []): MicroReview {
   let posted = 0;
   let gold = 0;
   let matched = 0;
+  let matchedFindings = 0;
   for (const r of counted) {
     posted += r.posted;
     gold += r.gold;
     matched += r.matched;
+    matchedFindings += r.matchedFindings ?? r.matched;
   }
   const microRecall = gold > 0 ? matched / gold : null;
-  const microPrecision = posted > 0 ? matched / posted : null;
+  const microPrecision = posted > 0 ? matchedFindings / posted : null;
   const microF1 =
     microRecall !== null && microPrecision !== null && microRecall + microPrecision > 0
       ? (2 * microRecall * microPrecision) / (microRecall + microPrecision)
@@ -202,11 +217,13 @@ function microOf(counted: Counted[], emptyGoldCases: string[]): MicroReview {
     posted,
     gold,
     matched,
+    matchedFindings,
     microRecall,
     microPrecision,
     microF1,
-    snr: snrOf(matched, posted),
+    snr: snrOf(matchedFindings, posted),
     emptyGoldCases,
+    ungradedCases,
     commentsPerPr: counted.length ? posted / counted.length : 0,
   };
 }
@@ -223,6 +240,9 @@ export function microReview(results: InstanceResult[]): MicroReview {
   return microOf(
     graded.map((r) => r.review!),
     graded.filter((r) => r.review!.gold === 0).map((r) => r.instance_id),
+    // Cases with a review block that this roll-up nonetheless excludes: named,
+    // so `cases` shrinking below the run's case list is visible in the artifact.
+    results.filter((r) => r.review !== undefined && r.error).map((r) => r.instance_id),
   );
 }
 

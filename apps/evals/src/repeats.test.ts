@@ -321,17 +321,22 @@ describe("run provenance — resolveFactsBin (§D1's order)", () => {
     }
   });
 
-  it("falls back to PATH, then to the baked path, then to null", () => {
+  it("falls back to PATH, then the baked path, then the workspace sibling, then null", () => {
     const dir = tmp();
     try {
       const bin = join(dir, "lastlight-facts");
       writeFileSync(bin, "#!/bin/sh\n");
       chmodSync(bin, 0o755);
       expect(resolveFactsBin({ PATH: dir })).toBe(bin);
-      // On a dev host the baked path does not exist and this is null; inside the
-      // sandbox image it does. Both are correct — asserting a bare null would
-      // make this test fail in exactly the environment the binary ships in.
-      expect([null, BAKED_FACTS_BIN]).toContain(resolveFactsBin({ PATH: join(dir, "empty") }));
+      // With nothing on PATH the answer depends on the host: null on a bare dev
+      // host, the baked path inside the sandbox image, and the monorepo's own
+      // `packages/code-facts/dist/cli.js` when the harness runs from the
+      // workspace (the fallback added after a shell without LASTLIGHT_FACTS_BIN
+      // ran the whole pr-review ladder with the conservation gate dead). All
+      // three are correct; a bare-null assertion would fail exactly where the
+      // binary ships.
+      const resolved = resolveFactsBin({ PATH: join(dir, "empty") });
+      expect(resolved === null || resolved === BAKED_FACTS_BIN || /code-facts[/\\]dist[/\\]cli\.js$/.test(resolved)).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

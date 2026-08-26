@@ -31,24 +31,29 @@ import type { FakeGitHub, SubmittedReview } from "./fake-github.js";
 import { judge, parseJudgeJson, defaultJudgeModel } from "./judge.js";
 
 /**
- * One judge call with a single retry on an UNPARSEABLE reply. Temp-0 judges
- * still occasionally return truncated/malformed JSON (three cases in one day,
+ * One judge call with retries on an UNPARSEABLE reply. Temp-0 judges still
+ * occasionally return truncated/malformed JSON (three cases in one day,
  * 2026-08-25 — each erroring a fully-run case as ungraded), and a fresh call
- * almost always parses. Retries parse failures only: a thrown HTTP/key error
- * keeps its existing meaning and path. Returns the LAST raw reply for the
- * trace either way.
+ * almost always parses. A single retry was not enough: the same day's ladder
+ * still lost a fully-run case to two bad replies in a row, and each lost case
+ * silently shrinks the arm's micro denominator (the exclusion is now also
+ * named in `micro.ungradedCases`). Retries parse failures only: a thrown
+ * HTTP/key error keeps its existing meaning and path. Returns the LAST raw
+ * reply for the trace either way.
  */
+const JUDGE_PARSE_ATTEMPTS = 3;
 async function judgeParsed<T>(
   model: string,
   system: string,
   user: string,
   valid: (parsed: T | null) => boolean,
 ): Promise<{ raw: string; parsed: T | null }> {
-  let raw = await judge(model, system, user);
-  let parsed = parseJudgeJson<T>(raw);
-  if (!valid(parsed)) {
+  let raw = "";
+  let parsed: T | null = null;
+  for (let attempt = 0; attempt < JUDGE_PARSE_ATTEMPTS; attempt++) {
     raw = await judge(model, system, user);
     parsed = parseJudgeJson<T>(raw);
+    if (valid(parsed)) break;
   }
   return { raw, parsed };
 }
@@ -248,9 +253,21 @@ export interface ReviewGrade {
   /** The β used for {@link ReviewGrade.fbeta} (1 = F1 = equal weight; 0.5 = F0.5
    * = precision weighted 2×). */
   beta: number;
+  /** Findings scored against gold — excludes any neutralized ones. */
   posted: number;
   gold: number;
+  /** Gold comments caught — recall's numerator. */
   matched: number;
+  /** Findings that matched ≥1 gold — precision's numerator. Diverges from
+   * {@link matched} only under `match-v2`, where one posted comment can carry
+   * two gold defects. Consumers read `matchedFindings ?? matched`. */
+  matchedFindings?: number;
+  /** Findings before neutral-set exclusion; absent when nothing was neutralized. */
+  postedRaw?: number;
+  /** Findings excluded from scoring: they matched the case's sibling-round
+   * neutral gold, so they are real defects of this PR that this case's gold
+   * doesn't credit. Neither matched nor false positives. */
+  neutralized?: { description: string; file?: string }[];
   falsePositives: { description: string; file?: string }[];
   falseNegatives: { description: string; file?: string; severity: string }[];
   /** Set if the judge couldn't be run (missing key, HTTP error, unparseable) —
@@ -271,14 +288,23 @@ export interface ReviewTrace {
   judgeModel: string;
   /** The flattened review text (body + inline comments) fed to the extractor. */
   reviewText: string;
-  /** Distinct findings the judge distilled from the review. */
-  findings: { description: string; file?: string; matchedGold: number | null }[];
+  /** Distinct findings the judge distilled from the review. `matchedGold` is
+   * the first (usually only) matched gold; `matchedGolds` appears when
+   * `match-v2` paired one finding with several. */
+  findings: { description: string; file?: string; matchedGold: number | null; matchedGolds?: number[] }[];
   /** The gold set the findings are matched against. */
   gold: { description: string; severity: string; matchedFinding: number | null }[];
+  /** The neutral (sibling-round) set and which finding each entry absorbed. */
+  neutral?: { description: string; matchedFinding: number | null }[];
   /** The judge's raw reply for the extraction step. */
   rawExtract?: string;
   /** The judge's raw reply for the matching step. */
   rawMatch?: string;
+  /** The judge's raw reply for the neutral-set matching step. */
+  rawNeutralMatch?: string;
+  /** Which MATCH prompt graded this case; absent = the original one-to-one
+   * `match-v1`. A cross-version comparison measures the grader, not the arm. */
+  matchPrompt?: string;
   /** Whether the PR diff was fed to the judge (`--judge-with-diff`). */
   usedDiff?: boolean;
 }
@@ -353,6 +379,38 @@ const MATCH_SYSTEM =
   'Output ONLY JSON: {"matches":[{"finding":<finding index>,"gold":<gold index>}]}';
 
 /**
+ * The current posted-side MATCH prompt — **`match-v2`**, many-to-one.
+ *
+ * v1's one-to-one pairing under-scores a review whose single comment genuinely
+ * asserts two gold defects. Measured on the 2026-08-25 ladder: a posted
+ * paragraph stating both the MIME-type trust defect and the shared-drive
+ * omission was credited with one match and charged one false negative for the
+ * defect its own text stated — twice, on the arm with the best recall in the
+ * set. One gold still matches at most one finding (a defect caught once is
+ * caught once); the relaxation is only that one FINDING may carry several
+ * distinct gold defects it explicitly asserts.
+ *
+ * Versioned rather than edited in place ({@link MATCH_SYSTEM} stays frozen):
+ * published numbers were graded under v1, `--repeat-judge` measures a specific
+ * grader, and the anchors artifact set the precedent — ship a better instrument
+ * as v2 and stamp it (`trace.matchPrompt`), never rewrite what past numbers
+ * meant. {@link INTERNAL_MATCH_SYSTEM} deliberately stays on the v1 base for
+ * the same reason: internal recall was back-filled across preserved runs under
+ * that prompt.
+ */
+const MATCH_SYSTEM_V2 =
+  "You judge whether a reviewer's findings match a gold set of KNOWN real issues in a pull request. " +
+  "Two items MATCH when they describe the SAME underlying issue — the same root cause or the same required fix — " +
+  "even if worded differently or the line is slightly off. Wording need not match; substance must. " +
+  "If a PR DIFF is provided, use it to resolve whether a finding and a gold issue point at the same code change. " +
+  "Each gold issue matches AT MOST ONE finding (choose the best one). A single finding MAY match several gold issues, " +
+  "but only when its text explicitly asserts each of those distinct defects — never because they are merely related. " +
+  'Output ONLY JSON: {"matches":[{"finding":<finding index>,"gold":<gold index>}]}';
+
+/** Stamped on every trace graded by {@link MATCH_SYSTEM_V2}. */
+export const MATCH_PROMPT_VERSION = "match-v2";
+
+/**
  * The internal-recall MATCH prompt — {@link MATCH_SYSTEM} plus a
  * claim-direction requirement, as its OWN constant on purpose.
  *
@@ -404,6 +462,10 @@ export async function gradeReview(opts: {
   reviews: SubmittedReview[];
   judgeModel?: string;
   beta?: number;
+  /** Sibling-round gold (`review_gold_neutral`): real defects of this PR that
+   * this case's gold doesn't credit. A finding matching one is excluded from
+   * scoring — neither a match nor a false positive. */
+  neutralGold?: GoldComment[];
   /** The PR diff. When provided (opt-in `--judge-with-diff`), the judge sees the
    * code so it can resolve terse, location-anchored review comments — at the cost
    * of leaderboard parity (Martian's offline judge is diff-blind). */
@@ -499,58 +561,91 @@ export async function gradeReview(opts: {
     const trace = bareTrace({ judgeModel: model, reviewText: text, findings, rawExtract });
     return gold.length === 0 ? perfect(trace) : empty({ trace });
   }
-  if (gold.length === 0) {
-    // Findings on a PR with no gold issues are all noise. Trace it like every
-    // other exit: this was the ONE path that returned no trace, so a canary
-    // case's false positives rendered with no review text behind them — which
-    // read as "false positives on a review that was never posted" (the 1641
-    // misread, 2026-08-24).
-    return {
-      precision: 0,
-      recall: 1,
-      fbeta: 0,
-      beta,
-      posted,
-      gold: 0,
-      matched: 0,
-      falsePositives: findings.map((f) => ({ description: f.description, file: f.file ?? undefined })),
-      falseNegatives: [],
-      trace: bareTrace({ judgeModel: model, reviewText: text, findings, rawExtract }),
-    };
+  // 2. Match findings ↔ gold (match-v2: one finding may carry several golds).
+  // A no-gold case skips the call — its findings go straight to the neutral
+  // pass, then to falsePositives. Every path below still builds a full trace:
+  // the no-gold early return was the ONE path that used to omit it, so a canary
+  // case's false positives rendered with no review text behind them — which
+  // read as "false positives on a review that was never posted" (the 1641
+  // misread, 2026-08-24).
+  let findingToGolds = new Map<number, number[]>();
+  if (gold.length > 0) {
+    const matchUser = JSON.stringify({
+      findings: findings.map((f, i) => ({ index: i, description: f.description, file: f.file ?? null })),
+      gold: gold.map((g, i) => ({ index: i, file: g.file ?? null, line: g.line ?? null, severity: g.severity, description: g.description })),
+    });
+    try {
+      const { raw, parsed } = await judgeParsed<{ matches?: { finding: number; gold: number }[] }>(
+        model,
+        MATCH_SYSTEM_V2,
+        withDiffContext(diff, "resolve whether a finding and a gold issue point at the same code", matchUser),
+        (p) => !!p?.matches,
+      );
+      rawMatch = raw;
+      if (!parsed?.matches) return empty({ error: "judge: unparseable match reply", posted });
+      findingToGolds = acceptPairsManyToOne(parsed.matches, posted, gold.length);
+    } catch (err) {
+      return empty({ error: `judge match: ${(err as Error).message}`, posted });
+    }
   }
 
-  // 2. Match findings ↔ gold.
-  const matchUser = JSON.stringify({
-    findings: findings.map((f, i) => ({ index: i, description: f.description, file: f.file ?? null })),
-    gold: gold.map((g, i) => ({ index: i, file: g.file ?? null, line: g.line ?? null, severity: g.severity, description: g.description })),
-  });
-  let matches: { finding: number; gold: number }[];
-  try {
-    const { raw, parsed } = await judgeParsed<{ matches?: { finding: number; gold: number }[] }>(
-      model,
-      MATCH_SYSTEM,
-      withDiffContext(diff, "resolve whether a finding and a gold issue point at the same code", matchUser),
-      (p) => !!p?.matches,
-    );
-    rawMatch = raw;
-    if (!parsed?.matches) return empty({ error: "judge: unparseable match reply", posted });
-    matches = parsed.matches;
-  } catch (err) {
-    return empty({ error: `judge match: ${(err as Error).message}`, posted });
+  // 2b. Neutral pass: findings that matched no gold get one chance to be
+  // absorbed by the sibling-round neutral set (see `review_gold_neutral`).
+  // Runs AFTER the gold match so the case's own gold always wins a finding.
+  // A judge failure here errors the case like any other judge failure — a
+  // silently skipped neutral pass would grade the same review two different
+  // ways depending on a transient network error.
+  const neutralGold = opts.neutralGold ?? [];
+  let rawNeutralMatch = "";
+  const neutralOfFinding = new Map<number, number>();
+  if (neutralGold.length > 0) {
+    const candidates = findings.map((f, i) => ({ f, i })).filter(({ i }) => !findingToGolds.has(i));
+    if (candidates.length > 0) {
+      const neutralUser = JSON.stringify({
+        findings: candidates.map(({ f }, k) => ({ index: k, description: f.description, file: f.file ?? null })),
+        gold: neutralGold.map((g, i) => ({ index: i, file: g.file ?? null, line: g.line ?? null, severity: g.severity, description: g.description })),
+      });
+      try {
+        const { raw, parsed } = await judgeParsed<{ matches?: { finding: number; gold: number }[] }>(
+          model,
+          MATCH_SYSTEM_V2,
+          withDiffContext(diff, "resolve whether a finding and a gold issue point at the same code", neutralUser),
+          (p) => !!p?.matches,
+        );
+        rawNeutralMatch = raw;
+        if (!parsed?.matches) return empty({ error: "judge: unparseable neutral match reply", posted });
+        for (const m of parsed.matches) {
+          if (!Number.isInteger(m.finding) || !Number.isInteger(m.gold)) continue;
+          if (m.finding < 0 || m.finding >= candidates.length || m.gold < 0 || m.gold >= neutralGold.length) continue;
+          const original = candidates[m.finding].i;
+          if (!neutralOfFinding.has(original)) neutralOfFinding.set(original, m.gold);
+        }
+      } catch (err) {
+        return empty({ error: `judge neutral match: ${(err as Error).message}`, posted });
+      }
+    }
   }
 
-  const findingToGold = acceptPairs(matches, posted, gold.length);
-  const usedFinding = new Set(findingToGold.keys());
-  const usedGold = new Set(findingToGold.values());
+  const usedGold = new Set<number>();
+  for (const golds of findingToGolds.values()) for (const g of golds) usedGold.add(g);
+  const matchedFindings = findingToGolds.size;
+  const matched = usedGold.size;
+  const neutralized = findings
+    .map((f, i) => ({ f, i }))
+    .filter(({ i }) => neutralOfFinding.has(i))
+    .map(({ f }) => ({ description: f.description, file: f.file ?? undefined }));
+  const postedScored = posted - neutralized.length;
 
-  const matched = usedFinding.size;
-  const precision = matched / posted;
-  const recall = matched / gold.length;
+  // With everything posted neutralized on a no-gold case, the review said
+  // nothing wrong that wasn't true of the PR: that is the clean outcome, not a
+  // precision 0.
+  const precision = postedScored > 0 ? matchedFindings / postedScored : gold.length === 0 ? 1 : 0;
+  const recall = gold.length > 0 ? matched / gold.length : 1;
   const fbeta = fBeta(precision, recall, beta);
 
   const falsePositives = findings
     .map((f, i) => ({ f, i }))
-    .filter(({ i }) => !usedFinding.has(i))
+    .filter(({ i }) => !findingToGolds.has(i) && !neutralOfFinding.has(i))
     .map(({ f }) => ({ description: f.description, file: f.file ?? undefined }));
   const falseNegatives = gold
     .map((g, i) => ({ g, i }))
@@ -558,26 +653,50 @@ export async function gradeReview(opts: {
     .map(({ g }) => ({ description: g.description, file: g.file, severity: g.severity }));
 
   const goldToFinding = new Map<number, number>();
-  for (const [f, g] of findingToGold) goldToFinding.set(g, f);
+  for (const [f, golds] of findingToGolds) for (const g of golds) if (!goldToFinding.has(g)) goldToFinding.set(g, f);
+  const findingOfNeutral = new Map<number, number>();
+  for (const [f, n] of neutralOfFinding) if (!findingOfNeutral.has(n)) findingOfNeutral.set(n, f);
   const trace: ReviewTrace = {
     judgeModel: model,
     reviewText: capTrace(text),
-    findings: findings.map((f, i) => ({
-      description: f.description,
-      file: f.file ?? undefined,
-      matchedGold: findingToGold.has(i) ? findingToGold.get(i)! : null,
-    })),
+    findings: findings.map((f, i) => {
+      const golds = findingToGolds.get(i);
+      return {
+        description: f.description,
+        file: f.file ?? undefined,
+        matchedGold: golds?.length ? golds[0] : null,
+        ...(golds && golds.length > 1 ? { matchedGolds: golds } : {}),
+      };
+    }),
     gold: gold.map((g, j) => ({
       description: g.description,
       severity: g.severity,
       matchedFinding: goldToFinding.has(j) ? goldToFinding.get(j)! : null,
     })),
+    ...(neutralGold.length
+      ? { neutral: neutralGold.map((g, j) => ({ description: g.description, matchedFinding: findingOfNeutral.get(j) ?? null })) }
+      : {}),
     rawExtract: capTrace(rawExtract),
-    rawMatch: capTrace(rawMatch),
+    ...(rawMatch ? { rawMatch: capTrace(rawMatch) } : {}),
+    ...(rawNeutralMatch ? { rawNeutralMatch: capTrace(rawNeutralMatch) } : {}),
+    matchPrompt: MATCH_PROMPT_VERSION,
     usedDiff: !!diff,
   };
 
-  return { precision, recall, fbeta, beta, posted, gold: gold.length, matched, falsePositives, falseNegatives, trace };
+  return {
+    precision,
+    recall,
+    fbeta,
+    beta,
+    posted: postedScored,
+    gold: gold.length,
+    matched,
+    matchedFindings,
+    ...(neutralized.length ? { postedRaw: posted, neutralized } : {}),
+    falsePositives,
+    falseNegatives,
+    trace,
+  };
 }
 
 /**
@@ -590,6 +709,27 @@ export async function gradeReview(opts: {
  * over-pairing differently would be a measurement artifact wearing a result's
  * clothes.
  */
+/**
+ * Accept a `match-v2` pairing: each gold used at most once, findings reusable
+ * across golds (one comment may assert two distinct defects), out-of-range
+ * indices dropped. The 1-to-1 {@link acceptPairs} guard stays for the internal
+ * pass, which is frozen on the v1 prompt (see {@link MATCH_SYSTEM_V2}).
+ */
+function acceptPairsManyToOne(matches: { finding: number; gold: number }[], nFindings: number, nGold: number): Map<number, number[]> {
+  const usedGold = new Set<number>();
+  const findingToGolds = new Map<number, number[]>();
+  for (const m of matches) {
+    if (!Number.isInteger(m.finding) || !Number.isInteger(m.gold)) continue;
+    if (m.finding < 0 || m.finding >= nFindings || m.gold < 0 || m.gold >= nGold) continue;
+    if (usedGold.has(m.gold)) continue;
+    usedGold.add(m.gold);
+    const golds = findingToGolds.get(m.finding) ?? [];
+    golds.push(m.gold);
+    findingToGolds.set(m.finding, golds);
+  }
+  return findingToGolds;
+}
+
 function acceptPairs(matches: { finding: number; gold: number }[], nFindings: number, nGold: number): Map<number, number> {
   const usedFinding = new Set<number>();
   const usedGold = new Set<number>();

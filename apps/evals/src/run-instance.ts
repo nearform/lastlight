@@ -52,6 +52,7 @@ import { modelCost } from "./env.js";
 import { gradeBehavioral, gradeExecution, gradeTriage, gradeReview, gradeInternalRecall, gradeMarkers } from "./grade.js";
 import { readPipelineStats, internalJudgeInputs, withInternalRecall } from "./review-pipeline-stats.js";
 import { prContextPatch, type ReviewOverride } from "./pr-context.js";
+import { resolveFactsBin } from "./paths.js";
 
 export interface RunInstanceOptions {
   /**
@@ -130,7 +131,14 @@ export interface RunInstanceOptions {
   manageEnv?: boolean;
 }
 
-const EVAL_ENV_KEYS = ["GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_API_URL"];
+const EVAL_ENV_KEYS = [
+  "GITHUB_APP_ID",
+  "GITHUB_APP_INSTALLATION_ID",
+  "GITHUB_TOKEN",
+  "GH_TOKEN",
+  "GITHUB_API_URL",
+  "LASTLIGHT_FACTS_BIN",
+];
 
 /**
  * Install the eval's static-token GitHub env and return a restore fn:
@@ -148,6 +156,16 @@ export function applyEvalEnv(): () => void {
   delete process.env.GITHUB_APP_INSTALLATION_ID;
   process.env.GITHUB_TOKEN = "eval-fake-token";
   process.env.GH_TOKEN = "eval-fake-token";
+  // Thread the facts binary into the run env the workflow's bash phases read.
+  // `resolveFactsBin` was provenance-only until 2026-08-25, when a shell without
+  // `LASTLIGHT_FACTS_BIN` ran the whole pr-review ladder with the conservation
+  // gate and the reconcile floor exiting 127 on every case — every adjudication
+  // ran to max_iterations and the scorecard's only witness was `factsBin: null`.
+  // Respect an operator's explicit value; only fill the gap.
+  if (!process.env.LASTLIGHT_FACTS_BIN) {
+    const facts = resolveFactsBin();
+    if (facts) process.env.LASTLIGHT_FACTS_BIN = facts;
+  }
   return () => restoreEnv(saved);
 }
 
@@ -679,7 +697,13 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
       // came to be absent from every arm ever measured. `undefined` for a
       // baseline arm, which runs no pipeline and writes no artifacts.
       const readout = readPipelineStats(repoDir);
-      const rg = await gradeReview({ gold: inst.review_gold, reviews, beta: opts.judge?.beta, diff });
+      const rg = await gradeReview({
+        gold: inst.review_gold,
+        reviews,
+        beta: opts.judge?.beta,
+        neutralGold: inst.review_gold_neutral,
+        diff,
+      });
       // Internal recall — gold matched by everything the pipeline GENERATED,
       // including what the attention boundary held back. One extra judge call
       // (MATCH only; `findings.json` needs no extraction), and it is what makes
@@ -695,6 +719,9 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
         posted: rg.posted,
         gold: rg.gold,
         matched: rg.matched,
+        ...(rg.matchedFindings !== undefined ? { matchedFindings: rg.matchedFindings } : {}),
+        ...(rg.postedRaw !== undefined ? { postedRaw: rg.postedRaw } : {}),
+        ...(rg.neutralized !== undefined ? { neutralized: rg.neutralized } : {}),
         falsePositives: rg.falsePositives,
         falseNegatives: rg.falseNegatives,
         trace: rg.trace,

@@ -804,6 +804,20 @@ async function runEval(): Promise<number> {
   // `factsBin`, and a scorecard whose judge silently changed between two runs is
   // otherwise indistinguishable from one where the models changed.
   const factsBin = resolveFactsBin();
+  // A pr-review tier with no facts binary runs a DIFFERENT pipeline than the
+  // one the scorecard claims: the survey seed, the adjudicate conservation gate
+  // and the reconcile floor all shell out to `lastlight-facts` and exit 127
+  // without it — measured 2026-08-25, every adjudication ran to max_iterations
+  // and shipped unrepaired findings while the run reported all phases green.
+  // Warn loudly rather than refuse: an analysis-DISABLED pr-review arm (the
+  // shipped baseline) never touches the binary and is fine without it.
+  if (!factsBin && tiers.some((t) => tierKeyFor(t).includes("pr-review"))) {
+    p.log.warn(
+      "lastlight-facts is UNRESOLVABLE (factsBin: null). Any analysis-enabled pr-review arm will run with " +
+        "its conservation gate and reconcile floor dead (exit 127) — adjudication loops to max_iterations and " +
+        "findings ship unrepaired. Set LASTLIGHT_FACTS_BIN or build packages/code-facts before trusting this run.",
+    );
+  }
   let judgeModel: string | undefined;
   try {
     judgeModel = defaultJudgeModel();

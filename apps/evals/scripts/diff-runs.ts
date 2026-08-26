@@ -188,6 +188,28 @@ function main(): void {
   console.log(`CANDIDATE ${candPath}  [arm: ${candModel}]`);
   console.log(`epsilon=${eps}  (Δ within ±epsilon counts as unchanged)\n`);
 
+  // A grader-version mismatch means the Δ below measures the JUDGE, not the
+  // arm: `match-v1` paired one-to-one, `match-v2` lets one comment carry two
+  // golds and neutralizes sibling-round findings. Warn loudly rather than
+  // refuse — the per-case table is still useful for eyeballing — but the
+  // verdict line cannot be trusted across versions.
+  const promptOf = (card: Scorecard, arm: string): string => {
+    const versions = new Set(
+      (card.results ?? [])
+        .filter((r) => r.model === arm && r.review?.trace)
+        .map((r) => r.review!.trace!.matchPrompt ?? "match-v1"),
+    );
+    return [...versions].sort().join("+") || "unknown";
+  };
+  const basePrompt = promptOf(base, baseModel);
+  const candPrompt = promptOf(cand, candModel);
+  if (basePrompt !== candPrompt) {
+    console.log(
+      `  ⚠ MATCH-PROMPT MISMATCH: baseline graded by ${basePrompt}, candidate by ${candPrompt}. ` +
+        `The Δ measures the grader as much as the arm — re-grade one side (rescore cannot do this; re-run or re-judge) before trusting any verdict.\n`,
+    );
+  }
+
   // Per-case table.
   const hdrSplit = train.size || heldout.size ? "  split" : "";
   console.log(`  ${"instance_id".padEnd(38)}  base   cand    Δ      ${hdrSplit}`);

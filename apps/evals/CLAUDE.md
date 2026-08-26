@@ -179,10 +179,14 @@ The release commit is conventionally just the two version-file lines
   NOT a substring, so pass the full id (e.g. `prreview__discourse-graphite-6`);
   `--model haiku` (fuzzy) picks one model; `--runs 3` repeats each CASE (worst-case
   verdict, mean metrics).
-- **Never report one arm as a number — `--repeats N`.** Three *identical* runs of
+- **Never report one arm as a number — `--repeats N`, and for arm RANKINGS use
+  `--repeats 4` or more.** Three *identical* runs of
   one pr-review arm measured micro-recall 0.320 / 0.080 / 0.200 (union 0.440,
   intersection 0.040), and `diff-runs` returned KEEP on one and REVERT on the other
-  two *from one configuration*. `--repeats N` re-runs the whole ARM N times,
+  two *from one configuration*. The 2026-08-25 twelve-arm ladder made the floor
+  concrete: at 2 repeats the repeat-to-repeat |ΔF1| reached 0.308 on one arm and
+  exceeded the gap between most adjacent arms, so every ranking below the top arm
+  was noise. Two repeats can smoke-test an arm; they cannot order two arms. `--repeats N` re-runs the whole ARM N times,
   sequentially by default (`--repeat-concurrency N` overlaps up to N repeats —
   see "Parallelism"), as N **sibling** run dirs — each a normal run tagged
   `meta.repeat = {group, index, of}` (`group` = the first repeat's `runId`), which

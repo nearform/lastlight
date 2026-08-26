@@ -99,7 +99,17 @@ export function resolveFactsBin(env: NodeJS.ProcessEnv = process.env): string | 
     const cand = join(dir, "lastlight-facts");
     if (executable(cand)) return cand;
   }
-  return executable(BAKED_FACTS_BIN) ? BAKED_FACTS_BIN : null;
+  if (executable(BAKED_FACTS_BIN)) return BAKED_FACTS_BIN;
+  // Monorepo fallback: a harness run from `apps/evals` in the `nearform/lastlight`
+  // workspace has the sibling `packages/code-facts` build on disk but nothing
+  // linking it onto PATH (`code-facts` is a CLI dependency, not an evals one).
+  // Without this, a shell that lost its `LASTLIGHT_FACTS_BIN` runs the whole
+  // pr-review pipeline with the conservation gate AND the reconcile floor dead —
+  // measured 2026-08-25: 32/32 case-runs exited the gate 127, every adjudication
+  // ran to max_iterations, and reconcile repaired nothing, while the scorecard
+  // stamped only `factsBin: null`.
+  const workspaceBin = join(packageRoot(), "..", "..", "packages", "code-facts", "dist", "cli.js");
+  return executable(workspaceBin) ? workspaceBin : null;
 }
 
 /**
