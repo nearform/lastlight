@@ -693,15 +693,22 @@ export type ProbeEnv = z.infer<typeof ProbeEnvSchema>;
  * and `dropped` are arrays if they are present at all.
  */
 export const ReviewFindingSchema = z.looseObject({
-  path: z.string().optional(),
+  // Advisory fields are `.nullish()`, not `.optional()`: models write literal
+  // `null` for "nobody looked" (the package's own convention), and `.optional()`
+  // rejects it — measured 2026-08-25, six of sixteen real adjudications were
+  // "unreadable" to the gate on `"obligation": null` alone, each buying a
+  // forced extra loop iteration AND a silently dead repair (`--repair` refuses
+  // an unreadable document). Same principle as the DroppedHypothesisSchema
+  // comment below: a floor that can crash on advisory data is not a floor.
+  path: z.string().nullish(),
   /** The verbatim excerpt; the anchor of record. `line` is derived, advisory. */
-  existingCode: z.string().optional(),
-  severity: z.string().optional(),
-  title: z.string().optional(),
-  body: z.string().optional(),
-  family: z.string().optional(),
-  obligation: z.string().optional(),
-  confidence: z.number().optional(),
+  existingCode: z.string().nullish(),
+  severity: z.string().nullish(),
+  title: z.string().nullish(),
+  body: z.string().nullish(),
+  family: z.string().nullish(),
+  obligation: z.string().nullish(),
+  confidence: z.number().nullish(),
   /**
    * Where it goes. `internal` is *recorded and never posted* — the auditable
    * tier, not a dark drop. Absent means the adjudicator did not tier it, which
@@ -735,15 +742,26 @@ export const DroppedHypothesisSchema = z.looseObject({
    * a document it was in the middle of rescuing. A floor that can crash is not
    * a floor.
    */
-  hypothesis: z.string().optional(),
-  refutedBy: z.string().optional(),
-  reason: z.string().optional(),
+  hypothesis: z.string().nullish(),
+  refutedBy: z.string().nullish(),
+  reason: z.string().nullish(),
 });
 export type DroppedHypothesis = z.infer<typeof DroppedHypothesisSchema>;
 
 export const FindingsDocumentSchema = z.looseObject({
   findings: z.array(ReviewFindingSchema).optional(),
   dropped: z.array(DroppedHypothesisSchema).optional(),
+  /**
+   * The internal-tier id-list shorthand: hypotheses filed at `internal` by
+   * canonical id alone, instead of a full finding row each. Measured
+   * 2026-08-25, internal rows were 57% of findings.json bytes (up to 92% on
+   * one case) while their prose degenerates to verification boilerplate the
+   * deterministic materializer reproduces from the hypothesis record anyway.
+   * The conservation gate credits each id exactly like a finding's
+   * `hypotheses[]` entry; reconcile's `--repair` expands the list into full
+   * rows, so every reader downstream of reconcile sees the classic shape.
+   */
+  internal: z.array(z.string()).nullish(),
 });
 export type FindingsDocument = z.infer<typeof FindingsDocumentSchema>;
 

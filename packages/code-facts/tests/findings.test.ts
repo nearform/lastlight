@@ -915,3 +915,95 @@ describe("findings — hypothesis identity", () => {
     expect(rendered).toContain("[ ] enforcement-001");
   });
 });
+
+describe("the `internal[]` id-list shorthand", () => {
+  // Measured 2026-08-25: internal-tier rows were 57% of findings.json bytes
+  // (92% on one case) while their prose degenerates to the same verification
+  // boilerplate `internalFinding` reproduces from the hypothesis record. The
+  // shorthand lets the adjudicator spend output only on posted-tier findings;
+  // conservation semantics must not move an inch.
+  it("closes the gate: a listed id is one disposition", () => {
+    const { dir } = workspace({
+      hypotheses: { contract: [H1], enforcement: [H2] },
+      findings: doc({ findings: [finding(["H-001"])], internal: ["enforcement-001"] }),
+    });
+    const result = checkFindings({ dir });
+    expect(result.satisfied).toBe(true);
+    expect(result.covered).toEqual(["contract-001", "enforcement-001"]);
+    expect(result.byTier["internal"]).toBe(1);
+  });
+
+  it("repair EXPANDS the list into full internal rows and removes the key — even on a satisfied document", () => {
+    const { dir, read } = workspace({
+      hypotheses: { contract: [H1], enforcement: [H2] },
+      findings: doc({ findings: [finding(["H-001"])], internal: ["enforcement-001"] }),
+    });
+    const result = checkFindings({ dir, repair: true });
+    expect(result.satisfied).toBe(true);
+    expect(result.repaired).toEqual([
+      expect.objectContaining({ kind: "expanded", hypothesis: "enforcement-001" }),
+    ]);
+    const after = read();
+    expect(after.internal).toBeUndefined();
+    const rows = after.findings as Record<string, unknown>[];
+    const expanded = rows.find((f) => (f.hypotheses as string[])?.includes("enforcement-001"));
+    expect(expanded).toBeDefined();
+    expect(expanded!.tier).toBe("internal");
+    // The materialized row carries the hypothesis's own claim, so the
+    // internal-recall judge reads the claim, not boilerplate.
+    expect(expanded!.body).toBe(H2.claim);
+    // Idempotent: a second repair finds nothing to do.
+    const again = checkFindings({ dir, repair: true });
+    expect(again.repaired).toEqual([]);
+  });
+
+  it("a fabricated id in the list fails the gate and survives repair, reported", () => {
+    const { dir, read } = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc({ findings: [finding(["H-001"])], internal: ["security-009"] }),
+    });
+    const before = checkFindings({ dir });
+    expect(before.satisfied).toBe(false);
+    expect(before.gaps).toEqual([expect.objectContaining({ kind: "fabricated", hypothesis: "security-009" })]);
+    checkFindings({ dir, repair: true });
+    // The citation is kept, not silently deleted — it is the evidence that the
+    // adjudicator cited provenance that does not exist.
+    expect(read().internal).toEqual(["security-009"]);
+  });
+
+  it("an id both listed and carried by a finding is a duplicate, and repair does not mint a second row", () => {
+    const { dir, read } = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc({ findings: [finding(["H-001"])], internal: ["contract-001"] }),
+    });
+    const result = checkFindings({ dir });
+    expect(result.satisfied).toBe(false);
+    expect(result.gaps).toEqual([expect.objectContaining({ kind: "duplicate", hypothesis: "contract-001" })]);
+    checkFindings({ dir, repair: true });
+    // The finding cites the alias `H-001` (resolving to contract-001); repair
+    // must not add a second row under the canonical spelling.
+    const rows = read().findings as Record<string, unknown>[];
+    const carrying = rows.filter((f) =>
+      ((f.hypotheses as string[]) ?? []).some((h) => h === "H-001" || h === "contract-001"),
+    );
+    expect(carrying).toHaveLength(1);
+  });
+
+  it("an unbacked drop of a listed id is withdrawn, never restored beside the expansion", () => {
+    const { dir, read } = workspace({
+      hypotheses: { contract: [H1] },
+      findings: doc({ findings: [], internal: ["contract-001"], dropped: [{ hypothesis: "contract-001", reason: "prose" }] }),
+    });
+    const result = checkFindings({ dir, repair: true });
+    expect(result.repaired).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "expanded", hypothesis: "contract-001" }),
+        expect.objectContaining({ kind: "withdrawn", hypothesis: "contract-001" }),
+      ]),
+    );
+    const after = read();
+    expect(after.dropped).toEqual([]);
+    const rows = after.findings as Record<string, unknown>[];
+    expect(rows.filter((f) => (f.hypotheses as string[])?.includes("contract-001"))).toHaveLength(1);
+  });
+});

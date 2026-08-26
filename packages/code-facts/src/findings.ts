@@ -87,8 +87,9 @@ export interface FindingsGap {
 export interface RepairAction {
   /** `recorded` — uncovered → internal. `promoted` — unbacked drop → internal.
    * `withdrawn` — unbacked drop whose hypothesis a finding already carries, so
-   * the drop is removed and nothing is appended. */
-  kind: "recorded" | "promoted" | "withdrawn";
+   * the drop is removed and nothing is appended. `expanded` — an `internal[]`
+   * id-list entry materialized as a full internal row. */
+  kind: "recorded" | "promoted" | "withdrawn" | "expanded";
   hypothesis: string;
   detail: string;
 }
@@ -229,6 +230,10 @@ function inspect(options: CheckFindingsOptions): CheckFindingsResult & {
   unbacked: { index: number; id: string; ref: string | null }[];
   /** Every CANONICAL id any finding cites, after resolution. */
   claimedByFinding: Set<string>;
+  /** The `internal[]` id-list entries, each with its resolved canonical id
+   * (`null` when fabricated/ambiguous — rule 5 reports those). The repair pass
+   * expands the resolvable ones into full rows. */
+  internalShorthand: { cited: string; id: string | null }[];
   rows: Map<string, HypothesisRecord>;
 } {
   const repo = options.repo ?? process.cwd();
@@ -267,6 +272,7 @@ function inspect(options: CheckFindingsOptions): CheckFindingsResult & {
       document: null,
       unbacked: [],
       claimedByFinding: new Set(),
+      internalShorthand: [],
       rows: hypotheses,
     };
   }
@@ -341,6 +347,28 @@ function inspect(options: CheckFindingsOptions): CheckFindingsResult & {
       creditTo(text, `findings[${index}]`, true);
     }
   });
+
+  // ── The `internal[]` id-list shorthand. Each entry credits exactly one
+  // disposition through the same `creditTo` path as a finding's `hypotheses[]`
+  // citation, so a duplicate (listed AND carried by a finding), an ambiguous
+  // model-minted id and a fabricated one all fail the gate exactly as before.
+  // NOT credited as `byFinding`: `claimedByFinding` answers "does a full row
+  // already carry this?", which is what decides both drop-withdrawal and
+  // whether expansion would manufacture a duplicate row. The repair pass adds
+  // each id it expands to that set itself.
+  const internalShorthand: { cited: string; id: string | null }[] = [];
+  const internalList = Array.isArray(document.internal) ? (document.internal as unknown[]) : [];
+  internalList.forEach((entry, index) => {
+    const text = asString(entry);
+    if (!text) return;
+    internalShorthand.push({ cited: text, id: creditTo(text, `internal[${index}]`, false) });
+  });
+  if (internalShorthand.length > 0) {
+    byTier["internal"] = (byTier["internal"] ?? 0) + internalShorthand.length;
+    notes.push(
+      `${internalShorthand.length} hypothesis id(s) filed internal via the \`internal[]\` shorthand — reconcile materializes them as full rows`,
+    );
+  }
 
   // ── Rule 4. Deletion is the one move that has to show its working.
   const unbacked: { index: number; id: string; ref: string | null }[] = [];
@@ -453,6 +481,7 @@ function inspect(options: CheckFindingsOptions): CheckFindingsResult & {
     document,
     unbacked,
     claimedByFinding,
+    internalShorthand,
     rows: hypotheses,
   };
 }
@@ -476,8 +505,14 @@ export function checkFindings(options: CheckFindingsOptions): CheckFindingsResul
   // No `--repair`, or nothing to repair, or nothing readable to repair. The
   // floor deliberately does NOT invent a `findings.json`: a fabricated
   // `summary` and `event` is a review nobody wrote, and a phase whose loop
-  // simply runs out of iterations does not fail the run anyway.
-  if (!options.repair || first.document === null || first.satisfied) return strip(first);
+  // simply runs out of iterations does not fail the run anyway. A SATISFIED
+  // document still gets the repair pass when it carries the `internal[]`
+  // shorthand: expansion is the reader-compat half of that contract —
+  // post-review's disposition record, the pipeline stats and the
+  // internal-recall judge all read full rows.
+  if (!options.repair || first.document === null || (first.satisfied && first.internalShorthand.length === 0)) {
+    return strip(first);
+  }
 
   const document = first.document;
   const findings = Array.isArray(document.findings)
@@ -497,6 +532,41 @@ export function checkFindings(options: CheckFindingsOptions): CheckFindingsResul
   // adjudicator meant, and guessing would be the deletion it exists to prevent.
   const removeAt = new Set(first.unbacked.map((u) => u.index));
   const claimed = new Set(first.claimedByFinding);
+
+  // ── Expand the `internal[]` id-list shorthand into full rows, first: the
+  // deterministic materializer reproduces from the hypothesis record the same
+  // row the model's own internal prose degenerates to, at zero model cost.
+  // Entries that resolved to nothing stay IN the list — rule 5 already
+  // reported them as fabricated/ambiguous, and silently removing a citation
+  // would erase the evidence that the adjudicator cited provenance that does
+  // not exist. Duplicates (an id both listed and carried by a finding) are
+  // left to the gate's duplicate report, exactly like duplicate citations.
+  const expandable = first.internalShorthand.filter(
+    (s): s is { cited: string; id: string } => s.id !== null,
+  );
+  if (first.internalShorthand.length > 0) {
+    for (const { id } of expandable) {
+      // Listed AND carried by a full row: the gate reports the duplicate;
+      // materializing a second row here would turn the report into the defect.
+      if (claimed.has(id)) continue;
+      findings.push(
+        internalFinding(
+          id,
+          first.rows.get(id),
+          "Filed at internal tier by the adjudicator via the id-list shorthand; materialized as a full row by reconcile.",
+        ),
+      );
+      claimed.add(id);
+      repaired.push({
+        kind: "expanded",
+        hypothesis: id,
+        detail: "internal[] shorthand — materialized as a full internal-tier row",
+      });
+    }
+    const unresolved = first.internalShorthand.filter((s) => s.id === null).map((s) => s.cited);
+    if (unresolved.length > 0) document.internal = unresolved;
+    else delete document.internal;
+  }
   for (const { id, ref } of first.unbacked) {
     if (claimed.has(id)) {
       repaired.push({
