@@ -1,7 +1,8 @@
 # State layer — schema, migrations, and the two dialects
 
-This is the harness's own database: fifteen tables holding workflow runs,
-executions, approvals, cron history, users, chat sessions and feedback signals.
+This is the harness's own database: sixteen tables holding workflow runs,
+executions, approvals, cron history, users, chat sessions, feedback signals and
+the activity log.
 It is written **once** and runs on **two dialects** — SQLite (via libsql) by
 default, Postgres (node-postgres or Neon) when `DATABASE_URL` says so. Both are
 supported production stores.
@@ -37,6 +38,7 @@ and the PGlite leg replays the entire behavioural suite against real Postgres.
 | `data-migrate.ts` | One-way SQLite → Postgres row copy, FK-ordered and batched. `TABLE_ORDER` is the FK order; the coverage check is what stops a sixteenth table being silently skipped. |
 | `state-cli.ts` | The `lastlight-state` bin (`check` / `migrate`) shipped in the agent image — what `lastlight server db` runs inside the container, since the CLI may never gain an edge to core. |
 | `*-store.ts` | One store class per table, over one shared client. Each destructures its tables from `tablesOf(client)`. |
+| `activity-store.ts` | The `activity_log` audit stream (issue #206) — one row per user-initiated action, append-only. Complements #205's per-run actor columns rather than replacing them. |
 | `repo-ref.ts` | The single expression of the `(owner, BARE repo)` ↔ `owner/repo` join. |
 
 Generated migrations live **outside** `src/`, in
@@ -132,13 +134,28 @@ process.
 
 ### 6. If you added a table
 
-Three places do not update themselves:
+Six places do not update themselves. The first three fail loudly; the rest are
+hardcoded counts that fail as an unhelpful off-by-one, so know them in advance:
 
 1. **`data-migrate.ts`'s `TABLE_ORDER`** — the SQLite→Postgres copy refuses to
    start if a schema export is missing from it, so this fails loudly rather than
    losing data. Place it after anything it references by foreign key.
 2. **`db.ts`** — wire the store in.
 3. **`spec/10-state.md`** — the table inventory and the count.
+4. **`tests/state/schema-equivalence.test.ts`** — add the table to
+   `POST_BASELINE_TABLES` (plus its named indexes to `POST_BASELINE_INDEXES`),
+   and bump `MIGRATION_COUNT`. **Do not add it to `LEGACY_TABLES`**: that list is
+   the pre-Drizzle production shape, and the whole point of the first test is
+   that the baseline no-ops over it. A new table is a *difference* between
+   `before` and `after`, which is why those two lists exist separately at all.
+5. **`tests/state/schema-parity.test.ts`** — the `covers all N tables` count.
+6. **`tests/state/data-migrate.test.ts`** — two counts (`TABLE_ORDER` length and
+   `result.tables` length), and ideally a row in `seed()` so the copy is actually
+   exercised for the new table rather than merely counted.
+
+`schema-parity.test.ts` otherwise derives its table list from the schema
+exports, so the per-column and per-index parity checks cover a new table for
+free once both declarations exist.
 
 ## Why `db.pg-server.test.ts` exists
 

@@ -323,7 +323,7 @@ src/
   state/
     db.ts               `StateDb` — the ASYNC factory (`await StateDb.open(url)`
                         / `StateDb.fromClient(client, dialect)`; no public
-                        constructor) that wires the seven stores together and
+                        constructor) that wires the eight stores together and
                         is the single import surface for their types. Every
                         store method returns a Promise. `open()` picks the
                         engine off the URL: libsql for `file:`/`:memory:`/a
@@ -347,10 +347,10 @@ src/
                         ships in the agent image — what `lastlight server db`
                         runs inside the container, since the CLI may never gain
                         an edge to core.
-    schema/sqlite.ts    Drizzle schema — the source of truth for all fifteen
+    schema/sqlite.ts    Drizzle schema — the source of truth for all sixteen
                         tables (executions, workflow_runs, workflow_approvals,
                         cron_runs, cron_overrides, workflow_overrides, users,
-                        messaging_*, feedback_*, github_team*).
+                        activity_log, messaging_*, feedback_*, github_team*).
     schema/pg.ts        The name-parity pgTable mirror. NOTHING under src/ may
                         import it — it exists for drizzle-kit and the PGlite
                         test leg. A schema change means editing BOTH files and
@@ -377,6 +377,17 @@ src/
                         only record that it ran at all. Keyed on the cron
                         rather than the workflow so a run dispatched by
                         `/api/run` or a comment cannot skew a cron's health.
+    activity-store.ts   The `activity_log` audit stream (issue #206) — one
+                        append-only row per USER-INITIATED action, across the
+                        dashboard, CLI, Slack, GitHub and cron. Complements
+                        #205's per-run `triggered_by` columns rather than
+                        replacing them: those stay the hot-path attribution, and
+                        this is the chronological stream that answers "what has
+                        this person done?" without joining five ledgers. System
+                        fan-out is deliberately NOT recorded per dispatch — a
+                        cron fires once and is logged once (`cron.fire`), the
+                        same reason `cron_runs` keys on the cron rather than the
+                        workflow.
     team-store.ts       The dashboard's per-repo visibility CACHE (issue #169):
                         github_teams / _team_repos / _team_members /
                         github_visibility_sync. Not a mirror of the org — rows
