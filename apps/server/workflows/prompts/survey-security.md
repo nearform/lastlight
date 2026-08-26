@@ -57,10 +57,9 @@ Your obligations are **appended to the end of this prompt**, under the heading
 the deterministic layer's output and attached them; they carry the discharge
 contract and you must follow it exactly.
 
-**Do not go looking for them on disk.** There is no path for you to construct
-here, and constructing one is how earlier passes lost their seed: the skill
-bundle you were handed sits one directory ABOVE your working directory, so the
-plausible absolute path is a file that does not exist.
+**Do not go looking for them on disk.** The attachment IS the delivery. Any
+path you construct for it is a guess about a harness layout that varies by
+backend, and earlier passes have lost their seed to exactly that guess.
 
 Read the attachment before anything else. It can say three things and they are
 three different facts:
@@ -69,7 +68,7 @@ three different facts:
 - **NOT MEASURED.** Record that and stop — do not substitute a judgement for a measurement.
 - **NOT AVAILABLE**, or a path for you to open yourself. The harness could not attach the file; do exactly what the attachment then tells you to. Where it says the block was never delivered, that is **not** a clean result and it is not a finding about the code either — record it FIRST, then work the diff for this family's question directly and say plainly in your output that you did so unseeded.
 
-The scanner hit is CORROBORATION, not the finding. Measured across fifty real PRs, the scanners produced thirteen hits and not one pointed at a place a human reviewer's finding was about. So never restate a scanner hit as a finding — trace the input path and quote the line that validates it, or the absence of one.
+The scanner hit is CORROBORATION, not the finding. Measured on real PRs, scanner hits and human reviewers' findings almost never coincide. So never restate a scanner hit as a finding — trace the input path and quote the line that validates it, or the absence of one.
 
 ## The questions an innocent quote cannot answer
 
@@ -78,12 +77,31 @@ innocent quote is not available. "The check exists" is not a discharge — ask
 what runs before it, what it does with the input it was not written for, and
 how a caller learns it fired. The recurring shapes:
 
-1. "Quote the line that rejects a request body that is not an object. If the
-   only guard is a property test (`'x' in body`, `body.x`), state what it does
-   for a scalar body."
-2. "Order the lifecycle phases this route registers. Quote the earliest phase
-   that rejects an unauthenticated caller."
-3. "Quote the line proving malformed input answers 4xx and not 5xx."
+1. **Input totality.** "Quote the guard, then state what it does with an input
+   shape it was not written for — the wrong type, the scalar where a structure
+   was assumed, the empty value. A guard that throws on unexpected input is a
+   different defect from one that rejects it."
+2. **Ordering.** "List, in execution order, every step that runs between the
+   network and the changed code, and quote the earliest one that turns an
+   unauthorized or malformed request away. Everything before that line runs
+   for ANY caller."
+3. **Failure channel.** "Quote the line proving invalid input produces the
+   rejection the contract promises — not an unhandled error the caller reads
+   as a server fault."
+
+## State the residual risk, not the reassurance
+
+A discharge that concludes "correctly handled", "properly ordered" or
+"enforced" is a CLAIM, not a measurement — and its direction is the one thing
+no downstream stage can flip. Before you write "correct", name the bar you
+graded against: who or what can reach this code WITHOUT the check, and what
+happens then. Two invariants can both be true of the same quoted line — "the
+check runs before the handler" and "the check runs before any request-derived
+value is read" are different bars — and this family's question is always the
+strongest bar it cares about, never the weakest true statement. If you cannot
+name the bar, record the mechanism with `needsProbe: true` and no verdict: the
+probe and the adjudicator can remove a risk you wrote down, but they will never
+see the one you graded away as fine.
 
 ## Output
 
@@ -92,3 +110,9 @@ in the shape the obligations file specifies. Create the file even if you have
 nothing to record — write a single line with `"claim": "no security hypothesis"`
 and the obligation ids you discharged, so that "surveyed and found nothing" and
 "never ran" stay distinguishable.
+
+The placeholder carries **no analysis**. The moment its details start quoting
+lines and grading them — "X runs before Y, so the order is correct" — you are
+writing a hypothesis with a verdict, and it must be recorded as one, bar named,
+never folded into the no-hypothesis line where no probe and no adjudicator will
+ever look at it.

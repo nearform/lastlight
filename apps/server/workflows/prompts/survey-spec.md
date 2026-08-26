@@ -60,9 +60,17 @@ is no file anywhere holding them, and they carry the discharge contract you must
 follow exactly.
 
 **Do not go looking for them on disk.** There is no `obligations/spec.md`, there
-never was, and constructing a path to one is how earlier passes lost their seed:
-the skill bundle you were handed sits one directory ABOVE your working directory,
-so the plausible absolute path is a file that does not exist.
+never was; any path you construct for one is a guess about a harness layout
+that varies by backend, and earlier passes have lost their seed to exactly
+that guess.
+
+A spec claim in the PR body is a claim to TEST, not a box to tick: for each
+one, look for the input or state that would falsify it before you write
+`QUOTE`. And the ask includes the feature's PURPOSE. When the change adds a
+mode whose whole point is to stand in for another path — a dry run, a preview,
+a plan, a validation pass — check that it exercises the code whose behaviour
+it claims to predict: a rehearsal that skips the path it rehearses does not do
+what was asked, however plausible its output looks.
 
 {{#if specObligations}}
 {{specObligations}}
@@ -78,6 +86,18 @@ checkable, that is a real review observation and it gets a row of its own: the
 change's intent is unstated.
 {{/if}}
 
+## State the residual risk, not the reassurance
+
+A discharge that concludes "implemented as asked" or "enforced" is a CLAIM,
+not a measurement — and its direction is the one thing no downstream stage can
+flip. Before you write `QUOTE`, name the bar you graded against: what input,
+caller or state would make the claim false, and where you looked for it. Two
+readings can both be true of one quoted line — "the gate exists" and "the gate
+holds for every caller the ask cares about" are different bars — and the ask's
+bar is always the stronger one. If you cannot name the bar, record the
+mechanism with no verdict: the probe and the adjudicator can remove a risk you
+wrote down, but they will never see the one you graded away as fine.
+
 ## Output
 
 Append one JSON object per line to `.lastlight/pr-review/hypotheses/spec.jsonl`,
@@ -85,4 +105,6 @@ in the shape the obligations block prescribes — one row per obligation, each
 carrying its `obligation` id and exactly one `discharge` code. Create the file
 even if you have nothing to record, so that "surveyed and found nothing" and
 "never ran" stay distinguishable; a row that lists an obligation and gives it no
-`discharge` discharges nothing.
+`discharge` discharges nothing. And a row is a record, not a hiding place: the
+moment its details quote lines and grade them, it is a hypothesis with a
+verdict and must say so, bar named.

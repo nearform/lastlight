@@ -205,7 +205,14 @@ describe("the adjudicate prompt carries the constraints that have money on them"
   it("states the conservation gate, and that `internal` is the answer to a thin claim", () => {
     expect(raw).toMatch(/must appear exactly once/i);
     expect(raw).toMatch(/Silence is not a disposition/i);
+    // The id-list shorthand was PROMPTED once (2026-08-25) and reverted the
+    // same day: with a bare-id filing available, the adjudicator bulk-filed
+    // internal and stopped promoting — posted findings fell from 5-8 to 1-3
+    // per case and micro-recall collapsed on the live band. The gate still
+    // ACCEPTS `internal[]` (code support is harmless), but the prompt must
+    // keep the full-row friction that makes the model look at each claim.
     expect(raw).toMatch(/write it down at `internal` tier/i);
+    expect(raw).not.toMatch(/"internal": \[/);
   });
 
   it("tells it to quote the code rather than count the lines", () => {

@@ -57,10 +57,9 @@ Your obligations are **appended to the end of this prompt**, under the heading
 the deterministic layer's output and attached them; they carry the discharge
 contract and you must follow it exactly.
 
-**Do not go looking for them on disk.** There is no path for you to construct
-here, and constructing one is how earlier passes lost their seed: the skill
-bundle you were handed sits one directory ABOVE your working directory, so the
-plausible absolute path is a file that does not exist.
+**Do not go looking for them on disk.** The attachment IS the delivery. Any
+path you construct for it is a guess about a harness layout that varies by
+backend, and earlier passes have lost their seed to exactly that guess.
 
 Read the attachment before anything else. It can say three things and they are
 three different facts:
@@ -81,6 +80,20 @@ The recurring shape this family keeps missing:
    the line inside it a caller cannot see and would be surprised by — a retry
    policy, a timeout, a swallowed error class."
 
+## State the residual risk, not the reassurance
+
+A discharge that concludes "correctly handled", "properly ordered" or
+"enforced" is a CLAIM, not a measurement — and its direction is the one thing
+no downstream stage can flip. Before you write "correct", name the bar you
+graded against: who or what can reach this code WITHOUT the check, and what
+happens then. Two invariants can both be true of the same quoted line — "the
+check runs before the handler" and "the check runs before any request-derived
+value is read" are different bars — and this family's question is always the
+strongest bar it cares about, never the weakest true statement. If you cannot
+name the bar, record the mechanism with `needsProbe: true` and no verdict: the
+probe and the adjudicator can remove a risk you wrote down, but they will never
+see the one you graded away as fine.
+
 ## Output
 
 Append one JSON object per line to `.lastlight/pr-review/hypotheses/contract.jsonl`,
@@ -88,3 +101,9 @@ in the shape the obligations file specifies. Create the file even if you have
 nothing to record — write a single line with `"claim": "no contract hypothesis"`
 and the obligation ids you discharged, so that "surveyed and found nothing" and
 "never ran" stay distinguishable.
+
+The placeholder carries **no analysis**. The moment its details start quoting
+lines and grading them — "X runs before Y, so the order is correct" — you are
+writing a hypothesis with a verdict, and it must be recorded as one, bar named,
+never folded into the no-hypothesis line where no probe and no adjudicator will
+ever look at it.

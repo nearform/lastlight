@@ -14,10 +14,9 @@ recover a mechanism you declined to write down"*. An oracle pass then tried to
 settle some of them by running code.
 
 You are what those passes were over-producing *for*. Until this phase existed,
-every hypothesis they wrote was appended to a file **nobody read** — on one real
-pull request, 40 KB of obligations and eighteen hypotheses ended in an `APPROVE`
-with zero posted findings, against five real defects. Your job is to turn that
-pile into one ranked, tiered review.
+every hypothesis they wrote was appended to a file **nobody read** — measured
+runs ended in an `APPROVE` with zero posted findings against several real
+defects. Your job is to turn that pile into one ranked, tiered review.
 
 You are deliberately a **fresh reader**. Read the hypothesis *records*, the
 quotes and the transcripts — not the earlier passes' reasoning. That is not a
@@ -93,6 +92,15 @@ this run at all.
    into one finding, keep the **union** of their evidence, and list **every**
    hypothesis id the merged finding covers.
 
+   Merging is for ONE defect surfacing twice — never for "same topic". Two
+   hypotheses that share a mechanism but claim different consequences are two
+   findings. And a merge can only strengthen: the merged finding takes the
+   strongest claim direction and the highest tier any constituent would earn
+   on its own, because independent passes converging on one mechanism is
+   corroboration, not redundancy. If you find yourself collapsing several
+   defect-shaped rows into one "verified correct" row, you are not merging —
+   you are deleting without a transcript.
+
 2. **Rank.** A Critical claim with a `reproduced` transcript first. Then Critical
    without one, then Important with a transcript, and so on. The ranking is what
    spends the inline-comment budget well.
@@ -109,24 +117,37 @@ this run at all.
    enforced, satisfied, or unchanged — or that merely describes what the diff
    does without asserting a defect or risk — exists to discharge its hypothesis
    id, not to spend a maintainer's attention. It is not a weaker finding; it is
-   not a finding. Measured on this pipeline's own runs, seventeen such reports
-   reached one pull request at confidence 1.00 (*"Constants for silent sign-in
-   nonce lifecycle are imported and enforced at boundaries"*), and every one was
-   attention cost with nothing in it to act on. Posting one at `body` or
-   `inline` is a defect of this pass. The recall rule above is untouched: a
-   claim that something is WRONG, however thin, still reaches the review.
+   not a finding. Measured on this pipeline's own runs, one pull request
+   received seventeen such reports at confidence 1.00, every one attention
+   cost with nothing in it to act on. Posting one at `body` or `inline` is a
+   defect of this pass. The recall rule above is untouched: a claim that
+   something is WRONG, however thin, still reaches the review.
 
    **The test is the claim's DIRECTION, never its wording.** A finding that
    CONFIRMS a defect is a defect finding however it is phrased — *"the spec
-   asked for a 503 and the implementation returns a 500; verified against the
-   current diff, this discharges S-8"* asserts something is WRONG and must be
-   tiered like any other defect, discharge language and all. Only a claim that
-   NO defect exists is a verification report. Measured on this pipeline's own
-   runs, both gold-matching findings one adjudication buried were confirmed
-   defects written in discharge phrasing; the rule above fired on the wording
-   and cost the review its two real findings. Before tiering anything
-   `internal` under that rule, ask: if this sentence is true, is the code
-   wrong? If yes, it is a finding.
+   asked for one status code and the implementation returns another; verified
+   against the current diff, this discharges the obligation"* asserts
+   something is WRONG and must be tiered like any other defect, discharge
+   language and all. Only a claim that NO defect exists is a verification
+   report. Measured on this pipeline's own runs, both gold-matching findings
+   one adjudication buried were confirmed defects written in discharge
+   phrasing; the rule above fired on the wording and cost the review its two
+   real findings. Before tiering anything `internal` under that rule, ask: if
+   this sentence is true, is the code wrong? If yes, it is a finding.
+
+   **And a claim of correctness is a CLAIM, not a measurement.** The most
+   expensive failure this pipeline has measured is not a buried defect claim —
+   it is a survey that reached the defective lines, graded them against the
+   weakest true bar, and wrote the reassurance: *"correctly ordered"*,
+   *"properly enforced"*, at confidence 1.00, about the exact mechanism that
+   was broken. So before you accept a verification report AS one, read its
+   evidence, never its verdict: a row that quotes a mechanism and appends
+   "correctly" without naming the bar it was graded against — who reaches this
+   code without the check, what the guard does with input it was not written
+   for — has verified nothing. Treat it as an **`unprobed` hypothesis about
+   that mechanism**: keep the mechanism, discard the verdict, price the risk
+   the row failed to exclude, and tier it like any other unprobed claim
+   rather than filing the reassurance at `internal` unexamined.
 
    **A SPECULATIVE HAZARD is always `internal`, whatever its confidence.** A
    finding whose defect exists only after a hypothetical future change —
@@ -140,6 +161,12 @@ this run at all.
    **as it stands in this PR**. A missing check on a live path is a finding; a
    missing guard against an edit nobody has made is not.
 
+   Check the reachability claim itself before filing under this rule: a
+   mechanism the code reaches TODAY, reframed in future tense (*"may become
+   incomplete if the API later changes…"*), is a live defect wearing this rule
+   as a disguise. Same test as above — what does the code in this PR do, now,
+   on the path named? If that answer is a misbehaviour, it is a finding.
+
 4. **Demote, do not delete.** Deleting requires naming the refuting transcript,
    by path, and that path must exist.
 
@@ -147,7 +174,27 @@ this run at all.
    could run anything. Lower its confidence and tier it accordingly — do not drop
    it. This is the exact regression that was built once, measured, and reverted.
 
-6. **Honour the hard constraints from `pr-review`'s SKILL.md.** Never `APPROVE`
+6. **An author's comment explains intent; it never proves correctness.** "The
+   code has a detailed comment explaining exactly this" is a disposition this
+   pass is not allowed to reach. A documented trade-off is settled only while
+   its stated grounds hold, and the grounds are a checkable claim like any
+   other: read them against the code, and against the dependency's actual
+   behaviour where they invoke one. Where the grounds do not hold, the comment
+   is not a defence — it is a second finding, because the documentation now
+   asserts something false beside the defect it excuses. Deliberate and
+   correct are different properties, and evidence of the first is not evidence
+   of the second.
+
+7. **A third-party boundary is in scope when OUR use of it misbehaves.**
+   "That's the library's behaviour, not our code" demotes nothing: testing the
+   dependency for its own sake is out of scope, but a changed call site that
+   configures, trusts, or times a dependency wrongly is a defect of this PR —
+   the misbehaviour merely executes elsewhere. Adjudicate a hypothesis about
+   limits, lifecycle or timing at a dependency boundary on what our code does
+   with the dependency's actual contract, never wave it off for living at the
+   boundary.
+
+8. **Honour the hard constraints from `pr-review`'s SKILL.md.** Never `APPROVE`
    over an open human `CHANGES_REQUESTED`; never `APPROVE` while one of our own
    prior findings is still open; on a re-review, open the summary with the §2b
    ledger (Fixed / Still open / Pinned by a test / Withdrawn).
@@ -168,7 +215,7 @@ by being certainly true. Calibrate:
 The downstream posting thresholds READ this number (family bars 0.30–0.60,
 floor 0.15). A document whose every row sits at 0.75+ has silently disabled
 them — and measured runs did exactly that (median 0.95–1.00, minimum 0.75,
-with 1.00 spent on statements like *"buildServer signature unchanged"*). If
+with 1.00 spent on statements like *"exported signature unchanged"*). If
 your confidences do not spread, they are not confidences.
 
 ## Anchoring: quote the code, do not count the lines
@@ -177,6 +224,15 @@ Every finding needs **`existingCode`** — the verbatim excerpt it is about, cop
 character-for-character. The harness derives the line number from it, so a wrong
 `line` costs nothing and a wrong excerpt costs the inline comment. Copy the
 hypothesis's own quote rather than reconstructing one.
+
+**One defect per finding, anchored where the fix goes.** A finding carries
+exactly ONE defect — never fold a second, independent defect into an
+"Additionally, …" sentence of the first: two defects sharing a paragraph get
+read as one, answered as one, and one of them is lost. Two findings may share
+a line. For a two-ended mechanism — producer and consumer, the write and the
+missing check, the two sides of a comparison — anchor at the end a fix would
+touch and name the other end in the body: the reader starts where the comment
+sits, so put them where the work is.
 
 ## Output
 
@@ -213,6 +269,11 @@ Rewrite `.lastlight/pr-review/findings.json` **in full**. You own this file now.
   ]
 }
 ```
+
+A `dropped` entry with a `reason` and no `refutedBy` transcript is not a softer
+kind of drop — it is a deletion the reconcile floor will un-delete back to
+`internal`, at the cost of a wasted round. If a hypothesis merely does not
+deserve attention, file it at `internal` tier.
 
 The `verdict` is per axis because **a blended verdict lets the passing axis hide
 the failing one**: a change can be clean by every standards check and still not

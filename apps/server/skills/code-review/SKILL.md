@@ -1,7 +1,7 @@
 ---
 name: code-review
 description: The shared rubric for reviewing a code change — precision-first, high-signal findings only (Critical/Important), what to check (correctness, contracts between producer and consumer, security, edge cases, regression risk, test coverage), and what is NOT a finding (pre-existing issues, linter territory, aspirational conventions the repo does not follow). Use when reviewing a PR or a branch diff.
-version: 2.3.0
+version: 2.4.0
 tags: [review, code-quality]
 ---
 
@@ -32,6 +32,12 @@ a human, none of the filtering in this section is yours to do.
 - **If you cannot name the concrete impact — what breaks, and for which input or
   caller — do not post it.** "This could be cleaner" is not a finding; "this
   crashes when `items` is empty because line 42 indexes `[0]`" is.
+- **One defect per comment, and distinct claims stay distinct.** Never fold a
+  second, independent defect into an "Additionally, …" sentence of the first —
+  two defects sharing a comment get read, answered and tracked as one, and one
+  of them is lost. Two comments may share a line. Keep each claim's precision
+  too: "out of date" is not "wrong", and collapsing distinct claims into the
+  harsher one overstates the review's case.
 - **Confidence gate — refute, don't doubt, and only at the end.** Before you
   finalise, re-read each finding against the actual code and try to *refute your
   own claim*. Dropping it requires naming the specific thing that makes it
@@ -131,7 +137,11 @@ what makes a comment actionable rather than a vague worry.
   parse/validate/emit responsibilities; ask for helper extraction. This is an
   **Important** finding, not a nit.
 - **Duplication** — flag avoidable duplicated logic (two or more clone groups of
-  the same code/branching). DRY is **should-fix** here, not merely "nice to have."
+  the same code/branching). DRY is **should-fix** here, not merely "nice to
+  have." This is about *logic*: a repeated **literal** — a constant, a URL, a
+  storage key appearing in source and its test, or on both sides of a stack —
+  is a finding only when this change makes the copies diverge in behaviour
+  (see "Not findings").
 - **Type safety** — flag `as any`, unchecked `as`-casts, or `@ts-ignore` used to
   silence the compiler or to bypass a validator the same code path defines.
 - **Regression risk** — existing callers of changed functions; behaviour changes
@@ -172,6 +182,25 @@ noise it was never supposed to produce, never a mechanism it could not refute.
   aspirational and departing from it is not a finding. Do not flag missing
   optional or "encouraged" fields. Read the surrounding code and the neighbours
   of the file you are reviewing; they are the standard, not the style guide.
+- **A repeated literal the merged code already repeats.** "This value is
+  hardcoded in two places" — a source file and its test, a frontend and its
+  backend — is the aspirational-convention rule in its most common costume.
+  If the copies agree and this change does not make them observably diverge,
+  sharing the constant is a Suggestion, not a finding. The moment this change
+  DOES let the copies disagree in behaviour it becomes a real finding — but
+  then say what diverges and for whom, not that a future edit needs two
+  keystrokes.
+- **"X is never validated" with no consumer that misbehaves.** A missing check
+  is a finding when some input or caller reaches code that then does the wrong
+  thing — name that path. Validation nobody's misbehaviour depends on is a
+  design note.
+- **Description staleness — though a doc's claims are checkable.** A PR
+  description that under- or over-describes the change's scope is a note for
+  the summary, not a finding. But a doc line, comment or example that asserts
+  something checkable about the code's behaviour which is **false at head** IS
+  a finding — the next reader will act on it — and so is an example that
+  contradicts the same file's guidance. The test: does the sentence make a
+  claim the code can falsify? Then check it like code; otherwise it is prose.
 
 ## Calibration
 

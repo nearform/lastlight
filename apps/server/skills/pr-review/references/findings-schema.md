@@ -18,6 +18,12 @@ own run context and the checkout, so you do **not** record any of that metadata.
 You never call `github_create_pull_request_review` yourself; writing this file is
 how you submit.
 
+> **Analysis mode writes a superset.** When the review evidence pipeline is on,
+> the adjudicate phase owns this file and adds `tier` / `family` / `hypotheses` /
+> `confidence` per finding and a `dropped[]` list. That contract lives in the
+> adjudicate prompt (`workflows/prompts/review-adjudicate.md`); everything below
+> is the shape both modes share.
+
 ## Top-level object
 
 | Field | Type | Required | Meaning |

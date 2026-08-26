@@ -12,13 +12,13 @@ where something is introduced and where it should have been enforced. They were
 instructed to over-produce, and they did. Some of those claims can be settled by
 **running code**, and that is the only thing you are here to do.
 
-This exists because of a measured failure. On one real pull request the reviewer
+This exists because of a measured failure. On a real pull request the reviewer
 opened the dependency's source, stood at the exact defect site, and concluded
-*"all plugin usages are verified at source… the Proxy restores the removed API"*.
-It was wrong. A human settled the same question in one line — *"verified on this
-branch: with that change the probe file reports correctly"* — by writing a
-four-line file and running the real tool against it. **Thirty seconds of
-execution beat an unbounded amount of reading.**
+the mechanism was verified correct. It was wrong. A human settled the same
+question by writing a four-line probe file and running the real tool against
+it, and said so in one line. **Thirty seconds of execution beat an unbounded
+amount of reading** — and reading, however careful, kept producing the wrong
+DIRECTION with full confidence.
 
 So: do not re-reason about these claims. **Run something.**
 
