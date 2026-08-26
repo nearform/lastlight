@@ -1017,7 +1017,31 @@ Four decisions in it that are decisions, not implementation detail:
   `optional()` for a second reason — a required one would report a missing id as
   *"unparseable document"* (a zod dump instead of the actionable line the next
   iteration needs) **and** make the floor's pre-write validation throw on a
-  document it was mid-rescue. A floor that can crash is not a floor.
+  document it was mid-rescue. A floor that can crash is not a floor. The same
+  rule made the advisory string fields (`obligation`, `path`, `title`, `body`,
+  `severity`, `family`, `existingCode`, `confidence`) **`.nullish()`** on
+  2026-08-25: models write literal `null` for "nobody looked" — this package's
+  own convention — and `.optional()` rejected it, so six of sixteen real
+  adjudications were "unreadable" to the gate on `"obligation": null` alone,
+  each buying a forced extra loop iteration *plus* a silently dead repair
+  (`--repair` refuses an unreadable document).
+- **The `internal[]` id-list is ACCEPTED, expanded by `--repair`, and
+  deliberately not advertised to the adjudicator.** A document may carry a
+  top-level `internal: ["contract-001", …]`; each entry credits exactly one
+  disposition through the same `creditTo` path as a finding citation
+  (duplicates, ambiguous model-minted ids and fabricated provenance fail the
+  gate unchanged), and `--repair` materialises every resolvable entry into a
+  full internal-tier row via `internalFinding()` — running **even on a
+  satisfied document**, because post-review's disposition record, the pipeline
+  stats and the internal-recall judge all read full rows. An unresolvable
+  entry stays in the list, reported, never silently deleted. **Do not teach a
+  prompt to use it.** It was prompted once (2026-08-25) and reverted the same
+  day: with bare-id filing available the adjudicator bulk-filed internal and
+  stopped promoting — posted findings fell from 5-8 to 1-3 per case and
+  micro-recall collapsed on the live band. The full-row cost is the friction
+  that makes the model look at each claim; the code support exists so a
+  document that *arrives* with the list is conserved rather than rejected
+  (`tests/findings.test.ts` pins all of it).
 
 Output is capped at 20 named ids plus a `+N more`, on both the gap list and the
 repair list. It goes into an agent's context, and *"3 hypotheses unaccounted
