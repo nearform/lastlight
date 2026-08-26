@@ -44,6 +44,7 @@
   "dependencies": {
     "@clack/prompts": "^1.7.0",
     "lastlight-core": "workspace:*",
+    "lastlight-workflow-engine": "workspace:*",
     "chalk": "^6.0.0",
     "yaml": "^2.5.0"
   },

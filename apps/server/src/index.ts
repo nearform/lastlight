@@ -59,7 +59,12 @@ import {
   PR_FIX_SHAPED_WORKFLOWS,
   type SimpleWorkflowRequest,
 } from "./workflows/simple.js";
-import { resolvePrState, prScopedWorkflows, type PrState } from "./engine/pr-state.js";
+import {
+  resolvePrState,
+  resolveSpecContext,
+  prScopedWorkflows,
+  type PrState,
+} from "./engine/pr-state.js";
 import { renderContext, type ReviewTriggerOptions } from "./engine/pr-decisions.js";
 import {
   REVIEW_WORKFLOW,
@@ -686,12 +691,42 @@ async function main() {
     // moved on. One projection at one choke point is what makes the webhook and
     // cron dispatches of a `pr-fix`-shaped workflow carry identical context.
     if (prState) {
+      const reviewConfig = repoConfig?.review ?? config.review;
+      // The `spec` axis's two live reads — the issues this PR closes, and its
+      // changed-file list (`docs/plans/deterministic-pr-levers.md` §Decisions,
+      // D7). Gated on
+      // `review.analysis.enabled`, which is operator-only, so a repo can neither
+      // buy itself the extra reads nor opt out of the operator's pipeline.
+      //
+      // HERE rather than inside `resolvePrState` for two reasons: the reads cost
+      // something and nothing but the reviewer consumes them, and locked
+      // decision 8 wants the disabled path to fetch nothing at all so the
+      // projection has nothing to project. Enriching at the choke point covers
+      // every route — including the webhook's, whose snapshot arrives on
+      // `_prState` already resolved and is enriched in place before it is
+      // persisted below.
+      //
+      // Never throws; a failed read degrades the obligation set and says so in
+      // the block rather than failing the dispatch.
+      //
+      // Scoped to `REVIEW_WORKFLOW` — the same constant `review-check.ts` gates
+      // its own check-run projection on — rather than to every PR-scoped
+      // workflow. The reviewer is the only consumer, and the fix family's
+      // prompts are template files that would render none of these variables
+      // while still paying for the reads. The cost of naming the workflow is
+      // that a deployment which remaps `routes.github.pr_opened` to a FORK of
+      // `pr-review` gets the plumbing but no obligations; that is a degradation
+      // the block announces, not a silent one.
+      if (reviewConfig.analysis.enabled && workflowName === REVIEW_WORKFLOW) {
+        await resolveSpecContext(prState, { github });
+      }
       Object.assign(
         extra,
         renderContext(
           prState,
           repoConfig?.fix ?? config.fix,
           repoConfig?.dependencies ?? config.dependencies,
+          reviewConfig,
         ),
       );
       extra.prState = prState;

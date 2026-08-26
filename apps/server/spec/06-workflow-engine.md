@@ -147,11 +147,14 @@ router routed nine, which is why the dashboard showed no Slack trigger for
   approval_gate?: string;               // pause gate name
   approval_artifact?: string;           // handoff doc this gate approves (e.g. architect-plan.md)
   approval_gate_message?: string;       // template rendered when pausing ({{approvalUrl}} deep-links the focused view)
-  depends_on?: string[];                // triggers DAG mode if any phase has it
+  depends_on?: string[];                // declaring this ANYWHERE disables chain synthesis for the WHOLE workflow
   trigger_rule?:
     | "all_success" | "one_success"     // DAG firing conditions
     | "none_failed_min_one_success"
     | "all_done";
+  branches?: FanoutBranch[];            // type: fanout only — required there, rejected elsewhere
+  max_concurrent?: number | { from: string; default: number };  // fanout width, clamped by the backend ceiling
+  on_branch_soft_failure?: { retries: number; then: "fail" | "complete" };  // per-BRANCH; not generic_loop's key
   output_var?: string;                  // alias for {{this.field}} in later phases
   unrestricted_egress?: boolean;        // bypass strict allowlist for this phase
   web_search?: boolean;                 // enable agentic-pi web tools
@@ -192,8 +195,16 @@ Defined with Zod; loaded and cached by `loader.ts`.
 
 ## Phase types
 
-Four: `context` (no execution), `agent` (one LLM session), and the
-deterministic `bash` / `script` pair (a command, no LLM).
+Six: `context` (no execution), `agent` (one LLM session), `fanout`
+(N LLM sessions, concurrently, in one workspace), the deterministic
+`bash` / `script` pair (a command, no LLM), and `post-review`
+(in-process PR-review submission, no sandbox).
+
+The engine owns only the generic kinds. `post-review` and any other
+app-specific type are dispatched through a `Map<string,
+PhaseTypeHandler>` injected on `EnginePorts.handlers`
+(`phase-executor.ts`, registered in `runner.ts`) — which is the seam to
+extend when a deployment needs a step the engine should not know about.
 
 - **context** — a checkpoint. The runner writes a `phase_history` row and
   moves on. Used to mark dashboard pipeline stages without spending
@@ -236,7 +247,11 @@ deterministic `bash` / `script` pair (a command, no LLM).
   and supplies every other fact from the harness's own run context: the PR
   number (`ctx.prNumber`/`ctx.issueNumber`), the base ref (`ctx.baseBranch`),
   and the head SHA + diff (`git` on the checkout). It anchors each finding to a
-  changed line via `src/engine/github/review-poster.ts`, demotes off-diff
+  changed line via `src/engine/github/review-poster.ts` — **deriving** the line
+  from the finding's verbatim `existingCode` excerpt rather than trusting the
+  number the model counted (own hunks → whole head file → a *unique* match
+  elsewhere in the diff, which re-files a finding filed against the wrong half
+  of a declaration/implementation pair) — demotes off-diff
   findings to the body, and posts one review through `GitHubClient` (App auth in
   prod; a bearer token + `config.githubApiBaseUrl` against the eval mock, which
   serves no App-token or diff endpoint). A genuine failure — missing findings
@@ -246,6 +261,127 @@ deterministic `bash` / `script` pair (a command, no LLM).
   the earlier in-sandbox `type: script` poster, which depended on the AI
   hand-writing `pr_number`/`base_ref`/`head_sha` into the JSON and silently
   `exit 0`'d on any mismatch.
+
+  The document may also carry an optional **split verdict** (issue #271's fix
+  7) — `verdict: { spec, standards }`, each `pass` / `fail` / `unknown`. A
+  `fail` on **either** axis stops the review being an `APPROVE`; it becomes a
+  `COMMENT`. Nothing else changes: the event is never escalated to
+  `REQUEST_CHANGES` on a heuristic (that would flip the `last-light/review`
+  check to `failure` and shut a merge gate), and among the non-`APPROVE` events
+  an explicit `event` still wins. `unknown` means *not assessed* and does not
+  block — most PRs state no acceptance criteria, and blocking on `unknown` would
+  stop the reviewer approving anything. The point is that a change clean by
+  every standards check but not doing what the issue asked is a case one `event`
+  cannot express, and 58 of 59 production approvals carried zero findings. An
+  absent `verdict` is today's behaviour exactly, and the handler **discards**
+  the field entirely unless `review.analysis.enabled` — so the inertness is
+  structural rather than a promise about what a prompt writes.
+
+### `fanout` — N agent sessions, one workspace
+
+```yaml
+- name: survey
+  type: fanout
+  depends_on: [seed]
+  trigger_rule: all_done
+  skills: [pr-review, code-review]
+  model: "{{models.review-survey}}"
+  max_concurrent: { from: surveyConcurrency, default: 6 }
+  on_branch_soft_failure: { retries: 1, then: complete }
+  branches:
+    - name: contract
+      prompt: prompts/survey-contract.md
+      context_file: .lastlight/pr-review/obligations/contract.md
+      until_bash: lastlight-facts discharge --dir .lastlight/pr-review --family contract
+    - name: security
+      prompt: prompts/survey-security.md
+      skills: [pr-review, code-review, security-review]
+```
+
+Each branch inherits the phase's `prompt` / `skills` / `model` /
+`variant` and may override any of them. Branch names are **ledger
+keys**, so they are alphanumeric-with-hyphens (no underscores, which
+`PhaseRef` uses as its separator), must be unique, and may not end in
+the reserved `-retry` / `-check` suffixes.
+
+(The `model:` line above is why `pr-review.yaml`'s downstream `adjudicate`
+phase carries its own key the guarded way —
+`model: "{{#if models.review-adjudicate}}{{models.review-adjudicate}}{{/if}}{{#if !models.review-adjudicate}}{{models.review}}{{/if}}"`.
+The `{{#if}}` pair is load-bearing: a bare unset key renders *empty*, and an
+empty `model:` resolves to the **default** model — not to `models.review`,
+which is the fallback the phase actually wants.)
+
+**`context_file` — a path in a prompt is not a path.** A branch may name a
+workspace file, relative to the AGENT'S OWN CWD, whose contents the harness
+reads and appends to that branch's rendered prompt. The model never resolves
+it. This exists because it was measured: across three stored `pr-review` runs
+on 2026-08-22, 27 of 133 attempts to open the per-family obligations block
+resolved against the workspace ROOT rather than the checkout and hit ENOENT
+(23 of 120 branches never recovered), while all 98 relative reads succeeded.
+The model's only absolute anchor by its first turn is its skill bundle at
+`<workspaceRoot>/.lastlight-skills/…`, one level above the checkout the
+deterministic phases write in — so a seeded pass silently became an unseeded
+one. The harness resolves the path against `ProvisionResult.hostAgentCwd`, the
+host end of the very `cwd` a `type: bash` phase runs in, so producer and
+consumer share one base by construction. It is appended **last**, which is the
+prompt-cache ordering the fan-out already depends on. An unreadable or escaping
+path (absolute, or containing `..`) appends a **loud NOT AVAILABLE notice**
+naming it, never silence: "nobody looked" must never render as "looked, found
+none". The one carve-out is **`kubernetes`**, whose `hostAgentCwd` is an in-pod
+path this process cannot see at all — there the read is not attempted and the
+branch is handed the path to open itself, with the mis-anchoring trap named.
+
+**Why one node instead of N parallel phases.** Real DAG concurrency is
+parked behind four hard blockers, and
+[the WP5 parking rationale](../../../docs/plans/deterministic-pr-levers.md#parked-parallel-phases-wp5)
+records why it can be sidestepped: *"every hard blocker exists because
+each phase provisions its own sandbox against a shared workspace."* A
+fan-out inside one phase has none of them — one node, one provision,
+one `current_phase`, one artifact harvest, one dispose.
+
+**Execution order**, and each step is load-bearing:
+
+1. One `withAgentSession` — a single `prepareRun`, so one GitHub token
+   mint and one workspace provision for the whole fan-out.
+2. Skill bundles staged **per branch, sequentially, before the join**.
+   The bundle is already keyed per phase so concurrent readers cannot
+   collide; staging is filesystem work and is serialised rather than
+   reasoned about.
+3. Branches run through a bounded `mapPool`.
+4. **`until_bash` gates run after the join, sequentially.**
+   `InProcessSandbox.runCommand` is a `spawnSync` — it blocks the event
+   loop — so interleaving a gate with the agent turns would serialise
+   the entire fan-out on `none`, the very backend the fan-out exists to
+   speed up. Each gate records a `<phase>_branch_<name>_check` ledger
+   row with `condition_met` / `condition_not_met`; it is observational
+   and can never fail the phase.
+5. One harvest, one dispose.
+
+**Concurrency is `min(max_concurrent, backend ceiling)`**, and the
+clamp is logged when the host has the last word:
+
+| backend | ceiling | why |
+|---|---:|---|
+| `none`, `docker` | 6 | in-process `run()`, or N `docker exec` into the one provisioned container |
+| `gondolin`, `smol`, `kubernetes` | **1** | a QEMU micro-VM (or equivalent) per branch, in the harness process |
+
+A ceiling of 1 runs the branches as a chain — byte-identical in
+behaviour to declaring them as sequential phases, which is what makes
+the type safe to ship with `gondolin` as the production default.
+
+**What it keeps, and what it gives up.** Each branch goes through the
+same dedup ledger under its own `<phase>_branch_<name>` key, so resume,
+dedup, per-branch cost attribution and the dashboard's longest-prefix
+grouping all still work, and a branch opens and closes its own reporter
+window so per-branch duration is measurable. What it gives up is a DAG
+node per branch: no per-branch `trigger_rule`, and no `approval_gate`
+(a fan-out cannot pause mid-flight — the schema refuses it, along with
+`loop:` / `generic_loop:`, whose iteration shape the branches already
+are).
+
+**Isolation between branches is by disjoint output paths**, not by
+separate checkouts — they share the one workspace. A fan-out whose
+branches write the same file is a data race the engine will not catch.
 
 The `bash`/`script` deterministic types share the agent phase's dedup ledger
 (`runCommandPhase` → `runPhaseLedger`), so they get an `executions` row and
@@ -257,9 +393,9 @@ the command env as `GITHUB_API_URL`, and `post-review` reads it directly to
 build its `GitHubClient`; in production both are unset, so GitHub calls fall
 back to `api.github.com`.
 
-## Linear vs DAG
+## Scheduling — one DAG, one node at a time
 
-The decision is automatic:
+Chain synthesis is automatic:
 
 ```ts
 // src/workflows/runner.ts:330
@@ -268,21 +404,42 @@ function hasDependencies(definition): boolean {
 }
 ```
 
-If any phase declares `depends_on`, the entire workflow runs through
-the DAG executor (`runner.ts:1092–1486`); otherwise it walks the phase
-array in order (`runner.ts:457–1033`).
+**Every workflow is a DAG, and there is exactly one scheduler**
+(`core/scheduler.ts`). `buildDag(phases, { chainIfNoDeps: true })`
+produces the node graph: a workflow that declares no `depends_on`
+anywhere gets a synthesized previous-phase chain, reproducing linear
+semantics including the failure cascade. Declaring `depends_on` on
+*any* phase disables that synthesis for the **whole** workflow, so a
+file that declares one edge must declare them all.
 
-- **Linear** — single `taskId` shared across phases. The sandbox
-  workspace persists, so the executor can read the architect's
+`getReadyNodes()` returns every node whose dependencies are satisfied
+per `trigger_rule` — but the scheduler runs **one at a time, in
+declaration order**:
+
+```ts
+// Sequential: run the earliest-declared ready node, one at a time.
+const node = ready[0];
+```
+
+- **One workspace per run.** Every phase and every loop iteration
+  shares the single `ctx.taskId`; the sandbox workspace persists
+  between phases, which is how the executor reads the architect's
   `architect-plan.md`.
-- **DAG** — `buildDag(phases)` from `dag.ts` produces a node graph;
-  `getReadyNodes()` returns nodes whose dependencies are satisfied per
-  `trigger_rule`. Concurrent phases run via `Promise.allSettled()`.
-  Each gets a phase-scoped taskId (`${taskId}-${phaseName}`) so they
-  don't trample each other's workspaces.
+- **Loop iterations run sequentially** within their node — each fix
+  cycle reads the previous reviewer verdict.
 
-Loop iterations always run sequentially even inside DAG-mode workflows
-(fix cycles read the prior reviewer verdict).
+There is **no cross-phase concurrency**. Two prior claims in this
+document — that concurrent phases run via `Promise.allSettled()` and
+that each takes a phase-scoped `${taskId}-${phaseName}` — described
+code removed by issue #94, which deliberately collapsed two forked
+schedulers into one and deferred real concurrency ("via git worktrees")
+to a later issue. That issue is still open and parked behind four hard
+blockers, of which the worst silently overwrites a `paused` run with
+`succeeded`: see
+[the WP5 parking rationale in `docs/plans/deterministic-pr-levers.md`](../../../docs/plans/deterministic-pr-levers.md#parked-parallel-phases-wp5).
+
+**Concurrency exists in exactly one place, and it is inside a node:**
+`type: fanout` (below).
 
 ## Gated skips
 
@@ -582,13 +739,19 @@ function workflowScopedTaskId(repo, number, workflowName, workflowId) {
 }
 ```
 
-- **Linear** — every phase uses this base. The sandbox workspace
-  persists, so files like `.lastlight/issue-42/architect-plan.md`
-  survive between phases.
-- **DAG** — each phase appends `-${phaseName}`. Concurrent phases
-  don't share workspaces.
+- **Every phase uses this base, unmodified.** The sandbox workspace
+  persists across the whole run, so files like
+  `.lastlight/issue-42/architect-plan.md` survive between phases.
+  Nothing appends a phase name: the per-phase
+  `${taskId}-${phaseName}` clones went with issue #94's scheduler
+  unification, and re-introducing them would break every handoff that
+  reads an earlier phase's output off disk.
 - **Loop iterations** — reuse the parent phase's taskId. Fix cycles
   read the reviewer's verdict from the same disk.
+- **Fan-out branches** — likewise. Every branch of a `type: fanout`
+  phase runs against the one provisioned workspace; isolation between
+  them is by *disjoint output paths* and a per-branch skill bundle, not
+  by separate checkouts.
 - **Resume** — stored in `workflow_runs.context.taskId`. A resumed run
   lands in the exact same sandbox directory.
 
@@ -889,8 +1052,13 @@ advance.
 - **`output_var` aliases are unprotected.** Two phases writing to
   overlapping output_vars will clobber each other silently. Convention:
   use distinct, descriptive aliases.
-- **DAG concurrency uses phase-scoped taskIds; loops reuse parent.**
-  This asymmetry is intentional and load-bearing.
+- **One workspace per run — phases, loop iterations and fan-out
+  branches all share `ctx.taskId`.** Every inter-phase handoff reads
+  the previous phase's output off that one disk, so a per-phase clone
+  would break them all.
+- **DAG nodes run one at a time.** The only concurrency in the engine
+  is *within* a `type: fanout` node. If you need two phases to overlap,
+  that is the parked worktree project, not a scheduler tweak.
 - **Scratch points at outputs; doesn't inline them.** A phase output of
   any size lives in `executions.output_text`. Scratch stores the row id.
 - **Approval gates are positive enable.** A gate name not in
@@ -934,14 +1102,25 @@ advance.
 
 | Piece | File |
 |---|---|
+The runtime-agnostic core lives in **`lastlight-workflow-engine`**
+(`packages/workflow-engine/src/`); the `src/workflows/*.ts` names below
+are one-line re-export shims (`export * from "lastlight-workflow-engine"`),
+kept so existing imports resolve. Anything needing GitHub, a sandbox or
+the database stays app-side, behind a port.
+
+| Piece | File |
+|---|---|
 | Public entry | `src/workflows/simple.ts` |
-| Linear executor | `src/workflows/runner.ts:457–1033` |
-| DAG executor | `src/workflows/runner.ts:1092–1486` |
-| YAML schema (Zod) | `src/workflows/schema.ts` |
+| The one scheduler (DAG walk, node status, wrap-up) | `packages/workflow-engine/src/core/scheduler.ts` |
+| Per-phase bodies (context / agent / loops / gates) | `packages/workflow-engine/src/core/phase-executor.ts` |
+| App-registered phase types | `src/workflows/handlers/{post-review,fanout}.ts`, registered in `runner.ts` |
+| Composition root (real ports: sandbox, state, GitHub) | `src/workflows/runner.ts` |
+| YAML schema (Zod) | `packages/workflow-engine/src/core/schema.ts` |
 | YAML loader + caching | `src/workflows/loader.ts` |
-| DAG graph utilities | `src/workflows/dag.ts` |
-| Until-condition evaluator | `src/workflows/loop-eval.ts` |
-| Template engine | `src/workflows/templates.ts` |
+| DAG graph utilities | `packages/workflow-engine/src/core/dag.ts` |
+| Loop-iteration / branch label authority | `packages/workflow-engine/src/core/phase-ref.ts` |
+| Until-condition evaluator | `packages/workflow-engine/src/core/loop-eval.ts` |
+| Template engine | `packages/workflow-engine/src/core/templates.ts` |
 | Resume + orphan recovery | `src/workflows/resume.ts` |
 | Concurrency cap + admission | `src/workflows/admission.ts` (cap enforced in `simple.ts`) |
 | Per-repo layer: dispatch-time resolve, persist, restore | `src/workflows/simple.ts` (`resolveRepoRunConfig`, `repoConfigRunRecord`, `restoreRepoRunConfig`) |

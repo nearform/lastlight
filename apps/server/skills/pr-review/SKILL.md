@@ -1,19 +1,40 @@
 ---
 name: pr-review
-description: Review a GitHub pull request and post one formal review — advance the existing discussion and give precision-first, high-signal feedback. A pure code review — no building. Use when asked to review a PR or on a cron PR scan.
-version: 7.2.0
+description: Review a GitHub pull request and post one formal review — advance the existing discussion and give precision-first, high-signal feedback. Judgement on the diff, not a build gate — CI validates that it builds, and a targeted probe is allowed as evidence. Use when asked to review a PR or on a cron PR scan.
+version: 7.4.0
 tags: [github, review, code-quality]
 chat: true
 ---
 
 # PR Review
 
-Review an open PR — high-signal findings only. This is a **pure code review**:
-read the change and reason about it. Do **not** install dependencies, build, or
-run tests — that is CI's job, and it validates whether the change actually works
-far more reliably than you re-running it here. Your job is judgement on the diff,
-not a build gate. A noisy review gets muted, so precision matters more than
-volume.
+Review an open PR — high-signal findings only. Read the change and reason about
+it; where reasoning cannot settle a question, **run something**. Installing the
+repo's dependencies, opening the installed library source, and writing the
+smallest file that exercises the behaviour and executing it are all **allowed
+and expected** — that is a *probe*, and it is how a question about how code
+actually behaves gets settled instead of guessed.
+
+Two limits on a probe, and they are what keep it from becoming a second CI:
+
+- **It must produce evidence you can quote.** Keep the command and its output,
+  and cite them in the finding that rests on them. "I ran it and it fails" with
+  nothing to quote is worth exactly what a guess is worth.
+- **It is targeted at one question, never a re-derivation of CI.** Whether the
+  change builds and whether the suite is green are already answered — see §4.
+  Never spend a probe on those.
+
+> **Why this is spelled out rather than left implicit.** An earlier version of
+> this skill forbade installing dependencies, and the measured failure was not
+> disobedience — it was the opposite. The reviewer referred to `WebClient` 32
+> times and never once opened `node_modules/@slack`, because the workspace it
+> was given had no `node_modules` at all. "Open the library source" was not
+> ignored; it was structurally impossible. **An affordance you do not have reads
+> to you as an instruction you cannot follow**, so what you *can* run is part of
+> the contract, not an implementation detail.
+
+Your job is judgement on the diff, not a build gate. A noisy review gets muted,
+so precision matters more than volume.
 
 You do **not** post the review yourself. You write your findings to a JSON file
 (`.lastlight/pr-review/findings.json`) and a deterministic follow-up step posts
@@ -28,8 +49,17 @@ the precision bar and what-to-check rubric.
 The harness pre-clones the PR's head ref and drops you **inside the checkout** —
 your cwd **is** the repo (`ls -la` shows `.git/` directly; `AGENTS.md` is the
 sibling one level up at `../`). Use `git`/`read`/`grep` from here. To refresh:
-`git fetch origin <branch> --depth 50 && git reset --hard FETCH_HEAD`. If the
-checkout is somehow missing, `git clone https://github.com/{{owner}}/{{repo}}.git .`.
+`git fetch origin <branch> && git reset --hard FETCH_HEAD` — **no `--depth`**,
+for the reason in §3. If the checkout is somehow missing,
+`git clone https://github.com/{{owner}}/{{repo}}.git .`.
+
+**Every `.lastlight/…` path in this skill and in any prompt is relative to that
+cwd — use it relative, never absolute.** The skill files you were handed are
+absolute paths under `…/.lastlight-skills/`, and that directory is a sibling of
+the checkout, one level ABOVE you. Joining a `.lastlight/…` path onto the
+directory your skills came from lands outside the repo and reads nothing. This
+is measured, not hypothetical: it cost 23 of 120 survey branches their seeded
+obligations across three runs on 2026-08-22.
 
 **Read code from this local checkout, never the API.** Use `git`/`read`/`grep`
 on disk for the diff and file contents. Do **not** call
@@ -103,12 +133,48 @@ contains a problem you raised, the correct `event` is still
 
 ### 3. Get the diff
 
+**First, check whether it is already staged.** When the review evidence pipeline
+is on, the deterministic `facts` phase resolves this range once and writes it
+down: `.lastlight/pr-review/diff/index.md` lists every changed file with its
+status, its changed line ranges and a per-file patch beside it under
+`.lastlight/pr-review/diff/`. If that index is there, read it and the patches
+instead of running the commands below — the range is already settled, and every
+re-derivation is another chance to spell it two-dot. Those paths are relative to
+this checkout; open them exactly as written. (If the index says NOT AVAILABLE, or
+there is no `.lastlight/pr-review/diff/` at all, carry on here.)
+
 From inside `<repo>/`:
 ```
-git fetch origin <baseRef> --depth 50      # base isn't in the head-only clone
+# The harness already materialized origin/<baseRef>, deepening base AND head
+# until they share a merge base. Verify that — do NOT re-fetch with --depth.
+# Repair only if it's actually missing: deepen BOTH sides, because unshallowing
+# the base alone leaves HEAD with no reachable ancestor and merge-base still fails.
+git merge-base origin/<baseRef> HEAD >/dev/null 2>&1 || {
+  git fetch origin --unshallow || true
+  git fetch origin "+refs/heads/<baseRef>:refs/remotes/origin/<baseRef>" --unshallow || true
+}
+
 git diff --stat origin/<baseRef>...HEAD    # churn
 git diff origin/<baseRef>...HEAD           # the patch
 ```
+
+**Never `git fetch --depth N` in this checkout.** A depth-limited fetch writes
+`.git/shallow` even into an already-complete clone, re-cutting history N commits
+back from the base tip — which severs the merge base on any PR that forked
+further back than that, and undoes the deepening the harness already paid for.
+
+**Three dots, always.** `origin/<baseRef>...HEAD` is the merge-base diff and
+matches GitHub's own PR diff. Two-dot (`git diff origin/<baseRef> HEAD`)
+additionally contains every commit the base branch picked up since the PR
+forked, and the author wrote none of it — measured across 50 real PRs, 9
+diverge, one of them 6125 files against 3.
+
+**If `merge-base` still fails after the repair**, the diff range could not be
+established and you have nothing to review. Do not quietly fall back to two-dot
+and review that instead. Write `event: "COMMENT"` — never `APPROVE` — with
+`findings: []` and a `summary` saying the base and head share no reachable
+history, then stop. Reviewing the wrong range and reporting success is the exact
+failure this instruction exists to prevent.
 
 ### 4. Read what CI said
 
@@ -125,16 +191,21 @@ speculate about whether this builds.**
   line 42, which is the same issue as finding 2"* — and let it steer you toward
   the part of the diff that is actually wrong.
 - `checksState: pending` / `none` — no CI evidence either way. Review the code
-  as written; still don't build or run it.
+  as written, and do **not** stand in for CI by building it or running the
+  suite — a matrix you cannot reproduce on one machine is not yours to guess at.
+  A targeted probe for one specific question is still fair game.
 
 ### 5. Assess and write your findings
 
 Apply the **code-review** skill's rubric — read each changed file in context;
 check correctness / **contracts** / edge-cases / security / regression-risk /
 test-coverage.
-Reason about the code statically; **don't build or run it** — CI is the build
-gate and it has already spoken (§4); spend your effort on what a human reviewer
-sees.
+Reason about the code statically first, and spend nothing re-deriving whether it
+builds — CI is the build gate and it has already spoken (§4). When a finding
+turns on how the code *behaves* rather than on how it reads — library or
+framework semantics, a lifecycle, an option interaction, an input the code does
+not expect — settle it with a probe (see the top of this skill) and quote the
+transcript in the finding's body.
 Follow that skill's **precision-first** rule: keep **only Critical and Important**
 findings, each anchored to a `path:line` with a one-line concrete impact (what
 breaks, for which input or caller). Drop Suggestions and Nits.
@@ -173,8 +244,8 @@ the shape is:
   "findings": [
     {
       "path": "src/foo.ts",
+      "existingCode": "the verbatim line(s) this finding is about",
       "line": 42,
-      "side": "RIGHT",
       "severity": "Critical",
       "title": "Short label for the finding",
       "body": "Concrete impact — what breaks, for which input or caller.",
@@ -190,11 +261,16 @@ SHA and diff from the harness's own context and the checkout, so you do **not**
 record any of that metadata (that reliance was a footgun — omit it).
 
 Rules:
-- **Anchor precisely.** `path` must match the diff path exactly; `line`/`side`
-  must point at a line that appears in the diff (added/context → `side: RIGHT`;
-  removed/context → `side: LEFT`). A finding whose line isn't in the diff is
-  demoted to the summary body, so get the anchor right. Use optional `start_line`
-  (same side) for a multi-line range.
+- **Quote the code; do not count the lines.** `existingCode` is the anchor of
+  record: copy the line(s) the finding is about character-for-character and the
+  harness finds them for you — in the file's own hunks, then the whole file, then
+  (on a *unique* match) elsewhere in the diff, which is how a finding filed
+  against the wrong half of a declaration/implementation pair still lands. `line`
+  and `side` are **advisory hints** that get overwritten; `start_line` is derived,
+  so do not set it. `path` should still match the diff path. An excerpt that
+  cannot be found is demoted to the summary body — nothing is lost, but an inline
+  comment at the defect site is worth much more, so copy carefully rather than
+  paraphrasing.
 - `severity` is `Critical` or `Important` only.
 - `suggestion` is optional — include it only when a concrete one-to-few-line fix
   is obvious. It must be the exact replacement text for the anchored line(s),

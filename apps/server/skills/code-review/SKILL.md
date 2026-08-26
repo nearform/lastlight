@@ -1,7 +1,7 @@
 ---
 name: code-review
-description: The shared rubric for reviewing a code change — precision-first, high-signal findings only (Critical/Important), plus what to check (correctness, contracts between producer and consumer, security, edge cases, regression risk, test coverage). Use when reviewing a PR or a branch diff.
-version: 2.1.0
+description: The shared rubric for reviewing a code change — precision-first, high-signal findings only (Critical/Important), what to check (correctness, contracts between producer and consumer, security, edge cases, regression risk, test coverage), and what is NOT a finding (pre-existing issues, linter territory, aspirational conventions the repo does not follow). Use when reviewing a PR or a branch diff.
+version: 2.4.0
 tags: [review, code-quality]
 ---
 
@@ -21,25 +21,58 @@ not just the happy path.
 
 A review is only useful if people trust it. A noisy reviewer gets muted; every
 low-value comment you post spends the credibility of the ones that matter. So
-the bar is **high-signal only**:
+the bar is **high-signal only** — on what you **post**. Read "Where the gate
+applies" below first: if your output is consumed by a later stage rather than by
+a human, none of the filtering in this section is yours to do.
 
 - **Post only Critical and Important findings.** Suggestions and Nits (below)
   are *not* worth a formal review comment on their own — drop them, or fold at
-  most one genuinely valuable line into the summary. When in doubt, leave it out.
+  most one genuinely valuable line into the summary. When in doubt about a
+  finding's **tier**, leave it out of the review.
 - **If you cannot name the concrete impact — what breaks, and for which input or
   caller — do not post it.** "This could be cleaner" is not a finding; "this
   crashes when `items` is empty because line 42 indexes `[0]`" is.
-- **Confidence gate — refute, don't doubt.** Before you finalise, re-read each
-  finding against the actual code and try to *refute your own claim*. Dropping
-  it requires naming the specific thing that makes it wrong: the guard you
-  missed, the caller that already validates, the type that makes the case
-  unreachable. **Unease is not a refutation.** "I'm not certain" is an
-  instruction to go and read the other side of the contract, not to delete the
-  finding.
+- **One defect per comment, and distinct claims stay distinct.** Never fold a
+  second, independent defect into an "Additionally, …" sentence of the first —
+  two defects sharing a comment get read, answered and tracked as one, and one
+  of them is lost. Two comments may share a line. Keep each claim's precision
+  too: "out of date" is not "wrong", and collapsing distinct claims into the
+  harsher one overstates the review's case.
+- **Confidence gate — refute, don't doubt, and only at the end.** Before you
+  finalise, re-read each finding against the actual code and try to *refute your
+  own claim*. Dropping it requires naming the specific thing that makes it
+  wrong: the guard you missed, the caller that already validates, the type that
+  makes the case unreachable. **Unease is not a refutation.** "I'm not certain"
+  is an instruction to go and read the other side of the contract, not to delete
+  the finding.
+
+### Where the gate applies
+
+The confidence gate filters what you **post**. It is not a filter on what you
+are allowed to notice, to write down, or to hand to a later stage — and which of
+those you are doing decides whether it fires at all.
+
+- **You are producing the review** — writing `findings.json`, submitting a
+  formal review, or recording a verdict on a branch diff. **The gate fires.**
+  Everything in this section applies: yours is the last hand on the work before
+  a human reads it, so an ungrounded finding costs real credibility.
+- **You are one pass of a multi-pass review** — discharging obligations and
+  appending hypotheses to a per-family file for a later phase to probe and
+  adjudicate. **The gate does not fire.** Record the mechanism you cannot yet
+  refute. Every downstream stage can only *remove*, so nothing there can recover
+  a hypothesis you declined to write down, and a pass that self-censors is
+  deleting evidence on behalf of a stage that has not run yet.
+
+The split is measured, not stylistic. Google's AutoCommenter found a single
+**global** confidence threshold (`t = 0.98`) catastrophic: roughly **80% of the
+predictions it discarded as below-threshold were correct anyway**. Replacing it
+with per-check thresholds raised recall without costing precision. So the gate
+is worth having at the one point where a wrong finding is actually paid for, and
+is expensive everywhere upstream of it.
 
 ### The gate cuts both ways
 
-The gate above exists to stop *speculative* findings. It is not a reason to
+The confidence gate exists to stop *speculative* findings. It is not a reason to
 approve a change you have not actually checked. Two failure modes, equally bad:
 
 | Failure | What it looks like | Cost |
@@ -104,7 +137,11 @@ what makes a comment actionable rather than a vague worry.
   parse/validate/emit responsibilities; ask for helper extraction. This is an
   **Important** finding, not a nit.
 - **Duplication** — flag avoidable duplicated logic (two or more clone groups of
-  the same code/branching). DRY is **should-fix** here, not merely "nice to have."
+  the same code/branching). DRY is **should-fix** here, not merely "nice to
+  have." This is about *logic*: a repeated **literal** — a constant, a URL, a
+  storage key appearing in source and its test, or on both sides of a stack —
+  is a finding only when this change makes the copies diverge in behaviour
+  (see "Not findings").
 - **Type safety** — flag `as any`, unchecked `as`-casts, or `@ts-ignore` used to
   silence the compiler or to bypass a validator the same code path defines.
 - **Regression risk** — existing callers of changed functions; behaviour changes
@@ -116,6 +153,54 @@ what makes a comment actionable rather than a vague worry.
   second, worse finding: it makes the bug look deliberate to the next reader.
   Say so explicitly, quoting the assertion.
 - **Fit** — does it match the codebase's existing patterns and conventions?
+
+## Not findings
+
+The list above is what *counts*. This is what does **not**, however real it may
+be. It is a **category** rule, not a confidence bar: "I am not certain this is
+enforced" is not on it. Read it with "Where the gate applies" — a survey pass is
+still told to over-produce, and the only thing this removes from that output is
+noise it was never supposed to produce, never a mechanism it could not refute.
+
+- **Pre-existing issues.** The change is adjacent to them; it did not cause them.
+- **Anything a linter, typechecker or compiler would catch.** They already run,
+  and they are right more often than you are. The exception is an assertion that
+  *silences* one — `as any`, `@ts-ignore` — which is by definition something the
+  compiler does not catch (see Type safety).
+- **Real issues on lines this PR did not touch — unless this PR is what makes
+  them wrong.** A consumer the diff never opened, now reading a shape the diff
+  moved, IS a finding and is the highest-value one there is (see Contracts).
+  What is excluded is a defect that was already there and still is.
+- **Changes that are clearly intentional and part of the broader change.** If
+  the diff is doing X on purpose, "this does X" is a restatement, not a finding.
+- **Points already deliberately silenced in the code** — an explicit
+  suppression, an ignore directive, a comment saying why. Someone already
+  decided; re-raising it costs the review's credibility and settles nothing.
+- **Conventions the reviewed repository does not actually follow.** **The
+  repository's conventions govern — not yours, and not the ones it aspires
+  to.** If the merged code does not follow a convention, that convention is
+  aspirational and departing from it is not a finding. Do not flag missing
+  optional or "encouraged" fields. Read the surrounding code and the neighbours
+  of the file you are reviewing; they are the standard, not the style guide.
+- **A repeated literal the merged code already repeats.** "This value is
+  hardcoded in two places" — a source file and its test, a frontend and its
+  backend — is the aspirational-convention rule in its most common costume.
+  If the copies agree and this change does not make them observably diverge,
+  sharing the constant is a Suggestion, not a finding. The moment this change
+  DOES let the copies disagree in behaviour it becomes a real finding — but
+  then say what diverges and for whom, not that a future edit needs two
+  keystrokes.
+- **"X is never validated" with no consumer that misbehaves.** A missing check
+  is a finding when some input or caller reaches code that then does the wrong
+  thing — name that path. Validation nobody's misbehaviour depends on is a
+  design note.
+- **Description staleness — though a doc's claims are checkable.** A PR
+  description that under- or over-describes the change's scope is a note for
+  the summary, not a finding. But a doc line, comment or example that asserts
+  something checkable about the code's behaviour which is **false at head** IS
+  a finding — the next reader will act on it — and so is an example that
+  contradicts the same file's guidance. The test: does the sentence make a
+  claim the code can falsify? Then check it like code; otherwise it is prose.
 
 ## Calibration
 

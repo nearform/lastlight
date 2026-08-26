@@ -51,6 +51,33 @@ COPY packages/agentic-pi/ packages/agentic-pi/
 RUN pnpm --filter agentic-pi build \
  && pnpm --filter agentic-pi deploy --prod /bundle
 
+# ── lastlight CLI build stage (kept in lockstep with sandbox.Dockerfile) ─────
+# Vendors the `lastlight` CLI bundle (which carries `lastlight facts` + the
+# `lastlight-facts` dependency bin) so review phases can run in this image too.
+# See sandbox.Dockerfile for the full rationale (no standalone facts binary —
+# the CLI bundle is the only distribution).
+FROM node:24-slim AS lastlight-cli-build
+RUN corepack enable
+WORKDIR /repo
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
+COPY plugins/ plugins/
+COPY .claude-plugin/ .claude-plugin/
+COPY packages/cli/package.json packages/cli/package.json
+COPY packages/cli/scripts/ packages/cli/scripts/
+COPY packages/code-facts/package.json packages/code-facts/package.json
+COPY packages/shared/package.json packages/shared/package.json
+COPY packages/workflow-engine/package.json packages/workflow-engine/package.json
+RUN pnpm install --frozen-lockfile --filter lastlight...
+COPY packages/cli/ packages/cli/
+COPY packages/code-facts/ packages/code-facts/
+COPY packages/shared/ packages/shared/
+COPY packages/workflow-engine/ packages/workflow-engine/
+RUN pnpm --filter lastlight-code-facts build \
+ && pnpm --filter lastlight-workflow-engine build \
+ && pnpm --filter lastlight-shared build \
+ && pnpm --filter lastlight build \
+ && pnpm --filter lastlight deploy --prod /bundle
+
 FROM ${BASE_IMAGE}
 
 # The base image ends as root; be explicit — we need root to apt-get install,
@@ -146,6 +173,18 @@ RUN node -e "const pw = require(process.env.LASTLIGHT_PLAYWRIGHT); if (!pw.chrom
 COPY --from=agentic-pi-build /bundle /opt/agentic-pi
 RUN chmod +x /opt/agentic-pi/dist/cli.js \
  && ln -sf /opt/agentic-pi/dist/cli.js /usr/local/bin/agentic-pi
+
+# lastlight CLI (`lastlight facts` + the lastlight-facts dependency bin) —
+# wrappers pin the image's system node; see sandbox.Dockerfile for rationale.
+COPY --from=lastlight-cli-build /bundle /opt/lastlight
+RUN mkdir -p /opt/lastlight/bin \
+ && printf '#!/bin/sh\nexec /usr/local/bin/node /opt/lastlight/dist/cli.js "$@"\n' \
+      > /opt/lastlight/bin/lastlight \
+ && printf '#!/bin/sh\nexec /usr/local/bin/node /opt/lastlight/node_modules/lastlight-code-facts/dist/cli.js "$@"\n' \
+      > /opt/lastlight/bin/lastlight-facts \
+ && chmod +x /opt/lastlight/bin/lastlight /opt/lastlight/bin/lastlight-facts \
+ && ln -sf /opt/lastlight/bin/lastlight /usr/local/bin/lastlight \
+ && ln -sf /opt/lastlight/bin/lastlight-facts /usr/local/bin/lastlight-facts
 
 # Agent context (baked at /app/ — entrypoint cats into workspace/AGENTS.md)
 COPY apps/server/agent-context/ /app/agent-context/

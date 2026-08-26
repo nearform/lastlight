@@ -32,7 +32,13 @@
  */
 import { basename } from "node:path";
 
-import { loadMergedConfig, resolvePhaseModel, type ModelConfig, type VariantConfig } from "./config.js";
+import {
+  loadMergedConfig,
+  loadOverlayReview,
+  resolvePhaseModel,
+  type ModelConfig,
+  type VariantConfig,
+} from "./config.js";
 import { bootstrapAssets } from "./bootstrap.js";
 
 /**
@@ -66,6 +72,21 @@ export interface Arm {
   /** Parallel-grouping key (provider env-key in `models`; the arm id in
    * `config`, which keeps config arms in their own serial family). */
   readonly family: string;
+  /**
+   * The arm's `review:` policy — its overlay `config.yaml` block, verbatim
+   * (undefined when the overlay declares none). Model selection is not the only
+   * thing an overlay varies: `review.analysis.enabled` is what switches the
+   * review evidence pipeline on, and it is a property of the DEPLOYMENT under
+   * test, so it rides on the arm beside `models`/`variants` rather than in the
+   * gold dataset. `run-instance.ts` hands it to `prContextPatch`, which merges
+   * it over core's `defaultReviewConfig()` and lets core's own `renderContext`
+   * project it.
+   *
+   * Typed loosely (raw YAML) because this module must never import the
+   * `lastlight/evals` barrel — the cast to core's `ReviewConfig` happens at the
+   * one place that already owns that coupling.
+   */
+  readonly review?: Record<string, unknown>;
   /** Repoint the process-global asset root to this arm's overlay before its
    * cases run. Guarded (ADR 0001): throws if a second, different overlay is
    * activated while one is still in use. No-op for `models` arms. */
@@ -75,8 +96,11 @@ export interface Arm {
    * invoked together. */
   prepare(ctx: MutableContext): PreparedModels;
   /** The model a phase resolved to, for `PhaseMetric.model` (the forced id for
-   * `models`; core's resolve precedence for `config`). */
-  recordPhaseModel(template: string | undefined, phase: string): string;
+   * `models`; core's resolve precedence for `config`). `phase` is the LEDGER
+   * label (`survey_branch_contract`, not `survey`); for a fan-out branch row
+   * `fallbackPhase` names the parent phase — core's `fallbackTask` — so the
+   * branch falls back `models[<label>]` → `models[<parent>]` → default. */
+  recordPhaseModel(template: string | undefined, phase: string, fallbackPhase?: string): string;
   /** Per-step `k→v` model-map summary for the plan note (config arms);
    * undefined for `models` arms (one model = the label). */
   describe(): string | undefined;
@@ -84,12 +108,20 @@ export interface Arm {
 
 /**
  * `models` arm — one model id forced across every workflow step. No ctx patch,
- * no overlay, no per-step map: the label IS the model and every phase runs it.
+ * no per-step map: the label IS the model and every phase runs it.
+ *
+ * It still takes an `overlayDir`, because an overlay carries more than a model
+ * map. `bootstrapAssets` has always wired the overlay's workflows/skills for a
+ * `models` run (run.ts does it once, up front — hence the no-op `activate()`),
+ * and its `review:` policy is the same kind of fact: the arm's deployment
+ * config, which a forced model neither supplies nor overrides. Omitting it
+ * would mean a `--model X --overlay wp3` run silently ran the baseline policy.
  */
-export function modelsArm(id: string, family: string): Arm {
+export function modelsArm(id: string, family: string, overlayDir?: string): Arm {
   return {
     label: id,
     family,
+    review: loadOverlayReview(overlayDir),
     activate() {
       /* no overlay to switch — built-in assets only */
     },
@@ -124,6 +156,7 @@ export function configArm(builtInRoot: string, overlayDir: string | undefined, d
   const label = overlayDir ? basename(overlayDir) : "config";
   return {
     label,
+    review: loadOverlayReview(overlayDir),
     // config arms keep their own serial family (one overlay at a time — the
     // asset root is a process global; see ADR 0001).
     family: label,
@@ -137,8 +170,8 @@ export function configArm(builtInRoot: string, overlayDir: string | undefined, d
       ctx.variants = merged.variants;
       return { model: merged.models.default, models: merged.models, variants: merged.variants };
     },
-    recordPhaseModel(template, phase) {
-      return resolvePhaseModel(template, phase, merged.models);
+    recordPhaseModel(template, phase, fallbackPhase) {
+      return resolvePhaseModel(template, phase, merged.models, fallbackPhase);
     },
     describe() {
       return Object.entries(merged.models)

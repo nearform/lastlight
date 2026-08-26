@@ -159,7 +159,12 @@ The release commit is conventionally just the two version-file lines
 | `src/judge.ts` | One-shot LLM client for `gradeReview` (pr-review only) — direct provider `fetch`, temp 0. `EVAL_JUDGE_MODEL` overrides `defaultJudgeModel()`. |
 | `scripts/import-martian.ts` | Import Martian's Code Review Bench offline set (50 PRs) into the `pr-review` tier (`gh`+`git`: resolves base/head, pins SHAs). |
 | `scripts/mine-failures.ts` | Read-only TRAIN-only failure-signature miner — clusters `review.falseNegatives`/`falsePositives` into ranked recall/precision signatures (the evidence bundle) for the `lastlight-evals-loop` skill's diagnose step. |
-| `scripts/diff-runs.ts` | Read-only two-scorecard F1 diff (per-case + arm delta) + train/held-out keep/revert verdict (opt-in `--symmetric` non-regressive gate; split-partitioned `REGRESSED(...)` line) — the measurement step of the `lastlight-evals-loop` skill. |
+| `scripts/diff-runs.ts` | Read-only two-scorecard F1 diff (per-case + arm delta) + train/held-out keep/revert verdict (opt-in `--symmetric` non-regressive gate; split-partitioned `REGRESSED(...)` line) — the measurement step of the `lastlight-evals-loop` skill. Also prints the MICRO section (micro-recall / SNR / paired McNemar) and refuses a verdict when the two runs graded different case sets. |
+| `scripts/facts-anchors.ts` | Builds `datasets/pr-review/anchors.json` — the **frozen, versioned** deterministic anchor labels (tokenizer `v1`) that give the code-facts evidence-coverage metric its denominator. No model anywhere. Freeze the labels, not the tokenizer: the artifact stamps `tokenizer`, so a better tokenizer ships as `v2` rather than rewriting past numbers. Carries a hand-audit block (seed + verdicts) that is the metric's error bar. Never commits gold text — `instances.json` is gitignored for a reason. |
+| `scripts/band.ts` | Read-only headless repeat band — the CLI path to `varianceRollup`/`bandVerdict` (union + intersection recall existed only in the dashboard before). Takes the arm's scorecards/run dirs EXPLICITLY (the mapping is an input, never inferred: the preserved 2026-08-22 runs carry no `meta.repeat`/`meta.overlay`, so any heuristic groups the baseline in with the candidates) and prints the per-repeat points, mean/min/max + band (null below 2 repeats), union/intersection recall, the per-gold hit matrix and the untraced cases by name. `--vs` adds a second arm and a `bandVerdict`. |
+| `scripts/backfill-pipeline.ts` | Back-fills `review.pipeline` onto a scorecard measured before the producer existed, from a PRESERVED workspace (`~/lastlight-run-artifacts/<run>/<instance>/pr-review/` — no `.lastlight` level, hence `readPipelineArtifacts`). The mechanism half is deterministic and free; **internal recall spends** (one MATCH judge call per case, `gradeInternalRecall`). Read-only unless `--write` (atomic), prints a cost estimate, refuses above `--max-spend` (default $1), refuses to write on any published-number drift, and a non-TTY without `--yes` is a REFUSAL — this script spends on plain invocation, so `rescore.ts`'s "no TTY = consent" rule would let a pipe buy judge calls. **`--no-judge` refreshes the FREE half only** (see below). |
+| `scripts/rescore.ts` | Read-only (unless `--write`) offline re-score: back-fills micro-recall / SNR / the attention boundaries onto an EXISTING scorecard with no model spend, and refuses to write if a published number changed. Plus `--repeat-judge N` — the ONE mode that spends (2 judge calls per case per repeat): it re-runs the judge N times over the stored review text + gold and reports the spread, separating GRADER noise from pipeline noise. Never runs by default, prints its cost estimate first, and refuses `--write` (a re-judge measures the grader, it does not correct the run). |
+| `src/review-metrics.ts` | The recall-first metrics — micro-aggregation, SNR, the detection floor + exact McNemar, the attention boundaries, per-family attribution. Pure arithmetic over stored fields, which is what makes the back-fill possible. |
 | `src/report.ts` | Scorecard roll-up + JSON/JSONL artifacts + `buildIndex` (filesystem → the SPA's `/api/index`). |
 | `src/serve.ts` | Tiny dependency-free server: `/api/index` (fs scan), `/data/*` (raw artifacts), the SPA + fallback. |
 | `dashboard/` | The JSON-driven dashboard SPA (Vite + React + Tailwind/daisyUI + TanStack Query); ships prebuilt as `dashboard/dist`. |
@@ -172,8 +177,63 @@ The release commit is conventionally just the two version-file lines
 - **Run a subset:** `EVAL_INSTANCE=<id[,id2]> lastlight-evals run <tier>` (same as
   `--instance`) filters by **exact** `instance_id` (comma-separated for several) —
   NOT a substring, so pass the full id (e.g. `prreview__discourse-graphite-6`);
-  `--model haiku` (fuzzy) picks one model; `--runs 3` repeats (worst-case verdict,
-  mean metrics).
+  `--model haiku` (fuzzy) picks one model; `--runs 3` repeats each CASE (worst-case
+  verdict, mean metrics).
+- **Never report one arm as a number — `--repeats N`, and for arm RANKINGS use
+  `--repeats 4` or more.** Three *identical* runs of
+  one pr-review arm measured micro-recall 0.320 / 0.080 / 0.200 (union 0.440,
+  intersection 0.040), and `diff-runs` returned KEEP on one and REVERT on the other
+  two *from one configuration*. The 2026-08-25 twelve-arm ladder made the floor
+  concrete: at 2 repeats the repeat-to-repeat |ΔF1| reached 0.308 on one arm and
+  exceeded the gap between most adjacent arms, so every ranking below the top arm
+  was noise. Two repeats can smoke-test an arm; they cannot order two arms. `--repeats N` re-runs the whole ARM N times,
+  sequentially by default (`--repeat-concurrency N` overlaps up to N repeats —
+  see "Parallelism"), as N **sibling** run dirs — each a normal run tagged
+  `meta.repeat = {group, index, of}` (`group` = the first repeat's `runId`), which
+  `varianceRollup` (`review-metrics.ts`) folds into a band with union/intersection
+  recall — read it with `npx tsx scripts/band.ts <run> <run> <run>` (pass the runs
+  explicitly; nothing infers which runs are one arm) or in the dashboard's repeat
+  view. Repeats are siblings and never nested because `indexTier`/`buildIndex`
+  and `clean.ts` all walk exactly two levels. It implies `--keep-workspace` (when
+  repeats disagree the question is always *which* evidence each produced) and
+  `--no-open` (a finished run holds its dashboard server open forever — a repeat
+  loop would leak one per repeat), printing the standalone `serve` command once
+  instead. Distinct from `--runs`, which folds a case's trials into one worst-case
+  result and destroys the per-trial hit vectors a band is computed from. Pair it
+  with `scripts/rescore.ts --repeat-judge N` for the grader's own band: a
+  candidate's Δ has to clear both.
+- **Run provenance (what the run actually was).** Every scorecard now stamps the
+  invocation beside the numbers, flat on `meta` alongside `gitSha`/`core` (grouped
+  as the `RunProvenance` type, which `RunMeta` extends) — `overlay`/`overlays`,
+  `datasets`, `sandbox`, `fBeta`, `judgeWithDiff`, `injectContext`, `keepWorkspace`,
+  `instances`, `limit`, `repeats`, `judgeModel`, the resolved `factsBin` + its
+  `toolchain` stamp, `harness` (version + root), and raw `argv` (an overlapped
+  band additionally stamps `meta.repeat.concurrency` — see "Parallelism").
+  `meta` used to
+  record model/gitSha/core but not
+  the overlay, so a `models` run recorded its `review.analysis.enabled` policy
+  nowhere at all; a globally-installed harness once ran the *baseline* while
+  reporting itself as the pipeline arm and nothing in the artifact could contradict
+  it. Every field is optional — absent means "not recorded", never "off".
+- **Re-read the mechanism metrics after the reader changes — `backfill-pipeline
+  --no-judge`.** `review.pipeline` has two halves that age differently. The
+  mechanism half is a pure function of the artifacts on disk, so it goes stale the
+  moment `readPipelineArtifacts` (`src/review-pipeline-stats.ts`) learns something
+  — on 2026-08-23 it learned that a clean discharge needs `failureScenario`
+  PRESENT and explicitly `null`, and that citations resolve through the canonical
+  `<family>-NNN` identity, which moved `cleanDischarges` on five preserved runs
+  (37→0 across the 16 minimal-era instances; 30→23 on one full-contract repeat).
+  The judge half (`internalMatched`, `inlineMatched`, per-family
+  `matched`/`internalMatched`) cost real money and **cannot be recomputed from a
+  scorecard at all** — `withInternalRecall` needs the judge's `goldToFinding`
+  reply, which nothing stores. So `--no-judge` re-reads the artifacts, rewrites
+  only the mechanism fields, and CARRIES the judged ones
+  (`mergePreservedJudgement`). Zero model calls, so no estimate and no
+  confirmation; a run with no stored internal recall never gains a fabricated one,
+  a stored `internalUngraded` survives, and the write is refused if the judged
+  half moved at all (`judgedHalf`) as well as on the usual published-number drift.
+  Re-running the full back-fill instead would re-buy every MATCH call to reach the
+  same answers.
 - **Verifying the harness/UI (not a model):** when running an eval just to check
   the plumbing or dashboard works, pick the **cheapest, fastest** model available
   (e.g. `--model haiku`, or the cheapest entry in `models.json`) and the smallest
@@ -401,6 +461,42 @@ the user-facing version):
   it read, extracted findings, the gold set, the finding↔gold pairing, raw
   replies). It rides in `InstanceResult.review.trace` → the dashboard's **judge**
   button (`JudgeModal`) renders it, so a score is inspectable, not a black box.
+#### Micro-recall + SNR (the recall-first headline)
+
+The per-case F1 mean is the right metric for the Martian leaderboard and the
+**wrong** one for steering recall work, so `src/review-metrics.ts` adds a second
+set of numbers alongside it (never instead of it). Both ride on `ModelSummary`.
+
+- **Micro-recall** = matched ÷ gold, summed over cases — not the mean of per-case
+  recalls. The mean weights a 1-gold case like a 6-gold one, and hands a free
+  1.00 to a case with **no gold at all**, which one of the eight `skillspro`
+  cases is. `renderTable` names every empty-gold case under the table as a
+  precision canary for exactly that reason.
+- **SNR** = matched ÷ (posted − matched) — true positives per false positive. It
+  replaces precision as the guardrail when the pipeline is deliberately tuned to
+  over-produce: it is the number that degrades when a recall intervention goes
+  wrong, and that degradation is invisible in F1. **Do not redefine it silently**
+  — every rung of the ablation ladder is read against it.
+- **The detection floor.** On a 25-finding gold set, one extra hit is McNemar
+  p = 0.50 — a coin flip; the floor is ≈ 0.24–0.28 micro-recall, at or above the
+  published frontier. `diff-runs.ts` prints the exact paired p beside every Δ so
+  nobody reads noise as progress, and `DETECTION_FLOOR_MICRO_RECALL` carries the
+  full table. **Gate on mechanism metrics** (obligations, discharge rate, the
+  per-family funnel — n in the hundreds), report micro-recall.
+- **Three boundaries, not one.** Once an arm emits an evidence packet, recall is
+  measured over everything *generated* (internal recall), precision/SNR over
+  everything *posted*, and attention cost over what went *inline*. An
+  intervention that finds more and shows less then reads as exactly that instead
+  of as a regression. All of it degrades to posted-only for an arm that emits no
+  packet (the shipped baseline) — `undefined`, never zeros.
+- **A missing analyser is not a null result.** A family whose scanner was absent
+  is reported `notMeasured`, never "did not convert".
+
+All of it is arithmetic over `posted`/`gold`/`matched`/`trace`, so
+`scripts/rescore.ts` back-fills these onto runs measured before they existed —
+with no re-run and no spend. It refuses to write if re-scoring changes a
+published number, because the comparator for every gate is an old run.
+
 - **Caveat to preserve in docs.** Martian's gold set is **incomplete** (their own
   methodology: it caps at human performance, so a real-but-unlisted finding scores
   as a false positive → understates precision). That's *why* the default is F1,
@@ -431,11 +527,50 @@ When pointing the harness at a new real workflow, check:
   workflow itself must be resolvable by core's `getWorkflow` (a built-in, or an
   overlay workflow under `<overlay>/workflows/`).
 
-## Parallelism (across provider families)
+## Parallelism (three axes)
 
-`run.ts` runs provider families (OpenAI / Anthropic / Fireworks — keyed by each
-model's `envKey`) **concurrently**, serial within a family (so one provider's
-rate limit is never hammered). Per-run workspaces were always isolated (a fresh
+**Across provider families** — `run.ts` runs provider families (OpenAI /
+Anthropic / Fireworks — keyed by each model's `envKey`) **concurrently**.
+
+**Within one arm** — `--concurrency N` (default `1`) runs N of that arm's cases
+at once, via the shared order-preserving `mapPool` in `src/pool.ts` (also used by
+`scripts/aacr-adjudicate.ts`). Serialism within a family was only ever a
+rate-limit choice, never a correctness constraint — every case is already
+isolated (see the list below). This is what makes an 8-case `pr-review` arm
+affordable: serial it is hours, because a pipeline-on case is ~30 minutes.
+
+**Across repeats** — `--repeat-concurrency N` (default `1` = the sequential
+repeat loop, untouched) runs up to N of a `--repeats` band's repeats at once,
+through the same `mapPool`. Safe for the same reason case concurrency is: every
+repeat runs the same arm(s) over ONE overlay, so the asset-root guard window is
+taken once for the whole batch (multi-overlay `config` runs and
+`--sandbox gondolin` clamp to 1). Sibling runIds are **pre-assigned** before
+launch (`assignRunIds` in `src/paths.ts` bumps the second per id, so
+simultaneous launches never collide and each `YYYY-MM-DD_HHMMSS` stamp stays
+unique — which `backfill-pipeline.ts`'s archive matching keys on);
+`meta.repeat.group` stays the first pre-assigned id. The accepted cost is the
+**latency instrument**: overlapped repeats contend for CPU/network, so per-phase
+`durationMs`/`agentMs` are contaminated — each repeat stamps
+`meta.repeat.concurrency` so latency reads can be discounted (verdicts, cost,
+recall are unaffected). Composes with `--concurrency`: total in-flight cases =
+repeat-concurrency × concurrency, uncapped — size the product against the
+provider's rate limit.
+
+Two hard limits, both enforced in code:
+
+- **Arms never overlap.** The workflow asset root is a process global
+  (`docs/adr/0001-asset-root-is-process-global.md`), so the concurrent branch
+  opens and closes the pool *inside* each arm's `activate()` /
+  `releaseOverlayGuard()` window, and asserts every pooled item belongs to that
+  arm. Two overlays live at once would either throw or — worse — measure one
+  arm's cases against another arm's prompts.
+- **`--sandbox gondolin` clamps to 1** (a QEMU micro-VM per case).
+
+`--runs N` trials stay serial within a case. With no `--concurrency` flag the
+runner takes the original serial branch unchanged, so the default is a no-op by
+construction rather than by argument.
+
+Per-run workspaces were always isolated (a fresh
 `mkdtemp` stateDir + a private fake-GitHub port each), so the *only* blocker to
 in-process concurrency was shared `process.env`. The fix:
 
@@ -456,8 +591,56 @@ in-process concurrency was shared `process.env`. The fix:
   event-loop turn, so concurrent family loops never interleave a write (and the
   temp-file+rename keeps a polling dashboard from reading a half-written file).
 
-Force serial with `--serial`; single-family runs (e.g. the default single
-model) are serial anyway and keep the per-run spinner + captured logs.
+Force serial with `--serial`; a single-family run at the default
+`--concurrency 1` keeps the per-run spinner + captured logs.
+
+## Metrics gotcha (per-phase)
+
+**`PhaseMetric.durationMs` / `agentMs` / `costUsd` are the latency instrument.**
+Without them a scorecard says a case took 30 minutes and nothing about where they
+went, which is why the review pipeline's breakdown had to be read by hand out of
+transcripts. Two different quantities, deliberately not merged:
+
+- **`durationMs`** — the measured phase window (`onPhaseEnd` − `onPhaseStart`),
+  so it includes workspace provisioning, skill staging and the `until_bash` gate.
+  **Absent means the phase never started** (it was skipped), not that it was
+  instant.
+- **`agentMs`** — summed `duration_ms` over that phase's own `result` envelopes,
+  i.e. agent + gate time only. Narrower, but derivable from artifacts a run
+  already wrote — which is what lets `scripts/rescore.ts` back-fill a per-phase
+  split onto runs measured before any of this existed, with no re-run and no
+  spend.
+
+Attribution is one function, `bucketSessionsByPhase` (`src/metrics.ts`) — the
+per-phase cost roll-up and the archived `NN-<phase>.jsonl` split read that one
+implementation, so they cannot disagree about which phase owned a session. It
+applies **two rules, in order**:
+
+1. **The stamp.** The event shim writes a `phase` field onto each session's
+   opening and closing envelopes (`apps/server/src/engine/event-shim.ts`), and a
+   fan-out branch is stamped with its own branch label (`survey_branch_contract`),
+   not its parent's. Present ⇒ that is the answer.
+2. **The window**, only when a session carries no stamp: the last phase started
+   at/before the file's first line.
+
+**The window rule is a fallback, not a peer.** It is a point lookup, so it cannot
+express concurrency *at all* — a `fanout` phase opens six windows within 35 ms and
+every one of its sessions resolves to whichever branch opened last. On a measured
+run that put $1.23 of a $2.01 case onto one branch, or onto no row at all where
+the bucket key was the parent and the `PhaseMetric` rows were the branches.
+Widening the slack cannot help: the branches are genuinely simultaneous. It also
+mis-files *sequential* phases whose session is written late — `writeCommandSession`
+writes a command's session after the command finishes, so `facts`' session landed
+at roughly `seed`'s start and billed a model-free bash phase for agent time.
+
+The fallback exists because every run archived before 2026-08-22 lacks the stamp,
+and those runs must keep bucketing exactly as they did.
+
+**Summing a fan-out's branch durations does not give wall clock.** Six branches of
+16/64/93/101/192/242 s sum to ~708 s across ~242 s of real time. A consumer tells
+concurrent siblings from sequential phases by their labels — `PhaseRef` emits
+`<parent>_branch_<name>` (`packages/workflow-engine/src/core/phase-ref.ts`), so
+rows sharing a `_branch_` parent overlap and want max, not sum.
 
 ## Known sharp edges
 

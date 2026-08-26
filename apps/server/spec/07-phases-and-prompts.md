@@ -294,6 +294,20 @@ absent — so the block disappears — on a PR with no journal.
 | `explore-synthesize.md` | Write the spec from baseline + full Q&A. | None | `{{issueDir}}/explore-spec.md` |
 | `explore-publish.md` | Comment on issue (GitHub-scoped) or open a new issue (Slack-scoped). | None | GitHub comment or issue |
 
+### PR review (evidence pipeline)
+
+The prompts `pr-review.yaml` runs when `review.analysis.enabled` is on. All of
+them coordinate through `.lastlight/pr-review/` in the checkout; the exit gates
+are `lastlight-facts` subcommands, not markers
+([Workflow engine](/spec/06-workflow-engine) has the phase wiring).
+
+| File | Purpose | Exit gate | Writes |
+|---|---|---|---|
+| `review.md` | **Two-mode.** Pipeline off: one line handing the run to the `pr-review` skill. Analysis mode: an abbreviated, deliberately hypothesis-blind independent pass over the PR description + diff — the description is a list of **claims to test, not boxes to tick**; a fact noticed and judged fine is still recorded (**no silent dismissals** — a dismissal that exists only in prose is one the adjudicator can never cross-check); never defers to the surveys. Always writes `findings.json`, empty `findings` included. | None | `.lastlight/pr-review/findings.json` (first version) |
+| `survey-contract.md` / `-enforcement` / `-security` / `-state` / `-tests` / `-spec` | One fan-out branch per family. Discharge the seeded obligations and **over-produce** hypotheses — no confidence gate, downstream stages can only remove. Each carries the shared spine: **state the residual risk, not the reassurance** (a "correctly ordered/enforced" verdict must name the bar it was graded against — who reaches the code *without* the check — or be recorded as an unprobed mechanism instead; the direction of a claim is the one thing no later stage can flip), and the no-hypothesis placeholder **carries no analysis** (a placeholder that quotes and grades lines is a hypothesis in disguise, invisible downstream). `tests` reads a coverage artifact and records `notMeasured` when there is none; `spec` ("does this change do what was asked?") is seeded harness-side from the PR body + linked issues and also checks a rehearsal mode (dry run, preview, plan) exercises the path it claims to predict. | `lastlight-facts discharge --family <f>` | `.lastlight/pr-review/hypotheses/<family>.jsonl` |
+| `review-falsify.md` | The oracle: settle hypotheses by **running code**. Three verdicts — `reproduced` / `refuted` / `unprobed` — and **only a transcript may refute**; silence is never a refutation. Gated on `probesEnabled` (`review.analysis.probes`, off by default) like `prepare`, so on a default deployment it skips. | `lastlight-facts probes` | `.lastlight/pr-review/probes/` (`verdicts.jsonl` + transcripts) |
+| `review-adjudicate.md` | Fresh-context ranking/tiering over every hypothesis + the review pass's findings; owns the full rewrite of `findings.json` (full finding rows at every tier). The rules with money on them: may re-rank/re-tier/merge/demote, may **delete only against a probe transcript**; a verification report is always `internal` — but the test is the claim's **direction**, never its wording, and **a claim of correctness is itself a claim** (a row that appends "correctly" without naming its bar is an unprobed hypothesis, not a discharge); an author's comment explains intent, never proves correctness; merging is for one defect surfacing twice and can only strengthen; a speculative hazard is `internal`, checked against what the code does *today*. | `lastlight-facts findings` (the conservation gate — every hypothesis id, exactly one disposition; `reconcile` then runs `--repair` as the model-free floor) | `.lastlight/pr-review/findings.json` (rewritten) |
+
 ## Handoff folder
 
 Phases coordinate through the git branch and `.lastlight/issue-<N>/`,

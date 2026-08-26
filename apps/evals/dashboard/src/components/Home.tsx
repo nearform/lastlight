@@ -1,5 +1,5 @@
 import type { IndexTier, ModelSummary } from "../types";
-import { fmtDate, modelLabel, tierMetric } from "../lib/format";
+import { fmtDate, modelDisplay, tierMetric } from "../lib/format";
 import { useNavigate } from "../lib/router";
 import { LiveBadge, RunTypeBadge } from "./ui";
 
@@ -59,7 +59,7 @@ export function Home({ tiers }: { tiers: IndexTier[] }) {
             <tr className="bg-neutral text-2xs uppercase tracking-wide text-neutral-content/70">
               <th className="px-3 py-3 text-left font-semibold">run</th>
               <th className="px-3 py-3 text-left font-semibold">tier</th>
-              <th className="px-3 py-3 text-left font-semibold">models</th>
+              <th className="px-3 py-3 text-left font-semibold">arm</th>
               <th className="px-3 py-3 text-left font-semibold">git</th>
               <th className="px-3 py-3 text-right font-semibold">score</th>
               <th className="px-3 py-3 text-right font-semibold">cost</th>
@@ -78,7 +78,15 @@ export function Home({ tiers }: { tiers: IndexTier[] }) {
                 })
                 .filter((x): x is number => x !== null);
               const best = score.length ? Math.max(...score) : null;
-              const modelNames = [...new Set(all.map((m) => modelLabel(labels, m.model)))];
+              // Collapse a pinned snapshot id onto its registry label, so one
+              // model does not read as two arms (see `modelDisplay`). A `config`
+              // run's arms are config names, which have no registry entry.
+              const modelNames = [
+                ...new Set(
+                  all.map((m) => (run.runType === "config" ? m.model : modelDisplay(labels, m.model).label)),
+                ),
+              ];
+              const overlay = run.overlay?.replace(/\/+$/, "").split("/").pop();
               return (
                 <tr
                   key={`${tierKey}/${run.id}`}
@@ -91,7 +99,11 @@ export function Home({ tiers }: { tiers: IndexTier[] }) {
                     <LiveBadge run={run} className="ml-2" />
                   </td>
                   <td className="px-3 py-2.5 font-mono text-base-content/70">{tierKey}</td>
-                  <td className="px-3 py-2.5 font-mono text-2xs text-base-content/50">{modelNames.join(", ")}</td>
+                  <td className="px-3 py-2.5 font-mono text-2xs text-base-content/50" title={run.overlay}>
+                    {overlay && <span className="text-base-content/70">{overlay}</span>}
+                    {overlay && modelNames.length > 0 && " · "}
+                    {modelNames.join(", ")}
+                  </td>
                   <td className="px-3 py-2.5 font-mono text-base-content/50">{run.gitSha ?? "—"}</td>
                   <td className="px-3 py-2.5 text-right font-mono">
                     {best === null ? <span className="text-base-content/40">—</span> : `${(best * 100).toFixed(0)}%`}

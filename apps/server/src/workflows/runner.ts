@@ -42,6 +42,7 @@ import type {
   WorkflowResult,
 } from "lastlight-workflow-engine";
 import { makePostReviewHandler } from "./handlers/post-review.js";
+import { makeFanoutHandler } from "./handlers/fanout.js";
 import { fileVerdictReader } from "./handlers/verdict-reader.js";
 import { QuotaExceededError } from "../sandbox/k8s/quota.js";
 import type { ProgressReporter } from "../notify/types.js";
@@ -607,6 +608,42 @@ export async function runWorkflow(
     verdictReader: fileVerdictReader,
     handlers: new Map([
       ["post-review", makePostReviewHandler({ ctx, config: runConfig, taskId, store: db, workflowId }, phaseReporter)],
+      [
+        "fanout",
+        makeFanoutHandler(
+          {
+            workflowName: definition.name,
+            ctx,
+            config: runConfig,
+            taskId,
+            triggerId,
+            githubAccess,
+            backend: runConfig.sandbox ?? "gondolin",
+            assets: assets
+              ? {
+                  loadPromptTemplate: (p) => assets.loadPromptTemplate(p),
+                  resolveSkillPaths: (n) => assets.resolveSkillPaths(n),
+                }
+              : defaultAssetLoader,
+            resolver: phaseResolver,
+            store: db,
+            workflowId,
+            ledger: {
+              liveness: dockerLivenessPort,
+              observability:
+                db && workflowId ? runScopedObservability(db, workflowId) : telemetryObservability,
+              logger: logger("fanout"),
+            },
+            // The same two quota hooks the AgentPort above is wrapped in — a
+            // fan-out branch bypasses that port, so without these a k8s
+            // ResourceQuota rejection inside a branch would fail the run red
+            // instead of requeueing it as backpressure.
+            observeResult: noteStopReason,
+            observeError: flagQuotaThrow,
+          },
+          phaseReporter,
+        ),
+      ],
     ]),
   };
 

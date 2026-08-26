@@ -1051,6 +1051,8 @@ describe('applyPrDispatchGate — the cron / api route crosses the same gate', (
       baseChecksState: 'passing',
       botReviewAtHead: null,
       ciReport: null,
+      closes: [],
+      changedFiles: null,
       attempt: 1,
       flakyDeferrals: 0,
       escalatedAtSha: null,

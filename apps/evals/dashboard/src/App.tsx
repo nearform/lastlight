@@ -5,6 +5,7 @@ import { useTheme } from "./hooks/useTheme";
 import { Home } from "./components/Home";
 import { NearformLogo } from "./components/NearformLogo";
 import { Overview } from "./components/Overview";
+import { RepeatView } from "./components/RepeatView";
 import { RunView } from "./components/RunView";
 
 export default function App() {
@@ -66,6 +67,22 @@ export default function App() {
           <Loading />
         ) : !tiers.length ? (
           <Empty />
+        ) : run && selectedTier && route.view === "repeats" ? (
+          <div>
+            <button
+              onClick={() => navigate(selectedTier.key, run.id)}
+              className="mb-5 font-mono text-xs text-info hover:underline"
+            >
+              ← back to this run
+            </button>
+            <RepeatView
+              tierKey={selectedTier.key}
+              anchor={run}
+              runs={selectedTier.runs}
+              labels={Object.assign({}, ...selectedTier.runs.map((r) => r.labels))}
+              onOpenRun={(runId) => navigate(selectedTier.key, runId)}
+            />
+          </div>
         ) : run && selectedTier ? (
           <div>
             <button
@@ -74,7 +91,7 @@ export default function App() {
             >
               ← all {selectedTier.key} runs
             </button>
-            <RunView run={run} />
+            <RunView run={run} onShowRepeats={() => navigate(selectedTier.key, run.id, "repeats")} />
           </div>
         ) : selectedTier ? (
           <div>

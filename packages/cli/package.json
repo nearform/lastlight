@@ -34,12 +34,14 @@
     "prebuild": "node scripts/copy-plugin.mjs",
     "prepack": "node scripts/copy-plugin.mjs",
     "build": "tsc && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && pnpm run lint:boundaries",
     "test": "vitest run",
-    "cli": "tsx src/cli.ts"
+    "cli": "tsx src/cli.ts",
+    "lint:boundaries": "node ../../scripts/lint-import-boundaries.mjs cli"
   },
   "dependencies": {
     "@clack/prompts": "^1.7.0",
+    "lastlight-code-facts": "workspace:*",
     "lastlight-shared": "workspace:*",
     "lastlight-workflow-engine": "workspace:*",
     "chalk": "^6.0.0",

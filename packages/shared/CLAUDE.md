@@ -58,7 +58,12 @@ repo-config-schema.ts The PURE half of the per-repository `.lastlight/` config
                       `key-not-allowed`: fix.escalateModelAfterAttempt (spend),
                       fix.gateTimeoutSeconds (shared resource),
                       dependencies.minSettledChecks (a max() clamp would weld
-                      the escape hatch shut for a repo with no CI).
+                      the escape hatch shut for a repo with no CI), and
+                      review.analysis (the review evidence pipeline — spend,
+                      with no more-conservative direction at all). That last one
+                      is also the only NESTED leaf outside `notifications`, so
+                      `review`'s provenance is flattened to dotted keys
+                      (`analysis.enabled`) by `nestedSourceMap`.
                       `shapeMerged` is TOTAL over the three blocks — a base
                       built before they existed, or the CLI's empty offline
                       base, still yields a complete policy leaf-by-leaf, so no

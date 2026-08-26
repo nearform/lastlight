@@ -336,6 +336,10 @@ review:
 				<td><code>review.generatedPaths</code></td>
 				<td><strong>add</strong> patterns — its own generator output, say. A longer list suppresses more re-reviews, which is the conservative direction. Dropping one of yours buys the repo an extra agent run per lock-file bump on your budget, so an omitted pattern is put back.</td>
 			</tr>
+			<tr>
+				<td><code>review.analysis</code></td>
+				<td><strong>nothing</strong> — operator-only. The review evidence pipeline is spend, and there's no "more conservative" direction to move it in: switching it <em>on</em> buys extra analysis on your budget, switching it <em>off</em> opts the repo out of the review machinery you chose.</td>
+			</tr>
 		</tbody>
 	</table>
 

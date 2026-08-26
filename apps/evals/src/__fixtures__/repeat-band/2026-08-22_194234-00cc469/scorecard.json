@@ -1,0 +1,419 @@
+{
+  "models": [
+    {
+      "model": "anthropic/claude-haiku-4-5-20251001",
+      "total": 8,
+      "codeFixResolved": 0,
+      "codeFixTotal": 0,
+      "behavioralOk": 7,
+      "behavioralTotal": 8,
+      "reviewTotal": 8,
+      "avgPrecision": 0.03571428571428571,
+      "avgRecall": 0.1875,
+      "avgFbeta": 0.045454545454545456,
+      "reviewBeta": 1,
+      "micro": {
+        "cases": 8,
+        "posted": 23,
+        "gold": 25,
+        "matched": 2,
+        "microRecall": 0.08,
+        "microPrecision": 0.08695652173913043,
+        "microF1": 0.08333333333333333,
+        "snr": 0.09523809523809523,
+        "emptyGoldCases": [
+          "prreview__skillspro-1641"
+        ],
+        "commentsPerPr": 2.875
+      },
+      "avgInputTokens": 3156,
+      "avgCachedTokens": 11592731.5,
+      "avgOutputTokens": 105770.75,
+      "totalCostUsd": 17.54998815,
+      "p50DurationMs": 653788,
+      "errors": 0
+    }
+  ],
+  "results": [
+    {
+      "instance_id": "prreview__skillspro-1587-r1",
+      "model": "anthropic/claude-haiku-4-5-20251001",
+      "tier": "pr-review",
+      "workflowSucceeded": true,
+      "inputTokens": 0,
+      "cachedTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "durationMs": 570501,
+      "phases": [],
+      "review": {
+        "precision": 0,
+        "recall": 0,
+        "fbeta": 0,
+        "beta": 1,
+        "posted": 3,
+        "gold": 3,
+        "matched": 0,
+        "falsePositives": [],
+        "falseNegatives": [],
+        "trace": {
+          "judgeModel": "anthropic/claude-sonnet-4-6",
+          "reviewText": "",
+          "findings": [],
+          "gold": [
+            {
+              "description": "gold-0",
+              "severity": "high",
+              "matchedFinding": null
+            },
+            {
+              "description": "gold-1",
+              "severity": "high",
+              "matchedFinding": null
+            },
+            {
+              "description": "gold-2",
+              "severity": "medium",
+              "matchedFinding": null
+            }
+          ],
+          "usedDiff": false
+        }
+      }
+    },
+    {
+      "instance_id": "prreview__skillspro-1641",
+      "model": "anthropic/claude-haiku-4-5-20251001",
+      "tier": "pr-review",
+      "workflowSucceeded": true,
+      "inputTokens": 0,
+      "cachedTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "durationMs": 636185,
+      "phases": [],
+      "review": {
+        "precision": 0,
+        "recall": 1,
+        "fbeta": 0,
+        "beta": 1,
+        "posted": 2,
+        "gold": 0,
+        "matched": 0,
+        "falsePositives": [],
+        "falseNegatives": []
+      }
+    },
+    {
+      "instance_id": "prreview__skillspro-1587-r2",
+      "model": "anthropic/claude-haiku-4-5-20251001",
+      "tier": "pr-review",
+      "workflowSucceeded": true,
+      "inputTokens": 0,
+      "cachedTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "durationMs": 685383,
+      "phases": [],
+      "review": {
+        "precision": 0,
+        "recall": 0,
+        "fbeta": 0,
+        "beta": 1,
+        "posted": 5,
+        "gold": 5,
+        "matched": 0,
+        "falsePositives": [],
+        "falseNegatives": [],
+        "trace": {
+          "judgeModel": "anthropic/claude-sonnet-4-6",
+          "reviewText": "",
+          "findings": [],
+          "gold": [
+            {
+              "description": "gold-0",
+              "severity": "high",
+              "matchedFinding": null
+            },
+            {
+              "description": "gold-1",
+              "severity": "critical",
+              "matchedFinding": null
+            },
+            {
+              "description": "gold-2",
+              "severity": "high",
+              "matchedFinding": null
+            },
+            {
+              "description": "gold-3",
+              "severity": "medium",
+              "matchedFinding": null
+            },
+            {
+              "description": "gold-4",
+              "severity": "medium",
+              "matchedFinding": null
+            }
+          ],
+          "usedDiff": false
+        }
+      }
+    },
+    {
+      "instance_id": "prreview__skillspro-1680-r1",
+      "model": "anthropic/claude-haiku-4-5-20251001",
+      "tier": "pr-review",
+      "workflowSucceeded": true,
+      "inputTokens": 0,
+      "cachedTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "durationMs": 720871,
+      "phases": [],
+      "review": {
+        "precision": 0.2857142857142857,
+        "recall": 0.5,
+        "fbeta": 0.36363636363636365,
+        "beta": 1,
+        "posted": 7,
+        "gold": 4,
+        "matched": 2,
+        "falsePositives": [],
+        "falseNegatives": [],
+        "trace": {
+          "judgeModel": "anthropic/claude-sonnet-4-6",
+          "reviewText": "",
+          "findings": [],
+          "gold": [
+            {
+              "description": "gold-0",
+              "severity": "high",
+              "matchedFinding": 3
+            },
+            {
+              "description": "gold-1",
+              "severity": "high",
+              "matchedFinding": null
+            },
+            {
+              "description": "gold-2",
+              "severity": "high",
+              "matchedFinding": null
+            },
+            {
+              "description": "gold-3",
+              "severity": "medium",
+              "matchedFinding": 5
+            }
+          ],
+          "usedDiff": false
+        }
+      }
+    },
+    {
+      "instance_id": "prreview__skillspro-1667",
+      "model": "anthropic/claude-haiku-4-5-20251001",
+      "tier": "pr-review",
+      "workflowSucceeded": true,
+      "inputTokens": 0,
+      "cachedTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "durationMs": 390717,
+      "phases": [],
+      "review": {
+        "precision": 0,
+        "recall": 0,
+        "fbeta": 0,
+        "beta": 1,
+        "posted": 0,
+        "gold": 5,
+        "matched": 0,
+        "falsePositives": [],
+        "falseNegatives": [],
+        "trace": {
+          "judgeModel": "anthropic/claude-sonnet-4-6",
+          "reviewText": "",
+          "findings": [],
+          "gold": [
+            {
+              "description": "gold-0",
+              "severity": "high",
+              "matchedFinding": null
+            },
+            {
+              "description": "gold-1",
+              "severity": "high",
+              "matchedFinding": null
+            },
+            {
+              "description": "gold-2",
+              "severity": "high",
+              "matchedFinding": null
+            },
+            {
+              "description": "gold-3",
+              "severity": "medium",
+              "matchedFinding": null
+            },
+            {
+              "description": "gold-4",
+              "severity": "high",
+              "matchedFinding": null
+            }
+          ],
+          "usedDiff": false
+        }
+      }
+    },
+    {
+      "instance_id": "prreview__skillspro-1680-r2",
+      "model": "anthropic/claude-haiku-4-5-20251001",
+      "tier": "pr-review",
+      "workflowSucceeded": true,
+      "inputTokens": 0,
+      "cachedTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "durationMs": 653788,
+      "phases": [],
+      "review": {
+        "precision": 0,
+        "recall": 0,
+        "fbeta": 0,
+        "beta": 1,
+        "posted": 0,
+        "gold": 3,
+        "matched": 0,
+        "falsePositives": [],
+        "falseNegatives": [],
+        "trace": {
+          "judgeModel": "anthropic/claude-sonnet-4-6",
+          "reviewText": "",
+          "findings": [],
+          "gold": [
+            {
+              "description": "gold-0",
+              "severity": "high",
+              "matchedFinding": null
+            },
+            {
+              "description": "gold-1",
+              "severity": "critical",
+              "matchedFinding": null
+            },
+            {
+              "description": "gold-2",
+              "severity": "medium",
+              "matchedFinding": null
+            }
+          ],
+          "usedDiff": false
+        }
+      }
+    },
+    {
+      "instance_id": "prreview__skillspro-1641-r2",
+      "model": "anthropic/claude-haiku-4-5-20251001",
+      "tier": "pr-review",
+      "workflowSucceeded": true,
+      "inputTokens": 0,
+      "cachedTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "durationMs": 612006,
+      "phases": [],
+      "review": {
+        "precision": 0,
+        "recall": 0,
+        "fbeta": 0,
+        "beta": 1,
+        "posted": 1,
+        "gold": 1,
+        "matched": 0,
+        "falsePositives": [],
+        "falseNegatives": [],
+        "trace": {
+          "judgeModel": "anthropic/claude-sonnet-4-6",
+          "reviewText": "",
+          "findings": [],
+          "gold": [
+            {
+              "description": "gold-0",
+              "severity": "high",
+              "matchedFinding": null
+            }
+          ],
+          "usedDiff": false
+        }
+      }
+    },
+    {
+      "instance_id": "prreview__skillspro-1587-r3",
+      "model": "anthropic/claude-haiku-4-5-20251001",
+      "tier": "pr-review",
+      "workflowSucceeded": true,
+      "inputTokens": 0,
+      "cachedTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "durationMs": 715851,
+      "phases": [],
+      "review": {
+        "precision": 0,
+        "recall": 0,
+        "fbeta": 0,
+        "beta": 1,
+        "posted": 5,
+        "gold": 4,
+        "matched": 0,
+        "falsePositives": [],
+        "falseNegatives": [],
+        "trace": {
+          "judgeModel": "anthropic/claude-sonnet-4-6",
+          "reviewText": "",
+          "findings": [],
+          "gold": [
+            {
+              "description": "gold-0",
+              "severity": "high",
+              "matchedFinding": null
+            },
+            {
+              "description": "gold-1",
+              "severity": "medium",
+              "matchedFinding": null
+            },
+            {
+              "description": "gold-2",
+              "severity": "medium",
+              "matchedFinding": null
+            },
+            {
+              "description": "gold-3",
+              "severity": "medium",
+              "matchedFinding": null
+            }
+          ],
+          "usedDiff": false
+        }
+      }
+    }
+  ],
+  "meta": {
+    "runId": "2026-08-22_194234-00cc469",
+    "runType": "models",
+    "tiers": [
+      "pr-review"
+    ],
+    "models": [
+      "anthropic/claude-haiku-4-5-20251001"
+    ],
+    "runs": 1,
+    "concurrency": 4,
+    "gitSha": "00cc469",
+    "generatedAt": "2026-08-22T20:05:56.249Z",
+    "live": false
+  }
+}

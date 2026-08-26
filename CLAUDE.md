@@ -32,19 +32,21 @@ lastlight/                     # repo root — private orchestration package (la
 │       └── dashboard/         # @lastlight/evals-dashboard — nested, private (CLAUDE.md)
 └── packages/                  # each package has its own CLAUDE.md
     ├── cli/                   # published "lastlight" — the lean global bin + host-local server cmds
+    ├── code-facts/            # published "lastlight-code-facts" — deterministic PR analysis (bin: lastlight-facts)
     ├── shared/                # lastlight-shared — light modules used by cli + core
     ├── workflow-engine/       # lastlight-workflow-engine — core/ ports/ test-support/
     └── agentic-pi/            # published "agentic-pi" — the coding-agent harness core runs in the sandbox
 ```
 
-## Published packages (six)
+## Published packages (seven)
 
 `lastlight` (cli), `lastlight-core`, `lastlight-workflow-engine`,
-`lastlight-shared`, `lastlight-evals`, and `agentic-pi` — all unscoped (the
-`@lastlight` npm scope is held by an unrelated account). Everything else is
-`private: true` (root, `lastlight-www`, both dashboards). Publishing is
-**automated**: a GitHub Release fires `publish.yml`, which builds the GHCR images
-then publishes the six npm packages via OIDC trusted publishing (no secret).
+`lastlight-shared`, `lastlight-code-facts`, `lastlight-evals`, and `agentic-pi`
+— all unscoped (the `@lastlight` npm scope is held by an unrelated account).
+Everything else is `private: true` (root, `lastlight-www`, both dashboards).
+Publishing is **automated**: a GitHub Release fires `publish.yml`, which builds
+the GHCR images then publishes **six** of them via OIDC trusted publishing (no
+secret) — every one except `agentic-pi`, which has its own stream (below).
 `agentic-pi` moved in from the standalone `nearform/agentic-pi` repo but stays a
 public npm package (published independently via `agentic-pi-npm.yml`); it also
 carries its own `image-v*` VM-image release stream (`agentic-pi-image.yml`). The
@@ -59,7 +61,10 @@ the sandbox runs. See [`docs/RELEASING.md`](docs/RELEASING.md).
 `lastlight-workflow-engine` ← `lastlight-shared` ← {`lastlight` (cli),
 `lastlight-core`} ← `lastlight-evals`. `agentic-pi` is a second leaf (no
 workspace deps) consumed by `lastlight-core` + `lastlight-evals` (and the private
-dashboard) via `workspace:*`. Invariants: **no edge from
+dashboard) via `workspace:*`. `lastlight-code-facts` is a **third leaf** (ts-morph
++ ast-grep, no workspace deps) consumed by the **CLI** — it ships there rather
+than only in the sandbox image because the eval harness runs `--sandbox none` on
+the host and can never see `/opt/lastlight/`. Invariants: **no edge from
 `shared`/`workflow-engine` back to `core`** (`scripts/lint-import-boundaries.mjs`,
 runs in `typecheck`); **the cli never gains an edge to `core`**. That script
 replaced dependency-cruiser when the workspace moved to TypeScript 7 — dep-cruiser
@@ -124,6 +129,9 @@ Node is pinned to 22 (`.nvmrc`, `engines.node >= 22.12`). Per-package commands
   runtime-agnostic workflow engine (scheduler + ports).
 - [`packages/shared/CLAUDE.md`](packages/shared/CLAUDE.md) — the light modules
   shared by cli + core (provider registry, overlay/config helpers).
+- [`packages/code-facts/CLAUDE.md`](packages/code-facts/CLAUDE.md) — the
+  deterministic PR-analysis layer (`lastlight facts` / `lastlight-facts`), its
+  fail-loud envelope, and `toolchain.json`.
 - [`packages/agentic-pi/CLAUDE.md`](packages/agentic-pi/CLAUDE.md) — the
   coding-agent harness (its `AGENTS.md` is a pointer here).
 - [`apps/www/CLAUDE.md`](apps/www/CLAUDE.md) and the two dashboard guides

@@ -33,7 +33,8 @@
 import { readFileSync } from "node:fs";
 import { extname, resolve } from "node:path";
 
-import type { Scorecard, InstanceResult } from "../src/schema.js";
+import type { InstanceResult } from "../src/schema.js";
+import type { Scorecard } from "../src/report.js";
 
 // ── CLI plumbing (shared shape with scripts/diff-runs.ts) ────────────────────
 function flag(name: string): string | undefined {

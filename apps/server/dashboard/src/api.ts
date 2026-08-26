@@ -241,7 +241,11 @@ export interface RepoMergedConfig {
   fix: Record<string, unknown>;
   /** Major-bump auto-merge policy (issue #252). */
   dependencies: Record<string, unknown>;
-  /** Review trigger policy. */
+  /**
+   * Review trigger policy. Nests one level at `analysis` (the review evidence
+   * pipeline), so its provenance below is keyed by dotted leaf for those —
+   * `"analysis.enabled"` — while the scalar leaves stay flat.
+   */
   review: Record<string, unknown>;
   /**
    * Where this repo's outbound notifications go (the weekly Slack digest).
@@ -260,6 +264,7 @@ export interface RepoConfigSources {
   approval: Record<string, ConfigSource>;
   fix: Record<string, ConfigSource>;
   dependencies: Record<string, ConfigSource>;
+  /** Scalar leaves flat; the nested `analysis` block by DOTTED leaf, e.g. `"analysis.enabled"`. */
   review: Record<string, ConfigSource>;
   /** Keyed by DOTTED leaf, e.g. `"slack.channel"`. */
   notifications: Record<string, ConfigSource>;

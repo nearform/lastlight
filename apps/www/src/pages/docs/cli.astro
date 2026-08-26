@@ -271,6 +271,42 @@ lastlight skills uninstall            # remove them [--scope user|project]</code
 		<code>claude plugin install lastlight@lastlight-skills</code>.
 	</p>
 
+	<h2 id="facts">Deterministic PR analysis</h2>
+	<p>
+		<code>lastlight facts</code> is the one command that runs entirely on your
+		machine and never talks to an instance. It reads a git checkout and emits
+		JSON facts about a diff — the changed symbols and every place that
+		references them, exported-signature deltas against the base, constants whose
+		value is also hard-coded somewhere that never imports them, dependency
+		changes, scanner hits and changed lines no test executes. It is the
+		deterministic substrate Last Light's reviewer reasons over, and it is useful
+		on its own for answering "what does this diff actually touch?".
+	</p>
+	<pre><code>lastlight facts all --repo . --base main --head HEAD --out facts.json
+lastlight facts constants --repo . --base main    # one extractor
+lastlight facts toolchain                         # pinned tool versions vs what resolved
+lastlight-facts …                                 # the same code, as its own binary</code></pre>
+	<p>
+		Extractors: <code>facts</code>, <code>contracts</code>,
+		<code>constants</code>, <code>deps</code>, <code>patterns</code>,
+		<code>coverage</code>, <code>all</code>. Exit codes are the contract —
+		<strong>0</strong> the result is trustworthy, <strong>2</strong> the analysis
+		could not run, <strong>3</strong> it ran degraded and the document's
+		<code>degraded[]</code> says exactly what was missing. Every document
+		carries that <code>coverage</code> / <code>degraded[]</code> envelope plus
+		the resolved tool versions, so an empty result and an unavailable analyser
+		are never the same answer.
+	</p>
+	<p>
+		<code>opengrep</code> and <code>gitleaks</code> (used by
+		<code>patterns</code>) are release binaries, not npm packages. They are
+		looked up as <code>LASTLIGHT_&lt;TOOL&gt;_BIN</code> → <code>PATH</code> →
+		<code>/opt/lastlight/bin</code>; when they are absent the run reports
+		<code>coverage: "degraded"</code> rather than "no findings". Everything else
+		is bundled and works with no install — including on a repo with no
+		<code>node_modules</code>.
+	</p>
+
 	<h2>Setup wizard</h2>
 	<pre><code>lastlight setup                       # first-run wizard — asks: client (login) or server (stack)
 lastlight setup --client              # skip the prompt: configure this machine as a client

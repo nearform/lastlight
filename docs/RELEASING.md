@@ -1,15 +1,16 @@
 # Releasing Last Light
 
-The monorepo publishes **six** npm packages plus **five** Docker images.
+The monorepo publishes **seven** npm packages plus **five** Docker images.
 Publishing is **automated**: cutting a GitHub Release fires `publish.yml`, which
-runs CI checks → builds+pushes the GHCR images → publishes **five** of the six
-npm packages (engine → shared → core → cli → evals) in dependency order via npm
-**OIDC trusted publishing** (no `NPM_TOKEN` secret, provenance attestations on).
-The sixth, **`agentic-pi`, is NOT published by `publish.yml`** — it has its own
+runs CI checks → builds+pushes the GHCR images → publishes **six** of the seven
+npm packages (engine → shared → code-facts → core → cli → evals) in dependency
+order via npm **OIDC trusted publishing** (no `NPM_TOKEN` secret, provenance
+attestations on).
+The seventh, **`agentic-pi`, is NOT published by `publish.yml`** — it has its own
 independent npm stream (`agentic-pi-npm.yml`, fired by an `agentic-pi-v*` tag),
 because its trusted-publisher entry on npmjs.com is scoped to that workflow, not
 `publish.yml`. So a release that bumps agentic-pi needs **two** tags: the
-`vX.Y.Z` release tag (five packages + images) **and** an `agentic-pi-vA.B.C` tag
+`vX.Y.Z` release tag (six packages + images) **and** an `agentic-pi-vA.B.C` tag
 (agentic-pi). The operator's job is to bump versions, tag, and cut the Release;
 the pipeline does the rest. (The manual `pnpm -r publish` sequence below is kept
 as the bootstrap/fallback path — e.g. the one-time first publish of a brand-new
@@ -41,6 +42,7 @@ major = break.
 |---|---|---|---|
 | `lastlight-workflow-engine` | `packages/workflow-engine` | 0.1.x | zod-only; leaf of the graph |
 | `lastlight-shared` | `packages/shared` | 0.1.x | light modules used by cli + core |
+| `lastlight-code-facts` | `packages/code-facts` | 0.1.x | the deterministic PR-analysis layer (ts-morph + ast-grep, `bin.lastlight-facts`). A second leaf — no workspace deps. **Published because the CLI ships it** ([`deterministic-pr-levers.md` §Decisions, D1](plans/deterministic-pr-levers.md#decisions)): the eval harness runs `--sandbox none` on the host, so an image-only toolchain would be unmeasurable. Its **first publish needs a trusted-publisher entry** on npmjs.com, like every new package name. |
 | `agentic-pi` | `packages/agentic-pi` | 0.2.x | the coding-agent harness; consumed by core/evals/dashboard via `workspace:*`, and **vendored** into the sandbox image from the workspace (a `pnpm deploy` bundle built in `sandbox*.Dockerfile` — no npm round-trip). Own semver line + its own `image-v*` VM-image release stream (`agentic-pi-image.yml`) + independent npm publish (`agentic-pi-npm.yml`, for external consumers). No `exports` map on purpose (evals deep-imports `dist/`). |
 | `lastlight-core` | `apps/server` | 0.16.x | the harness + server + `./evals` barrel + shipped assets |
 | `lastlight` | `packages/cli` | 0.16.x | the lean global CLI (`bin.lastlight`); ships `plugins/` + `.claude-plugin/` |
@@ -66,8 +68,10 @@ lastlight-shared    │                         │     │
    │        │        │        │                      │
 lastlight   lastlight-core ◀──┘                      │
   (cli)            ▲                                  │
-                   │ workspace:*                      │
-             lastlight-evals ◀────────────────────────┘  (workspace:* dev + peer range)
+   ▲               │ workspace:*                      │
+   │         lastlight-evals ◀────────────────────────┘  (workspace:* dev + peer range)
+   │
+lastlight-code-facts   (third leaf — ts-morph + ast-grep, no workspace deps)
 ```
 
 `agentic-pi` is a second leaf: it has no workspace dependencies, and
@@ -92,6 +96,7 @@ and every package that consumes it**, transitively:
 |---|---|
 | `lastlight-workflow-engine` | `lastlight-core`, `lastlight-shared` (if it consumes engine), `lastlight` (cli), `lastlight-evals` (via core) |
 | `lastlight-shared` | `lastlight-core`, `lastlight` (cli), `lastlight-evals` (via core) |
+| `lastlight-code-facts` | `lastlight` (cli) — and therefore nothing else; it is a leaf consumed by one package |
 | `agentic-pi` | `lastlight-core`, `lastlight-evals` (both consume it via `workspace:*`). Bump `lastlight-evals`'s `peerDependencies` range to match too. The sandbox picks up the change automatically on the next image build (it vendors agentic-pi from the workspace — no pin to bump). |
 | `lastlight-core` | `lastlight-evals` (its `workspace:*` dep) |
 | `lastlight` (cli) | — (nothing depends on the cli) |
@@ -146,6 +151,7 @@ pnpm -r publish --access public
 # …or, when only some packages changed, publish just those (still in dep order):
 pnpm --filter lastlight-workflow-engine publish --access public
 pnpm --filter lastlight-shared          publish --access public
+pnpm --filter lastlight-code-facts      publish --access public
 pnpm --filter agentic-pi                 publish --access public
 pnpm --filter lastlight-core            publish --access public
 pnpm --filter lastlight                  publish --access public
@@ -254,7 +260,7 @@ Run on a clean `main`, up to date with origin.
    ```
 
    `publish.yml` runs `checks` (reuses `ci.yml`) → `images` (`docker buildx bake
-   --push core`, then `sandbox-qa` non-fatal) → `npm` (publishes the five
+   --push core`, then `sandbox-qa` non-fatal) → `npm` (publishes the six
    non-agentic-pi packages in dependency order via OIDC trusted publishing;
    agentic-pi ships separately from `agentic-pi-npm.yml`, step 3's second tag).
    `:latest` moves only for a real, non-prerelease Release.

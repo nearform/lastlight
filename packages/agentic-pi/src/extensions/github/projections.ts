@@ -186,13 +186,28 @@ export function summarizeFile(
 }
 
 export function summarizeReview(
-  r: { id: number; state: string; body?: string | null; submitted_at?: string | null; user?: Actor },
+  r: {
+    id: number;
+    state: string;
+    body?: string | null;
+    submitted_at?: string | null;
+    commit_id?: string | null;
+    user?: Actor;
+  },
   full = false,
 ) {
   return {
     id: r.id,
     author: who(r.user),
     state: r.state,
+    // WHICH HEAD this review addressed. The tool exists to answer "have I
+    // already reviewed this PR?", and without the SHA that question can only be
+    // answered at PR granularity — an APPROVE of a three-commits-stale head is
+    // indistinguishable from an APPROVE of the tree in front of you. Observed
+    // 2026-08-22: handed its own prior APPROVE of an earlier head, the reviewer
+    // replied "a last-light[bot] review already exists on the current head SHA"
+    // — naming a SHA it had never been told — and submitted nothing.
+    commit_id: r.commit_id ?? null,
     submitted_at: r.submitted_at ?? null,
     body: capText(r.body, { full, hatch: "full_bodies: true" }),
   };

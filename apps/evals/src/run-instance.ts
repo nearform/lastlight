@@ -26,6 +26,7 @@ import { tmpdir } from "node:os";
 
 import {
   getWorkflow,
+  resolveReviewGitHubClient,
   runWorkflow,
   type ExecutorConfig,
   type TemplateContext,
@@ -34,13 +35,24 @@ import {
 
 import type { SweBenchInstance, InstanceResult, PhaseSession } from "./schema.js";
 import type { Arm } from "./arm.js";
+import { modelTemplateForRow } from "./phase-models.js";
 import { startFakeGitHub } from "./fake-github.js";
 import { appliedRepoConfigKeys, loadRepoConfigFixture, resolveEvalRepoConfig, type RepoConfigClient } from "./repo-config.js";
 import { seedWorkspace, seedWorkspaceFromGit, seedWorkspacePrReview, prFilesFromGit, isRealSha, injectRepoContext, type SeedResult } from "./seed.js";
-import { collectMetrics, drainSessions, readSessionLog, listSessionFiles, concatJsonl } from "./metrics.js";
+import {
+  collectMetrics,
+  collectMetricsFromFiles,
+  bucketSessionsByPhase,
+  drainSessions,
+  readSessionLog,
+  listSessionFiles,
+  concatJsonl,
+} from "./metrics.js";
 import { modelCost } from "./env.js";
-import { gradeBehavioral, gradeExecution, gradeTriage, gradeReview, gradeMarkers } from "./grade.js";
-import { prContextPatch } from "./pr-context.js";
+import { gradeBehavioral, gradeExecution, gradeTriage, gradeReview, gradeInternalRecall, gradeMarkers } from "./grade.js";
+import { readPipelineStats, internalJudgeInputs, withInternalRecall } from "./review-pipeline-stats.js";
+import { prContextPatch, type ReviewOverride } from "./pr-context.js";
+import { resolveFactsBin } from "./paths.js";
 
 export interface RunInstanceOptions {
   /**
@@ -68,6 +80,18 @@ export interface RunInstanceOptions {
   injectContext?: boolean;
   /** Default workflow when the instance doesn't name one. */
   defaultWorkflow?: string;
+  /**
+   * Keep the trial's workspace instead of deleting it, and record its path on
+   * the result as {@link InstanceResult.workspaceDir}.
+   *
+   * The evidence pipeline's whole output is files under
+   * `<stateDir>/sandboxes/<taskId>/.lastlight/pr-review/` — `facts.json`, the
+   * rendered obligation blocks, `hypotheses/<family>.jsonl`, `probes/env.json`
+   * and WP4's probe transcripts. The `finally` below removed all of it, so the
+   * only way to read an artifact was to catch a live run mid-flight. Off by
+   * default because a kept workspace is a full checkout (plus `node_modules`
+   * once `prepare` runs), which across a 50-case batch is tens of gigabytes.
+   */
   keepWorkspace?: boolean;
   /**
    * Absolute dir for THIS trial's archived session logs (e.g.
@@ -107,7 +131,14 @@ export interface RunInstanceOptions {
   manageEnv?: boolean;
 }
 
-const EVAL_ENV_KEYS = ["GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_API_URL"];
+const EVAL_ENV_KEYS = [
+  "GITHUB_APP_ID",
+  "GITHUB_APP_INSTALLATION_ID",
+  "GITHUB_TOKEN",
+  "GH_TOKEN",
+  "GITHUB_API_URL",
+  "LASTLIGHT_FACTS_BIN",
+];
 
 /**
  * Install the eval's static-token GitHub env and return a restore fn:
@@ -125,6 +156,16 @@ export function applyEvalEnv(): () => void {
   delete process.env.GITHUB_APP_INSTALLATION_ID;
   process.env.GITHUB_TOKEN = "eval-fake-token";
   process.env.GH_TOKEN = "eval-fake-token";
+  // Thread the facts binary into the run env the workflow's bash phases read.
+  // `resolveFactsBin` was provenance-only until 2026-08-25, when a shell without
+  // `LASTLIGHT_FACTS_BIN` ran the whole pr-review ladder with the conservation
+  // gate and the reconcile floor exiting 127 on every case — every adjudication
+  // ran to max_iterations and the scorecard's only witness was `factsBin: null`.
+  // Respect an operator's explicit value; only fill the gap.
+  if (!process.env.LASTLIGHT_FACTS_BIN) {
+    const facts = resolveFactsBin();
+    if (facts) process.env.LASTLIGHT_FACTS_BIN = facts;
+  }
   return () => restoreEnv(saved);
 }
 
@@ -171,7 +212,10 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
   const fake = await startFakeGitHub({
     owner,
     repo: name,
-    issues: inst.issue ? [inst.issue] : [],
+    // The PR's linked issues join the issue store so the `closingIssuesReferences`
+    // GraphQL route can resolve the body's `Closes #N` against real content —
+    // the first end of the `spec` axis. Content here, linkage in the fake.
+    issues: [...(inst.issue ? [inst.issue] : []), ...(inst.pr?.linked_issues ?? [])],
     pulls: inst.pr ? [inst.pr] : [],
     // The CI-read tools (`github_list_workflow_runs` / `..._run_jobs` /
     // `github_get_job_logs`) served from the SAME seed that produces the
@@ -274,13 +318,27 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     // Serve the PR's changed files at GET /pulls/:n/files (pr-review): computed
     // from base..head in the just-seeded workspace, so a review agent that lists
     // files via the API gets the real changed set instead of a 404.
+    //
+    // KEPT, not discarded: this same set is the SECOND END of every `spec`
+    // obligation, and in production `resolveSpecContext` reads it from
+    // `listPullRequestFilePaths` at the dispatch choke point. The eval never
+    // calls that (it builds the snapshot itself), so without threading it into
+    // `prContextPatch` below `changedFiles` stays `null`, `buildSpecObligations`
+    // correctly refuses to emit a one-ended seed, and the whole spec family —
+    // the one axis nothing else has tried — spends a model call reporting that
+    // it cannot work. Deriving it here rather than seeding it per case keeps the
+    // two ends from drifting apart and covers every case for free.
+    let prFilePaths: string[] | undefined;
     if (isPrReview && inst.pr && seed) {
-      fake.setPullFiles(inst.pr.number, prFilesFromGit(repoDir, inst.pr.base_commit, inst.pr.head_commit));
+      const files = prFilesFromGit(repoDir, inst.pr.base_commit, inst.pr.head_commit);
+      fake.setPullFiles(inst.pr.number, files);
+      prFilePaths = files.map((f) => f.filename);
     } else if (inst.pr?.files?.length) {
       // A tier with no checkout (dependency-merge) states its diff in the case
       // instead. Same registration, so `GET /pulls/:n/files` and the patch
       // `github_get_pull_request_diff` returns come from one source.
       fake.setPullFiles(inst.pr.number, inst.pr.files);
+      prFilePaths = inst.pr.files.map((f) => f.filename);
     }
 
     // 2b. Inject synthetic repo-context into the pr-review checkout so the
@@ -352,23 +410,54 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     // list here — the same fact core derives `prScopedWorkflows()` from, so an
     // overlay's forked fix workflow is covered without a change to this file.
     //
-    // `pr-review` is deliberately EXCLUDED. It is a shipped, judge-scored tier
-    // whose numbers are compared across runs and against Martian's leaderboard;
-    // enriching its context is a real improvement to make, but making it as a
-    // side effect here would silently move every historical score. Tracked as a
-    // follow-up, not smuggled in.
-    const wantsPrContext =
-      !isPrReview && ((def as { pr_scoped?: boolean }).pr_scoped === true || !!inst.pr_state);
+    // `pr-review` USED TO BE excluded here, and the exclusion was about scores,
+    // not about correctness: pr-review is judge-scored and its numbers are
+    // compared across runs and against Martian's leaderboard, so enriching its
+    // context would move every historical figure as a side effect of a change
+    // that was not about them.
+    //
+    // The exclusion was LIFTED DELIBERATELY on 2026-08-22. It had made the
+    // review evidence pipeline unmeasurable on the only tier its gates are read
+    // on: with no `prContextPatch`, core's `renderContext` never runs, the
+    // context never gets `analysisEnabled`, and every WP3 phase in
+    // `pr-review.yaml` matches `skip_if: "analysisEnabled != true"` and skips.
+    // WP0's `{{specObligations}}` was unmeasurable there for the same reason.
+    // The choice was between a pipeline that cannot be measured and a baseline
+    // that has to be re-run; the baseline is being re-run.
+    //
+    // THEREFORE: every pr-review number produced BEFORE 2026-08-22 was measured
+    // on a different template context and must NOT be compared across that
+    // boundary — not in `diff-runs.ts`, not against `2026-08-20_074355`, not
+    // against the leaderboard entry that run backed. Re-baseline instead.
+    const wantsPrContext = (def as { pr_scoped?: boolean }).pr_scoped === true || !!inst.pr_state;
     if (wantsPrContext) {
       Object.assign(
         ctx,
-        prContextPatch({
+        await prContextPatch({
           repo: `${owner}/${name}`,
           prNumber: inst.pr?.number ?? issueNumber,
           title: inst.pr?.title ?? inst.issue?.title ?? inst.instance_id,
           body: inst.pr?.body ?? inst.issue?.body ?? inst.problem_statement,
           branch,
           seed: inst.pr_state,
+          // A REAL `GitHubClient` pointed at the fake — the same construction
+          // `post-review` already uses against the mock. Core's own
+          // `resolveSpecContext` then reads BOTH ends of the spec axis through
+          // it, so the eval exercises the production code path (GraphQL
+          // `closingIssuesReferences` + `GET /pulls/:n/files`) rather than a
+          // harness copy of it. `setPullFiles` above is what the second read
+          // hits, so it must already have run — it has.
+          github: resolveReviewGitHubClient({ githubApiBaseUrl: fake.url }),
+          // Retained as the fallback for a tier with no live client: a case that
+          // seeds `pr_state.changed_files` still wins — including seeding `[]`,
+          // which asserts "this PR changes nothing" rather than "we could not
+          // read it". Those must stay distinguishable (locked decision 6).
+          changedFiles: prFilePaths,
+          // The arm's own `review:` policy — the overlay's, never gold's. This
+          // is the seam that turns the evidence pipeline on for the `wp3` arm
+          // and leaves it off for `baseline`, with no per-case special-casing:
+          // `baseline/config.yaml` simply declares no `analysis` block.
+          review: opts.arm.review as ReviewOverride | undefined,
         }),
       );
     }
@@ -434,14 +523,30 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
       webSearch: false,
     };
 
-    // Phase windows: each phase writes its own session jsonl(s), but the public
-    // runner doesn't expose the sessionId→phase map. Phases run sequentially, so
-    // `onPhaseStart` timestamps let us bucket each session file into the last
-    // phase started before it (see the split in 5d).
+    // Phase windows: `onPhaseStart`/`onPhaseEnd` bracket each phase, and the
+    // pair is what makes a phase's duration MEASURED rather than inferred from
+    // the next phase's start — which would silently bill the gap between phases
+    // (workspace refresh, the `until_bash` container spin-up) to whichever phase
+    // happened to precede it.
+    //
+    // `phaseStarts` additionally backs the FALLBACK attribution rule in
+    // `bucketSessionsByPhase`. Sessions now carry their owning phase as a stamp,
+    // so the windows are only consulted for jsonl archived before that stamp
+    // existed; see that function for why a start-time lookup cannot attribute a
+    // fan-out at all.
     const phaseStarts: { phase: string; start: number }[] = [];
+    const phaseWindows = new Map<string, { start: number; end?: number }>();
     const callbacks: RunnerCallbacks = {
       onPhaseStart: async (phase) => {
-        phaseStarts.push({ phase, start: Date.now() });
+        const now = Date.now();
+        phaseStarts.push({ phase, start: now });
+        // First start wins: a label the engine re-announces (a loop node whose
+        // condition-met entry repeats it) must not restart its own clock.
+        if (!phaseWindows.has(phase)) phaseWindows.set(phase, { start: now });
+      },
+      onPhaseEnd: async (phase) => {
+        const w = phaseWindows.get(phase);
+        if (w) w.end = Date.now();
       },
     };
 
@@ -492,13 +597,18 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     result.workflowSucceeded = wf.success;
     // Record the model each phase resolved to — the arm forced id in `models`
     // mode, or the per-step model the merged config assigned in `config` mode
-    // (mirrors core's selection for display; see config.ts).
-    const phaseModelTemplates = new Map(def.phases.map((p) => [p.name, p.model]));
-    result.phases = wf.phases.map((p) => ({
-      phase: p.phase,
-      success: p.success,
-      model: opts.arm.recordPhaseModel(phaseModelTemplates.get(p.phase), p.phase),
-    }));
+    // (mirrors core's selection for display; see config.ts). `wf.phases` rows
+    // carry ledger labels (`survey_branch_contract`), not YAML names, so the
+    // template lookup goes through modelTemplateForRow (phase-models.ts), which
+    // parses branch rows back to their declaration via core's PhaseRef.
+    result.phases = wf.phases.map((p) => {
+      const { template, fallbackPhase } = modelTemplateForRow(def.phases, p.phase);
+      return {
+        phase: p.phase,
+        success: p.success,
+        model: opts.arm.recordPhaseModel(template, p.phase, fallbackPhase),
+      };
+    });
 
     // A workflow can end un-successful for two very different reasons:
     //   - a DELIBERATE gate decision (guardrails `on_output` BLOCKED — the agent
@@ -581,7 +691,26 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
           /* leave diff undefined — judge falls back to diff-blind */
         }
       }
-      const rg = await gradeReview({ gold: inst.review_gold, reviews, beta: opts.judge?.beta, diff });
+      // The evidence pipeline's own telemetry, read off the artifacts it wrote.
+      // Deliberately read HERE and not from the `--keep-workspace` branch below:
+      // making the mechanism metrics conditional on a debugging flag is how they
+      // came to be absent from every arm ever measured. `undefined` for a
+      // baseline arm, which runs no pipeline and writes no artifacts.
+      const readout = readPipelineStats(repoDir);
+      const rg = await gradeReview({
+        gold: inst.review_gold,
+        reviews,
+        beta: opts.judge?.beta,
+        neutralGold: inst.review_gold_neutral,
+        diff,
+      });
+      // Internal recall — gold matched by everything the pipeline GENERATED,
+      // including what the attention boundary held back. One extra judge call
+      // (MATCH only; `findings.json` needs no extraction), and it is what makes
+      // "never found it" separable from "found it and did not say it".
+      const internal = readout
+        ? await gradeInternalRecall({ gold: inst.review_gold, findings: internalJudgeInputs(readout.findings), diff })
+        : undefined;
       result.review = {
         precision: rg.precision,
         recall: rg.recall,
@@ -590,9 +719,13 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
         posted: rg.posted,
         gold: rg.gold,
         matched: rg.matched,
+        ...(rg.matchedFindings !== undefined ? { matchedFindings: rg.matchedFindings } : {}),
+        ...(rg.postedRaw !== undefined ? { postedRaw: rg.postedRaw } : {}),
+        ...(rg.neutralized !== undefined ? { neutralized: rg.neutralized } : {}),
         falsePositives: rg.falsePositives,
         falseNegatives: rg.falseNegatives,
         trace: rg.trace,
+        ...(readout ? { pipeline: withInternalRecall(readout, internal) } : {}),
       };
       if (rg.error) result.error = result.error ?? `review judge: ${rg.error}`;
     }
@@ -647,6 +780,32 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     result.costUsd = m.costUsd;
     result.githubMutations = fake.calls.length;
 
+    // Session files + their phase attribution, computed ONCE: 5c' prices each
+    // bucket and 5d archives it. Two passes would be two chances to disagree
+    // about which phase a session belonged to.
+    const sessionFiles = listSessionFiles(sessionsDir); // chronological
+    const split = bucketSessionsByPhase(sessionFiles, phaseStarts);
+
+    // 5c'. Per-phase attribution — the instrument the speed work is graded on.
+    // Without it a scorecard says a case took 30 minutes and nothing about
+    // WHERE, so every latency claim had to be read by hand out of transcripts.
+    // Duration comes from the measured phase window; cost/tokens from that
+    // phase's own session jsonl, through the same roll-up the case level uses.
+    for (const pm of result.phases ?? []) {
+      const w = phaseWindows.get(pm.phase);
+      // Absent window ⇒ the phase never started (skipped). Leave it undefined:
+      // see PhaseMetric.durationMs — 0 would read as "instant", not "not run".
+      if (w?.end !== undefined) pm.durationMs = w.end - w.start;
+      const files = split.buckets.get(pm.phase);
+      if (!files?.length) continue;
+      const pmM = collectMetricsFromFiles(files, modelCost(prepared.model));
+      pm.inputTokens = pmM.inputTokens;
+      pm.cachedTokens = pmM.cachedTokens;
+      pm.outputTokens = pmM.outputTokens;
+      pm.costUsd = pmM.costUsd;
+      if (pmM.agentMs > 0) pm.agentMs = pmM.agentMs;
+    }
+
     // 5d. Archive the session (the drain above ensured the last `result`
     // envelope landed): a final consolidated `full.jsonl` plus one
     // `NN-<phase>.jsonl` per workflow phase — bucketing each session file into
@@ -657,23 +816,7 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
         flushFull();
         const rel = opts.sessionTrialRel ?? trialDir;
         const successByPhase = new Map(wf.phases.map((p) => [p.phase, p.success]));
-        const starts = [...phaseStarts].sort((a, b) => a.start - b.start);
-        const files = listSessionFiles(sessionsDir); // chronological
-        const buckets = new Map<string, string[]>();
-        const order: string[] = [];
-        for (const sf of files) {
-          // The last phase started at/before this session's first line (50ms slack).
-          let phase = starts[0]?.phase ?? "session";
-          for (const ev of starts) {
-            if (ev.start <= sf.firstTs + 50) phase = ev.phase;
-            else break;
-          }
-          if (!buckets.has(phase)) {
-            buckets.set(phase, []);
-            order.push(phase);
-          }
-          buckets.get(phase)!.push(sf.file);
-        }
+        const { order, buckets } = split;
         const phases: PhaseSession[] = [];
         let idx = 0;
         for (const phase of order) {
@@ -702,6 +845,11 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     restoreEvalEnv();
     if (!opts.keepWorkspace && !opts.stateDir) {
       rmSync(stateDir, { recursive: true, force: true });
+    } else if (opts.keepWorkspace) {
+      // Recorded rather than merely printed: the path has to survive into
+      // `scorecard.json` or a batch of 8 kept workspaces is 8 temp dirs with
+      // machine-generated names and no mapping back to a case.
+      result.workspaceDir = stateDir;
     }
   }
 

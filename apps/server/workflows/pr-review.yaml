@@ -32,8 +32,456 @@ description: |
     - manual CLI: tsx src/cli.ts review owner/repo#N
 
 phases:
+  # ── The evidence pipeline (WP3). INERT unless `review.analysis.enabled`. ────
+  #
+  # Every phase below carries `skip_if: "analysisEnabled != true"`, and that key
+  # reaches the context ONLY from `specContext` in pr-decisions.ts, which returns
+  # `{}` when the pipeline is off. `evalSkipIf` coerces an absent variable to
+  # false, so `!= true` matches and the phase skips — the failure direction of a
+  # typo anywhere in this block is "the analysis does not run", never "an
+  # unmeasured pipeline runs on a deployment that did not ask for it".
+  #
+  # Phases 1–3 spend NO MODEL. They are deterministic bash, and they are first
+  # so the six surveys below all read one artifact.
+  #
+  # `prepare` (WP4) carries its OWN gate — `probesEnabled`, projected only when
+  # the operator set `review.analysis.probes` as well as `enabled`. A deployment
+  # that turned on the pipeline but not probes runs WP3 exactly as before: this
+  # phase skips and `facts` sees the bare pre-clone it has always seen.
+  - name: prepare
+    label: Prepare · probe environment
+    type: bash
+    # BOTH gates, and the second is not redundant. `specContext` only projects
+    # `probesEnabled` when the pipeline is enabled too, so the pair can never
+    # disagree in production — but this phase is the one that installs a pull
+    # request author's dependency tree, and "it cannot happen because of how the
+    # projection is written" is a weaker guarantee than "the phase refuses". An
+    # install with no surveys to feed is pure cost either way.
+    skip_if:
+      - "analysisEnabled != true"
+      - "probesEnabled != true"
+    # The PHASE's ceiling, summed across the three steps in `specContext` —
+    # NOT the install budget. A phase killed part-way through a coverage run
+    # writes no env.json at all, which is the outcome this whole design exists
+    # to prevent.
+    timeout_seconds: { from: probePhaseTimeoutSeconds, default: 300 }
+    # FIRST, and that ordering is measured rather than tidy. On a bare checkout
+    # a tsconfig that `extends` a bare package specifier
+    # (`@calcom/tsconfig/react-library.json`) does not resolve; tsgo reports a
+    # config parsing error and EXCLUDES the project, the case drops to tier 2,
+    # and `contracts` emits nothing. Across the 50-PR corpus that is tier-1
+    # cases 21 -> 5 and contract deltas 73 -> 19, one cause, all 16 demoted
+    # cases. So this phase is not an affordance for probes — it is a
+    # precondition for two of the six obligation families, and it has to run
+    # before `facts` for either of them to see anything.
+    #
+    # The same shell-level catch as `facts` below, for the same §D12 reason: a
+    # phase that dies without writing its artifact is re-dispatched by
+    # cron-review.yaml every thirty minutes, forever.
+    command: |
+      set -u
+      FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+      OUT=.lastlight/pr-review/probes/env.json
+      mkdir -p .lastlight/pr-review/probes
+
+      # `installed` is read off the FILESYSTEM even in the fallback, because it
+      # is the only question a later phase asks and a dead process still leaves
+      # whatever it managed to unpack.
+      fallback() {
+        if [ -d node_modules ]; then INSTALLED=true; else INSTALLED=false; fi
+        printf '{"version":1,"generatedAt":"%s","repo":"{{owner}}/{{repo}}","packageManager":null,"install":"failed","installed":%s,"lifecycleScripts":false,"typecheck":"failed","typecheckDiagnostics":[],"coverage":"failed","coverageReport":null,"durationMs":{"install":0,"typecheck":0,"coverage":0,"total":0},"degraded":[{"extractor":"prepare","reason":"%s"}]}\n' \
+          "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$INSTALLED" "$1" > "$OUT"
+      }
+
+      ARGS="--repo . --out $OUT"
+      # Each sub-switch is projected as the literal string "true"/"false" and
+      # absent means OFF, so the failure direction of every one of them is "do
+      # the cheap thing" rather than "install a stranger's postinstall".
+      [ "{{probeLifecycleScripts}}" = "true" ] && ARGS="$ARGS --lifecycle-scripts"
+      [ "{{probeTypecheck}}" = "true" ] && ARGS="$ARGS --typecheck"
+      [ "{{probeCoverage}}" = "true" ] && ARGS="$ARGS --coverage"
+
+      if ! "$FACTS" prepare $ARGS --never-fail; then
+        fallback "the prepare process died without writing env.json (OOM, or a CLI that could not be executed) — dependencies may be absent or partial, so NOTHING downstream may read a thin analysis as evidence that there is nothing to find"
+      fi
+      echo "prepare: $(wc -c < "$OUT" 2>/dev/null || echo 0) bytes"
+
+  - name: facts
+    label: Facts · deterministic
+    type: bash
+    skip_if: "analysisEnabled != true"
+    # `all_done`, not the default `all_success`: `prepare` SKIPS on every
+    # deployment that has not enabled probes, and a skipped node is not
+    # `succeeded`. With `all_success` here the entire pipeline below would
+    # vanish the moment WP4 shipped off.
+    depends_on: [prepare]
+    trigger_rule: all_done
+    timeout_seconds: 300
+    # §D12, and the reason it is a shell-level `||` rather than trust in
+    # `--never-fail`: that flag is an in-process try/catch and cannot cover a
+    # process that DIES. An OOM, a segfault in the ast-grep native binary, or a
+    # tsgo executable that cannot exec all exit without writing an envelope —
+    # and a phase that fails hard is re-dispatched by cron-review.yaml every
+    # thirty minutes, forever. So the catch writes a `coverage: "none"` envelope
+    # itself and exits 0. The survey phases then say "nothing was analysed"
+    # instead of reading silence as "nothing was found".
+    #
+    # FACTS resolution is §D1's order — LASTLIGHT_FACTS_BIN, then PATH, then the
+    # image path. Expressed here in shell rather than reimplemented in core,
+    # which has no edge to code-facts and must not grow one for this.
+    command: |
+      set -u
+      FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+      OUT=.lastlight/pr-review/facts.json
+      mkdir -p .lastlight/pr-review
+
+      # The fallback envelope must VALIDATE, or the loudness is lost twice over:
+      # `seed` parses this file against AllDocumentSchema and exits UNAVAILABLE
+      # on a malformed one, which would leave no obligations AND no block saying
+      # why. A complete `coverage: "none"` document is what makes the survey
+      # phases print "nothing was analysed" instead of reading silence as clean.
+      fallback() {
+        printf '{"version":2,"generatedAt":"%s","extractor":"all","repo":"{{owner}}/{{repo}}","baseSha":"%s","headSha":"%s","tier":3,"engine":"none","languages":[],"coverage":"none","degraded":[{"extractor":"facts","reason":"%s"}],"toolchain":{"manifest":2,"bundled":{},"binaries":{}},"extractors":{}}\n' \
+          "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "${BASE:-unknown}" "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "$1" > "$OUT"
+      }
+
+      # Resolve the MERGE BASE, never the base branch tip. Two-dot additionally
+      # contains every commit that landed on the base branch since the PR forked,
+      # and the author wrote none of it — measured across 50 real PRs, 9 diverge,
+      # one of them 6125 files against 3. A base we cannot resolve is a loud
+      # failure, NOT a silent fallback to HEAD~1: analysing the wrong range and
+      # reporting success is the exact shape this pipeline exists to stop.
+      if ! BASE="$(git merge-base origin/{{baseBranch}} HEAD 2>/dev/null)" || [ -z "$BASE" ]; then
+        fallback "no merge base between origin/{{baseBranch}} and HEAD (unrelated histories, or a clone too shallow to share one) — the diff range could not be established, so NOTHING here may be read as 'no findings'"
+        echo "facts: no merge base — wrote a coverage:none envelope"
+        exit 0
+      fi
+
+      # §D12, and the reason this is a shell-level catch rather than trust in
+      # `--never-fail`: that flag is an in-process try/catch and cannot cover a
+      # process that DIES.
+      #
+      # `--stage-diff` is the f1 lever, and it is HERE rather than in a phase of
+      # its own because this is where the range already exists: the merge base
+      # above is resolved once and `all` writes the patch down beside the facts
+      # it derived from the same commit pair. Measured: the five survey branches
+      # make ~93 bash calls per case and ~30 of them re-derive this one fixed
+      # range — surveys are ~75% of a case's spend — and every re-derivation is
+      # another chance to spell it two-dot, which attributes 6125 files to an
+      # author who wrote 3. Staging cannot fail the run: a failure is a
+      # `degraded[]` entry plus an index.md that says so in words.
+      if ! "$FACTS" all --repo . --base "$BASE" --head HEAD --out "$OUT" --stage-diff --never-fail; then
+        fallback "the analysis process died without writing an envelope (OOM, a segfault in the native parser, or a compiler binary that cannot exec) — NOTHING here may be read as 'no findings'"
+      fi
+      echo "facts: $(wc -c < "$OUT" 2>/dev/null || echo 0) bytes, base $BASE"
+      # The staged diff gets its own line for the same reason the seed phase
+      # prints a per-family block manifest: "the layer staged nothing" and "the
+      # branches never found it" must be two lines in the log, not one silence.
+      if [ -s .lastlight/pr-review/diff/index.md ]; then
+        echo "facts: staged $(ls .lastlight/pr-review/diff/*.patch 2>/dev/null | wc -l) per-file patch(es) under .lastlight/pr-review/diff/"
+      else
+        echo "facts: NO staged diff — every survey branch will have to derive the range itself"
+      fi
+
+  - name: seed
+    label: Seed · obligations
+    type: bash
+    skip_if: "analysisEnabled != true"
+    depends_on: [facts]
+    trigger_rule: all_done
+    timeout_seconds: 120
+    # One obligations.json plus one rendered BLOCK per family. The blocks carry
+    # their own discharge contract — emitted from code, never from a template —
+    # for the reason renderSpecObligations does: v3 measured a 17-row ledger
+    # honestly discharged into ZERO findings, and obligations without the
+    # contract reproduce exactly that.
+    #
+    # `--contract` is the CONTROL for 2026-08-23 (review.analysis.obligationContract,
+    # `full` | `minimal`; see config/default.yaml for the measurement). It is
+    # read into a variable and defaulted in the shell rather than interpolated
+    # straight into the argument list, because renderTemplate substitutes an
+    # ABSENT context key with the empty string — and `--contract --out` would
+    # then swallow the next flag. The key is projected unconditionally beside
+    # `analysisEnabled`, which this phase is already gated on, so the default is
+    # a belt to that brace. The sixth family (`spec`) gets the same setting
+    # in-process from `specContext`, so all six axes move together.
+    command: |
+      set -u
+      FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+      CONTRACT="{{obligationContract}}"
+      MAX_OBLIGATIONS="{{maxObligations}}"
+      # The D2 minting arms (review.analysis.mint) — same shell-variable rule
+      # as CONTRACT above: never interpolate {{key}} straight into the arg
+      # list. Appended as `--mint "$MINT"` ONLY when non-empty, because the
+      # CLI refuses an empty --mint value; absent flag = the baseline arm.
+      MINT="{{mint}}"
+      mkdir -p .lastlight/pr-review/hypotheses
+      set -- seed --facts .lastlight/pr-review/facts.json \
+        --out .lastlight/pr-review/obligations.json \
+        --contract "${CONTRACT:-minimal}" \
+        --max-obligations "${MAX_OBLIGATIONS:-48}" \
+        --blocks .lastlight/pr-review/obligations
+      if [ -n "$MINT" ]; then set -- "$@" --mint "$MINT"; fi
+      "$FACTS" "$@" || true
+      echo "seed: contract ${CONTRACT:-minimal} backstop ${MAX_OBLIGATIONS:-48} mint ${MINT:-none}"
+      echo "seed: $(ls .lastlight/pr-review/obligations 2>/dev/null | wc -l) family block(s)"
+
+      # The MANIFEST, and it exists so that "the seeder wrote nothing for this
+      # family" and "the block never reached the pass that consumes it" are two
+      # different lines in the log rather than one silence. `renderFamilyBlock`
+      # always emits a block for all five seedable families — including a NOT
+      # MEASURED one — so a MISSING line here is a seeder failure, full stop, and
+      # a survey branch reporting a family clean on the back of one is reporting
+      # on a measurement that was never taken. The `spec` family is absent by
+      # design: it is built harness-side and has no block on disk.
+      for FAMILY in contract enforcement security state tests; do
+        BLOCK=".lastlight/pr-review/obligations/$FAMILY.md"
+        if [ -s "$BLOCK" ]; then
+          echo "seed: $FAMILY block $(wc -c < "$BLOCK") bytes"
+        else
+          echo "seed: $FAMILY block MISSING — the survey branch for this family will run UNSEEDED"
+        fi
+      done
+      exit 0
+
+  # ── The six surveys. ONE phase, six branches, run CONCURRENTLY. ────────────
+  #
+  # NOT a `generic_loop` over a `families` list, and the reason is measured:
+  # `until_bash` rejects template markers and the only env a phase receives is
+  # `LL_OUT_<PHASE>`, so `$LL_FAMILY` was never set, the gate tested
+  # `hypotheses/.jsonl`, always failed, and the loop ran to `max_iterations`
+  # against a gate that meant nothing — the dependency-cruiser failure shape.
+  # Worse, `surveyPasses` defaulted to 3 against six families and nothing
+  # recorded which three ran.
+  #
+  # WP11c — this WAS six chained phases, and chained is what made the review
+  # unshippable. Measured on `prreview__skillspro-1587-r1`: the six surveys are
+  # 851s of a 29-minute case, 49% of the wall clock, and they were sequential
+  # only because the scheduler runs one DAG node at a time
+  # (`packages/workflow-engine/src/core/scheduler.ts` — `const node = ready[0]`).
+  # The families are pairwise disjoint by construction (six append-only
+  # `hypotheses/<family>.jsonl`, no pass opening another's), so there was never
+  # an ordering constraint to respect — only an engine that could not express
+  # the absence of one.
+  #
+  # `type: fanout` is ONE node running the six sessions in one provisioned
+  # workspace, which is the carve-out the retired WP5 doc names in its own words
+  # (deterministic-pr-levers.md §"Parked: parallel phases (WP5)"; full text in
+  # git history): *"every hard blocker exists BECAUSE each phase provisions its own
+  # sandbox against a shared workspace. A fan-out inside one agent has none of
+  # them."* Six branches, one clone, one AGENTS.md, one artifact harvest, one
+  # dispose — and still one `executions` row per branch, so per-family cost,
+  # resume and the dashboard column survive the change.
+  #
+  # WHAT DID NOT CHANGE, deliberately: the six prompts, the six literal gates,
+  # the model, the skills, and the soft-failure policy. This is a latency change
+  # and it has to be readable as one — if a fan-out arm moves recall, that is a
+  # bug in this phase, not a result.
+  #
+  # `max_concurrent` is a CEILING the run clamps further per backend: gondolin
+  # boots a QEMU micro-VM per session and pins to 1 (so production is unchanged
+  # until that is measured), while `none` — the eval harness — takes all six.
+  #
+  # PROMPT ORDER IS FIXED HERE AND IS EXPENSIVE TO RETROFIT: the shared prefix
+  # (skills, AGENTS.md, diff summary) goes FIRST and the family's obligations
+  # LAST, because provider-side prompt caching is keyed on the request prefix.
+  # Six passes then share one cached prefix — which is worth MORE under a
+  # fan-out, not less, since the six now hit the provider inside one window.
+  - name: survey
+    label: Survey · five families
+    type: fanout
+    skills: [pr-review, code-review]
+    model: "{{models.review-survey}}"
+    skip_if: "analysisEnabled != true"
+    depends_on: [seed]
+    trigger_rule: all_done
+    max_concurrent: { from: surveyConcurrency, default: 6 }
+    # The fan-out's own key, NOT `on_soft_failure` — that name belongs to
+    # `generic_loop`, and at phase level zod strips it silently. All six surveys
+    # carried it in the wrong place until 2026-08-22 and therefore ran with
+    # `{retries: 0, then: fail}`: one degenerate turn HARD-FAILED the whole
+    # review, which records no `assessedHeadShaByWorkflow` and hands
+    # cron-review.yaml something to re-dispatch every thirty minutes, forever.
+    # A distinct key cannot be confused with it; `fanout-policy.test.ts` pins
+    # the EFFECTIVE value read off this file rather than the key's presence.
+    on_branch_soft_failure: { retries: 1, then: complete }
+    #
+    # `context_file` — WHY THE OBLIGATIONS ARE NOT A PATH IN THE PROMPT ANY MORE.
+    #
+    # They were, and it cost a quarter of the branches their seed. Measured over
+    # the three stored runs of 2026-08-22: across 120 non-spec survey branches,
+    # 27 first-turn reads of `obligations/<family>.md` resolved against the
+    # SANDBOX ROOT rather than the checkout and hit ENOENT; 23 branches never
+    # recovered. The split is total — every one of the 27 failures used the
+    # workspace-root ABSOLUTE form, and all 98 relative reads succeeded — because
+    # the only absolute path a branch has been handed by its first turn is its
+    # skill bundle, `<workspaceRoot>/.lastlight-skills/<phase>/<skill>/SKILL.md`,
+    # which lives one level ABOVE the checkout the deterministic phases write in.
+    # Those branches then took the prompt's "if the file does not exist, work the
+    # diff directly" escape hatch and free-styled, so a SEEDED pass became an
+    # unseeded one with nothing anywhere recording that it had. That is the best
+    # mechanical account there is of identical obligations producing 18
+    # hypotheses on one run and 43 on the next: which branches lose their seed
+    # varies per run, so which questions get asked varies per run.
+    #
+    # The harness now reads the file at `hostAgentCwd` — the host end of the very
+    # `cwd` the `seed` phase's shell ran in — and appends it to the branch's
+    # prompt. The producer and the consumer resolve against ONE base by
+    # construction, and the model resolves nothing at all. When the read fails,
+    # what is appended is a loud NOT AVAILABLE notice instead: a lost seed can
+    # no longer be mistaken for a family with genuinely nothing to check.
+    #
+    # `until_bash` — WHY THE GATE IS NO LONGER `test -s`.
+    #
+    # It was, and `test -s` is passed by ONE LINE OF ANY CONTENT. So the gate a
+    # survey had to clear was "write a byte", while the contract in its
+    # obligations block demanded a QUOTE/ABSENT/PARTIAL/PROBE discharge for every
+    # obligation. Measured over both preserved runs of 2026-08-22 — all 8 cases,
+    # every family — NOT ONE obligation ever carried a discharge code: 0 of 31,
+    # 0 of 34, 0 of 40. That was not the models ignoring the rule; the prescribed
+    # row shape in the same block had no field to record one in, so compliance
+    # was impossible. The shape now carries `discharge`, and this gate reads it.
+    #
+    # It is also what closes the hole the `context_file` note above leaves open:
+    # a branch that lost its seed and free-styled still writes a file, and
+    # `test -s` cannot tell that from a discharged pass. A `NOT_SEEDED` row
+    # discharges nothing, so this gate fails it.
+    #
+    # `discharge` exits 0 (satisfied, or the family has no obligations, or it is
+    # NOT MEASURED), 3 (something outstanding — iterate), or 2 (nothing to
+    # grade). Any non-zero re-runs the branch. With no readable obligations
+    # document it deliberately DEGRADES to the `test -s` floor it replaces
+    # rather than failing forever: `seed` runs with `|| true` and writes nothing
+    # on a `coverage: "none"` envelope, and a gate an agent cannot satisfy burns
+    # every iteration it has — which is the WP3 `$LL_FAMILY` bug, exactly.
+    #
+    # `spec` keeps `test -s`: its obligations are built harness-side and never
+    # reach `obligations.json`, so the gate would be vacuous there. That leaves
+    # it constraining five branches, and meaningfully four until WP4's `prepare`
+    # gives the `tests` family a coverage artifact to be measured against.
+    #
+    # UNDER `review.analysis.obligationContract: minimal` ALL SIX ARE `test -s`,
+    # and the gate commands below do NOT change to say so. `seed --contract
+    # minimal` stamps the mode into obligations.json and `discharge` reads it,
+    # degrading to the same `test -s` floor it degrades to when the document is
+    # unreadable — one mechanism, two triggers. That is deliberate: an
+    # until_bash rewritten per arm could disagree with the block the survey was
+    # actually handed, which is the separability this pipeline keeps paying for.
+    # The reason it must degrade at all is measured: under the `minimal` block
+    # NOT ONE obligation ever carried a code (0/31, 0/34, 0/40), because that
+    # block's prescribed row has no field to put one in. What it would cost
+    # today is a false signal rather than money — a fan-out branch gate is
+    # OBSERVATIONAL (handlers/fanout.ts `runBranchGate`: it runs once, records
+    # condition_met/not_met and never re-runs the branch, exactly as the six
+    # chained `generic_loop: {max_iterations: 1}` phases did) — but that handler
+    # frames single-shot as reproducing the old loops, so the loop can come back
+    # and the burned budget with it.
+    branches:
+      - name: contract
+        prompt: prompts/survey-contract.md
+        context_file: .lastlight/pr-review/obligations/contract.md
+        until_bash: |
+          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+          "$FACTS" discharge --dir .lastlight/pr-review --family contract
+      - name: enforcement
+        prompt: prompts/survey-enforcement.md
+        context_file: .lastlight/pr-review/obligations/enforcement.md
+        until_bash: |
+          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+          "$FACTS" discharge --dir .lastlight/pr-review --family enforcement
+      - name: security
+        prompt: prompts/survey-security.md
+        # The one branch with a third skill — the others inherit the phase's two.
+        skills: [pr-review, code-review, security-review]
+        context_file: .lastlight/pr-review/obligations/security.md
+        until_bash: |
+          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+          "$FACTS" discharge --dir .lastlight/pr-review --family security
+      - name: state
+        prompt: prompts/survey-state.md
+        context_file: .lastlight/pr-review/obligations/state.md
+        until_bash: |
+          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+          "$FACTS" discharge --dir .lastlight/pr-review --family state
+      # There is deliberately NO `tests` branch. The family is dead at both
+      # ends — no seeder function exists for it in `code-facts`, and the
+      # `coverage` extractor it would read from needs a report that only
+      # `prepare` (probes-gated, skipped on every measured run) can produce.
+      # Measured: 0 artifacts across 50 corpus cases AND all 8 gate cases, in
+      # every run ever taken. Running the branch paid a sixth of the survey
+      # fan-out to write NOT MEASURED. The seeder still emits the family's
+      # block and `obligations.json` row (`measured: false`), so the eval
+      # instrument keeps reporting it as `notMeasured` — never as "did not
+      # convert" — and reinstating the branch is this entry plus a seeder.
+      # `spec` is WP0's and is built HARNESS-side from the PR body and linked
+      # issues (review-spec.ts), so it reads `{{specObligations}}` from the
+      # context rather than a block on disk. It is the only untried axis and it
+      # is orthogonal to everything the investigation has tried.
+      - name: spec
+        prompt: prompts/survey-spec.md
+        until_bash: test -s .lastlight/pr-review/hypotheses/spec.jsonl
+
+  # ── WP4's oracle. The only phase that RUNS anything. ───────────────────────
+  #
+  # Gated on `probesEnabled` like `prepare`, and for one shared reason: a probe
+  # needs a tree it can execute in. With probes off this skips and the run is
+  # WP3 exactly — six surveys and the shipped reviewer.
+  #
+  # It reads the hypothesis RECORDS and the code, never an earlier pass's
+  # transcript. That is AnyPoC's checker-with-no-access-to-the-generator's-context,
+  # implemented with the mechanism this engine has (a separate phase), and it is
+  # why the phase exists rather than a seventh survey: baseline agents fail to
+  # reject 96% of false reports when they can see the reasoning that produced
+  # them.
+  #
+  # NOTE what it cannot do yet. Nothing reads `probes/verdicts.jsonl` — WP6's
+  # `adjudicate` is its consumer and does not exist, so this phase moves the
+  # MECHANISM metrics (probes attempted / succeeded / reproduced / refuted) and
+  # cannot move recall. That is a known non-goal, not an oversight.
+  - name: falsify
+    label: Falsify · run the probe
+    skills: [pr-review, code-review]
+    prompt: prompts/review-falsify.md
+    model: "{{models.review-survey}}"
+    skip_if:
+      - "analysisEnabled != true"
+      - "probesEnabled != true"
+    depends_on: [survey]
+    trigger_rule: all_done
+    generic_loop:
+      # `on_soft_failure` lives INSIDE the loop — see the fan-out above for
+      # what it costs when it does not.
+      on_soft_failure: { retries: 1, then: complete }
+      # Two rounds. v3's lesson 3 is the sizing argument and it was measured: a
+      # five-line existence gate earned the investigation's only gold match,
+      # while v2's full quote validator was overkill and cost 2.4x.
+      max_iterations: { from: probeRounds, default: 2 }
+      # The gate is an EXISTENCE check and it is deliberately satisfiable in one
+      # pass without lying: a hypothesis that genuinely cannot be executed
+      # against is recorded `unprobed`, which closes the gate for it and carries
+      # the claim forward to adjudication with lowered confidence. An
+      # unsatisfiable gate is the shape WP3 already hit once — `$LL_FAMILY` was
+      # never set, so the gate tested `hypotheses/.jsonl`, always failed, and the
+      # loop ran to `max_iterations` against a condition that meant nothing.
+      #
+      # Literal shell, no template markers: `validateShellCommand` rejects any
+      # command containing `{{` outright.
+      until_bash: |
+        FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+        "$FACTS" probes --dir .lastlight/pr-review
+
   - name: review
     label: Review
+    # EXPLICIT, and `all_done` rather than the default `all_success`, because
+    # declaring `depends_on` anywhere in a workflow disables the synthesized
+    # linear chain for ALL of it (`buildDag`'s `anyDeclared`). Without these two
+    # lines `review` and `post-review` become root nodes and run in PARALLEL
+    # with the surveys — and with `all_success` they would instead be SKIPPED
+    # whenever the analysis phases skip, which is every deployment that has not
+    # enabled the pipeline. `all_done` is the rule the schema names for exactly
+    # this: a skipped node is not `succeeded`.
+    depends_on: [falsify]
+    trigger_rule: all_done
     # pr-review: the PR procedure (primary). code-review: the finding-tier +
     # what-to-check rubric. No `building` — pr-review is a pure code review; CI
     # validates that the change builds/runs.
@@ -42,9 +490,125 @@ phases:
     # findings (content only: skip? / summary / event / findings[]) to
     # .lastlight/pr-review/findings.json. The first-class `post-review` action
     # below reads that file and posts one formal review.
+    #
+    # §3b lever f4: a TWO-MODE brief. With the pipeline off, the prompt is the
+    # old skill nudge plus a curated Context section (this phase used to have no
+    # `prompt:` at all and rode `buildPhasePrompt`'s skills fallback, which
+    # serialises the ENTIRE render context — the byte-for-byte guarantee on that
+    # dump is deliberately retired; golden-pr-review.test.ts pins the new
+    # contract). With the pipeline on, the brief collapses to one fast
+    # INDEPENDENT pass — PR-level judgment only, no per-hunk re-derivation, no
+    # reading hypotheses/ (adjudicate is the fresh-context reader) — because six
+    # survey families + falsify have already done the deep work and a full
+    # second review here was measured pure waste (137s / $0.30 per case on
+    # Haiku, an APPROVE with zero findings while 41 hypotheses sat unread).
+    # It still writes findings.json: adjudicate seeds from it and post-review
+    # fails loudly without it.
+    prompt: prompts/review.md
     skills: [pr-review, code-review]
     model: "{{models.review}}"
     variant: "{{variants.review}}"
+
+  # WP6c — the exit of the funnel. Everything before this phase APPENDS to
+  # `hypotheses/<family>.jsonl` and `probes/verdicts.jsonl`, and until now
+  # NOTHING READ EITHER: verified on a real case, 40 KB of obligations and 18+
+  # hypotheses ended in an APPROVE with zero posted findings against five gold.
+  # This is the only rung in the plan that can move recall.
+  #
+  # A SIBLING of `post-review`, not a link in its chain, and that placement is
+  # load-bearing. `trigger_rule` is per-node and applies to every dep, so
+  # `post-review: depends_on [review, adjudicate]` could not say "all_success
+  # w.r.t. review, all_done w.r.t. adjudicate" — it would have to relax to
+  # `all_done` and lose the invariant that a FAILED REVIEW MUST NOT POST, which
+  # is a worse bug than the one it would fix. Declared above `post-review`, so
+  # the sequential scheduler (ready[0], in declaration order) still runs it
+  # first; unreachable from `post-review`'s dep set, so it can never stop a
+  # review from being posted.
+  #
+  # WHAT IT MAY AND MAY NOT DO. It re-ranks, re-tiers, and demotes into the
+  # review body. It deletes ONLY when a probe transcript refutes the claim.
+  # That asymmetry is measured, not principled: `aacr-adjudicate.ts` scored two
+  # models against AACR-Bench's 1,505 valid / 640 invalid comments and NEITHER
+  # BEAT KEEPING EVERYTHING (F1 0.825 → 0.803 Haiku → 0.745 GLM). Haiku
+  # destroyed 131 valid comments to catch 98; precision barely moved, which is
+  # the signature of a filter that is not discriminating, only shrinking. The
+  # threshold sweep closes it — F1 is flat from t=0.0 to t=0.7 then collapses,
+  # so there is no operating point to tune toward. A cheap model asked "is this
+  # comment valid" is worse than useless here.
+  - name: adjudicate
+    label: Adjudicate
+    skills: [pr-review, code-review]
+    prompt: prompts/review-adjudicate.md
+    # Its OWN key, `models.review-adjudicate`, because this is a RANKING pass
+    # over an already-generated set — a different task from survey discovery
+    # (where Haiku beats Sonnet on recall) — so an overlay must be able to move
+    # it without also moving `review`. Unset, it falls through to
+    # `models.review`, preserving the old single-key behaviour byte-for-byte.
+    # The {{#if}} pair is load-bearing: a bare `{{models.review-adjudicate}}`
+    # renders EMPTY when unset, and `resolveModelVariant` then falls back to
+    # the DEFAULT model — not to `models.review`.
+    model: "{{#if models.review-adjudicate}}{{models.review-adjudicate}}{{/if}}{{#if !models.review-adjudicate}}{{models.review}}{{/if}}"
+    variant: "{{variants.review}}"
+    skip_if: "analysisEnabled != true"
+    depends_on: [review]
+    generic_loop:
+      # INSIDE the loop, where the schema reads it. At phase level zod strips
+      # the key and the policy silently reverts to `{retries: 0, then: fail}` —
+      # all six survey phases had it in the wrong place until 2026-08-22.
+      on_soft_failure: { retries: 1, then: complete }
+      max_iterations: 2
+      # The fresh-context adjudication AnyPoC recommends: it reads the
+      # hypothesis RECORDS, the quotes and the transcripts — not the survey's
+      # reasoning, which is what makes rejecting a false report possible at all
+      # (baseline agents fail to reject 96% of false reports when they can see
+      # the reasoning that produced them).
+      fresh_context: true
+      # The CONSERVATION gate. "Existence-plus-schema" was explicitly judged not
+      # enough: an adjudicator reading 30 hypotheses and writing 6 findings
+      # would have passed every other gate in this plan, and that is exactly v2
+      # — which "worked mechanically" and cost recall anyway. Every hypothesis
+      # id must appear with exactly one disposition, and a `dropped` one must
+      # name a transcript that EXISTS. Silent omission becomes impossible by
+      # construction rather than by instruction.
+      #
+      # Literal shell, no template markers: `validateShellCommand` rejects any
+      # command containing `{{` outright.
+      until_bash: |
+        FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+        "$FACTS" findings --dir .lastlight/pr-review
+
+  # §D12's FLOOR, and the reason the gate above is a mechanism rather than a
+  # request. Reaching `max_iterations` without the condition is NOT a phase
+  # failure in this engine (phase-executor.ts) — the loop simply ends — so an
+  # adjudicator that never satisfied conservation would otherwise leave
+  # hypotheses silently unaccounted for, which is the one outcome the gate
+  # exists to prevent.
+  #
+  # `--repair` writes every uncovered hypothesis into findings.json at
+  # `internal` tier, and PROMOTES any `dropped` entry whose transcript does not
+  # exist back to `internal` — an unjustified deletion becomes a recorded
+  # non-deletion. It is idempotent, so on a run where the model DID satisfy the
+  # gate this phase is a no-op.
+  #
+  # Deterministic, model-free, and it exits 0 on every path: a phase that fails
+  # hard records no `assessedHeadShaByWorkflow` and hands `cron-review.yaml`
+  # something to re-dispatch every thirty minutes, forever.
+  - name: reconcile
+    label: Reconcile · the conservation floor
+    type: bash
+    skip_if: "analysisEnabled != true"
+    depends_on: [adjudicate]
+    # `all_done`: the floor must apply even when the adjudicator failed or was
+    # cut short — that is precisely when there is something to repair.
+    trigger_rule: all_done
+    timeout_seconds: 120
+    command: |
+      set -u
+      FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+      if ! "$FACTS" findings --dir .lastlight/pr-review --repair; then
+        echo "reconcile: could not repair findings.json; it stands as the review phase wrote it"
+      fi
+      exit 0
 
   # First-class, in-process submission (type: post-review → PhaseExecutor.
   # runPostReview). Reads the agent's findings.json for the review *content*
@@ -61,3 +625,6 @@ phases:
   - name: post-review
     label: Post inline review
     type: post-review
+    # `all_success` (the default) is deliberate here where `review` uses
+    # `all_done`: a failed review must NOT post.
+    depends_on: [review]

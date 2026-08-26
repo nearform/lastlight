@@ -873,6 +873,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const holdRaw = isPlainObject(raw.hold) ? raw.hold : {};
   const exploreRaw = isPlainObject(raw.explore) ? raw.explore : {};
   const reviewRaw = isPlainObject(raw.review) ? raw.review : {};
+  const analysisRaw = isPlainObject(reviewRaw.analysis) ? reviewRaw.analysis : {};
   const fixRaw = isPlainObject(raw.fix) ? raw.fix : {};
   const dependenciesRaw = isPlainObject(raw.dependencies) ? raw.dependencies : {};
   const approvalRaw = isPlainObject(raw.approval) ? raw.approval : {};
@@ -984,6 +985,75 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     generatedPaths: Array.isArray(reviewRaw.generatedPaths)
       ? reviewRaw.generatedPaths.filter((p): p is string => typeof p === "string" && !!p.trim()).map((p) => p.trim())
       : reviewDefaults.generatedPaths,
+    // The evidence pipeline. `enabled` reads exactly like `postsCheck` above —
+    // anything that is not literally `true` is OFF — because locked decision 8
+    // makes "off" the byte-for-byte-today path, and a truthy-ish string in an
+    // overlay must not switch a deployment onto an unmeasured pipeline.
+    analysis: {
+      enabled: analysisRaw.enabled === true,
+      maxSpecObligations:
+        nonNegativeNumber(analysisRaw.maxSpecObligations) ?? reviewDefaults.analysis.maxSpecObligations,
+      maxObligations: nonNegativeNumber(analysisRaw.maxObligations) ?? reviewDefaults.analysis.maxObligations,
+      // The control arm. Anything that is not literally `"minimal"` is `full`,
+      // in the same direction every switch in this block fails: a typo leaves
+      // the deployment on the shipped block rather than silently running an
+      // experiment arm. `lastlight-facts seed` refuses an unrecognised value
+      // outright, so a misspelling is loud at the CLI door and inert here.
+      obligationContract:
+        analysisRaw.obligationContract === "minimal"
+          ? "minimal"
+          : reviewDefaults.analysis.obligationContract,
+      // The D2 minting arms. A plain string, passed through: the CLI is the
+      // loud gate (`lastlight-facts seed --mint` exits 2 on any unknown
+      // token), so validating here would only add a second, quieter copy of
+      // the same rule. A non-string falls back to the default (""), which is
+      // the baseline arm — the direction every switch in this block fails.
+      mint: typeof analysisRaw.mint === "string" ? analysisRaw.mint.trim() : reviewDefaults.analysis.mint,
+      surveyPasses: nonNegativeNumber(analysisRaw.surveyPasses) ?? reviewDefaults.analysis.surveyPasses,
+      // WP11c. A CEILING the run clamps again per backend, so an overlay that
+      // asks for six on gondolin still gets one — the operator's ask is not the
+      // effective value and the run logs when the host overrides it.
+      surveyConcurrency:
+        nonNegativeNumber(analysisRaw.surveyConcurrency) ?? reviewDefaults.analysis.surveyConcurrency,
+      // WP4. Every one of these four reads `=== true` for the same reason
+      // `enabled` does: each buys the operator's compute, and two of them —
+      // `probes` (which installs a PR author's dependencies) and
+      // `probeLifecycleScripts` (which runs that author's postinstall) — are
+      // decisions a truthy-ish string in an overlay must never make by accident.
+      probes: analysisRaw.probes === true,
+      probeLifecycleScripts: analysisRaw.probeLifecycleScripts === true,
+      probeTypecheck: analysisRaw.probeTypecheck === true,
+      probeCoverage: analysisRaw.probeCoverage === true,
+      prepareTimeoutSeconds:
+        nonNegativeNumber(analysisRaw.prepareTimeoutSeconds) ?? reviewDefaults.analysis.prepareTimeoutSeconds,
+      coverageTimeoutSeconds:
+        nonNegativeNumber(analysisRaw.coverageTimeoutSeconds) ?? reviewDefaults.analysis.coverageTimeoutSeconds,
+      probeRounds: nonNegativeNumber(analysisRaw.probeRounds) ?? reviewDefaults.analysis.probeRounds,
+      // WP6b, the attention boundary. `maxInlineComments` allows 0 — a
+      // deployment that wants every finding in the review body is a coherent
+      // choice — so `nonNegativeNumber` is right and `|| default` would not be.
+      maxInlineComments:
+        nonNegativeNumber(analysisRaw.maxInlineComments) ?? reviewDefaults.analysis.maxInlineComments,
+      // The per-family bars merge onto the packaged set rather than replacing
+      // it: an overlay tuning ONE family must not silently un-bar the other
+      // five, which a whole-map replacement would do.
+      thresholds: {
+        ...reviewDefaults.analysis.thresholds,
+        ...numericMap(analysisRaw.thresholds),
+      },
+      internalFloor:
+        nonNegativeNumber(analysisRaw.internalFloor) ?? reviewDefaults.analysis.internalFloor,
+      // The body-side budget. Nullable exactly like `fix.maxCostUsd` above: an
+      // explicit `null` is the documented "unlimited body overflow" value (the
+      // legacy funnel), distinct from an absent/typo'd key, which falls back
+      // to the shipped `0` — no overflow, everything that would have gone to
+      // the body recorded `internal` (reason `body-budget`) instead. `0` is
+      // meaningful, so `nonNegativeNumber` + `??`, never `||`.
+      maxBodyComments:
+        analysisRaw.maxBodyComments === null
+          ? null
+          : nonNegativeNumber(analysisRaw.maxBodyComments) ?? reviewDefaults.analysis.maxBodyComments,
+    },
   };
 
   const maxWorkflows =
@@ -1216,6 +1286,22 @@ function positiveNumber(raw: unknown): number | undefined {
 /** As {@link positiveNumber}, but 0 is a legal value rather than a fallback trigger. */
 function nonNegativeNumber(raw: unknown): number | undefined {
   return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : undefined;
+}
+
+/**
+ * The numeric leaves of a flat map, dropping anything that is not a finite
+ * number. Used for `review.analysis.thresholds`, where a non-numeric value must
+ * fall through to the packaged bar rather than silently becoming `NaN` — every
+ * comparison against which is `false`, so the family would lose its bar while
+ * looking configured.
+ */
+function numericMap(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
+  }
+  return out;
 }
 
 /**

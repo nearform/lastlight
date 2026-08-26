@@ -2,16 +2,18 @@ import { useState } from "react";
 
 import type { IndexRun, InstanceResult, MartianRanking, PendingCase } from "../types";
 import { useScorecard } from "../lib/api";
-import { fmtDate, modelLabel } from "../lib/format";
+import { fmtDate, fmtDuration, isPrReviewTier, modelLabel } from "../lib/format";
 import { summarizeModels } from "../lib/summarize";
 import { CompareTable } from "./CompareTable";
 import { InstanceTable } from "./InstanceTable";
+import { MetaStrip } from "./MetaStrip";
+import { MicroPanel } from "./MicroPanel";
 import { LiveBadge, RunTypeBadge } from "./ui";
 import { useTheme } from "../hooks/useTheme";
 
 /** One run's full scorecard: tier tabs, each with a model-comparison table and
  * the per-instance detail rows. Live runs poll + show running/queued rows. */
-export function RunView({ run }: { run: IndexRun }) {
+export function RunView({ run, onShowRepeats }: { run: IndexRun; onShowRepeats?: () => void }) {
   const { data: card, isLoading, error } = useScorecard(run.scorecard, run.live);
   const labels = card?.meta?.labels ?? run.labels;
   const results = card?.results ?? [];
@@ -73,7 +75,17 @@ export function RunView({ run }: { run: IndexRun }) {
           )}
           &nbsp;·&nbsp; {fmtDate(card?.meta?.generatedAt ?? run.generatedAt)}
         </div>
-        {tier === "pr-review" && card?.meta?.martian?.models[0] && (
+        {onShowRepeats && (
+          <button
+            onClick={onShowRepeats}
+            title="Read this arm as a band across its repeats — mean/min/max, union and intersection recall, and the per-gold hit matrix."
+            className="mt-3 mr-3 inline-flex items-center gap-1.5 rounded-lg border border-info/40 bg-info/10 px-3 py-1.5 font-mono text-xs text-info transition-colors hover:bg-info/20"
+          >
+            <span className="font-bold">repeats</span>
+            <span className="text-info/70">band · union/intersection · hit matrix</span>
+          </button>
+        )}
+        {isPrReviewTier(tier) && card?.meta?.martian?.models[0] && (
           <button
             onClick={() => document.getElementById("martian-rank")?.scrollIntoView({ behavior: "smooth", block: "start" })}
             className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-accent/40 bg-accent/10 px-3 py-1.5 font-mono text-xs text-accent transition-colors hover:bg-accent/20"
@@ -94,6 +106,12 @@ export function RunView({ run }: { run: IndexRun }) {
         <Loading />
       ) : (
         <>
+          <MetaStrip
+            meta={card?.meta}
+            results={results}
+            labels={labels}
+            fallback={{ gitSha: run.gitSha, models: [...new Set(results.map((r) => r.model))] }}
+          />
           {tiers.length > 1 && (
             <nav className="mb-4 flex flex-wrap gap-2">
               {tiers.map((t, i) => (
@@ -113,11 +131,11 @@ export function RunView({ run }: { run: IndexRun }) {
             </nav>
           )}
 
-          <h2 className={(tier === "pr-review" ? "mb-2" : "mb-3.5") + " mt-2 text-lg font-semibold text-base-content"}>
+          <h2 className={(isPrReviewTier(tier) ? "mb-2" : "mb-3.5") + " mt-2 text-lg font-semibold text-base-content"}>
             {isConfig ? "Config comparison" : "Model comparison"}{" "}
             <span className="font-normal text-base-content/50">— {tier}</span>
           </h2>
-          {tier === "pr-review" && (
+          {isPrReviewTier(tier) && (
             <details className="group mb-4 max-w-2xl">
               <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 text-2xs text-base-content/50 transition-colors hover:text-base-content/80 [&::-webkit-details-marker]:hidden">
                 <span className="flex h-4 w-4 items-center justify-center rounded-full border border-base-content/30 font-mono text-[10px] leading-none">
@@ -129,14 +147,18 @@ export function RunView({ run }: { run: IndexRun }) {
               <p className="mt-2 text-2xs leading-5 text-base-content/50">
                 An LLM judge matches the posted review against a human-verified gold set of real issues, giving{" "}
                 <span className="text-base-content/70">precision</span> (matched ÷ posted) and{" "}
-                <span className="text-base-content/70">recall</span> (matched ÷ gold), combined as{" "}
+                <span className="text-base-content/70">recall</span> (matched ÷ gold). The headline is{" "}
+                <b className="font-semibold text-base-content/70">micro-recall</b> — those counts summed across cases
+                and divided once, guarded by <b className="font-semibold text-base-content/70">SNR</b> rather than
+                precision, because the pipeline is deliberately tuned to over-produce. The per-case mean of{" "}
                 <b className="font-semibold text-base-content/70">F{reviewBeta}</b>
                 {reviewBeta === 1 ? (
-                  <> — the F-beta with <span className="font-mono">β=1</span> (equal weight), matching the benchmark leaderboard</>
+                  <> (β=1, the benchmark leaderboard's metric)</>
                 ) : (
-                  <> — the F-beta with <span className="font-mono">β={reviewBeta}</span> (via <span className="font-mono">EVAL_F_BETA</span>; β&lt;1 weights precision higher)</>
-                )}
-                . Click <b className="font-semibold text-base-content/70">judge</b> on any row to inspect the match. Cases
+                  <> (β={reviewBeta} via <span className="font-mono">EVAL_F_BETA</span>; β&lt;1 weights precision higher)</>
+                )}{" "}
+                is kept beside it as a secondary number: it weights a 1-gold case like a 6-gold one and scores 1.00 on
+                a case with no gold at all. Click <b className="font-semibold text-base-content/70">judge</b> on any row to inspect the match. Cases
                 come from the offline set of{" "}
                 <a
                   href="https://github.com/withmartian/code-review-benchmark"
@@ -152,12 +174,16 @@ export function RunView({ run }: { run: IndexRun }) {
           )}
           <CompareTable models={models} tier={tier} labels={labels} axisLabel={isConfig ? "Config" : "Model"} />
 
+          {isPrReviewTier(tier) && <MicroPanel models={models} labels={labels} />}
+
           {isConfig && <PhaseModelPanel results={tierResults} labels={labels} />}
+
+          <PhaseTimingPanel results={tierResults} labels={labels} concurrency={card?.meta?.concurrency} />
 
           <h2 className="mb-3.5 mt-8 text-lg font-semibold text-base-content">Per-instance results</h2>
           <InstanceTable tier={tier} results={tierResults} pending={tierPending} labels={labels} scorecardUrl={run.scorecard} />
 
-          {tier === "pr-review" && card?.meta?.martian && (
+          {isPrReviewTier(tier) && card?.meta?.martian && (
             <MartianRankPanel ranking={card.meta.martian} labels={labels} />
           )}
         </>
@@ -209,6 +235,98 @@ function PhaseModelPanel({ results, labels }: { results: InstanceResult[]; label
             </div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Where the wall clock went, per phase — the latency instrument.
+ *
+ * A case-level `durationMs` says a review took 30 minutes and nothing about
+ * which phase spent them, so the pipeline's cost breakdown had to be read by
+ * hand out of session transcripts. Phases are summed across the arm's cases and
+ * sorted by total time, because the question this answers is always "what is the
+ * biggest thing to attack", and share-of-total is what makes an answer
+ * actionable. Loop iterations carry their own labels (`adjudicate_iter_1`), so a
+ * gate that fails and retries shows up as two rows rather than one average.
+ *
+ * Renders nothing for runs measured before per-phase timing existed.
+ */
+function PhaseTimingPanel({
+  results,
+  labels,
+  concurrency,
+}: {
+  results: InstanceResult[];
+  labels: Record<string, string>;
+  concurrency?: number;
+}) {
+  // arm → phase → { ms, cost, n }. Only phases that actually reported a window.
+  const byArm = new Map<string, Map<string, { ms: number; cost: number; n: number }>>();
+  for (const r of results) {
+    for (const p of r.phases ?? []) {
+      if (p.durationMs == null) continue;
+      let phases = byArm.get(r.model);
+      if (!phases) byArm.set(r.model, (phases = new Map()));
+      const cur = phases.get(p.phase) ?? { ms: 0, cost: 0, n: 0 };
+      cur.ms += p.durationMs;
+      cur.cost += p.costUsd ?? 0;
+      cur.n += 1;
+      phases.set(p.phase, cur);
+    }
+  }
+  const arms = [...byArm].filter(([, phases]) => phases.size);
+  if (!arms.length) return null;
+
+  return (
+    <div className="mt-8">
+      <h3 className="mb-1 text-lg font-semibold text-base-content">Where the time went</h3>
+      <p className="mb-3 max-w-2xl text-2xs leading-5 text-base-content/50">
+        Measured phase windows summed across this arm's cases, sorted by total wall clock.
+        {concurrency && concurrency > 1 ? (
+          <>
+            {" "}
+            This run used <span className="font-mono text-base-content/70">--concurrency {concurrency}</span>, so the
+            arm's elapsed time is <em>not</em> the sum of these — per-phase and per-case numbers still are.
+          </>
+        ) : null}
+      </p>
+      <div className="flex flex-col gap-3">
+        {arms.map(([arm, phases]) => {
+          const rows = [...phases].sort((a, b) => b[1].ms - a[1].ms);
+          const totalMs = rows.reduce((s, [, v]) => s + v.ms, 0) || 1;
+          return (
+            <div key={arm} className="rounded-xl border border-base-300 bg-base-200 px-4 py-3">
+              <div className="mb-2 flex items-baseline gap-2">
+                <span className="font-mono text-xs font-semibold text-base-content">{modelLabel(labels, arm)}</span>
+                <span className="font-mono text-2xs text-base-content/40">
+                  {fmtDuration(totalMs)} of model + gate time
+                </span>
+              </div>
+              <div className="flex flex-col gap-1">
+                {rows.map(([phase, v]) => {
+                  const share = v.ms / totalMs;
+                  return (
+                    <div key={phase} className="flex items-center gap-2 font-mono text-2xs">
+                      <span className="w-44 shrink-0 truncate text-base-content/60" title={phase}>
+                        {phase}
+                      </span>
+                      <div className="h-1.5 flex-1 overflow-hidden rounded bg-base-300">
+                        <div className="h-full rounded bg-info/70" style={{ width: `${Math.max(share * 100, 0.5)}%` }} />
+                      </div>
+                      <span className="w-14 shrink-0 text-right text-base-content/70">{fmtDuration(v.ms)}</span>
+                      <span className="w-10 shrink-0 text-right text-base-content/40">{(share * 100).toFixed(0)}%</span>
+                      <span className="w-16 shrink-0 text-right text-base-content/40">
+                        {v.cost > 0 ? `$${v.cost.toFixed(2)}` : ""}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

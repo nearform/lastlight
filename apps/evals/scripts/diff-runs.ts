@@ -36,7 +36,13 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import type { Scorecard, InstanceResult, ModelSummary } from "../src/schema.js";
+// `Scorecard`/`ModelSummary` live in report.ts, not schema.ts. This file sits
+// outside the `src` rootDir so `tsc --noEmit` never checks it, and type imports
+// erase at runtime — so importing them from the wrong module resolved to
+// nothing and failed silently rather than erroring.
+import type { InstanceResult } from "../src/schema.js";
+import type { Scorecard, ModelSummary } from "../src/report.js";
+import { microReview, pairedRecall, DETECTION_FLOOR_MICRO_RECALL } from "../src/review-metrics.js";
 
 function flag(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -89,6 +95,50 @@ function fbetaByCase(card: Scorecard, model: string): Map<string, number> {
   return m;
 }
 
+/** One arm's graded pr-review results, for the micro/paired sections below. */
+function armResults(card: Scorecard, model: string): InstanceResult[] {
+  return card.results.filter((r) => r.model === model);
+}
+
+/** Restrict an arm's results to a split (all of them when the split is empty). */
+function inSplit(results: InstanceResult[], split: Set<string>): InstanceResult[] {
+  return split.size ? results.filter((r) => split.has(r.instance_id)) : results;
+}
+
+const ratio = (x: number | null | undefined) => (x === null || x === undefined || !Number.isFinite(x) ? "  n/a" : x.toFixed(3));
+
+/**
+ * Micro-recall, SNR and the paired significance for one slice.
+ *
+ * Micro-recall is the headline (`docs/plans/deterministic-pr-levers.md` §WP8)
+ * because the per-case F1 mean weights a 1-gold case like a 6-gold one and hands
+ * an empty-gold case a free 1.00. The McNemar line is the detection floor made
+ * mechanical: on a 25-finding gold set ONE extra hit is p = 0.50, and without
+ * that number printed beside the delta a reader will call a coin flip progress.
+ */
+function renderMicro(label: string, base: InstanceResult[], cand: InstanceResult[]): string[] {
+  const b = microReview(base);
+  const c = microReview(cand);
+  if (!b.cases && !c.cases) return [];
+  const paired = pairedRecall(base, cand);
+  const d = (x: number | null, y: number | null) =>
+    x === null || y === null ? "   —  " : delta(y - x);
+
+  const out = [
+    `  ${label.padEnd(9)} μrec ${ratio(b.microRecall)} → ${ratio(c.microRecall)}  ${d(b.microRecall, c.microRecall)}` +
+      `   SNR ${ratio(b.snr)} → ${ratio(c.snr)}` +
+      `   posted ${b.posted}→${c.posted}  matched ${b.matched}→${c.matched}  gold ${c.gold || b.gold}`,
+  ];
+  if (paired.gained || paired.lost) {
+    out.push(
+      `  ${" ".repeat(9)} paired: +${paired.gained} new / -${paired.lost} lost   ` +
+        `McNemar p=${paired.oneSided.toFixed(3)} one-sided, ${paired.twoSided.toFixed(3)} two-sided` +
+        `${paired.approximate ? "   (APPROXIMATE — a case had no judge trace; discordance is a lower bound)" : ""}`,
+    );
+  }
+  return out;
+}
+
 function fmt(x: number | undefined): string {
   return x === undefined ? " n/a" : x.toFixed(3);
 }
@@ -138,6 +188,28 @@ function main(): void {
   console.log(`CANDIDATE ${candPath}  [arm: ${candModel}]`);
   console.log(`epsilon=${eps}  (Δ within ±epsilon counts as unchanged)\n`);
 
+  // A grader-version mismatch means the Δ below measures the JUDGE, not the
+  // arm: `match-v1` paired one-to-one, `match-v2` lets one comment carry two
+  // golds and neutralizes sibling-round findings. Warn loudly rather than
+  // refuse — the per-case table is still useful for eyeballing — but the
+  // verdict line cannot be trusted across versions.
+  const promptOf = (card: Scorecard, arm: string): string => {
+    const versions = new Set(
+      (card.results ?? [])
+        .filter((r) => r.model === arm && r.review?.trace)
+        .map((r) => r.review!.trace!.matchPrompt ?? "match-v1"),
+    );
+    return [...versions].sort().join("+") || "unknown";
+  };
+  const basePrompt = promptOf(base, baseModel);
+  const candPrompt = promptOf(cand, candModel);
+  if (basePrompt !== candPrompt) {
+    console.log(
+      `  ⚠ MATCH-PROMPT MISMATCH: baseline graded by ${basePrompt}, candidate by ${candPrompt}. ` +
+        `The Δ measures the grader as much as the arm — re-grade one side (rescore cannot do this; re-run or re-judge) before trusting any verdict.\n`,
+    );
+  }
+
   // Per-case table.
   const hdrSplit = train.size || heldout.size ? "  split" : "";
   console.log(`  ${"instance_id".padEnd(38)}  base   cand    Δ      ${hdrSplit}`);
@@ -163,6 +235,47 @@ function main(): void {
     console.log(line("precision", bs.avgPrecision, cs.avgPrecision));
     console.log(line("recall", bs.avgRecall, cs.avgRecall));
     console.log(line(`F${cs.reviewBeta ?? 1}`, bs.avgFbeta, cs.avgFbeta));
+  }
+
+  // Micro-aggregated section — the headline for recall-first work, reported at
+  // arm AND split level. The per-case means above stay for leaderboard parity.
+  //
+  // Micro-aggregation is only meaningful over the SAME cases: summing gold from
+  // an 8-case baseline against a 1-case candidate compares two different
+  // denominators and reads as a collapse. So both sides are restricted to the
+  // cases BOTH runs graded, and anything dropped is named — an incomplete run
+  // silently changing the denominator has produced a wrong verdict here before.
+  const gradedIds = (c: Scorecard, m: string) =>
+    new Set(c.results.filter((r) => r.model === m && r.review && !r.error).map((r) => r.instance_id));
+  const baseIds = gradedIds(base, baseModel);
+  const candIds = gradedIds(cand, candModel);
+  const shared = new Set([...baseIds].filter((id) => candIds.has(id)));
+  const onlyBase = [...baseIds].filter((id) => !shared.has(id));
+  const onlyCand = [...candIds].filter((id) => !shared.has(id));
+  if (onlyBase.length || onlyCand.length) {
+    console.log(`\n⚠ INCOMPLETE COMPARISON — the two runs do not cover the same cases.`);
+    console.log(`  compared on ${shared.size} shared case(s); the micro + verdict sections below use ONLY those.`);
+    if (onlyBase.length) console.log(`  baseline-only  (${onlyBase.length}): ${onlyBase.sort().join(", ")}`);
+    if (onlyCand.length) console.log(`  candidate-only (${onlyCand.length}): ${onlyCand.sort().join(", ")}`);
+    console.log(`  The per-case table above still lists every case, with "n/a" where a run has none.`);
+  }
+  const baseArm = armResults(base, baseModel).filter((r) => shared.has(r.instance_id));
+  const candArm = armResults(cand, candModel).filter((r) => shared.has(r.instance_id));
+  const microLines = [
+    ...renderMicro("arm", baseArm, candArm),
+    ...(train.size ? renderMicro("train", inSplit(baseArm, train), inSplit(candArm, train)) : []),
+    ...(heldout.size ? renderMicro("heldout", inSplit(baseArm, heldout), inSplit(candArm, heldout)) : []),
+  ];
+  if (microLines.length) {
+    console.log(`\nMICRO (matched ÷ gold, summed — an empty-gold case cannot inflate it):`);
+    for (const l of microLines) console.log(l);
+    const goldTotal = microReview(candArm).gold || microReview(baseArm).gold;
+    if (goldTotal > 0 && goldTotal < 100) {
+      console.log(
+        `\n  ⚠ ${goldTotal} gold findings — the paired detection floor is ≈ ${DETECTION_FLOOR_MICRO_RECALL.toFixed(2)} μrec.` +
+          `\n    Read the McNemar p, not the Δ: one extra hit is p = 0.50. Gate on mechanism metrics.`,
+      );
+    }
   }
 
   // Split-aware verdict.
@@ -216,6 +329,13 @@ function main(): void {
       } else {
         verdict = `KEEP — train ↑ and held-out held (train Δ ${delta(trainD).trim()}, heldout Δ ${delta(heldD!).trim()})`;
       }
+    }
+    // A verdict on runs that graded different cases is not a weak signal, it is
+    // a wrong one: a split mean over 5 ids where 4 are missing compares one case
+    // against five. Say INCOMPLETE rather than REVERT — the eval-loop skill
+    // parses this line, and a false REVERT throws away a good candidate.
+    if (onlyBase.length || onlyCand.length) {
+      verdict = `INCOMPLETE — the runs graded different case sets (${shared.size} shared, ${onlyBase.length + onlyCand.length} unmatched); re-run the missing cases before judging. Original verdict on the partial data would have been: ${verdict}`;
     }
     console.log(`\nVERDICT: ${verdict}`);
     if (regressedIds.length) {

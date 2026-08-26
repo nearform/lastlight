@@ -1,0 +1,3709 @@
+{
+  "version": 1,
+  "generatedAt": "2026-08-21T12:00:02.112Z",
+  "tokenizer": "v1",
+  "source": {
+    "dataset": "martian code-review-benchmark (offline)",
+    "cases": 50,
+    "goldFindings": 137,
+    "diff": "git diff -U0 <base>...<head> (three-dot / merge-base)"
+  },
+  "summary": {
+    "anchored": 99,
+    "total": 137,
+    "anchorRate": 0.7226277372262774,
+    "unanchored": 38,
+    "unanchoredNoTokens": 20,
+    "unanchoredPathOnly": 1,
+    "byLanguage": {
+      "Java": {
+        "total": 24,
+        "anchored": 18,
+        "rate": 0.75
+      },
+      "Python": {
+        "total": 32,
+        "anchored": 16,
+        "rate": 0.5
+      },
+      "Go": {
+        "total": 22,
+        "anchored": 19,
+        "rate": 0.8636363636363636
+      },
+      "Ruby": {
+        "total": 28,
+        "anchored": 20,
+        "rate": 0.7142857142857143
+      },
+      "TypeScript": {
+        "total": 31,
+        "anchored": 26,
+        "rate": 0.8387096774193549
+      }
+    },
+    "byBugType": {
+      "incorrect_value": {
+        "total": 34,
+        "anchored": 18,
+        "rate": 0.5294117647058824
+      },
+      "missing_validation": {
+        "total": 5,
+        "anchored": 2,
+        "rate": 0.4
+      },
+      "other": {
+        "total": 10,
+        "anchored": 8,
+        "rate": 0.8
+      },
+      "logic_error": {
+        "total": 17,
+        "anchored": 15,
+        "rate": 0.8823529411764706
+      },
+      "api_misuse": {
+        "total": 26,
+        "anchored": 19,
+        "rate": 0.7307692307692307
+      },
+      "null_reference": {
+        "total": 11,
+        "anchored": 11,
+        "rate": 1
+      },
+      "security": {
+        "total": 9,
+        "anchored": 4,
+        "rate": 0.4444444444444444
+      },
+      "dead_code": {
+        "total": 5,
+        "anchored": 5,
+        "rate": 1
+      },
+      "race_condition": {
+        "total": 13,
+        "anchored": 11,
+        "rate": 0.8461538461538461
+      },
+      "type_error": {
+        "total": 7,
+        "anchored": 6,
+        "rate": 0.8571428571428571
+      }
+    }
+  },
+  "audit": {
+    "seed": 20260821,
+    "sampleSize": 20,
+    "method": "Uniform sample (mulberry32, seeded Fisher-Yates) of the ANCHORED findings, each read by hand against its matched diff lines. `verdict` is the NAMING bar (what `anchored` claims): good = the matching anchor refers to the same code entity the comment is about; spurious = a homonym, or not a code reference at all. `localized` is a stricter LOCATION bar: precise = a matched line is the site the comment targets; diffuse = the right entity is named but the target site is never matched.",
+    "sampled": [
+      "prreview__keycloak-36882#0",
+      "prreview__keycloak-greptile-41249#0",
+      "prreview__grafana-103633#1",
+      "prreview__grafana-106778#0",
+      "prreview__grafana-107534#0",
+      "prreview__grafana-79265#2",
+      "prreview__grafana-79265#3",
+      "prreview__grafana-76186#1",
+      "prreview__discourse-graphite-10#0",
+      "prreview__discourse-graphite-10#3",
+      "prreview__discourse-graphite-6#0",
+      "prreview__discourse-graphite-4#2",
+      "prreview__discourse-graphite-4#4",
+      "prreview__discourse-graphite-2#0",
+      "prreview__discourse-graphite-2#1",
+      "prreview__cal-com-8330#1",
+      "prreview__cal-com-7232#1",
+      "prreview__cal-com-10600#0",
+      "prreview__cal-com-10600#3",
+      "prreview__cal-com-10967#4"
+    ],
+    "good": 20,
+    "spurious": 0,
+    "falseMatchRate": 0,
+    "diffuse": 2,
+    "diffuseRate": 0.1,
+    "verdicts": [
+      {
+        "key": "prreview__keycloak-36882#0",
+        "verdict": "good",
+        "localized": "precise",
+        "note": "`picocli.exit` matched the exact `picocli.exit(CompatibilityResult…)` calls the comment names."
+      },
+      {
+        "key": "prreview__keycloak-greptile-41249#0",
+        "verdict": "good",
+        "localized": "precise",
+        "note": "`UserModel` matched `isConditionalPasskeysEnabled(UserModel currentUser)` — the signature under discussion."
+      },
+      {
+        "key": "prreview__grafana-103633#1",
+        "verdict": "good",
+        "localized": "diffuse",
+        "note": "Weakest of the 20. `checkPermission` IS the function the comment names, but the one matched line is its production call site; the comment is about a misleading comment + `false` value in the test's cached-permission map, which the anchor never reaches."
+      },
+      {
+        "key": "prreview__grafana-106778#0",
+        "verdict": "good",
+        "localized": "precise",
+        "note": "`GrafanaRuleListItem` matched both its definition and the `<GrafanaRuleListItem` render site missing the `key` prop."
+      },
+      {
+        "key": "prreview__grafana-107534#0",
+        "verdict": "good",
+        "localized": "precise",
+        "note": "`applyTemplateVariables` matched the exact three-argument call (`…, request.scopedVars, request.filters`) the comment quotes."
+      },
+      {
+        "key": "prreview__grafana-79265#2",
+        "verdict": "good",
+        "localized": "precise",
+        "note": "`dbSession.Exec` matched `result, err := dbSession.Exec(args...)` verbatim — the line that would not compile."
+      },
+      {
+        "key": "prreview__grafana-79265#3",
+        "verdict": "good",
+        "localized": "precise",
+        "note": "`ErrDeviceLimitReached` matched its declaration and the `return ErrDeviceLimitReached` the comment calls misleading."
+      },
+      {
+        "key": "prreview__grafana-76186#1",
+        "verdict": "good",
+        "localized": "precise",
+        "note": "All three anchors matched: the removed `traceID` logging lines in `LoggerMiddleware` and the new `ContextualLoggerMiddleware` that omits them."
+      },
+      {
+        "key": "prreview__discourse-graphite-10#0",
+        "verdict": "good",
+        "localized": "precise",
+        "note": "`before_validation` matched the `before_validation do` block in embeddable_host.rb; the `EmbeddableHost` anchor added 11 further, unrelated call sites."
+      },
+      {
+        "key": "prreview__discourse-graphite-10#3",
+        "verdict": "good",
+        "localized": "diffuse",
+        "note": "Right entity, wrong places: `embeddable_hosts`/`EmbeddableHost` matched 13 lines across 9 files (JS controllers, hbs templates, locale yml) and never the raw-SQL migration the comment is actually about."
+      },
+      {
+        "key": "prreview__discourse-graphite-6#0",
+        "verdict": "good",
+        "localized": "precise",
+        "note": "`include_website_name` matched `def include_website_name` — literally the method whose missing `?` suffix is the finding."
+      },
+      {
+        "key": "prreview__discourse-graphite-4#2",
+        "verdict": "good",
+        "localized": "precise",
+        "note": "`postMessage` matched the exact `parent.postMessage(…, '<%= request.referer %>')` line. The separate `URL` anchor matched a locale string and two spec titles — acronym noise inside an otherwise correct label."
+      },
+      {
+        "key": "prreview__discourse-graphite-4#4",
+        "verdict": "good",
+        "localized": "precise",
+        "note": "`TopicEmbed` matched `TopicEmbed.import(user, url, …)`, the method the comment names; the `HTML` anchor separately matched an unrelated code comment."
+      },
+      {
+        "key": "prreview__discourse-graphite-2#0",
+        "verdict": "good",
+        "localized": "precise",
+        "note": "`TopicUser` matched `tu = TopicUser.find_by(…)` — the nil-able assignment the comment warns about."
+      },
+      {
+        "key": "prreview__discourse-graphite-2#1",
+        "verdict": "good",
+        "localized": "precise",
+        "note": "The misspelled `stopNotificiationsText` matched its definition and its template use; the correctly-spelled variant matched nothing, as it should."
+      },
+      {
+        "key": "prreview__cal-com-8330#1",
+        "verdict": "good",
+        "localized": "precise",
+        "note": "Four anchors matched the exact `dayjs(date.start).add(utcOffset,…) === dayjs(date.end)…` comparison the comment says will always be false."
+      },
+      {
+        "key": "prreview__cal-com-7232#1",
+        "verdict": "good",
+        "localized": "precise",
+        "note": "`immediateDelete` matched `if (immediateDelete) {` inside `deleteScheduledEmailReminder` — the exact branch the comment describes."
+      },
+      {
+        "key": "prreview__cal-com-10600#0",
+        "verdict": "good",
+        "localized": "precise",
+        "note": "`TwoFactor` matched `export default function TwoFactor` inside BackupCode.tsx — the naming inconsistency itself."
+      },
+      {
+        "key": "prreview__cal-com-10600#3",
+        "verdict": "good",
+        "localized": "precise",
+        "note": "`backupCodes` matched the decrypt-then-mutate lines in disable.ts that the race-condition comment is about."
+      },
+      {
+        "key": "prreview__cal-com-10967#4",
+        "verdict": "good",
+        "localized": "precise",
+        "note": "`createEvent`/`credentialId` matched both `Calendar.d.ts` declarations the comment contrasts, plus the implementation that keeps the old arity."
+      }
+    ]
+  },
+  "cases": [
+    {
+      "instanceId": "prreview__keycloak-37429",
+      "repo": "keycloak/keycloak",
+      "language": "Java",
+      "requiresContext": "cross_file",
+      "changedFiles": 47,
+      "changedLines": 448,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "medium",
+          "anchors": [
+            "messages_lt"
+          ],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "incorrect_value",
+          "pathOnly": true
+        },
+        {
+          "goldIndex": 1,
+          "severity": "medium",
+          "anchors": [
+            "totpStep1",
+            "zh_CN"
+          ],
+          "anchoredLines": [
+            "themes/src/main/resources-community/theme/base/account/messages/messages_fi.properties:141",
+            "themes/src/main/resources-community/theme/base/account/messages/messages_lt.properties:101",
+            "themes/src/main/resources-community/theme/base/account/messages/messages_sk.properties:101",
+            "themes/src/main/resources-community/theme/base/account/messages/messages_sv.properties:96",
+            "themes/src/main/resources-community/theme/base/account/messages/messages_zh_CN.properties:112"
+          ],
+          "anchored": true,
+          "bugType": "incorrect_value",
+          "matchedAnchors": [
+            "totpStep1"
+          ],
+          "matchCount": 5,
+          "matchFiles": 5
+        },
+        {
+          "goldIndex": 2,
+          "severity": "low",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "missing_validation"
+        },
+        {
+          "goldIndex": 3,
+          "severity": "low",
+          "anchors": [
+            "santizeAnchors",
+            "sanitizeAnchors"
+          ],
+          "anchoredLines": [
+            "misc/theme-verifier/src/main/java/org/keycloak/themeverifier/VerifyMessageProperties.java:88",
+            "misc/theme-verifier/src/main/java/org/keycloak/themeverifier/VerifyMessageProperties.java:150"
+          ],
+          "anchored": true,
+          "bugType": "other",
+          "matchedAnchors": [
+            "santizeAnchors"
+          ],
+          "matchCount": 2,
+          "matchFiles": 1
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__keycloak-37634",
+      "repo": "keycloak/keycloak",
+      "language": "Java",
+      "requiresContext": "file",
+      "changedFiles": 28,
+      "changedLines": 748,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "critical",
+          "anchors": [
+            "grantType",
+            "rawTokenId"
+          ],
+          "anchoredLines": [
+            "server-spi-private/src/main/java/org/keycloak/protocol/oidc/grants/OAuth2GrantType.java:85",
+            "server-spi-private/src/main/java/org/keycloak/protocol/oidc/grants/OAuth2GrantType.java:102",
+            "server-spi-private/src/main/java/org/keycloak/protocol/oidc/grants/OAuth2GrantType.java:174",
+            "services/src/main/java/org/keycloak/protocol/oidc/encode/AccessTokenContext.java:33",
+            "services/src/main/java/org/keycloak/protocol/oidc/encode/AccessTokenContext.java:69",
+            "services/src/main/java/org/keycloak/protocol/oidc/encode/AccessTokenContext.java:72",
+            "services/src/main/java/org/keycloak/protocol/oidc/encode/AccessTokenContext.java:73",
+            "services/src/main/java/org/keycloak/protocol/oidc/encode/AccessTokenContext.java:76",
+            "services/src/main/java/org/keycloak/protocol/oidc/encode/AccessTokenContext.java:89",
+            "services/src/main/java/org/keycloak/protocol/oidc/encode/DefaultTokenContextEncoderProvider.java:57",
+            "services/src/main/java/org/keycloak/protocol/oidc/encode/DefaultTokenContextEncoderProvider.java:58",
+            "services/src/main/java/org/keycloak/protocol/oidc/encode/DefaultTokenContextEncoderProvider.java:59"
+          ],
+          "anchored": true,
+          "bugType": "incorrect_value",
+          "matchedAnchors": [
+            "grantType",
+            "rawTokenId"
+          ],
+          "matchCount": 30,
+          "matchFiles": 5
+        },
+        {
+          "goldIndex": 1,
+          "severity": "high",
+          "anchors": [
+            "isAccessTokenId",
+            "UUID"
+          ],
+          "anchoredLines": [
+            "testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/AssertEvents.java:145",
+            "testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/AssertEvents.java:173",
+            "testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/AssertEvents.java:182",
+            "testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/AssertEvents.java:244",
+            "testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/AssertEvents.java:476"
+          ],
+          "anchored": true,
+          "bugType": "logic_error",
+          "matchedAnchors": [
+            "isAccessTokenId"
+          ],
+          "matchCount": 5,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 2,
+          "severity": "low",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "other"
+        },
+        {
+          "goldIndex": 3,
+          "severity": "low",
+          "anchors": [
+            "RuntimeException",
+            "IllegalArgumentException"
+          ],
+          "anchoredLines": [
+            "services/src/test/java/org/keycloak/protocol/oidc/encode/DefaultTokenContextEncoderProviderTest.java:82",
+            "services/src/main/java/org/keycloak/protocol/oidc/encode/DefaultTokenContextEncoderProvider.java:75",
+            "services/src/main/java/org/keycloak/protocol/oidc/encode/DefaultTokenContextEncoderProvider.java:85",
+            "services/src/main/java/org/keycloak/protocol/oidc/encode/DefaultTokenContextEncoderProvider.java:89",
+            "services/src/main/java/org/keycloak/protocol/oidc/encode/DefaultTokenContextEncoderProvider.java:93"
+          ],
+          "anchored": true,
+          "bugType": "api_misuse",
+          "matchedAnchors": [
+            "RuntimeException",
+            "IllegalArgumentException"
+          ],
+          "matchCount": 5,
+          "matchFiles": 2
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__keycloak-38446",
+      "repo": "keycloak/keycloak",
+      "language": "Java",
+      "requiresContext": "cross_file",
+      "changedFiles": 8,
+      "changedLines": 287,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "medium",
+          "anchors": [
+            "Optional.get",
+            "RecoveryAuthnCodesUtils",
+            "getCredential",
+            "isPresent",
+            "NoSuchElementException"
+          ],
+          "anchoredLines": [
+            "services/src/main/java/org/keycloak/authentication/authenticators/browser/RecoveryAuthnCodesFormAuthenticator.java:80",
+            "services/src/main/java/org/keycloak/forms/login/freemarker/model/RecoveryAuthnCodeInputLoginBean.java:8",
+            "services/src/main/java/org/keycloak/forms/login/freemarker/model/RecoveryAuthnCodeInputLoginBean.java:17",
+            "server-spi/src/main/java/org/keycloak/models/utils/RecoveryAuthnCodesUtils.java:56"
+          ],
+          "anchored": true,
+          "bugType": "null_reference",
+          "matchedAnchors": [
+            "RecoveryAuthnCodesUtils",
+            "getCredential"
+          ],
+          "matchCount": 4,
+          "matchFiles": 3
+        },
+        {
+          "goldIndex": 1,
+          "severity": "low",
+          "anchors": [
+            "RecoveryAuthnCodesCredentialModel",
+            "e.g",
+            "myUser.recoveryCodes.getId",
+            "myUser",
+            "recoveryCodes",
+            "getId",
+            "removeStoredCredentialById"
+          ],
+          "anchoredLines": [
+            "server-spi-private/src/main/java/org/keycloak/utils/CredentialHelper.java:36",
+            "server-spi-private/src/main/java/org/keycloak/utils/CredentialHelper.java:115",
+            "server-spi/src/main/java/org/keycloak/models/utils/RecoveryAuthnCodesUtils.java:12",
+            "server-spi/src/main/java/org/keycloak/models/utils/RecoveryAuthnCodesUtils.java:59",
+            "server-spi/src/main/java/org/keycloak/models/utils/RecoveryAuthnCodesUtils.java:61",
+            "services/src/main/java/org/keycloak/authentication/authenticators/browser/RecoveryAuthnCodesFormAuthenticator.java:81",
+            "services/src/main/java/org/keycloak/forms/login/freemarker/model/RecoveryAuthnCodeInputLoginBean.java:14",
+            "services/src/main/java/org/keycloak/forms/login/freemarker/model/RecoveryAuthnCodeInputLoginBean.java:17",
+            "services/src/main/java/org/keycloak/forms/login/freemarker/model/RecoveryAuthnCodeInputLoginBean.java:19",
+            "testsuite/integration-arquillian/servers/auth-server/services/testsuite-providers/src/main/java/org/keycloak/testsuite/federation/BackwardsCompatibilityUserStorage.java:46",
+            "testsuite/integration-arquillian/servers/auth-server/services/testsuite-providers/src/main/java/org/keycloak/testsuite/federation/BackwardsCompatibilityUserStorage.java:114",
+            "testsuite/integration-arquillian/servers/auth-server/services/testsuite-providers/src/main/java/org/keycloak/testsuite/federation/BackwardsCompatibilityUserStorage.java:193"
+          ],
+          "anchored": true,
+          "bugType": "null_reference",
+          "matchedAnchors": [
+            "RecoveryAuthnCodesCredentialModel",
+            "myUser",
+            "recoveryCodes"
+          ],
+          "matchCount": 27,
+          "matchFiles": 5
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__keycloak-36882",
+      "repo": "keycloak/keycloak",
+      "language": "Java",
+      "requiresContext": "cross_file",
+      "changedFiles": 11,
+      "changedLines": 88,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "medium",
+          "anchors": [
+            "picocli.exit",
+            "System.exit"
+          ],
+          "anchoredLines": [
+            "quarkus/runtime/src/main/java/org/keycloak/quarkus/runtime/cli/command/UpdateCompatibilityCheck.java:48",
+            "quarkus/runtime/src/main/java/org/keycloak/quarkus/runtime/cli/command/UpdateCompatibilityMetadata.java:48"
+          ],
+          "anchored": true,
+          "bugType": "api_misuse",
+          "matchedAnchors": [
+            "picocli.exit"
+          ],
+          "matchCount": 2,
+          "matchFiles": 2
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__keycloak-36880",
+      "repo": "keycloak/keycloak",
+      "language": "Java",
+      "requiresContext": "cross_file",
+      "changedFiles": 10,
+      "changedLines": 1004,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "high",
+          "anchors": [
+            "AdminPermissions",
+            "ADMIN_FINE_GRAINED_AUTHZ",
+            "ADMIN_FINE_GRAINED_AUTHZ_V2"
+          ],
+          "anchoredLines": [
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/AdminPermissions.java:77"
+          ],
+          "anchored": true,
+          "bugType": "logic_error",
+          "matchedAnchors": [
+            "ADMIN_FINE_GRAINED_AUTHZ"
+          ],
+          "matchCount": 1,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 1,
+          "severity": "high",
+          "anchors": [
+            "hasPermission",
+            "ClientModel",
+            "findByName",
+            "client.getId",
+            "getId",
+            "server.getId",
+            "AdminPermissionsSchema",
+            "getOrCreateResource",
+            "resourceServer",
+            "getClientId"
+          ],
+          "anchoredLines": [
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionsV2.java:61",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionsV2.java:68",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionsV2.java:73",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionsV2.java:82",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionsV2.java:87",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionsV2.java:92",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionsV2.java:97",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionsV2.java:102",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionsV2.java:109",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionsV2.java:121",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionsV2.java:207",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionsV2.java:237"
+          ],
+          "anchored": true,
+          "bugType": "incorrect_value",
+          "matchedAnchors": [
+            "hasPermission",
+            "ClientModel",
+            "findByName",
+            "client.getId",
+            "getId",
+            "server.getId",
+            "AdminPermissionsSchema",
+            "getClientId"
+          ],
+          "matchCount": 162,
+          "matchFiles": 8
+        },
+        {
+          "goldIndex": 2,
+          "severity": "high",
+          "anchors": [
+            "getClientsWithPermission",
+            "resourceStore",
+            "findByType",
+            "AdminPermissionsSchema",
+            "CLIENTS_RESOURCE_TYPE",
+            "getName",
+            "AvailableRoleMappingResource",
+            "getRoleIdsWithPermissions",
+            "IDs",
+            "getClientById"
+          ],
+          "anchoredLines": [
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionsV2.java:125",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionsV2.java:138",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionsV2.java:214",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionsV2.java:244",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionEvaluator.java:43",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionEvaluator.java:55",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionEvaluator.java:67",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionEvaluator.java:110",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionEvaluator.java:119",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionEvaluator.java:138",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionEvaluator.java:150",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/ClientPermissionEvaluator.java:162"
+          ],
+          "anchored": true,
+          "bugType": "incorrect_value",
+          "matchedAnchors": [
+            "getClientsWithPermission",
+            "resourceStore",
+            "findByType",
+            "AdminPermissionsSchema",
+            "CLIENTS_RESOURCE_TYPE",
+            "getName",
+            "getClientById"
+          ],
+          "matchCount": 75,
+          "matchFiles": 6
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__keycloak-37038",
+      "repo": "keycloak/keycloak",
+      "language": "Java",
+      "requiresContext": "cross_file",
+      "changedFiles": 19,
+      "changedLines": 957,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "high",
+          "anchors": [
+            "canManage"
+          ],
+          "anchoredLines": [
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/GroupPermissionEvaluator.java:54",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/GroupPermissionEvaluator.java:81",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/GroupPermissionEvaluator.java:105",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/GroupPermissions.java:299",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/GroupPermissions.java:315",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/GroupPermissionsV2.java:65",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/GroupPermissionsV2.java:74",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/GroupPermissionsV2.java:91",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/UserPermissionEvaluator.java:34",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/UserPermissionEvaluator.java:39",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/UserPermissionsV2.java:90",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/UserPermissionsV2.java:99"
+          ],
+          "anchored": true,
+          "bugType": "security",
+          "matchedAnchors": [
+            "canManage"
+          ],
+          "matchCount": 12,
+          "matchFiles": 5
+        },
+        {
+          "goldIndex": 1,
+          "severity": "high",
+          "anchors": [
+            "getGroupIdsWithViewPermission",
+            "hasPermission",
+            "groupResource.getId",
+            "groupResource",
+            "getId",
+            "GroupPermissionEvaluator",
+            "IDs",
+            "UserModel",
+            "GROUPS",
+            "getUsersCount",
+            "VIEW_MEMBERS/MANAGE_MEMBERS",
+            "VIEW_MEMBERS",
+            "MANAGE_MEMBERS",
+            "JPA"
+          ],
+          "anchoredLines": [
+            "rest/admin-ui-ext/src/main/java/org/keycloak/admin/ui/rest/BruteForceUsersResource.java:147",
+            "services/src/main/java/org/keycloak/services/resources/admin/UsersResource.java:398",
+            "services/src/main/java/org/keycloak/services/resources/admin/UsersResource.java:425",
+            "services/src/main/java/org/keycloak/services/resources/admin/UsersResource.java:430",
+            "services/src/main/java/org/keycloak/services/resources/admin/UsersResource.java:448",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/GroupPermissionEvaluator.java:147",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/GroupPermissions.java:298",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/GroupPermissionsV2.java:106",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/GroupPermissions.java:310",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/GroupPermissions.java:356",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/GroupPermissions.java:340",
+            "services/src/main/java/org/keycloak/services/resources/admin/permissions/GroupPermissionsV2.java:52"
+          ],
+          "anchored": true,
+          "bugType": "api_misuse",
+          "matchedAnchors": [
+            "getGroupIdsWithViewPermission",
+            "hasPermission",
+            "groupResource.getId",
+            "groupResource",
+            "getId",
+            "IDs",
+            "UserModel",
+            "GROUPS",
+            "getUsersCount",
+            "VIEW_MEMBERS",
+            "MANAGE_MEMBERS"
+          ],
+          "matchCount": 93,
+          "matchFiles": 9
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__keycloak-33832",
+      "repo": "keycloak/keycloak",
+      "language": "Java",
+      "requiresContext": "cross_file",
+      "changedFiles": 12,
+      "changedLines": 682,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "high",
+          "anchors": [
+            "BouncyCastle"
+          ],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "incorrect_value"
+        },
+        {
+          "goldIndex": 1,
+          "severity": "low",
+          "anchors": [
+            "ASN1Encoder"
+          ],
+          "anchoredLines": [
+            "authz/client/src/main/java/org/keycloak/authorization/client/util/crypto/ASN1Decoder.java:52",
+            "authz/client/src/main/java/org/keycloak/authorization/client/util/crypto/ASN1Decoder.java:68",
+            "authz/client/src/main/java/org/keycloak/authorization/client/util/crypto/ASN1Encoder.java:30",
+            "authz/client/src/main/java/org/keycloak/authorization/client/util/crypto/ASN1Encoder.java:38",
+            "authz/client/src/main/java/org/keycloak/authorization/client/util/crypto/ASN1Encoder.java:42",
+            "authz/client/src/main/java/org/keycloak/authorization/client/util/crypto/ASN1Encoder.java:43",
+            "authz/client/src/main/java/org/keycloak/authorization/client/util/crypto/ASN1Encoder.java:46",
+            "authz/client/src/main/java/org/keycloak/authorization/client/util/crypto/ASN1Encoder.java:51",
+            "authz/client/src/main/java/org/keycloak/authorization/client/util/crypto/ASN1Encoder.java:93",
+            "authz/client/src/main/java/org/keycloak/authorization/client/util/crypto/ASN1Encoder.java:95",
+            "authz/client/src/main/java/org/keycloak/authorization/client/util/crypto/AuthzClientCryptoProvider.java:114",
+            "authz/client/src/main/java/org/keycloak/authorization/client/util/crypto/AuthzClientCryptoProvider.java:115"
+          ],
+          "anchored": true,
+          "bugType": "dead_code",
+          "matchedAnchors": [
+            "ASN1Encoder"
+          ],
+          "matchCount": 15,
+          "matchFiles": 3
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__keycloak-40940",
+      "repo": "keycloak/keycloak",
+      "language": "Java",
+      "requiresContext": "cross_file",
+      "changedFiles": 4,
+      "changedLines": 62,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "critical",
+          "anchors": [
+            "getSubGroupsCount",
+            "GroupModel",
+            "NPEs"
+          ],
+          "anchoredLines": [
+            "model/infinispan/src/main/java/org/keycloak/models/cache/infinispan/GroupAdapter.java:274",
+            "model/infinispan/src/main/java/org/keycloak/models/cache/infinispan/GroupAdapter.java:275",
+            "services/src/main/java/org/keycloak/utils/GroupUtils.java:102"
+          ],
+          "anchored": true,
+          "bugType": "null_reference",
+          "matchedAnchors": [
+            "getSubGroupsCount",
+            "GroupModel"
+          ],
+          "matchCount": 3,
+          "matchFiles": 2
+        },
+        {
+          "goldIndex": 1,
+          "severity": "medium",
+          "anchors": [
+            "deletedAll"
+          ],
+          "anchoredLines": [
+            "tests/base/src/test/java/org/keycloak/tests/admin/group/GroupTest.java:136",
+            "tests/base/src/test/java/org/keycloak/tests/admin/group/GroupTest.java:140",
+            "tests/base/src/test/java/org/keycloak/tests/admin/group/GroupTest.java:155"
+          ],
+          "anchored": true,
+          "bugType": "race_condition",
+          "matchedAnchors": [
+            "deletedAll"
+          ],
+          "matchCount": 3,
+          "matchFiles": 1
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__keycloak-greptile-41249",
+      "repo": "keycloak/keycloak",
+      "language": "Java",
+      "requiresContext": "cross_file",
+      "changedFiles": 10,
+      "changedLines": 502,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "medium",
+          "anchors": [
+            "ConditionalPasskeysEnabled",
+            "UserModel"
+          ],
+          "anchoredLines": [
+            "services/src/main/java/org/keycloak/authentication/authenticators/browser/UsernamePasswordForm.java:160"
+          ],
+          "anchored": true,
+          "bugType": "api_misuse",
+          "matchedAnchors": [
+            "UserModel"
+          ],
+          "matchCount": 1,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 1,
+          "severity": "medium",
+          "anchors": [
+            "isConditionalPasskeysEnabled",
+            "UserModel",
+            "webauthnAuth",
+            "fillContextForm",
+            "getUser"
+          ],
+          "anchoredLines": [
+            "services/src/main/java/org/keycloak/authentication/authenticators/browser/PasswordForm.java:52",
+            "services/src/main/java/org/keycloak/authentication/authenticators/browser/PasswordForm.java:63",
+            "services/src/main/java/org/keycloak/authentication/authenticators/browser/UsernamePasswordForm.java:115",
+            "services/src/main/java/org/keycloak/authentication/authenticators/browser/UsernamePasswordForm.java:137",
+            "services/src/main/java/org/keycloak/authentication/authenticators/browser/UsernamePasswordForm.java:160",
+            "services/src/main/java/org/keycloak/authentication/authenticators/browser/PasswordForm.java:53",
+            "services/src/main/java/org/keycloak/authentication/authenticators/browser/UsernamePasswordForm.java:114",
+            "services/src/main/java/org/keycloak/authentication/authenticators/browser/UsernamePasswordForm.java:116",
+            "services/src/main/java/org/keycloak/authentication/authenticators/browser/UsernamePasswordForm.java:161",
+            "services/src/main/java/org/keycloak/authentication/authenticators/browser/UsernamePasswordForm.java:162"
+          ],
+          "anchored": true,
+          "bugType": "logic_error",
+          "matchedAnchors": [
+            "isConditionalPasskeysEnabled",
+            "UserModel",
+            "webauthnAuth",
+            "fillContextForm",
+            "getUser"
+          ],
+          "matchCount": 10,
+          "matchFiles": 2
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__sentry-93824",
+      "repo": "getsentry/sentry",
+      "language": "Python",
+      "requiresContext": "cross_file",
+      "changedFiles": 6,
+      "changedLines": 249,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "medium",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "incorrect_value"
+        },
+        {
+          "goldIndex": 1,
+          "severity": "low",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "race_condition"
+        },
+        {
+          "goldIndex": 2,
+          "severity": "high",
+          "anchors": [
+            "get_context",
+            "SpawnProcess",
+            "POSIX"
+          ],
+          "anchoredLines": [
+            "src/sentry/spans/consumers/process/flusher.py:68"
+          ],
+          "anchored": true,
+          "bugType": "type_error",
+          "matchedAnchors": [
+            "SpawnProcess"
+          ],
+          "matchCount": 1,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 3,
+          "severity": "medium",
+          "anchors": [
+            "test_consumer.py",
+            "test_consumer",
+            "time.sleep"
+          ],
+          "anchoredLines": [
+            "src/sentry/spans/consumers/process/flusher.py:264",
+            "src/sentry/spans/consumers/process/flusher.py:344",
+            "tests/sentry/spans/consumers/process/test_consumer.py:62",
+            "tests/sentry/spans/consumers/process/test_consumer.py:88"
+          ],
+          "anchored": true,
+          "bugType": "api_misuse",
+          "matchedAnchors": [
+            "time.sleep"
+          ],
+          "matchCount": 4,
+          "matchFiles": 2
+        },
+        {
+          "goldIndex": 4,
+          "severity": "medium",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "logic_error"
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__sentry-greptile-5",
+      "repo": "ai-code-review-evaluation/sentry-greptile",
+      "language": "Python",
+      "requiresContext": "cross_file",
+      "changedFiles": 106,
+      "changedLines": 3293,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "medium",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "api_misuse"
+        },
+        {
+          "goldIndex": 1,
+          "severity": "medium",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "incorrect_value"
+        },
+        {
+          "goldIndex": 2,
+          "severity": "low",
+          "anchors": [
+            "error_ids",
+            "get_multi"
+          ],
+          "anchoredLines": [
+            "src/sentry/replays/endpoints/project_replay_summarize_breadcrumbs.py:84",
+            "src/sentry/replays/endpoints/project_replay_summarize_breadcrumbs.py:94",
+            "src/sentry/replays/endpoints/project_replay_summarize_breadcrumbs.py:104",
+            "src/sentry/replays/endpoints/project_replay_summarize_breadcrumbs.py:107",
+            "src/sentry/replays/endpoints/project_replay_summarize_breadcrumbs.py:118",
+            "tests/sentry/replays/test_project_replay_summarize_breadcrumbs.py:181",
+            "tests/sentry/replays/test_project_replay_summarize_breadcrumbs.py:247",
+            "src/sentry/replays/endpoints/project_replay_summarize_breadcrumbs.py:108"
+          ],
+          "anchored": true,
+          "bugType": "api_misuse",
+          "matchedAnchors": [
+            "error_ids",
+            "get_multi"
+          ],
+          "matchCount": 8,
+          "matchFiles": 2
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__sentry-greptile-1",
+      "repo": "ai-code-review-evaluation/sentry-greptile",
+      "language": "Python",
+      "requiresContext": "cross_file",
+      "changedFiles": 3,
+      "changedLines": 138,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "low",
+          "anchors": [
+            "OptimizedCursorPaginator"
+          ],
+          "anchoredLines": [
+            "src/sentry/api/endpoints/organization_auditlogs.py:11",
+            "src/sentry/api/endpoints/organization_auditlogs.py:79",
+            "src/sentry/api/paginator.py:821"
+          ],
+          "anchored": true,
+          "bugType": "api_misuse",
+          "matchedAnchors": [
+            "OptimizedCursorPaginator"
+          ],
+          "matchCount": 3,
+          "matchFiles": 2
+        },
+        {
+          "goldIndex": 1,
+          "severity": "high",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "api_misuse"
+        },
+        {
+          "goldIndex": 2,
+          "severity": "high",
+          "anchors": [
+            "API",
+            "user_id",
+            "organization_context",
+            "has_global_access",
+            "AttributeError",
+            "optimized_pagination"
+          ],
+          "anchoredLines": [
+            "src/sentry/api/endpoints/organization_auditlogs.py:71",
+            "src/sentry/api/endpoints/organization_auditlogs.py:70"
+          ],
+          "anchored": true,
+          "bugType": "null_reference",
+          "matchedAnchors": [
+            "organization_context",
+            "has_global_access",
+            "optimized_pagination"
+          ],
+          "matchCount": 2,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 3,
+          "severity": "high",
+          "anchors": [
+            "get_item_key",
+            "order_by",
+            "math.floor/ceil",
+            "TypeError"
+          ],
+          "anchoredLines": [
+            "src/sentry/api/paginator.py:838",
+            "src/sentry/api/paginator.py:889",
+            "src/sentry/api/paginator.py:904",
+            "src/sentry/api/endpoints/organization_auditlogs.py:72",
+            "src/sentry/api/endpoints/organization_auditlogs.py:80",
+            "src/sentry/api/endpoints/organization_auditlogs.py:89"
+          ],
+          "anchored": true,
+          "bugType": "type_error",
+          "matchedAnchors": [
+            "get_item_key",
+            "order_by"
+          ],
+          "matchCount": 6,
+          "matchFiles": 2
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__grafana-97529",
+      "repo": "grafana/grafana",
+      "language": "Go",
+      "requiresContext": "cross_file",
+      "changedFiles": 5,
+      "changedLines": 82,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "high",
+          "anchors": [
+            "BuildIndex",
+            "cacheMu"
+          ],
+          "anchoredLines": [
+            "pkg/storage/unified/search/bleve.go:88",
+            "pkg/storage/unified/search/bleve.go:89",
+            "pkg/storage/unified/search/bleve.go:137",
+            "pkg/storage/unified/search/bleve.go:139"
+          ],
+          "anchored": true,
+          "bugType": "race_condition",
+          "matchedAnchors": [
+            "cacheMu"
+          ],
+          "matchCount": 4,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 1,
+          "severity": "high",
+          "anchors": [
+            "TotalDocs",
+            "b.cache",
+            "BuildIndex",
+            "read/write"
+          ],
+          "anchoredLines": [
+            "pkg/storage/unified/resource/search.go:216"
+          ],
+          "anchored": true,
+          "bugType": "race_condition",
+          "matchedAnchors": [
+            "TotalDocs"
+          ],
+          "matchCount": 1,
+          "matchFiles": 1
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__sentry-80168",
+      "repo": "getsentry/sentry",
+      "language": "Python",
+      "requiresContext": "cross_file",
+      "changedFiles": 4,
+      "changedLines": 400,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "high",
+          "anchors": [
+            "MetricAlertDetectorHandler",
+            "StatefulDetectorHandler",
+            "counter_names",
+            "get_dedupe_value",
+            "get_group_key_values",
+            "build_occurrence_and_event_data",
+            "TypeError"
+          ],
+          "anchoredLines": [
+            "src/sentry/incidents/grouptype.py:12",
+            "src/sentry/incidents/grouptype.py:11",
+            "src/sentry/incidents/grouptype.py:7",
+            "tests/sentry/workflow_engine/processors/test_detector.py:27",
+            "tests/sentry/workflow_engine/processors/test_detector.py:155",
+            "tests/sentry/workflow_engine/processors/test_detector.py:245",
+            "tests/sentry/workflow_engine/processors/test_detector.py:28",
+            "tests/sentry/workflow_engine/processors/test_detector.py:156",
+            "tests/sentry/workflow_engine/processors/test_detector.py:30",
+            "tests/sentry/workflow_engine/processors/test_detector.py:158",
+            "tests/sentry/workflow_engine/processors/test_detector.py:33",
+            "tests/sentry/workflow_engine/processors/test_detector.py:161"
+          ],
+          "anchored": true,
+          "bugType": "api_misuse",
+          "matchedAnchors": [
+            "MetricAlertDetectorHandler",
+            "StatefulDetectorHandler",
+            "counter_names",
+            "get_dedupe_value",
+            "get_group_key_values",
+            "build_occurrence_and_event_data"
+          ],
+          "matchCount": 15,
+          "matchFiles": 3
+        },
+        {
+          "goldIndex": 1,
+          "severity": "low",
+          "anchors": [
+            "DetectorEvaluationResult",
+            "DetectorGroupKey"
+          ],
+          "anchoredLines": [
+            "src/sentry/incidents/grouptype.py:8",
+            "src/sentry/incidents/grouptype.py:15",
+            "src/sentry/workflow_engine/processors/detector.py:48",
+            "src/sentry/workflow_engine/processors/detector.py:49",
+            "src/sentry/workflow_engine/processors/detector.py:139",
+            "src/sentry/workflow_engine/processors/detector.py:128",
+            "src/sentry/workflow_engine/processors/detector.py:231",
+            "src/sentry/workflow_engine/processors/detector.py:228",
+            "tests/sentry/workflow_engine/processors/test_detector.py:32",
+            "tests/sentry/workflow_engine/processors/test_detector.py:33",
+            "tests/sentry/workflow_engine/processors/test_detector.py:61",
+            "tests/sentry/workflow_engine/processors/test_detector.py:62"
+          ],
+          "anchored": true,
+          "bugType": "other",
+          "matchedAnchors": [
+            "DetectorEvaluationResult",
+            "DetectorGroupKey"
+          ],
+          "matchCount": 31,
+          "matchFiles": 3
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__sentry-80528",
+      "repo": "getsentry/sentry",
+      "language": "Python",
+      "requiresContext": "file",
+      "changedFiles": 4,
+      "changedLines": 553,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "high",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "incorrect_value"
+        },
+        {
+          "goldIndex": 1,
+          "severity": "low",
+          "anchors": [
+            "MonitorCheckIn",
+            "previous_checkins"
+          ],
+          "anchoredLines": [
+            "src/sentry/monitors/logic/incident_occurrence.py:16",
+            "src/sentry/monitors/logic/incident_occurrence.py:30",
+            "src/sentry/monitors/logic/incidents.py:8",
+            "src/sentry/monitors/logic/incidents.py:15",
+            "src/sentry/monitors/logic/incidents.py:40",
+            "src/sentry/monitors/logic/incidents.py:93",
+            "src/sentry/monitors/logic/mark_failed.py:17",
+            "src/sentry/monitors/logic/mark_failed.py:9",
+            "src/sentry/monitors/logic/mark_failed.py:104",
+            "src/sentry/monitors/logic/mark_failed.py:129",
+            "src/sentry/monitors/logic/mark_failed.py:182",
+            "src/sentry/monitors/logic/mark_failed.py:198"
+          ],
+          "anchored": true,
+          "bugType": "other",
+          "matchedAnchors": [
+            "MonitorCheckIn",
+            "previous_checkins"
+          ],
+          "matchCount": 26,
+          "matchFiles": 3
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__sentry-77754",
+      "repo": "getsentry/sentry",
+      "language": "Python",
+      "requiresContext": "file",
+      "changedFiles": 7,
+      "changedLines": 227,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "medium",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "api_misuse"
+        },
+        {
+          "goldIndex": 1,
+          "severity": "low",
+          "anchors": [
+            "test_from_dict_inalid_data",
+            "test_from_dict_invalid_data"
+          ],
+          "anchoredLines": [
+            "tests/sentry/integrations/services/test_assignment_source.py:13"
+          ],
+          "anchored": true,
+          "bugType": "other",
+          "matchedAnchors": [
+            "test_from_dict_inalid_data"
+          ],
+          "matchCount": 1,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 2,
+          "severity": "low",
+          "anchors": [
+            "empty_array",
+            "test_from_dict_empty_dict"
+          ],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "other"
+        },
+        {
+          "goldIndex": 3,
+          "severity": "medium",
+          "anchors": [
+            "to_dict",
+            "e.g",
+            "apply_async",
+            "JSON"
+          ],
+          "anchoredLines": [
+            "src/sentry/integrations/services/assignment_source.py:27",
+            "src/sentry/integrations/utils/sync.py:141",
+            "tests/sentry/integrations/services/test_assignment_source.py:35"
+          ],
+          "anchored": true,
+          "bugType": "type_error",
+          "matchedAnchors": [
+            "to_dict"
+          ],
+          "matchCount": 3,
+          "matchFiles": 3
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__sentry-95633",
+      "repo": "getsentry/sentry",
+      "language": "Python",
+      "requiresContext": "file",
+      "changedFiles": 5,
+      "changedLines": 1282,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "high",
+          "anchors": [
+            "AttributeError",
+            "API"
+          ],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "api_misuse"
+        },
+        {
+          "goldIndex": 1,
+          "severity": "low",
+          "anchors": [
+            "max_wait"
+          ],
+          "anchoredLines": [
+            "tests/sentry/uptime/consumers/test_results_consumer.py:1718",
+            "tests/sentry/uptime/consumers/test_results_consumer.py:1719",
+            "tests/sentry/uptime/consumers/test_results_consumer.py:1765",
+            "tests/sentry/uptime/consumers/test_results_consumer.py:1766",
+            "tests/sentry/uptime/consumers/test_results_consumer.py:1812",
+            "tests/sentry/uptime/consumers/test_results_consumer.py:1813",
+            "tests/sentry/uptime/consumers/test_results_consumer.py:1860",
+            "tests/sentry/uptime/consumers/test_results_consumer.py:1861",
+            "tests/sentry/uptime/consumers/test_results_consumer.py:1912",
+            "tests/sentry/uptime/consumers/test_results_consumer.py:1913",
+            "tests/sentry/uptime/consumers/test_results_consumer.py:1961",
+            "tests/sentry/uptime/consumers/test_results_consumer.py:1962"
+          ],
+          "anchored": true,
+          "bugType": "other",
+          "matchedAnchors": [
+            "max_wait"
+          ],
+          "matchCount": 12,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 2,
+          "severity": "low",
+          "anchors": [
+            "test_thread_queue_parallel_error_handling"
+          ],
+          "anchoredLines": [
+            "tests/sentry/uptime/consumers/test_results_consumer.py:1874"
+          ],
+          "anchored": true,
+          "bugType": "other",
+          "matchedAnchors": [
+            "test_thread_queue_parallel_error_handling"
+          ],
+          "matchCount": 1,
+          "matchFiles": 1
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__sentry-greptile-92393",
+      "repo": "getsentry/sentry",
+      "language": "Python",
+      "requiresContext": "cross_file",
+      "changedFiles": 6,
+      "changedLines": 74,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "critical",
+          "anchors": [
+            "OptimizedCursorPaginator",
+            "QuerySet"
+          ],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "incorrect_value"
+        },
+        {
+          "goldIndex": 1,
+          "severity": "high",
+          "anchors": [
+            "BasePaginator",
+            "QuerySet"
+          ],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "incorrect_value"
+        },
+        {
+          "goldIndex": 2,
+          "severity": "high",
+          "anchors": [
+            "OptimizedCursorPaginator",
+            "get_item_key",
+            "floor/ceil",
+            "order_by",
+            "TypeError"
+          ],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "type_error"
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__sentry-greptile-94376",
+      "repo": "getsentry/sentry",
+      "language": "Python",
+      "requiresContext": "cross_file",
+      "changedFiles": 7,
+      "changedLines": 431,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "low",
+          "anchors": [
+            "sample_rate",
+            "0.0"
+          ],
+          "anchoredLines": [
+            "src/sentry/testutils/factories.py:345",
+            "src/sentry/testutils/factories.py:355"
+          ],
+          "anchored": true,
+          "bugType": "logic_error",
+          "matchedAnchors": [
+            "sample_rate"
+          ],
+          "matchCount": 2,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 1,
+          "severity": "low",
+          "anchors": [
+            "invalidate_upsampling_cache",
+            "project_ids"
+          ],
+          "anchoredLines": [
+            "src/sentry/api/helpers/error_upsampling.py:22",
+            "src/sentry/api/helpers/error_upsampling.py:29",
+            "src/sentry/api/helpers/error_upsampling.py:35",
+            "src/sentry/api/helpers/error_upsampling.py:43",
+            "tests/sentry/api/helpers/test_error_upsampling.py:27",
+            "tests/sentry/api/helpers/test_error_upsampling.py:40",
+            "tests/sentry/api/helpers/test_error_upsampling.py:41",
+            "tests/sentry/api/helpers/test_error_upsampling.py:44",
+            "tests/sentry/api/helpers/test_error_upsampling.py:45",
+            "tests/sentry/api/helpers/test_error_upsampling.py:49"
+          ],
+          "anchored": true,
+          "bugType": "api_misuse",
+          "matchedAnchors": [
+            "project_ids"
+          ],
+          "matchCount": 10,
+          "matchFiles": 2
+        },
+        {
+          "goldIndex": 2,
+          "severity": "medium",
+          "anchors": [
+            "scoped_dataset",
+            "e.g"
+          ],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "incorrect_value"
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__grafana-103633",
+      "repo": "grafana/grafana",
+      "language": "Go",
+      "requiresContext": "cross_file",
+      "changedFiles": 4,
+      "changedLines": 273,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "high",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "security"
+        },
+        {
+          "goldIndex": 1,
+          "severity": "low",
+          "anchors": [
+            "checkPermission"
+          ],
+          "anchoredLines": [
+            "pkg/services/authz/rbac/service.go:125"
+          ],
+          "anchored": true,
+          "bugType": "incorrect_value",
+          "matchedAnchors": [
+            "checkPermission"
+          ],
+          "matchCount": 1,
+          "matchFiles": 1
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__sentry-67876",
+      "repo": "getsentry/sentry",
+      "language": "Python",
+      "requiresContext": "cross_file",
+      "changedFiles": 3,
+      "changedLines": 297,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "medium",
+          "anchors": [
+            "github_authenticated_user"
+          ],
+          "anchoredLines": [
+            "src/sentry/integrations/github/integration.py:438",
+            "src/sentry/integrations/github/integration.py:502"
+          ],
+          "anchored": true,
+          "bugType": "null_reference",
+          "matchedAnchors": [
+            "github_authenticated_user"
+          ],
+          "matchCount": 2,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 1,
+          "severity": "medium",
+          "anchors": [
+            "OAuth"
+          ],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "security"
+        },
+        {
+          "goldIndex": 2,
+          "severity": "high",
+          "anchors": [
+            "KeyError"
+          ],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "missing_validation"
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__keycloak-32918",
+      "repo": "keycloak/keycloak",
+      "language": "Java",
+      "requiresContext": "file",
+      "changedFiles": 4,
+      "changedLines": 271,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "critical",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "api_misuse"
+        },
+        {
+          "goldIndex": 1,
+          "severity": "medium",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "incorrect_value"
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__grafana-94942",
+      "repo": "grafana/grafana",
+      "language": "Go",
+      "requiresContext": "file",
+      "changedFiles": 7,
+      "changedLines": 81,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "critical",
+          "anchors": [
+            "enableSqlExpressions",
+            "SQL"
+          ],
+          "anchoredLines": [
+            "pkg/expr/reader.go:129",
+            "pkg/expr/reader.go:194"
+          ],
+          "anchored": true,
+          "bugType": "logic_error",
+          "matchedAnchors": [
+            "enableSqlExpressions"
+          ],
+          "matchCount": 2,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 1,
+          "severity": "high",
+          "anchors": [
+            "NewInMemoryDB",
+            "RunCommands",
+            "QueryFramesInto"
+          ],
+          "anchoredLines": [
+            "pkg/expr/sql/db.go:24",
+            "pkg/expr/sql/parser.go:24",
+            "pkg/expr/sql/parser.go:23",
+            "pkg/expr/sql_command.go:97",
+            "pkg/expr/sql_command.go:96",
+            "pkg/expr/sql/db.go:16",
+            "pkg/expr/sql/db.go:20",
+            "pkg/expr/sql_command.go:101",
+            "pkg/expr/sql_command.go:100"
+          ],
+          "anchored": true,
+          "bugType": "dead_code",
+          "matchedAnchors": [
+            "NewInMemoryDB",
+            "RunCommands",
+            "QueryFramesInto"
+          ],
+          "matchCount": 9,
+          "matchFiles": 3
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__grafana-90939",
+      "repo": "grafana/grafana",
+      "language": "Go",
+      "requiresContext": "file",
+      "changedFiles": 1,
+      "changedLines": 16,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "medium",
+          "anchors": [
+            "GetWebAssets",
+            "RLock"
+          ],
+          "anchoredLines": [
+            "pkg/api/webassets/webassets.go:41"
+          ],
+          "anchored": true,
+          "bugType": "race_condition",
+          "matchedAnchors": [
+            "RLock"
+          ],
+          "matchCount": 1,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 1,
+          "severity": "high",
+          "anchors": [
+            "entryPointAssetsCache"
+          ],
+          "anchoredLines": [
+            "pkg/api/webassets/webassets.go:34",
+            "pkg/api/webassets/webassets.go:36",
+            "pkg/api/webassets/webassets.go:37",
+            "pkg/api/webassets/webassets.go:38",
+            "pkg/api/webassets/webassets.go:42"
+          ],
+          "anchored": true,
+          "bugType": "null_reference",
+          "matchedAnchors": [
+            "entryPointAssetsCache"
+          ],
+          "matchCount": 5,
+          "matchFiles": 1
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__grafana-80329",
+      "repo": "grafana/grafana",
+      "language": "Go",
+      "requiresContext": "local",
+      "changedFiles": 3,
+      "changedLines": 261,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "low",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "incorrect_value"
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__grafana-90045",
+      "repo": "grafana/grafana",
+      "language": "Go",
+      "requiresContext": "file",
+      "changedFiles": 5,
+      "changedLines": 655,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "medium",
+          "anchors": [
+            "d.Log"
+          ],
+          "anchoredLines": [
+            "pkg/apiserver/rest/dualwriter_mode3.go:38",
+            "pkg/apiserver/rest/dualwriter_mode3.go:65",
+            "pkg/apiserver/rest/dualwriter_mode3.go:54",
+            "pkg/apiserver/rest/dualwriter_mode3.go:81",
+            "pkg/apiserver/rest/dualwriter_mode3.go:96",
+            "pkg/apiserver/rest/dualwriter_mode3.go:97",
+            "pkg/apiserver/rest/dualwriter_mode3.go:77",
+            "pkg/apiserver/rest/dualwriter_mode3.go:122",
+            "pkg/apiserver/rest/dualwriter_mode3.go:113",
+            "pkg/apiserver/rest/dualwriter_mode3.go:149"
+          ],
+          "anchored": true,
+          "bugType": "incorrect_value",
+          "matchedAnchors": [
+            "d.Log"
+          ],
+          "matchCount": 10,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 1,
+          "severity": "high",
+          "anchors": [
+            "recordLegacyDuration",
+            "recordStorageDuration"
+          ],
+          "anchoredLines": [
+            "pkg/apiserver/rest/dualwriter_mode3.go:45",
+            "pkg/apiserver/rest/dualwriter_mode3.go:56",
+            "pkg/apiserver/rest/dualwriter_mode3.go:113",
+            "pkg/apiserver/rest/dualwriter_mode3.go:129",
+            "pkg/apiserver/rest/dualwriter_mode3.go:140",
+            "pkg/apiserver/rest/dualwriter_mode3.go:48",
+            "pkg/apiserver/rest/dualwriter_mode3.go:73",
+            "pkg/apiserver/rest/dualwriter_mode3.go:89",
+            "pkg/apiserver/rest/dualwriter_mode3.go:103",
+            "pkg/apiserver/rest/dualwriter_mode3.go:106",
+            "pkg/apiserver/rest/dualwriter_mode3.go:132",
+            "pkg/apiserver/rest/dualwriter_mode3.go:156"
+          ],
+          "anchored": true,
+          "bugType": "incorrect_value",
+          "matchedAnchors": [
+            "recordLegacyDuration",
+            "recordStorageDuration"
+          ],
+          "matchCount": 14,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 2,
+          "severity": "medium",
+          "anchors": [
+            "options.Kind"
+          ],
+          "anchoredLines": [
+            "pkg/apiserver/rest/dualwriter_mode3.go:38",
+            "pkg/apiserver/rest/dualwriter_mode3.go:45",
+            "pkg/apiserver/rest/dualwriter_mode3.go:48",
+            "pkg/apiserver/rest/dualwriter_mode3.go:56",
+            "pkg/apiserver/rest/dualwriter_mode3.go:65",
+            "pkg/apiserver/rest/dualwriter_mode3.go:73",
+            "pkg/apiserver/rest/dualwriter_mode3.go:81",
+            "pkg/apiserver/rest/dualwriter_mode3.go:89",
+            "pkg/apiserver/rest/dualwriter_mode3.go:96",
+            "pkg/apiserver/rest/dualwriter_mode3.go:103",
+            "pkg/apiserver/rest/dualwriter_mode3.go:113",
+            "pkg/apiserver/rest/dualwriter_mode3.go:122"
+          ],
+          "anchored": true,
+          "bugType": "incorrect_value",
+          "matchedAnchors": [
+            "options.Kind"
+          ],
+          "matchCount": 19,
+          "matchFiles": 1
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__grafana-106778",
+      "repo": "grafana/grafana",
+      "language": "Go",
+      "requiresContext": "cross_file",
+      "changedFiles": 14,
+      "changedLines": 952,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "medium",
+          "anchors": [
+            "GrafanaRuleListItem"
+          ],
+          "anchoredLines": [
+            "public/app/features/alerting/unified/rule-list/FilterView.tsx:15",
+            "public/app/features/alerting/unified/rule-list/FilterView.tsx:157",
+            "public/app/features/alerting/unified/rule-list/GrafanaGroupLoader.tsx:14",
+            "public/app/features/alerting/unified/rule-list/GrafanaGroupLoader.tsx:8",
+            "public/app/features/alerting/unified/rule-list/GrafanaGroupLoader.tsx:94",
+            "public/app/features/alerting/unified/rule-list/GrafanaRuleListItem.tsx:26",
+            "public/app/features/alerting/unified/rule-list/GrafanaRuleLoader.tsx:80",
+            "public/app/features/alerting/unified/rule-list/GrafanaRuleLoader.tsx:98"
+          ],
+          "anchored": true,
+          "bugType": "api_misuse",
+          "matchedAnchors": [
+            "GrafanaRuleListItem"
+          ],
+          "matchCount": 8,
+          "matchFiles": 4
+        },
+        {
+          "goldIndex": 1,
+          "severity": "high",
+          "anchors": [
+            "RuleActionsButtons",
+            "promRule",
+            "SilenceGrafanaRuleDrawer",
+            "showSilenceDrawer"
+          ],
+          "anchoredLines": [
+            "public/app/features/alerting/unified/components/rules/RulesTable.test.tsx:24",
+            "public/app/features/alerting/unified/components/rules/RulesTable.test.tsx:62",
+            "public/app/features/alerting/unified/rule-list/GrafanaRuleListItem.tsx:15",
+            "public/app/features/alerting/unified/rule-list/GrafanaRuleListItem.tsx:47",
+            "public/app/features/alerting/unified/rule-list/GrafanaRuleLoader.tsx:21",
+            "public/app/features/alerting/unified/rule-list/GrafanaRuleLoader.tsx:126",
+            "public/app/features/alerting/unified/components/rule-viewer/AlertRuleMenu.tsx:41",
+            "public/app/features/alerting/unified/components/rule-viewer/AlertRuleMenu.tsx:66",
+            "public/app/features/alerting/unified/components/rule-viewer/AlertRuleMenu.tsx:73",
+            "public/app/features/alerting/unified/rule-list/GrafanaGroupLoader.test.tsx:91",
+            "public/app/features/alerting/unified/rule-list/GrafanaGroupLoader.test.tsx:93",
+            "public/app/features/alerting/unified/rule-list/GrafanaGroupLoader.test.tsx:96"
+          ],
+          "anchored": true,
+          "bugType": "logic_error",
+          "matchedAnchors": [
+            "RuleActionsButtons",
+            "promRule"
+          ],
+          "matchCount": 37,
+          "matchFiles": 8
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__grafana-107534",
+      "repo": "grafana/grafana",
+      "language": "Go",
+      "requiresContext": "cross_file",
+      "changedFiles": 4,
+      "changedLines": 63,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "low",
+          "anchors": [
+            "applyTemplateVariables"
+          ],
+          "anchoredLines": [
+            "public/app/plugins/datasource/loki/querySplitting.ts:299",
+            "public/app/plugins/datasource/loki/shardQuerySplitting.test.ts:56",
+            "public/app/plugins/datasource/loki/shardQuerySplitting.test.ts:112",
+            "public/app/plugins/datasource/loki/shardQuerySplitting.test.ts:173",
+            "public/app/plugins/datasource/loki/shardQuerySplitting.ts:52"
+          ],
+          "anchored": true,
+          "bugType": "other",
+          "matchedAnchors": [
+            "applyTemplateVariables"
+          ],
+          "matchCount": 5,
+          "matchFiles": 3
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__grafana-79265",
+      "repo": "grafana/grafana",
+      "language": "Go",
+      "requiresContext": "cross_file",
+      "changedFiles": 11,
+      "changedLines": 142,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "high",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "race_condition"
+        },
+        {
+          "goldIndex": 1,
+          "severity": "medium",
+          "anchors": [
+            "anonDeviceService",
+            "TagDevice",
+            "ErrDeviceLimitReached"
+          ],
+          "anchoredLines": [
+            "pkg/services/anonymous/anonimpl/client.go:54",
+            "pkg/services/anonymous/anonimpl/client.go:44",
+            "pkg/services/anonymous/anonimpl/anonstore/database.go:18",
+            "pkg/services/anonymous/anonimpl/anonstore/database.go:96",
+            "pkg/services/anonymous/anonimpl/anonstore/database_test.go:69",
+            "pkg/services/anonymous/anonimpl/client.go:45"
+          ],
+          "anchored": true,
+          "bugType": "logic_error",
+          "matchedAnchors": [
+            "anonDeviceService",
+            "TagDevice",
+            "ErrDeviceLimitReached"
+          ],
+          "matchCount": 6,
+          "matchFiles": 3
+        },
+        {
+          "goldIndex": 2,
+          "severity": "medium",
+          "anchors": [
+            "dbSession.Exec",
+            "dbSession"
+          ],
+          "anchoredLines": [
+            "pkg/services/anonymous/anonimpl/anonstore/database.go:85",
+            "pkg/services/anonymous/anonimpl/anonstore/database.go:83"
+          ],
+          "anchored": true,
+          "bugType": "type_error",
+          "matchedAnchors": [
+            "dbSession.Exec",
+            "dbSession"
+          ],
+          "matchCount": 2,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 3,
+          "severity": "low",
+          "anchors": [
+            "ErrDeviceLimitReached"
+          ],
+          "anchoredLines": [
+            "pkg/services/anonymous/anonimpl/anonstore/database.go:18",
+            "pkg/services/anonymous/anonimpl/anonstore/database.go:96",
+            "pkg/services/anonymous/anonimpl/anonstore/database_test.go:69",
+            "pkg/services/anonymous/anonimpl/client.go:45"
+          ],
+          "anchored": true,
+          "bugType": "incorrect_value",
+          "matchedAnchors": [
+            "ErrDeviceLimitReached"
+          ],
+          "matchCount": 4,
+          "matchFiles": 3
+        },
+        {
+          "goldIndex": 4,
+          "severity": "low",
+          "anchors": [
+            "device.UpdatedAt.UTC",
+            "UpdatedAt",
+            "UTC",
+            "anonymousDeviceExpiration",
+            "time.Now"
+          ],
+          "anchoredLines": [
+            "pkg/services/anonymous/anonimpl/anonstore/database.go:80",
+            "pkg/services/anonymous/anonimpl/anonstore/database.go:81",
+            "pkg/services/anonymous/anonimpl/anonstore/database_test.go:59",
+            "pkg/services/anonymous/anonimpl/anonstore/database_test.go:66",
+            "pkg/services/anonymous/anonimpl/anonstore/database.go:110",
+            "pkg/services/anonymous/anonimpl/anonstore/database.go:16",
+            "pkg/services/anonymous/anonimpl/api/api.go:18",
+            "pkg/services/anonymous/anonimpl/api/api.go:71",
+            "pkg/services/anonymous/anonimpl/api/api.go:73"
+          ],
+          "anchored": true,
+          "bugType": "logic_error",
+          "matchedAnchors": [
+            "device.UpdatedAt.UTC",
+            "UpdatedAt",
+            "UTC",
+            "anonymousDeviceExpiration",
+            "time.Now"
+          ],
+          "matchCount": 9,
+          "matchFiles": 3
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__discourse-graphite-9",
+      "repo": "discourse/discourse",
+      "language": "Ruby",
+      "requiresContext": "file",
+      "changedFiles": 7,
+      "changedLines": 46,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "low",
+          "anchors": [
+            "loaded_locales"
+          ],
+          "anchoredLines": [
+            "lib/freedom_patches/translate_accelerator.rb:63",
+            "lib/freedom_patches/translate_accelerator.rb:64"
+          ],
+          "anchored": true,
+          "bugType": "race_condition",
+          "matchedAnchors": [
+            "loaded_locales"
+          ],
+          "matchCount": 2,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 1,
+          "severity": "low",
+          "anchors": [
+            "e.g",
+            "checking/loading"
+          ],
+          "anchoredLines": [
+            "config/initializers/i18n.rb:16"
+          ],
+          "anchored": true,
+          "bugType": "missing_validation",
+          "matchedAnchors": [
+            "e.g"
+          ],
+          "matchCount": 1,
+          "matchFiles": 1
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__grafana-76186",
+      "repo": "grafana/grafana",
+      "language": "Go",
+      "requiresContext": "cross_file",
+      "changedFiles": 8,
+      "changedLines": 215,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "high",
+          "anchors": [
+            "ContextualLoggerMiddleware",
+            "QueryData",
+            "CallResource",
+            "CheckHealth",
+            "CollectMetrics",
+            "PluginContext",
+            "instrumentContext"
+          ],
+          "anchoredLines": [
+            "pkg/services/pluginsintegration/clientmiddleware/contextual_logger_middleware.go:16",
+            "pkg/services/pluginsintegration/clientmiddleware/contextual_logger_middleware.go:22",
+            "pkg/services/pluginsintegration/clientmiddleware/contextual_logger_middleware.go:39",
+            "pkg/services/pluginsintegration/clientmiddleware/contextual_logger_middleware.go:44",
+            "pkg/services/pluginsintegration/clientmiddleware/contextual_logger_middleware.go:49",
+            "pkg/services/pluginsintegration/clientmiddleware/contextual_logger_middleware.go:54",
+            "pkg/services/pluginsintegration/clientmiddleware/contextual_logger_middleware.go:59",
+            "pkg/services/pluginsintegration/clientmiddleware/contextual_logger_middleware.go:63",
+            "pkg/services/pluginsintegration/clientmiddleware/contextual_logger_middleware.go:67",
+            "pkg/services/pluginsintegration/clientmiddleware/contextual_logger_middleware.go:41",
+            "pkg/services/pluginsintegration/clientmiddleware/instrumentation_middleware.go:161",
+            "pkg/services/pluginsintegration/clientmiddleware/metrics_middleware.go:144"
+          ],
+          "anchored": true,
+          "bugType": "null_reference",
+          "matchedAnchors": [
+            "ContextualLoggerMiddleware",
+            "QueryData",
+            "CallResource",
+            "CheckHealth",
+            "CollectMetrics",
+            "PluginContext",
+            "instrumentContext"
+          ],
+          "matchCount": 39,
+          "matchFiles": 4
+        },
+        {
+          "goldIndex": 1,
+          "severity": "low",
+          "anchors": [
+            "traceID",
+            "LoggerMiddleware",
+            "ContextualLoggerMiddleware"
+          ],
+          "anchoredLines": [
+            "pkg/services/pluginsintegration/clientmiddleware/logger_middleware.go:61",
+            "pkg/services/pluginsintegration/clientmiddleware/logger_middleware.go:62",
+            "pkg/services/pluginsintegration/clientmiddleware/logger_middleware.go:63",
+            "pkg/services/pluginsintegration/clientmiddleware/logger_middleware.go:36",
+            "pkg/services/pluginsintegration/clientmiddleware/contextual_logger_middleware.go:16",
+            "pkg/services/pluginsintegration/clientmiddleware/contextual_logger_middleware.go:22",
+            "pkg/services/pluginsintegration/clientmiddleware/contextual_logger_middleware.go:39",
+            "pkg/services/pluginsintegration/clientmiddleware/contextual_logger_middleware.go:44",
+            "pkg/services/pluginsintegration/clientmiddleware/contextual_logger_middleware.go:49",
+            "pkg/services/pluginsintegration/clientmiddleware/contextual_logger_middleware.go:54",
+            "pkg/services/pluginsintegration/clientmiddleware/contextual_logger_middleware.go:59",
+            "pkg/services/pluginsintegration/clientmiddleware/contextual_logger_middleware.go:63"
+          ],
+          "anchored": true,
+          "bugType": "incorrect_value",
+          "matchedAnchors": [
+            "traceID",
+            "LoggerMiddleware",
+            "ContextualLoggerMiddleware"
+          ],
+          "matchCount": 13,
+          "matchFiles": 2
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__discourse-graphite-10",
+      "repo": "discourse/discourse",
+      "language": "Ruby",
+      "requiresContext": "cross_file",
+      "changedFiles": 36,
+      "changedLines": 576,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "critical",
+          "anchors": [
+            "NoMethodError",
+            "before_validation",
+            "EmbeddableHost"
+          ],
+          "anchoredLines": [
+            "app/models/embeddable_host.rb:5",
+            "app/controllers/admin/embeddable_hosts_controller.rb:6",
+            "app/controllers/admin/embeddable_hosts_controller.rb:10",
+            "app/controllers/admin/embeddable_hosts_controller.rb:15",
+            "app/controllers/admin/embedding_controller.rb:18",
+            "app/controllers/embed_controller.rb:61",
+            "app/models/embeddable_host.rb:1",
+            "app/models/topic_embed.rb:36",
+            "lib/topic_retriever.rb:16",
+            "spec/models/embeddable_host_spec.rb:3",
+            "spec/models/embeddable_host_spec.rb:6",
+            "spec/models/embeddable_host_spec.rb:12"
+          ],
+          "anchored": true,
+          "bugType": "null_reference",
+          "matchedAnchors": [
+            "before_validation",
+            "EmbeddableHost"
+          ],
+          "matchCount": 18,
+          "matchFiles": 7
+        },
+        {
+          "goldIndex": 1,
+          "severity": "medium",
+          "anchors": [
+            "EmbeddableHostsController",
+            "EmbeddableHost",
+            "EmbeddableHost.where",
+            "i.e",
+            "e.g",
+            "save_host",
+            "NoMethodError"
+          ],
+          "anchoredLines": [
+            "app/controllers/admin/embeddable_hosts_controller.rb:1",
+            "spec/controllers/admin/embeddable_hosts_controller_spec.rb:3",
+            "spec/controllers/admin/embeddable_hosts_controller_spec.rb:6",
+            "app/controllers/admin/embeddable_hosts_controller.rb:6",
+            "app/controllers/admin/embeddable_hosts_controller.rb:10",
+            "app/controllers/admin/embeddable_hosts_controller.rb:15",
+            "app/controllers/admin/embedding_controller.rb:18",
+            "app/controllers/embed_controller.rb:61",
+            "app/models/embeddable_host.rb:1",
+            "app/models/topic_embed.rb:36",
+            "lib/topic_retriever.rb:16",
+            "spec/models/embeddable_host_spec.rb:3"
+          ],
+          "anchored": true,
+          "bugType": "null_reference",
+          "matchedAnchors": [
+            "EmbeddableHostsController",
+            "EmbeddableHost",
+            "EmbeddableHost.where",
+            "save_host"
+          ],
+          "matchCount": 22,
+          "matchFiles": 8
+        },
+        {
+          "goldIndex": 2,
+          "severity": "medium",
+          "anchors": [
+            "record_for_host"
+          ],
+          "anchoredLines": [
+            "app/models/embeddable_host.rb:10",
+            "app/models/embeddable_host.rb:21",
+            "app/models/topic_embed.rb:36"
+          ],
+          "anchored": true,
+          "bugType": "incorrect_value",
+          "matchedAnchors": [
+            "record_for_host"
+          ],
+          "matchCount": 3,
+          "matchFiles": 2
+        },
+        {
+          "goldIndex": 3,
+          "severity": "high",
+          "anchors": [
+            "embeddable_hosts",
+            "SQL",
+            "EmbeddableHost"
+          ],
+          "anchoredLines": [
+            "app/assets/javascripts/admin/controllers/admin-embedding.js.es6:11",
+            "app/assets/javascripts/admin/controllers/admin-embedding.js.es6:15",
+            "app/assets/javascripts/admin/templates/embedding.hbs:1",
+            "app/assets/javascripts/admin/templates/embedding.hbs:8",
+            "app/controllers/admin/embedding_controller.rb:18",
+            "app/controllers/embed_controller.rb:61",
+            "app/models/site_setting.rb:72",
+            "app/models/site_setting.rb:79",
+            "app/models/site_setting.rb:81",
+            "app/models/topic.rb:869",
+            "app/serializers/embedding_serializer.rb:3",
+            "config/locales/server.en.yml:1167"
+          ],
+          "anchored": true,
+          "bugType": "incorrect_value",
+          "matchedAnchors": [
+            "embeddable_hosts",
+            "EmbeddableHost"
+          ],
+          "matchCount": 45,
+          "matchFiles": 19
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__discourse-graphite-7",
+      "repo": "discourse/discourse",
+      "language": "Ruby",
+      "requiresContext": "cross_file",
+      "changedFiles": 32,
+      "changedLines": 230,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "low",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "incorrect_value"
+        },
+        {
+          "goldIndex": 1,
+          "severity": "low",
+          "anchors": [
+            "desktop/user.css"
+          ],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "incorrect_value"
+        },
+        {
+          "goldIndex": 2,
+          "severity": "low",
+          "anchors": [
+            "topic-post.css"
+          ],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "incorrect_value"
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__discourse-graphite-8",
+      "repo": "discourse/discourse",
+      "language": "Ruby",
+      "requiresContext": "cross_file",
+      "changedFiles": 16,
+      "changedLines": 672,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "high",
+          "anchors": [
+            "findMembers"
+          ],
+          "anchoredLines": [
+            "app/assets/javascripts/admin/controllers/admin-group.js.es6:37",
+            "app/assets/javascripts/admin/controllers/admin-group.js.es6:48",
+            "app/assets/javascripts/admin/routes/admin_group_route.js:13",
+            "app/assets/javascripts/discourse/models/group.js:47",
+            "app/assets/javascripts/discourse/models/group.js:58",
+            "app/assets/javascripts/discourse/routes/group-members.js.es6:10",
+            "app/assets/javascripts/discourse/routes/group-members.js.es6:11"
+          ],
+          "anchored": true,
+          "bugType": "race_condition",
+          "matchedAnchors": [
+            "findMembers"
+          ],
+          "matchCount": 7,
+          "matchFiles": 4
+        },
+        {
+          "goldIndex": 1,
+          "severity": "medium",
+          "anchors": [
+            "user_count",
+            "e.g",
+            "2/2"
+          ],
+          "anchoredLines": [
+            "app/assets/javascripts/admin/controllers/admin-group.js.es6:7",
+            "app/assets/javascripts/admin/controllers/admin-group.js.es6:9",
+            "app/assets/javascripts/admin/controllers/admin-group.js.es6:12",
+            "app/assets/javascripts/admin/controllers/admin-group.js.es6:13",
+            "app/assets/javascripts/admin/controllers/admin-group.js.es6:14",
+            "app/assets/javascripts/admin/controllers/admin-group.js.es6:33",
+            "app/assets/javascripts/admin/templates/group.hbs:14",
+            "app/assets/javascripts/discourse/models/group.js:12",
+            "app/assets/javascripts/discourse/models/group.js:23",
+            "app/assets/javascripts/discourse/models/group.js:32",
+            "spec/controllers/admin/groups_controller_spec.rb:23",
+            "spec/controllers/admin/groups_controller_spec.rb:25"
+          ],
+          "anchored": true,
+          "bugType": "logic_error",
+          "matchedAnchors": [
+            "user_count"
+          ],
+          "matchCount": 12,
+          "matchFiles": 4
+        },
+        {
+          "goldIndex": 2,
+          "severity": "medium",
+          "anchors": [
+            "HTTP",
+            "remove_member",
+            "DELETE"
+          ],
+          "anchoredLines": [
+            "app/controllers/admin/groups_controller.rb:84",
+            "config/routes.rb:49",
+            "spec/controllers/admin/groups_controller_spec.rb:112",
+            "spec/controllers/admin/groups_controller_spec.rb:115",
+            "spec/controllers/admin/groups_controller_spec.rb:125",
+            "app/assets/javascripts/discourse/models/group.js:29",
+            "app/assets/javascripts/discourse/models/group.js:43",
+            "app/assets/javascripts/discourse/models/group.js:83"
+          ],
+          "anchored": true,
+          "bugType": "api_misuse",
+          "matchedAnchors": [
+            "remove_member",
+            "DELETE"
+          ],
+          "matchCount": 8,
+          "matchFiles": 4
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__discourse-graphite-3",
+      "repo": "discourse/discourse",
+      "language": "Ruby",
+      "requiresContext": "file",
+      "changedFiles": 10,
+      "changedLines": 178,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "medium",
+          "anchors": [
+            "BlockedEmail",
+            "should_block_email"
+          ],
+          "anchoredLines": [
+            "app/models/blocked_email.rb:1",
+            "app/models/blocked_email.rb:12",
+            "app/models/blocked_email.rb:22",
+            "lib/validators/email_validator.rb:13",
+            "spec/components/validators/email_validator_spec.rb:11",
+            "spec/components/validators/email_validator_spec.rb:17",
+            "spec/fabricators/blocked_email_fabricator.rb:3",
+            "spec/models/blocked_email_spec.rb:3",
+            "spec/models/blocked_email_spec.rb:9",
+            "spec/models/blocked_email_spec.rb:15",
+            "spec/models/blocked_email_spec.rb:20",
+            "spec/models/blocked_email_spec.rb:26"
+          ],
+          "anchored": true,
+          "bugType": "race_condition",
+          "matchedAnchors": [
+            "BlockedEmail"
+          ],
+          "matchCount": 16,
+          "matchFiles": 5
+        },
+        {
+          "goldIndex": 1,
+          "severity": "medium",
+          "anchors": [
+            "evil.example.com",
+            "example.com"
+          ],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "security"
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__discourse-graphite-5",
+      "repo": "discourse/discourse",
+      "language": "Ruby",
+      "requiresContext": "cross_file",
+      "changedFiles": 5,
+      "changedLines": 67,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "low",
+          "anchors": [
+            "non-Ember/noscript"
+          ],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "api_misuse"
+        },
+        {
+          "goldIndex": 1,
+          "severity": "low",
+          "anchors": [
+            "IE/Edge"
+          ],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "incorrect_value"
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__discourse-graphite-6",
+      "repo": "discourse/discourse",
+      "language": "Ruby",
+      "requiresContext": "file",
+      "changedFiles": 5,
+      "changedLines": 56,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "medium",
+          "anchors": [
+            "include_website_name",
+            "include_",
+            "website_name",
+            "website_host"
+          ],
+          "anchoredLines": [
+            "app/serializers/user_serializer.rb:153",
+            "app/assets/javascripts/discourse/templates/user/user.hbs:66",
+            "app/assets/javascripts/discourse/templates/user/user.hbs:69",
+            "app/assets/javascripts/discourse/templates/user/user.hbs:71",
+            "app/serializers/user_serializer.rb:43",
+            "app/serializers/user_serializer.rb:137",
+            "spec/serializers/user_serializer_spec.rb:79",
+            "spec/serializers/user_serializer_spec.rb:84",
+            "spec/serializers/user_serializer_spec.rb:89",
+            "app/serializers/user_serializer.rb:138",
+            "app/serializers/user_serializer.rb:140",
+            "app/serializers/user_serializer.rb:141"
+          ],
+          "anchored": true,
+          "bugType": "api_misuse",
+          "matchedAnchors": [
+            "include_website_name",
+            "website_name",
+            "website_host"
+          ],
+          "matchCount": 16,
+          "matchFiles": 3
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__discourse-graphite-4",
+      "repo": "discourse/discourse",
+      "language": "Ruby",
+      "requiresContext": "cross_file",
+      "changedFiles": 28,
+      "changedLines": 666,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "critical",
+          "anchors": [
+            "SSRF"
+          ],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "security"
+        },
+        {
+          "goldIndex": 1,
+          "severity": "medium",
+          "anchors": [
+            "indexOf",
+            "evil-discourseUrl.com",
+            "discourseUrl"
+          ],
+          "anchoredLines": [
+            "app/assets/javascripts/embed.js:17",
+            "app/assets/javascripts/embed.js:1",
+            "app/assets/javascripts/embed.js:7"
+          ],
+          "anchored": true,
+          "bugType": "security",
+          "matchedAnchors": [
+            "indexOf",
+            "discourseUrl"
+          ],
+          "matchCount": 3,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 2,
+          "severity": "medium",
+          "anchors": [
+            "postMessage",
+            "targetOrigin",
+            "URL"
+          ],
+          "anchoredLines": [
+            "app/views/layouts/embed.html.erb:11",
+            "config/locales/server.en.yml:770",
+            "spec/components/topic_retriever_spec.rb:15",
+            "spec/models/topic_embed_spec.rb:18",
+            "spec/models/topic_embed_spec.rb:26"
+          ],
+          "anchored": true,
+          "bugType": "api_misuse",
+          "matchedAnchors": [
+            "postMessage",
+            "URL"
+          ],
+          "matchCount": 5,
+          "matchFiles": 4
+        },
+        {
+          "goldIndex": 3,
+          "severity": "medium",
+          "anchors": [
+            "ALLOWALL"
+          ],
+          "anchoredLines": [
+            "app/controllers/embed_controller.rb:28",
+            "spec/controllers/embed_controller_spec.rb:37"
+          ],
+          "anchored": true,
+          "bugType": "security",
+          "matchedAnchors": [
+            "ALLOWALL"
+          ],
+          "matchCount": 2,
+          "matchFiles": 2,
+          "acronymOnly": true
+        },
+        {
+          "goldIndex": 4,
+          "severity": "medium",
+          "anchors": [
+            "TopicEmbed",
+            "NoMethodError",
+            "XSS",
+            "HTML"
+          ],
+          "anchoredLines": [
+            "app/controllers/embed_controller.rb:10",
+            "app/jobs/scheduled/poll_feed.rb:36",
+            "app/models/topic_embed.rb:3",
+            "app/models/topic_embed.rb:15",
+            "app/models/topic_embed.rb:25",
+            "app/models/topic_embed.rb:52",
+            "app/models/topic_embed.rb:79",
+            "lib/tasks/disqus.thor:148",
+            "lib/topic_retriever.rb:37",
+            "lib/topic_retriever.rb:42",
+            "lib/topic_retriever.rb:52",
+            "spec/controllers/embed_controller_spec.rb:41"
+          ],
+          "anchored": true,
+          "bugType": "security",
+          "matchedAnchors": [
+            "TopicEmbed",
+            "HTML"
+          ],
+          "matchCount": 21,
+          "matchFiles": 8
+        },
+        {
+          "goldIndex": 5,
+          "severity": "medium",
+          "anchors": [
+            "ERB",
+            "Ruby/ERB"
+          ],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "logic_error"
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__discourse-graphite-1",
+      "repo": "discourse/discourse",
+      "language": "Ruby",
+      "requiresContext": "cross_file",
+      "changedFiles": 3,
+      "changedLines": 32,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "medium",
+          "anchors": [
+            "max_width",
+            "max_height"
+          ],
+          "anchoredLines": [
+            "app/models/optimized_image.rb:146"
+          ],
+          "anchored": true,
+          "bugType": "dead_code",
+          "matchedAnchors": [
+            "max_width",
+            "max_height"
+          ],
+          "matchCount": 1,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 1,
+          "severity": "low",
+          "anchors": [
+            "maxSizeKB",
+            "SiteSettings",
+            "max_",
+            "_size_kb"
+          ],
+          "anchoredLines": [
+            "app/assets/javascripts/discourse/lib/utilities.js:182",
+            "app/assets/javascripts/discourse/lib/utilities.js:246"
+          ],
+          "anchored": true,
+          "bugType": "incorrect_value",
+          "matchedAnchors": [
+            "maxSizeKB",
+            "SiteSettings",
+            "max_",
+            "_size_kb"
+          ],
+          "matchCount": 2,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 2,
+          "severity": "medium",
+          "anchors": [
+            "GIFs",
+            "allow_animated_thumbnails",
+            "WxH"
+          ],
+          "anchoredLines": [
+            "app/controllers/uploads_controller.rb:67"
+          ],
+          "anchored": true,
+          "bugType": "api_misuse",
+          "matchedAnchors": [
+            "allow_animated_thumbnails"
+          ],
+          "matchCount": 1,
+          "matchFiles": 1
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__discourse-graphite-2",
+      "repo": "discourse/discourse",
+      "language": "Ruby",
+      "requiresContext": "file",
+      "changedFiles": 18,
+      "changedLines": 225,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "high",
+          "anchors": [
+            "TopicUser"
+          ],
+          "anchoredLines": [
+            "app/controllers/topics_controller.rb:105",
+            "app/controllers/topics_controller.rb:107",
+            "app/controllers/topics_controller.rb:108",
+            "app/controllers/topics_controller.rb:110",
+            "app/models/topic_user.rb:11",
+            "app/models/topic_user.rb:12",
+            "app/models/topic_user.rb:130",
+            "app/models/topic_user.rb:125"
+          ],
+          "anchored": true,
+          "bugType": "null_reference",
+          "matchedAnchors": [
+            "TopicUser"
+          ],
+          "matchCount": 8,
+          "matchFiles": 2
+        },
+        {
+          "goldIndex": 1,
+          "severity": "low",
+          "anchors": [
+            "stopNotificiationsText",
+            "stopNotificationsText"
+          ],
+          "anchoredLines": [
+            "app/assets/javascripts/discourse/controllers/topic-unsubscribe.js.es6:5",
+            "app/assets/javascripts/discourse/templates/topic/unsubscribe.hbs:3"
+          ],
+          "anchored": true,
+          "bugType": "incorrect_value",
+          "matchedAnchors": [
+            "stopNotificiationsText"
+          ],
+          "matchCount": 2,
+          "matchFiles": 2
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__cal-com-22532",
+      "repo": "calcom/cal.com",
+      "language": "TypeScript",
+      "requiresContext": "cross_file",
+      "changedFiles": 17,
+      "changedLines": 410,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "medium",
+          "anchors": [
+            "updateManyByCredentialId",
+            "updatedAt"
+          ],
+          "anchoredLines": [
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:1024",
+            "packages/lib/server/repository/selectedCalendar.ts:400",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:1023",
+            "packages/features/calendar-cache/calendar-cache.repository.interface.ts:32",
+            "packages/features/calendar-cache/calendar-cache.repository.ts:180",
+            "packages/features/calendar-cache/calendar-cache.repository.ts:186",
+            "packages/lib/getConnectedDestinationCalendars.ts:23",
+            "packages/lib/getConnectedDestinationCalendars.ts:27",
+            "packages/lib/server/repository/user.ts:899",
+            "packages/prisma/migrations/20250715160635_add_calendar_cache_updated_at/migration.sql:4",
+            "packages/prisma/migrations/20250715160635_add_calendar_cache_updated_at/migration.sql:9",
+            "packages/prisma/schema.prisma:1719"
+          ],
+          "anchored": true,
+          "bugType": "api_misuse",
+          "matchedAnchors": [
+            "updateManyByCredentialId",
+            "updatedAt"
+          ],
+          "matchCount": 13,
+          "matchFiles": 9
+        },
+        {
+          "goldIndex": 1,
+          "severity": "low",
+          "anchors": [
+            "macOS"
+          ],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "api_misuse"
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__cal-com-8330",
+      "repo": "calcom/cal.com",
+      "language": "TypeScript",
+      "requiresContext": "file",
+      "changedFiles": 4,
+      "changedLines": 121,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "medium",
+          "anchors": [
+            "slotStartTime",
+            "slotEndTime"
+          ],
+          "anchoredLines": [
+            "packages/trpc/server/routers/viewer/slots.ts:111",
+            "packages/trpc/server/routers/viewer/slots.ts:123",
+            "packages/trpc/server/routers/viewer/slots.ts:140",
+            "packages/trpc/server/routers/viewer/slots.ts:141",
+            "packages/trpc/server/routers/viewer/slots.ts:142",
+            "packages/trpc/server/routers/viewer/slots.ts:118",
+            "packages/trpc/server/routers/viewer/slots.ts:119"
+          ],
+          "anchored": true,
+          "bugType": "incorrect_value",
+          "matchedAnchors": [
+            "slotStartTime",
+            "slotEndTime"
+          ],
+          "matchCount": 7,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 1,
+          "severity": "medium",
+          "anchors": [
+            "isSame",
+            "date.start",
+            "utcOffset",
+            "date.end"
+          ],
+          "anchoredLines": [
+            "packages/trpc/server/routers/viewer/slots.ts:119",
+            "packages/trpc/server/routers/viewer/slots.ts:107",
+            "packages/trpc/server/routers/viewer/slots.ts:110",
+            "packages/trpc/server/routers/viewer/slots.ts:114",
+            "packages/trpc/server/routers/viewer/slots.ts:118",
+            "packages/lib/slots.ts:212",
+            "packages/lib/slots.ts:213",
+            "packages/trpc/server/routers/viewer/slots.ts:123"
+          ],
+          "anchored": true,
+          "bugType": "api_misuse",
+          "matchedAnchors": [
+            "isSame",
+            "date.start",
+            "utcOffset",
+            "date.end"
+          ],
+          "matchCount": 8,
+          "matchFiles": 2
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__cal-com-14943",
+      "repo": "calcom/cal.com",
+      "language": "TypeScript",
+      "requiresContext": "file",
+      "changedFiles": 3,
+      "changedLines": 44,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "high",
+          "anchors": [
+            "retryCount"
+          ],
+          "anchoredLines": [
+            "packages/features/ee/workflows/api/scheduleSMSReminders.ts:39",
+            "packages/features/ee/workflows/api/scheduleSMSReminders.ts:58",
+            "packages/features/ee/workflows/api/scheduleSMSReminders.ts:60",
+            "packages/features/ee/workflows/api/scheduleSMSReminders.ts:184",
+            "packages/features/ee/workflows/api/scheduleSMSReminders.ts:195",
+            "packages/prisma/migrations/20240508134359_add_retry_count_to_workflow_reminder/migration.sql:2",
+            "packages/prisma/schema.prisma:1000"
+          ],
+          "anchored": true,
+          "bugType": "race_condition",
+          "matchedAnchors": [
+            "retryCount"
+          ],
+          "matchCount": 7,
+          "matchFiles": 3
+        },
+        {
+          "goldIndex": 1,
+          "severity": "high",
+          "anchors": [
+            "scheduleSMSReminders.ts",
+            "scheduleSMSReminders",
+            "SMS",
+            "e.g",
+            "WhatsApp",
+            "retryCount",
+            "WorkflowMethods.SMS",
+            "WorkflowMethods"
+          ],
+          "anchoredLines": [
+            "packages/features/ee/workflows/api/scheduleSMSReminders.ts:31",
+            "packages/features/ee/workflows/api/scheduleSMSReminders.ts:33",
+            "packages/features/ee/workflows/api/scheduleSMSReminders.ts:39",
+            "packages/features/ee/workflows/api/scheduleSMSReminders.ts:58",
+            "packages/features/ee/workflows/api/scheduleSMSReminders.ts:60",
+            "packages/features/ee/workflows/api/scheduleSMSReminders.ts:184",
+            "packages/features/ee/workflows/api/scheduleSMSReminders.ts:195",
+            "packages/prisma/migrations/20240508134359_add_retry_count_to_workflow_reminder/migration.sql:2",
+            "packages/prisma/schema.prisma:1000"
+          ],
+          "anchored": true,
+          "bugType": "logic_error",
+          "matchedAnchors": [
+            "SMS",
+            "retryCount",
+            "WorkflowMethods.SMS",
+            "WorkflowMethods"
+          ],
+          "matchCount": 9,
+          "matchFiles": 3
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__cal-com-22345",
+      "repo": "calcom/cal.com",
+      "language": "TypeScript",
+      "requiresContext": "file",
+      "changedFiles": 2,
+      "changedLines": 345,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "low",
+          "anchors": [
+            "getBaseConditions",
+            "filterConditions",
+            "getAuthorizationConditions",
+            "Prisma.Sql",
+            "authConditions",
+            "if/else"
+          ],
+          "anchoredLines": [
+            "packages/lib/server/service/__tests__/insightsBooking.integration-test.ts:437",
+            "packages/lib/server/service/__tests__/insightsBooking.integration-test.ts:480",
+            "packages/lib/server/service/insightsBooking.ts:68",
+            "packages/lib/server/service/insightsBooking.ts:71",
+            "packages/lib/server/service/insightsBooking.ts:72",
+            "packages/lib/server/service/insightsBooking.ts:73",
+            "packages/lib/server/service/insightsBooking.ts:76",
+            "packages/lib/server/service/insightsBooking.ts:77",
+            "packages/lib/server/service/__tests__/insightsBooking.integration-test.ts:496",
+            "packages/lib/server/service/__tests__/insightsBooking.integration-test.ts:507",
+            "packages/lib/server/service/insightsBooking.ts:78",
+            "packages/lib/server/service/insightsBooking.ts:83"
+          ],
+          "anchored": true,
+          "bugType": "dead_code",
+          "matchedAnchors": [
+            "getBaseConditions",
+            "filterConditions",
+            "getAuthorizationConditions",
+            "Prisma.Sql",
+            "authConditions"
+          ],
+          "matchCount": 24,
+          "matchFiles": 2
+        },
+        {
+          "goldIndex": 1,
+          "severity": "medium",
+          "anchors": [
+            "userIdsFromOrg",
+            "teamsFromOrg",
+            "teamIds",
+            "orgId"
+          ],
+          "anchoredLines": [
+            "packages/lib/server/service/insightsBooking.ts:170",
+            "packages/lib/server/service/insightsBooking.ts:174",
+            "packages/lib/server/service/insightsBooking.ts:166",
+            "packages/lib/server/service/insightsBooking.ts:167",
+            "packages/lib/server/service/insightsBooking.ts:164",
+            "packages/lib/server/service/__tests__/insightsBooking.integration-test.ts:491",
+            "packages/lib/server/service/__tests__/insightsBooking.integration-test.ts:522",
+            "packages/lib/server/service/insightsBooking.ts:32"
+          ],
+          "anchored": true,
+          "bugType": "logic_error",
+          "matchedAnchors": [
+            "userIdsFromOrg",
+            "teamIds",
+            "orgId"
+          ],
+          "matchCount": 8,
+          "matchFiles": 2
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__cal-com-11059",
+      "repo": "calcom/cal.com",
+      "language": "TypeScript",
+      "requiresContext": "cross_file",
+      "changedFiles": 40,
+      "changedLines": 494,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "high",
+          "anchors": [
+            "parseRefreshTokenResponse",
+            "refresh_token",
+            "OAuth"
+          ],
+          "anchoredLines": [
+            "packages/app-store/_utils/oauth/parseRefreshTokenResponse.ts:13",
+            "packages/app-store/_utils/oauth/parseRefreshTokenResponse.ts:32",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:21",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:97",
+            "packages/app-store/office365calendar/lib/CalendarService.ts:20",
+            "packages/app-store/office365calendar/lib/CalendarService.ts:263",
+            "packages/app-store/salesforce/lib/CalendarService.ts:20",
+            "packages/app-store/salesforce/lib/CalendarService.ts:90",
+            "packages/app-store/zoomvideo/lib/VideoApiAdapter.ts:12",
+            "packages/app-store/zoomvideo/lib/VideoApiAdapter.ts:104",
+            "packages/app-store/_utils/oauth/parseRefreshTokenResponse.ts:25",
+            "packages/app-store/_utils/oauth/parseRefreshTokenResponse.ts:26"
+          ],
+          "anchored": true,
+          "bugType": "incorrect_value",
+          "matchedAnchors": [
+            "parseRefreshTokenResponse",
+            "refresh_token"
+          ],
+          "matchCount": 38,
+          "matchFiles": 9
+        },
+        {
+          "goldIndex": 1,
+          "severity": "high",
+          "anchors": [
+            "toString"
+          ],
+          "anchoredLines": [
+            "packages/app-store/_utils/oauth/parseRefreshTokenResponse.ts:8",
+            "packages/app-store/_utils/oauth/parseRefreshTokenResponse.ts:10",
+            "packages/app-store/_utils/oauth/refreshOAuthTokens.ts:11"
+          ],
+          "anchored": true,
+          "bugType": "api_misuse",
+          "matchedAnchors": [
+            "toString"
+          ],
+          "matchCount": 3,
+          "matchFiles": 2
+        },
+        {
+          "goldIndex": 2,
+          "severity": "high",
+          "anchors": [
+            "parseRefreshTokenResponse",
+            "safeParse"
+          ],
+          "anchoredLines": [
+            "packages/app-store/_utils/oauth/parseRefreshTokenResponse.ts:13",
+            "packages/app-store/_utils/oauth/parseRefreshTokenResponse.ts:32",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:21",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:97",
+            "packages/app-store/office365calendar/lib/CalendarService.ts:20",
+            "packages/app-store/office365calendar/lib/CalendarService.ts:263",
+            "packages/app-store/salesforce/lib/CalendarService.ts:20",
+            "packages/app-store/salesforce/lib/CalendarService.ts:90",
+            "packages/app-store/zoomvideo/lib/VideoApiAdapter.ts:12",
+            "packages/app-store/zoomvideo/lib/VideoApiAdapter.ts:104",
+            "packages/app-store/_utils/oauth/parseRefreshTokenResponse.ts:16",
+            "packages/app-store/_utils/oauth/parseRefreshTokenResponse.ts:18"
+          ],
+          "anchored": true,
+          "bugType": "api_misuse",
+          "matchedAnchors": [
+            "parseRefreshTokenResponse",
+            "safeParse"
+          ],
+          "matchCount": 14,
+          "matchFiles": 5
+        },
+        {
+          "goldIndex": 3,
+          "severity": "high",
+          "anchors": [
+            "APP_CREDENTIAL_SHARING_ENABLED",
+            "CALCOM_CREDENTIAL_SYNC_ENDPOINT",
+            "refreshFunction",
+            "GoogleCalendarService",
+            "refreshAccessToken",
+            "res.data",
+            "HubspotCalendarService",
+            "HubspotToken"
+          ],
+          "anchoredLines": [
+            "apps/web/pages/api/webhook/app-credential.ts:5",
+            "apps/web/pages/api/webhook/app-credential.ts:19",
+            "packages/app-store/_utils/oauth/parseRefreshTokenResponse.ts:3",
+            "packages/app-store/_utils/oauth/parseRefreshTokenResponse.ts:15",
+            "packages/app-store/_utils/oauth/refreshOAuthTokens.ts:1",
+            "packages/app-store/_utils/oauth/refreshOAuthTokens.ts:5",
+            "packages/lib/constants.ts:103",
+            ".env.example:240",
+            "packages/app-store/_utils/oauth/refreshOAuthTokens.ts:8",
+            "turbo.json:201",
+            "packages/app-store/_utils/oauth/refreshOAuthTokens.ts:3",
+            "packages/app-store/_utils/oauth/refreshOAuthTokens.ts:17"
+          ],
+          "anchored": true,
+          "bugType": "type_error",
+          "matchedAnchors": [
+            "APP_CREDENTIAL_SHARING_ENABLED",
+            "CALCOM_CREDENTIAL_SYNC_ENDPOINT",
+            "refreshFunction",
+            "HubspotToken"
+          ],
+          "matchCount": 14,
+          "matchFiles": 7
+        },
+        {
+          "goldIndex": 4,
+          "severity": "high",
+          "anchors": [
+            "access_token",
+            "refreshOAuthTokens"
+          ],
+          "anchoredLines": [
+            "packages/app-store/_utils/oauth/parseRefreshTokenResponse.ts:6",
+            "packages/app-store/salesforce/lib/CalendarService.ts:44",
+            "packages/app-store/webex/lib/VideoApiAdapter.ts:61",
+            "packages/app-store/webex/lib/VideoApiAdapter.ts:64",
+            "packages/app-store/_utils/oauth/refreshOAuthTokens.ts:3",
+            "packages/app-store/_utils/oauth/refreshOAuthTokens.ts:22",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:22",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:86",
+            "packages/app-store/hubspot/lib/CalendarService.ts:26",
+            "packages/app-store/hubspot/lib/CalendarService.ts:177",
+            "packages/app-store/larkcalendar/lib/CalendarService.ts:14",
+            "packages/app-store/larkcalendar/lib/CalendarService.ts:67"
+          ],
+          "anchored": true,
+          "bugType": "type_error",
+          "matchedAnchors": [
+            "access_token",
+            "refreshOAuthTokens"
+          ],
+          "matchCount": 24,
+          "matchFiles": 12
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__cal-com-7232",
+      "repo": "calcom/cal.com",
+      "language": "TypeScript",
+      "requiresContext": "cross_file",
+      "changedFiles": 10,
+      "changedLines": 444,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "medium",
+          "anchors": [
+            "deleteScheduledEmailReminder",
+            "deleteScheduledSMSReminder",
+            "forEach",
+            "rescheduling/cancellation",
+            "workflow/workflow",
+            "deletion/updates"
+          ],
+          "anchoredLines": [
+            "packages/features/bookings/lib/handleCancelBooking.ts:492",
+            "packages/features/bookings/lib/handleCancelBooking.ts:488",
+            "packages/features/bookings/lib/handleNewBooking.ts:39",
+            "packages/features/bookings/lib/handleNewBooking.ts:968",
+            "packages/features/ee/workflows/lib/reminders/emailReminderManager.ts:197",
+            "packages/trpc/server/routers/viewer/bookings.tsx:494",
+            "packages/trpc/server/routers/viewer/bookings.tsx:490",
+            "packages/trpc/server/routers/viewer/workflows.tsx:214",
+            "packages/trpc/server/routers/viewer/workflows.tsx:381",
+            "packages/trpc/server/routers/viewer/workflows.tsx:378",
+            "packages/trpc/server/routers/viewer/workflows.tsx:537",
+            "packages/trpc/server/routers/viewer/workflows.tsx:521"
+          ],
+          "anchored": true,
+          "bugType": "race_condition",
+          "matchedAnchors": [
+            "deleteScheduledEmailReminder",
+            "deleteScheduledSMSReminder",
+            "forEach"
+          ],
+          "matchCount": 29,
+          "matchFiles": 6
+        },
+        {
+          "goldIndex": 1,
+          "severity": "high",
+          "anchors": [
+            "immediateDelete",
+            "deleteScheduledEmailReminder",
+            "SendGrid",
+            "WorkflowReminder",
+            "DELETE",
+            "API"
+          ],
+          "anchoredLines": [
+            "packages/features/ee/workflows/lib/reminders/emailReminderManager.ts:200",
+            "packages/features/ee/workflows/lib/reminders/emailReminderManager.ts:213",
+            "packages/features/bookings/lib/handleCancelBooking.ts:492",
+            "packages/features/bookings/lib/handleCancelBooking.ts:488",
+            "packages/features/bookings/lib/handleNewBooking.ts:39",
+            "packages/features/bookings/lib/handleNewBooking.ts:968",
+            "packages/features/ee/workflows/lib/reminders/emailReminderManager.ts:197",
+            "packages/trpc/server/routers/viewer/bookings.tsx:494",
+            "packages/trpc/server/routers/viewer/bookings.tsx:490",
+            "packages/trpc/server/routers/viewer/workflows.tsx:214",
+            "packages/trpc/server/routers/viewer/workflows.tsx:381",
+            "packages/trpc/server/routers/viewer/workflows.tsx:378"
+          ],
+          "anchored": true,
+          "bugType": "logic_error",
+          "matchedAnchors": [
+            "immediateDelete",
+            "deleteScheduledEmailReminder",
+            "WorkflowReminder",
+            "DELETE"
+          ],
+          "matchCount": 20,
+          "matchFiles": 7
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__cal-com-14740",
+      "repo": "calcom/cal.com",
+      "language": "TypeScript",
+      "requiresContext": "cross_file",
+      "changedFiles": 15,
+      "changedLines": 555,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "high",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "security"
+        },
+        {
+          "goldIndex": 1,
+          "severity": "critical",
+          "anchors": [
+            "admin/owner",
+            "isTeamAdmin",
+            "isTeamOwner"
+          ],
+          "anchoredLines": [
+            "packages/trpc/server/routers/viewer/bookings/addGuests.handler.ts:7",
+            "packages/trpc/server/routers/viewer/bookings/addGuests.handler.ts:47",
+            "packages/trpc/server/routers/viewer/bookings/addGuests.handler.ts:48"
+          ],
+          "anchored": true,
+          "bugType": "logic_error",
+          "matchedAnchors": [
+            "isTeamAdmin",
+            "isTeamOwner"
+          ],
+          "matchCount": 3,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 2,
+          "severity": "medium",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "incorrect_value"
+        },
+        {
+          "goldIndex": 3,
+          "severity": "medium",
+          "anchors": [
+            "uniqueGuests",
+            "createMany"
+          ],
+          "anchoredLines": [
+            "packages/trpc/server/routers/viewer/bookings/addGuests.handler.ts:74",
+            "packages/trpc/server/routers/viewer/bookings/addGuests.handler.ts:80",
+            "packages/trpc/server/routers/viewer/bookings/addGuests.handler.ts:83",
+            "packages/trpc/server/routers/viewer/bookings/addGuests.handler.ts:101"
+          ],
+          "anchored": true,
+          "bugType": "missing_validation",
+          "matchedAnchors": [
+            "uniqueGuests",
+            "createMany"
+          ],
+          "matchCount": 4,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 4,
+          "severity": "low",
+          "anchors": [
+            "MultiEmail"
+          ],
+          "anchoredLines": [
+            "apps/web/components/dialog/AddGuestsDialog.tsx:13",
+            "apps/web/components/dialog/AddGuestsDialog.tsx:69",
+            "packages/ui/form/MultiEmail.tsx:12",
+            "packages/ui/form/MultiEmail.tsx:96",
+            "packages/ui/form/MultiEmailLazy.tsx:4",
+            "packages/ui/form/MultiEmailLazy.tsx:6",
+            "packages/ui/index.tsx:153"
+          ],
+          "anchored": true,
+          "bugType": "incorrect_value",
+          "matchedAnchors": [
+            "MultiEmail"
+          ],
+          "matchCount": 7,
+          "matchFiles": 4
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__cal-com-10600",
+      "repo": "calcom/cal.com",
+      "language": "TypeScript",
+      "requiresContext": "cross_file",
+      "changedFiles": 16,
+      "changedLines": 316,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "low",
+          "anchors": [
+            "TwoFactor",
+            "BackupCode.tsx",
+            "BackupCode"
+          ],
+          "anchoredLines": [
+            "apps/web/components/auth/BackupCode.tsx:7",
+            "apps/web/components/auth/TwoFactor.tsx:8",
+            "apps/web/components/settings/DisableTwoFactorModal.tsx:88",
+            "apps/web/components/settings/DisableTwoFactorModal.tsx:106",
+            "apps/web/pages/auth/login.tsx:197",
+            "apps/web/pages/auth/login.tsx:221",
+            "apps/web/components/settings/DisableTwoFactorModal.tsx:8",
+            "apps/web/components/settings/DisableTwoFactorModal.tsx:104",
+            "apps/web/pages/auth/login.tsx:32"
+          ],
+          "anchored": true,
+          "bugType": "other",
+          "matchedAnchors": [
+            "TwoFactor",
+            "BackupCode"
+          ],
+          "matchCount": 9,
+          "matchFiles": 4
+        },
+        {
+          "goldIndex": 1,
+          "severity": "low",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "incorrect_value"
+        },
+        {
+          "goldIndex": 2,
+          "severity": "medium",
+          "anchors": [
+            "indexOf"
+          ],
+          "anchoredLines": [
+            "apps/web/pages/api/auth/two-factor/totp/disable.ts:61",
+            "packages/features/auth/lib/next-auth-options.ts:144"
+          ],
+          "anchored": true,
+          "bugType": "incorrect_value",
+          "matchedAnchors": [
+            "indexOf"
+          ],
+          "matchCount": 2,
+          "matchFiles": 2
+        },
+        {
+          "goldIndex": 3,
+          "severity": "high",
+          "anchors": [
+            "backupCodes",
+            "backupCode"
+          ],
+          "anchoredLines": [
+            "apps/web/components/settings/EnableTwoFactorModal.tsx:64",
+            "apps/web/components/settings/EnableTwoFactorModal.tsx:92",
+            "apps/web/components/settings/EnableTwoFactorModal.tsx:95",
+            "apps/web/components/settings/EnableTwoFactorModal.tsx:203",
+            "apps/web/components/settings/EnableTwoFactorModal.tsx:278",
+            "apps/web/pages/api/auth/two-factor/totp/disable.ts:54",
+            "apps/web/pages/api/auth/two-factor/totp/disable.ts:58",
+            "apps/web/pages/api/auth/two-factor/totp/disable.ts:61",
+            "apps/web/pages/api/auth/two-factor/totp/disable.ts:107",
+            "apps/web/pages/api/auth/two-factor/totp/setup.ts:61",
+            "apps/web/pages/api/auth/two-factor/totp/setup.ts:68",
+            "apps/web/pages/api/auth/two-factor/totp/setup.ts:78"
+          ],
+          "anchored": true,
+          "bugType": "race_condition",
+          "matchedAnchors": [
+            "backupCodes",
+            "backupCode"
+          ],
+          "matchCount": 34,
+          "matchFiles": 11
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__cal-com-10967",
+      "repo": "calcom/cal.com",
+      "language": "TypeScript",
+      "requiresContext": "cross_file",
+      "changedFiles": 22,
+      "changedLines": 584,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "high",
+          "anchors": [
+            "mainHostDestinationCalendar",
+            "destinationCalendar"
+          ],
+          "anchoredLines": [
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:100",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:122",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:123",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:198",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:228",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:229",
+            "packages/app-store/larkcalendar/lib/CalendarService.ts:128",
+            "packages/app-store/larkcalendar/lib/CalendarService.ts:129",
+            "packages/app-store/larkcalendar/lib/CalendarService.ts:164",
+            "packages/app-store/larkcalendar/lib/CalendarService.ts:165",
+            "packages/app-store/larkcalendar/lib/CalendarService.ts:192",
+            "packages/app-store/larkcalendar/lib/CalendarService.ts:193"
+          ],
+          "anchored": true,
+          "bugType": "null_reference",
+          "matchedAnchors": [
+            "mainHostDestinationCalendar",
+            "destinationCalendar"
+          ],
+          "matchCount": 113,
+          "matchFiles": 18
+        },
+        {
+          "goldIndex": 1,
+          "severity": "low",
+          "anchors": [
+            "mainHostDestinationCalendar"
+          ],
+          "anchoredLines": [
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:100",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:122",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:123",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:198",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:228",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:229",
+            "packages/app-store/larkcalendar/lib/CalendarService.ts:128",
+            "packages/app-store/larkcalendar/lib/CalendarService.ts:129",
+            "packages/app-store/larkcalendar/lib/CalendarService.ts:164",
+            "packages/app-store/larkcalendar/lib/CalendarService.ts:165",
+            "packages/app-store/larkcalendar/lib/CalendarService.ts:192",
+            "packages/app-store/larkcalendar/lib/CalendarService.ts:193"
+          ],
+          "anchored": true,
+          "bugType": "dead_code",
+          "matchedAnchors": [
+            "mainHostDestinationCalendar"
+          ],
+          "matchCount": 28,
+          "matchFiles": 6
+        },
+        {
+          "goldIndex": 2,
+          "severity": "high",
+          "anchors": [
+            "externalCalendarId",
+            "externalId",
+            "credentialId"
+          ],
+          "anchoredLines": [
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:256",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:306",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:315",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:316",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:317",
+            "packages/app-store/larkcalendar/lib/CalendarService.ts:190",
+            "packages/app-store/larkcalendar/lib/CalendarService.ts:193",
+            "packages/app-store/larkcalendar/lib/CalendarService.ts:234",
+            "packages/app-store/larkcalendar/lib/CalendarService.ts:238",
+            "packages/core/EventManager.ts:167",
+            "packages/core/EventManager.ts:169",
+            "packages/core/EventManager.ts:206"
+          ],
+          "anchored": true,
+          "bugType": "logic_error",
+          "matchedAnchors": [
+            "externalCalendarId",
+            "externalId",
+            "credentialId"
+          ],
+          "matchCount": 84,
+          "matchFiles": 9
+        },
+        {
+          "goldIndex": 3,
+          "severity": "medium",
+          "anchors": [
+            "IS_TEAM_BILLING_ENABLED",
+            "requestedSlug"
+          ],
+          "anchoredLines": [
+            "packages/trpc/server/routers/viewer/organizations/create.handler.ts:151",
+            "packages/trpc/server/routers/viewer/organizations/create.handler.ts:153"
+          ],
+          "anchored": true,
+          "bugType": "logic_error",
+          "matchedAnchors": [
+            "IS_TEAM_BILLING_ENABLED",
+            "requestedSlug"
+          ],
+          "matchCount": 2,
+          "matchFiles": 1
+        },
+        {
+          "goldIndex": 4,
+          "severity": "low",
+          "anchors": [
+            "createEvent",
+            "credentialId",
+            "e.g",
+            "Lark/Office365"
+          ],
+          "anchoredLines": [
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:87",
+            "packages/core/CalendarManager.ts:234",
+            "packages/core/CalendarManager.ts:236",
+            "packages/core/CalendarManager.ts:249",
+            "packages/core/CalendarManager.ts:246",
+            "packages/core/EventManager.ts:346",
+            "packages/core/EventManager.ts:370",
+            "packages/core/EventManager.ts:380",
+            "packages/core/EventManager.ts:356",
+            "packages/types/Calendar.d.ts:219",
+            "packages/types/Calendar.d.ts:221",
+            "packages/app-store/googlecalendar/lib/CalendarService.ts:145"
+          ],
+          "anchored": true,
+          "bugType": "api_misuse",
+          "matchedAnchors": [
+            "createEvent",
+            "credentialId"
+          ],
+          "matchCount": 39,
+          "matchFiles": 5
+        }
+      ]
+    },
+    {
+      "instanceId": "prreview__cal-com-8087",
+      "repo": "calcom/cal.com",
+      "language": "TypeScript",
+      "requiresContext": "cross_file",
+      "changedFiles": 12,
+      "changedLines": 189,
+      "gold": [
+        {
+          "goldIndex": 0,
+          "severity": "low",
+          "anchors": [],
+          "anchoredLines": [],
+          "anchored": false,
+          "bugType": "missing_validation"
+        },
+        {
+          "goldIndex": 1,
+          "severity": "critical",
+          "anchors": [
+            "forEach",
+            "e.g",
+            "calendar/video",
+            "for...of",
+            "Promise.all"
+          ],
+          "anchoredLines": [
+            "packages/app-store/vital/lib/reschedule.ts:125",
+            "packages/app-store/wipemycalother/lib/reschedule.ts:125",
+            "packages/features/bookings/lib/handleCancelBooking.ts:479",
+            "packages/trpc/server/routers/viewer/bookings.tsx:553",
+            "packages/core/CalendarManager.ts:142",
+            "packages/core/videoClient.ts:35",
+            "packages/core/videoClient.ts:39"
+          ],
+          "anchored": true,
+          "bugType": "race_condition",
+          "matchedAnchors": [
+            "forEach",
+            "Promise.all"
+          ],
+          "matchCount": 7,
+          "matchFiles": 6
+        }
+      ]
+    }
+  ]
+}

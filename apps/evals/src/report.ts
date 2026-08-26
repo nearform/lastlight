@@ -13,7 +13,17 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFile
 import { join } from "node:path";
 
 import type { InstanceResult } from "./schema.js";
+import type { CoreProvenance } from "./bootstrap.js";
 import { fLabel } from "./grade.js";
+import {
+  boundaryMetrics,
+  DETECTION_FLOOR_MICRO_RECALL,
+  familyFunnels,
+  microReview,
+  type BoundaryMetrics,
+  type FamilyFunnel,
+  type MicroReview,
+} from "./review-metrics.js";
 
 /** A case still running / queued (live runs only — surfaced in the dashboard). */
 export interface PendingCase {
@@ -27,10 +37,112 @@ export interface PendingCase {
 }
 
 /**
+ * Which repeat of an arm-level `--repeats N` band this run is.
+ *
+ * Repeats are SIBLING run directories, never nested: `indexTier`/`buildIndex`
+ * below and `clean.ts` both walk exactly `<resultsRoot>/<tierKey>/<runId>/`, so a
+ * `<runId>/rep-2/` would be invisible to the dashboard index AND to `clean`.
+ * Membership of a band is therefore a fact in `meta`, not in the filesystem.
+ *
+ * `group` is the FIRST repeat's `runId` — stable, already unique, and present on
+ * disk, so a consumer can find the band's other members without a manifest.
+ * Absent on an ordinary single run (a band of one is not a band; see
+ * `VarianceRollup.band`, which refuses to report a zero spread for one point).
+ */
+export interface RepeatRef {
+  /** `runId` of the first repeat in this band. */
+  group: string;
+  /** 1-based position in the band. */
+  index: number;
+  /** How many repeats the band was launched with. */
+  of: number;
+  /**
+   * `--repeat-concurrency N` when the band's repeats ran OVERLAPPED (absent =
+   * sequential, the default). Stamped because overlap contaminates the latency
+   * instrument: per-phase `durationMs`/`agentMs` on such a run include
+   * contention from sibling repeats, so latency reads must be discounted.
+   * Verdicts, cost, and recall/precision are unaffected.
+   */
+  concurrency?: number;
+}
+
+/**
+ * The invocation this run actually measured — every knob that changes what the
+ * numbers MEAN, recorded beside them.
+ *
+ * `RunMeta` used to stamp the model, git SHA, core provenance and concurrency but
+ * NOT the overlay: for a `models` run the overlay (which carries
+ * `review.analysis.enabled` — the whole evidence-pipeline switch) appeared
+ * nowhere at all, and for a `config` run only indirectly, via the arm label. A
+ * globally-installed harness once ran the *baseline* while reporting itself as
+ * the pipeline arm and nothing in the artifact could contradict it.
+ *
+ * Every field is optional: runs measured before this existed have none of it, and
+ * a missing field must read as "not recorded", never as "off".
+ *
+ * These sit FLAT on {@link RunMeta} (which extends this), matching how `gitSha` /
+ * `concurrency` / `core` already read, and grouped into a named type only so the
+ * documentation has one home. (`--repeat-concurrency` is the one knob recorded
+ * elsewhere — on `meta.repeat.concurrency`, beside the band it contaminates; see
+ * {@link RepeatRef}.)
+ */
+export interface RunProvenance {
+  /** The PRIMARY `--overlay` — the one that wired discovery and the initial asset
+   * bootstrap, and whose `review:` policy every `models` arm carries. */
+  overlay?: string;
+  /** All `--overlay` values in order (a `config` run repeats the flag, one arm per
+   * overlay). `[0]` is {@link overlay}. Absent ⇒ built-in assets only. */
+  overlays?: string[];
+  /** `--datasets` (or `LASTLIGHT_EVALS_DATASETS`, or the auto-detected
+   * `./evals/datasets`) — the extra tier root this run discovered from. */
+  datasets?: string;
+  /** `--sandbox` backend (`none` | `gondolin`). */
+  sandbox?: string;
+  /** The F-beta β the pr-review judge actually used. */
+  fBeta?: number;
+  /** `--judge-with-diff`. */
+  judgeWithDiff?: boolean;
+  /** Repo-context injection was ON (the default). `false` = `--no-inject-context`,
+   * i.e. the clean A/B control — the single biggest silent difference between two
+   * otherwise-identical pr-review arms. */
+  injectContext?: boolean;
+  /** `--keep-workspace`. */
+  keepWorkspace?: boolean;
+  /** `--instance` filter (exact instance_ids). */
+  instances?: string[];
+  /** `--limit` (cases per tier). */
+  limit?: number;
+  /** `--repeats N`, when the run was launched as a band. */
+  repeats?: number;
+  /** The pr-review judge model this run would use (`EVAL_JUDGE_MODEL`, else the
+   * default for whichever provider key is present). Undefined when no key
+   * resolves one. */
+  judgeModel?: string;
+  /** The `lastlight-facts` binary that resolved for this run
+   * (`LASTLIGHT_FACTS_BIN` → `PATH` → the baked path). `null` = nothing resolved,
+   * which is what explains an evidence-pipeline arm reporting `coverage: "none"`.
+   * Absent (vs null) = the run predates this stamp. */
+  factsBin?: string | null;
+  /** `lastlight-facts toolchain` → the probed binaries, flattened to
+   * `tool → "<resolved> (<status>)"`. Same shape and spirit as the per-case
+   * {@link ReviewPipelineStats.toolchain}, at run level: silent version drift
+   * between the host that measured a rung and the image that ships it is
+   * otherwise undetectable. Absent when no binary resolved or the probe failed. */
+  toolchain?: Record<string, string>;
+  /** The eval harness itself — version + resolved package root. `core` answers
+   * "which lastlight-core"; this answers "which lastlight-evals", which is the
+   * half the globally-installed-harness incident turned on. */
+  harness?: { version: string; root: string };
+  /** The command line, verbatim (`argv.slice(2)`). The backstop for every knob
+   * not enumerated above, including ones added after this run was measured. */
+  argv?: string[];
+}
+
+/**
  * Run-level metadata persisted into `scorecard.json` so the dashboard can label,
  * order, and live-poll runs without re-deriving from the current config.
  */
-export interface RunMeta {
+export interface RunMeta extends RunProvenance {
   runId: string;
   generatedAt: string;
   tiers: string[];
@@ -46,8 +158,33 @@ export interface RunMeta {
   models: string[];
   /** Trials per case (`--runs N`). */
   runs: number;
+  /**
+   * Cases of one arm run at once (`--concurrency N`; 1 = serial, and absent on
+   * runs measured before the flag existed).
+   *
+   * Stamped because it changes how the run's numbers may be READ, not what they
+   * are: each case's `durationMs` stays honest, but the arm's wall clock is no
+   * longer the sum of them, so a serial run and a concurrent one are not
+   * comparable on elapsed time. Per-case and per-phase timings still are.
+   */
+  concurrency?: number;
+  /**
+   * This run's place in an arm-level `--repeats N` band (sibling run dirs, one
+   * per repeat). Absent on a single run. See {@link RepeatRef}.
+   *
+   * Repeats are NOT `--runs`: `--runs` repeats each CASE and folds the trials
+   * into one worst-case result, destroying the per-trial hit vectors. A band
+   * keeps every repeat as a whole, separate run, which is the only shape
+   * `varianceRollup` can compute union/intersection recall from.
+   */
+  repeat?: RepeatRef;
   /** Short git SHA of the code/workflows under test, when in a repo. */
   gitSha?: string;
+  /** Which `lastlight-core` produced this run — a working tree or the published
+   * package. Stamped because `gitSha` is the CWD's repo (often the evals
+   * workspace, not the monorepo), so it does not answer this on its own. See
+   * {@link CoreProvenance}. */
+  core?: CoreProvenance;
   /** Display labels keyed by model id (so the dashboard reads them off disk). */
   labels?: Record<string, string>;
   /** While the run is in flight: the dashboard polls + shows a "live" badge.
@@ -164,6 +301,23 @@ export interface ModelSummary {
   avgFbeta: number;
   /** The β the graded cases used (F1 by default). Undefined when nothing graded. */
   reviewBeta?: number;
+  /**
+   * Micro-aggregated review metrics — **the headline for recall-first work**.
+   *
+   * The `avg*` fields above are means of per-case ratios, which weight a 1-gold
+   * case the same as a 6-gold one and hand a free 1.00 to a case with no gold at
+   * all. `micro` sums the counts first and divides once. Both are reported: the
+   * Martian leaderboard comparison needs the F1 mean, and steering this work
+   * needs micro-recall + SNR. Absent when nothing graded.
+   */
+  micro?: MicroReview;
+  /** Internal recall vs. posted vs. inline — the attention boundary WP6
+   * introduces. Absent for an arm that emits no evidence packet. */
+  boundaries?: BoundaryMetrics;
+  /** Per-family funnel (obligations → hypotheses → posted → matched), so a
+   * measurement says WHICH kind of reasoning improved. Absent for an arm that
+   * emits no evidence packet. */
+  families?: FamilyFunnel[];
   avgInputTokens: number;
   avgCachedTokens: number;
   avgOutputTokens: number;
@@ -247,6 +401,11 @@ export function aggregateTrials(trials: InstanceResult[]): InstanceResult {
       falsePositives: rep.review!.falsePositives,
       falseNegatives: rep.review!.falseNegatives,
       trace: rep.review!.trace,
+      // Pipeline telemetry comes from the SAME representative trial as the
+      // FP/FN lists and the trace, so the mechanism counts and the findings they
+      // explain always describe one run. Averaging them would produce a funnel
+      // no single trial ever had.
+      pipeline: rep.review!.pipeline,
     };
     out.reviewTrials = rev.length;
   }
@@ -281,6 +440,9 @@ export function summarizeModels(results: InstanceResult[]): ModelSummary[] {
       avgRecall: avg(review.map((r) => r.review!.recall)),
       avgFbeta: avg(review.map((r) => r.review!.fbeta)),
       reviewBeta: review[0]?.review!.beta,
+      micro: review.length ? microReview(list) : undefined,
+      boundaries: boundaryMetrics(list),
+      families: familyFunnels(list),
       avgInputTokens: avg(list.map((r) => r.inputTokens)),
       avgCachedTokens: avg(list.map((r) => r.cachedTokens)),
       avgOutputTokens: avg(list.map((r) => r.outputTokens)),
@@ -294,6 +456,59 @@ export function summarizeModels(results: InstanceResult[]): ModelSummary[] {
 
 export function summarize(results: InstanceResult[]): Scorecard {
   return { models: summarizeModels(results), results };
+}
+
+// ── Repeat bands (`--repeats N`) ────────────────────────────────────────────
+
+/**
+ * The band a scorecard belongs to.
+ *
+ * A run launched WITHOUT `--repeats` is its own band of one — it gets its
+ * `runId` back rather than `undefined`, so a caller can group a mixed pile of
+ * scorecards with one rule instead of two. A card with neither `repeat` nor a
+ * `runId` (an in-flight write with no meta at all) is genuinely ungroupable.
+ */
+export function repeatGroupOf(card: Scorecard): string | undefined {
+  return card.meta?.repeat?.group ?? card.meta?.runId;
+}
+
+/** One `--repeats N` band: its group id and its repeats, in run order. */
+export interface RepeatBand {
+  group: string;
+  /** `meta.repeat.of` from the first card that declares one; `cards.length` for
+   * an implicit band of ungrouped runs. A band with fewer cards than `of` was
+   * INTERRUPTED — a consumer must be able to see that rather than read a
+   * truncated band as a complete one. */
+  of: number;
+  cards: Scorecard[];
+}
+
+/**
+ * Group scorecards into `--repeats` bands, ordered by `meta.repeat.index`.
+ *
+ * Feed the `cards` of one band straight to `varianceRollup` (filter by arm first
+ * if a card carries more than one). Cards with no meta at all are dropped: they
+ * cannot be attributed to a band, and silently folding them into one would
+ * fabricate a repeat that was never run.
+ */
+export function groupRepeats(cards: Scorecard[]): RepeatBand[] {
+  const bands = new Map<string, Scorecard[]>();
+  for (const card of cards) {
+    const group = repeatGroupOf(card);
+    if (!group) continue;
+    const list = bands.get(group);
+    if (list) list.push(card);
+    else bands.set(group, [card]);
+  }
+  return [...bands].map(([group, list]) => {
+    // Index-ordered; a card without an index keeps its arrival order behind the
+    // indexed ones rather than being sorted to a position it never claimed.
+    const sorted = [...list].sort(
+      (a, b) => (a.meta?.repeat?.index ?? Number.MAX_SAFE_INTEGER) - (b.meta?.repeat?.index ?? Number.MAX_SAFE_INTEGER),
+    );
+    const declared = sorted.find((c) => c.meta?.repeat)?.meta?.repeat?.of;
+    return { group, of: declared ?? sorted.length, cards: sorted };
+  });
 }
 
 /** Load a tier's Martian leaderboard sidecar, or undefined if it ships none. */
@@ -373,16 +588,18 @@ export function computeMartianRanking(
 }
 
 export function renderTable(card: Scorecard, labels: Record<string, string> = {}): string {
-  // Show the pr-review columns (prec/rec/F-beta) only when some run graded a
-  // review — otherwise keep the table lean for triage/code-fix. The F-beta column
-  // is labelled by the β the run used (F1 by default).
+  // Show the pr-review columns only when some run graded a review — otherwise
+  // keep the table lean for triage/code-fix. The F-beta column is labelled by the
+  // β the run used (F1 by default). `μrec` is micro-recall — matched ÷ gold over
+  // the whole arm — and it sits LEFT of the per-case means because it is the
+  // headline; `SNR` is the over-generation guardrail that replaces precision.
   const hasReview = card.models.some((m) => m.reviewTotal > 0);
   const fCol = fLabel(card.models.find((m) => m.reviewBeta !== undefined)?.reviewBeta ?? 1);
   const header = [
     "model",
     "code-fix",
     "behavioral",
-    ...(hasReview ? ["prec", "rec", fCol] : []),
+    ...(hasReview ? ["μrec", "SNR", "prec", "rec", fCol] : []),
     "in tok",
     "cached",
     "out tok",
@@ -396,6 +613,8 @@ export function renderTable(card: Scorecard, labels: Record<string, string> = {}
     m.behavioralTotal ? `${m.behavioralOk}/${m.behavioralTotal}` : "—",
     ...(hasReview
       ? [
+          fmtRatio(m.micro?.microRecall),
+          fmtRatio(m.micro?.snr),
           m.reviewTotal ? m.avgPrecision.toFixed(2) : "—",
           m.reviewTotal ? m.avgRecall.toFixed(2) : "—",
           m.reviewTotal ? m.avgFbeta.toFixed(2) : "—",
@@ -408,7 +627,48 @@ export function renderTable(card: Scorecard, labels: Record<string, string> = {}
     fmtMs(m.p50DurationMs),
     String(m.errors),
   ]);
-  return table([header, ...rows]);
+  const out = [table([header, ...rows])];
+  if (hasReview) out.push(renderReviewNotes(card));
+  return out.filter(Boolean).join("\n");
+}
+
+/**
+ * The footnotes that stop a pr-review table being misread:
+ *
+ *  - the **empty-gold canary** (AC2). A case with no gold findings scores 1.00
+ *    for posting nothing, so it inflates every per-case mean while contributing
+ *    nothing to recall. Naming it is the difference between a precision canary
+ *    and a free point nobody noticed.
+ *  - the **detection floor**. On a 25-finding gold set, one extra hit is p=0.50 —
+ *    a coin flip. A reader who does not know that will read any movement as
+ *    progress.
+ *  - **not-measured families**, which must never be read as "did not convert".
+ */
+function renderReviewNotes(card: Scorecard): string {
+  const notes: string[] = [];
+
+  const canaries = [...new Set(card.models.flatMap((m) => m.micro?.emptyGoldCases ?? []))].sort();
+  if (canaries.length) {
+    notes.push(
+      `  ⚠ empty-gold case${canaries.length > 1 ? "s" : ""} (precision canary — scores 1.00 for posting nothing, ` +
+        `inflates prec/rec/F but NOT μrec): ${canaries.join(", ")}`,
+    );
+  }
+
+  const gold = card.models.find((m) => m.micro)?.micro?.gold ?? 0;
+  if (gold > 0 && gold < 100) {
+    notes.push(
+      `  ⚠ ${gold} gold findings: paired-McNemar detection floor ≈ ${DETECTION_FLOOR_MICRO_RECALL.toFixed(2)} μrec. ` +
+        `Below it, a μrec change is not distinguishable from chance — gate on mechanism metrics, not on this number.`,
+    );
+  }
+
+  const unmeasured = [...new Set(card.models.flatMap((m) => (m.families ?? []).filter((f) => f.notMeasured).map((f) => f.family)))];
+  if (unmeasured.length) {
+    notes.push(`  ⚠ families NOT MEASURED on this arm (a missing analyser, not a null result): ${unmeasured.join(", ")}`);
+  }
+
+  return notes.join("\n");
 }
 
 /**
@@ -462,6 +722,25 @@ export interface IndexRun {
   /** Comparison axis (see {@link RunMeta.runType}) — lets the SPA badge a run
    * without fetching its scorecard. Absent ⇒ `"models"`. */
   runType?: "models" | "config";
+  /**
+   * The ARM labels under test (`meta.models`) — model ids in a `models` run,
+   * config/overlay names in a `config` run.
+   *
+   * `byTier` already carries a per-arm summary, but only for arms that have
+   * FINISHED a case: a run that is still live with nothing graded yet has an
+   * empty `byTier` and would otherwise be an unnamed row. Carried here so the
+   * overview can name a run's arm from the index alone. */
+  models?: string[];
+  /** The primary `--overlay` (`meta.overlay`) — the other half of the arm's
+   * identity, and the one that carries the `review:` policy. Absent ⇒ not
+   * recorded (built-in assets, or a run measured before the stamp existed). */
+  overlay?: string;
+  /** Set when this run is one repeat of a deliberate band (`meta.repeat`). This
+   * is what lets the overview fold N sibling runs into ONE row instead of
+   * showing a band as N unrelated results; `group` is the first repeat's
+   * `runId` and `of` says how many repeats to expect, so a band that is still
+   * in flight is distinguishable from a short one. */
+  repeat?: RepeatRef;
   tiers: string[];
   /** Display labels keyed by model id, carried for the SPA. */
   labels: Record<string, string>;
@@ -533,6 +812,9 @@ function indexRun(tierKey: string, dir: string, card: Scorecard, nowMs: number):
     generatedAt: meta?.generatedAt ?? dir ?? "",
     gitSha: meta?.gitSha,
     runType: meta?.runType,
+    models: meta?.models,
+    overlay: meta?.overlay,
+    repeat: meta?.repeat,
     tiers: meta?.tiers ?? tierOrder,
     labels: meta?.labels ?? {},
     byTier,
@@ -599,6 +881,11 @@ export function buildIndex(resultsRoot: string, generatedAt: string): DashboardI
 
 function avg(xs: number[]): number {
   return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0;
+}
+/** A metric that is legitimately UNDEFINED (no gold, no noise, nothing posted)
+ * renders as an em dash — never as 0, which would read as a measured failure. */
+export function fmtRatio(x: number | null | undefined): string {
+  return x === null || x === undefined || !Number.isFinite(x) ? "—" : x.toFixed(3);
 }
 /** Compact token count: <1000 verbatim, else "k" (one decimal under 10k).
  * Tolerates undefined/NaN (e.g. a scorecard.json predating cached-token

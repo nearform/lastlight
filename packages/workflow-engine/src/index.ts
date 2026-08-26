@@ -31,7 +31,11 @@ export {
   phaseConfigFor,
   runPhase,
   runCommandPhase,
+  // The dedup ledger itself, for app-registered phase-type handlers that drive
+  // their own work (see `type: fanout`) and must still land an executions row.
+  runLedgeredPhase,
+  validateShellCommand,
 } from "./core/phase-executor.js";
-export type { PhaseRunContext } from "./core/phase-executor.js";
+export type { PhaseRunContext, LedgerDeps, RunPhaseResult } from "./core/phase-executor.js";
 export { runWorkflowCore } from "./core/scheduler.js";
 export type { SchedulerDeps, HostCapabilities } from "./core/scheduler.js";

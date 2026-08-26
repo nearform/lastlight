@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 
 import type { DashboardIndex, Scorecard } from "../types";
 
@@ -31,5 +31,24 @@ export function useScorecard(url: string | undefined, live: boolean) {
     enabled: !!url,
     refetchInterval: live ? 1500 : false,
     placeholderData: (prev) => prev,
+  });
+}
+
+/**
+ * Several finished scorecards at once — the repeat-group view needs each
+ * repeat's full `results` (for `review.trace`), which `/api/index` does not
+ * carry. Deliberately parallel and progressive rather than awaited as a batch,
+ * and the query key matches {@link useScorecard}'s at `live: false` so opening a
+ * run afterwards reuses what this already loaded. A finished scorecard never
+ * changes, hence `staleTime: Infinity`.
+ */
+export function useScorecards(urls: (string | undefined)[]) {
+  return useQueries({
+    queries: urls.map((url) => ({
+      queryKey: ["scorecard", url, false],
+      queryFn: () => getJson<Scorecard>(url as string),
+      enabled: !!url,
+      staleTime: Infinity,
+    })),
   });
 }

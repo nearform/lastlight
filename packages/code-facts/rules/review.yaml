@@ -1,0 +1,540 @@
+# The default Opengrep ruleset for the PR-review path.
+#
+# LOCAL AND OURS, DELIBERATELY. Locked decision 7 puts Opengrep in the engine
+# slot precisely because Semgrep's registry rules moved to a licence that
+# plausibly excludes a review product — so pointing this at `--config auto`
+# would reintroduce the problem the engine choice was made to avoid. Override
+# with `--rules <path>` (or `LASTLIGHT_OPENGREP_RULES`) to run a ruleset a
+# deployment owns.
+#
+# These are EVIDENCE, NOT FINDINGS. Every hit is a seed for the survey phase and
+# is never posted directly. So the bar for including a rule here is "does it
+# name a place worth asking a question about", not "is it always a defect" —
+# precision is not the guardrail (locked decision 2), and a static-analyser hit
+# rewritten prettily by an LLM and posted is the anti-pattern this whole design
+# is arranged to avoid.
+#
+# The set is deliberately small, and "small" counts FAMILIES, not rules. There
+# are six of them — dynamic code execution, a shell command built by
+# interpolation, SQL built by interpolation, weak randomness feeding something
+# named like a secret, disabled TLS verification, disabled cookie protection —
+# plus one library-shaped seventh (JWT verification) where the language has an
+# exact spelling for "off". It grows by a family when a per-family attribution
+# run shows the `security` family converting, not before.
+#
+# ## Why the same six families appear five times
+#
+# Every rule here was `languages: [typescript, javascript]` until a corpus
+# measurement put a number on what that cost: **40 of 50 real PRs in the
+# pr-review corpus are not TypeScript** (Java 9, Go 9, Python 7, Ruby 6), and on
+# those the pattern half of the security family produced an essentially empty
+# envelope. Opengrep is a Semgrep fork with 30-odd language front-ends, so the
+# per-language equivalents below are pure rule content and zero engine work.
+#
+# A rule cannot span languages whose pattern text does not parse in all of them
+# (`new Function($X)` is not Python), so one family becomes one rule per
+# language. The language identifiers are the ones `opengrep --show-supported-
+# languages` prints on the pinned 1.27.1 — `java`, `go`, `python`, `ruby` —
+# verified against the binary, not guessed.
+#
+# ## What did NOT transfer, and why it is absent rather than approximated
+#
+# A weak analogue is worse than a gap: it spends the survey phase's attention on
+# a shape nobody chose.
+#
+#  - **Dynamic code execution in Go.** The language has no eval. `plugin.Open`
+#    and a `text/template` parsed from user input are real questions, but they
+#    are DIFFERENT questions, and answering them with a rule named "dynamic code
+#    execution" would mislabel the evidence.
+#  - **JWT verification in Java and Go.** The TypeScript rule works because
+#    `jsonwebtoken` spells "off" in an options object. jjwt spells it as
+#    `parseClaimsJwt` against `parseClaimsJws` — one letter, easy to match
+#    backwards — and Go's `jwt.Parse` takes a key function, so "this verifies
+#    nothing" is a data-flow fact and not a pattern. Python and Ruby DO have an
+#    exact spelling (`options={"verify_signature": False}`, and a literal `false`
+#    third argument), so they keep the rule.
+#
+# Every rule below was run by the real 1.27.1 binary over a fixture holding both
+# a true positive and a near-miss true negative — `tests/rules.test.ts`, which
+# is the guard on the thing that actually goes wrong here: a rule that never
+# fires is worse than no rule, because it reads as "scanned, clean".
+
+rules:
+  # ── TypeScript / JavaScript ────────────────────────────────────────────────
+  - id: lastlight-eval-on-dynamic-input
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      Dynamic code execution. Ask what reaches this expression, and whether any
+      of it crosses a trust boundary.
+    patterns:
+      - pattern-either:
+          - pattern: eval($X)
+          - pattern: new Function($X)
+      - pattern-not: eval("...")
+      - pattern-not: new Function("...")
+
+  - id: lastlight-shell-from-template
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      A shell command built from a template literal. Name the interpolated
+      value and where it comes from.
+    pattern-either:
+      - pattern: $CP.exec(`...`, ...)
+      - pattern: $CP.execSync(`...`, ...)
+      - pattern: exec(`...`, ...)
+      - pattern: execSync(`...`, ...)
+
+  - id: lastlight-sql-from-template
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: >-
+      A SQL string built by interpolation. Ask whether the interpolated value is
+      ever attacker-controlled and whether a parameterised form exists.
+    pattern-either:
+      - pattern: $DB.query(`...`, ...)
+      - pattern: $DB.raw(`...`, ...)
+      - pattern: $DB.execute(`...`, ...)
+
+  - id: lastlight-math-random-for-secret
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      Math.random() feeding something named like a token, secret, key or id.
+      Ask whether this value is ever security-relevant.
+    patterns:
+      - pattern-inside: |
+          $NAME = ...
+      - pattern: Math.random()
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: (?i).*(token|secret|key|nonce|salt|password|session|otp).*
+
+  - id: lastlight-jwt-verification-weakened
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      JWT verification appears weakened or skipped. Ask which side enforces
+      expiry and signature, and quote the line that does it.
+    pattern-either:
+      - pattern: $JWT.decode($TOKEN, ...)
+      # QUOTED, and it must stay quoted. `- pattern: $JWT.verify(…, {...,
+      # algorithms: ["none"], ...})` is a plain YAML scalar containing `: `,
+      # which YAML rejects outright — and it shipped that way, so this file was
+      # never once loadable. `tests/rules.test.ts` now parses it as the guard,
+      # because the symptom is invisible: opengrep reports the config error in
+      # its `errors[]`, `patterns` faithfully turns that into a `degraded[]`
+      # entry, and the run stays green with `findings: []`. Nobody saw it
+      # because the binary was not installed on any machine that ran this.
+      - pattern: '$JWT.verify($TOKEN, $SECRET, {..., algorithms: ["none"], ...})'
+      - pattern: "$JWT.verify($TOKEN, $SECRET, {..., ignoreExpiration: true, ...})"
+
+  - id: lastlight-cookie-protection-disabled
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: >-
+      A cookie flag that protects the session is set to false. Ask what else
+      enforces the property this flag was carrying.
+    pattern-either:
+      - pattern: "{..., httpOnly: false, ...}"
+      - pattern: "{..., secure: false, ...}"
+
+  - id: lastlight-tls-verification-disabled
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      TLS certificate verification is disabled. Ask whether this reaches
+      production configuration.
+    pattern-either:
+      - pattern: "{..., rejectUnauthorized: false, ...}"
+      - pattern: process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"
+
+  # ── Java ───────────────────────────────────────────────────────────────────
+  # Java has no `eval` keyword; `.eval(` is a scripting engine (javax.script,
+  # Nashorn, Groovy, JEXL, MVEL) in essentially every occurrence, which is the
+  # same question the TypeScript rule asks.
+  - id: lastlight-dynamic-eval-java
+    languages: [java]
+    severity: ERROR
+    message: >-
+      A script engine evaluating a non-literal expression. Ask what reaches it,
+      and whether any of it crosses a trust boundary.
+    patterns:
+      - pattern: $ENGINE.eval($X)
+      - pattern-not: $ENGINE.eval("...")
+
+  # `<... ... ...>` is the deep-expression operator: `"a" + b + "c"` parses as
+  # `("a" + b) + "c"`, so a top-level `"..." + $X` would miss every concatenation
+  # of more than two terms — which is most of them.
+  - id: lastlight-shell-from-concat-java
+    languages: [java]
+    severity: ERROR
+    message: >-
+      A shell command built by string concatenation or String.format. Name the
+      interpolated value and where it comes from.
+    pattern-either:
+      - pattern: Runtime.getRuntime().exec(<... "..." + $X ...>)
+      - pattern: Runtime.getRuntime().exec(String.format(...), ...)
+      - pattern: new ProcessBuilder(..., <... "..." + $X ...>, ...)
+      - pattern: new ProcessBuilder(..., String.format(...), ...)
+
+  - id: lastlight-sql-from-concat-java
+    languages: [java]
+    severity: WARNING
+    message: >-
+      A SQL string built by concatenation or String.format. Ask whether the
+      interpolated value is ever attacker-controlled and whether a
+      PreparedStatement placeholder exists.
+    pattern-either:
+      - pattern: $S.executeQuery(<... "..." + $X ...>)
+      - pattern: $S.executeUpdate(<... "..." + $X ...>)
+      - pattern: $S.execute(<... "..." + $X ...>)
+      - pattern: $S.prepareStatement(<... "..." + $X ...>)
+      - pattern: $S.createQuery(<... "..." + $X ...>, ...)
+      - pattern: $S.createNativeQuery(<... "..." + $X ...>, ...)
+      - pattern: $S.executeQuery(String.format(...))
+      - pattern: $S.executeUpdate(String.format(...))
+      - pattern: $S.execute(String.format(...))
+      - pattern: $S.prepareStatement(String.format(...))
+
+  # Two branches rather than one: a `metavariable-regex` on an UNBOUND
+  # metavariable kills the match outright (measured — the `Math.random()` branch
+  # went silent the moment a `$R` constraint was added beside it), so the
+  # receiver check has to live only in the branch that binds a receiver. The
+  # negative lookahead is what keeps `secureRandom.nextLong()` out.
+  - id: lastlight-weak-random-for-secret-java
+    languages: [java]
+    severity: ERROR
+    message: >-
+      Weak randomness feeding something named like a token, secret, key or id.
+      Ask whether this value is ever security-relevant, and whether
+      SecureRandom belongs here.
+    pattern-either:
+      - patterns:
+          - pattern-inside: $T $NAME = ...;
+          - pattern: Math.random()
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: (?i).*(token|secret|key|nonce|salt|password|session|otp).*
+      - patterns:
+          - pattern-inside: $T $NAME = ...;
+          - pattern-either:
+              - pattern: $R.nextInt(...)
+              - pattern: $R.nextLong()
+              - pattern: $R.nextDouble()
+              - pattern: $R.nextBytes(...)
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: (?i).*(token|secret|key|nonce|salt|password|session|otp).*
+          - metavariable-regex:
+              metavariable: $R
+              regex: ^(?i)(?!.*secure).*$
+
+  - id: lastlight-tls-verification-disabled-java
+    languages: [java]
+    severity: ERROR
+    message: >-
+      TLS certificate or hostname verification is accepted unconditionally. Ask
+      whether this reaches production configuration.
+    pattern-either:
+      - pattern: |
+          public boolean verify(String $H, SSLSession $S) { return true; }
+      - pattern: |
+          public void checkServerTrusted(X509Certificate[] $C, String $A) { }
+      - pattern: $X.setHostnameVerifier(NoopHostnameVerifier.INSTANCE)
+      - pattern: $X.setHostnameVerifier(SSLConnectionSocketFactory.ALLOW_ALL_HOSTNAME_VERIFIER)
+
+  - id: lastlight-cookie-protection-disabled-java
+    languages: [java]
+    severity: WARNING
+    message: >-
+      A cookie flag that protects the session is set to false. Ask what else
+      enforces the property this flag was carrying.
+    pattern-either:
+      - pattern: $C.setHttpOnly(false)
+      - pattern: $C.setSecure(false)
+
+  # ── Go ─────────────────────────────────────────────────────────────────────
+  # No dynamic-code-execution rule: Go has no eval. See the header.
+  - id: lastlight-shell-from-interpolation-go
+    languages: [go]
+    severity: ERROR
+    message: >-
+      A shell command built from a non-literal string. Name the interpolated
+      value and where it comes from.
+    patterns:
+      - pattern-either:
+          - pattern: exec.Command("sh", "-c", $X)
+          - pattern: exec.Command("bash", "-c", $X)
+          - pattern: exec.CommandContext($CTX, "sh", "-c", $X)
+          - pattern: exec.CommandContext($CTX, "bash", "-c", $X)
+      - pattern-not: exec.Command($SH, "-c", "...")
+      - pattern-not: exec.CommandContext($CTX, $SH, "-c", "...")
+
+  - id: lastlight-sql-from-interpolation-go
+    languages: [go]
+    severity: WARNING
+    message: >-
+      A SQL string built by fmt.Sprintf or concatenation. Ask whether the
+      interpolated value is ever attacker-controlled and whether a placeholder
+      form exists.
+    pattern-either:
+      - pattern: $DB.Query(fmt.Sprintf(...), ...)
+      - pattern: $DB.QueryRow(fmt.Sprintf(...), ...)
+      - pattern: $DB.Exec(fmt.Sprintf(...), ...)
+      - pattern: $DB.QueryContext($CTX, fmt.Sprintf(...), ...)
+      - pattern: $DB.ExecContext($CTX, fmt.Sprintf(...), ...)
+      - pattern: $DB.Query(<... "..." + $X ...>, ...)
+      - pattern: $DB.QueryRow(<... "..." + $X ...>, ...)
+      - pattern: $DB.Exec(<... "..." + $X ...>, ...)
+
+  # The function list is the discriminator, not the package name: `Intn`,
+  # `Int31`, `Int63` and `Float64` exist only in `math/rand`, so an import of
+  # `crypto/rand` under the same `rand` identifier cannot trip this.
+  - id: lastlight-weak-random-for-secret-go
+    languages: [go]
+    severity: ERROR
+    message: >-
+      math/rand feeding something named like a token, secret, key or id. Ask
+      whether this value is ever security-relevant, and whether crypto/rand
+      belongs here.
+    patterns:
+      - pattern-either:
+          - pattern-inside: $NAME := ...
+          - pattern-inside: $NAME = ...
+      - pattern-either:
+          - pattern: rand.Intn(...)
+          - pattern: rand.Int31()
+          - pattern: rand.Int31n(...)
+          - pattern: rand.Int63()
+          - pattern: rand.Int63n(...)
+          - pattern: rand.Float64()
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: (?i).*(token|secret|key|nonce|salt|password|session|otp).*
+
+  - id: lastlight-tls-verification-disabled-go
+    languages: [go]
+    severity: ERROR
+    message: >-
+      TLS certificate verification is disabled. Ask whether this reaches
+      production configuration.
+    pattern: "tls.Config{..., InsecureSkipVerify: true, ...}"
+
+  - id: lastlight-cookie-protection-disabled-go
+    languages: [go]
+    severity: WARNING
+    message: >-
+      A cookie flag that protects the session is set to false. Ask what else
+      enforces the property this flag was carrying.
+    pattern-either:
+      - pattern: "http.Cookie{..., HttpOnly: false, ...}"
+      - pattern: "http.Cookie{..., Secure: false, ...}"
+
+  # ── Python ─────────────────────────────────────────────────────────────────
+  - id: lastlight-dynamic-eval-python
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Dynamic code execution. Ask what reaches this expression, and whether any
+      of it crosses a trust boundary.
+    patterns:
+      - pattern-either:
+          - pattern: eval($X)
+          - pattern: exec($X)
+      - pattern-not: eval("...")
+      - pattern-not: exec("...")
+
+  - id: lastlight-shell-from-interpolation-python
+    languages: [python]
+    severity: ERROR
+    message: >-
+      A shell command built from an f-string, %-format or concatenation. Name
+      the interpolated value and where it comes from.
+    pattern-either:
+      - pattern: os.system(f"...")
+      - pattern: os.system(<... "..." + $X ...>)
+      - pattern: os.system("..." % ...)
+      - pattern: os.system("...".format(...))
+      - pattern: os.popen(f"...")
+      - pattern: os.popen(<... "..." + $X ...>)
+      - pattern: subprocess.run(f"...", ..., shell=True, ...)
+      - pattern: subprocess.call(f"...", ..., shell=True, ...)
+      - pattern: subprocess.check_output(f"...", ..., shell=True, ...)
+      - pattern: subprocess.Popen(f"...", ..., shell=True, ...)
+
+  - id: lastlight-sql-from-interpolation-python
+    languages: [python]
+    severity: WARNING
+    message: >-
+      A SQL string built by interpolation. Ask whether the interpolated value is
+      ever attacker-controlled and whether a parameterised form exists — note
+      that DB-API's second argument is the parameterised form.
+    pattern-either:
+      - pattern: $C.execute(f"...", ...)
+      - pattern: $C.execute("..." % ..., ...)
+      - pattern: $C.execute("...".format(...), ...)
+      - pattern: $C.executemany(f"...", ...)
+      - pattern: $C.raw(f"...", ...)
+
+  - id: lastlight-weak-random-for-secret-python
+    languages: [python]
+    severity: ERROR
+    message: >-
+      random feeding something named like a token, secret, key or id. Ask
+      whether this value is ever security-relevant, and whether `secrets`
+      belongs here.
+    patterns:
+      - pattern-inside: |
+          $NAME = ...
+      - pattern-either:
+          - pattern: random.random()
+          - pattern: random.randint(...)
+          - pattern: random.randrange(...)
+          - pattern: random.choice(...)
+          - pattern: random.sample(...)
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: (?i).*(token|secret|key|nonce|salt|password|session|otp).*
+
+  # `verify=False` is deliberately matched on ANY callee: requests, httpx,
+  # aiohttp wrappers and every in-house `http_get` share the keyword, and the
+  # cost of the breadth is one dismissible seed. `jwt.decode` is excluded only
+  # because its own rule already names it better.
+  - id: lastlight-tls-verification-disabled-python
+    languages: [python]
+    severity: ERROR
+    message: >-
+      TLS certificate verification is disabled. Ask whether this reaches
+      production configuration.
+    patterns:
+      - pattern-either:
+          - pattern: $F(..., verify=False, ...)
+          - pattern: ssl._create_unverified_context(...)
+          - pattern: $CTX.check_hostname = False
+          - pattern: $CTX.verify_mode = ssl.CERT_NONE
+      - pattern-not: jwt.decode(...)
+
+  - id: lastlight-cookie-protection-disabled-python
+    languages: [python]
+    severity: WARNING
+    message: >-
+      A cookie flag that protects the session is set to false. Ask what else
+      enforces the property this flag was carrying.
+    pattern-either:
+      - pattern: $R.set_cookie(..., httponly=False, ...)
+      - pattern: $R.set_cookie(..., secure=False, ...)
+
+  - id: lastlight-jwt-verification-weakened-python
+    languages: [python]
+    severity: ERROR
+    message: >-
+      JWT verification appears weakened or skipped. Ask which side enforces
+      expiry and signature, and quote the line that does it.
+    pattern-either:
+      - pattern: jwt.decode(..., verify=False, ...)
+      - pattern: 'jwt.decode(..., options={..., "verify_signature": False, ...}, ...)'
+      - pattern: 'jwt.decode(..., options={..., "verify_exp": False, ...}, ...)'
+
+  # ── Ruby ───────────────────────────────────────────────────────────────────
+  - id: lastlight-dynamic-eval-ruby
+    languages: [ruby]
+    severity: ERROR
+    message: >-
+      Dynamic code execution. Ask what reaches this expression, and whether any
+      of it crosses a trust boundary.
+    patterns:
+      - pattern-either:
+          - pattern: eval($X)
+          - pattern: instance_eval($X)
+          - pattern: $O.instance_eval($X)
+          - pattern: class_eval($X)
+          - pattern: $O.class_eval($X)
+      - pattern-not: eval("...")
+      - pattern-not: instance_eval("...")
+      - pattern-not: class_eval("...")
+
+  # `"...#{$X}..."` is the interpolated-string pattern and it does NOT match a
+  # plain literal — which is the whole discriminator here, since `system("git
+  # log")` is not a question worth asking. The backtick pattern also covers
+  # `%x(...)`; they are the same node.
+  - id: lastlight-shell-from-interpolation-ruby
+    languages: [ruby]
+    severity: ERROR
+    message: >-
+      A shell command built by string interpolation. Name the interpolated
+      value and where it comes from.
+    pattern-either:
+      - pattern: system("...#{$X}...")
+      - pattern: exec("...#{$X}...")
+      - pattern: spawn("...#{$X}...")
+      - pattern: "`...#{$X}...`"
+      - pattern: IO.popen("...#{$X}...", ...)
+      - pattern: Open3.capture3("...#{$X}...", ...)
+      - pattern: Open3.popen3("...#{$X}...", ...)
+
+  - id: lastlight-sql-from-interpolation-ruby
+    languages: [ruby]
+    severity: WARNING
+    message: >-
+      A SQL fragment built by string interpolation. Ask whether the interpolated
+      value is ever attacker-controlled and whether the array or hash condition
+      form exists.
+    pattern-either:
+      - pattern: $C.execute("...#{$X}...")
+      - pattern: $C.exec_query("...#{$X}...")
+      - pattern: $C.find_by_sql("...#{$X}...")
+      - pattern: $C.where("...#{$X}...")
+      - pattern: $C.order("...#{$X}...")
+      - pattern: $C.select_all("...#{$X}...")
+
+  - id: lastlight-weak-random-for-secret-ruby
+    languages: [ruby]
+    severity: ERROR
+    message: >-
+      rand feeding something named like a token, secret, key or id. Ask whether
+      this value is ever security-relevant, and whether SecureRandom belongs
+      here.
+    patterns:
+      - pattern-inside: |
+          $NAME = ...
+      - pattern-either:
+          - pattern: rand(...)
+          - pattern: Random.rand(...)
+          - pattern: Random.new.rand(...)
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: (?i).*(token|secret|key|nonce|salt|password|session|otp).*
+
+  # The bare constant rather than the assignment: it also catches the
+  # `verify_mode: OpenSSL::SSL::VERIFY_NONE` option-hash spelling, which is how
+  # Net::HTTP, Faraday and Excon all take it.
+  - id: lastlight-tls-verification-disabled-ruby
+    languages: [ruby]
+    severity: ERROR
+    message: >-
+      TLS certificate verification is disabled. Ask whether this reaches
+      production configuration.
+    pattern: "OpenSSL::SSL::VERIFY_NONE"
+
+  - id: lastlight-cookie-protection-disabled-ruby
+    languages: [ruby]
+    severity: WARNING
+    message: >-
+      A cookie flag that protects the session is set to false. Ask what else
+      enforces the property this flag was carrying.
+    pattern-either:
+      - pattern: "{..., httponly: false, ...}"
+      - pattern: "{..., secure: false, ...}"
+
+  - id: lastlight-jwt-verification-weakened-ruby
+    languages: [ruby]
+    severity: ERROR
+    message: >-
+      JWT verification appears weakened or skipped — ruby-jwt's third argument
+      is the verify flag. Ask which side enforces expiry and signature, and
+      quote the line that does it.
+    pattern-either:
+      - pattern: JWT.decode($T, $K, false, ...)
+      - pattern: "JWT.decode(..., { ..., verify_expiration: false, ... })"

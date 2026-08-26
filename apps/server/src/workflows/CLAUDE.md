@@ -195,6 +195,34 @@ Phase kinds the runner recognises:
   PyPI (already on the strict egress allowlist) into a cached venv
   (`UV_CACHE_DIR=/cache/uv`, `UV_PYTHON_DOWNLOADS=never` so it uses the baked-in
   python3).
+- **fanout** (`type: fanout`) — N agent sessions run **concurrently
+  inside ONE provisioned workspace**, declared as `branches:`. Handler:
+  `handlers/fanout.ts`, registered on `EnginePorts.handlers` in
+  `runner.ts` — the same seam `post-review` uses, so the engine core
+  stays generic. Each branch inherits the phase's
+  `prompt`/`skills`/`model`/`variant` and may override them, gets its own
+  skill bundle, and gets its own `executions` row under
+  `<phase>_branch_<name>` — which is what preserves resume, dedup,
+  per-branch cost and the dashboard's longest-prefix grouping.
+  `max_concurrent` is clamped by a backend ceiling (`none`/`docker` 6;
+  `gondolin`/`smol`/`kubernetes` **1**, because each branch would be a
+  micro-VM in the harness process). A ceiling of 1 runs them as a chain,
+  byte-identical to declaring sequential phases. Branch `until_bash`
+  gates run **after** the join and **sequentially** —
+  `InProcessSandbox.runCommand` is a `spawnSync` that blocks the event
+  loop, so interleaving would serialise the whole fan-out on the one
+  backend it exists to speed up. No `approval_gate` (a fan-out cannot
+  pause mid-flight) and no `loop:`/`generic_loop:` (the branches are the
+  iteration shape). Isolation is by **disjoint output paths**, not
+  separate checkouts. A branch may also declare **`context_file`** — a
+  path relative to the AGENT'S CWD whose contents the harness reads and
+  appends to that branch's prompt, so the model resolves no path at all
+  (measured: 27 of 133 obligation reads across three stored `pr-review`
+  runs resolved against the workspace root instead of the checkout and
+  hit ENOENT). It resolves against `ProvisionResult.hostAgentCwd` — the
+  host end of the `cwd` a `type: bash` phase runs in — and an unreadable
+  path appends a loud NOT AVAILABLE notice rather than nothing. See
+  `spec/06-workflow-engine.md` → "`fanout`".
 - **loop-phase** — any phase with `loop:` set. Always executes as an
   agent phase internally, but repeated in `reviewer → fix → reviewer`
   pairs up to `max_cycles`. See loop iteration naming below.
@@ -391,8 +419,13 @@ builds a DAG with `buildDag(phases, { chainIfNoDeps: true })`:
 The scheduler then loops `while (!isComplete(dag))`: it skips nodes whose
 trigger rule fails (a failure cascades down the chain as **skips**, recorded
 in the `executions` ledger), and runs the earliest-declared ready node — **one
-at a time, sequentially, in declaration order**. Real concurrency via git
-worktrees is deferred to a later issue.
+at a time, sequentially, in declaration order**.
+
+**Concurrency across DAG nodes is still deferred** (it needs per-phase git
+worktrees; see `docs/plans/deterministic-pr-levers.md` §WP5 for
+the four blockers). **Concurrency *within* a node exists today** — `type:
+fanout` runs N agent sessions against the one provisioned workspace. See "Phase
+types" above.
 
 - **One workspace.** Every phase and every loop iteration uses the single
   `ctx.taskId`. The sandbox workspace persists between phases (architect writes
@@ -439,6 +472,12 @@ cycle:
   check that follows iteration n (see "Recording the loop" below). Ledger row
   only: it is never a phase, never enters `phase_history`, and never becomes
   `current_phase`.
+- `${parentPhaseName}_branch_${name}` — one branch of a `type: fanout` phase,
+  plus `_retry` (its one-shot soft retry) and `_check` (its `until_bash` gate).
+  This is why a fanout **branch name may not contain an underscore** and may not
+  end in `-retry`/`-check`: the name is a ledger key and `PhaseRef` parses these
+  suffixes off it. The schema rejects both, and `parse()` is ordered so the
+  suffixed forms win.
 
 The legacy bare-numeric re-review form (`reviewer_2`) is **dropped** — it was
 untagged, ambiguous with literal phase names, and inconsistent with the

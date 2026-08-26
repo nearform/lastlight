@@ -166,6 +166,32 @@ function eventToState(event: string | undefined): Review["state"] {
   }
 }
 
+/**
+ * The issue numbers a PR body says it CLOSES, in first-mention order.
+ *
+ * GitHub's own closing-keyword set, matched the way GitHub matches it: the
+ * keyword must be followed by `#<n>` (optionally via a full issue URL), and a
+ * mention that is merely a reference — `See #12`, `Part of #12` — is NOT a
+ * closing link and must not appear here. Getting that boundary wrong would seed
+ * the `spec` axis with criteria from an issue this PR never promised to satisfy,
+ * which is worse than seeding nothing: `buildSpecObligations` would emit a
+ * confident obligation naming the wrong "what was asked".
+ *
+ * This is the LINKAGE half of `closingIssuesReferences`. The real field also
+ * resolves issues linked by hand through the Development sidebar, which has no
+ * fixture equivalent — a case that needs one seeds the keyword in the body.
+ */
+export function closingIssueNumbers(body: string): number[] {
+  const re =
+    /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s+(?:https?:\/\/github\.com\/[^/\s]+\/[^/\s]+\/issues\/(\d+)|#(\d+))/gi;
+  const out: number[] = [];
+  for (const m of body.matchAll(re)) {
+    const n = Number(m[1] ?? m[2]);
+    if (Number.isFinite(n) && n > 0 && !out.includes(n)) out.push(n);
+  }
+  return out;
+}
+
 /** One failing job as the Actions endpoints should report it. */
 export interface ActionsJobSeed {
   name: string;
@@ -321,6 +347,13 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
         user: { login: r.user },
         body: r.body,
         state: r.state ?? "COMMENTED",
+        // `serializeReview` has always emitted `commit_id`; this map was the one
+        // place that never populated it, so every seeded review went out SHA-less
+        // while every SUBMITTED one carried `b.commit_id ?? pr.head.sha`. A prior
+        // APPROVE with no SHA reads as an approval of the current head — see
+        // `ReviewSeed.commit_id`. Undefined stays undefined: inventing the head
+        // here is the bug, not the fix.
+        commit_id: r.commit_id,
         submitted_at: NOW,
         comments: [],
       })),
@@ -533,7 +566,7 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
     if (method === "POST" && path === "/graphql") {
       const q = String((body as { query?: string } | undefined)?.query ?? "");
       const vars = ((body as { variables?: Record<string, unknown> } | undefined)?.variables ??
-        {}) as { id?: string; mergeMethod?: string };
+        {}) as { id?: string; mergeMethod?: string; number?: number; first?: number };
       if (q.includes("enablePullRequestAutoMerge")) {
         // The node id the client resolved via REST is `PR_<number>` here (see
         // `serializePull`), so the mutation can find the PR the same way.
@@ -549,6 +582,46 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
           data: {
             enablePullRequestAutoMerge: {
               pullRequest: { number: pr.number, autoMergeRequest: { enabledAt: NOW } },
+            },
+          },
+        });
+        return true;
+      }
+      // `closingIssuesReferences` — the FIRST end of every `spec` obligation
+      // (`GitHubClient.listPullRequestClosingIssues`, read by core's
+      // `resolveSpecContext` at the dispatch choke point).
+      //
+      // Served here rather than seeded on the snapshot because linkage is
+      // something GitHub COMPUTES, not something a case knows: the real field
+      // resolves the body's closing keywords AND issues linked by hand. A
+      // harness that seeded `closes` would be carrying a second copy of that
+      // resolution, free to drift; a harness that seeded neither end silenced
+      // the family outright, which is what happened.
+      //
+      // So the fixture supplies issue CONTENT (what GitHub stores) and this
+      // supplies LINKAGE (what GitHub derives) — the split the rest of the fake
+      // already follows.
+      if (q.includes("closingIssuesReferences")) {
+        const num = Number(vars.number ?? 0);
+        const pr = pulls.find((p) => p.number === num);
+        const first = Math.min(Math.max(Number(vars.first ?? 5) || 5, 1), 10);
+        const nodes = pr
+          ? closingIssueNumbers(pr.body)
+              .map((n) => issues.get(n))
+              .filter((i): i is Issue => !!i)
+              .slice(0, first)
+              .map((i) => ({
+                number: i.number,
+                title: i.title,
+                url: i.html_url,
+                state: i.state.toUpperCase(),
+                body: i.body,
+              }))
+          : [];
+        json(200, {
+          data: {
+            repository: {
+              pullRequest: { closingIssuesReferences: { nodes } },
             },
           },
         });
