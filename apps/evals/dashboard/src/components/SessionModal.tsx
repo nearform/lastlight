@@ -1,21 +1,61 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { isToolPair } from "../timeline";
 import type { TimelineItem as TimelineItemT } from "../timeline";
-import type { TrialSession } from "../types";
+import type { PhaseMetric, TrialSession } from "../types";
 import { TimelineItem } from "./timeline/TimelineItem";
-import { useSessionLog } from "../lib/session";
+import { useSessionLog, usePhaseLogs, branchVocabulary } from "../lib/session";
+import type { SessionLane } from "../lib/session";
+import { buildPhaseRows } from "../lib/phaseTree";
+import { PhaseSidebar, LiveSessionList } from "./PhaseSidebar";
+import type { PhasePick, SidebarPhase } from "./PhaseSidebar";
 
 /** Right-align user turns, matching the Last Light session viewer. */
 function isUserMessage(item: TimelineItemT): boolean {
   return !isToolPair(item) && item.message.type === "user";
 }
 
+/** Ledger duration for a phase row. Prefers `agentMs` (agent + gate time) over
+ * the wider `durationMs` window, because that is the number a reader compares
+ * across phases. Only a fallback: once the transcript loads, the measured span of
+ * its real sessions is authoritative — which is also what keeps the panel honest
+ * while the `survey_branch_*` ledger rows carry no metrics at all. */
+function ledgerMs(rows: PhaseMetric[]): number | undefined {
+  let total: number | undefined;
+  for (const m of rows) {
+    const ms = m.agentMs ?? m.durationMs;
+    if (ms === undefined) continue;
+    total = (total ?? 0) + ms;
+  }
+  return total;
+}
+
+function ledgerCost(rows: PhaseMetric[]): number | undefined {
+  let total: number | undefined;
+  for (const m of rows) {
+    if (m.costUsd === undefined) continue;
+    total = (total ?? 0) + m.costUsd;
+  }
+  return total;
+}
+
 /** What the modal is showing: a single live (still-writing) transcript to follow,
  * or a finished case's per-trial / per-phase logs to browse. */
 export type SessionSource =
+  // No `metrics` here on purpose: a running case is a `PendingCase`, which
+  // carries no phases — the scorecard gains `phases[]` only when the case
+  // finishes. Lanes in a live log are named from their own opening prompt
+  // instead, which is why that path does not depend on the vocabulary.
   | { kind: "live"; title: string; url: string }
-  | { kind: "trials"; title: string; sessions: TrialSession[]; baseUrl: string }
+  | {
+      kind: "trials";
+      title: string;
+      sessions: TrialSession[];
+      baseUrl: string;
+      /** Per-phase metrics from the scorecard, keyed by phase name — so a tab can
+       * show what the phase cost before you open it. Absent for older runs. */
+      metrics?: PhaseMetric[];
+    }
   | {
       kind: "execution";
       title: string;
@@ -87,28 +127,36 @@ function ExecutionView({
   );
 }
 
-/** Scrolling timeline for one session jsonl URL. Re-fetches on a short interval
- * when `live`. Keyed by url upstream so switching tabs resets scroll. */
-function SessionTimeline({ url, live }: { url: string; live?: boolean }) {
-  const { data, isLoading, error } = useSessionLog(url, live);
+/** Scrolling timeline over an already-loaded set of items. Pure — the fetching
+ * moved up to the modal, which loads every phase at once so the panel can show
+ * what is inside each one without the reader opening it. */
+function Timeline({
+  items,
+  live,
+  loading,
+  error,
+}: {
+  items: TimelineItemT[];
+  live?: boolean;
+  loading?: boolean;
+  error?: unknown;
+}) {
   // When following live, show newest-first so fresh turns land at the top.
-  const items = live ? [...(data?.items ?? [])].reverse() : data?.items ?? [];
+  const ordered = live ? [...items].reverse() : items;
   return (
-    <div className="flex-1 space-y-2 overflow-y-auto bg-base-100 px-4 py-3">
-      {error && (
+    <div className="min-w-0 flex-1 space-y-2 overflow-y-auto bg-base-100 px-4 py-3">
+      {error ? (
         <div className="rounded-lg border border-error/40 bg-error/10 px-4 py-3 font-mono text-xs text-error">
           Couldn't load the session log: {(error as Error).message}
         </div>
-      )}
-      {isLoading && !data && (
+      ) : loading && ordered.length === 0 ? (
         <div className="py-16 text-center font-mono text-sm text-base-content/40">loading session…</div>
-      )}
-      {!isLoading && !error && items.length === 0 && (
+      ) : ordered.length === 0 ? (
         <div className="py-16 text-center font-mono text-sm text-base-content/40">
           {live ? "waiting for the agent to start…" : "no messages recorded"}
         </div>
-      )}
-      {items.map((item) =>
+      ) : null}
+      {ordered.map((item) =>
         isUserMessage(item) ? (
           <div key={item.id} className="flex justify-end">
             <div className="w-fit min-w-0 max-w-[85%]">
@@ -129,11 +177,15 @@ function Tab({
   onClick,
   label,
   ok,
+  hint,
 }: {
   active: boolean;
   onClick: () => void;
   label: string;
   ok?: boolean;
+  /** Muted suffix — the phase's wall clock + cost, so the expensive phases are
+   * visible without opening each one. */
+  hint?: string;
 }) {
   return (
     <button
@@ -149,6 +201,7 @@ function Tab({
         <span className={"h-1.5 w-1.5 shrink-0 rounded-full " + (ok ? "bg-success" : "bg-error")} />
       )}
       {label}
+      {hint && <span className="opacity-50">{hint}</span>}
     </button>
   );
 }
@@ -166,26 +219,82 @@ export function SessionModal({ source, onClose }: { source: SessionSource; onClo
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // Trial / tab selection (trials mode only). "full" = the consolidated tab.
   const [trialIdx, setTrialIdx] = useState(0);
-  const [tab, setTab] = useState<string>("0"); // phase index as string, or "full"
+  // `undefined` = nothing chosen yet for this trial, resolved to the first
+  // openable phase below. `null` = the consolidated `full` transcript.
+  const [pick, setPick] = useState<PhasePick | null | undefined>(undefined);
+
+  const metrics = source.kind === "trials" ? (source.metrics ?? []) : [];
+  // The fan-out branch names the harness recorded for THIS case — what CONFIRMS
+  // a lane's mined family name (see `deriveLaneLabel`).
+  const vocab = useMemo(() => branchVocabulary(metrics), [metrics]);
 
   const trials = source.kind === "trials" ? source.sessions : [];
   const trial = trials[Math.min(trialIdx, Math.max(0, trials.length - 1))];
   const resolve = (rel: string) =>
     source.kind === "trials" ? source.baseUrl.replace(/scorecard\.json$/, rel) : rel;
 
-  // The currently-selected log URL + whether it's live.
-  let url: string;
-  let live = false;
-  if (source.kind === "live") {
-    url = source.url;
-    live = true;
-  } else if (tab === "full" && trial?.full) {
-    url = resolve(trial.full);
+  // The ledger joined to the archive: workflow order, with a transcript attached
+  // wherever one was written. See `buildPhaseRows` for why the two disagree.
+  const rows = useMemo(() => buildPhaseRows(metrics, trial?.phases ?? []), [metrics, trial]);
+
+  // Every phase's transcript, in parallel. Progressive: the panel renders from
+  // the ledger immediately and fills in each phase's sessions as they land.
+  const logs = usePhaseLogs(
+    rows.map((r) => (r.log ? resolve(r.log) : undefined)),
+    vocab,
+  );
+
+  // A running case has no archived phases at all — the splits are written when
+  // the trial finishes — so it follows the one consolidated stream and shows its
+  // sessions flat. That is the honest shape: nothing in a live log ties a
+  // session to a phase.
+  const liveLog = useSessionLog(source.kind === "live" ? source.url : undefined, true, vocab);
+  const fullUrl = trial?.full ? resolve(trial.full) : undefined;
+  const fullLog = useSessionLog(pick === null ? fullUrl : undefined, false, vocab);
+
+  const live = source.kind === "live";
+  const firstOpenable = rows.findIndex((r) => r.state === "log");
+  const active: PhasePick | null =
+    pick === undefined ? (firstOpenable >= 0 ? { phase: rows[firstOpenable].phase } : null) : pick;
+
+  const phases: SidebarPhase[] = rows.map((r, i) => ({
+    phase: r.phase,
+    state: r.state,
+    success: r.success,
+    costUsd: ledgerCost(r.branches.length ? r.branches : r.metric ? [r.metric] : []),
+    metricMs: ledgerMs(r.branches.length ? r.branches : r.metric ? [r.metric] : []),
+    lanes: logs[i]?.data?.lanes ?? [],
+    loading: !!logs[i]?.isLoading,
+  }));
+
+  // What the pane renders.
+  let items: TimelineItemT[] = [];
+  let loading = false;
+  let error: unknown;
+  let rawUrl: string | undefined;
+  if (live) {
+    const lanes: SessionLane[] = liveLog.data?.lanes ?? [];
+    const laneId = pick?.lane;
+    items = laneId ? (lanes.find((l) => l.sessionId === laneId)?.items ?? []) : (liveLog.data?.items ?? []);
+    loading = liveLog.isLoading;
+    error = liveLog.error;
+    rawUrl = source.kind === "live" ? source.url : undefined;
+  } else if (active === null) {
+    items = fullLog.data?.items ?? [];
+    loading = fullLog.isLoading;
+    error = fullLog.error;
+    rawUrl = fullUrl;
   } else {
-    const phase = trial?.phases[Number(tab)] ?? trial?.phases[0];
-    url = phase ? resolve(phase.log) : trial?.full ? resolve(trial.full) : "";
+    const idx = rows.findIndex((r) => r.phase === active.phase);
+    const q = logs[idx];
+    const lanes: SessionLane[] = q?.data?.lanes ?? [];
+    items = active.lane
+      ? (lanes.find((l) => l.sessionId === active.lane)?.items ?? [])
+      : (q?.data?.items ?? []);
+    loading = !!q?.isLoading;
+    error = q?.error;
+    rawUrl = rows[idx]?.log ? resolve(rows[idx].log as string) : undefined;
   }
 
   return (
@@ -203,11 +312,11 @@ export function SessionModal({ source, onClose }: { source: SessionSource; onClo
             </span>
           )}
           {(() => {
-            const rawUrl = source.kind === "execution" ? source.logUrl : url;
-            if (!rawUrl) return null;
+            const href = source.kind === "execution" ? source.logUrl : rawUrl;
+            if (!href) return null;
             return (
               <a
-                href={rawUrl}
+                href={href}
                 target="_blank"
                 rel="noreferrer"
                 className="ml-auto whitespace-nowrap font-mono text-2xs text-info hover:underline"
@@ -221,48 +330,49 @@ export function SessionModal({ source, onClose }: { source: SessionSource; onClo
           </button>
         </div>
 
-        {source.kind === "trials" && (
-          <div className="flex flex-col gap-2 border-b border-base-300 bg-base-200/40 px-4 py-2">
-            {trials.length > 1 && (
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="mr-1 font-mono text-2xs uppercase tracking-wide text-base-content/40">trial</span>
-                {trials.map((t, i) => (
-                  <Tab
-                    key={t.trial}
-                    active={i === trialIdx}
-                    onClick={() => {
-                      setTrialIdx(i);
-                      setTab("0");
-                    }}
-                    label={`#${t.trial}`}
-                  />
-                ))}
-              </div>
-            )}
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="mr-1 font-mono text-2xs uppercase tracking-wide text-base-content/40">phase</span>
-              {trial?.phases.map((p, i) => (
-                <Tab
-                  key={`${p.phase}:${i}`}
-                  active={tab === String(i)}
-                  onClick={() => setTab(String(i))}
-                  label={p.phase}
-                  ok={p.success}
-                />
-              ))}
-              {trial?.full && (
-                <Tab active={tab === "full"} onClick={() => setTab("full")} label="full" />
-              )}
-            </div>
+        {source.kind === "trials" && trials.length > 1 && (
+          <div className="flex flex-wrap items-center gap-1.5 border-b border-base-300 bg-base-200/40 px-4 py-2">
+            <span className="mr-1 font-mono text-2xs uppercase tracking-wide text-base-content/40">trial</span>
+            {trials.map((t, i) => (
+              <Tab
+                key={t.trial}
+                active={i === trialIdx}
+                onClick={() => {
+                  setTrialIdx(i);
+                  setPick(undefined);
+                }}
+                label={`#${t.trial}`}
+              />
+            ))}
           </div>
         )}
 
         {source.kind === "execution" ? (
           <ExecutionView logUrl={source.logUrl} failToPass={source.failToPass} passToPass={source.passToPass} />
-        ) : url ? (
-          <SessionTimeline key={url} url={url} live={live} />
         ) : (
-          <div className="flex-1 py-16 text-center font-mono text-sm text-base-content/40">no session log</div>
+          <div className="flex min-h-0 flex-1">
+            {live ? (
+              <LiveSessionList
+                lanes={liveLog.data?.lanes ?? []}
+                active={pick ?? null}
+                onPick={setPick}
+              />
+            ) : (
+              <PhaseSidebar
+                phases={phases}
+                active={active}
+                onPick={setPick}
+                hasFull={!!fullUrl}
+              />
+            )}
+            <Timeline
+              key={`${active?.phase ?? "full"}:${active?.lane ?? ""}`}
+              items={items}
+              live={live}
+              loading={loading}
+              error={error}
+            />
+          </div>
         )}
       </div>
     </div>

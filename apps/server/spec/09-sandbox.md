@@ -77,6 +77,20 @@ Five backends, all behind the **Sandbox port** (`src/sandbox/sandbox.ts`):
 isolation mechanism and translates the intent-only `EgressPolicy` to its own
 controls.
 
+`provision()` returns three paths, and the third is not derivable from the
+other two: `hostWorkspaceDir` (the workspace **root**, as this process sees
+it), `agentCwd` (the directory the agent/command process runs in, as the
+*sandbox* sees it), and `hostAgentCwd` — that same directory addressed from
+the harness. On a pre-cloned workflow the cwd is `<workspace>/<repo>`, one
+level below the root, so a harness-side reader of what a phase wrote needs
+the exact directory rather than its parent; that one level is what
+[`fanout`'s `context_file`](/spec/06-workflow-engine) resolves against, so
+the phase that writes a file and the harness that reads it share one base by
+construction. **On `kubernetes` `hostAgentCwd` — like `hostWorkspaceDir` — is
+an in-pod path that does not exist on the harness host**, so a caller must
+read a failure there as *not available on this backend*, never as *the file
+is absent*.
+
 The **orchestrator** (`src/engine/executors/orchestrator.ts`) drives any
 adapter through that port: `withSandbox` brackets provision → work → dispose,
 and `runSandboxedAgent` / `runSandboxedCommand` hold the skill staging,
@@ -374,6 +388,22 @@ deepened until they share a merge-base (depth 50 → 500 → `--unshallow`), so
 `git diff origin/<base>...HEAD` — the three-dot PR diff the review agent and
 post-review anchor against — resolves. `ensure_base` runs on **every** path:
 the fresh clone, the different-run refresh, *and* the same-run preserve.
+
+> **Nothing inside the checkout may run `git fetch --depth N`.** A
+> depth-limited fetch writes `.git/shallow` **even into an already-complete
+> clone**, re-cutting history N commits back from the base tip — which severs
+> the merge base on any PR that forked further back, and silently undoes the
+> ladder above. This is not hypothetical: the packaged `pr-review` skill
+> instructed exactly that (`git fetch origin <baseRef> --depth 50`, a leftover
+> from before `ensureBaseAvailable` existed), and it ran in six of seven agent
+> phases per review. The agent's three-dot diff then died with *"no merge
+> base"* and it fell back to two-dot — which contains every commit the base
+> picked up since the PR forked, none of which the author wrote. Measured over
+> 50 real PRs, 9 diverge from their base, one at 6125 files against 3.
+> A phase that needs to repair the base must check first
+> (`git merge-base origin/<base> HEAD`) and then deepen **both** sides — see
+> `post-review.ts`, which records that unshallowing the base alone leaves HEAD
+> with no reachable ancestor and the three-dot retry still fails.
 
 That last one is not redundant. Without it `origin/<base>` is frozen at whatever
 the run's *first* phase fetched, so a fix phase merging it tens of minutes later

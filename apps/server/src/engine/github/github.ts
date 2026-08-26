@@ -212,6 +212,24 @@ export interface ClosedIssueDetail extends DigestItemDetail {
   stateReason: string | null;
 }
 
+/**
+ * An issue an OPEN pull request declares it will close, WITH its body — what
+ * was asked for, as opposed to {@link ClosingIssueRef}, which is the digest's
+ * "what did this merge close" question and carries no prose.
+ *
+ * The body is bounded at the read (see
+ * {@link GitHubClient.listPullRequestClosingIssues}) because it is arbitrary
+ * user text that ends up on a persisted snapshot and in a prompt.
+ */
+export interface LinkedIssueRead {
+  number: number;
+  title: string;
+  url: string;
+  /** `OPEN` | `CLOSED`. */
+  state: string;
+  body: string;
+}
+
 /** What {@link GitHubClient.listRepoDigestDetail} returns — the week's content, in one request. */
 export interface RepoDigestDetail {
   merged: MergedPrDetail[];
@@ -1442,6 +1460,92 @@ export class GitHubClient {
   }
 
   /**
+   * The paths this pull request changes — the CANDIDATE SET that forms the
+   * second end of every `spec` obligation
+   * (`docs/plans/deterministic-pr-levers.md` §Decisions, D7).
+   *
+   * The same set `git diff --name-only origin/<base>...HEAD` yields, read from
+   * the API because the snapshot is resolved at the dispatch choke point, before
+   * any checkout exists. It is deliberately NOT
+   * {@link getChangedPathsBetween}: that answers "what moved since our last
+   * review" and returns `null` on truncation because its caller asks a
+   * completeness question. This one asks "where could the change have landed",
+   * for which a truncated list is still a usable candidate set — so it returns
+   * what it read, capped, and the caller says so in the rendered block.
+   *
+   * `null` means the read FAILED, which is a different fact from "this PR
+   * changes nothing" and must stay distinguishable (locked decision 6).
+   */
+  async listPullRequestFilePaths(
+    owner: string,
+    repo: string,
+    pullNumber: number,
+    opts: { max?: number } = {},
+  ): Promise<string[] | null> {
+    const max = Math.min(Math.max(opts.max ?? 100, 1), 100);
+    const kit = await this.kit(owner);
+    const res = await kit.rest.pulls.listFiles({
+      owner,
+      repo,
+      pull_number: pullNumber,
+      per_page: max,
+    });
+    if (!Array.isArray(res.data)) return null;
+    return res.data.map((f) => f.filename).filter((p): p is string => typeof p === "string" && !!p);
+  }
+
+  /**
+   * The issues this pull request would CLOSE, with their titles and bodies —
+   * "what was asked", which is the first end of every `spec` obligation.
+   *
+   * GitHub's own linkage, not our regex: `closingIssuesReferences` covers both
+   * the `Closes #12` keywords in the body and issues linked by hand through the
+   * Development sidebar. One GraphQL request costs one rate-limit point and
+   * carries the bodies, where the REST route would be a search plus one
+   * `GET /issues/:n` per hit.
+   *
+   * The bodies are what a prompt renders, so they are bounded HERE rather than
+   * at each reader: an issue body is arbitrary user text and the snapshot that
+   * holds it is persisted verbatim on the run context.
+   *
+   * Throws on a transport/GraphQL error — every caller is best-effort and
+   * records the failure rather than silently reading `[]`, which would be
+   * indistinguishable from "this PR closes nothing".
+   */
+  async listPullRequestClosingIssues(
+    owner: string,
+    repo: string,
+    pullNumber: number,
+    opts: { first?: number; maxBodyChars?: number } = {},
+  ): Promise<LinkedIssueRead[]> {
+    const first = Math.min(Math.max(opts.first ?? 5, 1), 10);
+    const maxBody = Math.max(opts.maxBodyChars ?? 4000, 200);
+    const kit = await this.kit(owner);
+    const res = await kit.graphql<GraphQlClosingIssues>(
+      `query($owner: String!, $repo: String!, $number: Int!, $first: Int!) {
+         repository(owner: $owner, name: $repo) {
+           pullRequest(number: $number) {
+             closingIssuesReferences(first: $first) {
+               nodes { number title url state body }
+             }
+           }
+         }
+       }`,
+      { owner, repo, number: pullNumber, first },
+    );
+    const nodes = res.repository?.pullRequest?.closingIssuesReferences?.nodes ?? [];
+    return nodes
+      .filter((n): n is NonNullable<typeof n> => !!n && typeof n.number === "number")
+      .map((n) => ({
+        number: n.number,
+        title: (n.title ?? "").slice(0, 300),
+        url: n.url ?? "",
+        state: n.state ?? "",
+        body: (n.body ?? "").slice(0, maxBody),
+      }));
+  }
+
+  /**
    * Fetch a PR's unified diff (three-dot, base…head) as a string. Used by the
    * `post-review` action to anchor findings to changed lines — the harness runs
    * this in-process (not in the sandbox), so the diff comes from the API rather
@@ -1989,6 +2093,23 @@ interface GraphQlIssue extends GraphQlDigestNode {
   createdAt?: string | null;
   closedAt?: string | null;
   stateReason?: string | null;
+}
+
+/** The one-PR closing-issues query — see {@link GitHubClient.listPullRequestClosingIssues}. */
+interface GraphQlClosingIssues {
+  repository?: {
+    pullRequest?: {
+      closingIssuesReferences?: {
+        nodes?: Array<{
+          number: number;
+          title?: string | null;
+          url?: string | null;
+          state?: string | null;
+          body?: string | null;
+        } | null>;
+      } | null;
+    } | null;
+  } | null;
 }
 
 interface GraphQlDigestSearch {

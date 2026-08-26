@@ -211,9 +211,30 @@ export async function withSandbox<T>(
  * upstream, to the value we are handed.
  *
  *   - host-shared backends (docker/gondolin/none/smol): written into the
- *     workspace, a sibling of any checkout. An empty context writes no file, so
- *     the sandbox entrypoint's baked `cat /app/agent-context/*.md` fallback
- *     still applies — a file written here always wins over it.
+ *     workspace ROOT, a sibling of any checkout — never into the checkout, so a
+ *     repo-write phase's `git add -A` can't commit the bot's own persona.
+ *
+ *     **Why the agent still sees it, one level above its cwd.** pi's resource
+ *     loader walks UP from `cwd` collecting `AGENTS.md`/`CLAUDE.md` and INLINES
+ *     each one into the system prompt at session construction (see
+ *     `DefaultResourceLoader.getAgentsFiles`). That walk runs in whichever
+ *     process hosts pi — the harness itself on gondolin/none, the container on
+ *     docker/smol — as a plain `fs.readFileSync`. The agent never reads the file
+ *     with a tool, so **the sandbox's mount boundary is irrelevant to it**. This
+ *     is the whole reason gondolin works despite mounting ONLY `cwd`: `AGENTS.md`
+ *     arrives as prompt text, not as a readable path. Contrast `stageSkills`,
+ *     which DOES have to stage gondolin's bundle under `cwd` — a `SKILL.md` is
+ *     read on demand *by the agent*, through the sandboxed `read` tool, and
+ *     `toGuestPath` throws "path escapes workspace" for anything above `cwd`.
+ *     The invariant this delivery depends on is therefore
+ *     `hostWorkspaceDir` being an ANCESTOR of `hostAgentCwd`
+ *     (`tests/sandbox/agent-context-visibility.test.ts` pins it; the pi-side half
+ *     is pinned by `packages/agentic-pi/test/context-file-walk.test.ts`).
+ *
+ *     An empty context writes no file. The docker sandbox image's entrypoint has
+ *     a baked `cat /app/agent-context/*.md > $WORKSPACE/AGENTS.md` fallback for
+ *     that case — but it covers **docker only** (`deploy/sandbox-entrypoint.sh`
+ *     runs for no other backend), so it is not what makes gondolin work.
  *   - kubernetes: `hostWorkspaceDir` is an in-pod path that doesn't exist on the
  *     harness host, so a write here would always ENOENT. The adapter takes the
  *     text through the {@link provideAgentContext} sink instead and serves it
@@ -259,28 +280,56 @@ function hostRepoDirFor(
 }
 
 /**
- * Run one agent turn through any backend. Replaces `executeDocker` /
- * `executeSmol` / `executeInProcess` — the three slightly-different fallback
- * paths are converged into the single catch below.
+ * Options for {@link runAgentIn}.
  */
-export async function runSandboxedAgent(
+export interface AgentTurnOpts {
+  /** The AGENT span this turn's turn/tool spans nest under. */
+  span?: Span;
+  /**
+   * When the caller started counting. Defaults to now.
+   *
+   * {@link runSandboxedAgent} passes a timestamp taken BEFORE provisioning, so
+   * a single-turn phase's `durationMs` keeps including its own provision — the
+   * value every existing `executions` row, dashboard and eval scorecard already
+   * carries. A fan-out branch passes its own start instead, because the
+   * provision it shares with five siblings belongs to none of them.
+   */
+  startTime?: number;
+}
+
+/**
+ * Run ONE agent turn inside an ALREADY-PROVISIONED sandbox.
+ *
+ * Extracted verbatim from {@link runSandboxedAgent}'s `withSandbox` callback so
+ * a caller holding one provisioned workspace can run several turns in it —
+ * sequentially or concurrently. It deliberately does NOT deliver `AGENTS.md` and
+ * does NOT stage/harvest build assets: those are per-WORKSPACE, not per-turn,
+ * and doing them per-turn under a fan-out is WP5's D3 (two concurrent harvests
+ * of the same `architect-plan.md`, last writer wins) plus a torn `AGENTS.md`
+ * from N concurrent identical `writeFileSync`s. Both wrappers below do them once.
+ *
+ * Skill staging IS per-turn, and safe: the bundle is keyed on
+ * `skillBundleKey(config)` → `config.telemetry.phaseName`, which a fan-out sets
+ * per branch, so branches never share a bundle directory.
+ */
+export async function runAgentIn(
+  sandbox: Sandbox,
+  prov: ProvisionResult,
   prompt: string,
   ctx: SandboxRunContext,
-  span?: Span,
+  opts: AgentTurnOpts = {},
 ): Promise<ExecutionResult> {
   const { config, access } = ctx;
-  const startTime = Date.now();
+  const span = opts.span;
+  const startTime = opts.startTime ?? Date.now();
   const model = config.model || DEFAULT_MODEL;
   const includeContent = config.otel?.includeContent === true;
   const thinking = coerceThinking(config.variant);
   const profile = access ? AGENTIC_PROFILE_FOR[access.profile] : undefined;
   const sessionsDir = resolveSessionsDir(config);
 
-  return withSandbox(ctx, async (sandbox, prov) => {
+  return await (async () => {
     log.info("Running agent", { taskId: ctx.taskId, sandbox: ctx.backend });
-    // AGENTS.md — composed once, delivered the way this backend needs it
-    // (workspace write, or the k8s adapter's own init-fetch channel).
-    deliverAgentContext(sandbox, ctx, prov);
 
     // Stage this phase's skills (adapter decides symlink/copy + path mapping).
     let skillDirs: string[] | undefined;
@@ -290,18 +339,14 @@ export async function runSandboxedAgent(
       log.warn("Could not stage skills", { err });
     }
 
-    // Server-mode build assets: stage in before, harvest after (even on error).
-    const artifacts = serverArtifacts(
-      config,
-      hostRepoDirFor(prov, ctx.prePopulate, config.buildAssetsRelocated === true),
-    );
-    stageArtifactsIn(artifacts);
-
     const shim = new AgenticShim({
       homeDir: sessionsDir,
       projectSlug: projectSlugForCwd(prov.agentCwd),
       model,
       initialPrompt: prompt,
+      // For a fan-out branch this is the branch label, which is what makes the
+      // six concurrent sessions of one phase tellable apart on disk.
+      phase: config.telemetry?.phaseName,
     });
     const acc = new RunResultAccumulator();
     // OpenInference span tree (turn = LLM, tool = TOOL) nested under the active
@@ -380,7 +425,6 @@ export async function runSandboxedAgent(
       const synthesizedId = await shim
         .finalizeWithFallback(emptyResult(stopReason, durationMs), `exec-${basename(ctx.taskId)}`, msg)
         .catch(() => null);
-      harvestArtifactsOut(artifacts);
       return {
         success: false,
         output: "",
@@ -392,7 +436,6 @@ export async function runSandboxedAgent(
       } satisfies ExecutionResult;
     }
 
-    harvestArtifactsOut(artifacts);
     // Close any turn/tool spans still open before we decorate the agent span.
     tree.end();
 
@@ -447,13 +490,49 @@ export async function runSandboxedAgent(
         : {}),
     });
     return finalResult;
-  }).catch((err: unknown): ExecutionResult => {
-    // A ResourceQuota rejection during PROVISIONING (pod-create) throws OUTSIDE
-    // the in-callback runAgent catch above — `withSandbox` provisions before it
-    // runs `fn`. Surface it as an error_quota RESULT (not a throw) so the runner
-    // flags backpressure and requeues, instead of the run terminal-failing red.
-    // Mirrors runSandboxedCommand's outer catch; every other provision failure
-    // propagates unchanged (withSandbox already disposed).
+  })();
+}
+
+/**
+ * Deliver `AGENTS.md` and bracket the server-mode build-asset stage/harvest
+ * around `fn` — the two per-WORKSPACE steps {@link runAgentIn} deliberately
+ * leaves out. Both wrappers ({@link runSandboxedAgent}, {@link withSandboxSession})
+ * go through here so a fan-out cannot accidentally do either N times.
+ *
+ * The harvest is a `finally` rather than a call on each exit path: the extracted
+ * code harvested once on the error path and once on the success path, which is
+ * what a `finally` is.
+ */
+async function withWorkspaceArtifacts<T>(
+  sandbox: Sandbox,
+  prov: ProvisionResult,
+  ctx: SandboxRunContext,
+  fn: () => Promise<T>,
+): Promise<T> {
+  // AGENTS.md — composed once, delivered the way this backend needs it
+  // (workspace write, or the k8s adapter's own init-fetch channel).
+  deliverAgentContext(sandbox, ctx, prov);
+  const artifacts = serverArtifacts(
+    ctx.config,
+    hostRepoDirFor(prov, ctx.prePopulate, ctx.config.buildAssetsRelocated === true),
+  );
+  stageArtifactsIn(artifacts);
+  try {
+    return await fn();
+  } finally {
+    harvestArtifactsOut(artifacts);
+  }
+}
+
+/**
+ * A k8s ResourceQuota rejection during PROVISIONING (pod-create) throws OUTSIDE
+ * the in-callback runAgent catch — `withSandbox` provisions before it runs `fn`.
+ * Surface it as an `error_quota` RESULT (not a throw) so the runner flags
+ * backpressure and requeues, instead of the run terminal-failing red. Every
+ * other provision failure propagates unchanged (withSandbox already disposed).
+ */
+function quotaAsResult(startTime: number) {
+  return (err: unknown): ExecutionResult => {
     if (err instanceof QuotaExceededError) {
       return {
         success: false,
@@ -465,7 +544,27 @@ export async function runSandboxedAgent(
       };
     }
     throw err;
-  });
+  };
+}
+
+/**
+ * Run one agent turn through any backend. Replaces `executeDocker` /
+ * `executeSmol` / `executeInProcess` — the three slightly-different fallback
+ * paths are converged into the single catch in {@link runAgentIn}.
+ */
+export async function runSandboxedAgent(
+  prompt: string,
+  ctx: SandboxRunContext,
+  span?: Span,
+): Promise<ExecutionResult> {
+  // Taken before provisioning, so a single-turn phase's recorded duration keeps
+  // including its own provision — see {@link AgentTurnOpts.startTime}.
+  const startTime = Date.now();
+  return withSandbox(ctx, (sandbox, prov) =>
+    withWorkspaceArtifacts(sandbox, prov, ctx, () =>
+      runAgentIn(sandbox, prov, prompt, ctx, { span, startTime }),
+    ),
+  ).catch(quotaAsResult(startTime));
 }
 
 // ── Deterministic command path (type: bash / type: script) ───────────
@@ -543,6 +642,32 @@ export async function runSandboxedCommand(
     );
   }
 
+  const startTime = Date.now();
+  try {
+    return await withSandbox(ctx, (sandbox, prov) => runCommandIn(sandbox, prov, spec, ctx, cmdOpts));
+  } catch (err: unknown) {
+    // A k8s ResourceQuota rejection on a bash/script phase is backpressure too:
+    // surface it as an error_quota RESULT so the runner requeues (spec/09-sandbox.md (Concurrency)).
+    // Every other throw propagates exactly as before (the engine records it as a
+    // failed phase) — we do NOT swallow real command failures.
+    return quotaAsResult(startTime)(err);
+  }
+}
+
+/**
+ * Run ONE deterministic command inside an ALREADY-PROVISIONED sandbox — the
+ * command-side twin of {@link runAgentIn}, extracted from
+ * {@link runSandboxedCommand}'s `withSandbox` callback for the same reason: a
+ * `type: fanout` phase runs its branches' `until_bash` gates in the workspace it
+ * already holds rather than provisioning six more.
+ */
+export async function runCommandIn(
+  sandbox: Sandbox,
+  prov: ProvisionResult,
+  spec: CommandSpec,
+  ctx: SandboxRunContext,
+  cmdOpts: CommandRunOpts,
+): Promise<ExecutionResult> {
   const { config } = ctx;
   const model = config.model || DEFAULT_MODEL;
   const sessionsDir = resolveSessionsDir(config);
@@ -551,8 +676,8 @@ export async function runSandboxedCommand(
   const displayPrompt =
     spec.kind === "bash" ? `$ ${spec.command}` : `${spec.runtime} script: ${spec.name}\n\n${spec.script}`;
 
-  try {
-    return await withSandbox(ctx, async (sandbox, prov) => {
+  return await (async () => {
+    {
       // Per-phase script-bundle dir, a workspace-root sibling of the skill bundle.
       const scriptDir = spec.kind === "script" ? `${SCRIPT_BUNDLE_ROOT}/${spec.name}` : SCRIPT_BUNDLE_ROOT;
 
@@ -596,6 +721,7 @@ export async function runSandboxedCommand(
               sessionsDir,
               projectSlug: projectSlugForCwd(prov.agentCwd),
               model,
+              phase: config.telemetry?.phaseName,
               displayPrompt,
               toolName: "bash",
               toolInput,
@@ -606,25 +732,97 @@ export async function runSandboxedCommand(
             });
       if (sessionId && ctx.onSessionId) ctx.onSessionId(sessionId);
       return buildCommandResult(res, durationMs, sessionId);
-    });
-  } catch (err: unknown) {
-    // A k8s ResourceQuota rejection on a bash/script phase is backpressure too:
-    // surface it as an error_quota RESULT so the runner requeues (spec/09-sandbox.md (Concurrency)).
-    // Every other throw propagates exactly as before (the engine records it as a
-    // failed phase) — we do NOT swallow real command failures.
-    if (err instanceof QuotaExceededError) {
-      const durationMs = Date.now() - startTime;
-      return {
-        success: false,
-        output: "",
-        turns: 0,
-        error: err.message,
-        durationMs,
-        stopReason: "error_quota",
-      } satisfies ExecutionResult;
     }
-    throw err;
-  }
+  })();
+}
+
+// ── The multi-turn bracket (`type: fanout`) ──────────────────────────
+
+/**
+ * One provisioned workspace, many turns. Handed to the callback of
+ * {@link withSandboxSession}.
+ *
+ * `config` is per-CALL rather than per-session because that is exactly what
+ * varies across the branches of a fan-out: the skill bundle key
+ * (`telemetry.phaseName`), the resolved `skillPaths`, and optionally the model /
+ * reasoning effort. Everything genuinely per-workspace — backend, taskId,
+ * minted GitHub credential, egress policy, pre-clone — is fixed when the session
+ * opens and cannot be varied per turn.
+ */
+export interface SandboxSession {
+  /**
+   * The agent's working directory, addressed from the HARNESS process — the
+   * host end of {@link ProvisionResult.agentCwd}.
+   *
+   * Exposed because a fan-out branch may need the harness to read a file a
+   * deterministic phase wrote into the checkout (`FanoutBranch.context_file`),
+   * and the harness must resolve it against exactly the base that phase's shell
+   * ran in. `hostWorkspaceDir` is one level too high whenever the workflow
+   * pre-clones — which is the whole class of bug this exists to close.
+   *
+   * On `kubernetes` this is an in-pod path: a read fails, and the caller must
+   * degrade rather than read the failure as "the file is not there".
+   */
+  readonly hostAgentCwd: string;
+  runAgent(
+    prompt: string,
+    config: ExecutorConfig,
+    opts?: { onSessionId?: (id: string) => void; span?: Span },
+  ): Promise<ExecutionResult>;
+  runCommand(
+    spec: CommandSpec,
+    config: ExecutorConfig,
+    opts?: CommandRunOpts & { onSessionId?: (id: string) => void },
+  ): Promise<ExecutionResult>;
+}
+
+/**
+ * Provision ONE sandbox and hand the caller a {@link SandboxSession} that can
+ * run any number of agent turns and commands in it — concurrently if it wants.
+ *
+ * This is the whole mechanism behind `type: fanout`, and the reason the fan-out
+ * dodges the blocker list in `docs/plans/deterministic-pr-levers.md` §WP5:
+ * every one of B1 / D1 / D2 / D3 / D7 exists because each PHASE provisions its
+ * own sandbox against a shared workspace. Here there is exactly one provision,
+ * one `AGENTS.md` write, one artifact stage/harvest and one dispose, no matter
+ * how many turns run inside.
+ *
+ * **Concurrency is the caller's to bound.** This bracket imposes none: the
+ * handler clamps per backend before it ever gets here (`none`/`docker` fan out;
+ * `gondolin` boots a QEMU micro-VM per session and is pinned to 1).
+ */
+export async function withSandboxSession<T>(
+  ctx: SandboxRunContext,
+  fn: (session: SandboxSession) => Promise<T>,
+): Promise<T> {
+  return withSandbox(ctx, (sandbox, prov) =>
+    withWorkspaceArtifacts(sandbox, prov, ctx, () => {
+      const session: SandboxSession = {
+        hostAgentCwd: prov.hostAgentCwd,
+        runAgent: (prompt, config, opts) =>
+          runAgentIn(
+            sandbox,
+            prov,
+            prompt,
+            { ...ctx, config, onSessionId: opts?.onSessionId ?? ctx.onSessionId },
+            { span: opts?.span },
+          ),
+        runCommand: (spec, config, opts) =>
+          runCommandIn(
+            sandbox,
+            prov,
+            spec,
+            { ...ctx, config, onSessionId: opts?.onSessionId ?? ctx.onSessionId },
+            {
+              timeoutSeconds: opts?.timeoutSeconds,
+              sandboxEnv: opts?.sandboxEnv,
+              writeSession: opts?.writeSession,
+            },
+          ),
+      };
+      return fn(session);
+    }),
+  );
 }
 
 /**
@@ -637,6 +835,8 @@ async function writeCommandSession(opts: {
   sessionsDir: string;
   projectSlug: string;
   model?: string;
+  /** Owning phase label — see {@link AgenticShimOptions.phase}. */
+  phase?: string;
   displayPrompt: string;
   toolName: string;
   toolInput: Record<string, unknown>;
@@ -650,6 +850,7 @@ async function writeCommandSession(opts: {
     projectSlug: opts.projectSlug,
     model: opts.model,
     initialPrompt: opts.displayPrompt,
+    phase: opts.phase,
   });
   const sessionId = randomUUID();
   const ts = Date.now();

@@ -33,6 +33,7 @@ import { HOLD_LABEL } from "../cron/dependabot-discovery.js";
 import { ATTEMPT_FREE_CLASSES } from "./fix-markers.js";
 import { renderPrNotes } from "./pr-notes.js";
 import { PR_NOTES_FILE_NAME, VERIFY_SCRIPT_NAME } from "./fix-scratch.js";
+import { buildSpecObligations, renderLinkedIssues, renderSpecObligations } from "./review-spec.js";
 
 /**
  * A skip that must be ESCALATED on the pull request — labelled `requires-human`
@@ -1252,15 +1253,24 @@ export function resolveDispatchDisposition(
  * Pure: the CI report was already fetched into the snapshot, so this renders it
  * rather than fetching it.
  *
- * `fix` and `dependencies` are optional because the variables they contribute
- * are policy, not state — they come from the run's already-repo-clamped config
- * blocks, not from the PR. Omitting one leaves its variables undefined, which
- * the prompts' own `{{#if maxAttempts}}`-style guards already handle.
+ * `fix`, `dependencies` and `review` are optional because the variables they
+ * contribute are policy, not state — they come from the run's already-repo-clamped
+ * config blocks, not from the PR. Omitting one leaves its variables undefined,
+ * which the prompts' own `{{#if maxAttempts}}`-style guards already handle.
+ *
+ * **The `spec` axis is ADDITIVE and off by default** (locked decision 8). With
+ * `review.analysis.enabled` false — or with no `review` block handed in at all,
+ * which is what every pre-WP0 caller does — this returns exactly the keys it
+ * always returned. Nothing is rendered empty, nothing is rendered `false`; the
+ * keys are simply absent, so `pr-review`'s prompt (which is built by listing the
+ * whole context, `buildPhasePrompt`'s skills branch) is byte-identical to
+ * today's.
  */
 export function renderContext(
   state: PrState,
   fix?: FixConfig,
   dependencies?: DependenciesConfig,
+  review?: ReviewConfig,
 ): Record<string, unknown> {
   // The merge gate, decided ONCE here rather than re-derived in prose by the
   // merge prompt. 09's thesis is one source and three renderings; a predicate
@@ -1274,6 +1284,7 @@ export function renderContext(
   const merge = dependencies ? mayMerge(state, dependencies) : undefined;
   const failedChecks = state.ciReport ? renderCiFailureReport(state.ciReport) : "";
   return {
+    ...specContext(state, review),
     // Identity / targeting.
     headSha: state.headSha,
     branch: state.headRef,
@@ -1354,5 +1365,200 @@ export function renderContext(
     maxFlakyDeferrals: fix?.maxFlakyDeferrals,
     flakyPromoted:
       fix !== undefined && state.flakyDeferrals >= fix.maxFlakyDeferrals,
+  };
+}
+
+/**
+ * The `spec`-axis half of {@link renderContext} — the review evidence pipeline's
+ * WP0 (`docs/plans/deterministic-pr-levers.md` §Decisions, D7).
+ *
+ * Returns `{}` unless `review.analysis.enabled`, and that empty object IS the
+ * inertness guarantee (locked decision 8): with the axis off, the reviewing
+ * agent's Context block is character-for-character the one it has always had.
+ *
+ * Three variables, and the first two are the plumbing §E2 found missing.
+ * `prBody` is a declared `TemplateContext` field that nothing has ever
+ * populated, and `closingIssuesReferences` existed on the client with
+ * `repo-digest.ts` as its only consumer — so the reviewer has never once been
+ * told what the change was FOR. That is the whole reason every candidate to
+ * date could only ever have moved the standards axis.
+ *
+ * They are gated with the obligations rather than shipped unconditionally
+ * because nothing else consumes them yet: an ungated `prBody` would change the
+ * `pr-review` prompt on a deployment that has not opted into the pipeline, which
+ * is precisely what locked decision 8 forbids. WP1+ can un-gate them the moment
+ * a second consumer exists.
+ */
+function specContext(state: PrState, review?: ReviewConfig): Record<string, unknown> {
+  if (!review?.analysis?.enabled) return {};
+  const rendered = renderSpecObligations(
+    buildSpecObligations({
+      prBody: state.body,
+      closes: state.closes,
+      changedFiles: state.changedFiles,
+      max: review.analysis.maxSpecObligations,
+    }),
+    review.analysis.obligationContract,
+  );
+  return {
+    /**
+     * The ONE key WP3's phases gate on — `skip_if: "analysisEnabled != true"`.
+     *
+     * A string rather than a boolean because the render context is projected to
+     * strings for template use and `coerceBool` reads `"true"` correctly either
+     * way. Absent when the pipeline is off, and absence is what makes the gate
+     * safe: `evalSkipIf` coerces a missing variable to `false`, so
+     * `!= true` MATCHES and the phase skips. The failure direction of a typo is
+     * therefore "the analysis phases skip", never "an unmeasured pipeline runs
+     * on a deployment that did not ask for it" (locked decision 8).
+     *
+     * `review` itself is deliberately not on the context — `build.yaml` emits
+     * `output_var: review` and a top-level object would shadow it — so this is
+     * the projection, not a convenience.
+     */
+    analysisEnabled: "true",
+    /**
+     * WP11c — the `survey` fan-out's concurrency CEILING, read by
+     * `max_concurrent: { from: surveyConcurrency, default: 6 }`.
+     *
+     * Projected unconditionally alongside `analysisEnabled` (not under the
+     * probes branch) because the fan-out is the surveys themselves, not a probe
+     * affordance. The run clamps it again per backend — gondolin pins to 1 — so
+     * this is the operator's ask, never the effective value.
+     */
+    surveyConcurrency: String(review.analysis.surveyConcurrency),
+    /**
+     * The CONTROL arm — `--contract` on the `seed` phase's `lastlight-facts`
+     * invocation, and the argument `renderSpecObligations` above just took.
+     *
+     * Projected unconditionally beside `analysisEnabled` (not under the probes
+     * branch) because it governs the surveys themselves, and projected at all
+     * because the five facts-derived families are rendered by a CLI in the
+     * sandbox: the only way the operator's answer reaches them is through the
+     * phase's command line. `spec` gets it in-process, one call up. Two readers,
+     * one config key, so the sixth axis cannot silently stay on `full` while its
+     * five siblings move.
+     *
+     * A string like every other key here: the render context is projected to
+     * strings, and the phase's shell defaults an empty value back to `minimal` —
+     * the direction every switch in this block fails in.
+     */
+    obligationContract: review.analysis.obligationContract,
+    /**
+     * The D2 minting arms — `--mint` on the same `seed` invocation, appended
+     * by the phase's shell ONLY when non-empty (an empty `--mint` must never
+     * reach the CLI, which refuses it). Projected for the same reason as its
+     * two siblings: the seeder is a CLI in the sandbox, and the phase's
+     * command line is the only way the operator's answer reaches it. The
+     * default `""` renders as the empty string, which the shell guard turns
+     * into "no flag at all" — the baseline arm.
+     */
+    mint: String(review.analysis.mint),
+    /**
+     * The obligation TOTAL BACKSTOP — `--max-obligations` on the same `seed`
+     * invocation `obligationContract` rides. Projected for the same reason:
+     * the seeder is a CLI in the sandbox, and until this key was threaded the
+     * operator's value never reached it at all — `code-facts`' own default
+     * applied, and only the accident of both defaults being 40 kept that
+     * inert rather than wrong. That was backlog item #24 (now
+     * `docs/plans/deterministic-pr-levers.md`), and it is CLOSED: the key is
+     * projected here, the phase reads it into `MAX_OBLIGATIONS` and passes it
+     * on the command line, and `pr-review-survey.test.ts` pins that path.
+     *
+     * Truncation itself is PER FAMILY (`FAMILY_CAPS` in
+     * `packages/code-facts/src/seed.ts` — contract 12, enforcement 12, state
+     * 8, security 8, tests 8), because each family feeds exactly one survey
+     * branch and the cost is per branch. This key is applied after those
+     * ceilings and defaults to their sum, so an operator moving it only ever
+     * matters once they have raised one.
+     *
+     * Same string projection, same fail-direction: the phase's shell defaults
+     * an empty render back to the seeder's own default.
+     */
+    maxObligations: String(review.analysis.maxObligations),
+    /**
+     * The ATTENTION BOUNDARY, projected so it reaches `post-review` on the
+     * run's own context — the same wire `analysisEnabled` rides, and for the
+     * same measured reason: the eval harness threads the arm's `review:`
+     * policy through the context and never populates the process-global
+     * runtime config, so a boundary read only off `getRuntimeConfig()` applies
+     * the packaged defaults to every eval arm regardless of what the overlay
+     * declares. Found by the reviewer on the pipeline's own PR: three repeats
+     * of an arm that pinned `maxBodyComments: null` each carried 5–14
+     * `body-budget` demotions — the shipped `0` had applied. Production is
+     * unchanged by construction: these project from the run's effective review
+     * config, which for an operator-only block IS the runtime config.
+     *
+     * `maxBodyComments` serialises `null` as the literal string `"null"` —
+     * null is the documented "unlimited" value and must survive a string
+     * projection; the consumer parses it back and degrades garbage to `0`,
+     * the same direction `config.ts` coerces. `boundaryThresholds` is the one
+     * JSON-valued key (a per-family map has no scalar form); nothing renders
+     * it into a prompt — `post-review` is its only reader.
+     */
+    maxInlineComments: String(review.analysis.maxInlineComments),
+    internalFloor: String(review.analysis.internalFloor),
+    maxBodyComments:
+      review.analysis.maxBodyComments === null ? "null" : String(review.analysis.maxBodyComments),
+    boundaryThresholds: JSON.stringify(review.analysis.thresholds ?? {}),
+    /**
+     * WP4's gate, and a SEPARATE one — `skip_if: "probesEnabled != true"`.
+     *
+     * Present only when the operator asked for both, so the absence rule above
+     * holds twice over: a deployment with the pipeline on and probes off gets
+     * WP3's phases and none of WP4's, and a typo anywhere still fails towards
+     * "the probe phases skip". It is its own key rather than a richer
+     * `analysis` object because `evalSkipIf` compares scalars, and because the
+     * decision it encodes — install a pull request author's dependencies into
+     * the workspace — is not the same decision as "run the surveys".
+     */
+    ...(review.analysis.probes ? { probesEnabled: "true" } : {}),
+    /**
+     * The three sub-switches, projected only when probes are on at all.
+     *
+     * They are strings for the same reason `analysisEnabled` is: the render
+     * context is projected to strings and `coerceBool` reads `"true"` either
+     * way. `prepare`'s command reads them to build its own flags, so a phase
+     * never has to know the config shape — and an absent one degrades to "do
+     * the cheap thing", which is the direction every default here points.
+     */
+    ...(review.analysis.probes
+      ? {
+          probeLifecycleScripts: review.analysis.probeLifecycleScripts ? "true" : "false",
+          probeTypecheck: review.analysis.probeTypecheck ? "true" : "false",
+          probeCoverage: review.analysis.probeCoverage ? "true" : "false",
+          prepareTimeoutSeconds: String(review.analysis.prepareTimeoutSeconds),
+          coverageTimeoutSeconds: String(review.analysis.coverageTimeoutSeconds),
+          probeRounds: String(review.analysis.probeRounds),
+          /**
+           * The PHASE's ceiling, which is not any one step's.
+           *
+           * `prepare` runs up to three timed steps and the engine's
+           * `timeout_seconds` bounds the whole phase, so handing it the install
+           * budget would kill the process part-way through a coverage run — and
+           * a killed process writes no `env.json` at all, which is the one
+           * outcome the whole design is against. Summed here rather than in
+           * YAML because `templated-number` reads a context value and cannot do
+           * arithmetic. The 30 s of slack covers the CLI's own startup.
+           */
+          probePhaseTimeoutSeconds: String(
+            review.analysis.prepareTimeoutSeconds +
+              (review.analysis.probeTypecheck ? review.analysis.prepareTimeoutSeconds : 0) +
+              (review.analysis.probeCoverage ? review.analysis.coverageTimeoutSeconds : 0) +
+              30,
+          ),
+        }
+      : {}),
+    // The PR's own description — what the AUTHOR says they did.
+    prBody: state.body,
+    // The issues it closes — what was ASKED, fenced as reference material by
+    // `renderLinkedIssues` for the same reason `priorNotes` is fenced: this is
+    // text a stranger wrote, and it must never read as instructions to the agent.
+    linkedIssues: renderLinkedIssues(state.closes),
+    // A `{{#if specObligations}}`-able string. Absent (not empty) when there is
+    // genuinely nothing to say AND nothing degraded — but a DEGRADED set still
+    // renders, because "we could not look" and "we looked and it is fine" must
+    // stay distinguishable (locked decision 6).
+    ...(rendered ? { specObligations: rendered } : {}),
   };
 }

@@ -265,9 +265,20 @@ src/
                         fallback routes it. `lastlight fork classifier` forks
                         the base prompt. (issue #164)
   workflows/            See src/workflows/CLAUDE.md for the full runner
-                        story. Loads YAML definitions, executes phases
-                        (linear or DAG), manages resume, approval gates,
-                        loop iterations.
+                        story. Loads YAML definitions and executes them as
+                        a DAG (a workflow declaring no `depends_on` gets a
+                        synthesized chain), manages resume, approval gates,
+                        loop iterations. The scheduler runs ONE node at a
+                        time; the only concurrency is inside a `type:
+                        fanout` node.
+    handlers/           App-registered phase types, injected on
+                        `EnginePorts.handlers` so the runtime-agnostic
+                        engine needs no knowledge of GitHub or sandboxes:
+                        `post-review.ts` (in-process review submission) and
+                        `fanout.ts` (N concurrent agent sessions in ONE
+                        provisioned workspace). NOT to be confused with
+                        `src/cron/fanout.ts`, which fans a cron out over
+                        repos.
   sandbox/              Isolation backends for agent runs. One container/VM/
                         worktree per task, hardened path checks (gitdir mounts
                         validated against sandbox root, taskId traversal
@@ -384,6 +395,9 @@ src/
     fanout.ts           One dispatch per repo (`context.repos`) — and the
                         shared engine behind the per-PR dependency-merge
                         fan-out. Narrows the repo list via repo-crons first.
+                        A CRON fan-out (one run per repo); the unrelated
+                        `src/workflows/handlers/fanout.ts` is a PHASE
+                        fan-out (many agents in one run).
     repo-crons.ts       Per-repo cron participation (issue #180):
                         resolveCronRepos / repoCronPrefs / cronVote /
                         repoLayerMayVote / operatorCrons, plus the
@@ -652,12 +666,16 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
     review modes are equally *safe* but not equally *expensive* — `eager`
     buys a full agent review per push on the operator's budget — and the
     audit comment is the record of a major this deployment auto-merged,
-    whose only silenceable party is the one being audited.) Three leaves are
+    whose only silenceable party is the one being audited.) Four leaves are
     **operator-only** and answer `key-not-allowed` instead:
     `fix.escalateModelAfterAttempt` (spend),
-    `fix.gateTimeoutSeconds` (shared resource), and
+    `fix.gateTimeoutSeconds` (shared resource),
     `dependencies.minSettledChecks` — where a `max(repo, operator)` clamp would
-    weld the escape hatch shut for a repo with no CI at all. `fix` +
+    weld the escape hatch shut for a repo with no CI at all — and
+    `review.analysis` (the review evidence pipeline: spend, with no
+    more-conservative direction to clamp towards, and the one `review:` leaf
+    that NESTS, so its provenance reports under a dotted `analysis.enabled`
+    key like `notifications.slack.channel`). `fix` +
     `dependencies` are now **live**: the PR dispatch gate (below) reads the
     run's repo-clamped blocks — on every route, webhook included — and enforces
     `fix.maxAttempts` / `fix.maxCostUsd` and

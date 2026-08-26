@@ -77,6 +77,8 @@ function liveState(over: Partial<PrState> = {}): PrState {
     lastBotReview: null,
     pathsSinceLastBotReview: null,
     ciReport: null,
+    closes: [],
+    changedFiles: null,
     attempt: 1,
     flakyDeferrals: 0,
     escalatedAtSha: null,

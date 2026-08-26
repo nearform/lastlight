@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import type { InstanceResult, PendingCase, ReviewTrace } from "../types";
-import { fmtMs, modelLabel } from "../lib/format";
+import { fmtDuration, isPrReviewTier, modelLabel } from "../lib/format";
 import { Chip, Frac, Pill } from "./ui";
 import { SessionModal, type SessionSource } from "./SessionModal";
 import { DiffModal } from "./DiffModal";
@@ -39,7 +39,7 @@ export function InstanceTable({
   scorecardUrl?: string;
 }) {
   const showCodeFix = tier === "code-fix";
-  const showReview = tier === "pr-review";
+  const showReview = isPrReviewTier(tier);
   // The β the graded cases used (F1 by default) — labels the review column.
   const reviewBeta = results.find((r) => r.review)?.review?.beta ?? 1;
   const cols = 6 + (showCodeFix ? 1 : 0) + (showReview ? 1 : 0);
@@ -62,7 +62,13 @@ export function InstanceTable({
     setOpenDiff({ title: `${titleFor(r.instance_id, r.model)} · changed files`, url: sessionUrl(r.modelPatchFile!) });
   // Finished case → browse per-trial / per-phase logs.
   const openResult = (r: InstanceResult) =>
-    setOpenLog({ kind: "trials", title: titleFor(r.instance_id, r.model), sessions: r.sessions ?? [], baseUrl: scorecardUrl ?? "" });
+    setOpenLog({
+      kind: "trials",
+      title: titleFor(r.instance_id, r.model),
+      sessions: r.sessions ?? [],
+      baseUrl: scorecardUrl ?? "",
+      metrics: r.phases,
+    });
   // Code-fix case → the held-out test breakdown + captured test output.
   const openTests = (r: InstanceResult) =>
     setOpenLog({
@@ -197,7 +203,9 @@ export function InstanceTable({
                   )}
                 </td>
                 <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono">${r.costUsd.toFixed(4)}</td>
-                <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono">{fmtMs(r.durationMs)}</td>
+                <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono">
+                  {r.durationMs ? fmtDuration(r.durationMs) : "—"}
+                </td>
               </tr>
             );
           })}

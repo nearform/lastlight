@@ -165,6 +165,7 @@ const ladderH = guards.length * rowH + 80;
 			<tr><td><code>baseChecksState</code></td><td>Whether the base branch is itself red — the live fact behind <code>upstream-broken</code></td></tr>
 			<tr><td><code>botReviewAtHead</code></td><td>Our own review at this exact commit, if any</td></tr>
 			<tr><td><code>ciReport</code></td><td>The failing jobs and their logs, fetched only when the checks are red</td></tr>
+			<tr><td><code>closes</code>, <code>changedFiles</code></td><td>The issues the PR says it closes, with their text, and the paths it changes — <em>what was asked</em> and <em>where it could have landed</em>. Filled only when <code>review.analysis</code> is on; nothing else reads them, so with it off the two extra GitHub reads are never issued</td></tr>
 		</tbody>
 	</table>
 

@@ -150,6 +150,8 @@ async function recordEscalation(workflowName = "dependabot-ci-fix"): Promise<voi
     lastBotReview: null,
     pathsSinceLastBotReview: null,
     ciReport: null,
+    closes: [],
+    changedFiles: null,
     attempt: 4,
     flakyDeferrals: 0,
     escalatedAtSha: HEAD,

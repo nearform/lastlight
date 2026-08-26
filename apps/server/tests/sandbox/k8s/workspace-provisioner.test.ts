@@ -40,7 +40,14 @@ describe("WorkspaceProvisioner", () => {
 
     expect(out.workspace).toEqual({ kind: "emptyDir" });
     expect(out.pre).toBeUndefined();
-    expect(out.result).toEqual({ hostWorkspaceDir: WORKSPACE_DIR, agentCwd: WORKSPACE_DIR });
+    // `hostAgentCwd` mirrors `hostWorkspaceDir` on this backend: both are
+    // IN-POD paths, so a harness-side read of either fails and its caller must
+    // degrade rather than conclude the file is absent.
+    expect(out.result).toEqual({
+      hostWorkspaceDir: WORKSPACE_DIR,
+      agentCwd: WORKSPACE_DIR,
+      hostAgentCwd: WORKSPACE_DIR,
+    });
     // Nothing PVC-related is touched for an ephemeral run.
     expect(pvcsRead).toHaveLength(0);
     expect(pvcsCreated).toHaveLength(0);

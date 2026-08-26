@@ -36,6 +36,24 @@ export interface AgenticShimOptions {
   model?: string;
   /** Original user prompt — written as the first envelope. */
   initialPrompt: string;
+  /**
+   * The phase (or fan-out branch) label that owns this session, stamped on the
+   * opening and closing envelopes.
+   *
+   * This is the AUTHORITATIVE `sessionId → phase` mapping, and it exists
+   * because the alternatives are both guesses. A reader can otherwise only
+   * attribute a session by *when it started* — "the last phase whose window
+   * opened at or before this session's first line" — and that rule cannot
+   * express concurrency at all: a `fanout` phase opens six windows within
+   * milliseconds of each other, so every one of its six sessions attributes to
+   * whichever branch happened to start last. Mining the label out of the
+   * session's own content is worse still; it has already mislabelled a lane
+   * `process that DIES.` by matching a shell comment inside a prompt.
+   *
+   * Additive: absent on every session written before this existed, so a reader
+   * must fall back rather than assume it.
+   */
+  phase?: string;
 }
 
 export interface ShimResultEnvelope {
@@ -110,6 +128,7 @@ export class AgenticShim {
           message: { role: "user", content: this.opts.initialPrompt },
           timestamp: ts,
           sessionId,
+          ...(this.opts.phase ? { phase: this.opts.phase } : {}),
         },
       ]);
     }
@@ -147,6 +166,7 @@ export class AgenticShim {
       total_cache_creation_input_tokens: result.cacheCreationInputTokens,
       duration_ms: result.durationMs,
       timestamp: ts,
+      ...(this.opts.phase ? { phase: this.opts.phase } : {}),
     });
     this.appendLines(lines);
   }

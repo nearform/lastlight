@@ -77,12 +77,15 @@ describe("dashboard's per-repo config mirror", () => {
     expect(listed.sort()).toEqual(Object.keys(BLOCKS).sort());
   });
 
-  it("covers every leaf of the three policy blocks — the tab renders leaves, not blocks", () => {
+  it("covers every leaf of the two flat policy blocks — the tab renders leaves, not blocks", () => {
     // `toLeaves` walks each section's own keys, so a NEW LEAF needs no
     // dashboard change. This asserts that property holds rather than listing
     // the leaves: if a block ever stops being a flat record of scalars, the
     // renderer's one-row-per-key assumption breaks silently.
-    for (const block of [defaultFixConfig(), defaultDependenciesConfig(), defaultReviewConfig()]) {
+    //
+    // `review` left this list when `review.analysis` landed — see the nesting
+    // test below, which is where it is now covered.
+    for (const block of [defaultFixConfig(), defaultDependenciesConfig()]) {
       for (const [key, value] of Object.entries(block)) {
         expect(
           value === null || typeof value !== "object" || Array.isArray(value),
@@ -92,14 +95,15 @@ describe("dashboard's per-repo config mirror", () => {
     }
   });
 
-  it("descends into `notifications`, the one block that nests", () => {
-    // `notifications` breaks the flat-record assumption above on purpose
-    // (`slack.channel`), and the endpoint keys its provenance by that DOTTED
-    // leaf. So the renderer has to walk into a nested value and join the path —
-    // otherwise the row reads `notifications.slack = [object Object]` with a
-    // provenance of "default", hiding the value the tab exists to show.
-    const channel = defaultNotificationsConfig().slack;
-    expect(typeof channel).toBe("object");
+  it("descends into the blocks that nest — `notifications` and `review.analysis`", () => {
+    // `notifications` broke the flat-record assumption above first
+    // (`slack.channel`), and `review.analysis` (the evidence pipeline, WP0) is
+    // the second. The endpoint keys their provenance by the DOTTED leaf, so the
+    // renderer has to walk into a nested value and join the path — otherwise the
+    // row reads `notifications.slack = [object Object]` with a provenance of
+    // "default", hiding the value the tab exists to show.
+    expect(typeof defaultNotificationsConfig().slack).toBe("object");
+    expect(typeof defaultReviewConfig().analysis).toBe("object");
 
     const pane = read("components/RepoConfigPane.tsx");
     expect(pane, "toLeaves no longer descends into a nested section").toContain("walk(value, leaf)");

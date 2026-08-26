@@ -15,6 +15,8 @@
  *
  *   node scripts/lint-import-boundaries.mjs server
  *   node scripts/lint-import-boundaries.mjs engine
+ *   node scripts/lint-import-boundaries.mjs code-facts
+ *   node scripts/lint-import-boundaries.mjs cli
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -60,6 +62,64 @@ const RULE_SETS = {
           spec.startsWith(".") &&
           !resolve(dirname(file), spec).startsWith(join(repoRoot, "packages/workflow-engine/src")),
         message: "the workflow engine must not reach outside its own src/ tree",
+      },
+    ],
+  },
+  "code-facts": {
+    root: join(repoRoot, "packages/code-facts/src"),
+    rules: [
+      {
+        // A LEAF, like agentic-pi: no workspace edges in either direction, so
+        // vendoring it into the sandbox image (WP2) never drags the workspace
+        // along. That is also why `log.ts` re-declares LoggerPort rather than
+        // importing the engine's.
+        name: "code-facts-leaf",
+        test: (spec) => /^lastlight(-|$)/.test(spec) || spec.startsWith("agentic-pi"),
+        message:
+          "code-facts is a leaf package — it must not depend on any other workspace package",
+      },
+      {
+        // NARROWED 2026-08-22 (`docs/plans/fact-engine/`). The rule used to ban
+        // `typescript` outright, on the premise that TS 7 had no programmatic
+        // API. It has one — `typescript/unstable/*` — and code-facts is
+        // migrating onto it, so a blanket ban now bans the engine itself.
+        //
+        // What the rule was really protecting is UNCHANGED and is the reason
+        // the narrow form still exists: the compiler must come from THIS
+        // package's pinned dependency, never from the repo under review. That
+        // half is enforced structurally by `tests/compiler-isolation.test.ts`
+        // (no `require.resolve("typescript", { paths: [repoDir] })`), and this
+        // rule keeps the stable public entry points out — importing plain
+        // `typescript` would pull the classic API surface the package does not
+        // use and must not start depending on.
+        name: "code-facts-no-typescript",
+        test: (spec) =>
+          spec === "typescript" ||
+          (spec.startsWith("typescript/") && !spec.startsWith("typescript/unstable/")),
+        message:
+          "only `typescript/unstable/*` (the tsgo API) may be imported — never the classic " +
+          "surface, and never `typescript` resolved from the repo under review",
+      },
+      {
+        name: "code-facts-self-contained",
+        test: (spec, file) =>
+          spec.startsWith(".") &&
+          !resolve(dirname(file), spec).startsWith(join(repoRoot, "packages/code-facts/src")),
+        message: "code-facts must not reach outside its own src/ tree",
+      },
+    ],
+  },
+  cli: {
+    root: join(repoRoot, "packages/cli/src"),
+    rules: [
+      {
+        // The invariant the whole `lastlight-shared` package exists to serve:
+        // the CLI is the lean global bin, and an edge to core would drag the
+        // harness, both Drizzle schemas and every driver into a `npm i -g`.
+        name: "cli-never-imports-core",
+        test: (spec) => spec === "lastlight-core" || spec.startsWith("lastlight-core/"),
+        message:
+          "the CLI must never gain an edge to lastlight-core — put the shared logic in lastlight-shared",
       },
     ],
   },

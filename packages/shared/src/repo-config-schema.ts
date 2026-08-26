@@ -55,6 +55,7 @@ import {
   type DisabledConfig,
   type FixConfig,
   type NotificationsConfig,
+  type ReviewAnalysisConfig,
   type ReviewConfig,
 } from "./config-types.js";
 import { ImageAllowlist, parseServiceSpec } from "./sandbox-services.js";
@@ -1206,6 +1207,19 @@ function sanitizeReview(
         out.generatedPaths = [...operator, ...names.filter((p) => !operator.includes(p))];
         break;
       }
+      case "analysis":
+        // Operator-only, for the same reason `fix.escalateModelAfterAttempt` is:
+        // it is spend, and there is no "how careful is this repo" direction to
+        // clamp it in. Turning the evidence pipeline ON buys extra analysis on
+        // the operator's budget; turning it OFF against an operator who enabled
+        // it would opt the repo out of the review machinery the deployment
+        // chose. Neither is the repo's call.
+        warn(
+          "key-not-allowed",
+          path,
+          `Ignored "${path}": this key is set by the deployment operator only.`,
+        );
+        break;
       default:
         warn("invalid-value", path, `Ignored "${path}": it is not a key of the review policy.`);
     }
@@ -1524,7 +1538,54 @@ function shapeReview(raw: unknown): ReviewConfig {
     generatedPaths: Array.isArray(node.generatedPaths)
       ? node.generatedPaths.filter((p): p is string => typeof p === "string" && !!p.trim()).map((p) => p.trim())
       : d.generatedPaths,
+    // The one nested node in `review:` — operator-only, so a repo layer never
+    // contributes to it, but a merged view still has to project it leaf by leaf
+    // (the same totality rule the blocks above follow).
+    analysis: shapeReviewAnalysis(node.analysis, d.analysis),
   };
+}
+
+function shapeReviewAnalysis(raw: unknown, d: ReviewAnalysisConfig): ReviewAnalysisConfig {
+  const node = isPlainObject(raw) ? raw : {};
+  return {
+    enabled: node.enabled === true,
+    maxSpecObligations: num(node.maxSpecObligations, d.maxSpecObligations),
+    maxObligations: num(node.maxObligations, d.maxObligations),
+    // Operator-only like the rest of `review.analysis`, so this only ever
+    // projects the operator's answer into the merged view. `minimal` or nothing.
+    obligationContract: node.obligationContract === "minimal" ? "minimal" : d.obligationContract,
+    // Operator-only projection too. A plain string — the CLI (`--mint`) is the
+    // loud validator, exactly as for obligationContract above.
+    mint: typeof node.mint === "string" ? node.mint : d.mint,
+    surveyPasses: num(node.surveyPasses, d.surveyPasses),
+    surveyConcurrency: num(node.surveyConcurrency, d.surveyConcurrency),
+    probes: node.probes === true,
+    probeLifecycleScripts: node.probeLifecycleScripts === true,
+    probeTypecheck: node.probeTypecheck === true,
+    probeCoverage: node.probeCoverage === true,
+    prepareTimeoutSeconds: num(node.prepareTimeoutSeconds, d.prepareTimeoutSeconds),
+    coverageTimeoutSeconds: num(node.coverageTimeoutSeconds, d.coverageTimeoutSeconds),
+    probeRounds: num(node.probeRounds, d.probeRounds),
+    maxInlineComments: num(node.maxInlineComments, d.maxInlineComments),
+    // Total, leaf-by-leaf like everything else here, but the KEY SET is the
+    // caller's: an unknown family name would configure a threshold nothing
+    // reads, which is worse than rejecting it, and a missing one correctly
+    // means "no bar for this family" rather than zero.
+    thresholds: shapeThresholds(node.thresholds, d.thresholds),
+    internalFloor: num(node.internalFloor, d.internalFloor),
+    // Nullable like `fix.maxCostUsd`: an explicit `null` is the documented
+    // "unlimited body overflow" value, distinct from an absent key (the
+    // shipped `0`). Operator-only like the rest of `review.analysis`, so this
+    // only ever projects the operator's answer into the merged view.
+    maxBodyComments: node.maxBodyComments === null ? null : num(node.maxBodyComments, d.maxBodyComments ?? 0),
+  };
+}
+
+function shapeThresholds(raw: unknown, d: Record<string, number>): Record<string, number> {
+  const node = isPlainObject(raw) ? raw : {};
+  const out: Record<string, number> = {};
+  for (const [family, fallback] of Object.entries(d)) out[family] = num(node[family], fallback);
+  return out;
 }
 
 function num(raw: unknown, fallback: number): number {
@@ -1547,9 +1608,13 @@ function shapeSources(sources: Record<string, unknown>): RepoConfigSources {
     approval: sourceMap(sources.approval),
     fix: sourceMap(sources.fix),
     dependencies: sourceMap(sources.dependencies),
-    review: sourceMap(sources.review),
-    // Flattened to a dotted leaf ("slack.channel") because `notifications:` is
-    // the one block that nests, and `RepoConfigSources` is deliberately flat —
+    // `review:` nests too, since `analysis:` — so its provenance is flattened to
+    // dotted leaves ("analysis.enabled") exactly as `notifications:` is. The
+    // helper keeps scalar leaves at the top level, so `review.trigger` still
+    // reads as `trigger`.
+    review: nestedSourceMap(sources.review),
+    // Flattened to a dotted leaf ("slack.channel") because `notifications:` was
+    // the FIRST block that nests, and `RepoConfigSources` is deliberately flat —
     // the dashboard renders provenance as a leaf→layer table, not a tree.
     notifications: nestedSourceMap(sources.notifications),
   };

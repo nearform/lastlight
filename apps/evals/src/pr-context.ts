@@ -55,13 +55,34 @@
 import {
   defaultDependenciesConfig,
   defaultFixConfig,
+  defaultReviewConfig,
   renderContext,
+  resolveSpecContext,
   type CiFailureReport,
   type CiJobFailure,
   type DependenciesConfig,
   type FixConfig,
   type PrState,
+  type ReviewConfig,
 } from "lastlight-core/evals";
+
+/**
+ * The two reads `resolveSpecContext` makes. Declared structurally so the fake
+ * only has to satisfy what is actually called — the same reasoning that lets a
+ * `FakeGitHub` stand in as a `GitHubClient` for `fetchRepoConfigTree`.
+ */
+export interface SpecGitHub {
+  listPullRequestClosingIssues: (
+    owner: string,
+    repo: string,
+    pullNumber: number,
+  ) => Promise<{ number: number; title: string; body: string; url?: string; state?: string }[]>;
+  listPullRequestFilePaths: (
+    owner: string,
+    repo: string,
+    pullNumber: number,
+  ) => Promise<string[] | null>;
+}
 
 /** One failing CI job, as a case writes it. */
 export interface CiJobSeed {
@@ -109,9 +130,32 @@ export interface PrStateSeed {
   notes?: { kind: string; text: string; stale?: boolean }[];
   cumulative_cost_usd?: number;
   cost_baseline_usd?: number;
-  /** Overrides on the two policy blocks; anything omitted takes the shipped default. */
+  /**
+   * The issues the PR says it closes, with their bodies — the FIRST end of every
+   * `spec` obligation (`docs/plans/deterministic-pr-levers.md` §Decisions, D7).
+   *
+   * Seeded rather than read, for the same reason the whole snapshot is: in
+   * production `resolveSpecContext` fetches it from
+   * `closingIssuesReferences`, and the fake GitHub answers GraphQL for one
+   * mutation only. A case that omits it measures the axis with the PR body as
+   * its only source, which is a weaker arm — not a broken one.
+   */
+  closes?: { number: number; title: string; body: string; state?: string; url?: string }[];
+  /**
+   * The PR's changed paths — the SECOND end. Absent ⇒ `null` ⇒ the obligation
+   * builder emits nothing at all, which is the correct degradation: a
+   * one-ended seed measured WORSE than no seed in IRIS's ablation.
+   */
+  changed_files?: string[];
+  /** Overrides on the three policy blocks; anything omitted takes the shipped default. */
   fix?: Partial<FixConfig>;
   dependencies?: Partial<DependenciesConfig>;
+  /**
+   * `review:` overrides — in practice `{ analysis: { enabled: true } }`, which
+   * is what turns the `spec` axis on for an arm. Off by default so every
+   * existing case keeps measuring the shipped two-phase review.
+   */
+  review?: Partial<ReviewConfig>;
 }
 
 const CHECKS_DEFAULT = "none" as const;
@@ -152,6 +196,8 @@ export function buildPrState(args: {
   body: string;
   branch: string;
   seed?: PrStateSeed;
+  /** Harness-derived changed paths; the case's own seed beats it. See {@link prContextPatch}. */
+  changedFiles?: string[];
 }): PrState {
   const s = args.seed ?? {};
   const at = new Date().toISOString();
@@ -181,6 +227,22 @@ export function buildPrState(args: {
     lastBotReview: null,
     pathsSinceLastBotReview: null,
     ciReport: toCiReport(s.ci_jobs),
+    // The `spec` axis's two ends. Both inert unless the case seeds them AND the
+    // arm turns `review.analysis` on — with the axis off, `renderContext` omits
+    // every variable they feed, so a case that seeds neither is byte-identical
+    // to one written before WP0.
+    closes: (s.closes ?? []).map((c) => ({
+      number: c.number,
+      title: c.title,
+      body: c.body,
+      ...(c.state ? { state: c.state } : {}),
+      ...(c.url ? { url: c.url } : {}),
+    })),
+    // `??`, not `||`: a case seeding `[]` is asserting "this PR changes no
+    // files", which is a different fact from "we could not read the list" and
+    // yields a different degraded message. Only a genuinely absent seed falls
+    // through to the harness-derived set.
+    changedFiles: s.changed_files ?? args.changedFiles ?? null,
     attempt: s.attempt ?? 1,
     flakyDeferrals: s.flaky_deferrals ?? 0,
     escalatedAtSha: null,
@@ -211,14 +273,54 @@ export function buildPrState(args: {
   };
 }
 
-/** The effective policy blocks for a case: shipped defaults under its overrides. */
-export function prPolicy(seed?: PrStateSeed): {
+/**
+ * A `review:` override as an ARM declares it — an overlay's `config.yaml` block,
+ * which names only the keys it changes (and, inside `analysis`, only the leaves
+ * it changes). `Partial<ReviewConfig>` is shallow, so `analysis` is widened here
+ * rather than requiring a whole `ReviewAnalysisConfig`.
+ */
+export type ReviewOverride = Partial<Omit<ReviewConfig, "analysis">> & {
+  analysis?: Partial<ReviewConfig["analysis"]>;
+};
+
+/**
+ * The effective policy blocks for a case: shipped defaults under its overrides.
+ *
+ * Two override layers for `review`, applied in that order:
+ *   1. the case's `pr_state.review` (gold), then
+ *   2. the ARM's `review:` (its overlay `config.yaml`), which wins on the keys
+ *      it names.
+ *
+ * The arm goes last because it is the axis under measurement: an overlay that
+ * says `analysis.enabled: true` must produce a pipeline-on run for every case in
+ * the tier, and a baseline overlay that says nothing about `analysis` must leave
+ * whatever the case declared alone. A gold file can therefore never flip an arm.
+ */
+export function prPolicy(
+  seed?: PrStateSeed,
+  armReview?: ReviewOverride,
+): {
   fix: FixConfig;
   dependencies: DependenciesConfig;
+  review: ReviewConfig;
 } {
+  const reviewDefaults = defaultReviewConfig();
   return {
     fix: { ...defaultFixConfig(), ...(seed?.fix ?? {}) },
     dependencies: { ...defaultDependenciesConfig(), ...(seed?.dependencies ?? {}) },
+    review: {
+      ...reviewDefaults,
+      ...(seed?.review ?? {}),
+      ...(armReview ?? {}),
+      // A one-level spread would drop `maxSpecObligations` the moment a case
+      // seeded `{ analysis: { enabled: true } }`, so the nested block merges
+      // leaf-by-leaf.
+      analysis: {
+        ...reviewDefaults.analysis,
+        ...(seed?.review?.analysis ?? {}),
+        ...(armReview?.analysis ?? {}),
+      },
+    },
   };
 }
 
@@ -232,18 +334,79 @@ export function prPolicy(seed?: PrStateSeed): {
  * exactly what the seam contributes — and so a workflow that is not PR-scoped
  * gets nothing at all.
  */
-export function prContextPatch(args: {
+export async function prContextPatch(args: {
   repo: string;
   prNumber: number;
   title: string;
   body: string;
   branch: string;
   seed?: PrStateSeed;
-}): Record<string, unknown> {
+  /**
+   * A `GitHubClient` pointed at the fake — the seam that makes the `spec` axis
+   * production-shaped.
+   *
+   * `closes` and `changedFiles` are the only two fields on the snapshot that are
+   * not facts a case *declares* but facts GitHub *computes*, and both went
+   * missing here, one at a time, precisely because the harness was seeding them.
+   * Given a client, core's own `resolveSpecContext` does both reads against the
+   * fake exactly as `dispatchWorkflow` does against real GitHub — one GraphQL
+   * (`closingIssuesReferences`) and one REST (`GET /pulls/:n/files`). No copy of
+   * the resolution lives here.
+   *
+   * Omit it and the snapshot keeps whatever the case seeded, which is what every
+   * non-pr-review tier does.
+   */
+  github?: SpecGitHub;
+  /**
+   * The ARM's `review:` policy (its overlay `config.yaml` block). This is how
+   * `review.analysis.enabled` reaches a run — and therefore how core's
+   * `specContext` comes to project `analysisEnabled`, the one key the review
+   * evidence pipeline's phases gate on. See {@link prPolicy} for the precedence.
+   */
+  review?: ReviewOverride;
+  /**
+   * The PR's changed paths as the HARNESS derived them from the seeded checkout
+   * — the fallback for the spec axis's second end.
+   *
+   * Production reads this from `listPullRequestFilePaths` inside
+   * `resolveSpecContext`; the eval builds its own snapshot and so never calls
+   * that. Without this the field stays `null`, which
+   * `buildSpecObligations` correctly treats as "could not read" and refuses to
+   * emit a one-ended seed for — silencing the entire `spec` family.
+   *
+   * A case's own `pr_state.changed_files` still wins, so a case can deliberately
+   * measure the degraded path.
+   */
+  changedFiles?: string[];
+}): Promise<Record<string, unknown>> {
   const state = buildPrState(args);
-  const { fix, dependencies } = prPolicy(args.seed);
+
+  // Production order, then the case's overrides. `resolveSpecContext` fills both
+  // ends unconditionally and never throws (a failed read lands in `readErrors`
+  // and leaves the field at the value that cannot cause a wrong claim), so the
+  // seeds are re-applied AFTER it — otherwise a case that deliberately seeds
+  // `changed_files: []` to measure the degraded path would have the resolver
+  // quietly answer its question for it.
+  if (args.github) {
+    await resolveSpecContext(state, { github: args.github as never });
+    if (args.seed?.closes) {
+      state.closes = args.seed.closes.map((c) => ({
+        number: c.number,
+        title: c.title,
+        body: c.body,
+        ...(c.state ? { state: c.state } : {}),
+        ...(c.url ? { url: c.url } : {}),
+      }));
+    }
+    if (args.seed?.changed_files) state.changedFiles = args.seed.changed_files;
+  }
+
+  const { fix, dependencies, review } = prPolicy(args.seed, args.review);
   return {
-    ...renderContext(state, fix, dependencies),
+    // `review` is passed but deliberately NOT seeded top-level the way `fix` and
+    // `dependencies` are: `build.yaml` already emits `output_var: review`, and a
+    // top-level object would shadow it (see `apps/server/CLAUDE.md`).
+    ...renderContext(state, fix, dependencies, review),
     prNumber: args.prNumber,
     fix: fix as unknown as Record<string, unknown>,
     dependencies: dependencies as unknown as Record<string, unknown>,

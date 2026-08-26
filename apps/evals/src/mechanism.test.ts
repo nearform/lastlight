@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { startFakeGitHub } from "./fake-github.js";
+import { startFakeGitHub, closingIssueNumbers } from "./fake-github.js";
 import {
   appliedRepoConfigKeys,
   loadRepoConfigFixture,
@@ -27,10 +27,11 @@ import { gitDiffAgainstBase } from "./run-instance.js";
 import { execFileSync } from "node:child_process";
 import { gradeExecution, gradeBehavioral, gradeTriage, gradeReview, gradeMarkers, fBeta } from "./grade.js";
 import { prContextPatch } from "./pr-context.js";
-import { defaultFixConfig } from "lastlight-core/evals";
+import { defaultFixConfig, resolveReviewGitHubClient } from "lastlight-core/evals";
 import { computeMartianRanking, type MartianSidecar } from "./report.js";
 import type { InstanceResult } from "./schema.js";
 import { loadMergedConfig, resolvePhaseModel } from "./config.js";
+import { modelTemplateForRow } from "./phase-models.js";
 import { modelsArm, configArm, releaseOverlayGuard } from "./arm.js";
 import { collectMetrics } from "./metrics.js";
 
@@ -683,6 +684,82 @@ describe("config run type — per-step model resolution (config.ts)", () => {
     // 5. Template referencing an unset key → falls through to phase/default.
     expect(resolvePhaseModel("{{models.missing}}", "executor", models)).toBe("m-default");
   });
+
+  it("renders {{#if}} conditional templates via core's engine (the adjudicate fallback pair)", () => {
+    // pr-review.yaml's `adjudicate` model — an {{#if}}/{{#if !x}} pair that
+    // falls back to models.review when models.review-adjudicate is unset. The
+    // old bare-variable regex left the {{#if}} blocks un-rendered, so the
+    // recorded PhaseMetric.model was literal template residue, not a model id.
+    const tpl =
+      "{{#if models.review-adjudicate}}{{models.review-adjudicate}}{{/if}}" +
+      "{{#if !models.review-adjudicate}}{{models.review}}{{/if}}";
+    const models = { default: "m-default", review: "m-review" };
+    // Unset → the {{#if !x}} branch renders models.review.
+    expect(resolvePhaseModel(tpl, "adjudicate", models)).toBe("m-review");
+    // Set → the pinned value wins and the negated branch renders empty.
+    expect(resolvePhaseModel(tpl, "adjudicate", { ...models, "review-adjudicate": "m-pinned" })).toBe("m-pinned");
+    // Both unset → both branches render empty → falls through to the default
+    // (matching core: an empty render is falsy, resolver → fallback).
+    expect(resolvePhaseModel(tpl, "adjudicate", { default: "m-default" })).toBe("m-default");
+  });
+
+  it("resolvePhaseModel branch precedence: template → models[label] → models[parent] → default", () => {
+    const models = {
+      default: "m-default",
+      survey: "m-survey",
+      survey_branch_contract: "m-contract-pin",
+    };
+    // Core's fanout resolver (`fanout.ts resolveModelVariant`) tries the branch
+    // LABEL as the task name, then the parent phase as fallbackTask.
+    expect(resolvePhaseModel(undefined, "survey_branch_contract", models, "survey")).toBe("m-contract-pin");
+    expect(resolvePhaseModel(undefined, "survey_branch_tests", models, "survey")).toBe("m-survey");
+    expect(resolvePhaseModel(undefined, "other_branch_x", models, "other")).toBe("m-default");
+    // A rendered template beats both map lookups.
+    expect(resolvePhaseModel("{{models.survey}}", "survey_branch_contract", models, "survey")).toBe("m-survey");
+  });
+});
+
+describe("modelTemplateForRow — ledger label → YAML model template (phase-models.ts)", () => {
+  // A pr-review-shaped def: a fanout phase whose `model:` template must govern
+  // every `<parent>_branch_<name>` row, plus one branch with its own override.
+  const phases = [
+    { name: "seed" },
+    {
+      name: "survey",
+      model: "{{models.review-survey}}",
+      branches: [{ name: "contract" }, { name: "tests", model: "{{models.survey-tests}}" }],
+    },
+    { name: "review", model: "{{models.review}}" },
+  ];
+
+  it("maps declared phase names to their own template (old behaviour)", () => {
+    expect(modelTemplateForRow(phases, "survey")).toEqual({
+      template: "{{models.review-survey}}",
+      fallbackPhase: undefined,
+    });
+    expect(modelTemplateForRow(phases, "seed")).toEqual({ template: undefined, fallbackPhase: undefined });
+  });
+
+  it("maps branch rows to the parent's template with the parent as fallback task", () => {
+    for (const label of ["survey_branch_contract", "survey_branch_contract_retry", "survey_branch_contract_check"]) {
+      expect(modelTemplateForRow(phases, label)).toEqual({
+        template: "{{models.review-survey}}",
+        fallbackPhase: "survey",
+      });
+    }
+  });
+
+  it("a branch-level model: override beats the parent template (forward-looking)", () => {
+    expect(modelTemplateForRow(phases, "survey_branch_tests")).toEqual({
+      template: "{{models.survey-tests}}",
+      fallbackPhase: "survey",
+    });
+  });
+
+  it("loop-derived and unknown labels keep the old no-template behaviour", () => {
+    expect(modelTemplateForRow(phases, "review_fix_1")).toEqual({ template: undefined, fallbackPhase: undefined });
+    expect(modelTemplateForRow(phases, "nonexistent")).toEqual({ template: undefined, fallbackPhase: undefined });
+  });
 });
 
 describe("Arm seam — model-selection adapters (arm.ts)", () => {
@@ -729,6 +806,30 @@ describe("Arm seam — model-selection adapters (arm.ts)", () => {
 
     it("activate() is a no-op (no overlay to switch)", () => {
       expect(() => modelsArm("m", "f").activate()).not.toThrow();
+    });
+
+    // A forced model is not the whole arm: the overlay's `review:` policy is a
+    // deployment fact `--model` says nothing about, and `review.analysis.enabled`
+    // is what switches the review evidence pipeline on. A `models` run with an
+    // overlay must carry it, or `--model X --overlay wp3` silently runs baseline.
+    it("carries the overlay's review policy; no overlay ⇒ undefined", () => {
+      const { root, overlay } = makeRoots();
+      try {
+        // The overlay `makeRoots` writes has no `review:` — absent, not empty.
+        expect(modelsArm("m", "f", overlay).review).toBeUndefined();
+        expect(modelsArm("m", "f").review).toBeUndefined();
+
+        writeFileSync(
+          join(overlay, "config.yaml"),
+          "models:\n  default: openai/gpt-5.4-mini\nreview:\n  postsCheck: true\n  analysis:\n    enabled: true\n    surveyPasses: 6\n",
+        );
+        const arm = modelsArm("m", "f", overlay);
+        expect(arm.review).toEqual({ postsCheck: true, analysis: { enabled: true, surveyPasses: 6 } });
+        // Config arms read the same block from the same file.
+        expect(configArm(root, overlay).review).toEqual(arm.review);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
     });
   });
 
@@ -778,6 +879,78 @@ describe("Arm seam — model-selection adapters (arm.ts)", () => {
         const desc = arm.describe();
         expect(desc).toContain("default→openai/gpt-5.4-mini");
         expect(desc).toContain("architect→openai/gpt-5.5");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it("records fan-out BRANCH rows with the survey model, not models.default (money trap 12, deterministic-pr-levers.md)", () => {
+      const { root, overlay } = makeRoots();
+      try {
+        // A wp-shaped overlay: surveys pinned to haiku, review to sonnet.
+        writeFileSync(
+          join(overlay, "config.yaml"),
+          [
+            "models:",
+            "  default: anthropic/claude-sonnet-4-6",
+            "  review-survey: anthropic/claude-haiku-4-5",
+            "  survey-tests: openai/gpt-5.5-mini",
+            "  review: anthropic/claude-sonnet-4-6",
+          ].join("\n") + "\n",
+        );
+        const arm = configArm(root, overlay);
+        const phases = [
+          {
+            name: "survey",
+            model: "{{models.review-survey}}",
+            branches: [{ name: "contract" }, { name: "tests", model: "{{models.survey-tests}}" }],
+          },
+          { name: "adjudicate", model: "{{models.review-survey}}" },
+        ];
+        // The exact recording path run-instance.ts takes for a wf.phases row:
+        // ledger label → modelTemplateForRow → arm.recordPhaseModel.
+        const record = (label: string) => {
+          const { template, fallbackPhase } = modelTemplateForRow(phases, label);
+          return arm.recordPhaseModel(template, label, fallbackPhase);
+        };
+        // Branch rows inherit the parent's template — the measured bug recorded
+        // these as models.default (sonnet) while the sessions ran haiku.
+        expect(record("survey_branch_contract")).toBe("anthropic/claude-haiku-4-5");
+        expect(record("survey_branch_contract_retry")).toBe("anthropic/claude-haiku-4-5");
+        // A branch-level `model:` override wins over the parent's (forward-looking).
+        expect(record("survey_branch_tests")).toBe("openai/gpt-5.5-mini");
+        // The parent row itself is unchanged.
+        expect(record("survey")).toBe("anthropic/claude-haiku-4-5");
+        // A generic-loop iteration re-runs ITS OWN phase — `adjudicate_iter_1`
+        // is the adjudicate phase, template and all. The measured bug (say-side
+        // ladder, 2026-08-25): the row stamped models.default while the session
+        // envelope ran the template's answer.
+        expect(record("adjudicate_iter_1")).toBe("anthropic/claude-haiku-4-5");
+        expect(record("adjudicate_iter_1_check")).toBe("anthropic/claude-haiku-4-5");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it("records the adjudicate {{#if}} fallback pair as a real model id, never template residue", () => {
+      const { root, overlay } = makeRoots();
+      try {
+        // The literal template from apps/server/workflows/pr-review.yaml.
+        const tpl =
+          "{{#if models.review-adjudicate}}{{models.review-adjudicate}}{{/if}}" +
+          "{{#if !models.review-adjudicate}}{{models.review}}{{/if}}";
+        // review-adjudicate UNSET → falls back to models.review.
+        writeFileSync(
+          join(overlay, "config.yaml"),
+          "models:\n  default: openai/gpt-5.4-mini\n  review: anthropic/claude-sonnet-4-6\n",
+        );
+        expect(configArm(root, overlay).recordPhaseModel(tpl, "adjudicate")).toBe("anthropic/claude-sonnet-4-6");
+        // review-adjudicate SET → the pinned value.
+        writeFileSync(
+          join(overlay, "config.yaml"),
+          "models:\n  default: openai/gpt-5.4-mini\n  review: anthropic/claude-sonnet-4-6\n  review-adjudicate: openai/gpt-5.5\n",
+        );
+        expect(configArm(root, overlay).recordPhaseModel(tpl, "adjudicate")).toBe("openai/gpt-5.5");
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
@@ -1068,8 +1241,8 @@ describe("PR context — core's own projection, not a copy", () => {
     branch: "dependabot/npm_and_yarn/tiny-case-3",
   };
 
-  it("projects the CI evidence the fix prompts render", () => {
-    const ctx = prContextPatch({
+  it("projects the CI evidence the fix prompts render", async () => {
+    const ctx = await prContextPatch({
       ...args,
       seed: {
         checks_state: "failing",
@@ -1097,8 +1270,8 @@ describe("PR context — core's own projection, not a copy", () => {
     expect(String(ctx.notesFile)).toContain(".git/");
   });
 
-  it("carries the flaky promotion the third attempt turns on", () => {
-    const ctx = prContextPatch({
+  it("carries the flaky promotion the third attempt turns on", async () => {
+    const ctx = await prContextPatch({
       ...args,
       seed: { attempt: 3, flaky_deferrals: 2, checks_state: "failing" },
     });
@@ -1109,34 +1282,182 @@ describe("PR context — core's own projection, not a copy", () => {
     expect(ctx.maxFlakyDeferrals).toBe(defaultFixConfig().maxFlakyDeferrals);
   });
 
-  it("projects the merge gate's verdict AND its reason, from one decision", () => {
-    const green = prContextPatch({
+  it("projects the merge gate's verdict AND its reason, from one decision", async () => {
+    const green = await prContextPatch({
       ...args,
       seed: { checks_state: "passing", settled_check_count: 3 },
     });
     expect(green.mayMerge).toBe(true);
     expect(typeof green.mayMergeReason).toBe("string");
 
-    const pending = prContextPatch({ ...args, seed: { checks_state: "pending" } });
+    const pending = await prContextPatch({ ...args, seed: { checks_state: "pending" } });
     expect(pending.mayMerge).toBe(false);
     // The reason is produced BY the decision — the panel, the log line and the
     // prompt are three renderings of it, never three prose variants.
     expect(String(pending.mayMergeReason).length).toBeGreaterThan(0);
   });
 
-  it("seeds the policy blocks a prompt renders, under the case's overrides", () => {
-    const ctx = prContextPatch({ ...args, seed: { dependencies: { autoMergeMaxImpact: "low" } } });
+  it("seeds the policy blocks a prompt renders, under the case's overrides", async () => {
+    const ctx = await prContextPatch({ ...args, seed: { dependencies: { autoMergeMaxImpact: "low" } } });
     expect((ctx.dependencies as { autoMergeMaxImpact: string }).autoMergeMaxImpact).toBe("low");
     // Everything the case did NOT override is the shipped default, so a case
     // states only what it is actually testing.
     expect((ctx.fix as { maxAttempts: number }).maxAttempts).toBe(defaultFixConfig().maxAttempts);
   });
 
-  it("a case with no seed still gets a coherent snapshot", () => {
-    const ctx = prContextPatch(args);
+  it("a case with no seed still gets a coherent snapshot", async () => {
+    const ctx = await prContextPatch(args);
     expect(ctx.attempt).toBe(1);
     expect(ctx.ciSection).toBe("");
     expect(ctx.prNumber).toBe(412);
+  });
+
+  // The review evidence pipeline's ONE switch. `analysisEnabled` is what every
+  // WP3 phase in `pr-review.yaml` gates on (`skip_if: "analysisEnabled != true"`),
+  // and it comes from the ARM's overlay `config.yaml`, never from gold — so this
+  // pair of assertions IS the two-arm comparison in miniature.
+  it("the arm's review policy switches the evidence pipeline on, and its absence leaves it off", async () => {
+    // baseline/config.yaml: a `review:` block with no `analysis` — the pipeline
+    // stays off, with no per-case special-casing.
+    const off = await prContextPatch({ ...args, review: { postsCheck: true } });
+    expect(off.analysisEnabled).toBeUndefined();
+    expect(off.prBody).toBeUndefined();
+
+    // wp3/config.yaml: the same block plus `analysis.enabled`.
+    const on = await prContextPatch({
+      ...args,
+      review: { postsCheck: true, analysis: { enabled: true, maxObligations: 40, surveyPasses: 6 } },
+    });
+    expect(on.analysisEnabled).toBe("true");
+    expect(on.prBody).toBe(args.body);
+
+    // No arm policy at all is byte-identical to a policy that names no analysis.
+    expect((await prContextPatch(args)).analysisEnabled).toBeUndefined();
+  });
+
+  // The `spec` family's SECOND END. It went inert twice: once when `pr-review`
+  // was excluded from `prContextPatch` entirely, and again after that exclusion
+  // was lifted — because production reads the changed-file list from
+  // `listPullRequestFilePaths` in `resolveSpecContext`, which the eval never
+  // calls. `buildSpecObligations` then correctly refuses to emit a one-ended
+  // seed (IRIS: a half mechanism measured WORSE than no seed), so all six
+  // obligations vanish and the branch spends a model call saying it cannot work.
+  //
+  // Both failures were silent in the sense that mattered: the run went green.
+  const withAnalysis = { enabled: true, maxObligations: 40, surveyPasses: 6 };
+  const specBody = "### What & why\n\nCloses #1586.\n\n### Acceptance criteria\n\n- [ ] Silent login must not show the Google popup on a returning session\n";
+
+  it("harness-derived changed files give the spec axis its second end", async () => {
+    const ctx = await prContextPatch({
+      ...args,
+      body: specBody,
+      review: { analysis: withAnalysis },
+      changedFiles: ["src/auth/redirect-sign-in.ts", "src/auth/session.ts"],
+    });
+    const block = ctx.specObligations as string | undefined;
+    expect(block).toBeDefined();
+    // The obligation names both ends: the criterion verbatim, and a changed file.
+    expect(block).toContain("Silent login must not show the Google popup");
+    expect(block).toContain("src/auth/redirect-sign-in.ts");
+    expect(block).not.toContain("changed-file list could not be read");
+  });
+
+  it("without them the axis degrades LOUDLY rather than silently passing", async () => {
+    const ctx = await prContextPatch({ ...args, body: specBody, review: { analysis: withAnalysis } });
+    // Locked decision 6: "could not look" and "looked and it is fine" are
+    // different facts, so the block still renders and says which.
+    expect(ctx.specObligations).toContain("changed-file list could not be read");
+    expect(ctx.specObligations).toContain("That is NOT a pass");
+  });
+
+  it("a case seeding [] means 'changes nothing', not 'could not read'", async () => {
+    const ctx = await prContextPatch({
+      ...args,
+      body: specBody,
+      review: { analysis: withAnalysis },
+      seed: { changed_files: [] },
+      changedFiles: ["src/auth/session.ts"],
+    });
+    // The seed wins over the harness-derived set, and its degraded message is
+    // the other one — a `||` fallback here would silently swap the two.
+    expect(ctx.specObligations).toContain("changes no files");
+    expect(ctx.specObligations).not.toContain("src/auth/session.ts");
+  });
+
+  it("the arm wins over a case's own review seed — gold can never flip an arm", async () => {
+    const ctx = await prContextPatch({
+      ...args,
+      seed: { review: { analysis: { enabled: true } as never } },
+      review: { analysis: { enabled: false } },
+    });
+    expect(ctx.analysisEnabled).toBeUndefined();
+  });
+
+  // BOTH ends, from the path production uses. The two above cover the
+  // harness-derived fallback; this one covers what actually ships: a real
+  // `GitHubClient` pointed at the fake, with core's own `resolveSpecContext`
+  // doing the GraphQL + REST reads. Each end went missing separately, so the
+  // assertion is deliberately on the CONJUNCTION — a criterion traceable to the
+  // linked ISSUE (not merely the PR body) and a changed file, in one block.
+  it("routes both ends through core's resolver against the fake (the production path)", async () => {
+    const fake = await startFakeGitHub({
+      owner: "acme",
+      repo: "widgets",
+      issues: [
+        {
+          number: 1586,
+          title: "Authentication standardisation: silent sign-in",
+          // The criterion lives ONLY here, never in the PR body — so a run that
+          // read the body alone cannot produce it, and this test would fail.
+          body: "Acceptance criteria\n\n- [ ] Backend enforces the nearform.com domain server-side (non-nearform accounts get 403)\n",
+        },
+      ],
+      pulls: [
+        {
+          number: 412,
+          title: "feat: silent sign-in",
+          body: "### What & why\n\nCloses #1586. Adds the silent transport.\n",
+          base_ref: "main",
+          head_ref: "feat/sso",
+          base_commit: "a".repeat(40),
+          head_commit: "b".repeat(40),
+        },
+      ],
+    });
+    try {
+      fake.setPullFiles(412, [
+        { filename: "src/auth/session.ts", status: "modified", additions: 12, deletions: 2, changes: 14, sha: "c".repeat(40) },
+      ]);
+      const ctx = await prContextPatch({
+        repo: "acme/widgets",
+        prNumber: 412,
+        title: "feat: silent sign-in",
+        body: "### What & why\n\nCloses #1586. Adds the silent transport.\n",
+        branch: "feat/sso",
+        review: { analysis: withAnalysis },
+        github: resolveReviewGitHubClient({ githubApiBaseUrl: fake.url }),
+      });
+      const block = ctx.specObligations as string | undefined;
+      expect(block).toBeDefined();
+      expect(block).toContain("nearform.com domain server-side");
+      expect(block).toContain("src/auth/session.ts");
+      expect(block).not.toContain("changed-file list could not be read");
+    } finally {
+      await fake.close();
+    }
+  });
+
+  // GitHub's own boundary: a closing keyword links, a bare reference does not.
+  // Getting this wrong would seed the axis with criteria from an issue the PR
+  // never promised to satisfy — a confident obligation about the wrong "what
+  // was asked", which is worse than no obligation.
+  it("resolves closing keywords only, not bare references", () => {
+    expect(closingIssueNumbers("Closes #12")).toEqual([12]);
+    expect(closingIssueNumbers("fixes #7 and resolved #8")).toEqual([7, 8]);
+    expect(closingIssueNumbers("Closes https://github.com/o/r/issues/99")).toEqual([99]);
+    expect(closingIssueNumbers("Closes #5. Also closes #5.")).toEqual([5]);
+    expect(closingIssueNumbers("See #12, part of #13, related to #14")).toEqual([]);
+    expect(closingIssueNumbers("no links here")).toEqual([]);
   });
 });
 

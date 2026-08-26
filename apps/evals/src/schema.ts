@@ -39,6 +39,20 @@ export interface ReviewSeed {
   body: string;
   /** APPROVED / CHANGES_REQUESTED / COMMENTED. */
   state?: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED";
+  /**
+   * The commit this review was submitted against. **Set it whenever the review
+   * predates the PR's head** — without it the review reads as covering the head,
+   * which for a prior APPROVE means "I already approved exactly this tree".
+   *
+   * Measured 2026-08-22: the seed path dropped `commit_id` while the submit path
+   * set it, so every seeded review was served with `commit_id: undefined`.
+   * `prreview__skillspro-1641` seeds our APPROVE of the PREVIOUS head; served
+   * SHA-less, the agent concluded it had already approved this one and submitted
+   * **no review at all** — the case measures re-review behaviour and could not
+   * observe any. Left `undefined` when absent rather than defaulting to the head,
+   * because defaulting to the head is precisely the false claim.
+   */
+  commit_id?: string;
 }
 
 /** A prior inline review comment to seed (path + line + body). */
@@ -72,6 +86,20 @@ export interface PullSeed {
    * `github_get_pull_request_diff` returns.
    */
   files?: PullFile[];
+  /**
+   * The issues this PR closes, with their bodies — the FIRST end of every `spec`
+   * obligation (`docs/plans/deterministic-pr-levers.md` §Decisions, D7).
+   *
+   * Content only. The LINKAGE is derived by the fake from the body's closing
+   * keywords, exactly as GitHub's `closingIssuesReferences` does, so a case
+   * states each fact once: `Closes #1586` in the body, issue 1586's text here.
+   * Seeding an issue nothing links to is inert rather than wrong.
+   *
+   * These are real issues fetched with `gh` when the case is authored (the same
+   * source `add-case` uses) — never written by hand, because the spec axis is
+   * graded on whether the agent discharged what was actually asked.
+   */
+  linked_issues?: IssueSeed[];
   /** Prior PR discussion the skill reads (advance, don't restart). */
   reviews?: ReviewSeed[];
   review_comments?: ReviewCommentSeed[];
@@ -105,7 +133,41 @@ export interface GoldComment {
   line?: number;
   severity: "low" | "medium" | "high" | "critical";
   description: string;
+  /**
+   * Bug taxonomy for this gold finding — the class of reasoning needed to catch
+   * it. Curated per dataset, never inferred.
+   *
+   * Without it a recall improvement cannot be **attributed to a mechanism**:
+   * "recall went from 1/25 to 4/25" says nothing about whether the cross-file
+   * machinery worked, whereas "all three new hits are `cross-file`" does. Purely
+   * additive metadata — it never affects grading, only how results are grouped.
+   */
+  class?: GoldClass;
 }
+
+/** The bug-taxonomy classes a {@link GoldComment} may be tagged with. Roughly
+ * ordered by the analysis depth needed to find one. */
+export const GOLD_CLASSES = [
+  /** Wrong inside a single function, visible in the hunk. */
+  "local",
+  /** Needs the caller/callee of a changed function, same file. */
+  "cross-function",
+  /** Needs a consumer in a file the diff does not touch. */
+  "cross-file",
+  /** Depends on lifecycle, caching, ordering or invalidation over time. */
+  "stateful",
+  /** Races, re-entrancy, parallel execution. */
+  "concurrency",
+  /** Migration, serialization, schema or data-shape correctness. */
+  "data",
+  /** Authn/authz, injection, secrets, attacker-controlled input. */
+  "security",
+  /** Complexity, allocation, N+1, unbounded work. */
+  "performance",
+  /** The change does not do what the issue/PR body asked. */
+  "specification",
+] as const;
+export type GoldClass = (typeof GOLD_CLASSES)[number];
 
 /** Assertions on the GitHub mutations the workflow performed (recorded by the
  * fake server). Every field is optional — only the ones present are checked. */
@@ -197,6 +259,18 @@ export interface SweBenchInstance {
    * against (LLM judge → precision/recall/F-beta). */
   review_gold?: GoldComment[];
   /**
+   * Real defects that are NOT this case's gold but are known-true of this PR —
+   * typically the gold of a SIBLING ROUND of the same PR (the `-r2`/`-r3`
+   * cases), which shares most of its head tree with this one. A posted finding
+   * that matches one is scored NEUTRAL: excluded from `posted`, never a false
+   * positive, never a match. Without this, a reviewer that catches the
+   * hardest defect in the PR one round early is punished twice — an FP here
+   * and an FN on the sibling case it never ran (measured on the 2026-08-25
+   * ladder: 9 of 190 FPs were sibling-round gold, concentrated on the
+   * strongest arms).
+   */
+  review_gold_neutral?: GoldComment[];
+  /**
    * The `PrState` snapshot a dispatch would have resolved for this case
    * (issues #251, #252). Present ⇒ the harness projects it through core's own
    * `renderContext` into the run context, exactly as `dispatchWorkflow` does —
@@ -245,9 +319,32 @@ export interface PhaseMetric {
    * assigned (the payoff signal that surfaces the per-phase model map). */
   model?: string;
   inputTokens?: number;
+  /** Cached prompt tokens (cache read + creation), split out for the same reason
+   * the case-level roll-up splits them: Anthropic bills most of a review's prompt
+   * as cached, so folding it into `inputTokens` hides where the spend went. */
+  cachedTokens?: number;
   outputTokens?: number;
   costUsd?: number;
+  /**
+   * Wall clock for this phase — `onPhaseEnd` minus `onPhaseStart`, so it includes
+   * the phase's `until_bash` gate and any in-phase retry, and loop iterations
+   * appear as their own labelled entries (`adjudicate_iter_1`).
+   *
+   * **Absent means not measured, not zero.** A phase the scheduler skipped
+   * (`skip_if`, an unsatisfied trigger rule) never starts, so it has no window —
+   * and reporting `0` there would read as "instant" rather than "did not run".
+   */
   durationMs?: number;
+  /**
+   * Agent + gate time this phase's own transcript reports (summed `duration_ms`
+   * over its `result` envelopes). Narrower than {@link durationMs}, which also
+   * carries workspace provisioning and skill staging.
+   *
+   * Recorded separately because it is derivable from artifacts a run already
+   * wrote, so `scripts/rescore.ts` can back-fill it onto runs measured before
+   * per-phase timing existed — with no re-run and no model spend.
+   */
+  agentMs?: number;
 }
 
 /** One workflow phase's archived agent session, for the dashboard log viewer. */
@@ -268,6 +365,206 @@ export interface TrialSession {
   /** Relative path of the consolidated transcript across all phases. */
   full?: string;
   phases: PhaseSession[];
+}
+
+/**
+ * The posted review scored against the gold set via LLM judge. `posted` =
+ * distinct findings the agent raised, `gold` = golden comments, `matched` =
+ * findings that matched a gold comment. `fbeta` is the F-beta at `beta` — β=1
+ * (F1) by default, matching Martian's leaderboard; `EVAL_F_BETA` reweights
+ * (β=0.5 → precision 2×).
+ *
+ * These per-case counts are what the arm-level micro metrics
+ * (`./review-metrics.ts`) aggregate, which is why an existing scorecard can be
+ * re-scored offline with no model spend.
+ */
+export interface ReviewGradeResult {
+  precision: number;
+  recall: number;
+  fbeta: number;
+  beta: number;
+  /** Findings scored against gold. Under a neutral set this EXCLUDES the
+   * neutralized findings — see {@link postedRaw}. */
+  posted: number;
+  gold: number;
+  /** Gold comments the review caught (recall's numerator). */
+  matched: number;
+  /**
+   * Findings that matched at least one gold — precision's numerator. Absent on
+   * grades from the one-to-one `match-v1` judge, where it always equals
+   * {@link matched}; the many-to-one `match-v2` judge lets one posted comment
+   * legitimately carry two gold defects, and there the two counts diverge.
+   * Every consumer reads `matchedFindings ?? matched`, so v1 scorecards
+   * re-score bit-identically.
+   */
+  matchedFindings?: number;
+  /** Findings as extracted, before neutral-set exclusion. Absent when nothing
+   * was neutralized ({@link posted} is then the raw count too). */
+  postedRaw?: number;
+  /** Findings excluded from scoring because they matched the case's
+   * `review_gold_neutral` set (sibling-round gold) — real defects of this PR
+   * that this case's gold doesn't credit. Neither matched nor false positives. */
+  neutralized?: { description: string; file?: string }[];
+  /** Findings the agent raised that matched no gold comment. */
+  falsePositives: { description: string; file?: string }[];
+  /** Gold comments the agent missed. */
+  falseNegatives: { description: string; file?: string; severity: string }[];
+  /** The judge's inspectable working (dashboard "judge" button): what it read,
+   * the findings it distilled, the gold set, the finding↔gold pairing, and its
+   * raw replies. Absent when the judge never ran. */
+  trace?: {
+    judgeModel: string;
+    reviewText: string;
+    findings: { description: string; file?: string; matchedGold: number | null; matchedGolds?: number[] }[];
+    gold: { description: string; severity: string; matchedFinding: number | null }[];
+    /** The neutral set and which finding (if any) each entry absorbed. */
+    neutral?: { description: string; matchedFinding: number | null }[];
+    rawExtract?: string;
+    rawMatch?: string;
+    rawNeutralMatch?: string;
+    /** Which MATCH prompt graded this case (absent = the original one-to-one
+     * `match-v1`). Comparisons across versions measure the grader, not the
+     * arm — `diff-runs` warns on a mismatch. */
+    matchPrompt?: string;
+    /** Whether the PR diff was fed to the judge (`--judge-with-diff`). */
+    usedDiff?: boolean;
+  };
+  /** What the analysis pipeline did to produce this review, when the arm runs
+   * one. Absent for the shipped two-phase reviewer — every metric that reads it
+   * degrades to posted-only rather than reporting zeros. */
+  pipeline?: ReviewPipelineStats;
+}
+
+/**
+ * The evidence-pipeline telemetry one case emitted — the mechanism metrics that
+ * WP3's and WP4's gates are actually read on.
+ *
+ * This matters because micro-recall on 25 gold findings **cannot** detect an
+ * improvement short of frontier performance (see `DETECTION_FLOOR_MICRO_RECALL`
+ * in `./review-metrics.ts`), whereas obligations generated, discharge rate and
+ * the per-family funnel have an n in the hundreds. Every field is optional: an
+ * arm reports what it has, and a consumer must distinguish "absent" from "zero".
+ */
+export interface ReviewPipelineStats {
+  /** Obligations the seeder emitted, and how many it dropped (with reasons) —
+   * a silently truncated list is the failure locked decision 6 exists to
+   * prevent. */
+  obligations?: number;
+  obligationsDropped?: { reason: string; count: number }[];
+  /** Hypotheses the survey phases produced across all families. */
+  hypotheses?: number;
+  /** Hypotheses that reached a recorded disposition. The conservation gate
+   * (§D11) requires every hypothesis to appear in `findings.json` exactly once,
+   * so `hypotheses - discharged` should be 0 — and when it is not, that is a
+   * measurement, not a crash. */
+  discharged?: number;
+  /**
+   * How each hypothesis discharged its obligation — the **discharge rate**
+   * the retired WP8 doc asks every rung to be gated on
+   * (`docs/plans/deterministic-pr-levers.md` §"The instrument (WP8)").
+   *
+   * `none` is a column and not an omission. Across both preserved 2026-08-22
+   * runs, every case and every family, **no obligation carried a code at all**
+   * (0/31, 0/34, 0/40) — the prescribed row shape had no field to record one in.
+   * A histogram that dropped the empty bucket would have made an impossible
+   * contract look like an unenthusiastic one.
+   */
+  dischargeCodes?: Record<string, number>;
+  /**
+   * Hypotheses discharged `QUOTE` with no `failureScenario` — the pass looked,
+   * quoted the line, and found it fine.
+   *
+   * These are **anti-findings**: they cannot match gold by construction, so
+   * wherever one is posted it is pure attention cost. On `1587-r2` (2026-08-23)
+   * 35 of 45 hypotheses were clean and **17 of the 27 body-posted findings**
+   * traced back to them. Counted separately from `dischargeCodes.QUOTE` because
+   * a QUOTE that *does* raise a defect is the pipeline working.
+   */
+  cleanDischarges?: number;
+  /**
+   * Findings carrying no `hypotheses[]` at all — generated downstream of the
+   * surveys rather than built from one.
+   *
+   * Conservation is checked in one direction only (every hypothesis must reach a
+   * finding); nothing requires the reverse. 8 of 32 findings on the measured
+   * case had no provenance, which means neither the discharge histogram nor the
+   * clean-discharge rule can say anything about a quarter of what got posted.
+   */
+  unprovenanced?: number;
+  /** Findings by destination tier (`inline` / `body` / `internal`). */
+  tiers?: Partial<Record<"inline" | "body" | "internal", number>>;
+  /** Gold findings matched by ANYTHING generated, posted or not — the numerator
+   * of internal recall. */
+  internalMatched?: number;
+  /**
+   * The internal-recall judge's `goldToFinding` reply, verbatim: index *i* is
+   * gold finding *i* (in `review_gold` order — the same order `trace.gold`
+   * carries), the value is an index into the run's generated findings array
+   * (the order `internalJudgeInputs` built), and `null` means that gold was
+   * never found.
+   *
+   * `internalMatched` is this vector's non-null count, and storing only the
+   * count was the defect: "found but withheld by the adjudicator" and "never
+   * found" collapsed into one number, and internal union/intersection across
+   * repeats could not be computed at all (the posted side has `trace.gold` for
+   * that; this is its internal counterpart). ABSENT means the vector was not
+   * recorded — historical runs, a judge failure — never "found nothing": a
+   * pipeline that found nothing records `[null, …]`.
+   */
+  internalGold?: (number | null)[];
+  /**
+   * The internal-recall judge did not run or did not parse, and why.
+   *
+   * Present ⇒ `internalMatched` is deliberately ABSENT rather than 0. An
+   * ungraded internal pass is not an internal recall of zero, and the case's
+   * posted grade is complete without it, so this is recorded here instead of
+   * erroring the case.
+   */
+  internalUngraded?: string;
+  /** Inline-only counts, for the attention boundary. */
+  inlinePosted?: number;
+  inlineMatched?: number;
+  /** Per-family funnel, keyed by obligation family. */
+  byFamily?: Record<string, ReviewFamilyStats>;
+  /** The oracle's own hit rate. If probes rarely settle anything, WP4 is not
+   * paying for itself. */
+  probes?: { attempted: number; succeeded: number; reproduced: number; refuted: number };
+  /** The facts envelope's own verdict on whether analysis could run at all.
+   * `"none"` is a recorded fact, not a failed phase (§D12). */
+  coverage?: "full" | "degraded" | "none";
+  /** Extractors that could not run, and why — an empty result and an unavailable
+   * analyser must never be indistinguishable. */
+  degraded?: string[];
+  /** Resolved tool versions, stamped so every scorecard records which toolchain
+   * produced it (§D3). Silent version drift between the host that measured a
+   * rung and the image that ships it is otherwise undetectable. */
+  toolchain?: Record<string, string>;
+}
+
+/** One obligation family's funnel on one case. */
+export interface ReviewFamilyStats {
+  obligations?: number;
+  hypotheses?: number;
+  /** Findings this family got POSTED — inline or body. Absent (never 0) when
+   * the run wrote no `disposition.json`, because nothing then knows where its
+   * findings went. */
+  posted?: number;
+  /** Gold matched by this family's POSTED findings. Pairs with `posted`, so the
+   * funnel obligations → hypotheses → posted → matched stays one story. */
+  matched?: number;
+  /**
+   * Gold matched by anything this family GENERATED, posted or withheld.
+   *
+   * Separate from `matched` because the two answer different questions and a
+   * single column cannot: `matched` is what the family contributed to the
+   * review, this is what it was capable of. A family whose findings are all
+   * tiered `internal` scores 0 on the first and can score well on the second —
+   * which is the signal that its threshold is wrong rather than its reasoning.
+   */
+  internalMatched?: number;
+  /** The family could not be measured here (e.g. `security` with no Opengrep on
+   * PATH). Reported as "not measured", never as "did not convert". */
+  notMeasured?: boolean;
 }
 
 export interface InstanceResult {
@@ -293,37 +590,8 @@ export interface InstanceResult {
    * touching no GitHub state, so `behavioral` alone would score it green.
    */
   markers?: { ok: boolean; checks: { name: string; ok: boolean; detail?: string }[] };
-  /** PR-review grade (pr-review tier): the posted review scored against the gold
-   * set via LLM judge. `posted` = distinct findings the agent raised, `gold` =
-   * golden comments, `matched` = findings that matched a gold comment. `fbeta` is
-   * the F-beta at `beta` — β=1 (F1) by default, matching Martian's leaderboard;
-   * `EVAL_F_BETA` reweights (β=0.5 → precision 2×). */
-  review?: {
-    precision: number;
-    recall: number;
-    fbeta: number;
-    beta: number;
-    posted: number;
-    gold: number;
-    matched: number;
-    /** Findings the agent raised that matched no gold comment. */
-    falsePositives: { description: string; file?: string }[];
-    /** Gold comments the agent missed. */
-    falseNegatives: { description: string; file?: string; severity: string }[];
-    /** The judge's inspectable working (dashboard "judge" button): what it read,
-     * the findings it distilled, the gold set, the finding↔gold pairing, and its
-     * raw replies. Absent when the judge never ran. */
-    trace?: {
-      judgeModel: string;
-      reviewText: string;
-      findings: { description: string; file?: string; matchedGold: number | null }[];
-      gold: { description: string; severity: string; matchedFinding: number | null }[];
-      rawExtract?: string;
-      rawMatch?: string;
-      /** Whether the PR diff was fed to the judge (`--judge-with-diff`). */
-      usedDiff?: boolean;
-    };
-  };
+  /** PR-review grade (pr-review tier) — see {@link ReviewGradeResult}. */
+  review?: ReviewGradeResult;
   /** When `--runs N`: how many trials the mean review metrics aggregate. */
   reviewTrials?: number;
   /** When `--runs N` (N>1): how many non-errored trials this result aggregates,
@@ -402,4 +670,22 @@ export interface InstanceResult {
     warnings?: string[];
     refused?: string;
   };
+  /**
+   * Absolute path of the trial's workspace, recorded ONLY when `--keep-workspace`
+   * suppressed the teardown.
+   *
+   * Every artifact the evidence pipeline writes — `facts.json`,
+   * `obligations/`, `hypotheses/*.jsonl`, `probes/env.json` and WP4's probe
+   * transcripts — lives under `<workspace>/sandboxes/<taskId>/.lastlight/pr-review/`
+   * and is deleted with the temp dir at the end of every ordinary run. Sampling
+   * them while the run is live was the only way to see them, which is a poor
+   * instrument for a work package whose whole output is artifacts.
+   *
+   * Absent on a normal run, and that absence is the point: an eval batch that
+   * kept 50 installed checkouts would be tens of gigabytes.
+   *
+   * On a `--runs N` aggregate this is **trial 1's** workspace, like every other
+   * field `aggregateTrials` carries through; the runner prints all N paths.
+   */
+  workspaceDir?: string;
 }

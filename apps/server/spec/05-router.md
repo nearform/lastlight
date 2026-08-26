@@ -600,6 +600,25 @@ it would make it read as having served the ask it was written to defer.
   note may tell an agent something; it can never make a code path
   reachable, stand in for the local push gate, or cause a push.
 
+- **`closes` and `changedFiles`** are the two fields that are *not* resolved
+  with the rest of the snapshot, and the exception is deliberate. They feed
+  the `spec` axis of the review evidence pipeline — the issues a PR says it
+  closes (with their bodies: what was **asked**) and the paths it changes
+  (**where** an ask could have landed) — and nothing else reads them. They
+  cost two live GitHub reads that no pre-existing decision needs, so
+  `resolveSpecContext` fills them as a separate step at the dispatch choke
+  point, gated on `review.analysis.enabled` (operator-only, off by default)
+  and on the workflow being `pr-review`.
+  With the axis off nothing is fetched, so the projection has nothing to
+  project and the reviewer's context is byte-for-byte what it has always
+  been. `changedFiles` is `null` — never `[]` — when it was not read or the
+  read failed, because a PR that changes nothing and a PR we could not ask
+  about are different facts, and the obligation builder refuses to emit
+  anything at all on `null`: an obligation naming only the ask would be a
+  one-ended seed, which measures *worse* than no seed. Both reads are
+  best-effort like every other read here, and a failure lands in
+  `readErrors`.
+
 Every policy question is then a **pure function over that snapshot**
 (`src/engine/pr-decisions.ts`) returning `{ decision, reason, inputs }`
 rather than a bare enum — `mayMerge`, `resolveFixDisposition`,

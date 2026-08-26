@@ -51,6 +51,42 @@ COPY packages/agentic-pi/ packages/agentic-pi/
 RUN pnpm --filter agentic-pi build \
  && pnpm --filter agentic-pi deploy --prod /bundle
 
+# ── lastlight CLI build stage ────────────────────────────────────────────────
+# The review evidence pipeline's deterministic phases run `lastlight-facts`
+# (pr-review.yaml resolves it via `command -v`), and the user rule is: NO
+# standalone facts binary distribution — `lastlight facts` is a subcommand of
+# the normal `lastlight` CLI and the `lastlight-facts` bin exists only as the
+# CLI's dependency bin (`lastlight-code-facts` is a dependency of packages/cli).
+# So we vendor the WHOLE CLI bundle, exactly like agentic-pi above: build from
+# the workspace, `pnpm deploy` a self-contained lockfile-resolved tree, COPY it
+# in content-addressed. This also enforces WP1's pinned-compiler rule — the
+# bundle carries its own `typescript`, so facts never resolve the target repo's.
+FROM node:24-slim AS lastlight-cli-build
+RUN corepack enable
+WORKDIR /repo
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
+# The CLI's `prepare` script (scripts/copy-plugin.mjs) stages the repo-root
+# plugin dirs into the package and pnpm runs it during install — so the script
+# and both source dirs must be present BEFORE the frozen install.
+COPY plugins/ plugins/
+COPY .claude-plugin/ .claude-plugin/
+COPY packages/cli/package.json packages/cli/package.json
+COPY packages/cli/scripts/ packages/cli/scripts/
+COPY packages/code-facts/package.json packages/code-facts/package.json
+COPY packages/shared/package.json packages/shared/package.json
+COPY packages/workflow-engine/package.json packages/workflow-engine/package.json
+RUN pnpm install --frozen-lockfile --filter lastlight...
+COPY packages/cli/ packages/cli/
+COPY packages/code-facts/ packages/code-facts/
+COPY packages/shared/ packages/shared/
+COPY packages/workflow-engine/ packages/workflow-engine/
+# Build in dependency order: code-facts + engine (leaves) → shared → cli.
+RUN pnpm --filter lastlight-code-facts build \
+ && pnpm --filter lastlight-workflow-engine build \
+ && pnpm --filter lastlight-shared build \
+ && pnpm --filter lastlight build \
+ && pnpm --filter lastlight deploy --prod /bundle
+
 # ── Sandbox image ────────────────────────────────────────────────────────────
 FROM ${BASE_IMAGE}
 
@@ -63,6 +99,24 @@ FROM ${BASE_IMAGE}
 COPY --from=agentic-pi-build /bundle /opt/agentic-pi
 RUN chmod +x /opt/agentic-pi/dist/cli.js \
  && ln -sf /opt/agentic-pi/dist/cli.js /usr/local/bin/agentic-pi
+
+# lastlight CLI (carries `lastlight facts` + the lastlight-facts dependency
+# bin), vendored from the build stage above — same content-addressed pattern.
+# The wrappers pin the IMAGE's system node (/usr/local/bin/node) explicitly:
+# fnm switches the `node` on PATH per repo .nvmrc, and a `#!/usr/bin/env node`
+# shim would run the facts engine under whatever the target repo pins (possibly
+# < 22, below the CLI's engines floor). /opt/lastlight/bin is also the baked
+# fallback path pr-review.yaml echoes when `command -v lastlight-facts` fails —
+# with these symlinks on /usr/local/bin it never should.
+COPY --from=lastlight-cli-build /bundle /opt/lastlight
+RUN mkdir -p /opt/lastlight/bin \
+ && printf '#!/bin/sh\nexec /usr/local/bin/node /opt/lastlight/dist/cli.js "$@"\n' \
+      > /opt/lastlight/bin/lastlight \
+ && printf '#!/bin/sh\nexec /usr/local/bin/node /opt/lastlight/node_modules/lastlight-code-facts/dist/cli.js "$@"\n' \
+      > /opt/lastlight/bin/lastlight-facts \
+ && chmod +x /opt/lastlight/bin/lastlight /opt/lastlight/bin/lastlight-facts \
+ && ln -sf /opt/lastlight/bin/lastlight /usr/local/bin/lastlight \
+ && ln -sf /opt/lastlight/bin/lastlight-facts /usr/local/bin/lastlight-facts
 
 # Agent context (baked at /app/ — entrypoint cats into workspace/AGENTS.md)
 COPY apps/server/agent-context/ /app/agent-context/

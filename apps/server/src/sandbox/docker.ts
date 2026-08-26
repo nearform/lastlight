@@ -35,10 +35,29 @@ export interface SandboxConfig {
   /** Timeout in seconds (default: 1800 = 30 min) */
   timeoutSeconds?: number;
   /**
-   * Per-sandbox memory cap, in Docker's `--memory` format (e.g. "2g", "512m").
-   * Default: 2g — enough headroom for `npm install`, vite build, and an
-   * agent loop, but small enough that several concurrent sandboxes can't
-   * exhaust a 16 GB host. Override via the `SANDBOX_MEMORY_LIMIT` env var.
+   * Per-sandbox memory cap, in Docker's `--memory` format (e.g. "8g", "512m").
+   * Default: 8g. Override via the `SANDBOX_MEMORY_LIMIT` env var.
+   *
+   * It was 2g, sized for `npm install` + a vite build + an agent loop. That
+   * is no longer the peak: a type-aware `lastlight facts` pass allocates
+   * against the whole `ts.Program`, and the measurements are not close to the
+   * old cap. On a BARE tree (no `node_modules`) two of the fifty corpus PRs
+   * peak at **2449 MB (`grafana-106778`) and 2988 MB (`sentry-greptile-5`)** —
+   * and the 2449 MB case changes fourteen files, so the driver is REPO size
+   * through the `--max-files` budget, not diff size. (`sentry-greptile-5`
+   * re-measured at 3024 MB on an 8-case re-run the next day; quote the 2988
+   * figure, which belongs to the fifty-case population the sentence is about.) On an INSTALLED tree — which is what WP4's `prepare` leaves
+   * behind, since its coverage report means running a suite — `--resolution
+   * full` measured 3481–4430 MB with an OOM at 4347.
+   *
+   * The failure mode is why the headroom is generous rather than tight: the
+   * process dies at exit 134 having written NO envelope, so `--never-fail`
+   * cannot catch it, the phase fails, `assessedHeadShaByWorkflow` is written
+   * from succeeded runs only, and `cron-review.yaml` re-dispatches every
+   * thirty minutes forever. An OOM here costs money on a loop, not one run.
+   *
+   * The trade is host RAM against concurrent sandboxes — n × this value.
+   * Lower it per-deployment on a small host.
    */
   memoryLimit?: string;
   /**
@@ -203,7 +222,7 @@ export class DockerSandbox {
     // `npm install` / vite build inside the workspace) can OOM the host
     // and take every other container with it. We set --memory-swap to the
     // same value so swap can't be used to silently exceed the cap.
-    const memoryLimit = this.config.memoryLimit || "2g";
+    const memoryLimit = this.config.memoryLimit || "8g";
 
     // Network attachment. Default is the `internal: true` sandbox-egress
     // network declared in docker-compose.yml, which has no host route —

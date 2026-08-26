@@ -18,12 +18,21 @@ botName: last-light
 
 models:
   default: anthropic/claude-sonnet-4-6
+  # The five `pr-review.yaml` survey branches and `falsify`. SET, not an
+  # example — see the note below: this is the measured RECALL winner for
+  # hypothesis generation, not a cost downgrade, and leaving it unset silently
+  # ran six Sonnet phases under every number the pipeline was tuned on. A
+  # deployment whose `models.default` points at a non-Anthropic provider MUST
+  # override this in its overlay `config.yaml`, or these six phases reach for a
+  # provider it has no key for.
+  review-survey: anthropic/claude-haiku-4-5-20251001
   # Per-task overrides keyed by phase or helper name, e.g.:
   #   architect: anthropic/claude-opus-4-8
   #   classifier: anthropic/claude-haiku-4-5-20251001   # the intent-routing helper
   #   screener: anthropic/claude-haiku-4-5-20251001     # the prompt-injection screener
   #   diagnose: anthropic/claude-haiku-4-5-20251001     # the CI-failure classifier
   #   pr-fix-retry: anthropic/claude-opus-4-8           # used above fix.escalateModelAfterAttempt
+  #   review-adjudicate: anthropic/claude-sonnet-4-6      # the adjudication pass
   # A per-task entry wins over `default`. `classifier`/`screener` are the cheap
   # one-shot helpers (src/engine/llm.ts); when unset they fall back to the first
   # configured provider's fast model, NOT `default`.
@@ -35,6 +44,40 @@ models:
   # only `default` to another provider would otherwise find this phase reaching
   # for a provider it has no key for. Unset, it falls through to `default`, so
   # each fix run costs one extra call at the default model until you pin it.
+  #
+  # `review-survey` is SET above, and it is the one entry in this block that is
+  # not an example. It is the key the five survey branches of `pr-review.yaml`
+  # declare (`model: "{{models.review-survey}}"`, one per obligation family)
+  # and, since it has no key of its own, the `falsify` phase too — six phases.
+  #
+  # Pinning it to Haiku 4.5 is NOT a cost downgrade, and that is the unusual
+  # part: on review RECALL, Haiku 4.5 BEATS Sonnet 4.6 on two independent evals
+  # — 41.2% vs 22.1% on the Martian corpus. It is the better model for
+  # HYPOTHESIS GENERATION, which is what a survey branch does; its price is
+  # merely what makes a five-way fan-out affordable inside the pipeline's 2–3x
+  # budget. It is a different question from the SAYING phases (`review`,
+  # `adjudicate`), which are not pinned here.
+  #
+  # It was deliberately left unset for a long time, for the `diagnose` reason
+  # above — these are Anthropic model ids, and a deployment that overrode only
+  # `default` to another provider would find six phases reaching for a provider
+  # it has no key for. That reason has not gone away; it is now handled the
+  # other way round, because the cost of the unset default turned out to be
+  # worse. Unset, all six fell through to `default` (Sonnet) SILENTLY, so an
+  # operator who enabled the pipeline ran a configuration no measurement in
+  # `docs/plans/deterministic-pr-levers.md` describes — every recall, cost and
+  # latency number on record assumes Haiku surveys. A wrong-provider failure is
+  # loud on the first run; a quietly-different model is not.
+  #
+  # SO: a non-Anthropic deployment must override this key in its overlay
+  # `config.yaml` (a cheap, fast model of its own provider), exactly as it
+  # already overrides `models.default`.
+  #
+  # `review-adjudicate` is the adjudicate phase's own key in `pr-review.yaml` —
+  # the RANKING pass over what the surveys found, a different task from survey
+  # discovery, so it can be moved independently of `models.review`. Unset, it
+  # falls through to `models.review` (the phase's template guards it), so a
+  # deployment that never sets it keeps today's behaviour exactly.
 
 variants: {}
 
@@ -280,6 +323,244 @@ review:
     - "*.min.css"
     - "*.generated.*"
     - "**/__generated__/**"
+  # The review evidence pipeline (docs/plans/deterministic-pr-levers.md).
+  #
+  # OFF by default and that is a locked decision: `enabled: false` reproduces
+  # today's two-phase review BYTE-FOR-BYTE — every variable this block governs
+  # is absent from the template context rather than present-and-empty. Each
+  # stage lands dark and is switched on per deployment once it is measured.
+  #
+  # What `enabled: true` adds today (WP0, the `spec` axis):
+  #   - `{{prBody}}` + `{{linkedIssues}}` — the PR body and the issues it closes
+  #     (`closingIssuesReferences`), neither of which reached a prompt before.
+  #   - `{{specObligations}}` — one obligation per acceptance criterion found in
+  #     the issue/PR body, each naming BOTH ENDS of the mechanism: the criterion
+  #     itself, and the changed files that could satisfy it with `found: false`.
+  #     A one-ended seed measures WORSE than no seed (IRIS ablation: -3), which
+  #     is why the second end is the mechanical changed-file list and never
+  #     prose.
+  #   - the split verdict: `findings.json` may carry
+  #     `verdict: { spec, standards }` and a `fail` on either axis stops the
+  #     review being an APPROVE, so a clean standards pass can no longer hide a
+  #     spec miss (issue #271 fix 7).
+  #
+  # OPERATOR-ONLY — unlike every other `review:` key, a repo may not set this.
+  # It is spend, with no "more conservative" direction to clamp towards.
+  # What `enabled: true` additionally adds from WP3 (the facts-derived families):
+  #   - a `facts` phase writing .lastlight/pr-review/facts.json (no model spend)
+  #   - a `seed` phase turning it into obligations.json + one rendered block per
+  #     family, each naming BOTH ENDS of a mechanism
+  #   - five survey branches, one per live family, each appending to its OWN
+  #     hypotheses/<family>.jsonl — no pass ever reads or rewrites another's,
+  #     which makes consensus collapse impossible by construction rather than
+  #     by instruction
+  #
+  # Neither phase can run where `lastlight-facts` is not resolvable. That is
+  # true of the SANDBOX IMAGE today (WP2 is what installs it); the eval harness
+  # runs `--sandbox none` on the host, where it is. Set LASTLIGHT_FACTS_BIN to
+  # point at a specific build. A missing binary degrades to a `coverage: "none"`
+  # envelope and the survey phases say so — it never fails the run.
+  analysis:
+    enabled: false
+    # A SAFETY BOUND, not a budget — it should never bind on a real PR. The
+    # extractor still ranks, truncates and records what it dropped, but this
+    # number exists only to stop a pathological PR blowing the prompt.
+    #
+    # It was 6, and while the spec axis produced nothing that was inert. The
+    # moment the axis started working it became the binding constraint on FIVE
+    # of the six linked cases in the gate set — 11 criteria extracted and 6 kept
+    # on the three `1587` cases, 10 and 6 on the two `1641` ones. What it was
+    # discarding is the acceptance-criteria checklist a human wrote on the
+    # issue, which is the most direct statement of intent this pipeline ever
+    # gets. Capping GENERATION also inverts locked decision 2: we deliberately
+    # over-generate and let the probe oracle and WP6b's attention boundary
+    # (maxInlineComments + the family thresholds) do the narrowing. Truncating
+    # obligations truncates DISCOVERY, and discovery is the measured ceiling.
+    maxSpecObligations: 40
+    # The five facts-derived families are bounded PER FAMILY, not pooled:
+    # contract 12, enforcement 12, state 8, security 8, tests 8 (FAMILY_CAPS in
+    # packages/code-facts/src/seed.ts). Each family's obligations feed exactly
+    # ONE survey branch, so the cost is per branch and a pooled cap never bound
+    # the fattest one; and cross-family ranking prices incommensurable mechanism
+    # classes against each other — measured, `contract` minted 89 across the
+    # eight gate cases while `security` minted 3, and the pool went to contract.
+    #
+    # This key is the TOTAL BACKSTOP applied after those ceilings, and it is
+    # their sum — so it cannot bind on a shipped configuration. It exists so
+    # that raising one ceiling is a bounded act rather than an unbounded one.
+    maxObligations: 48
+
+    # Which obligation BLOCK the six families are handed. `full` | `minimal`.
+    #
+    # This is a CONTROL, not a dial. On 2026-08-23 the block gained a mandatory
+    # discharge contract (a `discharge` field the row can actually hold a code
+    # in), an un-truncated id checklist and one worked exemplar. Measured on
+    # `prreview__skillspro-1587-r2` with `--repeats 3`: discharge compliance went
+    # 0/33 to 33/33, and the union of matched gold went 4-of-5 to ZERO-of-5, all
+    # three repeats. Half to two thirds of every hypothesis became a "clean
+    # quote" — QUOTE with `failureScenario: null`, i.e. "I found the line and it
+    # is fine".
+    #
+    # Two variables moved in that one commit, so it cannot say which caused it:
+    # the obligations may ask the WRONG QUESTION (and making a wrong question
+    # mandatory turns hunting into checklist-clearing), and/or RELIABLE SEEDING
+    # itself suppresses discovery — the same commit stopped ~24% of survey
+    # branches losing their seed entirely.
+    #
+    # `minimal` is the SHIPPED default, and it was measured in, not assumed:
+    # under `full`, half to two-thirds of everything the surveys produce is a
+    # clean quote — "I looked, the line is fine" — and those verification
+    # reports reached real pull requests as posted findings. Under `minimal`
+    # the same pipeline posted the same recall union with 37–71% better
+    # signal-to-noise and half the run-to-run variance. Under `minimal`,
+    # `lastlight-facts discharge` degrades to the `test -s` floor it replaces —
+    # the block does not ask for discharge codes, so grading them would fail
+    # every family over a field the survey was never told to write.
+    #
+    # `full` remains available for deployments that want the discharge-code
+    # telemetry (and the clean-discharge demotion it enables at the posting
+    # boundary), at the cost of the verification-report volume above.
+    obligationContract: minimal
+
+    # Which D2 minting rules `lastlight-facts seed` runs beyond the original
+    # four. A comma-list; the valid tokens are `all-in-diff` (contract
+    # obligations for symbols whose every reference is inside the diff) and
+    # `registrations` (security obligations for route/hook registration
+    # order). BOTH ON by default — the measured shipped shape (8-case confirm:
+    # internal paired +10/−1, p=0.006, the only lever measured to GROW the
+    # recall union rather than rotate it; external validation +7/−0, p=0.008).
+    # Empty string = the pre-D2 baseline set. It reaches the sandbox as
+    # `--mint <spec>` on the seed phase's command line — appended only when
+    # non-empty — and the CLI refuses any unknown token with exit 2, so a
+    # typo'd arm is loud rather than silently running baseline.
+    mint: all-in-diff,registrations
+
+    # RECORDED, NOT CONSUMED. The fan-out's branch list in `pr-review.yaml` is
+    # the authority (five branches; `tests` has no seeder and no branch), and
+    # nothing reads this key to pick or drop branches — it exists so the value
+    # an operator believed they set is on the record. A previous design DID
+    # consume a count (defaulted to 3 against six families, never recording
+    # which three ran), which is exactly why the branch list is now the one
+    # authority.
+    surveyPasses: 6
+
+    # How many of those families run AT ONCE (WP11c).
+    #
+    # A CEILING the run clamps again per backend, never the effective value. On
+    # the shipped default backend (gondolin) each agent session is a QEMU
+    # micro-VM inside the harness process, so it pins to 1 and this key changes
+    # nothing at all until that is measured; `none` and `docker` take it as
+    # written.
+    #
+    # Six because the six families write six disjoint, append-only
+    # `hypotheses/<family>.jsonl` and never read each other's — there was never
+    # an ordering constraint between them, only a scheduler that ran one DAG
+    # node at a time. Chained, they were 851s of a 29-minute review (49% of the
+    # wall clock); concurrent, they cost the slowest single family.
+    #
+    # Lower it to bound provider rate-limit pressure or memory, NOT to bound
+    # spend: six passes cost the same in tokens either way.
+    surveyConcurrency: 6
+
+    # ── WP4: `prepare` (the affordance) + `falsify` (the oracle) ──────────────
+    #
+    # A SECOND switch under an already-gated block, and deliberately so. What
+    # `probes: true` buys is a review workspace with a `node_modules` in it, and
+    # that one fact changes three things at once:
+    #
+    #   - `contract` can seed at all on a normal monorepo. A tsconfig that
+    #     `extends` a bare package specifier (`@calcom/tsconfig/react-library`)
+    #     does not resolve on a bare checkout, tsgo excludes the project, and the
+    #     case drops to tier 2 with `contracts` emitting nothing. Measured over
+    #     the 50-PR corpus: tier-1 cases 21 -> 5, contract deltas 73 -> 19.
+    #   - `tests` can seed at all. The `coverage` extractor READS a report and
+    #     never runs a suite; it found ZERO artifacts across all 50 corpus cases
+    #     and all 8 gate cases. Until `probeCoverage` produces one, that family
+    #     is NOT MEASURED — a different row from "did not convert".
+    #   - the `facts` phase inherits an installed tree, on every re-review too
+    #     (the cross-run refresh is `git clean -fdx -e node_modules`). Peak RSS
+    #     there is UNMEASURED on the current engine.
+    #
+    # Default posture: OFF in production, ON in the eval overlay — whether it
+    # ships on is an ablation number, not a judgement call.
+    probes: false
+    # Let the install run the tree's own postinstall. OFF, as a SECURITY default:
+    # `prepare` installs at a PULL REQUEST HEAD, so a lifecycle script there is
+    # code the PR author wrote running on this machine — and `pr-review`'s
+    # workspace has never installed anything, which makes this the first thing in
+    # the workflow that could. Making an `extends` resolve needs the files, not
+    # their scripts.
+    probeLifecycleScripts: false
+    # The repo's own `tsc --noEmit`, for per-file/per-line diagnostics a
+    # hypothesis can be anchored to. NOT a CI re-run: CI already reports
+    # pass/fail over a matrix and `{{ciSection}}` is already in the context.
+    probeTypecheck: false
+    # The ONE step in this pipeline that runs a test suite — the wall-clock item
+    # the design review deleted along with `mutants`. Its own switch because it
+    # is its own price: everything else in `prepare` is seconds, this is minutes.
+    # It never guesses a command, only one the repo itself named (a `coverage` /
+    # `test:coverage` script).
+    probeCoverage: false
+    prepareTimeoutSeconds: 300
+    coverageTimeoutSeconds: 900
+    # Rounds `falsify` gets to write and run probes. Two: the loop's exit is a
+    # five-line existence gate, not a validator — v2's full quote validator was
+    # overkill and cost 2.4x for a worse result.
+    probeRounds: 2
+    # The attention boundary (WP6b). Preserving internal recall and spending a
+    # human's attention are two different budgets; conflating them is how a
+    # recall-first reviewer becomes unreadable.
+    #
+    # Everything past the inline budget goes to the review BODY under
+    # "Additional findings" — still posted, still visible. Nothing is dropped
+    # for being noisy: this is an attention boundary, not the v2 suppressor that
+    # was built, measured and reverted.
+    #
+    # Ten, from "Does AI Code Review Lead to Code Changes?" (22k+ real review
+    # comments): concise, hunk-level, actionable findings are substantially
+    # likelier to cause a change, and the wall the paper warns about is TWENTY.
+    # A ceiling rather than a budget that bites — measured inline volume is 1–5
+    # per PR, so this has never bound, and the overflow goes to the body.
+    maxInlineComments: 10
+    # The BODY budget — how many findings the review body's "Additional
+    # findings" list may carry. N (the default is 5) keeps the top N ranked by
+    # severity × confidence and records the rest in disposition.json at
+    # `internal` with reason `body-budget` — capped attention, never a lost
+    # record. 0 = NO overflow at all (nothing tiers to body); null = unlimited
+    # (the pre-2026-08-24 funnel).
+    #
+    # Why 5 and not the 0 this shipped with: 0 measured better on the external
+    # set under the production SONNET-adjudicator shape (29 of 36 matched gold
+    # kept, precision 0.263 → 0.492, F1 0.362 → 0.479, above the two-phase
+    # baseline) — but the same sweep showed that win is adjudicator-shape-
+    # conditional. With a weak adjudicator the body tier carries most of the
+    # recall (Haiku-everywhere: posted recall 0.42 → 0.12 at cap 0), while mid
+    # caps kept nearly all of it (skillspro cap 4: 0.300, cap 8: 0.380 vs 0.420
+    # unlimited; Martian cap 4: 0.548, cap 8: 0.581 vs 0.581 unlimited at
+    # slightly better precision). 5 is the recall-preserving compromise pending
+    # a real boundary tune — so an eval overlay measuring a particular shape
+    # should still pin this key (`null` for the open funnel) explicitly rather
+    # than inherit it.
+    maxBodyComments: 5
+    # Per-family confidence bar for an INLINE comment; below it, the body.
+    # Per-family and not global because AutoCommenter (Google Critique) measured
+    # a global threshold as catastrophic — at t=0.98, ~80% of below-threshold
+    # predictions were still CORRECT — while per-URL thresholds raised recall
+    # without hurting precision.
+    #
+    # THESE ARE INITIAL GUESSES TO BE TUNED ON THE TRAIN SPLIT, NOT
+    # MEASUREMENTS. Record each retune in the eval journal.
+    thresholds:
+      contract: 0.35      # converts; cheap to check; bias to surface
+      enforcement: 0.35
+      security: 0.30
+      state: 0.50
+      tests: 0.60         # mechanical provenance, but noisier as prose
+      spec: 0.45
+    # Below this, recorded in findings.json but not posted at all. The one tier
+    # that costs recall, so it is low. A finding carrying NO confidence is never
+    # affected — an absent field is not a zero.
+    internalFloor: 0.15
 
 # Retry policy for every PR_FIX_SHAPED workflow — pr-fix and dependabot-ci-fix
 # (issue #251). The loop diagnoses a CI failure before it retries, and these are

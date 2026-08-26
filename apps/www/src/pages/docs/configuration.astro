@@ -210,6 +210,27 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 		</tbody>
 	</table>
 
+	<div class="docs-callout">
+		<div class="docs-callout-body">
+			<strong>One per-task model key ships <em>set</em>.</strong> Every entry in
+			the <code>models:</code> block of <code>config/default.yaml</code> is a
+			commented-out example except <code>review-survey</code>, which is pinned to
+			<code>anthropic/claude-haiku-4-5-20251001</code>. It is the key the five
+			survey branches of the <a href="#workflow-policy">review evidence
+			pipeline</a> declare, and — having no key of its own — its
+			<code>falsify</code> phase too, so six phases resolve through it. Pinning
+			it is not a cost downgrade: on review <em>recall</em> Haiku 4.5 beats
+			Sonnet 4.6 on two independent evals, and its price is merely what makes a
+			five-way fan-out affordable. The consequence for you: if your
+			<code>models.default</code> points at a <strong>non-Anthropic</strong>
+			provider, override <code>models.review-survey</code> in your overlay
+			<code>config.yaml</code> as well, or those six phases reach for a provider
+			you have no key for. Nothing happens either way until
+			<code>review.analysis.enabled</code> is on — those phases skip while it is
+			off.
+		</div>
+	</div>
+
 	<div class="docs-callout tip">
 		<div class="docs-callout-body">
 			<strong>Legacy env vars.</strong> All <code>OPENCODE_*</code> names from the
@@ -406,6 +427,43 @@ review:
     - "*.min.js"
     - "*.generated.*"
     - "**/__generated__/**"
+  analysis:
+    enabled: false             # the review evidence pipeline — off, and inert
+    maxSpecObligations: 40     # SAFETY BOUND for the `spec` family — should never bind
+    maxObligations: 48         # TOTAL backstop over the five facts-derived
+                               # families, which are capped PER FAMILY (contract
+                               # 12, enforcement 12, state 8, security 8, tests
+                               # 8). 48 is their sum, so it cannot bind unless
+                               # you raise one of those ceilings
+    obligationContract: minimal  # minimal | full — how much each survey records
+                               # per obligation. minimal is the measured default
+    mint: all-in-diff,registrations  # extra seeding rules beyond the original
+                               # four; "" = the pre-D2 baseline set
+    surveyPasses: 6            # RECORDED, not consumed — the fan-out branch list
+                               # is the authority
+    surveyConcurrency: 6       # survey families running at once (a ceiling,
+                               # clamped per sandbox backend)
+    probes: false              # install deps so a probe can be RUN. Its own switch
+    probeLifecycleScripts: false  # let the PR's own postinstall run. Off: it is the
+                               # author's code, on your machine
+    probeTypecheck: false      # the repo's own tsc --noEmit, for per-line diagnostics
+    probeCoverage: false       # the one step that runs a test suite
+    prepareTimeoutSeconds: 300
+    coverageTimeoutSeconds: 900
+    probeRounds: 2
+    maxInlineComments: 10      # the attention boundary — findings past this go
+                               # to the review body, never dropped
+    maxBodyComments: 5         # body-tier budget. N = top N by severity ×
+                               # confidence (default 5); 0 = no overflow at all;
+                               # null = unlimited
+    thresholds:                # per-family confidence bar for an INLINE comment;
+      contract: 0.35           # below it, the body
+      enforcement: 0.35
+      security: 0.30
+      state: 0.50
+      tests: 0.60
+      spec: 0.45
+    internalFloor: 0.15        # below this, recorded in findings.json, not posted
 
 fix:                           # every PR-fixing workflow: pr-fix, dependabot-ci-fix
   maxAttempts: 3               # attempts ACROSS runs for one PR, then a human is asked
@@ -489,6 +547,60 @@ dependencies:
 		leaves the PR alone, but this one would otherwise strand a required check on
 		a head nobody reviewed. Its conclusion mirrors that earlier review, so a
 		<code>CHANGES_REQUESTED</code> carried forward still blocks the merge.
+	</p>
+
+	<p>
+		<code>analysis</code> is the <strong>review evidence pipeline</strong>, and
+		it ships off. <code>enabled: false</code> reproduces the review you get
+		today byte for byte — not "the feature is on but finds nothing": the
+		variables it governs are absent from the agent's context entirely, and the
+		extra GitHub reads it needs are never issued. Switch it on per deployment,
+		once you want it.
+	</p>
+
+	<p>
+		What it adds today is a <strong>spec axis</strong>. Every item in the
+		reviewer's rubric — correctness, contracts, edge cases, security, test
+		coverage — is a <em>standards</em> check, and none of them asks whether the
+		change does what was asked. Turning <code>analysis</code> on hands the
+		reviewer the PR's body and the issues it closes (which it had never been
+		shown), extracts the acceptance criteria out of them, and pairs each one
+		with the files the PR actually changed. The reviewer then has to quote the
+		line that implements a criterion, or say that no changed file does. It also
+		lets the review carry a verdict <em>per axis</em>: a change that is clean by
+		every standards check but doesn't do what the issue asked can no longer be
+		approved on the strength of the half that passed.
+	</p>
+
+	<p>
+		<code>probes</code> is a <strong>second switch</strong> under the same
+		block, and it is separate because it buys something different: a review
+		workspace with a <code>node_modules</code> in it. That one fact is what lets
+		a <code>tsconfig</code> that extends a package resolve — without it the
+		analysis quietly drops a tier and the contract checks find nothing — and it
+		is the only route to a coverage report, without which "no untested changed
+		lines" means <em>nobody measured</em> rather than <em>well tested</em>. The
+		three sub-switches under it are priced separately on purpose:
+		<code>probeTypecheck</code> is seconds and gives per-line diagnostics (it is
+		not a CI re-run — Last Light already reads your CI result);
+		<code>probeCoverage</code> is the one step that runs your test suite, and it
+		never guesses a command, only one your <code>package.json</code> already
+		names.
+	</p>
+
+	<p>
+		<code>probeLifecycleScripts</code> is off as a <strong>security</strong>
+		default rather than a performance one. The install happens at a pull request
+		head, so a <code>postinstall</code> there is code the PR author wrote,
+		running on your infrastructure — and nothing <code>probes</code> exists for
+		needs it.
+	</p>
+
+	<p>
+		This one is <strong>operator-only</strong> — a repo's own
+		<code>.lastlight/</code> can't turn it on or off. It buys analysis on your
+		budget, and there is no "more conservative" direction for a repo to move it
+		in.
 	</p>
 
 	<p>

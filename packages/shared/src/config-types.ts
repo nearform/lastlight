@@ -216,13 +216,291 @@ export function reviewTriggerRank(trigger: ReviewTrigger): number {
 }
 
 /**
- * The `review:` block. Every key is repo-settable, and every one is CLAMPED
- * towards less automation: `postsCheck` and `skipDraft` are add-only `true` (a
- * repo may ask for the check and may skip drafts; it may not suppress an
- * operator's check or force reviews onto drafts), `trigger` takes the lower
- * {@link reviewTriggerRank} of repo and operator, `generatedPaths` is
- * superset-only (a longer list suppresses MORE re-reviews), and `requestLabel`
- * is free — naming a label only ever adds an explicit, human-initiated route.
+ * The `review.analysis:` sub-block — the evidence pipeline
+ * (`docs/plans/deterministic-pr-levers.md`).
+ *
+ * **OFF by default, and that is a locked decision** (README locked decision 8):
+ * `enabled: false` must reproduce today's two-phase review byte-for-byte, so
+ * every projection this block governs is *absent* from the template context
+ * rather than present-and-empty. Each stage lands dark and is switched on per
+ * deployment once it has been measured.
+ *
+ * **Operator-only, unlike every other `review:` leaf.** It buys analysis on the
+ * operator's budget, which is the same argument that made `review.trigger`
+ * clamped rather than free (#256) — except there is no "more conservative"
+ * direction here to clamp towards, so a repo asking for it answers
+ * `key-not-allowed` exactly as `fix.escalateModelAfterAttempt` does.
+ */
+export interface ReviewAnalysisConfig {
+  /** `false` ⇒ today's two-phase review, byte-for-byte. */
+  enabled: boolean;
+  /**
+   * How many `spec` obligations one PR may carry.
+   *
+   * A **safety bound**, not a budget — it should never bind on a real PR. The
+   * extractor still ranks, truncates, and records in the rendered block how
+   * many it dropped (a silently truncated list is the failure locked decision 6
+   * exists to prevent); this number exists only to stop a pathological PR
+   * blowing the prompt.
+   *
+   * It shipped at 6, which was inert while the spec axis produced nothing. The
+   * moment the axis started working it bound on FIVE of the six linked cases in
+   * the gate set, discarding acceptance criteria a human wrote on the issue —
+   * the most direct statement of intent this pipeline ever gets. Capping
+   * GENERATION also inverts locked decision 2: we over-generate deliberately and
+   * let the probe oracle and WP6b's attention boundary narrow. Truncating
+   * obligations truncates DISCOVERY, which is the measured ceiling.
+   */
+  maxSpecObligations: number;
+  /**
+   * A TOTAL BACKSTOP over the **facts-derived** obligations one PR may carry,
+   * across all five families `lastlight-facts seed` produces (`contract`,
+   * `enforcement`, `security`, `state`, `tests`). The `spec` family has its own
+   * bound above, because it is built harness-side from the issue text and
+   * shares no ranking axis with these.
+   *
+   * **Truncation is per FAMILY, not here.** The seeder caps each family at its
+   * own ceiling — `contract` 12, `enforcement` 12, `state` 8, `security` 8,
+   * `tests` 8 (`FAMILY_CAPS` in `packages/code-facts/src/seed.ts`) — because
+   * each family's obligations feed exactly ONE survey branch, so the cost is
+   * per branch rather than per document, and cross-family ranking prices
+   * incommensurable mechanism classes against each other. Measured: `contract`
+   * minted 89 across the eight gate cases while `security` minted 3, and the
+   * pooled budget went to `contract`.
+   *
+   * This number is applied AFTER those ceilings and defaults to their sum, so
+   * it cannot bind on a shipped configuration — it is there so that raising one
+   * ceiling is a bounded act. What it drops is counted in `obligations.json`
+   * with the reason (naming the ceiling or the backstop), never silently.
+   */
+  maxObligations: number;
+  /**
+   * Which obligation BLOCK the six survey families are handed — the CONTROL for
+   * 2026-08-23, and the only key in this block that exists to make a result
+   * readable rather than to buy compute.
+   *
+   * `full` (the default) is that day's block: a mandatory discharge contract
+   * with a `discharge` field to record a code in, an un-truncated id checklist,
+   * and one worked exemplar. It moved discharge compliance 0/33 → 33/33 on
+   * `prreview__skillspro-1587-r2` — and moved the union of matched gold
+   * **4-of-5 → 0-of-5**, over three repeats, with half to two thirds of every
+   * hypothesis becoming a clean quote (`QUOTE`, `failureScenario: null`).
+   *
+   * Two variables changed in the same commit, so the run cannot say which:
+   * whether the obligations ask the WRONG QUESTION and making a wrong question
+   * mandatory turns hunting into checklist-clearing, or whether RELIABLE SEEDING
+   * itself suppresses discovery (the same commit stopped ~24% of survey branches
+   * losing their seed entirely). `minimal` renders the pre-2026-08-23 block —
+   * same obligations, delivered just as reliably, asking the old question — so
+   * one arm separates them.
+   *
+   * It reaches the five facts-derived families as `lastlight-facts seed
+   * --contract`, is stamped into `obligations.json`, and the `spec` family reads
+   * it directly (`renderSpecObligations`) because it is rendered harness-side.
+   * **`lastlight-facts discharge` degrades to its `test -s` floor under
+   * `minimal`**: measured compliance under that block was 0/31, 0/34 and 0/40,
+   * so a gate demanding a code the block never asked for would fail every family
+   * of every run.
+   */
+  obligationContract: "full" | "minimal";
+  /**
+   * Which D2 minting arms `lastlight-facts seed` runs, as a comma-list over
+   * `all-in-diff` (contract obligations for symbols whose every reference is
+   * inside the diff) and `registrations` (security obligations for route/hook
+   * registration order).
+   *
+   * BOTH ON by default — the measured shipped shape (8-case confirm: internal
+   * paired +10/−1, p=0.006, the only lever measured to GROW the recall union
+   * rather than rotate it; external validation +7/−0, p=0.008). `""` is
+   * NEITHER — the pre-D2 baseline set, byte-identical to a run before the
+   * toggle existed. Reaches the seeder as `--mint <spec>`
+   * on the seed phase's command line, appended ONLY when non-empty, and the
+   * seeder stamps what it was asked into `obligations.json` (`minting`) so an
+   * artifact answers "which arm produced this". Kept a plain string rather
+   * than a validated union because the CLI is the loud gate: any unknown token
+   * exits 2 before the document is read — a typo'd arm can never silently run
+   * baseline and report a number for an experiment that never happened.
+   */
+  mint: string;
+  /**
+   * How many of the six survey families actually run.
+   *
+   * **Six, and the default is not negotiable down without saying which.** The
+   * previous design defaulted this to 3 against six families and never recorded
+   * which three ran — so half the families silently never executed, and
+   * `enforcement`, the one that produced the only gold match, could have been
+   * among them (§D4). A value below 6 takes the families in the seeder's rank
+   * order and the run says so in its artifact.
+   */
+  surveyPasses: number;
+  /**
+   * How many survey families run CONCURRENTLY (WP11c).
+   *
+   * A CEILING, not a guarantee: the run clamps it to what the active sandbox
+   * backend can actually hold. `none` and `docker` take the declared value;
+   * `gondolin` boots a QEMU micro-VM per agent session inside the harness
+   * process and pins to 1, as do `smol` and `kubernetes` until measured. So on
+   * a stock deployment (gondolin) this key changes nothing at all today.
+   *
+   * Six by default because six is what the fan-out exists for. The six families
+   * write six disjoint append-only files and never read each other's, so there
+   * was never an ordering constraint between them — only a scheduler that ran
+   * one DAG node at a time. Chained, they were 851s of a 29-minute review (49%
+   * of the wall clock); concurrent, they are the slowest single family.
+   *
+   * Lower it to bound provider rate-limit pressure or memory, not to bound
+   * spend: the six passes cost the same in tokens either way.
+   */
+  surveyConcurrency: number;
+  /**
+   * WP4 — the `prepare` + `falsify` pair: install dependencies so a probe can be
+   * **run**, then write probes and run them.
+   *
+   * A second switch under an already-gated block, deliberately. `prepare` is the
+   * phase that decides whether the review workspace has a `node_modules`, and
+   * that one fact changes three things at once: it is what makes a
+   * package-extending `tsconfig` resolve (so `contract` can seed at all on a
+   * normal monorepo), it is the only route to a coverage artifact (so `tests`
+   * can), and it re-arms the memory profile of a *different* phase. Bundling it
+   * into `enabled` would have made "run the surveys" and "install the PR
+   * author's dependencies" the same decision.
+   *
+   * `false` reproduces WP3 exactly. Default posture is **off in production, on
+   * in the eval overlay** — the ablation rung is what decides whether it ships
+   * on, and that is a number, not a judgement call.
+   */
+  probes: boolean;
+  /**
+   * Let `prepare`'s install run the tree's own lifecycle scripts.
+   *
+   * **Off, and it is a security default rather than a performance one.** The
+   * install runs against a PULL REQUEST HEAD, so a `postinstall` there is code
+   * the PR author wrote executing on the operator's infrastructure — and
+   * `pr-review`'s workspace has never installed anything, which makes `prepare`
+   * the first thing in the workflow that could. What `prepare` is FOR (making an
+   * `extends` resolve, putting library source on disk to be read) needs the
+   * files, not their scripts.
+   *
+   * Turning it on is legitimate for a repo whose install genuinely does not work
+   * without them; it is not the default for the same reason `probes` is not.
+   */
+  probeLifecycleScripts: boolean;
+  /**
+   * Run the repo's own `tsc --noEmit` in `prepare` and record the diagnostics.
+   *
+   * Cheap, independent of the other two, and **not** a CI re-run: CI reports a
+   * pass/fail summary over a matrix, this reports a per-file, per-line
+   * diagnostic that can be attached to a specific hypothesis (locked decision
+   * 11 — we never re-derive what `checksState` already said).
+   */
+  probeTypecheck: boolean;
+  /**
+   * Run a coverage command in `prepare` so the `tests` obligation family has an
+   * input for the first time.
+   *
+   * **The one step in this pipeline that runs a test suite**, which is the
+   * wall-clock item §D13 deleted along with `mutants` and `suite`. It is a
+   * separate switch because it is a separate price: everything else in `prepare`
+   * is seconds and this is minutes. It never guesses a command — only one the
+   * repo itself named (a `coverage` / `test:coverage` script) — because a
+   * guessed fifteen-minute run that produced nothing makes "no command" and "no
+   * artifact" the same row in the funnel.
+   */
+  probeCoverage: boolean;
+  /** Ceiling on `prepare`'s dependency install, in seconds. */
+  prepareTimeoutSeconds: number;
+  /** Ceiling on `prepare`'s coverage run, in seconds. Minutes, not seconds. */
+  coverageTimeoutSeconds: number;
+  /**
+   * How many rounds `falsify` gets to write and run probes.
+   *
+   * Two. v3's lesson 3 is the sizing argument: the loop's exit condition is a
+   * five-line existence gate, not a validator — v2's full quote validator was
+   * overkill and cost 2.4× for a worse result.
+   */
+  probeRounds: number;
+  /**
+   * The inline-comment attention budget (WP6b).
+   *
+   * Preserving internal recall and spending a human's attention are two
+   * different budgets, and conflating them is how a recall-first reviewer
+   * becomes unreadable. Everything past this rank goes to the review BODY —
+   * still posted, still visible, just not an inline comment. Nothing is dropped.
+   *
+   * Ten, on the evidence in *"Does AI Code Review Lead to Code Changes?"*
+   * (22k+ real review comments): concise, hunk-level, actionable findings are
+   * substantially likelier to lead to a change, and the wall the paper warns
+   * about is TWENTY — twenty inline comments is not twice the signal of ten,
+   * it is a muted bot. Ten is a ceiling, not a budget that bites: measured
+   * inline volume is 1–5 per PR, so this has never bound, and anything past it
+   * goes to the body rather than away.
+   */
+  maxInlineComments: number;
+  /**
+   * Per-obligation-family confidence bar for an INLINE comment. Below the bar a
+   * finding goes to the body; it is never deleted.
+   *
+   * **Per-family, not global, and that is a measured choice.** AutoCommenter
+   * (Google Critique) found a global threshold catastrophic — at `t = 0.98`,
+   * ~80% of below-threshold predictions were still correct — while per-URL
+   * thresholds raised recall without hurting precision.
+   *
+   * **These numbers are initial guesses to be tuned on the train split, not
+   * measurements.** Record each retune in the eval journal.
+   */
+  thresholds: Record<string, number>;
+  /**
+   * Below this confidence a finding is recorded but not posted at all.
+   *
+   * The one tier that costs recall, so it is deliberately low and deliberately
+   * auditable. A finding carrying NO confidence is never affected — see
+   * `tierFindings`; treating an absent field as zero would silently delete every
+   * finding from any prompt that has not been taught to self-score.
+   */
+  internalFloor: number;
+  /**
+   * Cap on findings rendered into the review BODY (the "Additional findings"
+   * section) — the body-side sibling of `maxInlineComments`, and the one
+   * budget that DOES filter: everything past it is recorded `internal` with
+   * the machine reason `body-budget` in `disposition.json`, never posted.
+   * Nothing is deleted — the demotion stays auditable like every other
+   * `internal` entry.
+   *
+   * - `null` — unlimited: the legacy funnel, where everything demoted from
+   *   inline lands in the body.
+   * - `0` — no overflow at all: nothing tiers to body; anything that would
+   *   have gone there is recorded `internal` instead.
+   * - `N > 0` — at most N body findings, ranked by severity × confidence
+   *   exactly as the inline overflow ranks (an absent confidence ranks as
+   *   1.0, so an unscored document degenerates to severity order).
+   *
+   * **`5` is the shipped default, and the number it replaced is the reason.**
+   * `0` was measured rather than assumed: under the production
+   * Sonnet-adjudicator shape no-overflow keeps 29/36 matched gold and lifts
+   * precision 0.263 → 0.492 / F1 0.362 → 0.479 on the Martian external set.
+   * But the same $0 sweep showed that result is
+   * **adjudicator-shape-conditional** — under Haiku-everywhere the body tier
+   * carries most of the matched gold and cap 0 costs posted recall 0.42 →
+   * 0.12, while MID caps keep nearly all of it (skillspro cap 4: 0.300, cap 8:
+   * 0.380 against 0.420 unlimited; Martian cap 4: 0.548, cap 8: 0.581 against
+   * 0.581 unlimited, at slightly better precision). `5` is the
+   * recall-preserving compromise pending a real boundary tune, not a measured
+   * optimum — which is also why eval overlays keep pinning this key
+   * explicitly instead of inheriting whatever it currently is.
+   */
+  maxBodyComments: number | null;
+}
+
+/**
+ * The `review:` block. Every key except `analysis` is repo-settable, and every
+ * one of those is CLAMPED towards less automation: `postsCheck` and `skipDraft`
+ * are add-only `true` (a repo may ask for the check and may skip drafts; it may
+ * not suppress an operator's check or force reviews onto drafts), `trigger`
+ * takes the lower {@link reviewTriggerRank} of repo and operator,
+ * `generatedPaths` is superset-only (a longer list suppresses MORE
+ * re-reviews), and `requestLabel` is free — naming a label only ever adds an
+ * explicit, human-initiated route. {@link ReviewAnalysisConfig} is
+ * operator-only; see its own doc.
  */
 export interface ReviewConfig {
   /** Post the `last-light/review` Check Run. */
@@ -252,6 +530,8 @@ export interface ReviewConfig {
    * that also touched a hand-written file — see `resolveReviewTrigger`.
    */
   generatedPaths: string[];
+  /** The evidence pipeline. Off by default — see {@link ReviewAnalysisConfig}. */
+  analysis: ReviewAnalysisConfig;
 }
 
 /**
@@ -309,5 +589,51 @@ export function defaultReviewConfig(): ReviewConfig {
       "*.generated.*",
       "**/__generated__/**",
     ],
+    analysis: {
+      enabled: false,
+      // A safety bound, not a budget — see config/default.yaml for why this is
+      // 40 rather than the 6 it shipped with. It must not bind on a real PR:
+      // capping generation truncates discovery, which is the measured ceiling.
+      maxSpecObligations: 40,
+      // The TOTAL backstop, and it is the per-family ceilings' sum
+      // (12 + 12 + 8 + 8 + 8) so it cannot bind unless an operator raises one.
+      maxObligations: 48,
+      // `minimal` ships, measured in: under `full`, half to two-thirds of
+      // survey output arrives as clean-quote verification reports that reached
+      // real PRs as posted findings; under `minimal` the same recall union
+      // posts with 37–71% better SNR and half the run-to-run variance. `full`
+      // remains the opt-in telemetry arm (discharge codes + the
+      // clean-discharge demotion at the posting boundary).
+      obligationContract: "minimal",
+      // Both D2 rules — the measured shipped shape. See the field's doc.
+      mint: "all-in-diff,registrations",
+      surveyPasses: 6,
+      surveyConcurrency: 6,
+      probes: false,
+      probeLifecycleScripts: false,
+      probeTypecheck: false,
+      probeCoverage: false,
+      prepareTimeoutSeconds: 300,
+      coverageTimeoutSeconds: 900,
+      probeRounds: 2,
+      maxInlineComments: 10,
+      thresholds: {
+        contract: 0.35,
+        enforcement: 0.35,
+        security: 0.3,
+        state: 0.5,
+        tests: 0.6,
+        spec: 0.45,
+      },
+      internalFloor: 0.15,
+      // A bounded body overflow. Cap 0 measured better under the production
+      // Sonnet adjudicator (precision 0.263→0.492 / F1 0.362→0.479) but that
+      // win is adjudicator-shape-conditional — under Haiku-everywhere the body
+      // tier carries most of the matched gold (posted recall 0.42→0.12 at 0),
+      // and mid caps kept nearly all of it. 5 is the recall-preserving
+      // compromise; `null` restores the legacy unlimited funnel. See the
+      // field's doc.
+      maxBodyComments: 5,
+    },
   };
 }
