@@ -156,9 +156,9 @@ describe("schema parity: sqlite ↔ pg", () => {
     ).toEqual([]);
   });
 
-  it("covers all 15 tables", () => {
-    expect(sqliteNames).toHaveLength(15);
-    expect(pgNames).toHaveLength(15);
+  it("covers all 16 tables", () => {
+    expect(sqliteNames).toHaveLength(16);
+    expect(pgNames).toHaveLength(16);
   });
 
   for (const name of tableExports(sqliteSchema as Record<string, unknown>)) {

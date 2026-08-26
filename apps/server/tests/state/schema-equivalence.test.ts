@@ -24,20 +24,24 @@ import { applyLegacySqliteCompat } from "#src/state/legacy-sqlite.js";
 
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("../../drizzle/sqlite", import.meta.url));
 /**
- * Migrations in `drizzle/sqlite`: the baseline plus the #279 repo-ref backfill.
- * Bump it when one is added — deliberately not derived from the journal, so a
- * migration that fails to record itself shows up here as a diff rather than
- * agreeing with whatever happened.
+ * Migrations in `drizzle/sqlite`: the baseline, the #279 repo-ref backfill, and
+ * the #206 `activity_log` table. Bump it when one is added — deliberately not
+ * derived from the journal, so a migration that fails to record itself shows up
+ * here as a diff rather than agreeing with whatever happened.
  */
-const MIGRATION_COUNT = 2;
+const MIGRATION_COUNT = 3;
 
 const LEGACY_SCHEMA = readFileSync(
   fileURLToPath(new URL("./fixtures/legacy-schema.sql", import.meta.url)),
   "utf8",
 );
 
-/** The 15 tables both paths must produce, and nothing else. */
-const EXPECTED_TABLES = [
+/**
+ * The 15 tables the legacy (pre-Drizzle) production database carries. The
+ * baseline must leave every one of them byte-identical — that is the whole
+ * proof this file exists for.
+ */
+const LEGACY_TABLES = [
   "cron_overrides",
   "cron_runs",
   "executions",
@@ -54,6 +58,30 @@ const EXPECTED_TABLES = [
   "workflow_overrides",
   "workflow_runs",
 ];
+
+/**
+ * Tables a POST-baseline migration creates, so they are absent from the legacy
+ * shape and present after boot. `activity_log` (issue #206) is the first —
+ * before it, `before` and `after` were the same set and this file could compare
+ * them directly. Add to this list when a migration adds a table; the baseline
+ * itself must still never alter a legacy one.
+ */
+const POST_BASELINE_TABLES = ["activity_log"];
+
+/** Named indexes those post-baseline tables bring with them. */
+const POST_BASELINE_INDEXES = [
+  "idx_activity_actor_created",
+  "idx_activity_created",
+  "idx_activity_target",
+];
+
+/** The 16 tables a fully-migrated database holds, and nothing else. */
+const EXPECTED_TABLES = [...LEGACY_TABLES, ...POST_BASELINE_TABLES].sort();
+
+/** `{a, b}` minus the given keys — for comparing only the legacy tables. */
+function omit<T>(record: Record<string, T>, keys: string[]): Record<string, T> {
+  return Object.fromEntries(Object.entries(record).filter(([k]) => !keys.includes(k)));
+}
 
 /**
  * The five indexes the Drizzle baseline has that the legacy DDL does not.
@@ -225,37 +253,47 @@ async function bootStateLayer(client: Client): Promise<void> {
 }
 
 describe("the Drizzle baseline over a legacy (production-shaped) database", () => {
-  it("no-ops: the schema is unchanged and the journal records one migration", async () => {
+  it("no-ops over every legacy table, and the journal records each migration", async () => {
     const client = await legacyShapedDb(":memory:");
     try {
       const q = queryOn(client);
       const before = await extract(q);
-      expect(before.tables).toEqual(EXPECTED_TABLES);
+      expect(before.tables).toEqual(LEGACY_TABLES);
       expect(Object.keys(before.indexes)).toHaveLength(25);
 
       await bootStateLayer(client);
 
       const after = await extract(q);
       expect(after.tables).toEqual(EXPECTED_TABLES);
-      expect(after.columns).toEqual(before.columns);
-      expect(after.pks).toEqual(before.pks);
+      // The legacy tables are untouched. The only difference is the tables a
+      // post-baseline migration ADDS — never a change to one that was there.
+      expect(omit(after.columns, POST_BASELINE_TABLES)).toEqual(before.columns);
+      expect(omit(after.pks, POST_BASELINE_TABLES)).toEqual(before.pks);
       expect(after.fks).toEqual(before.fks);
       expect(after.fks).toEqual([
         "messaging_messages.session_id -> messaging_sessions.id [update=NO ACTION delete=NO ACTION]",
       ]);
 
       // Every legacy index survives byte-identical; the only additions are the
-      // five redundant unique indexes, whose rules were already enforced.
+      // five redundant unique indexes, whose rules were already enforced, plus
+      // whatever a post-baseline migration's own new tables carry.
       for (const name of Object.keys(before.indexes)) {
         expect(after.indexes[name]).toBe(before.indexes[name]);
       }
       const added = Object.keys(after.indexes).filter((n) => !(n in before.indexes));
-      expect(added.sort()).toEqual(DRIZZLE_ONLY_UNIQUE_INDEXES);
+      expect(added.sort()).toEqual(
+        [...DRIZZLE_ONLY_UNIQUE_INDEXES, ...POST_BASELINE_INDEXES].sort(),
+      );
 
-      // The SET of enforced rules is unchanged; the multiset is not — those
-      // five tuples are now doubly indexed. That is the whole cost.
-      expect([...new Set(after.uniques)].sort()).toEqual([...new Set(before.uniques)].sort());
-      const duplicated = after.uniques.filter((t, i) => after.uniques.indexOf(t) !== i);
+      // The SET of enforced rules is unchanged over the legacy tables; the
+      // multiset is not — those five tuples are now doubly indexed. That is the
+      // whole cost. A post-baseline table brings its own PK tuple, which is a
+      // new rule on a new table rather than a change to an existing one.
+      const legacyUniques = after.uniques.filter(
+        (t) => !POST_BASELINE_TABLES.some((table) => t.startsWith(`${table}:`)),
+      );
+      expect([...new Set(legacyUniques)].sort()).toEqual([...new Set(before.uniques)].sort());
+      const duplicated = legacyUniques.filter((t, i) => legacyUniques.indexOf(t) !== i);
       expect(duplicated.sort()).toEqual([
         "feedback_anchors:source,channel,external_id",
         "feedback_signals:anchor_id,reactor,emoji",
@@ -304,8 +342,9 @@ describe("the Drizzle baseline over a legacy (production-shaped) database", () =
       const sess = await client.execute("SELECT id FROM messaging_sessions");
       expect(sess.rows.map((r) => r.id)).toEqual(["sess-1"]);
 
-      // Both migrations recorded exactly once: the baseline, and the #279
-      // repo-ref backfill. The second boot above must not re-apply either.
+      // Every migration recorded exactly once: the baseline, the #279 repo-ref
+      // backfill, and the #206 activity_log table. The second boot above must
+      // not re-apply any of them.
       const journal = await client.execute(
         "SELECT count(*) AS n FROM __drizzle_migrations",
       );
