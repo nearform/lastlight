@@ -306,9 +306,12 @@ phases:
     # the tiers, "Not findings", and the multi-pass carve-out that tells it to
     # over-produce — assembled from that measured text rather than rewritten.
     #
-    # `code-review` is UNCHANGED and still staged on `falsify`, `review` and
-    # `adjudicate` below, and on build's branch-diff reviewer. Those phases are
-    # producing a review; the subtraction is at the fan-out, not in the rubric.
+    # `code-review` is UNCHANGED and still staged on `review` below, and on
+    # build's branch-diff reviewer + dependabot-pr-merge. Those are producing a
+    # review from a diff, which is where its precision gate is meant to fire; the
+    # subtraction is at the passes that are not, never in the rubric. `falsify`
+    # and `adjudicate` have since joined the fan-out on the other side of that
+    # line — see each phase for why.
     skills: [survey-pass]
     model: "{{models.review-survey}}"
     skip_if: "analysisEnabled != true"
@@ -466,9 +469,18 @@ phases:
   # `adjudicate` is its consumer and does not exist, so this phase moves the
   # MECHANISM metrics (probes attempted / succeeded / reproduced / refuted) and
   # cannot move recall. That is a known non-goal, not an oversight.
+  # NO SKILL, deliberately. This used to stage `[pr-review, code-review]` for the
+  # workspace layout and nothing else — its own prompt opened by countermanding
+  # the rest ("it overrides any instruction in that skill about posting, about
+  # writing findings.json, or about how confident you must be"), which is the
+  # same sentence that took both skills off the survey fan-out. An oracle
+  # produces no review: it neither posts, nor writes findings.json, nor tiers
+  # anything, so `code-review`'s rubric and `pr-review`'s procedure are 528 lines
+  # of instruction for a job it is not doing. The workspace layout — the only
+  # part it did use — is now inline in the prompt, which is where a block that
+  # fits in twelve lines and is read by exactly one phase belongs.
   - name: falsify
     label: Falsify · run the probe
-    skills: [pr-review, code-review]
     prompt: prompts/review-falsify.md
     model: "{{models.review-survey}}"
     skip_if:
@@ -563,9 +575,28 @@ phases:
   # threshold sweep closes it — F1 is flat from t=0.0 to t=0.7 then collapses,
   # so there is no operating point to tune toward. A cheap model asked "is this
   # comment valid" is worse than useless here.
+  # ONE role-scoped skill, for the same reason the fan-out has one. This staged
+  # `[pr-review, code-review]` and its prompt named exactly two things it wanted
+  # from them — "the workspace layout" and "the finding tiers", ~54 lines of 552
+  # — then overrode the rest. Three of those overrides are not stylistic: the
+  # adjudicator's output schema CONTRADICTS `pr-review`'s (which says to write
+  # "only these content fields" while this phase must carry tier / family /
+  # obligation / confidence / hypotheses / evidence and a top-level `dropped[]`,
+  # and whose `references/findings-schema.md` documents the wrong contract);
+  # `pr-review`'s §1 tells it to write `{"skip": true}` on an already-reviewed
+  # head, which here would discard five surveys and an oracle; and `pr-review`'s
+  # confidence gate permits dropping a finding by naming code that refutes it,
+  # where this phase may delete ONLY on a probe transcript.
+  #
+  # `adjudicate-pass` carries the three things the prompt assumes and does not
+  # state: the workspace layout, the severity vocabulary it ranks on, and the
+  # prior-review ledger + the two APPROVE constraints it inherits as the only
+  # pass that owns the posted verdict. It is deliberately NOT `survey-pass`: a
+  # survey is told to over-produce and posts nothing, an adjudicator ranks and
+  # owns the verdict, and one skill serving both would be generic again.
   - name: adjudicate
     label: Adjudicate
-    skills: [pr-review, code-review]
+    skills: [adjudicate-pass]
     prompt: prompts/review-adjudicate.md
     # Its OWN key, `models.review-adjudicate`, because this is a RANKING pass
     # over an already-generated set — a different task from survey discovery

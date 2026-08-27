@@ -192,14 +192,25 @@ describe("AC3 — five survey branches, five disjoint families", () => {
     }
   });
 
-  it("keeps `code-review` on the phases that are PRODUCING a review", () => {
-    // The subtraction is at the fan-out, not in the rubric. `falsify`, `review`
-    // and `adjudicate` are the last hands on the work before a human reads it,
-    // which is exactly where the precision gate is supposed to fire.
-    for (const name of ["falsify", "review", "adjudicate"]) {
-      expect(byName.get(name)?.skills, name).toContain("code-review");
-    }
+  it("keeps `code-review` on the one phase that is PRODUCING a review from a diff", () => {
+    // The subtraction is at the passes that are not, never in the rubric.
+    // `review` is the last hand on a diff-level judgement before a human reads
+    // it, which is exactly where the precision gate is supposed to fire — and in
+    // the `!analysisEnabled` branch `pr-review` IS its whole procedure.
+    expect(byName.get("review")?.skills).toEqual(["pr-review", "code-review"]);
   });
+
+  it("gives `falsify` and `adjudicate` a role-scoped skill, or none", () => {
+    // Both used to stage `[pr-review, code-review]` and both opened by
+    // countermanding them. `falsify` produces no review at all and wanted only
+    // the workspace layout, which is now inline in its prompt. `adjudicate`
+    // owns the verdict but writes a DIFFERENT schema under a NARROWER deletion
+    // rule, so a generic review procedure is not merely surplus to it — it
+    // contradicts it.
+    expect(byName.get("falsify")?.skills).toBeUndefined();
+    expect(byName.get("adjudicate")?.skills).toEqual(["adjudicate-pass"]);
+  });
+
 
   it("names only its own family's files in its prompt — no pass opens another's", () => {
     for (const family of BRANCH_FAMILIES) {
