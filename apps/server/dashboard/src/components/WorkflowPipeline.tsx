@@ -22,6 +22,7 @@ import {
   type PhaseStatus,
   type PipelineNodeData,
 } from "./pipeline-node";
+import { isNoOpSummary, phaseSummary } from "../lib/phase-outcome";
 
 type PhaseNodeData = PipelineNodeData;
 
@@ -36,7 +37,8 @@ function nodeDataEqual(a: PhaseNodeData, b: PhaseNodeData): boolean {
     a.duration === b.duration &&
     a.selected === b.selected &&
     a.kind === b.kind &&
-    a.pulse === b.pulse
+    a.pulse === b.pulse &&
+    a.summary === b.summary
   );
 }
 
@@ -394,11 +396,30 @@ export function WorkflowPipeline({
         }
       }
 
+      // What the phase DID, so a green-but-did-nothing node is distinguishable
+      // from a green-and-did-a-lot one without opening the panel.
+      //
+      // TOP ROW ONLY (`y === 0`). Two reasons, both about not bloating the
+      // graph: the stacked nodes are loop iterations and fan-out branches whose
+      // summaries are boilerplate ("iteration 3 — work complete"), and their
+      // vertical pitch is the fixed NODE_ROW_HEIGHT constant, which an extra
+      // line per card would silently overrun. Every node still carries the full
+      // text in its tooltip and in the detail panel.
+      const summary = y === 0 ? phaseSummary(histEntry) : undefined;
+
       return {
         id: name,
         type: "phase",
         position: { x, y },
-        data: { label, status, timestamp, duration, selected: selectedPhase === name },
+        data: {
+          label,
+          status,
+          timestamp,
+          duration,
+          summary,
+          summaryNoOp: summary ? isNoOpSummary(summary) : undefined,
+          selected: selectedPhase === name,
+        },
         style: { width: NODE_WIDTH },
       };
     };

@@ -1,5 +1,6 @@
 import { Position, Handle, type Node, type NodeProps } from "@xyflow/react";
 import clsx from "clsx";
+import { truncateSummary } from "../lib/phase-outcome";
 
 /**
  * Shared pipeline node presentation, used by BOTH the workflow-run pipeline
@@ -47,6 +48,20 @@ export interface PipelineNodeData extends Record<string, unknown> {
   tags?: PhaseTag[];
   /** Secondary line under the label (e.g. the phase id when it differs). */
   subtitle?: string;
+  /**
+   * Run-view: the phase's OUTCOME SUMMARY — what it did, from its
+   * `phase_history` entry (see `lib/phase-outcome.ts`). Clipped to at most two
+   * short lines; the full text rides the card's `title` and the detail panel. A
+   * card is 110px wide, so this is deliberately a hint that a phase is worth
+   * clicking, not the place to read the outcome.
+   */
+  summary?: string;
+  /**
+   * The summary says the phase declined to do its work. Display-only: it mutes
+   * the summary line so a green-but-did-nothing phase is distinguishable from a
+   * green-and-did-a-lot one at a glance, and never touches {@link status}.
+   */
+  summaryNoOp?: boolean;
   /**
    * Override the status-derived surface with a neutral brand (primary) tint.
    * Used by the definition view, whose phases have no run status — a brand
@@ -222,7 +237,10 @@ export function PhaseFlowNode({ data }: NodeProps<Node<PipelineNodeData>>) {
   );
 
   return (
-    <div className={containerClass}>
+    // The full outcome summary as the card's tooltip — a 110px node can only
+    // ever show a clipped line, and truncating with no way to read the rest is
+    // how you learn a phase did something without learning what.
+    <div className={containerClass} title={data.summary}>
       {data.loops && <LoopArc />}
       {/* Horizontal handles carry the main left-to-right pipeline; the vertical
           handles carry loop-iteration stacks so those edges run straight down. */}
@@ -242,6 +260,16 @@ export function PhaseFlowNode({ data }: NodeProps<Node<PipelineNodeData>>) {
       )}
       {data.duration !== undefined && (
         <span className="text-2xs text-base-content/40 font-mono">{formatDuration(data.duration)}</span>
+      )}
+      {data.summary && (
+        <span
+          className={clsx(
+            "text-2xs leading-tight max-w-full break-words line-clamp-2",
+            data.summaryNoOp ? "italic text-base-content/45" : "text-base-content/65",
+          )}
+        >
+          {truncateSummary(data.summary)}
+        </span>
       )}
       {data.tags && data.tags.length > 0 && <TagRow tags={data.tags} />}
       <Handle type="source" position={Position.Right} id="right" className={handleClass} />
