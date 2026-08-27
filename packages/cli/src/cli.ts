@@ -1175,9 +1175,26 @@ async function cmdSkill(name: string): Promise<void> {
     die(`Usage: lastlight ${name} <owner/repo${repoLevelOnly ? "" : "#N"}>${takesClaim ? ` [-- "<claim or steps>"]` : ""}`);
   }
   const parsed = repoLevelOnly ? null : parseGitHubRef(target);
+  // `pr-review` is PR-SCOPED (`pr_scoped: true` in its workflow YAML), and the
+  // server resolves the `PrState` snapshot only when the dispatch context
+  // carries `prNumber` **as a number**. `issueNumber` alone does not satisfy
+  // that gate, so a CLI-triggered review used to run with no head SHA, no PR
+  // title, no `{{ciSection}}` and no merge decision — the agent had to
+  // rediscover the PR with `list_pull_requests` — and, once the review evidence
+  // pipeline shipped, no `analysisEnabled` either, which made every analysis
+  // phase skip as "trigger rule not satisfied" on a deployment that had turned
+  // the pipeline ON.
+  //
+  // The webhook sets BOTH keys to the same value ("PRs are issues too"), so
+  // mirror it rather than swapping: nothing that reads `issueNumber` changes.
+  // `parsed.type` is only `"pr"` for a full `/pull/N` URL — the `owner/repo#N`
+  // short form is always reported as an issue — so the command name has to be
+  // the authority for `review`, not the ref shape.
+  const prScoped = name === "review" || parsed?.type === "pr";
   let context: Record<string, unknown>;
   if (parsed) {
     context = { repo: `${parsed.owner}/${parsed.repo}`, issueNumber: parsed.number, sender: "cli" };
+    if (prScoped) context.prNumber = parsed.number;
     if (claim) context.commentBody = claim;
     if (!JSON_OUT) console.log(`Triggering ${name} on ${parsed.owner}/${parsed.repo}#${parsed.number}…`);
   } else {
