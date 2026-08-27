@@ -62,12 +62,28 @@ function reconcileNodes(
       old &&
       old.position.x === n.position.x &&
       old.position.y === n.position.y &&
+      old.parentId === n.parentId &&
+      old.type === n.type &&
       nodeDataEqual(old.data, n.data)
     ) {
       return old; // unchanged — keep identity + xyflow's measured dimensions
     }
     changed = true;
-    return old ? { ...old, position: n.position, data: n.data, style: n.style } : n;
+    // `parentId` / `extent` / `type` must be carried across explicitly: a node
+    // that gained a parent between polls (a fan-out's first branch appearing)
+    // would otherwise keep the old object's absent parentId and render at the
+    // canvas origin, because child positions are RELATIVE to the parent.
+    return old
+      ? {
+          ...old,
+          type: n.type,
+          position: n.position,
+          data: n.data,
+          style: n.style,
+          parentId: n.parentId,
+          extent: n.extent,
+        }
+      : n;
   });
   if (!changed) {
     for (let i = 0; i < merged.length; i++) {
@@ -101,17 +117,37 @@ function reconcileEdges(prev: Edge[], next: Edge[]): Edge[] {
   return changed ? merged : prev;
 }
 
-const NODE_WIDTH = 110;
+/**
+ * Card width. Wider than it needs to be for the text, deliberately: the phase
+ * labels are sentences ("Reconcile · the conservation floor"), and at a narrow
+ * width each one wraps to a different number of lines, so every card in the row
+ * was a different height. Width is the cheap lever on that — it buys uniform
+ * height without truncating anything.
+ */
+const NODE_WIDTH = 150;
 const NODE_GAP = 40;
-// Approximate rendered height of a stacked node (label + timestamp + duration
-// + padding). Sets the vertical pitch between loop iterations + their gates.
-const NODE_ROW_HEIGHT = 78;
+// Approximate rendered height of a nested node (label + the combined
+// time·duration line + padding). Sets the vertical pitch inside a container.
+const NODE_ROW_HEIGHT = 62;
 const ROW_GAP = 20;
-// Extra one-time gap below the loop parent only. The parent card is taller than
-// a normal node (wrapped 2-line label + timestamp + duration), so the first
-// iteration needs to start lower to clear it — without spreading the rest of
-// the stack apart.
-const LOOP_PARENT_EXTRA = 34;
+// ── Container geometry (fan-out branches and loop iterations) ─────────────
+// A phase with dynamic children is drawn as a box they sit INSIDE (React Flow
+// `parentId`), rather than as a card with a vertical stack hanging off it. The
+// stack was the bug: five branches interleaved with five gate cards made a
+// ten-deep ladder that ran off the canvas and pushed the rest of the row out of
+// frame, while drawing concurrent work as something with an order.
+const GROUP_PAD = 10;
+/**
+ * Header height inside the container, i.e. where the first child starts.
+ *
+ * Sized for the WORST case rather than the average: a two-line wrapped label
+ * plus the combined time·duration line and the child count. A one-line label
+ * leaves a little slack, which is the cheap direction to be wrong in — too
+ * small and the header sits on top of the first child.
+ */
+const GROUP_HEADER = 76;
+/** Vertical pitch between branches inside the container. */
+const BRANCH_GAP = 12;
 
 /**
  * Map a dynamic phase name (e.g. "reviewer_fix_1", "reviewer_recheck_1") back
@@ -168,7 +204,8 @@ function parseDerived(name: string): DerivedRef | null {
 
 /**
  * A SHORT label for a derived node. Short is the requirement, not a preference:
- * these render in a 110px card under a parent that already names the phase, so
+ * these render in a narrow card inside a parent that already names the phase,
+ * so
  * `survey_branch_contract` overflowed its box and read as a different phase
  * rather than as one branch of the node directly above it.
  */
@@ -186,11 +223,43 @@ function derivedLabel(ref: DerivedRef): string {
   }
 }
 
-/** The branch node a `_retry` / `_check` row hangs off, if it is one. */
-function branchParentOf(name: string): string | null {
+/**
+ * The node a `_retry` / `_check` row is a verdict ABOUT, if it is one.
+ *
+ * Both shapes of container have them: a fan-out branch
+ * (`survey_branch_contract_check`) and a loop iteration
+ * (`adjudicate_iter_1_check`). Neither is independent work, so neither gets a
+ * card of its own — see {@link foldGateStatus}.
+ */
+function gateOwnerOf(name: string): string | null {
   const ref = parseDerived(name);
-  if (!ref || ref.kind !== "branch" || !ref.suffix) return null;
-  return `${ref.base}_branch_${ref.branch}`;
+  if (!ref) return null;
+  if (ref.kind === "branch" && ref.suffix) return `${ref.base}_branch_${ref.branch}`;
+  if (ref.kind === "iter" && ref.suffix) return `${ref.base}_iter_${ref.index}`;
+  return null;
+}
+
+/**
+ * Fold a `_check` (exit gate) or `_retry` row INTO the status of the node it
+ * judges, instead of drawing it as a sibling card.
+ *
+ * A gate is a verdict about the row above it, not work of its own, and giving
+ * each one a card doubled the height of every fan-out and every loop for rows
+ * whose entire content is a tone. The verdict is not dropped — it decides the
+ * colour, and the reason rides the card's tooltip and the detail panel.
+ *
+ * `unmet` only overrides a row that otherwise passed. A row that genuinely
+ * failed keeps `failed`: a red gate under a red iteration is the same news
+ * twice, and the row's own failure is the more specific of the two.
+ */
+function foldGateStatus(
+  ownStatus: PhaseStatus,
+  gate: WorkflowRunExecution | undefined,
+): PhaseStatus {
+  if (!gate || ownStatus !== "done") return ownStatus;
+  if (gate.success === true && gate.stopReason === "condition_not_met") return "unmet";
+  if (gate.success === false && gate.stopReason !== "skipped") return "failed";
+  return ownStatus;
 }
 
 interface Props {
@@ -300,11 +369,21 @@ export function WorkflowPipeline({
     const isTerminalRun =
       run.status === "failed" || run.status === "succeeded" || run.status === "cancelled";
 
-    const buildNode = (name: string, x: number, y: number): Node<PhaseNodeData> => {
+    const buildNode = (
+      name: string,
+      x: number,
+      y: number,
+      opts: {
+        /** Render the outcome summary line. Top-row nodes only — see below. */
+        withSummary?: boolean;
+        /** Fold this row's verdict into the node's status (fan-out branches). */
+        gate?: WorkflowRunExecution;
+      } = {},
+    ): Node<PhaseNodeData> => {
       // Declared name → its YAML `label:`. Otherwise it is a DERIVED name
       // (a fan-out branch or a loop iteration), and the raw ledger key is the
       // last resort rather than the default: `survey_branch_contract` overflows
-      // a 110px card and reads as an unrelated phase instead of as one branch
+      // a branch card and reads as an unrelated phase instead of as one branch
       // of the node above it.
       const derived = declaredLabelByName.has(name) ? null : parseDerived(name);
       const label = declaredLabelByName.get(name) ?? (derived ? derivedLabel(derived) : name);
@@ -396,16 +475,24 @@ export function WorkflowPipeline({
         }
       }
 
+      // A fan-out branch's exit gate is a verdict about the branch, not work of
+      // its own — fold it in rather than drawing it as a second card.
+      status = foldGateStatus(status, opts.gate);
+
       // What the phase DID, so a green-but-did-nothing node is distinguishable
       // from a green-and-did-a-lot one without opening the panel.
       //
-      // TOP ROW ONLY (`y === 0`). Two reasons, both about not bloating the
-      // graph: the stacked nodes are loop iterations and fan-out branches whose
-      // summaries are boilerplate ("iteration 3 — work complete"), and their
-      // vertical pitch is the fixed NODE_ROW_HEIGHT constant, which an extra
-      // line per card would silently overrun. Every node still carries the full
-      // text in its tooltip and in the detail panel.
-      const summary = y === 0 ? phaseSummary(histEntry) : undefined;
+      // TOP ROW ONLY. Two reasons, both about not bloating the graph: the
+      // nested nodes are loop iterations and fan-out branches whose summaries
+      // are boilerplate ("iteration 3 — work complete"), and their vertical
+      // pitch is a fixed constant an extra line per card would silently
+      // overrun. Every node still carries the full text in its tooltip and in
+      // the detail panel.
+      //
+      // Passed in rather than inferred from `y === 0`: a fan-out branch is a
+      // React Flow child, so its `y` is relative to its container and the first
+      // branch in every fan-out is at `y === 0` without being a top-row node.
+      const summary = opts.withSummary ? phaseSummary(histEntry) : undefined;
 
       return {
         id: name,
@@ -519,9 +606,10 @@ export function WorkflowPipeline({
       slots.push({ kind: "phase", name });
     }
 
-    // Lay the slots out left-to-right. Loop iterations stack vertically under
-    // their declared parent's column.
-    let maxColumnDepth = 0;
+    // Lay the slots out left-to-right. A fan-out or loop phase becomes a
+    // CONTAINER holding its children, so a column's height is the tallest
+    // container rather than a stack depth.
+    let maxGroupHeight = 0;
     let prevId: string | undefined;
     slots.forEach((slot, col) => {
       const x = col * (NODE_WIDTH + NODE_GAP);
@@ -533,93 +621,124 @@ export function WorkflowPipeline({
         return;
       }
       const name = slot.name;
-      reactFlowNodes.push(buildNode(name, x, 0));
-      linkTo(name, prevId);
-      prevId = name;
+      const children = childrenByParent.get(name) ?? [];
 
-      let children = childrenByParent.get(name) ?? [];
-      // A `type: fanout` column. Its children are CONCURRENT branches, not loop
-      // iterations, so neither the ordering nor the edges below can be the
-      // chain a loop wants.
-      const isFanoutColumn = children.some((c) => parseDerived(c)?.kind === "branch");
-      if (isFanoutColumn) {
-        // Group each branch with its own `_retry` / `_check` rows. Sorting the
-        // flat list by start time scattered them — the five branches start
-        // within milliseconds of each other, so the order jittered between
-        // polls and a branch's gate rarely landed next to the branch it gates.
-        const groupOf = (n: string): string => branchParentOf(n) ?? n;
-        const rank = (n: string): number => {
-          const ref = parseDerived(n);
-          return ref?.kind === "branch" && ref.suffix ? (ref.suffix === "retry" ? 1 : 2) : 0;
-        };
-        const firstStart = new Map<string, string>();
-        for (const c of children) {
-          const g = groupOf(c);
-          const s = execByPhase.get(c)?.startedAt ?? "";
-          const cur = firstStart.get(g);
-          if (cur === undefined || (s && s < cur)) firstStart.set(g, s);
-        }
-        children = [...children].sort((a, b) => {
-          const ga = groupOf(a);
-          const gb = groupOf(b);
-          if (ga !== gb) {
-            const sa = firstStart.get(ga) ?? "";
-            const sb = firstStart.get(gb) ?? "";
-            return sa === sb ? ga.localeCompare(gb) : sa.localeCompare(sb);
-          }
-          return rank(a) - rank(b);
-        });
+      // No dynamic children — an ordinary card in the row.
+      if (children.length === 0) {
+        reactFlowNodes.push(buildNode(name, x, 0, { withSummary: true }));
+        linkTo(name, prevId);
+        prevId = name;
+        return;
       }
-      // Weave each iteration's interactive gate in right after the iteration it
-      // belongs to, so the vertical stack reads run → gate → run → gate → run.
+
+      // ── A container column: a fan-out or a loop ──────────────────────────
+      // Both draw their children INSIDE the parent (React Flow `parentId`)
+      // rather than as a stack hanging below it. The one difference that
+      // matters is preserved: a LOOP's iterations are sequential and stay
+      // chained, a FAN-OUT's branches are concurrent and are not.
+      const isFanout = children.some((c) => parseDerived(c)?.kind === "branch");
+
+      // Split the rows that are real work from the `_retry` / `_check` rows,
+      // which are verdicts about them and fold into their colour.
+      const gateFor = new Map<string, WorkflowRunExecution>();
+      const rows: string[] = [];
+      for (const c of children) {
+        const owner = gateOwnerOf(c);
+        if (owner) {
+          const ex = execByPhase.get(c);
+          // A row can have both a `_retry` and a `_check`; keep whichever
+          // actually decided the outcome (a red verdict beats a green one).
+          if (ex && (!gateFor.has(owner) || ex.success !== true)) gateFor.set(owner, ex);
+        } else {
+          rows.push(c);
+        }
+      }
+      // Fan-out branches sort by NAME: they start within milliseconds of each
+      // other, so a start-time sort jittered the order between polls, and there
+      // is no real order to preserve. Loop iterations keep the chronological
+      // sort applied upstream — for them the order IS the information.
+      if (isFanout) rows.sort((a, b) => a.localeCompare(b));
+
+      // An interactive `generic_loop` approval belongs beside the iteration it
+      // paused. These are human gates, not `until_bash` verdicts, so they stay
+      // as their own (diamond) node rather than folding.
       type StackItem =
         | { kind: "phase"; name: string }
         | { kind: "approval"; a: WorkflowApproval };
       const stackItems: StackItem[] = [];
-      for (const childName of children) {
-        stackItems.push({ kind: "phase", name: childName });
-        for (const a of loopApprovalsByIter.get(childName) ?? []) {
+      for (const rowName of rows) {
+        stackItems.push({ kind: "phase", name: rowName });
+        for (const a of loopApprovalsByIter.get(rowName) ?? []) {
           stackItems.push({ kind: "approval", a });
         }
       }
-      if (stackItems.length > maxColumnDepth) maxColumnDepth = stackItems.length;
-      let childPrev = name;
+
+      const groupWidth = NODE_WIDTH + GROUP_PAD * 2;
+      const groupHeight =
+        GROUP_HEADER +
+        stackItems.length * NODE_ROW_HEIGHT +
+        Math.max(0, stackItems.length - 1) * BRANCH_GAP +
+        GROUP_PAD;
+
+      // PARENT FIRST — React Flow requires a parent to appear before its
+      // children in the nodes array or the containment is not processed.
+      const parent = buildNode(name, x, 0, { withSummary: true });
+      reactFlowNodes.push({
+        ...parent,
+        type: "fanout",
+        data: {
+          ...parent.data,
+          // The summary would compete with the children for the header; the
+          // count is what the header has room to say.
+          summary: undefined,
+          summaryNoOp: undefined,
+          subtitle: isFanout
+            ? `${stackItems.length} branches`
+            : `${rows.length} iteration${rows.length === 1 ? "" : "s"}`,
+        },
+        style: { width: groupWidth, height: groupHeight },
+      });
+      linkTo(name, prevId);
+      prevId = name;
+
+      let childPrev: string | undefined;
       stackItems.forEach((item, idx) => {
-        const y = (idx + 1) * (NODE_ROW_HEIGHT + ROW_GAP) + LOOP_PARENT_EXTRA;
+        // Positions are RELATIVE to the container once `parentId` is set.
+        const y = GROUP_HEADER + idx * (NODE_ROW_HEIGHT + BRANCH_GAP);
         const childId = item.kind === "phase" ? item.name : `approval:${item.a.id}`;
-        reactFlowNodes.push(
-          item.kind === "phase" ? buildNode(item.name, x, y) : buildApprovalNode(item.a, x, y),
-        );
-        // WHERE THE EDGE COMES FROM is the difference between "these ran in
-        // sequence" and "these ran at once", and it is the only thing on this
-        // canvas that says which. A loop chains child→child, because iteration
-        // 2 really did wait for iteration 1. A fan-out must NOT: its branches
-        // all start from the parent, and chaining them drew five concurrent
-        // surveys as a five-deep ladder — the one claim the picture makes about
-        // a fan-out, made backwards.
-        //
-        // A branch's own `_retry` / `_check` row hangs off THAT BRANCH rather
-        // than the parent, so a gate sits under the thing it gates.
-        const source = isFanoutColumn
-          ? (item.kind === "phase" ? branchParentOf(item.name) ?? name : name)
-          : childPrev;
-        reactFlowEdges.push({
-          id: `${source}->${childId}`,
-          source,
-          target: childId,
-          sourceHandle: "bottom",
-          targetHandle: "top",
-          style: { stroke: "var(--color-base-300, #ccc)", strokeWidth: 1.5 },
-          animated: false,
-        });
+        const node =
+          item.kind === "phase"
+            ? buildNode(item.name, GROUP_PAD, y, { gate: gateFor.get(item.name) })
+            : buildApprovalNode(item.a, GROUP_PAD, y);
+        reactFlowNodes.push({ ...node, parentId: name, extent: "parent", draggable: false });
+
+        // A LOOP chains child→child, because iteration 2 really did wait for
+        // iteration 1 — that edge is the only thing on this canvas that says
+        // these ran in sequence. A FAN-OUT draws none: a line between
+        // concurrent branches asserts an order the run does not have, and the
+        // box already says they belong together.
+        if (!isFanout && childPrev) {
+          reactFlowEdges.push({
+            id: `${childPrev}->${childId}`,
+            source: childPrev,
+            target: childId,
+            sourceHandle: "bottom",
+            targetHandle: "top",
+            style: { stroke: "var(--color-base-300, #ccc)", strokeWidth: 1.5 },
+            animated: false,
+            // React Flow renders edges in a layer BENEATH nodes, so an edge
+            // between two children of a container is drawn behind the
+            // container's own background and is simply invisible. Lift it.
+            zIndex: 10,
+          });
+        }
         childPrev = childId;
       });
+
+      if (groupHeight > maxGroupHeight) maxGroupHeight = groupHeight;
     });
 
-    const canvasHeight =
-      maxColumnDepth > 0
-        ? (maxColumnDepth + 1) * (NODE_ROW_HEIGHT + ROW_GAP) + LOOP_PARENT_EXTRA + 20
-        : (NODE_ROW_HEIGHT + ROW_GAP) + 20;
+    const canvasHeight = Math.max(maxGroupHeight, NODE_ROW_HEIGHT + ROW_GAP) + 20;
 
     return { nodes: reactFlowNodes, edges: reactFlowEdges, canvasHeight };
   }, [definition, run, executions, approvals, selectedPhase]);

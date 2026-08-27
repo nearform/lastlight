@@ -52,7 +52,7 @@ export interface PipelineNodeData extends Record<string, unknown> {
    * Run-view: the phase's OUTCOME SUMMARY — what it did, from its
    * `phase_history` entry (see `lib/phase-outcome.ts`). Clipped to at most two
    * short lines; the full text rides the card's `title` and the detail panel. A
-   * card is 110px wide, so this is deliberately a hint that a phase is worth
+   * card is narrow, so this is deliberately a hint that a phase is worth
    * clicking, not the place to read the outcome.
    */
   summary?: string;
@@ -87,6 +87,23 @@ export function formatDuration(secs: number): string {
 export function formatTime(ts: string): string {
   const d = new Date(ts);
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+/**
+ * Start time and duration on ONE line — they are both "when", they are both
+ * short, and giving each its own row cost every card a line of height for no
+ * information. The middot only appears when both are present, so a phase with
+ * a time and no duration does not render a dangling separator.
+ */
+function MetaLine({ timestamp, duration }: { timestamp?: string; duration?: number }) {
+  if (!timestamp && duration === undefined) return null;
+  return (
+    <span className="text-2xs text-base-content/40 font-mono whitespace-nowrap">
+      {timestamp && formatTime(timestamp)}
+      {timestamp && duration !== undefined && " · "}
+      {duration !== undefined && formatDuration(duration)}
+    </span>
+  );
 }
 
 /** Tiny lock glyph for the approval-gate node header. */
@@ -237,7 +254,7 @@ export function PhaseFlowNode({ data }: NodeProps<Node<PipelineNodeData>>) {
   );
 
   return (
-    // The full outcome summary as the card's tooltip — a 110px node can only
+    // The full outcome summary as the card's tooltip — a narrow node can only
     // ever show a clipped line, and truncating with no way to read the rest is
     // how you learn a phase did something without learning what.
     <div className={containerClass} title={data.summary}>
@@ -255,12 +272,7 @@ export function PhaseFlowNode({ data }: NodeProps<Node<PipelineNodeData>>) {
           {data.subtitle}
         </span>
       )}
-      {data.timestamp && (
-        <span className="text-2xs text-base-content/40 font-mono">{formatTime(data.timestamp)}</span>
-      )}
-      {data.duration !== undefined && (
-        <span className="text-2xs text-base-content/40 font-mono">{formatDuration(data.duration)}</span>
-      )}
+      <MetaLine timestamp={data.timestamp} duration={data.duration} />
       {data.summary && (
         <span
           className={clsx(
@@ -278,5 +290,61 @@ export function PhaseFlowNode({ data }: NodeProps<Node<PipelineNodeData>>) {
   );
 }
 
+/**
+ * A `type: fanout` phase, drawn as a CONTAINER its branches sit inside.
+ *
+ * React Flow expresses this with `parentId` on the children (positions become
+ * relative to this node), which is why this is a custom type rather than the
+ * built-in `group`: `group` has no handles, and the main left-to-right pipeline
+ * has to enter and leave the fan-out like any other column.
+ *
+ * Containment is what says "these ran at once". The branches carry no edges
+ * between them and none from this header — a fan-out has no first or last
+ * branch, and any line drawn between them would assert an order the run does
+ * not have. The card renders a header and then empty space; the children are
+ * absolutely positioned into that space by the layout.
+ */
+export function FanoutGroupNode({ data }: NodeProps<Node<PipelineNodeData>>) {
+  const dotClass = clsx("w-2.5 h-2.5 rounded-full shrink-0", {
+    "bg-success": data.status === "done",
+    "bg-error": data.status === "failed",
+    "bg-info animate-pulse": data.status === "active",
+    "bg-warning": data.status === "paused",
+    "bg-base-300": data.status === "pending",
+    "bg-base-300 opacity-60": data.status === "skipped",
+    "bg-base-content/30": data.status === "unmet",
+  });
+
+  return (
+    <div
+      className={clsx(
+        "relative w-full h-full rounded-xl border-2 border-dashed shadow-sm transition-shadow",
+        statusSurface(data.status),
+        { "ring-2 ring-primary ring-offset-1 ring-offset-base-100": data.selected },
+      )}
+      title={data.summary}
+    >
+      <Handle type="target" position={Position.Left} id="left" className={handleClass} />
+      <Handle type="target" position={Position.Top} id="top" className={handleClass} />
+      {/* The header is the clickable phase card; the space below it belongs to
+          the branch children, so nothing here may capture their pointer events. */}
+      <div className="flex flex-col items-center gap-0.5 px-2 pt-2 pb-1 cursor-pointer">
+        <div className="flex items-center gap-1.5">
+          <span className={dotClass} />
+          <span className="text-xs font-medium text-base-content/80 text-center leading-tight">
+            {data.label}
+          </span>
+        </div>
+        <MetaLine timestamp={data.timestamp} duration={data.duration} />
+        {data.subtitle && (
+          <span className="text-2xs text-base-content/45 font-mono">{data.subtitle}</span>
+        )}
+      </div>
+      <Handle type="source" position={Position.Right} id="right" className={handleClass} />
+      <Handle type="source" position={Position.Bottom} id="bottom" className={handleClass} />
+    </div>
+  );
+}
+
 /** Shared node-type map for both pipeline views. */
-export const pipelineNodeTypes = { phase: PhaseFlowNode };
+export const pipelineNodeTypes = { phase: PhaseFlowNode, fanout: FanoutGroupNode };
