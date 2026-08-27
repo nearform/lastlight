@@ -15,6 +15,7 @@ import {
   commentableOf,
   parseDiffFiles,
   unknownSeverity,
+  internalJargon,
   worstAxis,
   type AttentionBoundary,
   type DiffFile,
@@ -535,6 +536,19 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
           severities: [...new Set(strange.map((f) => f.severity))],
         },
       );
+    }
+
+    // Warn, never rewrite: the review still posts as written. What this makes
+    // is the leak COUNTABLE — "the prompt says not to" is not evidence that it
+    // did not, and nothing else a run records would show that our own
+    // vocabulary reached somebody's pull request.
+    const jargon = internalJargon(doc);
+    if (jargon.length > 0) {
+      log.warn("review prose names this pipeline's internals — posting as written", {
+        repo: `${owner}/${repo}`,
+        prNumber,
+        terms: jargon,
+      });
     }
 
     // WP6b — the attention boundary, and it exists ONLY when the evidence

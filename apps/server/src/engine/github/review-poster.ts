@@ -697,6 +697,70 @@ export function unknownSeverity(f: ReviewFinding): boolean {
 }
 
 /**
+ * This pipeline's OWN vocabulary, which must never reach a pull request.
+ *
+ * The maintainer reading a review did not build this and has no idea what an
+ * adjudication or a hypothesis ledger is; a review that names them spends the
+ * reader's attention explaining our architecture instead of their change.
+ * Measured on `cliftonc/drizzle-cube#891`, where a posted summary opened
+ * *"This adjudication keeps those findings reconciled as not applicable and
+ * adds the hypothesis ledger"* — three internal terms in one sentence, about a
+ * quick-search feature.
+ *
+ * Deliberately biased toward RECALL over precision. Every entry is a word this
+ * codebase uses as a term of art, and some of them are also ordinary English
+ * that a review of the right codebase could legitimately use — `obligation` in
+ * a billing system, `discharge` in a battery driver. That trade is only sound
+ * because the consequence is a log line: see {@link internalJargon}.
+ */
+const INTERNAL_JARGON: RegExp[] = [
+  /\badjudicat\w*/i,
+  /\bhypothes[ie]s\b/i,
+  /\bobligations?\b/i,
+  /\bsurvey (?:pass|passes|branch|branches|famil\w+)\b/i,
+  /\bfalsify\b/i,
+  /\bprobe transcripts?\b/i,
+  /\bconservation (?:holds|floor)\b/i,
+  /\battention boundary\b/i,
+  /\binternal tier\b/i,
+  /\bdischarges?d?\b/i,
+  /\.lastlight\//i,
+];
+
+/**
+ * The internal terms a review's own prose uses, if any.
+ *
+ * A PREDICATE, not a warning, for the same reason as {@link unknownSeverity}:
+ * this module does no I/O. `post-review.ts` owns the logger and calls this.
+ *
+ * **It reports; it never rewrites.** Silently editing a review's wording would
+ * change a claim nobody re-read, and the failure this catches is a prompt
+ * drifting rather than a one-off — which is a thing to fix upstream, not to
+ * paper over per-post. It is also why the term list can afford to be greedy: a
+ * false positive costs one log line, while a false negative ships our
+ * architecture to somebody else's pull request.
+ *
+ * Scans the prose fields only — `summary`, and each finding's `title` and
+ * `body`. Never `suggestion` or `existingCode`, which are verbatim excerpts of
+ * the author's own code and would match on their identifiers, not on ours.
+ */
+export function internalJargon(doc: {
+  summary?: string;
+  findings?: ReviewFinding[];
+}): string[] {
+  const prose = [
+    doc.summary ?? "",
+    ...(doc.findings ?? []).flatMap((f) => [f.title ?? "", f.body ?? ""]),
+  ].join("\n");
+  const hits = new Set<string>();
+  for (const re of INTERNAL_JARGON) {
+    const m = prose.match(re);
+    if (m) hits.add(m[0].toLowerCase());
+  }
+  return [...hits].sort();
+}
+
+/**
  * Is every hypothesis behind this finding a CLEAN DISCHARGE — i.e. is the
  * finding an anti-finding?
  *
@@ -909,13 +973,20 @@ export function renderDemoted(list: ReviewFinding[]): string {
  * heading is a worse review to read, so each group says what it is — and the
  * wording matters: none of these mean "we were not sure", they mean "this did
  * not earn an inline comment", which is a different claim.
+ *
+ * **These are read by a maintainer who has never heard of this pipeline.** They
+ * are the one part of the posted review this repository writes verbatim, so
+ * they say what happened in ordinary review language and never name internal
+ * machinery — no "adjudicating pass", no obligation "family". Measured on
+ * `cliftonc/drizzle-cube#891`, where a real review told its author that a
+ * finding was "reported here rather than inline by the adjudicating pass",
+ * which names a phase of ours and tells them nothing they can act on.
  */
 const DEMOTION_LEAD: Record<DemotionReason, string> = {
   "off-diff": "_Outside this PR's diff — GitHub cannot anchor a comment here._",
-  "below-threshold": "_Below the reporting confidence bar for their family._",
-  overflow:
-    "_Beyond the inline comment budget, ranked by severity and confidence._",
-  adjudicated: "_Reported here rather than inline by the adjudicating pass._",
+  "below-threshold": "_Below the confidence bar for an inline comment._",
+  overflow: "_Beyond this review's inline comment limit, ranked by severity._",
+  adjudicated: "_Raised for context rather than as an inline comment._",
 };
 
 const DEMOTION_ORDER: DemotionReason[] = [

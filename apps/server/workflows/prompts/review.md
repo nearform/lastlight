@@ -55,6 +55,12 @@ skill's format (`skip?` / `summary` / `event` / `findings[]`): the posting step
 and the adjudicator both require that file to exist even when `findings` is
 empty. The **code-review** skill's precision bar applies to anything you do
 report.
+
+**Your `summary`, `title` and `body` may be posted verbatim to the maintainer.**
+This prompt has told you about survey families, hypotheses and an adjudicating
+phase so you know what NOT to duplicate — none of it is vocabulary the author
+shares. Write about their change in their words; a review that explains how it
+was produced has spent the reader's attention on us instead of on their code.
 {{/if}}
 
 Context:

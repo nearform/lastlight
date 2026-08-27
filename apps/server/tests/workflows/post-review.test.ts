@@ -651,7 +651,7 @@ describe("post-review action (runPostReview)", () => {
         for (const t of ["on-diff C", "on-diff D", "off-diff E"]) expect(posted.body, t).toContain(t);
         // …and the two causes are not pooled under one heading.
         expect(posted.body).toContain("Outside this PR's diff");
-        expect(posted.body).toContain("Beyond the inline comment budget");
+        expect(posted.body).toContain("Beyond this review's inline comment limit");
 
         // "What did we know and not say?" is answerable on disk.
         const record = JSON.parse(readFileSync(dispositionPath(taskId), "utf8")) as {

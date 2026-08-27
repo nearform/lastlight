@@ -733,7 +733,7 @@ describe("buildReview — the boundary is opt-in, and absent means today", () =>
     expect(after.inlineCount).toBe(8);
     expect(after.demotedCount).toBe(12);
     expect(after.body).toContain("### Additional findings");
-    expect(after.body).toContain("Beyond the inline comment budget");
+    expect(after.body).toContain("Beyond this review's inline comment limit");
   });
 
   it("never posts an internal-tier finding, inline or in the body", () => {
@@ -764,14 +764,14 @@ describe("renderDemotedGrouped — three causes must not share one heading", () 
     ]);
     expect(out.match(/### Additional findings/g)).toHaveLength(1);
     expect(out).toContain("Outside this PR's diff");
-    expect(out).toContain("Below the reporting confidence bar");
-    expect(out).toContain("Beyond the inline comment budget");
+    expect(out).toContain("Below the confidence bar");
+    expect(out).toContain("Beyond this review's inline comment limit");
     // Ordered off-diff → below-threshold → overflow regardless of input order.
     expect(out.indexOf("Outside this PR's diff")).toBeLessThan(
-      out.indexOf("Below the reporting"),
+      out.indexOf("Below the confidence"),
     );
-    expect(out.indexOf("Below the reporting")).toBeLessThan(
-      out.indexOf("Beyond the inline"),
+    expect(out.indexOf("Below the confidence")).toBeLessThan(
+      out.indexOf("Beyond this review"),
     );
   });
 
@@ -780,7 +780,7 @@ describe("renderDemotedGrouped — three causes must not share one heading", () 
       { finding: f({ line: 1 }), reason: "overflow" },
     ]);
     expect(out).not.toContain("Outside this PR's diff");
-    expect(out).toContain("Beyond the inline comment budget");
+    expect(out).toContain("Beyond this review's inline comment limit");
   });
 
   it("renders nothing at all for an empty list", () => {

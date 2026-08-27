@@ -255,6 +255,15 @@ sits, so put them where the work is.
 
 Rewrite `.lastlight/pr-review/findings.json` **in full**. You own this file now.
 
+**`summary`, `title` and `body` are POSTED VERBATIM to a maintainer who has never
+heard of this pipeline** — see `adjudicate-pass`. Write about their change in
+their vocabulary; never name a phase, a hypothesis, an obligation, a discharge
+or a tier. *"This adjudication keeps those findings reconciled as not applicable
+and adds the hypothesis ledger"* is a real posted summary and it is the failure
+this paragraph exists to prevent. Everything else in the schema below —
+`family`, `obligation`, `confidence`, `hypotheses`, `mechanism`, `evidence` — is
+machine-read and never rendered, so that is where the bookkeeping belongs.
+
 ```jsonc
 {
   "summary": "…",
