@@ -82,6 +82,22 @@ Two harmless leftovers, confirmed: `obligations/tests.md` **is** still written o
 
 **R6 — treat the survey-branch probe as the E4 argument.** The run's two strongest findings came from executing code, in a phase not designed to execute anything, with the oracle disabled. E4 (turning `prepare` on) is already on the lever board; this is the first production evidence that reproduction converts. It also raises a design question worth answering before E4: if survey branches can and do run code, is the generator/checker separation still real, or only nominal?
 
+## Measured, 2026-08-27 — $0, no model calls
+
+Everything below cost nothing. It is recorded here because two of the proposals above were argued from n=1 and one of them turns out to be wrong.
+
+**Proposal 1 (replay the seeder over stored envelopes) was unnecessary — the data was already on disk.** `results[].review.pipeline.obligationsDropped[]` and `byFamily` are persisted in every stored scorecard. `apps/evals/scripts/ceiling-pressure.ts` sweeps them. It classifies each run by ERA first, which matters more than it sounds: per-family ceilings landed 2026-08-25, and reading a pre-ceilings run against today's table reports "at its ceiling" for a family that had none — on the floors-era envelopes `contract` held 17 against today's cap of 12. 37 of 58 stored `pr-review` runs are pooled-budget and are excluded.
+
+Across the 11 ceilings-era runs (67 case-runs): **a family is at its ceiling on 73%**, every live family is capped at once on 7%, and the `#937` shape — capped while another family minted zero — is 24%. So **ceiling pressure is general, not a `#937` artifact.** But it has two shapes and only one of them has a surplus to reallocate: on `1587-r1/r2/r3` all four families are at their ceilings with 0–1 unused slots between them.
+
+**And the tail contains nothing.** `apps/evals/scripts/cap-sweep.ts` re-seeds cached `facts.json` envelopes at any ceiling — the seeder is a pure function with no network and no model — and cross-references the obligations against gold `file:line`. Across the eight gate cases the shipped ceiling names **21 of 25** gold; uncapped names the same **21**. On `1587-r3`, all **59** refused obligations name nothing the kept 40 do not. The four gold it misses are unnamed at every ceiling, so they are a seeding-shape gap, not a budget one.
+
+Validated by reproducing a stored run to the obligation (`1587-r3`: kept 12/12/8/8, minted 59/17/8/15 against the stored drop counts). That cross-check is also what caught a bug in the sweep itself — `--mint` is a `seed` flag and was being passed to `all`, where it is inert; `enforcement` and `state`, the two families no mint arm touches, matched throughout and localised it.
+
+**So R5 is settled for this gate set: the ceiling is not what is costing recall, and no arm should be bought to raise it.** What survives is the visibility half, and it was a live defect rather than a proposal — `seed-render.ts:517` matched the substring `"budget"` in a dropped reason, and the 2026-08-25 rename made every reason say `"per-family ceiling"` / `"total backstop"`. **The truncation notice had not rendered since.** `1587-r3`'s contract branch was handed twelve questions and told nothing about the forty-seven it did not get. Fixed, reading the structured `families[].minted`/`cap` rather than prose, and pinned — nothing had asserted the notice rendered, which is why a rename could kill it silently.
+
+The standing conclusion from `deterministic-pr-levers.md` therefore holds unchanged: **the found→said gap is the binding constraint, not discovery.**
+
 ## What must be measured, and how
 
 Nothing above ships on this run. n=1, no gold, no recall denominator, and `review-pipeline-run-variance` puts the repeat band above most effects worth arguing about.
@@ -94,11 +110,13 @@ Nothing above ships on this run. n=1, no gold, no recall denominator, and `revie
 
 **Then arms, internal-recall-first per LD1** (posted recall is downstream of discovery; read the discovery number before the posted one, every time):
 
+R1 and R2 were built together and went further than proposed, at the user's direction: the survey branches now stage **one** skill, `survey-pass`, and neither generic skill at all. The argument is the one R1 makes about the ten axes, extended — `pr-review` is a procedure for *producing* a review, which is the thing a survey pass is forbidden to do, and each family prompt already said so in its own header. `security-review` is gone from the branch rather than rewritten, which also restores the byte-identical prompt head across all five branches and removes the confound in Problem 2 without needing R2's transcript mining to resolve it first.
+
 | Arm | Question | Read |
 |---|---|---|
-| R1 skill split | Does removing eight off-family axes cost discovery? | internal union first; then survey branch-seconds and cache-read tokens |
-| R2 security fragment | Does a PR-scoped security skill beat a cron-scan skill on the branch? | security-family internal recall on `1667` (2 of 5 gold are security-family) |
-| R4 severity predicate | Does a trust-boundary gate cost gold? | matched-gold severity distribution and inline occupancy; precision is the win, recall is the guardrail |
+| Baseline re-run | The comparator is invalid: repeats 3 and 4 of group `111801` graded 6 and 4 cases against 8 (`diff-runs.ts` refuses a verdict across unequal case sets, and nothing had noticed). Three complete 8-case repeats survive: `102443` 0.240, `111801` 0.280, `111802` 0.400 | one more repeat completes an n=4 band |
+| B1 survey-scoped skill | Does removing both generic skills cost discovery? | internal union first; then survey branch-seconds and cache-read tokens |
+| B2 severity predicate | Does a trust-boundary gate cost gold? | matched-gold severity distribution and inline occupancy; precision is the win, recall is the guardrail |
 
 Standard discipline from `deterministic-pr-levers.md` applies without exception: 8 cases × 2 repeats minimum, `--keep-workspace`, verify the arm rather than reading its label (`disposition.json` present with the arm's pinned budgets), one variable per arm or say in the write-up that it is a bundle, and paired per-gold comparison (`pairedBand`) over mean deltas. Every arm is human-authorised spend.
 
