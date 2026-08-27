@@ -1,7 +1,7 @@
-You are running **one pass** of a multi-pass code review. Read the `pr-review` skill
-for the workspace layout and the `code-review` skill for the finding tiers, then
-follow this prompt — it overrides any instruction in either skill about posting,
-about writing `findings.json`, or about how confident you must be.
+You are running **one pass** of a multi-pass code review. Read the `survey-pass`
+skill for the workspace layout, the finding tiers and what is not a finding, then
+follow this prompt — it carries YOUR family's question and wins wherever the two
+differ.
 
 Reviewing **{{owner}}/{{repo}}#{{prNumber}}**, head `{{headSha}}` against `{{baseBranch}}`.
 
@@ -51,6 +51,53 @@ finding live in the code the diff touches but does not display.**
 ## Your family: `security`
 
 A changed symbol sits in a file a scanner also flagged. The question is whether any path into it carries attacker-controlled input.
+
+**The axes you own: Security and the input-shaped half of Edge cases.**
+Injection, authn/authz, secret handling, untrusted input, and what a guard does
+with an input shape it was not written for.
+
+**A hazard is not a boundary crossing.** Before you record anything as
+`Critical`, name the boundary the input crosses AND a capability its supplier
+does not already have. A local CLI parsing a manifest the user themselves wrote
+is codegen robustness, not a security boundary — the supplier already holds
+every capability the finding would grant. Record it, at its real tier. Severity
+is what the adjudicator ranks on, so an inflated one spends a maintainer's top
+slot on a hazard nobody can reach.
+
+### The change-scoped checklist
+
+Read the diff, plus the current contents of the changed files, against these.
+Each is a *shape to look for*, not a finding: a match still owes you the input
+path and the quoted line.
+
+- **CI workflows** (`.github/workflows/*.yml`): actions pinned by floating ref
+  (`@main`/`@v1`) rather than a commit SHA; `pull_request_target` that checks out
+  the PR head; a missing top-level or job `permissions:` block; a `secrets.`
+  expression interpolated into a `run:` where it can land in logs; untrusted PR
+  body, title or branch name interpolated into a `run:` block. (Spelled without
+  the `$`-brace syntax on purpose — this prompt is itself rendered by a template
+  engine, and the literal form does not survive it.)
+- **Container config**: base images on floating tags introduced here; new
+  `curl … | sh`; new `--privileged` / `--cap-add`; removed `security_opt` /
+  `read_only` hardening; newly host-exposed ports.
+- **Auth / authorization**: modified middleware, route guards, role checks, CORS,
+  JWT verification, OAuth handlers, webhook signature verification — especially a
+  constant-time compare replaced with `===`.
+- **Secret handling in new code**: a new `process.env.*` read whose value flows
+  into a log or an HTTP response; new code logging Authorization headers, cookies
+  or tokens; key-shaped literals.
+- **Shell exec on attacker-influenced args**: new `exec` / `execSync` / `spawn`
+  where any argument is non-static — concatenated, interpolated or
+  request-derived.
+- **Supply-chain churn**: NEW top-level dependencies (not version bumps) —
+  name the package and its publisher, and weigh a typosquat-shaped name higher;
+  removed integrity controls (`npm ci` → `npm install`, a dropped
+  `--ignore-scripts`).
+- **Release / publish flows**: changes to publish scripts, release CI steps or
+  signing keys — anything touching what users download.
+
+If the diff is docs, tests or unrelated config and none of the above applies,
+this pass legitimately has nothing on those shapes. Say so; do not manufacture.
 
 Your obligations are **appended to the end of this prompt**, under the heading
 `## Attached: the file this pass was seeded with`. The harness read them out of

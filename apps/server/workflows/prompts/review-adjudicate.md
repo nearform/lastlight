@@ -105,6 +105,21 @@ this run at all.
    without one, then Important with a transcript, and so on. The ranking is what
    spends the inline-comment budget well.
 
+   **`Critical` needs a trust boundary, not a category — and the survey passes
+   do not apply this bar, so applying it is yours.** Before you keep a security
+   claim at `Critical`, check that the finding names the boundary the input
+   crosses AND a capability its supplier does not already have. Where it does
+   not, DEMOTE it to `Important`; do not drop it. A local tool parsing a file
+   the invoking user wrote is robustness, not a boundary: the supplier already
+   holds every capability the finding would grant, so "a malicious input could
+   do X" describes someone attacking themselves. Measured on this pipeline's
+   first production run, all three Criticals it posted arrived from the surveys
+   as `Important` and were promoted here on category membership alone.
+
+   Demotion is a RANKING act, not a deletion, and it must not become one: the
+   claim keeps its tier, its body and its hypothesis ids. What changes is which
+   of the few inline slots it occupies.
+
 3. **Tier.** Three destinations, and be honest about which:
    - `inline` — a comment on the diff line. The scarce one.
    - `body` — the *"Additional findings"* list. Still posted, still read.

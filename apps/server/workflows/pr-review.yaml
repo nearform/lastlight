@@ -290,7 +290,26 @@ phases:
   - name: survey
     label: Survey · five families
     type: fanout
-    skills: [pr-review, code-review]
+    # ONE skill, and the same one on every branch (LD9 — specialists are
+    # separated by QUESTION, not by tool access; the question is the family
+    # prompt's, and the shared rules are here).
+    #
+    # This used to be `[pr-review, code-review]` — 528 lines of which the family
+    # prompt's own header then countermanded the main contracts: "it overrides
+    # any instruction in either skill about posting, about writing
+    # findings.json, or about how confident you must be." `pr-review` is a
+    # procedure for PRODUCING a review (confirm the target, read prior
+    # discussion, re-derive on re-review, read CI, write findings.json, submit)
+    # and a survey pass does none of it; `code-review` is a ten-axis checklist
+    # handed whole to five specialists who own one or two axes each.
+    # `survey-pass` carries what a pass actually shares — the workspace layout,
+    # the tiers, "Not findings", and the multi-pass carve-out that tells it to
+    # over-produce — assembled from that measured text rather than rewritten.
+    #
+    # `code-review` is UNCHANGED and still staged on `falsify`, `review` and
+    # `adjudicate` below, and on build's branch-diff reviewer. Those phases are
+    # producing a review; the subtraction is at the fan-out, not in the rubric.
+    skills: [survey-pass]
     model: "{{models.review-survey}}"
     skip_if: "analysisEnabled != true"
     depends_on: [seed]
@@ -391,8 +410,17 @@ phases:
           "$FACTS" discharge --dir .lastlight/pr-review --family enforcement
       - name: security
         prompt: prompts/survey-security.md
-        # The one branch with a third skill — the others inherit the phase's two.
-        skills: [pr-review, code-review, security-review]
+        # NO skills override — it inherits the phase's `survey-pass` like every
+        # other branch, which is what keeps the shared prompt head byte-identical
+        # across all five and the cached prefix shared (see the phase comment).
+        #
+        # It used to stage `security-review` as a third skill. That skill is a
+        # CRON procedure: it clones the repo itself, derives its range from the
+        # newest `security-scan` issue's timestamp marker, ensures labels, files
+        # one dated summary issue per run and keeps state across runs in
+        # SECURITY.md — none of which a survey branch does, and all of which its
+        # own prompt forbids. Only the SDLC checklist applied, and that is now in
+        # `prompts/survey-security.md` where the family's other questions live.
         context_file: .lastlight/pr-review/obligations/security.md
         until_bash: |
           FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"

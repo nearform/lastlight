@@ -1,5 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, join, resolve, sep } from "node:path";
 import { GitHubClient } from "../../engine/github/github.js";
 import {
@@ -8,6 +14,7 @@ import {
   buildBodyOnlyReview,
   commentableOf,
   parseDiffFiles,
+  unknownSeverity,
   worstAxis,
   type AttentionBoundary,
   type DiffFile,
@@ -16,7 +23,11 @@ import {
 } from "../../engine/github/review-poster.js";
 import { getRuntimeConfig } from "../../config/config.js";
 import { defaultReviewConfig } from "lastlight-shared/config-types";
-import { hasMaterialChange, resolveReviewPost, type HeadReview } from "../../engine/pr-decisions.js";
+import {
+  hasMaterialChange,
+  resolveReviewPost,
+  type HeadReview,
+} from "../../engine/pr-decisions.js";
 import { logger } from "../../logging/logger.js";
 
 const log = logger("post-review");
@@ -57,11 +68,14 @@ export interface PostReviewRunScope {
  * that mutates the process env in future. Exported for the concurrent-clear
  * regression test.
  */
-export function resolveReviewGitHubClient(runConfig: { githubApiBaseUrl?: string }): GitHubClient {
+export function resolveReviewGitHubClient(runConfig: {
+  githubApiBaseUrl?: string;
+}): GitHubClient {
   const baseUrl = runConfig.githubApiBaseUrl;
   if (baseUrl) {
     // Eval / test path: the mock ignores auth; any bearer token works.
-    const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "eval-fake-token";
+    const token =
+      process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "eval-fake-token";
     return GitHubClient.withToken(token, baseUrl);
   }
   const cfg = getRuntimeConfig();
@@ -108,7 +122,8 @@ function isCleanDischarge(row: unknown): boolean {
   if (!row || typeof row !== "object" || Array.isArray(row)) return false;
   const r = row as Record<string, unknown>;
   const raw = r.discharge ?? r.status;
-  if (typeof raw !== "string" || raw.trim().toUpperCase() !== "QUOTE") return false;
+  if (typeof raw !== "string" || raw.trim().toUpperCase() !== "QUOTE")
+    return false;
   return "failureScenario" in r && r.failureScenario === null;
 }
 
@@ -136,7 +151,9 @@ function isCleanDischarge(row: unknown): boolean {
  * consumes its ordinal, because `readHypothesisSet` counts it — an ordinal that
  * drifted from the ledger's would mis-resolve every later citation in the file.
  */
-export function readCleanDischarges(dir: string): ReadonlySet<string> | undefined {
+export function readCleanDischarges(
+  dir: string,
+): ReadonlySet<string> | undefined {
   let files: string[];
   try {
     files = readdirSync(join(dir, "hypotheses"))
@@ -176,7 +193,11 @@ export function readCleanDischarges(dir: string): ReadonlySet<string> | undefine
       canonical.add(id);
       if (isCleanDischarge(row)) cleanCanonical.add(id);
       const declared = (row as { id?: unknown } | null)?.id;
-      if (typeof declared === "string" && declared.length > 0 && declared !== id) {
+      if (
+        typeof declared === "string" &&
+        declared.length > 0 &&
+        declared !== id
+      ) {
         claims.set(declared, [...(claims.get(declared) ?? []), id]);
       }
     });
@@ -210,7 +231,10 @@ function dispatchReview(ctx: TemplateContext): HeadReview | null {
   if (!review || typeof review !== "object") return null;
   const { state: reviewState, submittedAt } = review as Record<string, unknown>;
   if (typeof reviewState !== "string") return null;
-  return { state: reviewState, submittedAt: typeof submittedAt === "string" ? submittedAt : null };
+  return {
+    state: reviewState,
+    submittedAt: typeof submittedAt === "string" ? submittedAt : null,
+  };
 }
 
 /**
@@ -234,7 +258,8 @@ function parseThresholds(v: unknown): Record<string, number> {
   if (typeof v !== "string" || v === "") return {};
   try {
     const parsed: unknown = JSON.parse(v);
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+      return {};
     const out: Record<string, number> = {};
     for (const [k, val] of Object.entries(parsed)) {
       const n = Number(val);
@@ -280,14 +305,23 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     await this.reporter.step(phaseName, "running", phase.messages?.on_start);
 
     const succeed = async (summary: string): Promise<PhaseOutcome> => {
-      const result: PhaseResult = { phase: phaseName, success: true, output: summary };
+      const result: PhaseResult = {
+        phase: phaseName,
+        success: true,
+        output: summary,
+      };
       await this.reporter.persistPhase(phaseName, summary);
       await this.reporter.onEnd(phaseName, result);
       await this.reporter.step(phaseName, "done", phase.messages?.on_success);
       return { results: [result], status: "succeeded" };
     };
     const fail = async (error: string): Promise<PhaseOutcome> => {
-      const result: PhaseResult = { phase: phaseName, success: false, output: "", error };
+      const result: PhaseResult = {
+        phase: phaseName,
+        success: false,
+        output: "",
+        error,
+      };
       await this.reporter.onEnd(phaseName, result);
       await this.reporter.step(phaseName, "failed", phase.messages?.on_failure);
       // Record a failed phase_history entry so the dashboard pipeline renders
@@ -312,8 +346,13 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     const repo = String(ctx.repo);
     const prNumber =
       (typeof ctx.prNumber === "number" ? ctx.prNumber : undefined) ??
-      (typeof ctx.issueNumber === "number" && ctx.issueNumber > 0 ? ctx.issueNumber : undefined);
-    if (!prNumber) return fail("post-review: no PR number in run context; cannot post review");
+      (typeof ctx.issueNumber === "number" && ctx.issueNumber > 0
+        ? ctx.issueNumber
+        : undefined);
+    if (!prNumber)
+      return fail(
+        "post-review: no PR number in run context; cannot post review",
+      );
 
     // A human asked for THIS run by name — projected onto the run context at
     // the dispatch choke point (`src/index.ts`), so every route carries it
@@ -326,7 +365,12 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     // it at `.lastlight/pr-review/findings.json` relative to the repo cwd; the
     // workspace persists on the host between phases (see sandbox/index.ts).
     const hostRepoDir = this.resolveHostRepoDir(repo);
-    const findingsPath = join(hostRepoDir, ".lastlight", "pr-review", "findings.json");
+    const findingsPath = join(
+      hostRepoDir,
+      ".lastlight",
+      "pr-review",
+      "findings.json",
+    );
     let doc: ReviewFindingsDoc;
     try {
       doc = JSON.parse(readFileSync(findingsPath, "utf8")) as ReviewFindingsDoc;
@@ -334,7 +378,9 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       const msg = err instanceof Error ? err.message : String(err);
       // A missing/unreadable file after a completed review means the review
       // phase didn't honour its contract — surface it, don't post silently.
-      return fail(`post-review: could not read findings (${findingsPath}): ${msg}`);
+      return fail(
+        `post-review: could not read findings (${findingsPath}): ${msg}`,
+      );
     }
 
     // The split verdict (#271 fix 7) only exists when the evidence pipeline is
@@ -363,7 +409,10 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     const github = this.buildReviewClient();
 
     // Head SHA + base ref come from the checkout / run context, never the agent.
-    const baseRef = typeof ctx.baseBranch === "string" && ctx.baseBranch ? ctx.baseBranch : undefined;
+    const baseRef =
+      typeof ctx.baseBranch === "string" && ctx.baseBranch
+        ? ctx.baseBranch
+        : undefined;
     // `git rev-parse HEAD` doubles as the "is there a local checkout?" probe: it
     // returns a SHA on host-checkout backends (docker/none/gondolin) and
     // undefined on k8s, where the workspace lives in a sandbox PVC and only the
@@ -373,17 +422,29 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     // idempotency check below and inline comments (which require a commit id)
     // both work.
     let headSha = localHeadSha;
-    if (!headSha) headSha = await github.getPullRequestHeadSha(owner, repo, prNumber).catch(() => undefined);
+    if (!headSha)
+      headSha = await github
+        .getPullRequestHeadSha(owner, repo, prNumber)
+        .catch(() => undefined);
 
     // One pass over our review history answers both questions asked below: is
     // there already a review on THIS head (idempotency), and what did we last
     // actually say (the duplicate guard). Both used to be their own paginated
     // `listReviews`.
-    let history: Awaited<ReturnType<GitHubClient["getBotReviewHistory"]>> = { atHead: null, latest: null };
+    let history: Awaited<ReturnType<GitHubClient["getBotReviewHistory"]>> = {
+      atHead: null,
+      latest: null,
+    };
     if (headSha) {
       // Best-effort: a failed read leaves both null, which posts.
       history = await github
-        .getBotReviewHistory(owner, repo, prNumber, headSha, getRuntimeConfig()?.botLogin)
+        .getBotReviewHistory(
+          owner,
+          repo,
+          prNumber,
+          headSha,
+          getRuntimeConfig()?.botLogin,
+        )
         .catch(() => ({ atHead: null, latest: null }));
 
       // "We already reviewed this head" — decided ONCE, by the same module the
@@ -408,7 +469,13 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
         return succeed(`${post.reason} — ${headSha.slice(0, 7)}`);
       }
 
-      const stale = await this.staleAgainstCurrentHead(github, owner, repo, prNumber, headSha);
+      const stale = await this.staleAgainstCurrentHead(
+        github,
+        owner,
+        repo,
+        prNumber,
+        headSha,
+      );
       if (stale) return succeed(stale);
     }
 
@@ -418,7 +485,8 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     // harness) runs a guaranteed-to-fail `git diff` that dumps a usage block and
     // a FALSE "demoting all findings to the body" on every run — before the API
     // fallback silently rescues the findings.
-    let files = localHeadSha && baseRef ? this.gitDiffFiles(hostRepoDir, baseRef) : null;
+    let files =
+      localHeadSha && baseRef ? this.gitDiffFiles(hostRepoDir, baseRef) : null;
     // No local checkout (or no base ref) — fall back to GitHub's own PR diff
     // (the same merge-base diff) so findings still anchor inline on k8s instead
     // of demoting to the body.
@@ -437,7 +505,11 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
         files,
         localHeadSha ? (p) => this.readHeadFile(hostRepoDir, p) : undefined,
       );
-      if (anchored.stats.hunk || anchored.stats.file || anchored.stats.relocated) {
+      if (
+        anchored.stats.hunk ||
+        anchored.stats.file ||
+        anchored.stats.relocated
+      ) {
         log.info("Anchored findings from their code excerpts", {
           repo: `${owner}/${repo}`,
           prNumber,
@@ -445,6 +517,24 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
         });
       }
       doc = { ...doc, findings: anchored.findings };
+    }
+
+    // Warn, never fail: the finding is real and still posts — it just ranks as
+    // Important, which is the wrong slot if it meant to be Critical. Nothing
+    // else a run writes records that this happened.
+    const strange = (Array.isArray(doc.findings) ? doc.findings : []).filter(
+      unknownSeverity,
+    );
+    if (strange.length > 0) {
+      log.warn(
+        "findings carry a severity the ranker does not know — ranked as Important",
+        {
+          repo: `${owner}/${repo}`,
+          prNumber,
+          count: strange.length,
+          severities: [...new Set(strange.map((f) => f.severity))],
+        },
+      );
     }
 
     // WP6b — the attention boundary, and it exists ONLY when the evidence
@@ -461,21 +551,34 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       : undefined;
     const review = buildReview(doc, commentable, boundary, clean);
     if (boundary && review.tiered) {
-      const antiFindings = review.tiered.internal.filter((r) => r.reason === "clean-discharge").length;
+      const antiFindings = review.tiered.internal.filter(
+        (r) => r.reason === "clean-discharge",
+      ).length;
       if (clean?.size || antiFindings) {
-        log.info("Withheld findings whose evidence is entirely clean discharges", {
-          repo: `${owner}/${repo}`,
-          prNumber,
-          cleanHypotheses: clean?.size ?? 0,
-          antiFindings,
-        });
+        log.info(
+          "Withheld findings whose evidence is entirely clean discharges",
+          {
+            repo: `${owner}/${repo}`,
+            prNumber,
+            cleanHypotheses: clean?.size ?? 0,
+            antiFindings,
+          },
+        );
       }
       this.recordDisposition(hostRepoDir, boundary, review.tiered);
     }
 
-    const repeat = this.repeatOfLastReview(history.latest, review, explicitRequest);
+    const repeat = this.repeatOfLastReview(
+      history.latest,
+      review,
+      explicitRequest,
+    );
     if (repeat) {
-      log.info("Skipping a duplicate review post", { repo: `${owner}/${repo}`, prNumber, summary: repeat });
+      log.info("Skipping a duplicate review post", {
+        repo: `${owner}/${repo}`,
+        prNumber,
+        summary: repeat,
+      });
       return succeed(repeat);
     }
 
@@ -490,14 +593,18 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       // Without it "event=COMMENT" on a doc whose `event` says APPROVE reads as
       // a bug rather than as the axis floor doing its job.
       const downgraded =
-        doc.event === "APPROVE" && review.event !== "APPROVE" && worstAxis(doc.verdict) === "fail"
+        doc.event === "APPROVE" &&
+        review.event !== "APPROVE" &&
+        worstAxis(doc.verdict) === "fail"
           ? `, downgraded from APPROVE by verdict spec=${doc.verdict?.spec ?? "-"}/standards=${doc.verdict?.standards ?? "-"}`
           : "";
       // The `internal` count is reported even when it is zero, and only when a
       // boundary applied: "recorded, not posted" is a number nobody can read off
       // the review itself, and leaving it out of the one line the ledger keeps
       // is how a dark drop would look exactly like a quiet review.
-      const withheld = review.tiered ? `, ${review.internalCount} recorded-only` : "";
+      const withheld = review.tiered
+        ? `, ${review.internalCount} recorded-only`
+        : "";
       return succeed(
         `posted review: ${review.inlineCount} inline, ${review.demotedCount} in body${withheld}, event=${review.event}${downgraded}`,
       );
@@ -515,10 +622,14 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
           event: bodyOnly.event,
           commitId: headSha,
         });
-        return succeed(`posted review (body-only fallback): ${bodyOnly.demotedCount} findings, event=${bodyOnly.event}`);
+        return succeed(
+          `posted review (body-only fallback): ${bodyOnly.demotedCount} findings, event=${bodyOnly.event}`,
+        );
       } catch (err2) {
         const msg2 = err2 instanceof Error ? err2.message : String(err2);
-        return fail(`post-review: GitHub rejected the review (inline: ${msg}; body-only: ${msg2})`);
+        return fail(
+          `post-review: GitHub rejected the review (inline: ${msg}; body-only: ${msg2})`,
+        );
       }
     }
   }
@@ -566,7 +677,8 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
   ): string | null {
     if (explicitRequest) return null;
     if (review.event !== "APPROVE" || review.comments.length > 0) return null;
-    if (!last || last.state !== "APPROVED" || last.body !== review.body) return null;
+    if (!last || last.state !== "APPROVED" || last.body !== review.body)
+      return null;
     return `duplicate: this APPROVE is word-for-word the one we posted on ${last.sha.slice(0, 7)}`;
   }
 
@@ -606,13 +718,18 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     const review = getRuntimeConfig()?.review;
     if (!review || review.trigger === "on-request") return null;
 
-    const currentSha = await github.getPullRequestHeadSha(owner, repo, prNumber).catch(() => undefined);
+    const currentSha = await github
+      .getPullRequestHeadSha(owner, repo, prNumber)
+      .catch(() => undefined);
     if (!currentSha || currentSha === reviewedSha) return null;
 
     const changed = await github
       .getChangedPathsBetween(owner, repo, reviewedSha, currentSha)
       .catch((err: unknown) => {
-        log.warn("Could not compare the reviewed head with the current one; posting anyway", { err });
+        log.warn(
+          "Could not compare the reviewed head with the current one; posting anyway",
+          { err },
+        );
         return null;
       });
     // `null` (degraded/truncated) and `[]` both mean "no material change proven",
@@ -622,14 +739,20 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     const summary =
       `stale: reviewed ${reviewedSha.slice(0, 7)} but the head is now ${currentSha.slice(0, 7)}; ` +
       `a review of the new head will be dispatched instead`;
-    log.info("Skipping a stale review post", { repo: `${owner}/${repo}`, prNumber, summary });
+    log.info("Skipping a stale review post", {
+      repo: `${owner}/${repo}`,
+      prNumber,
+      summary,
+    });
     return summary;
   }
 
   /** Host path of the run's repo checkout — mirrors sandbox/index.ts layout. */
   private resolveHostRepoDir(repo: string): string {
     const config = this.run.config;
-    const sandboxBase = resolve(config.sandboxDir || join(config.stateDir || "data", "sandboxes"));
+    const sandboxBase = resolve(
+      config.sandboxDir || join(config.stateDir || "data", "sandboxes"),
+    );
     const workDir = join(sandboxBase, this.run.taskId);
     // pr-review pre-clones into a `<repo>/` subdir (a sibling of the workspace
     // root's AGENTS.md / skill bundle). Fall back to the workspace root if the
@@ -663,9 +786,15 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     const ctx = this.run.ctx as Record<string, unknown>;
     if (typeof ctx.maxInlineComments === "string") {
       return {
-        maxInlineComments: toBudget(ctx.maxInlineComments, defaultReviewConfig().analysis.maxInlineComments),
+        maxInlineComments: toBudget(
+          ctx.maxInlineComments,
+          defaultReviewConfig().analysis.maxInlineComments,
+        ),
         thresholds: parseThresholds(ctx.boundaryThresholds),
-        internalFloor: toFloor(ctx.internalFloor, defaultReviewConfig().analysis.internalFloor),
+        internalFloor: toFloor(
+          ctx.internalFloor,
+          defaultReviewConfig().analysis.internalFloor,
+        ),
         // `"null"` is the literal the projection writes for the documented
         // "unlimited body overflow" value; anything else degrades to the
         // shipped default, the same direction `config.ts` coerces garbage —
@@ -674,10 +803,14 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
         maxBodyComments:
           ctx.maxBodyComments === "null"
             ? null
-            : toBudget(ctx.maxBodyComments, defaultReviewConfig().analysis.maxBodyComments ?? 0),
+            : toBudget(
+                ctx.maxBodyComments,
+                defaultReviewConfig().analysis.maxBodyComments ?? 0,
+              ),
       };
     }
-    const analysis = getRuntimeConfig()?.review?.analysis ?? defaultReviewConfig().analysis;
+    const analysis =
+      getRuntimeConfig()?.review?.analysis ?? defaultReviewConfig().analysis;
     return {
       maxInlineComments: analysis.maxInlineComments,
       thresholds: analysis.thresholds ?? {},
@@ -745,8 +878,16 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
   ): void {
     try {
       const rows = [
-        ...tiered.inline.map((f) => ({ tier: "inline" as const, reason: null, finding: f })),
-        ...tiered.body.map((d) => ({ tier: "body" as const, reason: d.reason, finding: d.finding })),
+        ...tiered.inline.map((f) => ({
+          tier: "inline" as const,
+          reason: null,
+          finding: f,
+        })),
+        ...tiered.body.map((d) => ({
+          tier: "body" as const,
+          reason: d.reason,
+          finding: d.finding,
+        })),
         // `reason` is the same machine token the body tier carries, not prose:
         // the sibling eval harness reads this file, and "below the internal
         // floor" as a sentence made the three causes of a withheld finding
@@ -759,7 +900,11 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       ];
       writeFileSync(
         join(repoDir, ".lastlight", "pr-review", "disposition.json"),
-        JSON.stringify({ generatedAt: new Date().toISOString(), boundary, findings: rows }, null, 2),
+        JSON.stringify(
+          { generatedAt: new Date().toISOString(), boundary, findings: rows },
+          null,
+          2,
+        ),
       );
     } catch (err) {
       log.warn("Could not record the finding disposition", { err });
@@ -811,7 +956,10 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
   /** Compute the base…head diff locally and parse it into per-file hunks. */
   private gitDiffFiles(repoDir: string, baseRef: string): DiffFile[] | null {
     const git = (...args: string[]): string =>
-      execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+      execFileSync("git", ["-C", repoDir, ...args], {
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+      });
     const tryGit = (...args: string[]): void => {
       try {
         execFileSync("git", ["-C", repoDir, ...args], { stdio: "ignore" });
@@ -823,19 +971,27 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     // The three-dot (merge-base…head) diff mirrors GitHub's own PR diff exactly,
     // so it's the ideal anchor set — but it needs the merge-base present locally,
     // which a shallow `--depth 1 --single-branch` pr-review clone doesn't have.
-    const threeDot = () => parseDiffFiles(git("diff", `origin/${baseRef}...HEAD`));
+    const threeDot = () =>
+      parseDiffFiles(git("diff", `origin/${baseRef}...HEAD`));
     // Two-dot compares the two end trees directly — no history walk — so it works
     // on ANY clone depth (down to depth 1). It's a *superset* of the three-dot
     // diff (it also shows changes the base picked up since the PR forked), which
     // is a safe over-approximation for anchoring: the agent's findings sit on the
     // PR's own changed lines (⊆ three-dot ⊆ two-dot), and any stray off-diff
     // anchor is caught by the body-only POST retry.
-    const twoDot = () => parseDiffFiles(git("diff", `origin/${baseRef}`, "HEAD"));
+    const twoDot = () =>
+      parseDiffFiles(git("diff", `origin/${baseRef}`, "HEAD"));
 
     // Materialize origin/<base> as a real remote-tracking ref (a single-branch
     // clone's refspec only covers the PR branch, so a bare `fetch origin <base>`
     // updates FETCH_HEAD but may not create origin/<base>).
-    tryGit("fetch", "origin", `+refs/heads/${baseRef}:refs/remotes/origin/${baseRef}`, "--depth", "50");
+    tryGit(
+      "fetch",
+      "origin",
+      `+refs/heads/${baseRef}:refs/remotes/origin/${baseRef}`,
+      "--depth",
+      "50",
+    );
     try {
       return threeDot();
     } catch (err) {
@@ -857,7 +1013,12 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       // `--unshallow` no-ops-then-throws on an already-complete repo, so both
       // are best-effort; we only pay the full fetch on this rare failure path.
       tryGit("fetch", "origin", "--unshallow"); // deepen the PR branch (the single-branch refspec)
-      tryGit("fetch", "origin", `+refs/heads/${baseRef}:refs/remotes/origin/${baseRef}`, "--unshallow"); // deepen base
+      tryGit(
+        "fetch",
+        "origin",
+        `+refs/heads/${baseRef}:refs/remotes/origin/${baseRef}`,
+        "--unshallow",
+      ); // deepen base
       try {
         return threeDot();
       } catch (err2) {
@@ -875,7 +1036,10 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
   }
 
   private diffFailed(msg: string): null {
-    log.warn("Could not compute commentable diff; demoting all findings to the body", { reason: msg });
+    log.warn(
+      "Could not compute commentable diff; demoting all findings to the body",
+      { reason: msg },
+    );
     return null;
   }
 
@@ -891,7 +1055,9 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     prNumber: number,
   ): Promise<DiffFile[] | null> {
     try {
-      return parseDiffFiles(await github.getPullRequestDiff(owner, repo, prNumber));
+      return parseDiffFiles(
+        await github.getPullRequestDiff(owner, repo, prNumber),
+      );
     } catch (err) {
       return this.diffFailed(err instanceof Error ? err.message : String(err));
     }
@@ -899,6 +1065,9 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
 }
 
 /** Build the app-registered `post-review` phase-type handler for a run. */
-export function makePostReviewHandler(run: PostReviewRunScope, reporter: PhaseReporter): PhaseTypeHandler {
+export function makePostReviewHandler(
+  run: PostReviewRunScope,
+  reporter: PhaseReporter,
+): PhaseTypeHandler {
   return new GitHubPostReviewHandler(run, reporter);
 }

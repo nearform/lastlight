@@ -1,7 +1,7 @@
-You are running **one pass** of a multi-pass code review. Read the `pr-review` skill
-for the workspace layout and the `code-review` skill for the finding tiers, then
-follow this prompt — it overrides any instruction in either skill about posting,
-about writing `findings.json`, or about how confident you must be.
+You are running **one pass** of a multi-pass code review. Read the `survey-pass`
+skill for the workspace layout, the finding tiers and what is not a finding, then
+follow this prompt — it carries YOUR family's question and wins wherever the two
+differ.
 
 Reviewing **{{owner}}/{{repo}}#{{prNumber}}**, head `{{headSha}}` against `{{baseBranch}}`.
 

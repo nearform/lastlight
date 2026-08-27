@@ -294,7 +294,7 @@ extend when a deployment needs a step the engine should not know about.
   type: fanout
   depends_on: [seed]
   trigger_rule: all_done
-  skills: [pr-review, code-review]
+  skills: [survey-pass]
   model: "{{models.review-survey}}"
   max_concurrent: { from: surveyConcurrency, default: 6 }
   on_branch_soft_failure: { retries: 1, then: complete }
@@ -305,7 +305,7 @@ extend when a deployment needs a step the engine should not know about.
       until_bash: lastlight-facts discharge --dir .lastlight/pr-review --family contract
     - name: security
       prompt: prompts/survey-security.md
-      skills: [pr-review, code-review, security-review]
+      context_file: .lastlight/pr-review/obligations/security.md
 ```
 
 Each branch inherits the phase's `prompt` / `skills` / `model` /
@@ -313,6 +313,16 @@ Each branch inherits the phase's `prompt` / `skills` / `model` /
 keys**, so they are alphanumeric-with-hyphens (no underscores, which
 `PhaseRef` uses as its separator), must be unique, and may not end in
 the reserved `-retry` / `-check` suffixes.
+
+**A branch's `skills` REPLACES the phase's — it does not union with it**
+(`branchPhase()` in `handlers/fanout.ts`), so an override has to re-list
+everything it still wants. `pr-review.yaml` no longer uses one: the fan-out
+stages the single `survey-pass` skill on every branch, and the family's
+question lives in its prompt. That is LD9 — specialists separated by *question*,
+not by tool access — and it is also what keeps the shared prompt head
+byte-identical across the five branches, so they share one provider-side cached
+prefix. The `security` branch used to override with a third skill and voided
+that for itself.
 
 (The `model:` line above is why `pr-review.yaml`'s downstream `adjudicate`
 phase carries its own key the guarded way —

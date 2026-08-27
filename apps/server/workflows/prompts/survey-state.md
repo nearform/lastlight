@@ -1,7 +1,7 @@
-You are running **one pass** of a multi-pass code review. Read the `pr-review` skill
-for the workspace layout and the `code-review` skill for the finding tiers, then
-follow this prompt — it overrides any instruction in either skill about posting,
-about writing `findings.json`, or about how confident you must be.
+You are running **one pass** of a multi-pass code review. Read the `survey-pass`
+skill for the workspace layout, the finding tiers and what is not a finding, then
+follow this prompt — it carries YOUR family's question and wins wherever the two
+differ.
 
 Reviewing **{{owner}}/{{repo}}#{{prNumber}}**, head `{{headSha}}` against `{{baseBranch}}`.
 
@@ -51,6 +51,14 @@ finding live in the code the diff touches but does not display.**
 ## Your family: `state`
 
 A changed symbol is used at sites the diff did not touch. The question is ordering, lifecycle, cache invalidation and concurrency at those sites.
+
+**The axes you own: Edge cases, concurrency, and Regression risk over time.**
+Empty and null inputs, boundaries, error paths, re-entrancy, retries, partial
+failure — and, above all, what the code does on the SECOND call rather than the
+first. An existing caller of a changed function whose behaviour ripples is
+yours; so is a cache nobody invalidates and a guard that fires once.
+
+The other axes belong to other passes. Do not spend this one on them.
 
 Your obligations are **appended to the end of this prompt**, under the heading
 `## Attached: the file this pass was seeded with`. The harness read them out of

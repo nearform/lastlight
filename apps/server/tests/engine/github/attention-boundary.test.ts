@@ -17,6 +17,7 @@ import {
   buildReview,
   renderDemotedGrouped,
   tierFindings,
+  unknownSeverity,
   type AttentionBoundary,
   type ReviewFinding,
 } from "#src/engine/github/review-poster.js";
@@ -33,8 +34,72 @@ const COMMENTABLE = new Map([
 ]);
 
 function f(over: Partial<ReviewFinding> & { line: number }): ReviewFinding {
-  return { path: "src/a.ts", severity: "Important", title: "t", body: "b", ...over };
+  return {
+    path: "src/a.ts",
+    severity: "Important",
+    title: "t",
+    body: "b",
+    ...over,
+  };
 }
+
+describe("unknownSeverity — the drift nothing else records", () => {
+  // Severity is written by prompts, in more than one schema, and nothing
+  // between them normalises it. `rankOf` maps anything it does not recognise to
+  // Important via `?? 2`, so a prompt that starts emitting `High` produces a
+  // review that looks entirely ordinary and ranks its findings wrongly. This
+  // predicate is the only thing that can tell.
+
+  it("is FALSE for the vocabulary the ranker knows, in any case", () => {
+    for (const severity of [
+      "Critical",
+      "critical",
+      "IMPORTANT",
+      "Minor",
+      " Important ",
+    ]) {
+      expect(unknownSeverity(f({ line: 1, severity })), severity).toBe(false);
+    }
+  });
+
+  it("is FALSE for an absent or empty severity — that is the documented default", () => {
+    // The shipped reviewer writes no severity at all and ranks Important on
+    // purpose. Warning about it would fire on every run of the configuration
+    // that is not opted into the pipeline, which is how a drift detector gets
+    // muted.
+    expect(unknownSeverity(f({ line: 1, severity: undefined }))).toBe(false);
+    expect(unknownSeverity(f({ line: 1, severity: "" }))).toBe(false);
+    expect(unknownSeverity(f({ line: 1, severity: "   " }))).toBe(false);
+  });
+
+  it("is TRUE for a spelling from some other vocabulary", () => {
+    for (const severity of [
+      "High",
+      "Medium",
+      "Low",
+      "Blocker",
+      "p1",
+      "warning",
+    ]) {
+      expect(unknownSeverity(f({ line: 1, severity })), severity).toBe(true);
+    }
+  });
+
+  it("does not change how the finding is TIERED — it only reports", () => {
+    // The finding is real and still posts. Suppressing it on a severity nobody
+    // defined would turn a vocabulary drift into silent recall loss, which is
+    // strictly worse than ranking it wrongly.
+    const odd = f({
+      line: 1,
+      severity: "Blocker",
+      confidence: 0.9,
+      family: "contract",
+    });
+    const tiered = tierFindings([odd], COMMENTABLE, BOUNDARY);
+    expect(tiered.inline).toHaveLength(1);
+    expect(tiered.internal).toHaveLength(0);
+  });
+});
 
 describe("tierFindings — AC1b, nothing is lost past the budget", () => {
   it("puts 8 inline and the other 12 in the BODY, not nowhere", () => {
@@ -98,14 +163,21 @@ describe("tierFindings — an absent confidence never demotes and never suppress
   it("keeps a finding with no confidence inline even under a high family bar", () => {
     // The failure this guards: every finding today's shipped reviewer writes
     // carries no `confidence`. Reading absence as 0 would delete all of them.
-    const t = tierFindings([f({ line: 1, family: "tests" })], COMMENTABLE, BOUNDARY);
+    const t = tierFindings(
+      [f({ line: 1, family: "tests" })],
+      COMMENTABLE,
+      BOUNDARY,
+    );
     expect(t.inline).toHaveLength(1);
     expect(t.internal).toHaveLength(0);
   });
 
   it("ranks an unscored finding by its severity alone", () => {
     const t = tierFindings(
-      [f({ line: 1, severity: "Critical", title: "unscored" }), f({ line: 2, severity: "Critical", confidence: 0.4, title: "scored" })],
+      [
+        f({ line: 1, severity: "Critical", title: "unscored" }),
+        f({ line: 2, severity: "Critical", confidence: 0.4, title: "scored" }),
+      ],
       COMMENTABLE,
       { ...BOUNDARY, maxInlineComments: 1 },
     );
@@ -113,12 +185,20 @@ describe("tierFindings — an absent confidence never demotes and never suppress
   });
 
   it("applies no bar at all to a finding with no family", () => {
-    const t = tierFindings([f({ line: 1, confidence: 0.2 })], COMMENTABLE, BOUNDARY);
+    const t = tierFindings(
+      [f({ line: 1, confidence: 0.2 })],
+      COMMENTABLE,
+      BOUNDARY,
+    );
     expect(t.inline).toHaveLength(1);
   });
 
   it("applies no bar to a family the operator did not configure", () => {
-    const t = tierFindings([f({ line: 1, family: "state", confidence: 0.2 })], COMMENTABLE, BOUNDARY);
+    const t = tierFindings(
+      [f({ line: 1, family: "state", confidence: 0.2 })],
+      COMMENTABLE,
+      BOUNDARY,
+    );
     expect(t.inline).toHaveLength(1);
   });
 });
@@ -143,7 +223,11 @@ describe("tierFindings — the internal tier", () => {
     // Order matters: "is this worth a human's attention at all" is asked before
     // "can GitHub anchor it". Otherwise the body fills with sub-floor findings
     // purely because they happened to be off-diff.
-    const t = tierFindings([f({ line: 999, confidence: 0.05 })], COMMENTABLE, BOUNDARY);
+    const t = tierFindings(
+      [f({ line: 999, confidence: 0.05 })],
+      COMMENTABLE,
+      BOUNDARY,
+    );
     expect(t.internal).toHaveLength(1);
     expect(t.body).toHaveLength(0);
   });
@@ -156,7 +240,11 @@ describe("tierFindings — an EXPLICIT tier, which is a cross-package seam", () 
     // A confidence-only internal rule would have posted every one of them,
     // turning "we recorded what we could not adjudicate" into "we published
     // what we could not adjudicate" — the exact inversion of the floor's job.
-    const t = tierFindings([f({ line: 1, tier: "internal", title: "repaired" })], COMMENTABLE, BOUNDARY);
+    const t = tierFindings(
+      [f({ line: 1, tier: "internal", title: "repaired" })],
+      COMMENTABLE,
+      BOUNDARY,
+    );
     expect(t.internal.map((x) => x.finding.title)).toEqual(["repaired"]);
     expect(t.internal.map((x) => x.reason)).toEqual(["adjudicated"]);
     expect(t.inline).toHaveLength(0);
@@ -164,7 +252,11 @@ describe("tierFindings — an EXPLICIT tier, which is a cross-package seam", () 
   });
 
   it("obeys an explicit `body`, and labels it as the adjudicator's own call", () => {
-    const t = tierFindings([f({ line: 1, tier: "body" })], COMMENTABLE, BOUNDARY);
+    const t = tierFindings(
+      [f({ line: 1, tier: "body" })],
+      COMMENTABLE,
+      BOUNDARY,
+    );
     expect(t.body.map((d) => d.reason)).toEqual(["adjudicated"]);
     expect(t.inline).toHaveLength(0);
   });
@@ -174,7 +266,11 @@ describe("tierFindings — an EXPLICIT tier, which is a cross-package seam", () 
     // finding that is off-diff cannot be commented on at all (GitHub 422s), and
     // a document that could grant itself inline slots would make the attention
     // budget advisory.
-    const off = tierFindings([f({ line: 999, tier: "inline" })], COMMENTABLE, BOUNDARY);
+    const off = tierFindings(
+      [f({ line: 999, tier: "inline" })],
+      COMMENTABLE,
+      BOUNDARY,
+    );
     expect(off.body.map((d) => d.reason)).toEqual(["off-diff"]);
 
     const many = tierFindings(
@@ -187,7 +283,11 @@ describe("tierFindings — an EXPLICIT tier, which is a cross-package seam", () 
   });
 
   it("still applies the floor to an untagged low-confidence finding", () => {
-    const t = tierFindings([f({ line: 1, confidence: 0.01 })], COMMENTABLE, BOUNDARY);
+    const t = tierFindings(
+      [f({ line: 1, confidence: 0.01 })],
+      COMMENTABLE,
+      BOUNDARY,
+    );
     expect(t.internal).toHaveLength(1);
   });
 });
@@ -213,12 +313,21 @@ describe("tierFindings — findings whose evidence is entirely clean discharges"
 
   it("records a finding built only from clean discharges, and does not post it", () => {
     const t = tierFindings(
-      [f({ line: 1, confidence: 0.95, hypotheses: ["contract-002"], title: "anti" })],
+      [
+        f({
+          line: 1,
+          confidence: 0.95,
+          hypotheses: ["contract-002"],
+          title: "anti",
+        }),
+      ],
       COMMENTABLE,
       BOUNDARY,
       CLEAN,
     );
-    expect(t.internal.map((x) => [x.finding.title, x.reason])).toEqual([["anti", "clean-discharge"]]);
+    expect(t.internal.map((x) => [x.finding.title, x.reason])).toEqual([
+      ["anti", "clean-discharge"],
+    ]);
     expect(t.inline).toHaveLength(0);
     expect(t.body).toHaveLength(0);
   });
@@ -227,7 +336,13 @@ describe("tierFindings — findings whose evidence is entirely clean discharges"
     // 1.00 confidence, no family bar, on-diff: every existing gate passes it.
     // Only its provenance says it reports nothing.
     const t = tierFindings(
-      [f({ line: 1, confidence: 1, hypotheses: ["contract-002", "contract-003"] })],
+      [
+        f({
+          line: 1,
+          confidence: 1,
+          hypotheses: ["contract-002", "contract-003"],
+        }),
+      ],
       COMMENTABLE,
       BOUNDARY,
       CLEAN,
@@ -240,7 +355,10 @@ describe("tierFindings — findings whose evidence is entirely clean discharges"
     // They are generated downstream of the surveys, or are the shipped
     // reviewer's own, and nothing about them is knowable from an empty list.
     const t = tierFindings(
-      [f({ line: 1, title: "none" }), f({ line: 2, hypotheses: [], title: "empty" })],
+      [
+        f({ line: 1, title: "none" }),
+        f({ line: 2, hypotheses: [], title: "empty" }),
+      ],
       COMMENTABLE,
       BOUNDARY,
       CLEAN,
@@ -251,7 +369,13 @@ describe("tierFindings — findings whose evidence is entirely clean discharges"
 
   it("does NOT touch a finding citing an id that resolves to no row", () => {
     const t = tierFindings(
-      [f({ line: 1, hypotheses: ["contract-002", "ghost-001"], title: "unresolvable" })],
+      [
+        f({
+          line: 1,
+          hypotheses: ["contract-002", "ghost-001"],
+          title: "unresolvable",
+        }),
+      ],
       COMMENTABLE,
       BOUNDARY,
       CLEAN,
@@ -265,7 +389,13 @@ describe("tierFindings — findings whose evidence is entirely clean discharges"
     // it is not a clean QUOTE. Either way the finding is not an anti-finding,
     // and demoting it would be the recall loss this boundary exists to avoid.
     const t = tierFindings(
-      [f({ line: 1, hypotheses: ["contract-002", "contract-009"], title: "mixed" })],
+      [
+        f({
+          line: 1,
+          hypotheses: ["contract-002", "contract-009"],
+          title: "mixed",
+        }),
+      ],
       COMMENTABLE,
       BOUNDARY,
       CLEAN,
@@ -275,7 +405,9 @@ describe("tierFindings — findings whose evidence is entirely clean discharges"
   });
 
   it("is inert with no clean set and with an empty one — no pipeline, no change", () => {
-    const findings = [f({ line: 1, hypotheses: ["contract-002"], title: "anti" })];
+    const findings = [
+      f({ line: 1, hypotheses: ["contract-002"], title: "anti" }),
+    ];
     for (const clean of [undefined, new Set<string>()]) {
       const t = tierFindings(findings, COMMENTABLE, BOUNDARY, clean);
       expect(t.internal, String(clean)).toHaveLength(0);
@@ -379,9 +511,19 @@ describe("tierFindings — the body budget (maxBodyComments)", () => {
     const t = tierFindings(
       [
         f({ line: 999, severity: "Minor", title: "minor" }),
-        f({ line: 999, severity: "Critical", confidence: 0.9, title: "critHigh" }),
+        f({
+          line: 999,
+          severity: "Critical",
+          confidence: 0.9,
+          title: "critHigh",
+        }),
         f({ line: 999, severity: "Important", title: "imp" }),
-        f({ line: 999, severity: "Critical", confidence: 0.5, title: "critLow" }),
+        f({
+          line: 999,
+          severity: "Critical",
+          confidence: 0.5,
+          title: "critLow",
+        }),
       ],
       COMMENTABLE,
       { ...BOUNDARY, maxBodyComments: 2 },
@@ -399,17 +541,26 @@ describe("tierFindings — the body budget (maxBodyComments)", () => {
     const t = tierFindings(
       [
         f({ line: 999, severity: "Important", title: "unscored" }),
-        f({ line: 999, severity: "Important", confidence: 0.9, title: "scored" }),
+        f({
+          line: 999,
+          severity: "Important",
+          confidence: 0.9,
+          title: "scored",
+        }),
       ],
       COMMENTABLE,
       { ...BOUNDARY, maxBodyComments: 1 },
     );
     expect(t.body.map((d) => d.finding.title)).toEqual(["unscored"]);
-    expect(t.internal.map((x) => [x.finding.title, x.reason])).toEqual([["scored", "body-budget"]]);
+    expect(t.internal.map((x) => [x.finding.title, x.reason])).toEqual([
+      ["scored", "body-budget"],
+    ]);
   });
 
   it("inline overflow under a cap of 0 goes internal, not to a body the cap just closed", () => {
-    const findings = Array.from({ length: 3 }, (_, i) => f({ line: i + 1, title: `t${i}` }));
+    const findings = Array.from({ length: 3 }, (_, i) =>
+      f({ line: i + 1, title: `t${i}` }),
+    );
     const t = tierFindings(findings, COMMENTABLE, {
       ...BOUNDARY,
       maxInlineComments: 1,
@@ -423,7 +574,10 @@ describe("tierFindings — the body budget (maxBodyComments)", () => {
 
   it("does not relabel findings that were internal for a more specific reason", () => {
     const t = tierFindings(
-      [f({ line: 1, confidence: 0.01, title: "dark" }), f({ line: 999, title: "off" })],
+      [
+        f({ line: 1, confidence: 0.01, title: "dark" }),
+        f({ line: 999, title: "off" }),
+      ],
       COMMENTABLE,
       { ...BOUNDARY, maxBodyComments: 0 },
     );
@@ -438,9 +592,15 @@ describe("buildReview + the 422 retry — the body budget's withholding is real"
   it("renders no 'Additional findings' section at all under a cap of 0", () => {
     const doc = {
       summary: "s",
-      findings: [f({ line: 999, title: "capped", body: "SHOULD NOT APPEAR" }), f({ line: 1, title: "in" })],
+      findings: [
+        f({ line: 999, title: "capped", body: "SHOULD NOT APPEAR" }),
+        f({ line: 1, title: "in" }),
+      ],
     };
-    const r = buildReview(doc, COMMENTABLE, { ...BOUNDARY, maxBodyComments: 0 });
+    const r = buildReview(doc, COMMENTABLE, {
+      ...BOUNDARY,
+      maxBodyComments: 0,
+    });
     expect(r.body).toBe("s");
     expect(r.inlineCount).toBe(1);
     expect(r.demotedCount).toBe(0);
@@ -451,9 +611,15 @@ describe("buildReview + the 422 retry — the body budget's withholding is real"
   it("the body-only retry cannot republish what the body budget withheld", () => {
     const doc = {
       summary: "s",
-      findings: [f({ line: 1, title: "posted" }), f({ line: 999, title: "capped" })],
+      findings: [
+        f({ line: 1, title: "posted" }),
+        f({ line: 999, title: "capped" }),
+      ],
     };
-    const tiered = tierFindings(doc.findings, COMMENTABLE, { ...BOUNDARY, maxBodyComments: 0 });
+    const tiered = tierFindings(doc.findings, COMMENTABLE, {
+      ...BOUNDARY,
+      maxBodyComments: 0,
+    });
     const retry = buildBodyOnlyReview(doc, tiered);
     expect(retry.body).toContain("posted");
     expect(retry.body).not.toContain("capped");
@@ -465,11 +631,26 @@ describe("buildReview — an anti-finding never reaches the review text", () => 
     const doc = {
       summary: "s",
       findings: [
-        f({ line: 1, hypotheses: ["contract-002"], title: "anti", body: "SHOULD NOT APPEAR" }),
-        f({ line: 2, hypotheses: ["contract-009"], title: "real", body: "keep" }),
+        f({
+          line: 1,
+          hypotheses: ["contract-002"],
+          title: "anti",
+          body: "SHOULD NOT APPEAR",
+        }),
+        f({
+          line: 2,
+          hypotheses: ["contract-009"],
+          title: "real",
+          body: "keep",
+        }),
       ],
     };
-    const after = buildReview(doc, COMMENTABLE, BOUNDARY, new Set(["contract-002"]));
+    const after = buildReview(
+      doc,
+      COMMENTABLE,
+      BOUNDARY,
+      new Set(["contract-002"]),
+    );
     expect(after.internalCount).toBe(1);
     expect(after.inlineCount).toBe(1);
     expect(after.body).not.toContain("SHOULD NOT APPEAR");
@@ -479,8 +660,16 @@ describe("buildReview — an anti-finding never reaches the review text", () => 
   it("ignores the clean set entirely when no boundary is configured", () => {
     // The pre-WP6b branch: anchorability is the only question, so a deployment
     // that never opted in cannot be moved by a hypotheses directory.
-    const doc = { summary: "s", findings: [f({ line: 1, hypotheses: ["contract-002"], title: "anti" })] };
-    const before = buildReview(doc, COMMENTABLE, undefined, new Set(["contract-002"]));
+    const doc = {
+      summary: "s",
+      findings: [f({ line: 1, hypotheses: ["contract-002"], title: "anti" })],
+    };
+    const before = buildReview(
+      doc,
+      COMMENTABLE,
+      undefined,
+      new Set(["contract-002"]),
+    );
     expect(before.inlineCount).toBe(1);
     expect(before.internalCount).toBe(0);
   });
@@ -500,7 +689,12 @@ describe("buildBodyOnlyReview — the 422 retry must not republish the internal 
         f({ line: 3, title: "repaired", tier: "internal" as const }),
       ],
     };
-    const tiered = tierFindings(doc.findings, COMMENTABLE, BOUNDARY, new Set(["contract-002"]));
+    const tiered = tierFindings(
+      doc.findings,
+      COMMENTABLE,
+      BOUNDARY,
+      new Set(["contract-002"]),
+    );
     const retry = buildBodyOnlyReview(doc, tiered);
     expect(retry.demotedCount).toBe(1);
     expect(retry.body).toContain("posted");
@@ -509,14 +703,20 @@ describe("buildBodyOnlyReview — the 422 retry must not republish the internal 
   });
 
   it("is byte-identical to today when no tiering is supplied", () => {
-    const doc = { summary: "s", findings: [f({ line: 1, title: "a" }), f({ line: 2, title: "b" })] };
+    const doc = {
+      summary: "s",
+      findings: [f({ line: 1, title: "a" }), f({ line: 2, title: "b" })],
+    };
     expect(buildBodyOnlyReview(doc).demotedCount).toBe(2);
   });
 });
 
 describe("buildReview — the boundary is opt-in, and absent means today", () => {
   it("is byte-identical to the pre-WP6b behaviour with no boundary", () => {
-    const doc = { summary: "s", findings: Array.from({ length: 20 }, (_, i) => f({ line: i + 1 })) };
+    const doc = {
+      summary: "s",
+      findings: Array.from({ length: 20 }, (_, i) => f({ line: i + 1 })),
+    };
     const before = buildReview(doc, COMMENTABLE);
     expect(before.inlineCount).toBe(20);
     expect(before.demotedCount).toBe(0);
@@ -525,7 +725,10 @@ describe("buildReview — the boundary is opt-in, and absent means today", () =>
   });
 
   it("caps and groups once a boundary is supplied", () => {
-    const doc = { summary: "s", findings: Array.from({ length: 20 }, (_, i) => f({ line: i + 1 })) };
+    const doc = {
+      summary: "s",
+      findings: Array.from({ length: 20 }, (_, i) => f({ line: i + 1 })),
+    };
     const after = buildReview(doc, COMMENTABLE, BOUNDARY);
     expect(after.inlineCount).toBe(8);
     expect(after.demotedCount).toBe(12);
@@ -536,7 +739,14 @@ describe("buildReview — the boundary is opt-in, and absent means today", () =>
   it("never posts an internal-tier finding, inline or in the body", () => {
     const doc = {
       summary: "s",
-      findings: [f({ line: 1, confidence: 0.01, title: "dark", body: "SHOULD NOT APPEAR" })],
+      findings: [
+        f({
+          line: 1,
+          confidence: 0.01,
+          title: "dark",
+          body: "SHOULD NOT APPEAR",
+        }),
+      ],
     };
     const after = buildReview(doc, COMMENTABLE, BOUNDARY);
     expect(after.internalCount).toBe(1);
@@ -557,12 +767,18 @@ describe("renderDemotedGrouped — three causes must not share one heading", () 
     expect(out).toContain("Below the reporting confidence bar");
     expect(out).toContain("Beyond the inline comment budget");
     // Ordered off-diff → below-threshold → overflow regardless of input order.
-    expect(out.indexOf("Outside this PR's diff")).toBeLessThan(out.indexOf("Below the reporting"));
-    expect(out.indexOf("Below the reporting")).toBeLessThan(out.indexOf("Beyond the inline"));
+    expect(out.indexOf("Outside this PR's diff")).toBeLessThan(
+      out.indexOf("Below the reporting"),
+    );
+    expect(out.indexOf("Below the reporting")).toBeLessThan(
+      out.indexOf("Beyond the inline"),
+    );
   });
 
   it("omits a group with no members rather than printing an empty heading", () => {
-    const out = renderDemotedGrouped([{ finding: f({ line: 1 }), reason: "overflow" }]);
+    const out = renderDemotedGrouped([
+      { finding: f({ line: 1 }), reason: "overflow" },
+    ]);
     expect(out).not.toContain("Outside this PR's diff");
     expect(out).toContain("Beyond the inline comment budget");
   });

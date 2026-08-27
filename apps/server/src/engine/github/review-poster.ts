@@ -223,11 +223,26 @@ export function parseDiffFiles(diff: string): DiffFile[] {
       }
     } else if (hunk && file) {
       if (line.startsWith("+")) {
-        hunk.lines.push({ prefix: "+", text: line.slice(1), left: null, right: right++ });
+        hunk.lines.push({
+          prefix: "+",
+          text: line.slice(1),
+          left: null,
+          right: right++,
+        });
       } else if (line.startsWith("-")) {
-        hunk.lines.push({ prefix: "-", text: line.slice(1), left: left++, right: null });
+        hunk.lines.push({
+          prefix: "-",
+          text: line.slice(1),
+          left: left++,
+          right: null,
+        });
       } else if (line.startsWith(" ")) {
-        hunk.lines.push({ prefix: " ", text: line.slice(1), left: left++, right: right++ });
+        hunk.lines.push({
+          prefix: " ",
+          text: line.slice(1),
+          left: left++,
+          right: right++,
+        });
       } else if (line.startsWith("\\")) {
         /* "\ No newline at end of file" */
       } else {
@@ -305,7 +320,10 @@ interface HayLine {
  * hence one haystack per HUNK rather than per file, so a match can never span
  * the gap between two hunks and claim lines that are not adjacent.
  */
-function findRuns(hay: HayLine[], needle: string[]): { start: number; end: number }[] {
+function findRuns(
+  hay: HayLine[],
+  needle: string[],
+): { start: number; end: number }[] {
   const out: { start: number; end: number }[] = [];
   if (needle.length === 0 || hay.length < needle.length) return out;
   for (let i = 0; i + needle.length <= hay.length; i++) {
@@ -316,19 +334,24 @@ function findRuns(hay: HayLine[], needle: string[]): { start: number; end: numbe
         break;
       }
     }
-    if (ok) out.push({ start: hay[i]!.line, end: hay[i + needle.length - 1]!.line });
+    if (ok)
+      out.push({ start: hay[i]!.line, end: hay[i + needle.length - 1]!.line });
   }
   return out;
 }
 
 /** The new-side (context + added) view of a hunk, in new-file line numbers. */
 function newSide(hunk: DiffHunk): HayLine[] {
-  return hunk.lines.filter((l) => l.right !== null).map((l) => ({ text: l.text, line: l.right! }));
+  return hunk.lines
+    .filter((l) => l.right !== null)
+    .map((l) => ({ text: l.text, line: l.right! }));
 }
 
 /** The old-side (context + removed) view of a hunk, in old-file line numbers. */
 function oldSide(hunk: DiffHunk): HayLine[] {
-  return hunk.lines.filter((l) => l.left !== null).map((l) => ({ text: l.text, line: l.left! }));
+  return hunk.lines
+    .filter((l) => l.left !== null)
+    .map((l) => ({ text: l.text, line: l.left! }));
 }
 
 /**
@@ -337,7 +360,10 @@ function oldSide(hunk: DiffHunk): HayLine[] {
  * wrong by a little, which is the whole premise of this cascade. Across files
  * there is no such signal, which is why step 3 requires uniqueness instead.
  */
-function nearest(runs: { start: number; end: number }[], advisory: number | undefined) {
+function nearest(
+  runs: { start: number; end: number }[],
+  advisory: number | undefined,
+) {
   if (runs.length <= 1 || advisory === undefined) return runs[0];
   return runs.reduce((best, r) =>
     Math.abs(r.start - advisory) < Math.abs(best.start - advisory) ? r : best,
@@ -423,7 +449,8 @@ export function resolveAnchor(
   for (const file of files) {
     if (file.path === f.path) continue;
     for (const h of file.hunks) {
-      for (const run of findRuns(newSide(h), needle)) hits.push({ path: file.path, run });
+      for (const run of findRuns(newSide(h), needle))
+        hits.push({ path: file.path, run });
     }
   }
   if (hits.length === 1) {
@@ -458,7 +485,13 @@ export function anchorFindings(
   files: DiffFile[],
   readHeadFile?: (path: string) => string | null,
 ): { findings: ReviewFinding[]; stats: AnchorStats } {
-  const stats: AnchorStats = { hunk: 0, file: 0, relocated: 0, unresolved: 0, noExcerpt: 0 };
+  const stats: AnchorStats = {
+    hunk: 0,
+    file: 0,
+    relocated: 0,
+    unresolved: 0,
+    noExcerpt: 0,
+  };
   const out = findings.map((f) => {
     if (!f || !f.path) return f;
     if (!needleOf(f.existingCode).length) {
@@ -513,7 +546,8 @@ export function splitFindings(
   const inline: AnchoredFinding[] = [];
   const demoted: ReviewFinding[] = [];
   for (const f of findings) {
-    if (f && f.path && f.line && isAnchored(f, commentable)) inline.push(f as AnchoredFinding);
+    if (f && f.path && f.line && isAnchored(f, commentable))
+      inline.push(f as AnchoredFinding);
     else if (f) demoted.push(f);
   }
   return { inline, demoted };
@@ -529,7 +563,8 @@ export function splitFindings(
  * below-threshold AND overflowed-the-cap, under one heading, is a worse review
  * to read than the one it replaced (§D11).
  */
-export type DemotionReason = "off-diff" | "below-threshold" | "overflow" | "adjudicated";
+export type DemotionReason =
+  "off-diff" | "below-threshold" | "overflow" | "adjudicated";
 
 /** One demoted finding, carrying the reason it did not earn an inline comment. */
 export interface DemotedFinding {
@@ -557,7 +592,8 @@ export interface DemotedFinding {
  *   as a judgement about the finding's content, when it is a judgement about
  *   the reader's attention.
  */
-export type InternalReason = "adjudicated" | "clean-discharge" | "below-floor" | "body-budget";
+export type InternalReason =
+  "adjudicated" | "clean-discharge" | "below-floor" | "body-budget";
 
 /** One recorded-not-posted finding, carrying the reason it was withheld. */
 export interface InternalFinding {
@@ -610,7 +646,11 @@ export interface TieredFindings {
   internal: InternalFinding[];
 }
 
-const SEVERITY_WEIGHT: Record<string, number> = { critical: 3, important: 2, minor: 1 };
+const SEVERITY_WEIGHT: Record<string, number> = {
+  critical: 3,
+  important: 2,
+  minor: 1,
+};
 
 /**
  * Rank for the inline budget: confidence × severity.
@@ -621,10 +661,39 @@ const SEVERITY_WEIGHT: Record<string, number> = { critical: 3, important: 2, min
  * a silent re-ranking of the reviewer that ships, caused by a field it does not
  * know about. With 1.0 the ranking degenerates to severity order, which is what
  * a document with no confidences should get.
+ *
+ * **An UNRECOGNISED severity is warned about, not just defaulted.** Absence is a
+ * known state and ranks Important on purpose (above). A string nobody defined —
+ * `Blocker`, `High`, `p1` — is a different thing: it means some prompt is
+ * emitting a vocabulary this code does not share, and the `?? 2` below turns
+ * that into an ordinary-looking Important. See {@link unknownSeverity}.
  */
 function rankOf(f: ReviewFinding): number {
   const sev = SEVERITY_WEIGHT[(f.severity || "important").toLowerCase()] ?? 2;
   return (f.confidence ?? 1) * sev;
+}
+
+/**
+ * A severity string no {@link SEVERITY_WEIGHT} entry matches — see `rankOf`.
+ *
+ * A PREDICATE, not a warning, because this module does no I/O: every function
+ * here is a pure transform, which is what lets the anchoring and tiering rules
+ * be exercised directly rather than through an eval. `post-review.ts` owns the
+ * logger and calls this.
+ *
+ * **Absence is deliberately NOT unknown.** The shipped reviewer writes no
+ * severity at all, and ranking that Important is the documented default above,
+ * not a drift. What this catches is a spelling from some other vocabulary —
+ * severity is written by prompts, in more than one schema, and nothing between
+ * them normalises it.
+ */
+export function unknownSeverity(f: ReviewFinding): boolean {
+  const raw = f.severity?.trim();
+  return (
+    raw !== undefined &&
+    raw !== "" &&
+    SEVERITY_WEIGHT[raw.toLowerCase()] === undefined
+  );
 }
 
 /**
@@ -644,7 +713,10 @@ function rankOf(f: ReviewFinding): number {
  *   direction: a citation naming provenance that does not exist is exactly the
  *   case where the boundary must not act on the citation.
  */
-function allHypothesesClean(f: ReviewFinding, clean: ReadonlySet<string> | undefined): boolean {
+function allHypothesesClean(
+  f: ReviewFinding,
+  clean: ReadonlySet<string> | undefined,
+): boolean {
   if (!clean || clean.size === 0) return false;
   const ids = f.hypotheses;
   if (!Array.isArray(ids) || ids.length === 0) return false;
@@ -776,7 +848,9 @@ export function tierFindings(
     return { inline, body, internal };
   }
   const keep = new Set(
-    [...body].sort((a, b) => rankOf(b.finding) - rankOf(a.finding)).slice(0, Math.max(0, cap)),
+    [...body]
+      .sort((a, b) => rankOf(b.finding) - rankOf(a.finding))
+      .slice(0, Math.max(0, cap)),
   );
   const kept: DemotedFinding[] = [];
   for (const e of body) {
@@ -787,30 +861,37 @@ export function tierFindings(
 }
 
 function commentBody(f: ReviewFinding): string {
-  let b = "**[" + (f.severity || "Important") + "] " + (f.title || "") + "**\n\n" + (f.body || "");
-  if (f.suggestion) b += "\n\n" + FENCE + "suggestion\n" + f.suggestion + "\n" + FENCE;
+  let b =
+    "**[" +
+    (f.severity || "Important") +
+    "] " +
+    (f.title || "") +
+    "**\n\n" +
+    (f.body || "");
+  if (f.suggestion)
+    b += "\n\n" + FENCE + "suggestion\n" + f.suggestion + "\n" + FENCE;
   return b;
 }
 
 /** The bullet list itself — shared by the flat and the grouped renderings. */
 function renderDemotedItems(list: ReviewFinding[]): string {
   return list
-      .map(
-        (f) =>
-          "- **[" +
-          (f.severity || "Important") +
-          "] " +
-          (f.title || "") +
-          "** (" +
-          f.path +
-          // A finding the cascade could not place has no line, and `path:undefined`
-          // reads as a bug in the reviewer rather than as an honest "somewhere in
-          // this file". WP6a made `line` optional; this is where that surfaces.
-          (f.line ? ":" + f.line : "") +
-          ") — " +
-          (f.body || ""),
-      )
-      .join("\n");
+    .map(
+      (f) =>
+        "- **[" +
+        (f.severity || "Important") +
+        "] " +
+        (f.title || "") +
+        "** (" +
+        f.path +
+        // A finding the cascade could not place has no line, and `path:undefined`
+        // reads as a bug in the reviewer rather than as an honest "somewhere in
+        // this file". WP6a made `line` optional; this is where that surfaces.
+        (f.line ? ":" + f.line : "") +
+        ") — " +
+        (f.body || ""),
+    )
+    .join("\n");
 }
 
 /**
@@ -832,7 +913,8 @@ export function renderDemoted(list: ReviewFinding[]): string {
 const DEMOTION_LEAD: Record<DemotionReason, string> = {
   "off-diff": "_Outside this PR's diff — GitHub cannot anchor a comment here._",
   "below-threshold": "_Below the reporting confidence bar for their family._",
-  overflow: "_Beyond the inline comment budget, ranked by severity and confidence._",
+  overflow:
+    "_Beyond the inline comment budget, ranked by severity and confidence._",
   adjudicated: "_Reported here rather than inline by the adjudicating pass._",
 };
 
@@ -858,7 +940,11 @@ export function renderDemotedGrouped(entries: DemotedFinding[]): string {
   for (const reason of DEMOTION_ORDER) {
     const group = entries.filter((e) => e.reason === reason);
     if (!group.length) continue;
-    out.push("", DEMOTION_LEAD[reason], renderDemotedItems(group.map((e) => e.finding)));
+    out.push(
+      "",
+      DEMOTION_LEAD[reason],
+      renderDemotedItems(group.map((e) => e.finding)),
+    );
   }
   return out.join("\n");
 }
@@ -867,7 +953,12 @@ export function renderDemotedGrouped(entries: DemotedFinding[]): string {
 export function toInlineComments(list: AnchoredFinding[]): InlineComment[] {
   return list.map((f) => {
     const side: ReviewSide = f.side === "LEFT" ? "LEFT" : "RIGHT";
-    const c: InlineComment = { path: f.path, line: f.line, side, body: commentBody(f) };
+    const c: InlineComment = {
+      path: f.path,
+      line: f.line,
+      side,
+      body: commentBody(f),
+    };
     if (f.start_line) {
       c.start_line = f.start_line;
       c.start_side = side;
@@ -882,7 +973,9 @@ export function toInlineComments(list: AnchoredFinding[]): InlineComment[] {
  * Ordering is `fail` > `unknown` > `pass`, and only `fail` is load-bearing —
  * see {@link SplitVerdict} for why `unknown` must not block.
  */
-export function worstAxis(verdict: SplitVerdict | undefined): AxisVerdict | undefined {
+export function worstAxis(
+  verdict: SplitVerdict | undefined,
+): AxisVerdict | undefined {
   if (!verdict) return undefined;
   const axes = [verdict.spec, verdict.standards].filter(
     (v): v is AxisVerdict => v === "pass" || v === "fail" || v === "unknown",
@@ -924,7 +1017,8 @@ export function worstAxis(verdict: SplitVerdict | undefined): AxisVerdict | unde
 export function resolveEvent(doc: ReviewFindingsDoc): ReviewEvent {
   const findings = Array.isArray(doc.findings) ? doc.findings : [];
   const event = doc.event || (findings.length === 0 ? "APPROVE" : "COMMENT");
-  if (event === "APPROVE" && worstAxis(doc.verdict) === "fail") return "COMMENT";
+  if (event === "APPROVE" && worstAxis(doc.verdict) === "fail")
+    return "COMMENT";
   return event;
 }
 
@@ -978,7 +1072,10 @@ export function buildReview(
  * nobody decided on, reached by a failure in an unrelated request. Omitted ⇒
  * today's behaviour exactly, which is what every no-boundary caller gets.
  */
-export function buildBodyOnlyReview(doc: ReviewFindingsDoc, tiered?: TieredFindings): BuiltReview {
+export function buildBodyOnlyReview(
+  doc: ReviewFindingsDoc,
+  tiered?: TieredFindings,
+): BuiltReview {
   const findings = tiered
     ? [...tiered.inline, ...tiered.body.map((d) => d.finding)]
     : Array.isArray(doc.findings)

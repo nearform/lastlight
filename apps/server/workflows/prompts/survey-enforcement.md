@@ -1,7 +1,7 @@
-You are running **one pass** of a multi-pass code review. Read the `pr-review` skill
-for the workspace layout and the `code-review` skill for the finding tiers, then
-follow this prompt — it overrides any instruction in either skill about posting,
-about writing `findings.json`, or about how confident you must be.
+You are running **one pass** of a multi-pass code review. Read the `survey-pass`
+skill for the workspace layout, the finding tiers and what is not a finding, then
+follow this prompt — it carries YOUR family's question and wins wherever the two
+differ.
 
 Reviewing **{{owner}}/{{repo}}#{{prNumber}}**, head `{{headSha}}` against `{{baseBranch}}`.
 
@@ -51,6 +51,17 @@ finding live in the code the diff touches but does not display.**
 ## Your family: `enforcement`
 
 A value is defined on one side of a boundary. The question is who checks it on the other.
+
+**The axes you own: Correctness, and the multi-site half of Contracts.** A value
+that has to be enforced in more than one place — a limit, an expiry, a max-age,
+an auth check — is enforced nowhere if one side never checks it: a constant
+defined client-side and never compared server-side is not a limit, it is a
+suggestion. And a silent default or a dropped output for an input the code does
+not support is a correctness bug, not graceful handling — flag any unsupported
+case that is silently defaulted, skipped or omitted rather than warned-and-
+surfaced.
+
+The other axes belong to other passes. Do not spend this one on them.
 
 Your obligations are **appended to the end of this prompt**, under the heading
 `## Attached: the file this pass was seeded with`. The harness read them out of

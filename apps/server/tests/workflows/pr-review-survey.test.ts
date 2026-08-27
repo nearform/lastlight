@@ -164,15 +164,40 @@ describe("AC3 — five survey branches, five disjoint families", () => {
     );
   });
 
-  it("keeps the `security` skill set on the branch that needs it, and only there", () => {
-    // Four families inherit the phase's two skills; `security` adds a third.
-    // A fan-out that flattened the five onto one skill catalogue would hand
-    // `security-review` to every family — cheap-looking, and a change to what
-    // four of the five models see.
-    expect(surveyPhase().skills).toEqual(["pr-review", "code-review"]);
-    expect(surveyBranch("security").skills).toEqual(["pr-review", "code-review", "security-review"]);
-    for (const f of BRANCH_FAMILIES.filter((x) => x !== "security")) {
+  it("stages ONE skill, the same one on every branch", () => {
+    // LD9: specialists are separated by QUESTION, not by tool access. The
+    // question is the family prompt's; `survey-pass` is what the five share.
+    //
+    // This used to be `[pr-review, code-review]` on the phase plus a third skill
+    // on `security`, and both halves were wrong in the same direction. The two
+    // generic skills are 528 lines whose main contracts each family's prompt
+    // then countermands — `pr-review` is a procedure for PRODUCING a review and
+    // `code-review` is a ten-axis checklist handed whole to five specialists who
+    // own one or two axes each. `security-review` was a CRON procedure (clone
+    // the repo, file one dated summary issue, keep state across runs) staged on
+    // the one branch, and its only relevant part — the SDLC checklist — now
+    // lives in `prompts/survey-security.md`.
+    expect(surveyPhase().skills).toEqual(["survey-pass"]);
+  });
+
+  it("gives NO branch a skills override — the prompt head stays byte-identical", () => {
+    // The five requests share a provider-side cached prefix, which is keyed on
+    // the prefix and therefore on the skill catalogue. `security` used to void
+    // that for itself; nothing does now. It is also the confound that made the
+    // one branch with a bespoke skill the same branch with no obligations —
+    // freeform-vs-seeded and third-skill-vs-not moved together and no run could
+    // separate them.
+    for (const f of BRANCH_FAMILIES) {
       expect(surveyBranch(f).skills, f).toBeUndefined();
+    }
+  });
+
+  it("keeps `code-review` on the phases that are PRODUCING a review", () => {
+    // The subtraction is at the fan-out, not in the rubric. `falsify`, `review`
+    // and `adjudicate` are the last hands on the work before a human reads it,
+    // which is exactly where the precision gate is supposed to fire.
+    for (const name of ["falsify", "review", "adjudicate"]) {
+      expect(byName.get(name)?.skills, name).toContain("code-review");
     }
   });
 

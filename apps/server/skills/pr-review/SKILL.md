@@ -276,7 +276,15 @@ Rules:
   cannot be found is demoted to the summary body — nothing is lost, but an inline
   comment at the defect site is worth much more, so copy carefully rather than
   paraphrasing.
-- `severity` is `Critical` or `Important` only.
+- `severity` is `Critical` or `Important` only. **`Critical` needs a trust
+  boundary, not a category**: data loss, a breaking change, silent
+  data-dropping, or a security issue where you can name the boundary the input
+  crosses AND a capability its supplier does not already have. A local tool
+  parsing a file the invoking user wrote is robustness, not a boundary — the
+  supplier already holds every capability the finding would grant. Everything
+  else that is worth posting is `Important`. (Stated here rather than
+  cross-referenced: this skill is `chat: true` and is read in threads where
+  `code-review` is not staged. Same rule, same words — change both together.)
 - `suggestion` is optional — include it only when a concrete one-to-few-line fix
   is obvious. It must be the exact replacement text for the anchored line(s),
   nothing else; GitHub renders it as an applyable suggestion.

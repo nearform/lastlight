@@ -1,7 +1,7 @@
-You are running **one pass** of a multi-pass code review. Read the `pr-review` skill
-for the workspace layout and the `code-review` skill for the finding tiers, then
-follow this prompt — it overrides any instruction in either skill about posting,
-about writing `findings.json`, or about how confident you must be.
+You are running **one pass** of a multi-pass code review. Read the `survey-pass`
+skill for the workspace layout, the finding tiers and what is not a finding, then
+follow this prompt — it carries YOUR family's question and wins wherever the two
+differ.
 
 Reviewing **{{owner}}/{{repo}}#{{prNumber}}**, head `{{headSha}}` against `{{baseBranch}}`.
 
@@ -51,6 +51,18 @@ finding live in the code the diff touches but does not display.**
 ## Your family: `contract`
 
 A producer's exported shape moved. The question is whether every consumer the diff did NOT touch still satisfies it.
+
+**The axes you own: Contracts and Regression risk.** Whenever the diff changes
+what a unit produces or accepts — a return shape, a field name, an enum value,
+an event payload, a header, a status code, a units convention, a nullability, an
+ordering guarantee — grep for the consumers and READ them, including consumers
+the diff does not touch. Then state the two sides explicitly: *producer now emits
+X; consumer at `path:line` still reads Y*. A mismatch is the single highest-value
+thing a review catches, because it is invisible in the diff — each side looks
+correct alone. If the change spans modules and you have not opened the other
+side, you have not finished this pass.
+
+The other axes belong to other passes. Do not spend this one on them.
 
 Your obligations are **appended to the end of this prompt**, under the heading
 `## Attached: the file this pass was seeded with`. The harness read them out of

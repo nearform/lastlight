@@ -98,8 +98,22 @@ Severity decides how hard you must work to refute, not how sure you must feel:
 Categorise every finding into exactly one tier. **Only Critical and Important
 are posted** (see Precision first):
 
-- **Critical** — security issues, data loss, breaking changes, silent
-  data-dropping (see Correctness below). Blocks merge.
+- **Critical** — data loss, breaking changes, silent data-dropping (see
+  Correctness below), or a security issue **that crosses a trust boundary**.
+  Blocks merge.
+
+  Membership in the security *category* is not sufficient, and this is the one
+  place the rubric says so. Name the boundary the input crosses **and** a
+  capability its supplier does not already have. A local CLI parsing a config
+  file the user themselves wrote is robustness, not a security boundary — the
+  supplier of the input already holds every capability the finding would grant,
+  so "a malicious file could do X" describes someone attacking themselves. If
+  you cannot name the boundary and the capability, it is **Important**.
+
+  This is not a bar on *raising* the finding; it is a bar on the tier. Severity
+  decides ordering, so it decides which findings occupy the few inline slots a
+  maintainer reads first — an inflated Critical spends that slot on a hazard
+  nobody can reach, and the real one drops below the fold.
 - **Important** — missing tests, performance problems, type errors, **avoidable
   duplication**, **excessive complexity**, **compiler-silencing assertions**.
   Should fix.
