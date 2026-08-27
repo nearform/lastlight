@@ -21,6 +21,7 @@ import { CRON_GLOBALLY_ENABLED_KEY, CRON_NAME_KEY, resolveCronRepos } from "./re
 import { logger } from "../logging/logger.js";
 import { recordCronFire, withSpan } from "../telemetry/index.js";
 import type { CronRunStatus } from "../state/cron-run-store.js";
+import { recordActivity } from "../activity.js";
 
 const log = logger("cron");
 
@@ -117,6 +118,21 @@ export function makeCronRunner(deps: CronRunnerDeps): WorkflowRunner {
     const actor = typeof rawActor === "string" ? rawActor : null;
 
     const id = await db.cronRuns.start({ cronName, workflow: workflowName, source, actor });
+
+    // The activity log's ONE row for this fire (issue #206). The fan-out below
+    // may dispatch a run per repo, and those dispatches deliberately write no
+    // `workflow.trigger` row — a fan-out is one operational event, not N user
+    // actions, the same reason this ledger is keyed on the cron rather than the
+    // workflow. A scheduled fire has no human actor; a manual one carries the
+    // login of whoever pressed "Run now".
+    await recordActivity(db, {
+      actorLogin: actor,
+      actorType: source === "manual" ? "admin" : "cron",
+      action: "cron.fire",
+      targetType: "cron",
+      targetId: cronName,
+      detail: { source, workflow: workflowName },
+    });
 
     let counts: FireCounts = {
       reposEligible: null,
