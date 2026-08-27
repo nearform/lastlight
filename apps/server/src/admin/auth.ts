@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type { Context, Next } from "hono";
+import type { TriggerActorType } from "../state/db.js";
 
 const TOKEN_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 
@@ -152,7 +153,10 @@ export function authMiddleware(enabled: boolean, secret: string) {
     }
     // Surface the verified identity to downstream routes (issue #205). The
     // single seam every actor-hardcoded route reads via {@link actorFromContext}.
-    c.set("actorLogin", decodeToken(token)?.login);
+    const decoded = decodeToken(token);
+    c.set("actorLogin", decoded?.login);
+    // How they authenticated, for the activity log's `actor_type` (issue #206).
+    c.set("actorMethod", decoded?.method);
     return next();
   };
 }
@@ -167,4 +171,20 @@ export function authMiddleware(enabled: boolean, secret: string) {
  */
 export function actorFromContext(c: Context): string | undefined {
   return c.get("actorLogin") as string | undefined;
+}
+
+/**
+ * How the current actor authenticated, as a {@link TriggerActorType} — the
+ * activity log's `actor_type` (issue #206).
+ *
+ * A `password` session maps to `admin`, not to a person: it carries no verified
+ * login, which is exactly why {@link actorFromContext} returns undefined
+ * alongside it. Undefined here means auth is disabled entirely.
+ */
+export function actorTypeFromContext(c: Context): TriggerActorType | undefined {
+  const method = c.get("actorMethod") as TokenPayload["method"] | undefined;
+  if (method === "github") return "github";
+  if (method === "slack") return "slack";
+  if (method === "password") return "admin";
+  return undefined;
 }
