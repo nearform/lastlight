@@ -622,6 +622,27 @@ describe("resolveReviewTrigger", () => {
       /^requested:/,
     ],
     [
+      // The one thing that outranks the explicit request above, because it is
+      // not a policy question: GitHub 422s a review event on a PR we opened,
+      // so "always dispatches" would dispatch a run that cannot post.
+      "a PR we opened is skipped even when a human asks",
+      { authorIsOurs: true, authorLogin: "last-light[bot]" },
+      { trigger: "eager" },
+      { explicitRequest: true },
+      "skip",
+      /^self-authored:/,
+    ],
+    [
+      // The guard must key on who OPENED the PR, never on who pushed the head
+      // commit — our fix landing on a human's PR must not suppress its review.
+      "our commit on someone else's PR still reviews",
+      { authorIsOurs: false, authorLogin: "cliftonc", headIsOurs: true, headAuthor: "last-light[bot]" },
+      { trigger: "eager" },
+      { explicitRequest: true },
+      "dispatch",
+      /^requested:/,
+    ],
+    [
       "the request label is an explicit ask too",
       { labels: ["needs-review"] },
       { trigger: "on-request", requestLabel: "needs-review" },
