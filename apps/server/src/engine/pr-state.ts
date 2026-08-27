@@ -212,8 +212,13 @@ export interface PrState {
   /**
    * The bot's own most recent review AT THE CURRENT HEAD SHA, or null. A push
    * invalidates it naturally (GitHub records the review's `commit_id`).
+   *
+   * `submittedAt` is carried as an IDENTITY rather than a date — nothing orders
+   * it. It is the only field distinguishing two of our reviews on ONE commit,
+   * which is what lets `resolveReviewPost` tell the review this run was sent to
+   * override from the review this run has just posted.
    */
-  botReviewAtHead: { state: string } | null;
+  botReviewAtHead: { state: string; submittedAt: string | null } | null;
   /**
    * The bot's most recent posted review at ANY head SHA, with the SHA it was
    * submitted against — the baseline the generated-only re-review gate diffs
@@ -666,7 +671,9 @@ export async function resolvePrState(
         state.settledCheckCount = summary.settledCount;
       }
       state.baseChecksState = baseState;
-      state.botReviewAtHead = review.atHead ? { state: review.atHead.state } : null;
+      state.botReviewAtHead = review.atHead
+        ? { state: review.atHead.state, submittedAt: review.atHead.submittedAt }
+        : null;
       state.lastBotReview = review.latest ? { state: review.latest.state, sha: review.latest.sha } : null;
       state.headAuthor = author;
       state.headIsOurs = !!deps.botLogin && author === deps.botLogin;

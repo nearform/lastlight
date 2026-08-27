@@ -497,6 +497,33 @@ async function main() {
         ? (context._prState as PrState)
         : null;
     let prState: PrState | null = inheritedPrState;
+
+    // DID A HUMAN ASK FOR THIS RUN, BY NAME? Resolved once, here, for the same
+    // reason the snapshot above is: every route funnels through this function,
+    // and the two that can answer `true` answer it differently.
+    //
+    // It is NOT part of `PrState` and must not become one. The snapshot is what
+    // is true of the pull request — re-resolvable from GitHub, identical for
+    // every workflow that looks at the PR this minute. This is a property of
+    // one DISPATCH: the same PR, at the same SHA, is explicitly requested on
+    // the comment route and not on the sweep that follows it 30 minutes later.
+    // Putting it on the snapshot would make `renderContext` — a pure function
+    // over `PrState` — vary by how the run was triggered, and would let a
+    // persisted snapshot claim a request that belonged to a different run.
+    //
+    // So it rides the run CONTEXT, projected below beside `prState`, which is
+    // the record of what this dispatch decided rather than of what the PR is.
+    const explicitRequest =
+      // The event/comment route decided already (`dispatcher.ts`) — a
+      // `@bot review`, a Slack ask, a review requested by name.
+      context._explicitRequest === true ||
+      // A direct `/api/run` (the CLI's `lastlight review`, the dashboard) is an
+      // operator asking for a REVIEW by hand, and overrides mode, draft and
+      // dedup exactly as `@bot review` does. Deliberately narrowed to
+      // `pr-review`: the fix family's skips are budgets and live facts rather
+      // than policy, and the human override for those already exists on the
+      // comment path.
+      (workflowName === REVIEW_WORKFLOW && context._triggerType === "api");
     if (
       !prState &&
       prScopedWorkflows().has(workflowName) &&
@@ -532,13 +559,7 @@ async function main() {
           // that reaches an `after-checks` PR no further `check_suite` will ever
           // fire for.
           route: reviewRouteFromContext(context),
-          // A direct `/api/run` (the CLI, the dashboard) is an operator asking
-          // for a REVIEW by hand, and overrides mode, draft and dedup exactly as
-          // `@bot review` does. Deliberately narrowed to `pr-review`: the fix
-          // family's skips are budgets and live facts rather than policy, and
-          // the human override for those already exists on the comment path.
-          explicitRequest:
-            workflowName === REVIEW_WORKFLOW && context._triggerType === "api",
+          explicitRequest,
           logPrefix: "[dispatch]",
         },
         { db, github, botLogin: config.botLogin, botMention: `@${config.botName}` },
@@ -636,6 +657,9 @@ async function main() {
       _triggerType,
       _prState: _inheritedPrState,
       _reviewRoute: _ignoredReviewRoute,
+      // Plucked so the wire name never reaches the run context: it is projected
+      // below, once, under the name every reader uses.
+      _explicitRequest: _ignoredExplicitRequest,
       repo: _r,
       issueNumber,
       prNumber,
@@ -730,6 +754,12 @@ async function main() {
         ),
       );
       extra.prState = prState;
+      // Beside the snapshot, and deliberately not inside it (see the resolution
+      // above). Scoped to PR-scoped runs because they are the only ones with a
+      // reader — `post-review`, whose `resolveReviewPost` needs to tell a
+      // maintainer's deliberate re-review from its own re-entry — and because a
+      // `false` on every issue-triage run is noise nobody can act on.
+      extra.explicitRequest = explicitRequest;
     }
 
     // For PR-scoped read workflows, resolve the PR head ref and ask the

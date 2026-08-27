@@ -190,6 +190,15 @@ export function PrStatePanel({ run }: { run: WorkflowRun }) {
               value={`${str(state.authorLogin) || "unknown"}${state.authorIsOurs ? " · ours" : ""}`}
               tone={state.authorIsOurs ? "warn" : undefined}
             />
+            {/* WHO ASKED. Recorded beside the snapshot rather than in it: the
+                snapshot is what is true of the PR, this is what was true of the
+                dispatch. It is also the flag that lets a re-review of an
+                already-reviewed head actually post, so "why did this run say
+                nothing" is answerable from here. */}
+            <Fact
+              label="trigger"
+              value={ctx.explicitRequest === true ? "asked for" : "automatic"}
+            />
             <Fact
               label="shape"
               value={[

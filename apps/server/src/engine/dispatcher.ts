@@ -252,6 +252,13 @@ export async function dispatch(
     // both override mode, draft and dedup exactly as `@bot review` does. The
     // router has already dropped requests naming somebody else.
     envelope.type === "pr.review_requested";
+  // Carried down to `dispatchWorkflow`, which projects it onto the RUN CONTEXT
+  // — the same way `_prState` rides down beside it. The gate below is not the
+  // last step that has to know a human asked: `post-review` re-decides "we
+  // already reviewed this head" once the review is written, and with no way to
+  // see the request it silently overturned the dispatch this flag authorised
+  // (`resolveReviewPost`).
+  context._explicitRequest = explicitRequest;
   // Which route this dispatch arrived on, for `resolveReviewTrigger`. Only
   // `checks-settled` satisfies `after-checks`; `attention` is what defers.
   const reviewRoute: ReviewTriggerOptions["route"] =

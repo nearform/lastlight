@@ -257,7 +257,17 @@ extend when a deployment needs a step the engine should not know about.
   serves no App-token or diff endpoint). A genuine failure — missing findings
   after a real review, or a GitHub error surviving the body-only retry — **fails
   the phase**; a legitimate `skip` succeeds without posting. Idempotent on
-  resume (no-op when a bot review already exists on the head SHA). This replaced
+  resume, and the idempotency is narrower than it reads: a handler phase writes
+  no `executions` row, so `shouldRunPhase` never skips it and every resume or
+  retry re-executes it. What it must not re-post is the review **this run**
+  posted, which is not the same fact as "a review exists on the head SHA" — a
+  maintainer's explicit `@bot review` on a head we reviewed yesterday is a
+  request for exactly that. `resolveReviewPost` (`src/engine/pr-decisions.ts`,
+  the same module the dispatch gate asks) tells them apart on the review the
+  **dispatch snapshot** saw: still the same one ⇒ prior, and an explicit request
+  overrides it; appeared since ⇒ ours, and nothing overrides that. The two used
+  to be one guard, so an explicit re-review ran the whole pipeline, reported
+  `succeeded` and posted nothing. This replaced
   the earlier in-sandbox `type: script` poster, which depended on the AI
   hand-writing `pr_number`/`base_ref`/`head_sha` into the JSON and silently
   `exit 0`'d on any mismatch.

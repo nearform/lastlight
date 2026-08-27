@@ -855,7 +855,16 @@ Two consequences worth stating outright:
   becomes a decision. The **one** thing it does not override is the run
   lock, which is checked above it: the lock is not policy but a physical
   constraint (one workspace, one branch, one agent). The requester is told
-  so, and the sweep is the re-pickup.
+  so, and the sweep is the re-pickup. The gate is **not the last reader**:
+  the flag is projected onto the run context (`context.explicitRequest`, set
+  at the `dispatchWorkflow` choke point beside `context.prState`) because
+  `post-review` asks the same head-SHA question again once the review is
+  written, and without it that step silently overturned the dispatch — eight
+  minutes of pipeline, a `succeeded` run and no review. See
+  `resolveReviewPost` in [Workflow engine](/spec/06-workflow-engine). Note
+  what is deliberately not carried: the `review.requestLabel`. A label is a
+  standing state, not a discrete act, so it would authorise a fresh review of
+  an unchanged head on every push and every sweep until somebody removed it.
 - **The sweep is exempt from the `pending` deferral.** `defer` on
   `checks-pending` applies on every route *except* `route === "sweep"`. A
   check run that never CONCLUDES — a fork PR's `workflow_run` awaiting

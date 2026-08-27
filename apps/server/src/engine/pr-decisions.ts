@@ -913,6 +913,11 @@ export function resolveReviewTrigger(
     return { decision: "skip", reason: "draft: review.skipDraft is on", inputs };
   }
 
+  // Per-head DEDUP, and only that. Below the explicit-request branch, so an
+  // `@bot review` overrides it — and `post-review` must reach the same answer
+  // once the review is written, which is what {@link resolveReviewPost} is for.
+  // The two used to disagree, and the run that lost eight minutes to the
+  // disagreement is named there.
   if (state.botReviewAtHead) {
     return {
       decision: "skip",
@@ -1048,6 +1053,132 @@ export function resolveReviewTrigger(
   return {
     decision: "dispatch",
     reason: `${cfg.trigger}: ${route} route, checks ${state.checksState}`,
+    inputs,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// resolveReviewPost — the head-SHA question, asked the second time
+// ---------------------------------------------------------------------------
+
+/** Publish the review this run produced, or say nothing? */
+export type ReviewPostDecision = "post" | "skip";
+
+/**
+ * One of OUR reviews standing on the head SHA — as thin as
+ * {@link resolveReviewPost} needs it to be, and the shape
+ * {@link PrState.botReviewAtHead} persists.
+ */
+export interface HeadReview {
+  state: string;
+  /** See {@link PrState.botReviewAtHead} — an identity, not a date. */
+  submittedAt?: string | null;
+}
+
+/**
+ * Is this the SAME review, or a second one on the same commit?
+ *
+ * `submittedAt` refutes identity; it cannot establish it. Two of our reviews on
+ * one commit are minutes apart, so two DIFFERENT stamps prove "not the same
+ * one" — while a pair of nulls proves nothing, and a snapshot persisted before
+ * that field existed (a run dispatched by the previous build and resumed after
+ * the deploy) has exactly that shape.
+ *
+ * So: different ⇒ different, anything else ⇒ the same. The cost of that
+ * direction being wrong is one duplicate review, on a re-entry whose timestamps
+ * GitHub declined to populate; the cost of the other direction is the silence
+ * {@link resolveReviewPost} exists to end.
+ */
+function sameReview(a: HeadReview, b: HeadReview): boolean {
+  const at = a.submittedAt ?? null;
+  const bt = b.submittedAt ?? null;
+  if (at !== null && bt !== null) return at === bt;
+  return true;
+}
+
+/**
+ * "We have already reviewed this head SHA" — asked the SECOND time, after the
+ * run happened and the review is written.
+ *
+ * One fact, two questions, and conflating them is the bug this exists to stop.
+ * {@link resolveReviewTrigger} asks *may we spend a run*, where a prior review
+ * is DEDUP and an explicit request overrides it. This asks *may we publish the
+ * review we have already paid for*, where the same prior review is not dedup at
+ * all: `post-review` re-executes on every resume and every retry — it is a
+ * handler phase, so it writes no `executions` row and `shouldRunPhase` never
+ * skips it — and without a guard a boot-time resume posts a second copy of what
+ * the first pass already published.
+ *
+ * The two are distinguishable, and the discriminator costs nothing: the review
+ * the DISPATCH SNAPSHOT saw. One that is still the review
+ * `resolveReviewTrigger` was asked to override is a PRIOR review — post over
+ * it, because a maintainer asked for exactly that. One that appeared since is
+ * OURS, posted minutes ago by this very run — never post over that, whoever
+ * asked. Read off GitHub rather than off a marker we write on the way past, so
+ * it still holds when the run died between the POST and its own bookkeeping,
+ * which is precisely when a resume happens.
+ *
+ * cliftonc/drizzle-cube#937 is the case: an `@last-light review` on a head we
+ * had already reviewed surveyed, adjudicated and reconciled for eight minutes,
+ * reported `succeeded`, and posted nothing — the gate had correctly decided
+ * `requested: an explicit review request overrides mode, draft and dedup`, and
+ * this step then re-decided it in the other direction.
+ *
+ * `explicitRequest` here is the SAME value the gate was given: a discrete human
+ * act (an `@bot review` comment, a review request by name, `lastlight review`).
+ * Note what it deliberately is NOT — the `review.requestLabel`. A label is a
+ * standing state rather than an act: it is still there on the next push and the
+ * next 30-minute sweep, each of which the trigger gate dispatches, so honouring
+ * it here would post a fresh review of an unchanged head every half hour until
+ * somebody took the label off. The same distinction {@link
+ * Decision.selfAuthoredPr} draws for its one-comment-per-ask notice.
+ */
+export function resolveReviewPost(opts: {
+  /** Our review on the head this run is posting against, read just now. */
+  atHead: HeadReview | null;
+  /** The one the dispatch snapshot carried — {@link PrState.botReviewAtHead}. */
+  atDispatch: HeadReview | null;
+  /** A human asked for THIS run, by name. See {@link ReviewTriggerOptions}. */
+  explicitRequest?: boolean;
+}): Decision<ReviewPostDecision> {
+  const inputs = {
+    atHead: opts.atHead?.state ?? null,
+    atHeadSubmittedAt: opts.atHead?.submittedAt ?? null,
+    atDispatch: opts.atDispatch?.state ?? null,
+    atDispatchSubmittedAt: opts.atDispatch?.submittedAt ?? null,
+    explicitRequest: !!opts.explicitRequest,
+  };
+
+  if (!opts.atHead) {
+    return {
+      decision: "post",
+      reason: "unreviewed-head: nothing of ours stands on this commit",
+      inputs,
+    };
+  }
+
+  // OURS, from this run: it was not there when we were dispatched. This is the
+  // re-entry guard, and it binds however loudly the human asked — a second copy
+  // of the review they are already reading answers nobody.
+  if (!opts.atDispatch || !sameReview(opts.atHead, opts.atDispatch)) {
+    return {
+      decision: "skip",
+      reason: `already-posted: the ${opts.atHead.state} on this head was not there at dispatch, so this run posted it`,
+      inputs,
+    };
+  }
+
+  if (!opts.explicitRequest) {
+    return {
+      decision: "skip",
+      reason: `already-reviewed: we reviewed this head before the run started (${opts.atHead.state})`,
+      inputs,
+    };
+  }
+
+  return {
+    decision: "post",
+    reason: `requested: an explicit review request overrides the ${opts.atHead.state} already on this head`,
     inputs,
   };
 }

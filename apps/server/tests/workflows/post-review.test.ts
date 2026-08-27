@@ -826,6 +826,113 @@ describe("post-review action (runPostReview)", () => {
     });
   });
   /**
+   * A review already standing on the head SHA — and the two situations that
+   * fact describes (`resolveReviewPost`).
+   *
+   * cliftonc/drizzle-cube#937: an `@last-light review` on a head we had already
+   * reviewed surveyed, adjudicated and reconciled for eight minutes, reported
+   * `succeeded`, and posted nothing. The dispatch gate had decided the request
+   * overrode dedup; this step then re-decided it the other way.
+   *
+   * Fixing that must not cost what the guard was written for. `post-review` is
+   * a handler phase with no `executions` row, so `shouldRunPhase` never skips
+   * it and every resume/retry re-executes it — the review it finds at the head
+   * is then its OWN, and posting a second copy is the failure mode. The
+   * discriminator is the dispatch snapshot, so both cases are exercised here
+   * with the same `explicitRequest: true` context.
+   */
+  describe("a review already on the head SHA", () => {
+    const AT_DISPATCH = "2026-08-05T20:14:46Z";
+    const reviewAtHead = (body: string, submittedAt: string) => ({
+      id: 7,
+      state: "APPROVED",
+      commit_id: HEAD_SHA,
+      body,
+      submitted_at: submittedAt,
+      user: { login: "last-light[bot]" },
+    });
+    /** The snapshot the dispatch gate resolved, as `index.ts` persists it. */
+    const snapshot = (botReviewAtHead: unknown) => ({ prState: { botReviewAtHead } });
+
+    it("skips the post when nobody asked — the unchanged idempotency case", async () => {
+      setPriorReviews([reviewAtHead("Reviewed already.", AT_DISPATCH)]);
+      const taskId = "widget-42-athead-auto";
+      seedFindings(taskId, "widget", { summary: "Looks good.", event: "APPROVE", findings: [] });
+      const { executor, rep } = makeExecutor(taskId, {
+        ...snapshot({ state: "APPROVED", submittedAt: AT_DISPATCH }),
+      });
+
+      const outcome = await executor.execute(NODE, {});
+
+      expect(outcome.status).toBe("succeeded");
+      expect(rep.failed).toHaveLength(0);
+      expect(reviews).toHaveLength(0);
+      expect(outcome.results[0]!.output).toMatch(/^already-reviewed:/);
+    });
+
+    it("POSTS over the prior review when a human asked for this run by name", async () => {
+      setPriorReviews([reviewAtHead("Reviewed already.", AT_DISPATCH)]);
+      const taskId = "widget-42-athead-asked";
+      seedFindings(taskId, "widget", { summary: "Had another look.", event: "APPROVE", findings: [] });
+      const { executor, rep } = makeExecutor(taskId, {
+        explicitRequest: true,
+        // The review at the head is the very one the gate decided to override.
+        ...snapshot({ state: "APPROVED", submittedAt: AT_DISPATCH }),
+      });
+
+      const outcome = await executor.execute(NODE, {});
+
+      expect(outcome.status).toBe("succeeded");
+      expect(rep.failed).toHaveLength(0);
+      expect(reviews).toHaveLength(1);
+      expect((reviews[0]!.body as { body: string }).body).toContain("Had another look.");
+    });
+
+    it("does NOT double-post on a re-entry — the review at the head is this run's own", async () => {
+      // Dispatched on a head with no review of ours; by the time post-review
+      // re-executes (a resume, a Retry) there is one, so it is ours. The
+      // explicit request must not override this: a second copy of the review
+      // they are already reading answers nobody.
+      setPriorReviews([reviewAtHead("Had another look.", "2026-08-05T20:41:02Z")]);
+      const taskId = "widget-42-athead-reentry";
+      seedFindings(taskId, "widget", { summary: "Had another look.", event: "APPROVE", findings: [] });
+      const { executor, rep } = makeExecutor(taskId, {
+        explicitRequest: true,
+        ...snapshot(null),
+      });
+
+      const outcome = await executor.execute(NODE, {});
+
+      expect(outcome.status).toBe("succeeded");
+      expect(rep.failed).toHaveLength(0);
+      expect(reviews).toHaveLength(0);
+      expect(outcome.results[0]!.output).toMatch(/^already-posted:/);
+    });
+
+    it("does NOT double-post the re-review it already posted OVER a prior one", async () => {
+      // The hard half of the re-entry case: an explicit re-review that posted
+      // and then died leaves TWO of our reviews on the head. Only the timestamp
+      // tells the one we were sent to override from the one we posted.
+      setPriorReviews([
+        reviewAtHead("Reviewed already.", AT_DISPATCH),
+        reviewAtHead("Had another look.", "2026-08-05T20:41:02Z"),
+      ]);
+      const taskId = "widget-42-athead-reentry-twice";
+      seedFindings(taskId, "widget", { summary: "Had another look.", event: "APPROVE", findings: [] });
+      const { executor } = makeExecutor(taskId, {
+        explicitRequest: true,
+        ...snapshot({ state: "APPROVED", submittedAt: AT_DISPATCH }),
+      });
+
+      const outcome = await executor.execute(NODE, {});
+
+      expect(outcome.status).toBe("succeeded");
+      expect(reviews).toHaveLength(0);
+      expect(outcome.results[0]!.output).toMatch(/^already-posted:/);
+    });
+  });
+
+  /**
    * The duplicate-review guard (issue #271).
    *
    * nearform/skillspro#1641: two APPROVEs six minutes and 400 identical bytes
@@ -893,6 +1000,20 @@ describe("post-review action (runPostReview)", () => {
       const taskId = "widget-42-dupe-changes";
       seedFindings(taskId, "widget", { summary: SUMMARY, event: "REQUEST_CHANGES", findings: [] });
       const { executor } = makeExecutor(taskId);
+      expect((await executor.execute(NODE, {})).status).toBe("succeeded");
+      expect(reviews).toHaveLength(1);
+    });
+
+    // The same carve-out `resolveReviewPost` makes one guard above: the shape
+    // this rule catches is an UNPROMPTED re-review of a push that changed
+    // nothing readable. A maintainer who typed `@bot review` is asking for
+    // precisely the review it would suppress, and suppressing it hands them
+    // eight minutes of pipeline and silence.
+    it("posts a word-for-word repeat when a human asked for this run by name", async () => {
+      setPriorReviews(priorApprove("0ldsha0", SUMMARY));
+      const taskId = "widget-42-dupe-asked";
+      seedFindings(taskId, "widget", { summary: SUMMARY, event: "APPROVE", findings: [] });
+      const { executor } = makeExecutor(taskId, { explicitRequest: true });
       expect((await executor.execute(NODE, {})).status).toBe("succeeded");
       expect(reviews).toHaveLength(1);
     });
