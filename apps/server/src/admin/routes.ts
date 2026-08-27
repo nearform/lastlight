@@ -101,6 +101,8 @@ import { BuildAssetStore, buildAssetIssueKey } from "../state/build-assets.js";
 import type { WorkflowApproval } from "../state/approval-store.js";
 import type { PublicConfigBundle, BuildAssetsLocation } from "../config/config.js";
 import { logger } from "../logging/logger.js";
+import { recordActivity } from "../activity.js";
+import { recordActivityFor } from "./activity.js";
 
 const log = logger("admin");
 const oauthLog = logger("oauth");
@@ -982,6 +984,16 @@ export function createAdminRoutes(
     const a = Buffer.from(body.password);
     const b = Buffer.from(config.adminPassword);
     const ok = a.length === b.length && timingSafeEqual(a, b);
+    // A failed password attempt is one of the few things an audit stream is
+    // unambiguously for. `actorType` is passed explicitly because there is no
+    // token yet — the context this route runs in carries no actor at all, and
+    // password login never learns a login.
+    await recordActivity(db, {
+      action: "login",
+      actorType: "admin",
+      outcome: ok ? "ok" : "denied",
+      detail: { method: "password" },
+    });
     if (!ok) {
       return c.json({ error: "invalid password" }, 401);
     }
@@ -1114,6 +1126,15 @@ export function createAdminRoutes(
       }
 
       const token = createToken(config.adminSecret, "slack", matchedLogin);
+      // `actorLogin` is the MATCHED GitHub login, or null when the email did not
+      // resolve to a `users` row — the same degradation #205 documents for the
+      // Slack connector, and the reason this column is nullable.
+      await recordActivity(db, {
+        action: "login",
+        actorLogin: matchedLogin ?? null,
+        actorType: "slack",
+        detail: { method: "slack", matched: !!matchedLogin },
+      });
       // Redirect to dashboard with token in URL; App.tsx strips it immediately.
       // Trailing slash matters: Vite serves the SPA with base "/admin/" so a
       // bare "/admin" 404s in dev. Production static serving accepts both.
@@ -1222,6 +1243,15 @@ export function createAdminRoutes(
           org: config.githubAllowedOrg!,
           memberStatus,
         });
+        // A rejected login names a real, verified GitHub identity — the one
+        // denial in here where we know exactly who was turned away.
+        await recordActivity(db, {
+          action: "login",
+          actorLogin: login,
+          actorType: "github",
+          outcome: "denied",
+          detail: { method: "github", reason: "not_org_member", org: config.githubAllowedOrg! },
+        });
         return fail("github_org");
       }
 
@@ -1271,6 +1301,12 @@ export function createAdminRoutes(
       // Carry the verified login in the token so actor-hardcoded routes
       // attribute to this person.
       const token = createToken(config.adminSecret, "github", login);
+      await recordActivity(db, {
+        action: "login",
+        actorLogin: login,
+        actorType: "github",
+        detail: { method: "github" },
+      });
       return c.redirect(`/admin/?token=${encodeURIComponent(token)}`);
     } catch (err: unknown) {
       oauthLog.error("GitHub OAuth exchange failed", { err });
@@ -1446,8 +1482,23 @@ export function createAdminRoutes(
           await db.executions.recordFinish(e.id, { success: false, error: "terminated via admin dashboard" });
         }
       }
+      await recordActivityFor(c, db, {
+        action: "container.kill",
+        targetType: "container",
+        targetId: name,
+      });
       return c.json({ killed: name });
     } catch (err: any) {
+      // The kill itself failed — record the attempt, since "someone tried to
+      // kill this and could not" is exactly the kind of thing an audit stream
+      // is read for.
+      await recordActivityFor(c, db, {
+        action: "container.kill",
+        targetType: "container",
+        targetId: name,
+        outcome: "error",
+        detail: { error: String(err?.message ?? err).slice(0, 200) },
+      });
       return c.json({ error: err.message }, 500);
     }
   });
@@ -1757,6 +1808,13 @@ export function createAdminRoutes(
         }
       }
     }
+    await recordActivityFor(c, db, {
+      action: "workflow.cancel",
+      targetType: "workflow_run",
+      targetId: id,
+      // The COUNT, not the names — `detail` is a summary, not a payload.
+      detail: { workflow: run.workflowName, killedContainers: killed.length },
+    });
     return c.json({ cancelled: id, killedContainers: killed, reapedWorkspace: reaped });
   });
 
@@ -1780,6 +1838,12 @@ export function createAdminRoutes(
     // atomically, so a second immediate retry click 400s on the status guard.
     config.retryWorkflow(run, actorFromContext(c) ?? "admin").catch((err) =>
       log.error("Retry failed", { id, err }));
+    await recordActivityFor(c, db, {
+      action: "workflow.retry",
+      targetType: "workflow_run",
+      targetId: id,
+      detail: { workflow: run.workflowName, from: run.status },
+    });
     return c.json({ retrying: id });
   });
 
@@ -1865,7 +1929,16 @@ export function createAdminRoutes(
     }
     const current = await db.isWorkflowEnabled(name);
     const next = !current;
-    await db.setWorkflowEnabled(name, next, "admin");
+    // `?? "admin"` matches cancel/retry/respond: the column is an existing wire
+    // contract the dashboard renders, so it keeps its literal fallback. The
+    // activity row does NOT — see recordActivityFor.
+    await db.setWorkflowEnabled(name, next, actorFromContext(c) ?? "admin");
+    await recordActivityFor(c, db, {
+      action: "workflow.toggle",
+      targetType: "workflow",
+      targetId: name,
+      detail: { enabled: next },
+    });
     return c.json({ name, enabled: next });
   });
 
@@ -2266,10 +2339,25 @@ export function createAdminRoutes(
       buildAssetStore.fileFor({ owner, repo, issueKey: key }, doc);
       const metadata = await computeArtifactMetadata(owner, repo, key, doc);
       if (!metadata.editable) {
+        // A refused edit is worth a row: the approval lock is exactly the kind
+        // of guard someone later asks "did anyone try to get around this?".
+        await recordActivityFor(c, db, {
+          action: "artifact.edit",
+          targetType: "repo",
+          targetId: `${owner}/${repo}`,
+          outcome: "denied",
+          detail: { key, doc, reason: "artifact_locked" },
+        });
         return c.json({ error: "artifact_locked", lock: metadata.lock }, 403);
       }
       const body = await c.req.text();
       buildAssetStore.write({ owner, repo, issueKey: key }, doc, body);
+      await recordActivityFor(c, db, {
+        action: "artifact.edit",
+        targetType: "repo",
+        targetId: `${owner}/${repo}`,
+        detail: { key, doc, bytes: body.length },
+      });
       return c.json({ ok: true });
     } catch (err: unknown) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
@@ -2362,6 +2450,16 @@ export function createAdminRoutes(
         });
       }
     }
+    await recordActivityFor(c, db, {
+      action: body.decision === "rejected" ? "approval.reject" : "approval.approve",
+      targetType: "approval",
+      targetId: id,
+      detail: {
+        gate: approval.gate,
+        workflowRunId: approval.workflowRunId,
+        ...(body.reason ? { reason: body.reason } : {}),
+      },
+    });
     return c.json({ status: body.decision });
   });
 
@@ -2508,7 +2606,16 @@ export function createAdminRoutes(
     const override = await db.getCronOverride(name);
     const currentlyEnabled = override ? override.enabled : true;
     const nextEnabled = !currentlyEnabled;
-    await db.setCronOverride(name, { enabled: nextEnabled, updatedBy: "admin" });
+    await db.setCronOverride(name, {
+      enabled: nextEnabled,
+      updatedBy: actorFromContext(c) ?? "admin",
+    });
+    await recordActivityFor(c, db, {
+      action: "cron.toggle",
+      targetType: "cron",
+      targetId: name,
+      detail: { enabled: nextEnabled },
+    });
     // Off is "off BY DEFAULT", not "unregistered" (issue #180): a managed repo
     // may opt itself back into a globally-off cron from its `.lastlight/`, and
     // that is resolved at TICK time — so the tick has to keep running. It just
@@ -2553,7 +2660,13 @@ export function createAdminRoutes(
       const msg = err instanceof Error ? err.message : String(err);
       return c.json({ error: `invalid schedule: ${msg}` }, 400);
     }
-    await db.setCronOverride(name, { schedule, updatedBy: "admin" });
+    await db.setCronOverride(name, { schedule, updatedBy: actorFromContext(c) ?? "admin" });
+    await recordActivityFor(c, db, {
+      action: "config.edit",
+      targetType: "cron",
+      targetId: name,
+      detail: { schedule },
+    });
     const override = await db.getCronOverride(name);
     if (override?.enabled !== false) {
       config.cronScheduler.update({
@@ -2575,6 +2688,12 @@ export function createAdminRoutes(
     const def = getCronWorkflows().find((d) => d.name === name);
     if (!def) return c.json({ error: `cron not found: ${name}` }, 404);
     await db.clearCronOverride(name);
+    await recordActivityFor(c, db, {
+      action: "config.edit",
+      targetType: "cron",
+      targetId: name,
+      detail: { cleared: true, schedule: def.schedule },
+    });
     const job = {
       name,
       schedule: def.schedule,
@@ -2598,7 +2717,7 @@ export function createAdminRoutes(
   // even for crons that aren't registered — disabled ones, or the polling crons
   // dropped when webhooks are live — which is exactly what manual testing needs.
   // Bypasses the scheduler's per-job overlap guard (acceptable for a manual fire).
-  app.post("/crons/:name/trigger", (c) => {
+  app.post("/crons/:name/trigger", async (c) => {
     const name = c.req.param("name");
     const def = getCronWorkflows().find((d) => d.name === name);
     if (!def) return c.json({ error: `cron not found: ${name}` }, 404);
@@ -2644,6 +2763,15 @@ export function createAdminRoutes(
       : config.triggerCron!(def.workflow!, context);
     fire.catch((err) => {
       log.error("Cron trigger failed", { name, err });
+    });
+    // The REQUEST, not the fire — `fire` is deliberately not awaited, and the
+    // fire itself writes its own `cron.fire` row from the runner. The pair is
+    // the point: a trigger that never produced a fire is the interesting case.
+    await recordActivityFor(c, db, {
+      action: "cron.trigger",
+      targetType: "cron",
+      targetId: name,
+      detail: def.handler ? { handler: def.handler } : { workflow: def.workflow ?? "" },
     });
     return c.json({ name, workflow: def.workflow, handler: def.handler, triggered: true });
   });
@@ -2751,6 +2879,20 @@ export function createAdminRoutes(
       // `retry-requested` row inside the gate, so the ask is parked and will be
       // honoured by the next event — a 200 with `dispatched: false`.
       const refused = !!(disposition.onHold || disposition.runInFlight || disposition.readDegraded);
+      await recordActivityFor(c, db, {
+        action: "pr.retry",
+        targetType: "pr",
+        targetId: `${repo}#${prNumber}`,
+        // A refusal is `denied`; a parked ask that a later event will honour
+        // still happened, so it is `ok` with `dispatched: false` in the detail.
+        outcome: refused ? "denied" : "ok",
+        detail: {
+          workflow: workflowName,
+          dispatched: false,
+          reason: String(disposition.reason ?? "").slice(0, 200),
+          ...(reason ? { note: reason } : {}),
+        },
+      });
       return c.json(
         {
           repo,
@@ -2783,6 +2925,19 @@ export function createAdminRoutes(
       log.error("retry failed", { workflow: workflowName, repo, prNumber, err });
     });
 
+    // The ASK. The run it starts writes its own `workflow.trigger` row from
+    // `dispatchWorkflow` — the same request/execution pair as cron.trigger and
+    // cron.fire, and worth keeping distinct because the two can disagree.
+    await recordActivityFor(c, db, {
+      action: "pr.retry",
+      targetType: "pr",
+      targetId: `${repo}#${prNumber}`,
+      detail: {
+        workflow: workflowName,
+        dispatched: true,
+        ...(reason ? { note: reason } : {}),
+      },
+    });
     return c.json({
       repo,
       prNumber,
