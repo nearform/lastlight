@@ -81,8 +81,13 @@ listing dumps a large payload for nothing.
 **Stop conditions** (check before reviewing):
 - PR authored by `last-light[bot]` → skip. Never self-review.
 - `merged === true` → stop. This skill reviews open PRs only.
-- A `last-light[bot]` review already exists on the **current head SHA** → stop;
-  don't post a duplicate. (A re-review is fine once new commits land.)
+A prior `last-light[bot]` review at the current head SHA is **not** a stop
+condition. Whether an already-reviewed head deserves another look was decided
+before you were dispatched, weighing the prior review against the trigger mode,
+the changed paths, and whether a human asked directly — an explicit request
+overrides de-duplication. If you are running, that question has already been
+answered yes; re-deciding it here can only overturn it. Posting is idempotent
+per head SHA regardless, so a genuine duplicate costs nothing.
 
 ### 2. Read the prior discussion
 
