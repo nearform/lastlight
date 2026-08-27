@@ -198,8 +198,40 @@ function ResizablePipeline({
     document.addEventListener("mouseup", onUp);
   }, [pipelineHeight]);
 
+  // The harness records a terminal failure as a string on the run context.
+  // Shown only for a terminal run: a `running` run can carry a stale `error`
+  // from an earlier phase that was since retried, and banner-ing that would
+  // report a live run as broken.
+  const contextError = run.context?.error;
+  const runFailureReason =
+    (run.status === "failed" || run.status === "cancelled") && typeof contextError === "string"
+      ? contextError
+      : null;
+
   return (
     <div ref={containerRef} className="flex flex-col flex-1 min-h-0">
+      {/* Why the run failed.
+       *
+       * Not every failure has a phase node to hang off. A handler phase that
+       * throws before it writes an `executions` row leaves NOTHING in the
+       * pipeline — `post-review` rejecting a review is the case that prompted
+       * this: the graph showed every phase green, the run said `failed`, and
+       * the reason ("GitHub rejected the review … Can not request changes on
+       * your own pull request") existed only on `context.error`, reachable
+       * from the API and nowhere in the UI. A run that fails invisibly reads
+       * as a bug in the dashboard rather than an answer about the run. */}
+      {runFailureReason && (
+        <div className="shrink-0 mb-3 rounded border border-error/40 bg-error/5 px-3 py-2">
+          <div className="text-2xs font-semibold uppercase tracking-wider text-error/80">
+            {run.status === "cancelled" ? "Cancelled" : "Failed"}
+            {run.currentPhase ? ` · ${run.currentPhase}` : ""}
+          </div>
+          <div className="mt-1 text-xs text-base-content/80 break-words whitespace-pre-wrap font-mono">
+            {runFailureReason}
+          </div>
+        </div>
+      )}
+
       {/* Pipeline section — capped at 50% by default */}
       <div
         data-pipeline
