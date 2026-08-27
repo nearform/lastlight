@@ -263,9 +263,12 @@ async function seed(db: StateDb): Promise<void> {
 
 describe("data-migrate", () => {
   it("covers every table in the schema", () => {
-    // The guard that stops a 17th table from being silently left behind.
+    // The guard that stops a table being silently left behind. It checks BOTH
+    // directions — a schema export missing from TABLE_ORDER, and a TABLE_ORDER
+    // entry no longer in the schema — so a hardcoded count would add nothing
+    // beyond an edit on every table added.
     expect(() => assertCoversEveryTable()).not.toThrow();
-    expect(TABLE_ORDER).toHaveLength(16);
+    expect(TABLE_ORDER.length).toBeGreaterThan(0);
   });
 
   it("orders messaging_sessions before messaging_messages (the only FK)", () => {
@@ -284,8 +287,10 @@ describe("data-migrate", () => {
       onProgress: (e) => events.push(e),
     });
 
-    // Row counts first — the cheap half.
-    expect(result.tables).toHaveLength(16);
+    // Row counts first — the cheap half. Compared against TABLE_ORDER rather
+    // than a literal: the copy visits exactly those tables by construction, so
+    // a number here would only restate it.
+    expect(result.tables).toHaveLength(TABLE_ORDER.length);
     expect(result.totalRows).toBeGreaterThan(0);
     for (const t of result.tables) expect(t.target).toBe(t.source);
     expect(events.at(-1)).toMatchObject({ type: "done", totalRows: result.totalRows });

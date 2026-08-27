@@ -134,28 +134,35 @@ process.
 
 ### 6. If you added a table
 
-Six places do not update themselves. The first three fail loudly; the rest are
-hardcoded counts that fail as an unhelpful off-by-one, so know them in advance:
+Three places do not update themselves, and all three fail loudly:
 
 1. **`data-migrate.ts`'s `TABLE_ORDER`** — the SQLite→Postgres copy refuses to
    start if a schema export is missing from it, so this fails loudly rather than
    losing data. Place it after anything it references by foreign key.
 2. **`db.ts`** — wire the store in.
 3. **`spec/10-state.md`** — the table inventory and the count.
-4. **`tests/state/schema-equivalence.test.ts`** — add the table to
-   `POST_BASELINE_TABLES` (plus its named indexes to `POST_BASELINE_INDEXES`),
-   and bump `MIGRATION_COUNT`. **Do not add it to `LEGACY_TABLES`**: that list is
-   the pre-Drizzle production shape, and the whole point of the first test is
-   that the baseline no-ops over it. A new table is a *difference* between
-   `before` and `after`, which is why those two lists exist separately at all.
-5. **`tests/state/schema-parity.test.ts`** — the `covers all N tables` count.
-6. **`tests/state/data-migrate.test.ts`** — two counts (`TABLE_ORDER` length and
-   `result.tables` length), and ideally a row in `seed()` so the copy is actually
-   exercised for the new table rather than merely counted.
 
-`schema-parity.test.ts` otherwise derives its table list from the schema
-exports, so the per-column and per-index parity checks cover a new table for
-free once both declarations exist.
+Plus **`MIGRATION_COUNT`** in `tests/state/schema-equivalence.test.ts`, since
+adding a table means adding a migration. That one is deliberately not derived
+from the journal — see its comment.
+
+**The test suite otherwise learns about a new table by itself**, and that is a
+property worth preserving rather than a coincidence:
+
+- `schema-parity.test.ts` derives its table list from the schema exports, so
+  every per-column and per-index parity check covers a new table for free.
+- `schema-equivalence.test.ts` applies the **baseline alone** when it asserts
+  "nothing changed", then checks the full migration set against the tables
+  `schema/sqlite.ts` declares. So later migrations are free to add things
+  without the test needing a list of what they were allowed to add.
+- `data-migrate.test.ts` leans on `assertCoversEveryTable()`, which already
+  checks both directions (missing from `TABLE_ORDER`, and stale in it).
+
+If you find yourself adding a table name or a count to a test, check whether the
+assertion above it already proves the thing — several used to, and the counts
+were removed in #206 for exactly that reason. Do add a row to `data-migrate`'s
+`seed()` though: that one is not bookkeeping, it is what makes the sqlite→pg
+copy actually exercise your columns instead of merely counting them.
 
 ## Why `db.pg-server.test.ts` exists
 
