@@ -14,6 +14,7 @@ import {
 } from "../src/seed.js";
 import { renderFamilyBlock } from "../src/seed-render.js";
 import type { AllDocument } from "../src/schema.js";
+import type { ObligationsDocument } from "../src/seed.js";
 
 function envelope(
   extractors: AllDocument["extractors"],
@@ -475,11 +476,18 @@ describe("per-family obligation ceilings", () => {
 
   it("familyCaps overrides the shipped table, and is absent-means-shipped", () => {
     const doc = mixed(30, 20);
-    // Absent ⇒ byte-identical to the shipped table. The measurement seam must
-    // not be able to move a production document by existing.
-    expect(
-      JSON.stringify(seedObligations(doc, { familyCaps: undefined })),
-    ).toBe(JSON.stringify(seedObligations(doc)));
+    // Absent ⇒ the same document as the shipped table. The measurement seam
+    // must not be able to move a production document by existing.
+    //
+    // `generatedAt` is a wall clock, so it is excluded rather than compared:
+    // the two calls straddle a millisecond boundary on a slow enough runner and
+    // the assertion fails on the one field it is not making a claim about.
+    // Compared as OBJECTS, not stringified — a failure here should name the
+    // field that moved, not print two 50 KB blobs and leave you to diff them.
+    const withoutClock = ({ generatedAt, ...rest }: ObligationsDocument) => rest;
+    expect(withoutClock(seedObligations(doc, { familyCaps: undefined }))).toEqual(
+      withoutClock(seedObligations(doc)),
+    );
 
     // A partial map merges over the shipped one — security keeps its 8.
     const raised = seedObligations(doc, {
