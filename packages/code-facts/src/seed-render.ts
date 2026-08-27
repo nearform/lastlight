@@ -54,13 +54,21 @@
  * back to `discharge:` under `minimal` (see {@link renderOne}).
  */
 import type { StagedDiff } from "./schema.js";
-import type { Obligation, ObligationContract, ObligationsDocument, SeedFamily } from "./seed.js";
+import type {
+  Obligation,
+  ObligationContract,
+  ObligationsDocument,
+  SeedFamily,
+} from "./seed.js";
 
 const FAMILY_TITLE: Record<SeedFamily, string> = {
-  contract: "CONTRACT — a producer's shape moved; does every consumer outside the diff still satisfy it?",
-  enforcement: "ENFORCEMENT — a value is defined on one side of a boundary; who checks it on the other?",
+  contract:
+    "CONTRACT — a producer's shape moved; does every consumer outside the diff still satisfy it?",
+  enforcement:
+    "ENFORCEMENT — a value is defined on one side of a boundary; who checks it on the other?",
   security: "SECURITY — attacker-controlled input reaching a changed sink",
-  state: "STATE — cache invalidation, lifecycle, ordering and concurrency on a changed symbol",
+  state:
+    "STATE — cache invalidation, lifecycle, ordering and concurrency on a changed symbol",
   tests: "TESTS — changed lines executed by zero tests",
 };
 
@@ -286,7 +294,10 @@ function pathOf(candidate: string): string {
  * in. So this section never prints an absolute path and says out loud not to
  * build one.
  */
-function renderStagedDiff(staged: StagedDiff | null | undefined, mine: Obligation[]): string[] {
+function renderStagedDiff(
+  staged: StagedDiff | null | undefined,
+  mine: Obligation[],
+): string[] {
   const missing = (why: string): string[] => [
     "STAGED DIFF: NOT AVAILABLE.",
     "",
@@ -318,7 +329,10 @@ function renderStagedDiff(staged: StagedDiff | null | undefined, mine: Obligatio
   const byPath = new Map(staged.files.map((f) => [f.path, f]));
   const relevant = [
     ...new Set(
-      mine.flatMap((o) => [o.introducedAt.path, ...o.enforcedAt.candidates.map(pathOf)]),
+      mine.flatMap((o) => [
+        o.introducedAt.path,
+        ...o.enforcedAt.candidates.map(pathOf),
+      ]),
     ),
   ]
     .filter((p) => byPath.has(p))
@@ -351,7 +365,10 @@ function renderStagedDiff(staged: StagedDiff | null | undefined, mine: Obligatio
   ];
 
   if (relevant.length > 0) {
-    lines.push("", "The files THIS family's obligations name, and their patches:");
+    lines.push(
+      "",
+      "The files THIS family's obligations name, and their patches:",
+    );
     for (const path of relevant.slice(0, STAGED_FILES_SHOWN)) {
       const file = byPath.get(path)!;
       lines.push(
@@ -455,12 +472,76 @@ function minimalTail(family: SeedFamily): string[] {
  * straight through from the document it just parsed. Omitting it is not the
  * same as `null` and neither is silent — see {@link renderStagedDiff}.
  */
+/**
+ * Tell the family it was truncated — the notice that had stopped rendering.
+ *
+ * It used to look for the substring `"budget"` in a `dropped[]` reason. The
+ * 2026-08-25 move from a pooled budget to per-family ceilings reworded every
+ * reason to `"per-family ceiling"` / `"total backstop"`, so from that commit to
+ * this one **the notice never rendered at all** — measured on the eight gate
+ * cases, `1587-r3` dropped 59 obligations across four families and every one of
+ * its briefs claimed, by omission, to be the complete set. That is exactly the
+ * *"we could not look" vs "we looked and it is clean"* conflation this package
+ * exists to prevent, arriving through a stale string match.
+ *
+ * So it reads the STRUCTURED row now (`minted` − `obligations`), not prose. A
+ * document written before those fields existed falls back to the `dropped[]`
+ * scan, keyed on the reason the seeder actually emits.
+ *
+ * Two distinct claims, deliberately two paragraphs:
+ *
+ * - **The family's own ceiling** — this family had more to say. Nothing was
+ *   taken by another family, which is the whole property the ceilings bought.
+ * - **The total backstop** — the lowest-ranked across every family, applied
+ *   after the ceilings. On a shipped configuration it cannot bind, so if a
+ *   survey ever reads this line an operator has raised a ceiling.
+ */
+function renderTruncation(
+  doc: ObligationsDocument,
+  family: SeedFamily,
+  row: ObligationsDocument["families"][number] | undefined,
+): string[] {
+  const cappedOff =
+    row?.minted != null
+      ? row.minted - row.obligations
+      : (doc.dropped.find(
+          (d) =>
+            d.reason.startsWith(`over the per-family ceiling of `) &&
+            d.reason.includes(` for ${family} —`),
+        )?.count ?? 0);
+
+  const lines: string[] = [];
+  if (cappedOff > 0) {
+    const ceiling = row?.cap != null ? ` of ${row.cap}` : "";
+    lines.push(
+      "",
+      `${cappedOff} further ${family} obligation(s) were built and dropped at this family's own ceiling${ceiling}.`,
+      `They are NOT "checked". No other family took these slots — the ceiling is this family's own. What`,
+      "follows is its highest-ranked questions, not all of them, so the absence of an obligation about some",
+      "mechanism is not evidence that the mechanism is sound.",
+    );
+  }
+
+  const backstop = doc.dropped.find((d) =>
+    d.reason.startsWith("over the total backstop of "),
+  );
+  if (backstop) {
+    lines.push(
+      "",
+      `${backstop.count} obligation(s) were dropped after that, at the document-wide backstop — the lowest-ranked`,
+      'across every family. They are NOT "checked" either.',
+    );
+  }
+  return lines;
+}
+
 export function renderFamilyBlock(
   doc: ObligationsDocument,
   family: SeedFamily,
   staged?: StagedDiff | null,
 ): string {
-  const contract: ObligationContract = doc.contract === "minimal" ? "minimal" : "full";
+  const contract: ObligationContract =
+    doc.contract === "minimal" ? "minimal" : "full";
   const mine = doc.obligations.filter((o) => o.family === family);
   const row = doc.families.find((f) => f.family === family);
   const notMeasured = row && !row.measured ? row.notMeasuredReason : null;
@@ -480,6 +561,19 @@ export function renderFamilyBlock(
   }
 
   if (mine.length === 0) {
+    // "Minted nothing" and "minted N and a ceiling of 0 took them all" are
+    // different facts, and only the first one licenses the sentence below.
+    // Unreachable at the shipped caps; reachable the moment one is varied.
+    if (row?.minted) {
+      lines.push(
+        `${row.minted} ${family} obligation(s) were built and ALL of them dropped at a ceiling of ${row.cap ?? 0}.`,
+        "",
+        'None of them is "checked", and this is NOT the seeder finding nothing — it found these and was refused',
+        "the slots. Work the diff for this family's question directly, and say so in your output.",
+      );
+      lines.push("", ...renderStagedDiff(staged, []));
+      return lines.join("\n");
+    }
     lines.push(
       `No ${family} obligations could be built from the deterministic layer for this diff.`,
       "",
@@ -487,8 +581,12 @@ export function renderFamilyBlock(
       "that none exists. Work the diff for this family's question directly, and say so in your output.",
     );
     if (doc.degraded.length > 0) {
-      lines.push("", `The analysis ran ${doc.coverage}. What was not analysed:`);
-      for (const d of doc.degraded.slice(0, 10)) lines.push(`  - [${d.extractor}] ${d.reason}`);
+      lines.push(
+        "",
+        `The analysis ran ${doc.coverage}. What was not analysed:`,
+      );
+      for (const d of doc.degraded.slice(0, 10))
+        lines.push(`  - [${d.extractor}] ${d.reason}`);
     }
     // The branch this section is worth MOST to: "work the diff directly" is
     // exactly the instruction that sends an unseeded pass off to re-derive the
@@ -511,16 +609,11 @@ export function renderFamilyBlock(
       "COVERAGE IS NOT FULL. Parts of this diff were not analysed, so the absence of an obligation about some",
       "file is not evidence that the file is clean. What was missed:",
     );
-    for (const d of doc.degraded.slice(0, 10)) lines.push(`  - [${d.extractor}] ${d.reason}`);
+    for (const d of doc.degraded.slice(0, 10))
+      lines.push(`  - [${d.extractor}] ${d.reason}`);
   }
 
-  const truncation = doc.dropped.find((d) => d.reason.includes("budget"));
-  if (truncation) {
-    lines.push(
-      "",
-      `${truncation.count} further obligation(s) were built and dropped to stay inside the per-PR budget. They are NOT "checked".`,
-    );
-  }
+  lines.push(...renderTruncation(doc, family, row));
 
   // Per-run context, and it goes ABOVE the discharge contract deliberately: it
   // is about how to READ the diff, which every obligation below then asks a
@@ -528,7 +621,11 @@ export function renderFamilyBlock(
   // the never-empty rule, not the question `minimal` exists to hold constant.
   lines.push("", ...renderStagedDiff(staged, mine));
 
-  lines.push("", ...(contract === "minimal" ? DISCHARGE_MINIMAL : DISCHARGE), "");
+  lines.push(
+    "",
+    ...(contract === "minimal" ? DISCHARGE_MINIMAL : DISCHARGE),
+    "",
+  );
   for (const o of mine) lines.push(...renderOne(o, contract));
 
   if (contract === "minimal") {
@@ -554,7 +651,7 @@ export function renderFamilyBlock(
     ...wrapIds(mine.map((o) => o.id)),
     "",
     "A clean QUOTE gets a row too. That row is the RECORD that the question was answered, not a finding you",
-    "are proposing — write it at `severity: \"Minor\"` and let a later phase decide what is worth posting.",
+    'are proposing — write it at `severity: "Minor"` and let a later phase decide what is worth posting.',
     "",
     "`failureScenario` is REQUIRED on every row that claims a defect — ABSENT, PARTIAL, PROBE, or a QUOTE you",
     "are raising: *what input or state makes this behave wrongly, and what does it do then?* A finding with no",

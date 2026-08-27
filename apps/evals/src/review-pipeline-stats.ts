@@ -42,7 +42,14 @@ const ARTIFACT_DIR = join(".lastlight", "pr-review");
  * read as a pipeline that simply was not discharging, rather than as a contract
  * that was not expressible.
  */
-export const DISCHARGE_CODES = ["QUOTE", "ABSENT", "PARTIAL", "PROBE", "bad-code", "none"] as const;
+export const DISCHARGE_CODES = [
+  "QUOTE",
+  "ABSENT",
+  "PARTIAL",
+  "PROBE",
+  "bad-code",
+  "none",
+] as const;
 export type DischargeCode = (typeof DISCHARGE_CODES)[number];
 
 /**
@@ -139,7 +146,10 @@ const VALID_CODES = new Set(["QUOTE", "ABSENT", "PARTIAL", "PROBE"]);
  * that is not this one.
  */
 function isNotMeasuredMarker(row: Record<string, unknown>): boolean {
-  return typeof row.status === "string" && row.status.trim().toLowerCase() === "notmeasured";
+  return (
+    typeof row.status === "string" &&
+    row.status.trim().toLowerCase() === "notmeasured"
+  );
 }
 
 /**
@@ -173,10 +183,13 @@ function readJsonlRows(path: string): unknown[] {
 }
 
 const asRecord = (row: unknown): Record<string, unknown> =>
-  row && typeof row === "object" && !Array.isArray(row) ? (row as Record<string, unknown>) : {};
+  row && typeof row === "object" && !Array.isArray(row)
+    ? (row as Record<string, unknown>)
+    : {};
 
 /** `<family>-NNN` — the identity `code-facts` assigns at ingest. */
-const hypothesisId = (family: string, ordinal: number): string => `${family}-${String(ordinal).padStart(3, "0")}`;
+const hypothesisId = (family: string, ordinal: number): string =>
+  `${family}-${String(ordinal).padStart(3, "0")}`;
 
 /**
  * **A clean discharge: `QUOTE` with `failureScenario` PRESENT and explicitly
@@ -192,13 +205,24 @@ const hypothesisId = (family: string, ordinal: number): string => `${family}-${S
  * strength of a field nobody asked for.
  */
 function isCleanDischarge(row: Record<string, unknown>): boolean {
-  return dischargeOf(row) === "QUOTE" && "failureScenario" in row && row.failureScenario === null;
+  return (
+    dischargeOf(row) === "QUOTE" &&
+    "failureScenario" in row &&
+    row.failureScenario === null
+  );
 }
 
 interface ObligationsDoc {
   coverage?: "full" | "degraded" | "none";
   degraded?: { extractor?: string; reason?: string }[];
-  families?: { family: string; obligations?: number; measured?: boolean; notMeasuredReason?: string | null }[];
+  families?: {
+    family: string;
+    obligations?: number;
+    minted?: number;
+    cap?: number | null;
+    measured?: boolean;
+    notMeasuredReason?: string | null;
+  }[];
   obligations?: { family?: string }[];
   dropped?: { reason?: string; count?: number }[];
 }
@@ -216,7 +240,11 @@ interface FindingsDoc {
 }
 
 interface DispositionDoc {
-  findings?: { tier?: string; reason?: string | null; finding?: FindingsDoc["findings"] extends (infer F)[] ? F : never }[];
+  findings?: {
+    tier?: string;
+    reason?: string | null;
+    finding?: FindingsDoc["findings"] extends (infer F)[] ? F : never;
+  }[];
 }
 
 /**
@@ -230,7 +258,9 @@ interface DispositionDoc {
  * branch: making the mechanism metrics conditional on a debugging flag is how
  * they came to be absent from every arm ever run.
  */
-export function readPipelineStats(repoDir: string): PipelineReadout | undefined {
+export function readPipelineStats(
+  repoDir: string,
+): PipelineReadout | undefined {
   return readPipelineArtifacts(join(repoDir, ARTIFACT_DIR));
 }
 
@@ -243,17 +273,27 @@ export function readPipelineStats(repoDir: string): PipelineReadout | undefined 
  * checkout-relative path. Same reader either way: a back-filled number and a
  * live one must not be able to disagree.
  */
-export function readPipelineArtifacts(dir: string): PipelineReadout | undefined {
+export function readPipelineArtifacts(
+  dir: string,
+): PipelineReadout | undefined {
   if (!existsSync(dir)) return undefined;
 
-  const obligationsDoc = readJson<ObligationsDoc>(join(dir, "obligations.json"));
-  const factsDoc = readJson<{ toolchain?: Parameters<typeof flattenToolchain>[0] }>(join(dir, "facts.json"));
+  const obligationsDoc = readJson<ObligationsDoc>(
+    join(dir, "obligations.json"),
+  );
+  const factsDoc = readJson<{
+    toolchain?: Parameters<typeof flattenToolchain>[0];
+  }>(join(dir, "facts.json"));
   const findingsDoc = readJson<FindingsDoc>(join(dir, "findings.json"));
-  const dispositionDoc = readJson<DispositionDoc>(join(dir, "disposition.json"));
+  const dispositionDoc = readJson<DispositionDoc>(
+    join(dir, "disposition.json"),
+  );
 
   let hypothesisFiles: string[] = [];
   try {
-    hypothesisFiles = readdirSync(join(dir, "hypotheses")).filter((f) => f.endsWith(".jsonl"));
+    hypothesisFiles = readdirSync(join(dir, "hypotheses")).filter((f) =>
+      f.endsWith(".jsonl"),
+    );
   } catch {
     /* no hypotheses dir — the surveys never ran */
   }
@@ -262,7 +302,13 @@ export function readPipelineArtifacts(dir: string): PipelineReadout | undefined 
   // not zeros. Note the hypotheses dir counts: a run that died after `survey`
   // still produced the telemetry you most want to read, and an earlier version
   // of this guard threw exactly that case away.
-  if (!obligationsDoc && !findingsDoc && !dispositionDoc && !hypothesisFiles.length) return undefined;
+  if (
+    !obligationsDoc &&
+    !findingsDoc &&
+    !dispositionDoc &&
+    !hypothesisFiles.length
+  )
+    return undefined;
 
   const byFamily: Record<string, ReviewFamilyStats> = {};
   const family = (name: string): ReviewFamilyStats => (byFamily[name] ??= {});
@@ -289,6 +335,12 @@ export function readPipelineArtifacts(dir: string): PipelineReadout | undefined 
   for (const f of obligationsDoc?.families ?? []) {
     const stats = family(f.family);
     if (f.obligations !== undefined) stats.obligations = f.obligations;
+    // Carried, never derived. `minted` is absent on every run measured before
+    // code-facts recorded it, and a run that did not record it must not gain a
+    // fabricated `minted === obligations` — that would read as "nothing was
+    // truncated" on exactly the runs where the truncation notice was dead.
+    if (f.minted !== undefined) stats.minted = f.minted;
+    if (f.cap != null) stats.cap = f.cap;
     if (f.measured === false) declaredNotMeasured.push(f.family);
   }
   const obligations = obligationsDoc?.obligations?.length;
@@ -315,7 +367,8 @@ export function readPipelineArtifacts(dir: string): PipelineReadout | undefined 
     hypotheses += rows.length;
     rows.forEach((raw, index) => {
       const row = asRecord(raw);
-      if (!isNotMeasuredMarker(row)) liveRows.set(name, (liveRows.get(name) ?? 0) + 1);
+      if (!isNotMeasuredMarker(row))
+        liveRows.set(name, (liveRows.get(name) ?? 0) + 1);
       const id = hypothesisId(name, index + 1);
       const code = dischargeOf(row);
       dischargeCodes[code] = (dischargeCodes[code] ?? 0) + 1;
@@ -327,7 +380,11 @@ export function readPipelineArtifacts(dir: string): PipelineReadout | undefined 
       // row declaring `contract-001` from third position cannot capture
       // citations meant for the real first row.
       const declared = typeof row.id === "string" ? row.id : undefined;
-      if (declared && declared !== id) declaredClaims.set(declared, [...(declaredClaims.get(declared) ?? []), id]);
+      if (declared && declared !== id)
+        declaredClaims.set(declared, [
+          ...(declaredClaims.get(declared) ?? []),
+          id,
+        ]);
     });
   }
   // Deferred from the families loop: `measured: false` marks a family NOT
@@ -358,7 +415,8 @@ export function readPipelineArtifacts(dir: string): PipelineReadout | undefined 
   const tiers: Partial<Record<"inline" | "body" | "internal", number>> = {};
   const tierOf = new Map<string, string>();
   for (const d of dispositionDoc?.findings ?? []) {
-    if (d.tier === "inline" || d.tier === "body" || d.tier === "internal") tiers[d.tier] = (tiers[d.tier] ?? 0) + 1;
+    if (d.tier === "inline" || d.tier === "body" || d.tier === "internal")
+      tiers[d.tier] = (tiers[d.tier] ?? 0) + 1;
     const f = d.finding as { title?: string; path?: string } | undefined;
     if (f?.title && d.tier) tierOf.set(findingKey(f), d.tier);
   }
@@ -393,29 +451,47 @@ export function readPipelineArtifacts(dir: string): PipelineReadout | undefined 
       hypotheses: ids,
       // Every supporting hypothesis must RESOLVE and be clean. An id that names
       // no row is not evidence of innocence any more than citing none is.
-      cleanDischarge: ids.length > 0 && ids.every((id) => cleanById.get(resolve(id) ?? "") === true),
+      cleanDischarge:
+        ids.length > 0 &&
+        ids.every((id) => cleanById.get(resolve(id) ?? "") === true),
     });
   }
 
   // Conservation: how many distinct hypotheses reached a finding. The gate
   // requires every one to appear exactly once, so `hypotheses - discharged`
   // should be 0 — and when it is not, that is a measurement, not a crash.
-  const discharged = new Set(rawFindings.flatMap((f) => f.hypotheses ?? [])).size;
+  const discharged = new Set(rawFindings.flatMap((f) => f.hypotheses ?? []))
+    .size;
 
   const stats: ReviewPipelineStats = {
     ...(obligations !== undefined ? { obligations } : {}),
     ...(obligationsDoc?.dropped?.length
-      ? { obligationsDropped: obligationsDoc.dropped.map((d) => ({ reason: d.reason ?? "unknown", count: d.count ?? 0 })) }
+      ? {
+          obligationsDropped: obligationsDoc.dropped.map((d) => ({
+            reason: d.reason ?? "unknown",
+            count: d.count ?? 0,
+          })),
+        }
       : {}),
-    ...(hypothesisFiles.length ? { hypotheses, discharged, dischargeCodes, cleanDischarges } : {}),
+    ...(hypothesisFiles.length
+      ? { hypotheses, discharged, dischargeCodes, cleanDischarges }
+      : {}),
     ...(rawFindings.length ? { unprovenanced } : {}),
-    ...(Object.keys(tiers).length ? { tiers, inlinePosted: tiers.inline ?? 0 } : {}),
+    ...(Object.keys(tiers).length
+      ? { tiers, inlinePosted: tiers.inline ?? 0 }
+      : {}),
     ...(Object.keys(byFamily).length ? { byFamily } : {}),
     ...(obligationsDoc?.coverage ? { coverage: obligationsDoc.coverage } : {}),
     ...(obligationsDoc?.degraded?.length
-      ? { degraded: obligationsDoc.degraded.map((d) => `${d.extractor ?? "?"}: ${(d.reason ?? "").slice(0, 200)}`) }
+      ? {
+          degraded: obligationsDoc.degraded.map(
+            (d) => `${d.extractor ?? "?"}: ${(d.reason ?? "").slice(0, 200)}`,
+          ),
+        }
       : {}),
-    ...(factsDoc?.toolchain ? { toolchain: flattenToolchain(factsDoc.toolchain) } : {}),
+    ...(factsDoc?.toolchain
+      ? { toolchain: flattenToolchain(factsDoc.toolchain) }
+      : {}),
   };
 
   return { stats, findings };
@@ -444,7 +520,9 @@ function findingKey(f: { title?: string; path?: string }): string {
  * mechanism the gold is about lives in the body. Order is preserved: the
  * judge's indices come back as offsets into this array.
  */
-export function internalJudgeInputs(findings: PipelineFinding[]): { description: string; file: string | null }[] {
+export function internalJudgeInputs(
+  findings: PipelineFinding[],
+): { description: string; file: string | null }[] {
   return findings.map((f) => ({
     description: f.body ? `${f.title} — ${f.body}` : f.title,
     file: f.path ?? null,
@@ -462,7 +540,9 @@ export function internalJudgeInputs(findings: PipelineFinding[]): { description:
  */
 export function withInternalRecall(
   readout: PipelineReadout,
-  internal: { goldToFinding: (number | null)[]; matched: number; error?: string } | undefined,
+  internal:
+    | { goldToFinding: (number | null)[]; matched: number; error?: string }
+    | undefined,
 ): ReviewPipelineStats {
   const stats = readout.stats;
   // No pass at all (no gold, or no findings to match) — nothing to record, and
@@ -473,7 +553,8 @@ export function withInternalRecall(
   if (internal.error) return { ...stats, internalUngraded: internal.error };
 
   const byFamily: Record<string, ReviewFamilyStats> = {};
-  for (const [name, f] of Object.entries(stats.byFamily ?? {})) byFamily[name] = { ...f };
+  for (const [name, f] of Object.entries(stats.byFamily ?? {}))
+    byFamily[name] = { ...f };
   let inlineMatched = 0;
   for (const idx of internal.goldToFinding) {
     if (idx === null) continue;
@@ -485,7 +566,8 @@ export function withInternalRecall(
     // Discovery, always. Contribution to the review, only if it was posted —
     // so `matched` never exceeds `posted` and the funnel reads as one story.
     fam.internalMatched = (fam.internalMatched ?? 0) + 1;
-    if (f.tier === "inline" || f.tier === "body") fam.matched = (fam.matched ?? 0) + 1;
+    if (f.tier === "inline" || f.tier === "body")
+      fam.matched = (fam.matched ?? 0) + 1;
   }
 
   return {

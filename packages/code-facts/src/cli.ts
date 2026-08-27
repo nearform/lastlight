@@ -31,13 +31,19 @@ import {
 import { prepareTree } from "./prepare.js";
 import { checkProbes, renderProbeCheck } from "./probes.js";
 import { runExtractor, runWrapped, writeDocument } from "./run.js";
-import { AllDocumentSchema, DOCUMENT_SCHEMAS, type AllDocument, type ExtractorName } from "./schema.js";
+import {
+  AllDocumentSchema,
+  DOCUMENT_SCHEMAS,
+  type AllDocument,
+  type ExtractorName,
+} from "./schema.js";
 import {
   isObligationContract,
   OBLIGATION_CONTRACTS,
   SEEDABLE_FAMILIES,
   seedObligations,
   type MintOptions,
+  type SeedFamily,
 } from "./seed.js";
 import { renderFamilyBlock } from "./seed-render.js";
 import { loadManifest, resolveFactsBin, toolchainStamp } from "./toolchain.js";
@@ -156,6 +162,16 @@ passes; it reads no quote and judges no claim):
                       token is a WIRING bug and exits 2 before the document is
                       read — a typo'd arm silently running baseline would
                       report a number for an experiment that never happened.
+  --family-caps <spec>  override the per-family ceilings, as a comma-list of
+                      \`<family>=<n>\` (or \`=none\` for uncapped), e.g.
+                      \`contract=25,security=none\`. A MEASUREMENT seam, not an
+                      operator knob: there is no config key for it, and the
+                      ceilings' own rationale says the table is untuned and
+                      expects to move — so "what is in the tail this ceiling
+                      refused, and would any of it have reached gold?" needs to
+                      be askable without editing a constant. Families not named
+                      keep their shipped ceiling. An unknown family, a negative
+                      or a non-numeric value exits 2, unclamped and undefaulted.
 
 Options:
   --repo <dir>        the checkout to analyse            (default: cwd)
@@ -264,7 +280,9 @@ function stringFlag(value: string | boolean | undefined): string | undefined {
 
 function selfVersion(): string {
   try {
-    const pkg = JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")) as {
+    const pkg = JSON.parse(
+      readFileSync(join(packageRoot(), "package.json"), "utf8"),
+    ) as {
       version?: string;
     };
     return pkg.version ?? "unknown";
@@ -310,7 +328,10 @@ export function runCli(
   if (command === "toolchain") {
     io.out(
       JSON.stringify(
-        { manifest: loadManifest(), resolved: toolchainStamp(Object.keys(loadManifest().binaries)) },
+        {
+          manifest: loadManifest(),
+          resolved: toolchainStamp(Object.keys(loadManifest().binaries)),
+        },
         null,
         2,
       ),
@@ -452,9 +473,14 @@ export function runCli(
     const mint: MintOptions = { allInDiff: false, registrations: false };
     if (flags.mint !== undefined) {
       const spec = stringFlag(flags.mint);
-      const tokens = (spec ?? "").split(",").map((t) => t.trim()).filter((t) => t.length > 0);
+      const tokens = (spec ?? "")
+        .split(",")
+        .map((t) => t.trim())
+        .filter((t) => t.length > 0);
       if (tokens.length === 0) {
-        io.err(`--mint needs at least one of all-in-diff | registrations (comma-separated)`);
+        io.err(
+          `--mint needs at least one of all-in-diff | registrations (comma-separated)`,
+        );
         return EXIT_UNAVAILABLE;
       }
       for (const token of tokens) {
@@ -469,15 +495,66 @@ export function runCli(
       }
     }
 
+    // `--family-caps` is the MEASUREMENT seam onto FAMILY_CAPS, and it is
+    // validated exactly as the two above and before the document is read. The
+    // table's own docblock says it is untuned and expects to move; nothing could
+    // vary it without editing a module constant, so "what is in the tail this
+    // ceiling refused?" was unanswerable offline. Deliberately CLI-only — there
+    // is no config key, and `review.analysis.maxObligations` stays the only
+    // bound an operator sets.
+    const familyCaps: Partial<Record<SeedFamily, number>> = {};
+    if (flags["family-caps"] !== undefined) {
+      const spec = stringFlag(flags["family-caps"]);
+      const tokens = (spec ?? "")
+        .split(",")
+        .map((t) => t.trim())
+        .filter((t) => t.length > 0);
+      if (tokens.length === 0) {
+        io.err(
+          `--family-caps needs at least one <family>=<n> pair (comma-separated)`,
+        );
+        return EXIT_UNAVAILABLE;
+      }
+      for (const token of tokens) {
+        const [family, raw] = token.split("=", 2);
+        if (!(SEEDABLE_FAMILIES as readonly string[]).includes(family)) {
+          io.err(
+            `--family-caps must name one of ${SEEDABLE_FAMILIES.join(" | ")} (got "${family}")`,
+          );
+          return EXIT_UNAVAILABLE;
+        }
+        // `none` is the uncapped arm, spelled so a shell never has to quote
+        // `Infinity`. A negative or non-numeric ceiling is refused rather than
+        // clamped: a cap of -1 silently truncating every family to nothing is
+        // the typo'd-control-arm failure again.
+        const value = raw === "none" ? Infinity : Number(raw);
+        if (!Number.isFinite(value) && value !== Infinity) {
+          io.err(
+            `--family-caps ${family}= must be a non-negative integer or \`none\` (got "${raw}")`,
+          );
+          return EXIT_UNAVAILABLE;
+        }
+        if (value < 0) {
+          io.err(`--family-caps ${family}=${raw} is negative`);
+          return EXIT_UNAVAILABLE;
+        }
+        familyCaps[family as SeedFamily] = value;
+      }
+    }
+
     let document: AllDocument;
     try {
-      document = AllDocumentSchema.parse(JSON.parse(readFileSync(factsPath, "utf8")));
+      document = AllDocumentSchema.parse(
+        JSON.parse(readFileSync(factsPath, "utf8")),
+      );
     } catch (err) {
       // A malformed or absent envelope is EXIT_UNAVAILABLE, never an empty
       // obligation set: "nobody looked" and "looked and found none" must stay
       // distinguishable at every layer, and this is the layer where an empty
       // file would be read as the second.
-      io.err(`could not read a valid \`all\` document from ${factsPath}: ${err instanceof Error ? err.message : String(err)}`);
+      io.err(
+        `could not read a valid \`all\` document from ${factsPath}: ${err instanceof Error ? err.message : String(err)}`,
+      );
       return EXIT_UNAVAILABLE;
     }
 
@@ -485,6 +562,7 @@ export function runCli(
       maxObligations: numberFlag(flags["max-obligations"]),
       contract: contractFlag,
       mint,
+      familyCaps: Object.keys(familyCaps).length > 0 ? familyCaps : undefined,
       log,
     });
 
@@ -496,10 +574,15 @@ export function runCli(
         // rather than stamped. Passing `undefined` when the field is absent is
         // load-bearing: the brief says "nobody staged" in different words from
         // "staging failed", and both out loud.
-        const block = renderFamilyBlock(obligations, family, document.stagedDiff);
+        const block = renderFamilyBlock(
+          obligations,
+          family,
+          document.stagedDiff,
+        );
         // An empty block means "nothing to say AND nothing degraded". Writing an
         // empty file would make a phase's `test -s` gate pass on silence.
-        if (block) writeDocument(join(blocksDir, `${family}.md`), block, { raw: true });
+        if (block)
+          writeDocument(join(blocksDir, `${family}.md`), block, { raw: true });
       }
     }
 
@@ -559,7 +642,10 @@ const isMain = (() => {
   const entry = process.argv[1];
   if (!entry) return false;
   try {
-    return import.meta.url === new URL(`file://${entry}`).href || entry.endsWith("cli.js");
+    return (
+      import.meta.url === new URL(`file://${entry}`).href ||
+      entry.endsWith("cli.js")
+    );
   } catch {
     return false;
   }
@@ -575,7 +661,9 @@ if (isMain) {
   } catch (err) {
     // Reached only WITHOUT --never-fail, where a non-zero exit is the right
     // signal — a human or a test is reading it.
-    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+    process.stderr.write(
+      `${err instanceof Error ? err.message : String(err)}\n`,
+    );
     code = EXIT_UNAVAILABLE;
   }
   process.exitCode = code;

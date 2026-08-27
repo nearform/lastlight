@@ -68,11 +68,22 @@
  * never done, without failing the run and re-arming the 30-minute re-dispatch
  * loop.
  */
-import type { AllDocument, ConstantFact, ContractDelta, SymbolFact } from "./schema.js";
+import type {
+  AllDocument,
+  ConstantFact,
+  ContractDelta,
+  SymbolFact,
+} from "./schema.js";
 import { type LoggerPort, noopLogger } from "./log.js";
 
 /** The five families this package can seed. `spec` is WP0's and is not here. */
-export const SEEDABLE_FAMILIES = ["contract", "enforcement", "security", "state", "tests"] as const;
+export const SEEDABLE_FAMILIES = [
+  "contract",
+  "enforcement",
+  "security",
+  "state",
+  "tests",
+] as const;
 export type SeedFamily = (typeof SEEDABLE_FAMILIES)[number];
 
 /** One end of a mechanism, at a quotable site. */
@@ -148,8 +159,13 @@ export interface CoverageSet {
 export const OBLIGATION_CONTRACTS = ["full", "minimal"] as const;
 export type ObligationContract = (typeof OBLIGATION_CONTRACTS)[number];
 
-export function isObligationContract(value: unknown): value is ObligationContract {
-  return typeof value === "string" && (OBLIGATION_CONTRACTS as readonly string[]).includes(value);
+export function isObligationContract(
+  value: unknown,
+): value is ObligationContract {
+  return (
+    typeof value === "string" &&
+    (OBLIGATION_CONTRACTS as readonly string[]).includes(value)
+  );
 }
 
 /**
@@ -192,6 +208,16 @@ export interface ObligationsDocument {
   families: {
     family: SeedFamily | "spec";
     obligations: number;
+    /**
+     * How many this family BUILT, before its ceiling — so `minted > obligations`
+     * is "truncated at its own ceiling" and `minted === obligations` is "this is
+     * everything it had to say". Reconstructing that from `dropped[]` meant
+     * parsing a prose reason string for a family name, which is a join no
+     * consumer should have to make about its own instrument.
+     */
+    minted: number;
+    /** The ceiling in force for this family on this run; `null` for `spec`. */
+    cap: number | null;
     /** `false` ⇒ the seeding surface was absent, not empty. Never confuse them. */
     measured: boolean;
     notMeasuredReason: string | null;
@@ -220,6 +246,20 @@ export interface SeedOptions {
    * {@link MintOptions}.
    */
   mint?: MintOptions;
+  /**
+   * Override {@link FAMILY_CAPS} for this call. Absent ⇒ the shipped table, so
+   * the document is byte-identical unless a caller asks for a different one.
+   *
+   * It exists because the ceilings are the one truncation mechanism and nothing
+   * could vary them without editing a module constant — so "what is in the tail
+   * this cap refused?" was unanswerable offline, and the table's own docblock
+   * says it is untuned and expects to move. A partial map is merged over the
+   * shipped one; `Infinity` is the uncapped arm.
+   *
+   * Not wired to config on purpose: this is a measurement seam, not an operator
+   * knob. `review.analysis.maxObligations` remains the only configured bound.
+   */
+  familyCaps?: Partial<Record<SeedFamily, number>>;
   log?: LoggerPort;
 }
 
@@ -281,7 +321,10 @@ function isDiscriminating(c: ConstantFact): boolean {
  * back of the budget, not off the list.
  */
 function isTestPath(path: string): boolean {
-  return /(^|\/)(tests?|__tests__|spec)\//.test(path) || /\.(test|spec)\.[cm]?[jt]sx?$/.test(path);
+  return (
+    /(^|\/)(tests?|__tests__|spec)\//.test(path) ||
+    /\.(test|spec)\.[cm]?[jt]sx?$/.test(path)
+  );
 }
 
 /** Every site is a test file — so both ends of the mechanism are in the suite. */
@@ -356,6 +399,8 @@ interface CappedResult {
   kept: Obligation[];
   /** family → how many of ITS obligations fell past its own ceiling. */
   over: Map<SeedFamily, number>;
+  /** family → how many it MINTED, before its ceiling. `kept + over`. */
+  minted: Map<SeedFamily, number>;
 }
 
 /**
@@ -373,17 +418,22 @@ interface CappedResult {
  * 3. **An under-cap family is untouched.** No slot is reserved, so a family
  *    with two obligations gets two and gives nothing up to anyone.
  */
-function applyFamilyCaps(ranked: Obligation[]): CappedResult {
+function applyFamilyCaps(
+  ranked: Obligation[],
+  caps: Record<SeedFamily, number>,
+): CappedResult {
   const seen = new Map<SeedFamily, number>();
   const over = new Map<SeedFamily, number>();
   const kept: Obligation[] = [];
   for (const o of ranked) {
     const rank = (seen.get(o.family) ?? 0) + 1;
     seen.set(o.family, rank);
-    if (rank <= FAMILY_CAPS[o.family]) kept.push(o);
+    if (rank <= caps[o.family]) kept.push(o);
     else over.set(o.family, (over.get(o.family) ?? 0) + 1);
   }
-  return { kept, over };
+  // `seen` is the per-family running rank, so its final value IS the mint count
+  // — every candidate that reached here, cap or no cap.
+  return { kept, over, minted: seen };
 }
 
 /** `path:line` → the pair, or `null` for anything that is not one. */
@@ -391,7 +441,9 @@ function splitSite(site: string): { path: string; line: number } | null {
   const i = site.lastIndexOf(":");
   if (i <= 0) return null;
   const line = Number(site.slice(i + 1));
-  return Number.isInteger(line) && line > 0 ? { path: site.slice(0, i), line } : null;
+  return Number.isInteger(line) && line > 0
+    ? { path: site.slice(0, i), line }
+    : null;
 }
 
 /**
@@ -463,7 +515,11 @@ function seedEnforcement(constants: ConstantFact[]): Obligation[] {
       mechanism: viaDuplicates
         ? `the value ${c.value} is declared as ${c.constant} and ALSO written literally at ${duplicates.length} other site(s), so a change to the constant does not reach them`
         : `${c.constant} is referenced ${references?.length ?? 0} time(s) and may never be compared or enforced on the other side of its boundary`,
-      introducedAt: { path: site.path, line: site.line, quote: `const ${c.constant} = ${c.value}` },
+      introducedAt: {
+        path: site.path,
+        line: site.line,
+        quote: `const ${c.constant} = ${c.value}`,
+      },
       enforcedAt: { candidates: candidates.slice(0, 8), found: false },
       question: viaDuplicates
         ? `Quote the line at each candidate that reads ${c.constant}, or state that the site hard-codes ${c.value} and would not follow a change to the constant.`
@@ -509,8 +565,15 @@ function seedContract(contracts: ContractDelta[]): Obligation[] {
       id: "",
       family: "contract",
       mechanism: `${d.symbol}'s exported shape ${d.change} from \`${before}\` to \`${after}\`, and ${d.consumersOutsideDiff.length} consumer(s) outside this diff were not updated with it`,
-      introducedAt: { path: d.file, line: 1, quote: `export ${d.symbol}: ${after}` },
-      enforcedAt: { candidates: d.consumersOutsideDiff.slice(0, 8), found: false },
+      introducedAt: {
+        path: d.file,
+        line: 1,
+        quote: `export ${d.symbol}: ${after}`,
+      },
+      enforcedAt: {
+        candidates: d.consumersOutsideDiff.slice(0, 8),
+        found: false,
+      },
       question: `Quote the line at each consumer that still satisfies ${d.symbol}'s NEW shape, or state which one does not.`,
       evidence: [{ type: "contract", ref: `contracts.contracts[${index}]` }],
       discharge: "quote",
@@ -548,8 +611,15 @@ function seedState(symbols: SymbolFact[]): Obligation[] {
       id: "",
       family: "state",
       mechanism: `${s.name} changed in this diff and is used at ${outside.length} site(s) the diff did not touch — ordering, lifecycle or invalidation there is not visible file-by-file`,
-      introducedAt: { path: site.path, line: site.line, quote: `${s.kind} ${s.name}` },
-      enforcedAt: { candidates: outside.slice(0, 8).map((r) => r.at), found: false },
+      introducedAt: {
+        path: site.path,
+        line: site.line,
+        quote: `${s.kind} ${s.name}`,
+      },
+      enforcedAt: {
+        candidates: outside.slice(0, 8).map((r) => r.at),
+        found: false,
+      },
       question: `Quote the line at each untouched call site that still holds after ${s.name}'s change, or name the one whose assumption it breaks.`,
       evidence: [{ type: "symbol", ref: `facts.symbols[${index}]` }],
       // `name-match` sites are HYPOTHESES, not a resolved reference set, so they
@@ -559,7 +629,12 @@ function seedState(symbols: SymbolFact[]): Obligation[] {
         FAMILY_WEIGHT.state +
         Math.round(ratio * 20) +
         (s.exported ? 5 : 0) -
-        (whollyInTests(site.path, outside.map((r) => r.at)) ? TEST_ONLY_PENALTY : 0),
+        (whollyInTests(
+          site.path,
+          outside.map((r) => r.at),
+        )
+          ? TEST_ONLY_PENALTY
+          : 0),
     });
   }
   return out;
@@ -574,7 +649,10 @@ function seedState(symbols: SymbolFact[]): Obligation[] {
  * `state` does, and a scanner hit in the same FILE is attached as extra evidence
  * on an obligation that already exists. A `patterns` hit never creates one.
  */
-function seedSecurity(symbols: SymbolFact[], patternFiles: Map<string, number[]>): Obligation[] {
+function seedSecurity(
+  symbols: SymbolFact[],
+  patternFiles: Map<string, number[]>,
+): Obligation[] {
   const out: Obligation[] = [];
   for (const [index, s] of symbols.entries()) {
     const site = splitSite(s.declaredAt);
@@ -587,18 +665,33 @@ function seedSecurity(symbols: SymbolFact[], patternFiles: Map<string, number[]>
       id: "",
       family: "security",
       mechanism: `${s.name} changed in a file a scanner also flagged (${hits.length} hit(s)), and it is reachable from ${s.references.length} site(s) — the question is whether any of them carries attacker-controlled input`,
-      introducedAt: { path: site.path, line: site.line, quote: `${s.kind} ${s.name}` },
-      enforcedAt: { candidates: s.references.slice(0, 8).map((r) => r.at), found: false },
+      introducedAt: {
+        path: site.path,
+        line: site.line,
+        quote: `${s.kind} ${s.name}`,
+      },
+      enforcedAt: {
+        candidates: s.references.slice(0, 8).map((r) => r.at),
+        found: false,
+      },
       question: `Quote the line that validates or escapes the input reaching ${s.name}, or state that the path from each caller is unvalidated.`,
       evidence: [
         { type: "symbol", ref: `facts.symbols[${index}]` },
-        ...hits.map((h) => ({ type: "pattern", ref: `patterns.findings[${h}]` })),
+        ...hits.map((h) => ({
+          type: "pattern",
+          ref: `patterns.findings[${h}]`,
+        })),
       ],
       discharge: "either",
       rank:
         FAMILY_WEIGHT.security +
         Math.min(hits.length, 10) -
-        (whollyInTests(site.path, s.references.map((r) => r.at)) ? TEST_ONLY_PENALTY : 0),
+        (whollyInTests(
+          site.path,
+          s.references.map((r) => r.at),
+        )
+          ? TEST_ONLY_PENALTY
+          : 0),
     });
   }
   return out;
@@ -658,7 +751,11 @@ function seedAllInDiff(symbols: SymbolFact[]): Obligation[] {
       id: "",
       family: "contract",
       mechanism: `${s.name} is changed in this diff and every one of its ${s.referenceCount} reference(s) is also inside the diff — no consumer outside the change constrains it, and a caller-side surprise is invisible file-by-file`,
-      introducedAt: { path: site.path, line: site.line, quote: `${s.kind} ${s.name}` },
+      introducedAt: {
+        path: site.path,
+        line: site.line,
+        quote: `${s.kind} ${s.name}`,
+      },
       enforcedAt: { candidates, found: false },
       // The last sentence is load-bearing: the 8-case D2 confirm measured this
       // question's escape hatch being answered with FUTURE hypotheticals
@@ -756,9 +853,16 @@ function seedRegistrations(symbols: SymbolFact[]): Obligation[] {
  * survives is what each family's ranking says converts, no family displaces
  * another, and what was dropped is counted rather than vanished.
  */
-export function seedObligations(doc: AllDocument, options: SeedOptions = {}): ObligationsDocument {
+export function seedObligations(
+  doc: AllDocument,
+  options: SeedOptions = {},
+): ObligationsDocument {
   const log = options.log ?? noopLogger;
   const max = options.maxObligations ?? DEFAULT_MAX_OBLIGATIONS;
+  const caps: Record<SeedFamily, number> = {
+    ...FAMILY_CAPS,
+    ...options.familyCaps,
+  };
   const x = doc.extractors;
 
   const patternFiles = new Map<string, number[]>();
@@ -801,12 +905,12 @@ export function seedObligations(doc: AllDocument, options: SeedOptions = {}): Ob
   // comparing two families' counts has to be able to tell "this family had
   // little to say" from "this family was truncated at its own ceiling", and a
   // pooled reason cannot say which.
-  const capped = applyFamilyCaps(valid);
+  const capped = applyFamilyCaps(valid, caps);
   for (const family of SEEDABLE_FAMILIES) {
     const count = capped.over.get(family);
     if (!count) continue;
     dropCounts.set(
-      `over the per-family ceiling of ${FAMILY_CAPS[family]} for ${family} — that family's own obligations, ranked by how much of the impact cone lies outside the diff, past its ceiling. No other family lost a slot to them. These are NOT "checked"`,
+      `over the per-family ceiling of ${caps[family]} for ${family} — that family's own obligations, ranked by how much of the impact cone lies outside the diff, past its ceiling. No other family lost a slot to them. These are NOT "checked"`,
       count,
     );
   }
@@ -834,6 +938,8 @@ export function seedObligations(doc: AllDocument, options: SeedOptions = {}): Ob
     ...SEEDABLE_FAMILIES.map((family) => ({
       family: family as SeedFamily | "spec",
       obligations: counts.get(family) ?? 0,
+      minted: capped.minted.get(family) ?? 0,
+      cap: caps[family],
       measured: family === "tests" ? coverageRead : true,
       notMeasuredReason:
         family === "tests" && !coverageRead
@@ -843,6 +949,10 @@ export function seedObligations(doc: AllDocument, options: SeedOptions = {}): Ob
     {
       family: "spec" as const,
       obligations: 0,
+      // Seeded elsewhere, so this package minted none and holds no ceiling for
+      // it. `cap: null` is "nobody looked", not "unbounded".
+      minted: 0,
+      cap: null,
       measured: false,
       notMeasuredReason:
         "seeded from the PR body and the linked issue, which this package cannot see — built harness-side by review-spec.ts (WP0)",
@@ -875,7 +985,10 @@ export function seedObligations(doc: AllDocument, options: SeedOptions = {}): Ob
     degraded: doc.degraded,
     families,
     obligations: kept,
-    dropped: [...dropCounts.entries()].map(([reason, count]) => ({ reason, count })),
+    dropped: [...dropCounts.entries()].map(([reason, count]) => ({
+      reason,
+      count,
+    })),
     coverageSet: {
       selected: kept.map((o) => o.id),
       sealed: true,

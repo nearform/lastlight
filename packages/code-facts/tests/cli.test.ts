@@ -13,17 +13,32 @@
  * the CLI's own output is a value here rather than a side effect.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeConstantFixture, makeFakeTool, type Fixture } from "./helpers.js";
 import { parseArgv, runCli } from "../src/cli.js";
 import { EXIT_DEGRADED, EXIT_OK, EXIT_UNAVAILABLE } from "../src/errors.js";
 import { ProbeEnvSchema } from "../src/schema.js";
-import type { CoverageDocument, FactsDocument, PatternsDocument } from "../src/schema.js";
+import type {
+  CoverageDocument,
+  FactsDocument,
+  PatternsDocument,
+} from "../src/schema.js";
 
 /** Collect what the CLI wrote, keeping the two streams apart. */
-function capture(): { out: string[]; err: string[]; io: { out: (s: string) => void; err: (s: string) => void } } {
+function capture(): {
+  out: string[];
+  err: string[];
+  io: { out: (s: string) => void; err: (s: string) => void };
+} {
   const out: string[] = [];
   const err: string[] = [];
   return { out, err, io: { out: (s) => out.push(s), err: (s) => err.push(s) } };
@@ -40,11 +55,19 @@ describe("parseArgv", () => {
       flags: { base: "main" },
     });
     // An `=` inside the VALUE survives — `--sides client=web/,server=api/`.
-    expect(parseArgv(["constants", "--sides=client=web/"]).flags.sides).toBe("client=web/");
+    expect(parseArgv(["constants", "--sides=client=web/"]).flags.sides).toBe(
+      "client=web/",
+    );
   });
 
   it("treats the declared boolean flags as booleans, not as value-takers", () => {
-    const parsed = parseArgv(["facts", "--never-fail", "--stage", "--base", "main"]);
+    const parsed = parseArgv([
+      "facts",
+      "--never-fail",
+      "--stage",
+      "--base",
+      "main",
+    ]);
     expect(parsed.flags["never-fail"]).toBe(true);
     expect(parsed.flags.stage).toBe(true);
     // The flag AFTER a boolean is still a flag, not that boolean's value.
@@ -58,7 +81,13 @@ describe("parseArgv", () => {
    * re-dispatch loop shut (§D12).
    */
   it("does not swallow a following argument that begins with `-`", () => {
-    const parsed = parseArgv(["facts", "--out", "--never-fail", "--base", "main"]);
+    const parsed = parseArgv([
+      "facts",
+      "--out",
+      "--never-fail",
+      "--base",
+      "main",
+    ]);
     expect(parsed.flags.out).toBe(true);
     expect(parsed.flags["never-fail"]).toBe(true);
     expect(parsed.flags.base).toBe("main");
@@ -95,7 +124,9 @@ describe("the informational commands", () => {
     expect(printed.compiler.version).toMatch(/^\d+\.\d+/);
     // The path is the load-bearing half: the compiler must come from THIS
     // package's tree, never from the repo under review (`compiler-isolation`).
-    expect(printed.compiler.modulePath).toMatch(/node_modules[/\\]typescript[/\\]package\.json$/);
+    expect(printed.compiler.modulePath).toMatch(
+      /node_modules[/\\]typescript[/\\]package\.json$/,
+    );
     // And the per-platform sidecar, because only the matching one installs: a
     // `typescript` that imports with no executable behind it is the shape a
     // wrong-platform image produces, and "which compiler produced this?" has to
@@ -112,14 +143,23 @@ describe("the informational commands", () => {
     const { out, io } = capture();
     expect(runCli(["toolchain"], io)).toBe(EXIT_OK);
     const printed = JSON.parse(out.join("\n")) as {
-      manifest: { version: number; binaries: Record<string, { version: string; sources: unknown }> };
-      resolved: { binaries: Record<string, { status: string; expected: string | null }> };
+      manifest: {
+        version: number;
+        binaries: Record<string, { version: string; sources: unknown }>;
+      };
+      resolved: {
+        binaries: Record<string, { status: string; expected: string | null }>;
+      };
     };
     expect(printed.manifest.version).toBe(2);
     for (const [name, entry] of Object.entries(printed.manifest.binaries)) {
       // The manifest half is what SHOULD be there; the resolved half is what is.
-      expect(printed.resolved.binaries[name].expected, name).toBe(entry.version);
-      expect(printed.resolved.binaries[name].status, name).toMatch(/^(ok|mismatch|missing|unprobed)$/);
+      expect(printed.resolved.binaries[name].expected, name).toBe(
+        entry.version,
+      );
+      expect(printed.resolved.binaries[name].status, name).toMatch(
+        /^(ok|mismatch|missing|unprobed)$/,
+      );
     }
   });
 
@@ -142,7 +182,16 @@ describe("the informational commands", () => {
     expect(out).toEqual([]);
     const message = err.join("\n");
     expect(message).toMatch(/unknown command "fatcs"/);
-    for (const command of ["facts", "contracts", "constants", "deps", "patterns", "coverage", "all", "toolchain"]) {
+    for (const command of [
+      "facts",
+      "contracts",
+      "constants",
+      "deps",
+      "patterns",
+      "coverage",
+      "all",
+      "toolchain",
+    ]) {
       expect(message, command).toContain(command);
     }
   });
@@ -174,7 +223,18 @@ describe("the flags reach the extraction", () => {
 
   function run(argv: string[]): { code: number; out: string; err: string } {
     const { out, err, io } = capture();
-    const code = runCli([...argv, "--repo", fixture.dir, "--base", fixture.base, "--head", fixture.head], io);
+    const code = runCli(
+      [
+        ...argv,
+        "--repo",
+        fixture.dir,
+        "--base",
+        fixture.base,
+        "--head",
+        fixture.head,
+      ],
+      io,
+    );
     return { code, out: out.join("\n"), err: err.join("\n") };
   }
 
@@ -187,9 +247,14 @@ describe("the flags reach the extraction", () => {
   it("`--max-references 1` caps references[] while referenceCount stays truthful", () => {
     const uncapped = JSON.parse(run(["facts"]).out) as FactsDocument;
     const before = uncapped.symbols.find((s) => s.name === "MAX_TOKEN_AGE");
-    expect(before?.references.length, "the fixture must have more than one reference").toBeGreaterThan(1);
+    expect(
+      before?.references.length,
+      "the fixture must have more than one reference",
+    ).toBeGreaterThan(1);
 
-    const capped = JSON.parse(run(["facts", "--max-references", "1"]).out) as FactsDocument;
+    const capped = JSON.parse(
+      run(["facts", "--max-references", "1"]).out,
+    ) as FactsDocument;
     const after = capped.symbols.find((s) => s.name === "MAX_TOKEN_AGE");
     expect(after?.references).toHaveLength(1);
     expect(after?.referenceCount).toBe(before?.referenceCount);
@@ -197,7 +262,11 @@ describe("the flags reach the extraction", () => {
   });
 
   it("`--tsconfig` at a path that does not exist degrades and NAMES the path", () => {
-    const { code, out } = run(["facts", "--tsconfig", join(fixture.dir, "nope.tsconfig.json")]);
+    const { code, out } = run([
+      "facts",
+      "--tsconfig",
+      join(fixture.dir, "nope.tsconfig.json"),
+    ]);
     const document = JSON.parse(out) as FactsDocument;
     expect(code).not.toBe(EXIT_OK);
     expect(document.coverage).toBe("degraded");
@@ -211,7 +280,10 @@ describe("the flags reach the extraction", () => {
     // opengrep is absent on a developer Mac, and the missing-binary branch
     // short-circuits before the ruleset is ever looked at — so the flag can only
     // be exercised with something resolvable behind it.
-    const opengrep = makeFakeTool("opengrep", `#!/bin/sh\necho '{"results":[],"errors":[]}'\n`);
+    const opengrep = makeFakeTool(
+      "opengrep",
+      `#!/bin/sh\necho '{"results":[],"errors":[]}'\n`,
+    );
     scratch.push(opengrep.dir);
     const missing = join(fixture.dir, "no-such-rules.yaml");
     process.env.LASTLIGHT_OPENGREP_BIN = opengrep.bin;
@@ -219,7 +291,10 @@ describe("the flags reach the extraction", () => {
       const { out } = run(["patterns", "--rules", missing]);
       const document = JSON.parse(out) as PatternsDocument;
       const entry = document.degraded.find((d) => d.reason.includes(missing));
-      expect(entry, "an unreadable ruleset must not read as `no findings`").toBeDefined();
+      expect(
+        entry,
+        "an unreadable ruleset must not read as `no findings`",
+      ).toBeDefined();
       expect(entry?.reason).toMatch(/does not exist/);
       expect(document.findings).toEqual([]);
       expect(document.coverage).toBe("degraded");
@@ -244,16 +319,24 @@ describe("the flags reach the extraction", () => {
       "utf8",
     );
 
-    const document = JSON.parse(run(["coverage", "--report", "artifacts/named.info"]).out) as CoverageDocument;
+    const document = JSON.parse(
+      run(["coverage", "--report", "artifacts/named.info"]).out,
+    ) as CoverageDocument;
     expect(document.report).toBe("artifacts/named.info");
     // Read from the named artifact, which says the line is UNCOVERED; the
     // default candidate says it ran nine times.
-    expect(document.files.find((f) => f.path === "src/config.ts")?.uncoveredChangedLines).toEqual([1]);
+    expect(
+      document.files.find((f) => f.path === "src/config.ts")
+        ?.uncoveredChangedLines,
+    ).toEqual([1]);
 
     // The pin without the flag: the same repo defaults back to the candidate.
     const fallback = JSON.parse(run(["coverage"]).out) as CoverageDocument;
     expect(fallback.report).toBe("coverage/lcov.info");
-    expect(fallback.files.find((f) => f.path === "src/config.ts")?.uncoveredChangedLines).toEqual([]);
+    expect(
+      fallback.files.find((f) => f.path === "src/config.ts")
+        ?.uncoveredChangedLines,
+    ).toEqual([]);
 
     rmSync(join(fixture.dir, "coverage"), { recursive: true, force: true });
     rmSync(join(fixture.dir, "artifacts"), { recursive: true, force: true });
@@ -312,13 +395,17 @@ describe("the `prepare` command", () => {
   it("`--never-fail` flattens that to 0 — §D12, the 30-minute re-dispatch loop", () => {
     const repo = tree({ "pom.xml": "<project/>" });
     const { io } = capture();
-    expect(runCli(["prepare", "--repo", repo, "--never-fail"], io)).toBe(EXIT_OK);
+    expect(runCli(["prepare", "--repo", repo, "--never-fail"], io)).toBe(
+      EXIT_OK,
+    );
   });
 
   it("`--no-install` reports the tree without touching it", () => {
     const repo = tree({ "package.json": "{}", "package-lock.json": "{}" });
     const { io, out } = capture();
-    expect(runCli(["prepare", "--repo", repo, "--no-install"], io)).toBe(EXIT_OK);
+    expect(runCli(["prepare", "--repo", repo, "--no-install"], io)).toBe(
+      EXIT_OK,
+    );
     const env = JSON.parse(out.join("\n"));
     expect(env.install).toBe("skipped");
     expect(env.installed).toBe(false);
@@ -329,9 +416,13 @@ describe("the `prepare` command", () => {
     const repo = tree({ "package.json": "{}", "node_modules/.keep": "" });
     const target = join(repo, ".lastlight", "pr-review", "probes", "env.json");
     const { io, out } = capture();
-    expect(runCli(["prepare", "--repo", repo, "--out", target], io)).toBe(EXIT_OK);
+    expect(runCli(["prepare", "--repo", repo, "--out", target], io)).toBe(
+      EXIT_OK,
+    );
     expect(out.join("")).toBe("");
-    expect(ProbeEnvSchema.parse(JSON.parse(readFileSync(target, "utf8")))).toBeTruthy();
+    expect(
+      ProbeEnvSchema.parse(JSON.parse(readFileSync(target, "utf8"))),
+    ).toBeTruthy();
   });
 });
 
@@ -394,7 +485,16 @@ describe("`seed --contract`", () => {
   const seedInto = (dir: string, facts: string, argv: string[]) => {
     const { io, out, err } = capture();
     const code = runCli(
-      ["seed", "--facts", facts, "--out", join(dir, "obligations.json"), "--blocks", join(dir, "blocks"), ...argv],
+      [
+        "seed",
+        "--facts",
+        facts,
+        "--out",
+        join(dir, "obligations.json"),
+        "--blocks",
+        join(dir, "blocks"),
+        ...argv,
+      ],
       io,
     );
     return { code, out, err };
@@ -405,7 +505,9 @@ describe("`seed --contract`", () => {
     expect(seedInto(dir, facts, []).code).toBe(EXIT_OK);
     const doc = JSON.parse(readFileSync(join(dir, "obligations.json"), "utf8"));
     expect(doc.contract).toBe("full");
-    expect(readFileSync(join(dir, "blocks", "enforcement.md"), "utf8")).toMatch(/"discharge":/);
+    expect(readFileSync(join(dir, "blocks", "enforcement.md"), "utf8")).toMatch(
+      /"discharge":/,
+    );
   });
 
   it("`--contract minimal` reaches the BLOCK on disk, not just the option object", () => {
@@ -438,21 +540,98 @@ describe("`seed --contract`", () => {
     const { dir, facts } = factsTree();
     const { code, err } = seedInto(dir, facts, ["--mint", "bogus"]);
     expect(code).toBe(EXIT_UNAVAILABLE);
-    expect(err.join(" ")).toMatch(/--mint must be a comma-list over all-in-diff \| registrations/);
+    expect(err.join(" ")).toMatch(
+      /--mint must be a comma-list over all-in-diff \| registrations/,
+    );
     expect(existsSync(join(dir, "obligations.json"))).toBe(false);
     // A known token dragging a typo along fails identically.
-    expect(seedInto(dir, facts, ["--mint", "all-in-diff,registartions"]).code).toBe(EXIT_UNAVAILABLE);
+    expect(
+      seedInto(dir, facts, ["--mint", "all-in-diff,registartions"]).code,
+    ).toBe(EXIT_UNAVAILABLE);
   });
 
   it("absent `--mint` stamps both arms false; a spec stamps what was asked", () => {
     const { dir, facts } = factsTree();
     expect(seedInto(dir, facts, []).code).toBe(EXIT_OK);
-    const baseline = JSON.parse(readFileSync(join(dir, "obligations.json"), "utf8"));
-    expect(baseline.minting).toEqual({ allInDiff: false, registrations: false });
+    const baseline = JSON.parse(
+      readFileSync(join(dir, "obligations.json"), "utf8"),
+    );
+    expect(baseline.minting).toEqual({
+      allInDiff: false,
+      registrations: false,
+    });
 
-    expect(seedInto(dir, facts, ["--mint", "all-in-diff,registrations"]).code).toBe(EXIT_OK);
-    const minted = JSON.parse(readFileSync(join(dir, "obligations.json"), "utf8"));
+    expect(
+      seedInto(dir, facts, ["--mint", "all-in-diff,registrations"]).code,
+    ).toBe(EXIT_OK);
+    const minted = JSON.parse(
+      readFileSync(join(dir, "obligations.json"), "utf8"),
+    );
     expect(minted.minting).toEqual({ allInDiff: true, registrations: true });
+  });
+
+  it("`--family-caps` reaches the document, and names the cap in force", () => {
+    // The measurement seam onto FAMILY_CAPS. The point of it is the DROPPED
+    // reason and the recorded `cap`: an offline sweep re-reads them to ask what
+    // a given ceiling refused, so both have to carry the ceiling that actually
+    // ran rather than the shipped one.
+    const { dir, facts } = factsTree();
+    expect(seedInto(dir, facts, ["--family-caps", "enforcement=1"]).code).toBe(
+      EXIT_OK,
+    );
+    const doc = JSON.parse(readFileSync(join(dir, "obligations.json"), "utf8"));
+
+    const enforcement = doc.families.find(
+      (f: { family: string }) => f.family === "enforcement",
+    );
+    expect(enforcement.cap).toBe(1);
+    expect(enforcement.obligations).toBeLessThanOrEqual(1);
+    // Families not named keep their shipped ceiling.
+    expect(
+      doc.families.find((f: { family: string }) => f.family === "contract").cap,
+    ).toBe(12);
+  });
+
+  it("refuses an unknown family, a negative and a non-numeric ceiling, before reading anything", () => {
+    // Same rule as `--contract` and `--mint`. A clamped or defaulted ceiling is
+    // the worst of the three failures: the run succeeds, the document looks
+    // ordinary, and the number belongs to an experiment nobody ran.
+    const { dir, facts } = factsTree();
+
+    const unknown = seedInto(dir, facts, ["--family-caps", "contarct=4"]);
+    expect(unknown.code).toBe(EXIT_UNAVAILABLE);
+    expect(unknown.err.join(" ")).toMatch(/--family-caps must name one of/);
+    expect(existsSync(join(dir, "obligations.json"))).toBe(false);
+
+    expect(seedInto(dir, facts, ["--family-caps", "contract=-1"]).code).toBe(
+      EXIT_UNAVAILABLE,
+    );
+    expect(seedInto(dir, facts, ["--family-caps", "contract=lots"]).code).toBe(
+      EXIT_UNAVAILABLE,
+    );
+    expect(seedInto(dir, facts, ["--family-caps", ""]).code).toBe(
+      EXIT_UNAVAILABLE,
+    );
+  });
+
+  it("`=none` is the uncapped arm, spelled so a shell never quotes Infinity", () => {
+    const { dir, facts } = factsTree();
+    expect(
+      seedInto(dir, facts, ["--family-caps", "enforcement=none"]).code,
+    ).toBe(EXIT_OK);
+    const doc = JSON.parse(readFileSync(join(dir, "obligations.json"), "utf8"));
+    const enforcement = doc.families.find(
+      (f: { family: string }) => f.family === "enforcement",
+    );
+    // JSON has no Infinity — it serialises as null, which is why the sweep reads
+    // `minted` rather than trusting `cap` to be a number on an uncapped arm.
+    expect(enforcement.cap).toBeNull();
+    expect(enforcement.obligations).toBe(enforcement.minted);
+    expect(
+      doc.dropped.filter((d: { reason: string }) =>
+        d.reason.includes("ceiling of Infinity"),
+      ),
+    ).toEqual([]);
   });
 });
 

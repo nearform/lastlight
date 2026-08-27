@@ -24,22 +24,38 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { checkDischarge, DISCHARGE_CODES, renderDischargeCheck } from "../src/discharge.js";
+import {
+  checkDischarge,
+  DISCHARGE_CODES,
+  renderDischargeCheck,
+} from "../src/discharge.js";
 import { renderFamilyBlock } from "../src/seed-render.js";
 import type { StagedDiff } from "../src/schema.js";
-import type { Obligation, ObligationsDocument, SeedFamily } from "../src/seed.js";
+import type {
+  Obligation,
+  ObligationsDocument,
+  SeedFamily,
+} from "../src/seed.js";
 
 const dirs: string[] = [];
 afterAll(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
 
-function ob(id: string, family: SeedFamily, over: Partial<Obligation> = {}): Obligation {
+function ob(
+  id: string,
+  family: SeedFamily,
+  over: Partial<Obligation> = {},
+): Obligation {
   return {
     id,
     family,
     mechanism: `${id} is introduced on one side of a boundary and may never be checked on the other`,
-    introducedAt: { path: "src/config.ts", line: 12, quote: "const MAX_AGE = 300" },
+    introducedAt: {
+      path: "src/config.ts",
+      line: 12,
+      quote: "const MAX_AGE = 300",
+    },
     enforcedAt: { candidates: ["src/server/auth.ts:73"], found: false },
     question: `Quote the line that compares or enforces ${id}, or state that no such line exists.`,
     evidence: [{ type: "constant", ref: "MAX_AGE" }],
@@ -68,11 +84,46 @@ function doc(over: Partial<ObligationsDocument> = {}): ObligationsDocument {
     coverage: "full",
     degraded: [],
     families: [
-      { family: "enforcement", obligations: 3, measured: true, notMeasuredReason: null },
-      { family: "contract", obligations: 1, measured: true, notMeasuredReason: null },
-      { family: "security", obligations: 0, measured: true, notMeasuredReason: null },
-      { family: "state", obligations: 0, measured: true, notMeasuredReason: null },
-      { family: "tests", obligations: 0, measured: false, notMeasuredReason: "no coverage report" },
+      {
+        family: "enforcement",
+        obligations: 3,
+        minted: 3,
+        cap: 12,
+        measured: true,
+        notMeasuredReason: null,
+      },
+      {
+        family: "contract",
+        obligations: 1,
+        minted: 1,
+        cap: 12,
+        measured: true,
+        notMeasuredReason: null,
+      },
+      {
+        family: "security",
+        obligations: 0,
+        minted: 0,
+        cap: 8,
+        measured: true,
+        notMeasuredReason: null,
+      },
+      {
+        family: "state",
+        obligations: 0,
+        minted: 0,
+        cap: 8,
+        measured: true,
+        notMeasuredReason: null,
+      },
+      {
+        family: "tests",
+        obligations: 0,
+        minted: 0,
+        cap: 8,
+        measured: false,
+        notMeasuredReason: "no coverage report",
+      },
     ],
     obligations,
     dropped: [],
@@ -102,7 +153,9 @@ function exampleRowIn(block: string): Record<string, unknown> {
     .map((line) => {
       try {
         const value: unknown = JSON.parse(line.trim());
-        return typeof value === "object" && value !== null && !Array.isArray(value)
+        return typeof value === "object" &&
+          value !== null &&
+          !Array.isArray(value)
           ? (value as Record<string, unknown>)
           : null;
       } catch {
@@ -115,16 +168,24 @@ function exampleRowIn(block: string): Record<string, unknown> {
 }
 
 /** A `.lastlight/pr-review` tree, laid out exactly as the phases write it. */
-function workspace(obligations: ObligationsDocument, rows: Record<string, unknown[]>): string {
+function workspace(
+  obligations: ObligationsDocument,
+  rows: Record<string, unknown[]>,
+): string {
   const root = mkdtempSync(join(tmpdir(), "ll-seed-render-"));
   dirs.push(root);
   const dir = join(root, ".lastlight", "pr-review");
   mkdirSync(join(dir, "hypotheses"), { recursive: true });
-  writeFileSync(join(dir, "obligations.json"), `${JSON.stringify(obligations, null, 2)}\n`, "utf8");
+  writeFileSync(
+    join(dir, "obligations.json"),
+    `${JSON.stringify(obligations, null, 2)}\n`,
+    "utf8",
+  );
   for (const [family, lines] of Object.entries(rows)) {
     writeFileSync(
       join(dir, "hypotheses", `${family}.jsonl`),
-      lines.map((r) => JSON.stringify(r)).join("\n") + (lines.length > 0 ? "\n" : ""),
+      lines.map((r) => JSON.stringify(r)).join("\n") +
+        (lines.length > 0 ? "\n" : ""),
       "utf8",
     );
   }
@@ -159,7 +220,9 @@ describe("the contract names four codes and the row shape can hold one", () => {
     // and `--ledger`, not the bare gate: the gate's non-zero "iterate again"
     // reads as a TOOL FAILURE inside an agent's own bash tool, which is the
     // exact reason `--ledger` always exits 0 (`cli.ts`, `discharge`).
-    expect(rendered).toContain("lastlight-facts discharge --ledger --family enforcement");
+    expect(rendered).toContain(
+      "lastlight-facts discharge --ledger --family enforcement",
+    );
   });
 
   it("prescribes `failureScenario` on the row", () => {
@@ -171,7 +234,9 @@ describe("the contract names four codes and the row shape can hold one", () => {
     // can only remove. A shape requirement that became a bar would re-create the
     // confidence gate this design deliberately inverts.
     const rendered = block();
-    expect(rendered).toMatch(/nothing anywhere drops a hypothesis for a thin scenario/);
+    expect(rendered).toMatch(
+      /nothing anywhere drops a hypothesis for a thin scenario/,
+    );
     expect(rendered).toMatch(/OVER-PRODUCE/);
   });
 
@@ -215,7 +280,9 @@ describe("the worked exemplar", () => {
     // happen is a `contract` pass reading an `enforcement` row as its own.
     const rendered = renderFamilyBlock(doc(), "contract");
     expect(exampleRowIn(rendered).family).toBe("enforcement");
-    expect(rendered).toMatch(/WORKED EXAMPLE — one real row, from a real `enforcement` pass on another PR/);
+    expect(rendered).toMatch(
+      /WORKED EXAMPLE — one real row, from a real `enforcement` pass on another PR/,
+    );
     expect(rendered).toContain("your rows carry contract ids");
   });
 });
@@ -236,7 +303,9 @@ describe("the round trip — the emitted shape satisfies the gate that grades it
     // The loop the bug opened, closed. Until this passes, `lastlight-facts
     // discharge --family enforcement` fails every family forever, because the
     // block never asked for the field it reads.
-    const dir = workspace(doc(), { enforcement: rowsFor(["O-002", "O-003", "O-004"]) });
+    const dir = workspace(doc(), {
+      enforcement: rowsFor(["O-002", "O-003", "O-004"]),
+    });
     const result = checkDischarge({ dir, family: "enforcement" });
 
     expect(result.satisfied).toBe(true);
@@ -250,12 +319,18 @@ describe("the round trip — the emitted shape satisfies the gate that grades it
     // answered none, and the old `test -s` gate passed it. Listing is not
     // discharging, and if this test ever goes green the one above proves nothing.
     const dir = workspace(doc(), {
-      enforcement: rowsFor(["O-002", "O-003", "O-004"]).map(({ discharge: _drop, ...rest }) => rest),
+      enforcement: rowsFor(["O-002", "O-003", "O-004"]).map(
+        ({ discharge: _drop, ...rest }) => rest,
+      ),
     });
     const result = checkDischarge({ dir, family: "enforcement" });
 
     expect(result.satisfied).toBe(false);
-    expect(result.outstanding.map((e) => e.status)).toEqual(["no-code", "no-code", "no-code"]);
+    expect(result.outstanding.map((e) => e.status)).toEqual([
+      "no-code",
+      "no-code",
+      "no-code",
+    ]);
   });
 
   it("NON-VACUITY: an obligation with no row at all stays undischarged", () => {
@@ -295,11 +370,155 @@ describe("what the block must NOT blur", () => {
 
   it("a measured family with zero obligations gets no row shape either", () => {
     const block = renderFamilyBlock(
-      doc({ degraded: [{ extractor: "facts", reason: "tsconfig unparsable" }], coverage: "degraded" }),
+      doc({
+        degraded: [{ extractor: "facts", reason: "tsconfig unparsable" }],
+        coverage: "degraded",
+      }),
       "security",
     );
     expect(block).toMatch(/No security obligations could be built/);
     expect(block).not.toMatch(/"discharge":/);
+  });
+});
+
+/**
+ * The truncation notice, which had stopped rendering entirely.
+ *
+ * It matched the substring `"budget"` in a dropped reason; the 2026-08-25 move
+ * to per-family ceilings reworded every reason to `"per-family ceiling"` /
+ * `"total backstop"`. From that commit until this one **no brief ever told a
+ * family it had been truncated** — on the eight gate cases `1587-r3` dropped 59
+ * obligations across four families and every one of its briefs read, by
+ * omission, as the complete set.
+ *
+ * Nothing asserted the notice renders, which is why a string rename could kill
+ * it silently. These tests are that assertion.
+ */
+describe("the truncation notice", () => {
+  /** A `contract` family that minted 43 against a ceiling of 12. */
+  const truncated = (over: Partial<ObligationsDocument> = {}) =>
+    doc({
+      families: [
+        ...doc().families.filter((f) => f.family !== "contract"),
+        {
+          family: "contract",
+          obligations: 1,
+          minted: 44,
+          cap: 12,
+          measured: true,
+          notMeasuredReason: null,
+        },
+      ],
+      ...over,
+    });
+
+  it("tells the family it was capped, in its own name and against its own ceiling", () => {
+    const block = renderFamilyBlock(truncated(), "contract");
+    expect(block).toMatch(
+      /43 further contract obligation\(s\) were built and dropped/,
+    );
+    expect(block).toMatch(/this family's own ceiling of 12/);
+    expect(block).toMatch(/NOT "checked"/);
+    // The point of the sentence: absence of an obligation is not evidence.
+    expect(block).toMatch(/not all of them/);
+    expect(block).toMatch(/not evidence that the mechanism is sound/);
+    // …and the property the ceilings bought must not be blurred by the notice.
+    expect(block).toMatch(/No other family took these slots/);
+  });
+
+  it("says nothing to a family that was NOT capped", () => {
+    // The neighbouring family in the same document minted 3 of 12. Telling it
+    // about someone else's truncation would be the pooled-budget confusion the
+    // ceilings exist to remove.
+    expect(renderFamilyBlock(truncated(), "enforcement")).not.toMatch(
+      /were built and dropped/,
+    );
+  });
+
+  it("reads the structured row, not the prose — a reason rename cannot kill it again", () => {
+    // `dropped[]` is deliberately EMPTY here. The notice comes off
+    // minted − obligations, so no future rewording of a reason string can
+    // silence it the way "budget" was silenced.
+    const block = renderFamilyBlock(truncated({ dropped: [] }), "contract");
+    expect(block).toMatch(/43 further contract obligation\(s\)/);
+  });
+
+  it("falls back to dropped[] for a document written before minted/cap existed", () => {
+    // Preserved envelopes are replayed offline; they carry neither field.
+    const legacy = doc({
+      families: doc().families.map((f) =>
+        f.family === "contract"
+          ? ({
+              family: "contract",
+              obligations: 1,
+              measured: true,
+              notMeasuredReason: null,
+            } as never)
+          : f,
+      ),
+      dropped: [
+        {
+          reason:
+            'over the per-family ceiling of 12 for contract — that family\'s own obligations, ranked by how much of the impact cone lies outside the diff, past its ceiling. No other family lost a slot to them. These are NOT "checked"',
+          count: 43,
+        },
+      ],
+    });
+    expect(renderFamilyBlock(legacy, "contract")).toMatch(
+      /43 further contract obligation\(s\)/,
+    );
+    // The other family's ceiling reason must not be picked up by this one.
+    expect(renderFamilyBlock(legacy, "enforcement")).not.toMatch(
+      /were built and dropped/,
+    );
+  });
+
+  it("reports the document-wide backstop as a SEPARATE claim", () => {
+    // Two different facts: "this family had more to say" and "the lowest-ranked
+    // across every family were cut". Only the second one is cross-family, and
+    // on a shipped configuration it cannot bind at all.
+    const block = renderFamilyBlock(
+      truncated({
+        dropped: [
+          {
+            reason:
+              'over the total backstop of 20 (review.analysis.maxObligations), applied AFTER the per-family ceilings — the lowest-ranked across every family. These are NOT "checked"',
+            count: 5,
+          },
+        ],
+      }),
+      "contract",
+    );
+    expect(block).toMatch(/43 further contract obligation\(s\)/);
+    expect(block).toMatch(
+      /5 obligation\(s\) were dropped after that, at the document-wide backstop/,
+    );
+  });
+
+  it("a family whose ceiling took EVERYTHING does not read as 'the seeder found nothing'", () => {
+    // Unreachable at the shipped caps, reachable the moment one is varied — and
+    // the two facts are exactly the ones this package refuses to collapse.
+    const block = renderFamilyBlock(
+      doc({
+        obligations: doc().obligations.filter((o) => o.family !== "contract"),
+        families: [
+          ...doc().families.filter((f) => f.family !== "contract"),
+          {
+            family: "contract",
+            obligations: 0,
+            minted: 7,
+            cap: 0,
+            measured: true,
+            notMeasuredReason: null,
+          },
+        ],
+      }),
+      "contract",
+    );
+    expect(block).toMatch(
+      /7 contract obligation\(s\) were built and ALL of them dropped at a ceiling of 0/,
+    );
+    expect(block).not.toMatch(/No contract obligations could be built/);
   });
 });
 
@@ -374,7 +593,13 @@ describe("--contract minimal restores the pre-2026-08-23 block", () => {
     // that stopped ~24% of survey branches losing their seed. Restoring
     // `return ""` here would re-confound the two causes this arm exists to
     // separate.
-    for (const family of ["contract", "enforcement", "security", "state", "tests"] as SeedFamily[]) {
+    for (const family of [
+      "contract",
+      "enforcement",
+      "security",
+      "state",
+      "tests",
+    ] as SeedFamily[]) {
       expect(minimal(family).length, family).toBeGreaterThan(0);
     }
     expect(minimal("tests")).toMatch(/NOT MEASURED: no coverage report/);
@@ -384,8 +609,13 @@ describe("--contract minimal restores the pre-2026-08-23 block", () => {
     // The baseline of a control arm must not move. A document written before
     // this switch existed has no field at all and has to read as `full`.
     const { contract: _drop, ...legacy } = doc();
-    const asLegacy = renderFamilyBlock(legacy as ObligationsDocument, "enforcement");
-    expect(asLegacy).toBe(renderFamilyBlock(doc({ contract: "full" }), "enforcement"));
+    const asLegacy = renderFamilyBlock(
+      legacy as ObligationsDocument,
+      "enforcement",
+    );
+    expect(asLegacy).toBe(
+      renderFamilyBlock(doc({ contract: "full" }), "enforcement"),
+    );
     expect(asLegacy).not.toBe(minimal());
   });
 });
@@ -402,10 +632,14 @@ describe("--contract minimal restores the pre-2026-08-23 block", () => {
  */
 describe("the discharge gate degrades under `minimal`", () => {
   /** One free-form row, citing nothing — the pre-change measured shape. */
-  const freeForm = [{ claim: "the nonce lifetime is never compared server-side" }];
+  const freeForm = [
+    { claim: "the nonce lifetime is never compared server-side" },
+  ];
 
   it("passes on one parsed row, and says it graded nothing", () => {
-    const dir = workspace(doc({ contract: "minimal" }), { enforcement: freeForm });
+    const dir = workspace(doc({ contract: "minimal" }), {
+      enforcement: freeForm,
+    });
     const result = checkDischarge({ dir, family: "enforcement" });
 
     expect(result.satisfied).toBe(true);
@@ -444,14 +678,20 @@ describe("the discharge gate degrades under `minimal`", () => {
     // imperative ("answer it with QUOTE, ABSENT, PARTIAL or PROBE"), and thirty
     // of those under a note saying none was requested reads as the failure the
     // note is denying.
-    const dir = workspace(doc({ contract: "minimal" }), { enforcement: freeForm });
-    const rendered = renderDischargeCheck(checkDischarge({ dir, family: "enforcement" }));
+    const dir = workspace(doc({ contract: "minimal" }), {
+      enforcement: freeForm,
+    });
+    const rendered = renderDischargeCheck(
+      checkDischarge({ dir, family: "enforcement" }),
+    );
     expect(rendered).toMatch(/contract: "minimal"/);
     expect(rendered).not.toMatch(/answer it with QUOTE/);
   });
 
   it("an unknown --family stays fatal — a wiring bug is not an arm", () => {
-    const dir = workspace(doc({ contract: "minimal" }), { enforcement: freeForm });
+    const dir = workspace(doc({ contract: "minimal" }), {
+      enforcement: freeForm,
+    });
     const result = checkDischarge({ dir, family: "enfrocement" });
     expect(result.satisfied).toBe(false);
     expect(result.familyError).toMatch(/WIRING bug/);
@@ -508,7 +748,9 @@ describe("the staged-diff section", () => {
   it("points at the index and the patch directory, and forbids re-deriving the range", () => {
     const block = renderFamilyBlock(doc(), "enforcement", stagedRecord());
     expect(block).toContain(".lastlight/pr-review/diff/index.md");
-    expect(block).toMatch(/DO NOT RE-DERIVE THE RANGE with `git diff` or `git show`/);
+    expect(block).toMatch(
+      /DO NOT RE-DERIVE THE RANGE with `git diff` or `git show`/,
+    );
     // The reason, not just the rule — a rule without its reason is the first
     // thing a fork drops.
     expect(block).toMatch(/two-dot diff creeps back in/);
@@ -532,7 +774,9 @@ describe("the staged-diff section", () => {
   it("names the files THIS family's obligations point at, with their patches", () => {
     // `ob()` builds every obligation over `src/config.ts` → `src/server/auth.ts`.
     const block = renderFamilyBlock(doc(), "enforcement", stagedRecord());
-    expect(block).toContain("src/config.ts   → .lastlight/pr-review/diff/src__config.ts.patch");
+    expect(block).toContain(
+      "src/config.ts   → .lastlight/pr-review/diff/src__config.ts.patch",
+    );
     expect(block).toContain(
       "src/server/auth.ts   → .lastlight/pr-review/diff/src__server__auth.ts.patch",
     );
@@ -550,7 +794,9 @@ describe("the staged-diff section", () => {
     const block = renderFamilyBlock(doc(), "enforcement", stagedRecord());
     expect(block).not.toMatch(/\s\/[\w/.-]*\.lastlight/);
     expect(block).toMatch(/relative to your working directory/);
-    expect(block).toMatch(/skill bundle, which sits one directory ABOVE the checkout/);
+    expect(block).toMatch(
+      /skill bundle, which sits one directory ABOVE the checkout/,
+    );
   });
 
   it("says NOT AVAILABLE, loudly, when nobody staged — it is never omitted", () => {
@@ -569,7 +815,11 @@ describe("the staged-diff section", () => {
 
   it("distinguishes `files: null` (tried and failed) from nobody having tried", () => {
     // `null` ≠ `[]` ≠ absent, at the layer where the difference reaches a model.
-    const failed = renderFamilyBlock(doc(), "enforcement", stagedRecord({ files: null }));
+    const failed = renderFamilyBlock(
+      doc(),
+      "enforcement",
+      stagedRecord({ files: null }),
+    );
     expect(failed).toContain("STAGED DIFF: NOT AVAILABLE");
     expect(failed).toContain("TRIED to stage");
     expect(failed).toContain(".lastlight/pr-review/diff/index.md");
@@ -612,8 +862,14 @@ describe("the staged-diff section", () => {
     // (the same reason the never-empty rule holds under both). A control arm
     // that also withheld the diff would be measuring two variables.
     for (const contract of ["full", "minimal"] as const) {
-      const block = renderFamilyBlock(doc({ contract }), "enforcement", stagedRecord());
-      expect(block, contract).toContain("STAGED DIFF: this PR's patch is already on disk");
+      const block = renderFamilyBlock(
+        doc({ contract }),
+        "enforcement",
+        stagedRecord(),
+      );
+      expect(block, contract).toContain(
+        "STAGED DIFF: this PR's patch is already on disk",
+      );
     }
   });
 

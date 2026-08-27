@@ -415,8 +415,17 @@ export interface ReviewGradeResult {
   trace?: {
     judgeModel: string;
     reviewText: string;
-    findings: { description: string; file?: string; matchedGold: number | null; matchedGolds?: number[] }[];
-    gold: { description: string; severity: string; matchedFinding: number | null }[];
+    findings: {
+      description: string;
+      file?: string;
+      matchedGold: number | null;
+      matchedGolds?: number[];
+    }[];
+    gold: {
+      description: string;
+      severity: string;
+      matchedFinding: number | null;
+    }[];
     /** The neutral set and which finding (if any) each entry absorbed. */
     neutral?: { description: string; matchedFinding: number | null }[];
     rawExtract?: string;
@@ -528,7 +537,12 @@ export interface ReviewPipelineStats {
   byFamily?: Record<string, ReviewFamilyStats>;
   /** The oracle's own hit rate. If probes rarely settle anything, WP4 is not
    * paying for itself. */
-  probes?: { attempted: number; succeeded: number; reproduced: number; refuted: number };
+  probes?: {
+    attempted: number;
+    succeeded: number;
+    reproduced: number;
+    refuted: number;
+  };
   /** The facts envelope's own verdict on whether analysis could run at all.
    * `"none"` is a recorded fact, not a failed phase (§D12). */
   coverage?: "full" | "degraded" | "none";
@@ -544,6 +558,19 @@ export interface ReviewPipelineStats {
 /** One obligation family's funnel on one case. */
 export interface ReviewFamilyStats {
   obligations?: number;
+  /**
+   * How many this family BUILT, before its per-family ceiling truncated it.
+   *
+   * `minted > obligations` is "capped"; equal is "this is everything it had to
+   * say". The distinction is the one the ceilings themselves are read on, and it
+   * used to be reachable only by parsing a prose `dropped[]` reason for a family
+   * name. Absent on any run measured before `code-facts` recorded it — unknown,
+   * never 0.
+   */
+  minted?: number;
+  /** The ceiling in force for this family on this run; absent for `spec`, which
+   * is seeded harness-side and holds no `FAMILY_CAPS` entry. */
+  cap?: number;
   hypotheses?: number;
   /** Findings this family got POSTED — inline or body. Absent (never 0) when
    * the run wrote no `disposition.json`, because nothing then knows where its
@@ -582,14 +609,20 @@ export interface InstanceResult {
   failToPass?: { id: string; pass: boolean }[];
   passToPass?: { id: string; pass: boolean }[];
   /** Behavioral grade: did the workflow take the expected GitHub actions? */
-  behavioral?: { ok: boolean; checks: { name: string; ok: boolean; detail?: string }[] };
+  behavioral?: {
+    ok: boolean;
+    checks: { name: string; ok: boolean; detail?: string }[];
+  };
   /**
    * Marker grade (fix / dependency-merge tiers): did the run sign off with the
    * verdict the case expects? For those tiers this is the primary signal — a
    * diagnosis that reaches the wrong class misroutes the whole retry loop while
    * touching no GitHub state, so `behavioral` alone would score it green.
    */
-  markers?: { ok: boolean; checks: { name: string; ok: boolean; detail?: string }[] };
+  markers?: {
+    ok: boolean;
+    checks: { name: string; ok: boolean; detail?: string }[];
+  };
   /** PR-review grade (pr-review tier) — see {@link ReviewGradeResult}. */
   review?: ReviewGradeResult;
   /** When `--runs N`: how many trials the mean review metrics aggregate. */
@@ -652,7 +685,11 @@ export interface InstanceResult {
    * (`<datasetDir>/context/<instance_id>/`). Recorded so a run is inspectable —
    * which context produced which score — without re-reading the workspace. See
    * `injectRepoContext` in seed.ts. */
-  injectedContext?: { source: "overlay" | "instance"; path: string; bytes: number }[];
+  injectedContext?: {
+    source: "overlay" | "instance";
+    path: string;
+    bytes: number;
+  }[];
   /** The target repo's committed `.lastlight/` config layer (issue #180), when
    * the case declared one at `<datasetDir>/lastlight/<instance_id>/`. Absent for
    * every case without a fixture — i.e. the whole pre-#180 corpus, which runs on
