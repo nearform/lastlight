@@ -15,7 +15,8 @@
  * is why this is asserted on the wire rather than on the exit code.
  */
 import { describe, it, expect } from "vitest";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { createServer, type Server } from "node:http";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -25,7 +26,17 @@ const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 type Captured = { workflow?: string; skill?: string; context: Record<string, unknown> };
 
-/** Run one CLI command against a throwaway server and return what it POSTed. */
+const run = promisify(execFile);
+
+/**
+ * Run one CLI command against a throwaway server and return what it POSTed.
+ *
+ * `execFile`, NOT `execFileSync`. The server lives in THIS process, so a
+ * synchronous spawn blocks the event loop that would have to answer the
+ * request: the child waits forever for a response and the parent waits forever
+ * for the child. That deadlock does not fail, it hangs — the suite sits there
+ * until something outside kills it.
+ */
 async function capture(args: string[]): Promise<Captured> {
   const seen: Captured[] = [];
   const server: Server = createServer((req, res) => {
@@ -40,7 +51,7 @@ async function capture(args: string[]): Promise<Captured> {
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
   try {
-    execFileSync(
+    await run(
       process.execPath,
       [join(PACKAGE_ROOT, "node_modules", "tsx", "dist", "cli.mjs"), join(PACKAGE_ROOT, "src", "cli.ts"), ...args],
       {
@@ -54,6 +65,9 @@ async function capture(args: string[]): Promise<Captured> {
       },
     );
   } finally {
+    // `close()` alone waits for keep-alive sockets the CLI's fetch leaves open,
+    // so the callback would not fire and the hang would simply move here.
+    server.closeAllConnections();
     await new Promise<void>((r) => server.close(() => r()));
   }
   expect(seen).toHaveLength(1);

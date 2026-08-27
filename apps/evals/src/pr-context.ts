@@ -209,6 +209,12 @@ export function buildPrState(args: {
     // gates attempt bookkeeping, which this harness does not run.
     headAuthor: "dependabot[bot]",
     headIsOurs: false,
+    // Nor did it OPEN the PR — a distinct question from `headIsOurs`, and the
+    // one the review gate reads. Every eval case is a third party's pull
+    // request; a case that set this would be asking the harness to grade a
+    // review the dispatch gate refuses to run at all.
+    authorLogin: "dependabot[bot]",
+    authorIsOurs: false,
     headRef: s.head_ref ?? args.branch,
     baseRef: s.base_ref ?? "main",
     isDraft: s.is_draft ?? false,
