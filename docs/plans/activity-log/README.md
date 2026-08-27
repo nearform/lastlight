@@ -164,8 +164,8 @@ The feature first does something in Phase 2; Phase 3 is what a person can see.
   both dialects, `ActivityStore`, and the six places that do not update
   themselves *(risk: medium — dual-dialect schema change, the one class of
   change this repo guards hardest)*
-- [ ] **Phase 2** — [01-write-seams.md](01-write-seams.md) — `recordActivity()`
-  and its 19 call sites, plus the three `"admin"` literals *(risk: low —
+- [x] **Phase 2** — [01-write-seams.md](01-write-seams.md) — `recordActivity()`
+  and its 22 call sites, plus the three `"admin"` literals *(risk: low —
   additive, best-effort, cannot fail an action; but touches many files)*
 - [ ] **Phase 3** — [02-read-surfaces.md](02-read-surfaces.md) — the admin
   endpoint, the dashboard tab + per-run strip, the `lastlight activity`
@@ -186,10 +186,11 @@ Both are cheap to change now and expensive once rows exist.
 
 ## Status
 
-**Phase 1 implemented; Phases 2 and 3 outstanding.** Written against `main` at
+**Phases 1 and 2 implemented; Phase 3 outstanding.** Written against `main` at
 `0d167c01`. Each phase doc gains Execution notes as it lands, so this directory
 reads as both a plan and a record.
 
-The two open questions above are still open — the verb vocabulary is now
-declared in `src/state/activity-store.ts` as a closed union, so changing it is
-still a one-file edit until Phase 2 starts writing rows against it.
+The two open questions above are still open. The verb vocabulary is declared as
+a closed union in `src/state/activity-store.ts`; changing a verb is now that
+edit plus its call sites, so it is no longer free — but nothing has been
+deployed, so no rows exist yet and nothing needs migrating.

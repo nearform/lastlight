@@ -1,5 +1,9 @@
 # Phase 2 — the write seams
 
+> **Status: implemented.** See the Execution notes at the end for what actually
+> happened. The steps below are the plan **as originally written**, kept
+> unchanged on purpose so the notes can argue against them.
+
 Nineteen call sites, one helper, and the three `"admin"` literals. Every write is
 **best-effort**: a store failure logs and is swallowed, never propagated.
 
@@ -195,3 +199,54 @@ pnpm --filter lastlight-core typecheck   # lint:promises catches a dropped await
 - A scheduled cron fire writes one `cron.fire` and zero `workflow.trigger` rows,
   however many repos it fans out to.
 - Stubbing the store to throw breaks no test but the one asserting it throws.
+
+## Execution notes (27 Aug 2026)
+
+Phase 2 landed. `pnpm turbo run typecheck test build` is green — 25/25 tasks,
+3855 core tests. Five things the plan did not anticipate:
+
+- **The helper had to split in two, and the plan put it in the wrong place.**
+  It said "the `Context` half in `src/admin/activity.ts`", which is right, but
+  the *pure* half cannot live there either: `engine/dispatcher.ts` and
+  `cron/runner.ts` both write, and `engine/ → admin/` is the wrong direction.
+  `recordActivity` therefore sits at **`src/activity.ts`**, a peer of
+  `managed-repos.ts`, with `admin/activity.ts` holding only the Hono wrapper.
+  `lint:boundaries` does not currently police that direction — this was caught
+  by reading, not by the gate.
+
+- **`actorFromContext` was not enough.** It surfaces the login but not *how* the
+  person authenticated, and `actor_type` needs the latter. `authMiddleware` now
+  also sets `actorMethod`, with a new `actorTypeFromContext()` beside the
+  existing seam mapping `password → admin`, `github → github`, `slack → slack`.
+  Additive, and it keeps the "one place reads the token" property #205
+  established.
+
+- **Nineteen call sites is really twenty-two**, because six routes write on
+  *both* their success and their refusal path — a denied login, a locked
+  artifact, a refused PR retry, a failed container kill. Those denials are a
+  large part of what an audit stream is read for, so the extra rows are the
+  feature rather than overhead. Still fifteen distinct actions.
+
+- **`workflow.trigger` belongs in `onRunStart`, not at the top of
+  `dispatchWorkflow`.** The plan said "after the guards pass", which is correct
+  but underspecified: the run **id** does not exist until `runSimpleWorkflow`
+  creates the row, and `onRunStart` is the callback that fires the moment it
+  does. Writing earlier would have meant either no target or a row for a
+  dispatch that was later refused.
+
+- **A seventh thing that does not update itself, and it is not in the state
+  layer.** `scripts/lint-floating-promises.mjs` carries an `ALLOWED` set keyed
+  by **`file:line`** — two deliberately-unfixed `stream.writeSSE` calls in
+  `routes.ts`. Adding two import lines shifted them from 452/458 to 454/460, so
+  the gate failed pointing at SSE code this change never touched. The entries
+  are updated and a comment now warns about the coupling. Deliberately **not**
+  re-keyed on expression text: that file's own comment says to fix its contents
+  in a change that is about SSE, and re-designing a gate as a drive-by is the
+  same mistake in a different direction. Worth a maintainer's decision.
+
+One thing the plan got right and is worth restating, because it looks like a
+bug: a manual cron fire writes **two** rows — `cron.trigger` from the route and
+`cron.fire` from the runner — and a PR retry likewise writes `pr.retry` plus a
+`workflow.trigger` from the dispatch it starts. Those are the request and the
+execution. They can disagree (a trigger that never fires, a retry the gate
+refuses), and that disagreement is the interesting case.
