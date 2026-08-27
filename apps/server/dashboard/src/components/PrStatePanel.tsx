@@ -181,6 +181,15 @@ export function PrStatePanel({ run }: { run: WorkflowRun }) {
                 life — the same `costBaselineUsd` boundary that re-arms the
                 attempt counter. */}
             <Fact label="spent on this problem" value={`$${spent.toFixed(2)}`} />
+            {/* WHO OPENED IT. Distinct from the head-commit author already on
+                the snapshot: GitHub refuses a review event on a PR you opened,
+                so `ours` here means a review can never post, however green
+                every phase looks. */}
+            <Fact
+              label="pr author"
+              value={`${str(state.authorLogin) || "unknown"}${state.authorIsOurs ? " · ours" : ""}`}
+              tone={state.authorIsOurs ? "warn" : undefined}
+            />
             <Fact
               label="shape"
               value={[

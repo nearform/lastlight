@@ -348,6 +348,18 @@ export async function dispatch(
       if (disposition.forkPr) {
         await noticeForkPr(handler, prState, deps);
       }
+      // We opened this PR, so GitHub will not accept a review event on it. The
+      // flag is set only when a human asked directly (see
+      // `Decision.selfAuthoredPr`), so this replies to the ask and stays silent
+      // on the webhook and cron routes that re-examine the same PR forever.
+      // `envelope.reply` rather than a `notice…` recorder for exactly that
+      // reason: one ask, one answer, nothing to de-duplicate.
+      if (disposition.selfAuthoredPr) {
+        await envelope.reply(
+          `I can't review this one — I opened it, and GitHub won't accept an approval or a ` +
+            `change request on your own pull request. Worth a human pair of eyes instead.`,
+        );
+      }
       return { kind: "skipped", reason: `${handler}: ${disposition.reason}` };
     }
   }

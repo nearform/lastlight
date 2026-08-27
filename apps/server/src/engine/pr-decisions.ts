@@ -164,6 +164,21 @@ export interface Decision<T> {
    * this.
    */
   forkPr?: true;
+  /**
+   * Set ONLY on the review skip taken because WE opened this pull request, and
+   * ONLY when a human asked for the review directly.
+   *
+   * Both halves matter. Keyed on the deciding branch rather than on
+   * `prState.authorIsOurs` for the reason {@link forkPr}'s header records
+   * (#256): the flag must explain the decision that was taken, not every skip a
+   * bot-authored PR happens to take. And gated on the explicit request because
+   * a PR we opened is re-examined on every push, every check and every review
+   * cron — a notice on those would be a comment per event, forever, on a PR
+   * nobody asked about. An explicit `@bot review` is a discrete human act, so
+   * one comment per ask needs no de-duplication record at all; that is why this
+   * carries no `…AtSha` guard where {@link forkPr} needs one.
+   */
+  selfAuthoredPr?: true;
 }
 
 // ---------------------------------------------------------------------------
@@ -842,6 +857,29 @@ export function resolveReviewTrigger(
   const blind = readDegradedDrop<ReviewTriggerDecision>("skip", state, inputs);
   if (blind) return blind;
 
+  // A PR WE opened. GitHub refuses `APPROVE` and `REQUEST_CHANGES` on your own
+  // pull request (422), and `resolveEvent` produces one or the other for every
+  // review — `APPROVE` on a clean findings set, the agent's explicit event
+  // otherwise — so the posting step cannot succeed in either direction. Left to
+  // run, the pipeline surveys, adjudicates and reconciles for ~10 minutes and
+  // then dies at `post-review`, which is the whole cost of the review for none
+  // of the result.
+  //
+  // ABOVE the run lock and the trigger modes deliberately: this is not policy
+  // about when a review is wanted, it is a fact about what GitHub will accept,
+  // and it does not become false by waiting. Below `readDegradedDrop` only
+  // because a PR we could not read has no trustworthy author.
+  if (state.authorIsOurs) {
+    return {
+      decision: "skip",
+      reason: `self-authored: we opened this PR (${state.authorLogin}), and GitHub refuses a review event on your own pull request`,
+      inputs,
+      // The notice is owed to a human who asked, and to nobody else — see
+      // `Decision.selfAuthoredPr`.
+      ...(opts.explicitRequest ? { selfAuthoredPr: true as const } : {}),
+    };
+  }
+
   // The PR-scoped run lock, before anything else — see `runLockDrop`. Above the
   // explicit-request branch on purpose: the lock is not policy but a physical
   // constraint (one workspace, one branch, one agent), so it is the one thing an
@@ -1223,6 +1261,10 @@ export function resolveDispatchDisposition(
       // the same reason and one more — it is what stops the caller posting a
       // placeholder check against a head SHA we could not read.
       ...(review.runInFlight ? { runInFlight: review.runInFlight } : {}),
+      // Carried through the collapse for the same reason as the rest: the
+      // caller keys on the typed field, and `decision: "skip"` alone cannot say
+      // which skip it was.
+      ...(review.selfAuthoredPr ? { selfAuthoredPr: true as const } : {}),
       ...(review.readDegraded ? { readDegraded: true as const } : {}),
       // Same rule again: the check projection needs the finer verdict, and the
       // collapse to run/skip is exactly what would lose it.
