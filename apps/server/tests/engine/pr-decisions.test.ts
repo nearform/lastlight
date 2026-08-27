@@ -21,6 +21,7 @@ import {
   resolveReviewTrigger,
   resolveDispatchDisposition,
   reviewCheckPlacement,
+  resolveReviewPost,
   renderContext,
   isGeneratedPath,
   allPathsGenerated,
@@ -622,6 +623,27 @@ describe("resolveReviewTrigger", () => {
       /^requested:/,
     ],
     [
+      // The one thing that outranks the explicit request above, because it is
+      // not a policy question: GitHub 422s a review event on a PR we opened,
+      // so "always dispatches" would dispatch a run that cannot post.
+      "a PR we opened is skipped even when a human asks",
+      { authorIsOurs: true, authorLogin: "last-light[bot]" },
+      { trigger: "eager" },
+      { explicitRequest: true },
+      "skip",
+      /^self-authored:/,
+    ],
+    [
+      // The guard must key on who OPENED the PR, never on who pushed the head
+      // commit — our fix landing on a human's PR must not suppress its review.
+      "our commit on someone else's PR still reviews",
+      { authorIsOurs: false, authorLogin: "cliftonc", headIsOurs: true, headAuthor: "last-light[bot]" },
+      { trigger: "eager" },
+      { explicitRequest: true },
+      "dispatch",
+      /^requested:/,
+    ],
+    [
       "the request label is an explicit ask too",
       { labels: ["needs-review"] },
       { trigger: "on-request", requestLabel: "needs-review" },
@@ -806,6 +828,81 @@ describe("resolveReviewTrigger", () => {
     const d = resolveReviewTrigger(state(over), { ...review, ...cfgOver }, opts);
     expect(d.decision).toBe(expected);
     expect(d.reason).toMatch(reason);
+  });
+});
+
+/**
+ * `resolveReviewPost` — the head-SHA question asked the second time, after the
+ * run happened and the review is written.
+ *
+ * The whole table is one distinction: a review that stood on the head BEFORE
+ * this run was dispatched is a prior review (an explicit request overrides it,
+ * which is what the gate already decided), and one that appeared since is this
+ * run's own (never post over it, however the run was triggered).
+ *
+ * cliftonc/drizzle-cube#937 is the first column and the second row: the gate
+ * said `requested: an explicit review request overrides mode, draft and dedup`,
+ * and this step re-decided it in the other direction, for eight minutes and no
+ * review.
+ */
+describe("resolveReviewPost", () => {
+  const prior = { state: "APPROVED", submittedAt: "2026-08-05T20:14:46Z" };
+  /** The one this run posted before it died and was resumed. */
+  const ours = { state: "APPROVED", submittedAt: "2026-08-05T20:41:02Z" };
+
+  const cases: [
+    string,
+    Parameters<typeof resolveReviewPost>[0],
+    "post" | "skip",
+    RegExp,
+  ][] = [
+    [
+      "a head with nothing of ours on it posts, asked or not",
+      { atHead: null, atDispatch: null },
+      "post",
+      /^unreviewed-head:/,
+    ],
+    [
+      "the prior review the gate overrode does not stop the review it authorised",
+      { atHead: prior, atDispatch: prior, explicitRequest: true },
+      "post",
+      /^requested:/,
+    ],
+    [
+      "the same prior review skips when nobody asked — the dedup case, unchanged",
+      { atHead: prior, atDispatch: prior },
+      "skip",
+      /^already-reviewed:/,
+    ],
+    [
+      "a review that was not there at dispatch is OURS — a resume must not post twice",
+      { atHead: ours, atDispatch: null, explicitRequest: true },
+      "skip",
+      /^already-posted:/,
+    ],
+    [
+      "…including when it was posted OVER a prior review, which only the stamp tells apart",
+      { atHead: ours, atDispatch: prior, explicitRequest: true },
+      "skip",
+      /^already-posted:/,
+    ],
+    [
+      // A run dispatched by a build that recorded no `submittedAt`, resumed
+      // after the deploy that added it: unidentifiable, so it reads as the
+      // prior review. `explicitRequest` cannot be set on such a context either,
+      // so the pair is self-consistent and the answer is today's.
+      "a snapshot with no timestamp is read as the prior review, not as ours",
+      { atHead: { state: "APPROVED", submittedAt: null }, atDispatch: { state: "APPROVED" } },
+      "skip",
+      /^already-reviewed:/,
+    ],
+  ];
+
+  it.each(cases)("%s", (_name, opts, expected, reason) => {
+    const d = resolveReviewPost(opts);
+    expect(d.decision).toBe(expected);
+    expect(d.reason).toMatch(reason);
+    expect(d.inputs.explicitRequest).toBe(!!opts.explicitRequest);
   });
 });
 

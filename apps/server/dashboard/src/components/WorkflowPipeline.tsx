@@ -22,6 +22,7 @@ import {
   type PhaseStatus,
   type PipelineNodeData,
 } from "./pipeline-node";
+import { isNoOpSummary, phaseSummary } from "../lib/phase-outcome";
 
 type PhaseNodeData = PipelineNodeData;
 
@@ -36,7 +37,8 @@ function nodeDataEqual(a: PhaseNodeData, b: PhaseNodeData): boolean {
     a.duration === b.duration &&
     a.selected === b.selected &&
     a.kind === b.kind &&
-    a.pulse === b.pulse
+    a.pulse === b.pulse &&
+    a.summary === b.summary
   );
 }
 
@@ -126,6 +128,69 @@ function findParentDeclared(name: string, declared: string[]): string | null {
     }
   }
   return best;
+}
+
+/**
+ * The derived-phase-name grammar, MIRRORED from
+ * `packages/workflow-engine/src/core/phase-ref.ts` (`PhaseRef.format`/`parse`).
+ *
+ * Mirrored rather than imported because the dashboard has no dependency on
+ * `lastlight-workflow-engine` — the same reason it hand-mirrors the config
+ * types in `api.ts`. If the grammar there gains a form, it has to be added
+ * here too; the failure mode is cosmetic (the raw ledger key renders, which is
+ * exactly what this replaces) rather than a crash.
+ *
+ * Branch names are schema-constrained to `[A-Za-z0-9-]`, and that is what makes
+ * the greedy-base split unambiguous against a base that may itself contain `_`.
+ * Order matters: the two SUFFIXED branch forms must be tried before the bare
+ * one, and likewise for the iteration forms.
+ */
+type DerivedRef =
+  | { kind: "branch"; base: string; branch: string; suffix?: "retry" | "check" }
+  | { kind: "iter"; base: string; index: number; suffix?: "retry" | "check" }
+  | { kind: "fix" | "recheck"; base: string; index: number };
+
+function parseDerived(name: string): DerivedRef | null {
+  let m = name.match(/^(.*)_branch_([A-Za-z0-9-]+)_(retry|check)$/);
+  if (m) return { kind: "branch", base: m[1]!, branch: m[2]!, suffix: m[3] as "retry" | "check" };
+  m = name.match(/^(.*)_branch_([A-Za-z0-9-]+)$/);
+  if (m) return { kind: "branch", base: m[1]!, branch: m[2]! };
+  m = name.match(/^(.*)_iter_(\d+)_(retry|check)$/);
+  if (m) return { kind: "iter", base: m[1]!, index: Number(m[2]), suffix: m[3] as "retry" | "check" };
+  m = name.match(/^(.*)_iter_(\d+)$/);
+  if (m) return { kind: "iter", base: m[1]!, index: Number(m[2]) };
+  m = name.match(/^(.*)_fix_(\d+)$/);
+  if (m) return { kind: "fix", base: m[1]!, index: Number(m[2]) };
+  m = name.match(/^(.*)_recheck_(\d+)$/);
+  if (m) return { kind: "recheck", base: m[1]!, index: Number(m[2]) };
+  return null;
+}
+
+/**
+ * A SHORT label for a derived node. Short is the requirement, not a preference:
+ * these render in a 110px card under a parent that already names the phase, so
+ * `survey_branch_contract` overflowed its box and read as a different phase
+ * rather than as one branch of the node directly above it.
+ */
+function derivedLabel(ref: DerivedRef): string {
+  const suffix = "suffix" in ref && ref.suffix ? (ref.suffix === "check" ? " · gate" : " · retry") : "";
+  switch (ref.kind) {
+    case "branch":
+      return `${ref.branch}${suffix}`;
+    case "iter":
+      return `#${ref.index}${suffix}`;
+    case "fix":
+      return `fix ${ref.index}`;
+    case "recheck":
+      return `recheck ${ref.index}`;
+  }
+}
+
+/** The branch node a `_retry` / `_check` row hangs off, if it is one. */
+function branchParentOf(name: string): string | null {
+  const ref = parseDerived(name);
+  if (!ref || ref.kind !== "branch" || !ref.suffix) return null;
+  return `${ref.base}_branch_${ref.branch}`;
 }
 
 interface Props {
@@ -236,7 +301,13 @@ export function WorkflowPipeline({
       run.status === "failed" || run.status === "succeeded" || run.status === "cancelled";
 
     const buildNode = (name: string, x: number, y: number): Node<PhaseNodeData> => {
-      const label = declaredLabelByName.get(name) ?? name;
+      // Declared name → its YAML `label:`. Otherwise it is a DERIVED name
+      // (a fan-out branch or a loop iteration), and the raw ledger key is the
+      // last resort rather than the default: `survey_branch_contract` overflows
+      // a 110px card and reads as an unrelated phase instead of as one branch
+      // of the node above it.
+      const derived = declaredLabelByName.has(name) ? null : parseDerived(name);
+      const label = declaredLabelByName.get(name) ?? (derived ? derivedLabel(derived) : name);
       const histEntry = historyMap.get(name);
       const exec = execByPhase.get(name);
 
@@ -283,31 +354,72 @@ export function WorkflowPipeline({
           .map((k) => execByPhase.get(k))
           .filter((e): e is WorkflowRunExecution => !!e);
         if (kidExecs.length > 0) {
+          // A FAN-OUT's children are concurrent; a LOOP's are sequential. That
+          // one difference changes both answers below, so decide it once.
+          const isFanout = kids.some((k) => parseDerived(k)?.kind === "branch");
           const lastExec = execByPhase.get(kids[kids.length - 1]!);
           if (kidExecs.some((kx) => kx.success === undefined))
             status = isTerminalRun ? "failed" : "active";
-          else if (lastExec?.success === true)
+          else if (isFanout) {
+            // "Last child wins" is a loop rule — the final iteration is the
+            // outcome. Concurrent branches have no last, only a worst: one red
+            // branch is a red fan-out however the start times happened to sort.
+            const failed = kidExecs.find((kx) => kx.success === false && kx.stopReason !== "skipped");
+            const skipped = kidExecs.every((kx) => kx.stopReason === "skipped");
+            status = failed ? "failed" : skipped ? "skipped" : "done";
+          } else if (lastExec?.success === true)
             // Same rule as the leaf above: a loop whose LAST child is a red
             // exit check ran out of iterations without its gate ever going
             // green. That is not a failure, but it is not a pass either.
             status = lastExec.stopReason === "condition_not_met" ? "unmet" : "done";
           else if (lastExec?.success === false)
             status = lastExec.stopReason === "skipped" ? "skipped" : "failed";
-          // Span the loop: earliest iteration start + summed iteration durations.
           timestamp = kidExecs.reduce(
             (min, kx) => (kx.startedAt < min ? kx.startedAt : min),
             kidExecs[0]!.startedAt,
           );
-          const totalMs = kidExecs.reduce((sum, kx) => sum + (kx.durationMs ?? 0), 0);
-          if (totalMs > 0) duration = totalMs / 1000;
+          if (isFanout) {
+            // WALL CLOCK, not the sum. Summing concurrent branches reports a
+            // number the run never spent: the five surveys of a real pr-review
+            // measured 161+59+235+233+194s, which summed to 882s for a phase
+            // that actually took 235 — so the fan-out looked like the most
+            // expensive step in the run when it was the point at which the run
+            // stopped being sequential.
+            const startMs = kidExecs.map((kx) => Date.parse(kx.startedAt));
+            const endMs = kidExecs.map((kx) => Date.parse(kx.startedAt) + (kx.durationMs ?? 0));
+            const spanMs = Math.max(...endMs) - Math.min(...startMs);
+            if (spanMs > 0) duration = spanMs / 1000;
+          } else {
+            const totalMs = kidExecs.reduce((sum, kx) => sum + (kx.durationMs ?? 0), 0);
+            if (totalMs > 0) duration = totalMs / 1000;
+          }
         }
       }
+
+      // What the phase DID, so a green-but-did-nothing node is distinguishable
+      // from a green-and-did-a-lot one without opening the panel.
+      //
+      // TOP ROW ONLY (`y === 0`). Two reasons, both about not bloating the
+      // graph: the stacked nodes are loop iterations and fan-out branches whose
+      // summaries are boilerplate ("iteration 3 — work complete"), and their
+      // vertical pitch is the fixed NODE_ROW_HEIGHT constant, which an extra
+      // line per card would silently overrun. Every node still carries the full
+      // text in its tooltip and in the detail panel.
+      const summary = y === 0 ? phaseSummary(histEntry) : undefined;
 
       return {
         id: name,
         type: "phase",
         position: { x, y },
-        data: { label, status, timestamp, duration, selected: selectedPhase === name },
+        data: {
+          label,
+          status,
+          timestamp,
+          duration,
+          summary,
+          summaryNoOp: summary ? isNoOpSummary(summary) : undefined,
+          selected: selectedPhase === name,
+        },
         style: { width: NODE_WIDTH },
       };
     };
@@ -425,7 +537,39 @@ export function WorkflowPipeline({
       linkTo(name, prevId);
       prevId = name;
 
-      const children = childrenByParent.get(name) ?? [];
+      let children = childrenByParent.get(name) ?? [];
+      // A `type: fanout` column. Its children are CONCURRENT branches, not loop
+      // iterations, so neither the ordering nor the edges below can be the
+      // chain a loop wants.
+      const isFanoutColumn = children.some((c) => parseDerived(c)?.kind === "branch");
+      if (isFanoutColumn) {
+        // Group each branch with its own `_retry` / `_check` rows. Sorting the
+        // flat list by start time scattered them — the five branches start
+        // within milliseconds of each other, so the order jittered between
+        // polls and a branch's gate rarely landed next to the branch it gates.
+        const groupOf = (n: string): string => branchParentOf(n) ?? n;
+        const rank = (n: string): number => {
+          const ref = parseDerived(n);
+          return ref?.kind === "branch" && ref.suffix ? (ref.suffix === "retry" ? 1 : 2) : 0;
+        };
+        const firstStart = new Map<string, string>();
+        for (const c of children) {
+          const g = groupOf(c);
+          const s = execByPhase.get(c)?.startedAt ?? "";
+          const cur = firstStart.get(g);
+          if (cur === undefined || (s && s < cur)) firstStart.set(g, s);
+        }
+        children = [...children].sort((a, b) => {
+          const ga = groupOf(a);
+          const gb = groupOf(b);
+          if (ga !== gb) {
+            const sa = firstStart.get(ga) ?? "";
+            const sb = firstStart.get(gb) ?? "";
+            return sa === sb ? ga.localeCompare(gb) : sa.localeCompare(sb);
+          }
+          return rank(a) - rank(b);
+        });
+      }
       // Weave each iteration's interactive gate in right after the iteration it
       // belongs to, so the vertical stack reads run → gate → run → gate → run.
       type StackItem =
@@ -446,9 +590,22 @@ export function WorkflowPipeline({
         reactFlowNodes.push(
           item.kind === "phase" ? buildNode(item.name, x, y) : buildApprovalNode(item.a, x, y),
         );
+        // WHERE THE EDGE COMES FROM is the difference between "these ran in
+        // sequence" and "these ran at once", and it is the only thing on this
+        // canvas that says which. A loop chains child→child, because iteration
+        // 2 really did wait for iteration 1. A fan-out must NOT: its branches
+        // all start from the parent, and chaining them drew five concurrent
+        // surveys as a five-deep ladder — the one claim the picture makes about
+        // a fan-out, made backwards.
+        //
+        // A branch's own `_retry` / `_check` row hangs off THAT BRANCH rather
+        // than the parent, so a gate sits under the thing it gates.
+        const source = isFanoutColumn
+          ? (item.kind === "phase" ? branchParentOf(item.name) ?? name : name)
+          : childPrev;
         reactFlowEdges.push({
-          id: `${childPrev}->${childId}`,
-          source: childPrev,
+          id: `${source}->${childId}`,
+          source,
           target: childId,
           sourceHandle: "bottom",
           targetHandle: "top",

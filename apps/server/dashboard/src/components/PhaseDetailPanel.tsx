@@ -10,6 +10,7 @@ import {
 } from "../api";
 import { GhLink } from "./GhLink";
 import { repoUrl, issueUrl } from "../lib/githubLinks";
+import { isNoOpSummary, phaseSummary } from "../lib/phase-outcome";
 
 /**
  * In-SPA navigation to the artifact editor for a specific doc — the Repos tab's
@@ -143,6 +144,9 @@ export function PhaseDetailPanel({
   // resolves a repeated label last-wins; this keeps the two views in agreement.
   const historyEntry = run.phaseHistory.filter((h) => h.phase === phaseName).at(-1);
 
+  const summary = phaseSummary(historyEntry);
+  const noOp = summary ? isNoOpSummary(summary) : false;
+
   const statusLabel = execution
     ? execution.success === true
       ? // A generic-loop `until_bash` check records success = "did the check
@@ -253,6 +257,37 @@ export function PhaseDetailPanel({
 
       {tab === "details" && (
         <div className="flex flex-col gap-4">
+          {/* What the phase DID — first, because it is what the user clicked to
+            * find out. A green tick answers "did it break"; only this answers
+            * "did it do anything". `post-review` is the case that forced it:
+            * `skipped: …`, `already-reviewed: …` and `posted review: 4 inline,
+            * 1 in body, event=COMMENT` all rendered as the same silent green
+            * node, so a run that posted nothing looked completely healthy.
+            * Absent for plain agent phases (they record no summary) — render
+            * nothing at all rather than an empty box. */}
+          {summary && (
+            <div>
+              <div className="text-2xs font-semibold uppercase tracking-wider text-base-content/40 mb-1">
+                Outcome
+              </div>
+              <div
+                className={clsx(
+                  "text-xs wrap-break-word whitespace-pre-wrap rounded border px-3 py-2",
+                  noOp
+                    ? "border-base-300/60 bg-base-200/40 text-base-content/60 italic"
+                    : "border-base-300/40 bg-base-200/30 text-base-content/80",
+                )}
+              >
+                {noOp && (
+                  <span className="badge badge-xs badge-ghost font-mono mr-2 align-middle not-italic">
+                    no-op
+                  </span>
+                )}
+                {summary}
+              </div>
+            </div>
+          )}
+
           {phaseDef && (
             <div className="grid grid-cols-2 gap-3">
               <Field label="Type">{phaseDef.type}</Field>
@@ -269,7 +304,12 @@ export function PhaseDetailPanel({
             </div>
           )}
 
-          {!execution && (
+          {/* Suppressed once an outcome exists. A HANDLER phase (`post-review`,
+            * a `fanout` join) runs in-process and never writes an `executions`
+            * row, so this box is permanent for it — and "No execution recorded
+            * yet." beside a phase that just posted a review is the opposite of
+            * what happened. */}
+          {!execution && !summary && (
             <div className="text-xs text-base-content/50 border border-base-300/40 bg-base-200/30 rounded px-3 py-2">
               No execution recorded yet.
             </div>

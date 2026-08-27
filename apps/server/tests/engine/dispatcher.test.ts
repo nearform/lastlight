@@ -1596,6 +1596,46 @@ describe('dispatch — the pr-review trigger gate (Phase 7)', () => {
     expect(await dispatch(envelope, deps)).toEqual({ kind: 'dispatched', workflow: 'pr-review' });
   });
 
+  // THE GATE IS NOT THE LAST READER. `post-review` re-decides "we already
+  // reviewed this head" once the review is written, and with no way to see the
+  // request it overturned the very dispatch this flag authorised — eight
+  // minutes of pipeline, `succeeded`, and nothing posted
+  // (cliftonc/drizzle-cube#937). So the flag has to leave this function on the
+  // context, which `dispatchWorkflow` projects onto the run.
+  it('hands the explicit request down on the context, for the step that posts', async () => {
+    withReview({ trigger: 'on-request' });
+    const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
+    const github = prGithubStub({ botReview: { state: 'APPROVED' } });
+    const envelope = makeEnvelope({
+      type: 'comment.created',
+      repo: 'cliftonc/lastlight',
+      prNumber: 8,
+      body: '@last-light review',
+    });
+    const deps = makeDeps(
+      {
+        action: 'handler',
+        handler: 'pr-review',
+        context: { _routeKey: 'github.pr_review', repo: 'cliftonc/lastlight', prNumber: 8 },
+      },
+      { db: mockDb() as any, github, dispatchWorkflow },
+    );
+
+    await dispatch(envelope, deps);
+
+    expect(dispatchWorkflow.mock.calls[0][1]._explicitRequest).toBe(true);
+  });
+
+  it('marks an automatic dispatch as one nobody asked for', async () => {
+    withReview({ trigger: 'eager' });
+    const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
+    const { envelope, deps } = reviewDeps(prGithubStub({ checksState: 'pending' }), dispatchWorkflow);
+
+    await dispatch(envelope, deps);
+
+    expect(dispatchWorkflow.mock.calls[0][1]._explicitRequest).toBe(false);
+  });
+
   it('does not post a placeholder on the 30-minute sweep route — that would be one check per tick', async () => {
     withReview({ trigger: 'on-request', postsCheck: true });
     const dispatchWorkflow = vi.fn();

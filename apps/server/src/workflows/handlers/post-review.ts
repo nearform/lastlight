@@ -16,7 +16,7 @@ import {
 } from "../../engine/github/review-poster.js";
 import { getRuntimeConfig } from "../../config/config.js";
 import { defaultReviewConfig } from "lastlight-shared/config-types";
-import { hasMaterialChange } from "../../engine/pr-decisions.js";
+import { hasMaterialChange, resolveReviewPost, type HeadReview } from "../../engine/pr-decisions.js";
 import { logger } from "../../logging/logger.js";
 
 const log = logger("post-review");
@@ -192,6 +192,28 @@ export function readCleanDischarges(dir: string): ReadonlySet<string> | undefine
 }
 
 /**
+ * The review that stood on the head SHA when this run was DISPATCHED, off the
+ * persisted `context.prState` — `resolveReviewPost`'s discriminator between a
+ * prior review and this run's own.
+ *
+ * Read defensively rather than through the `PrState` type: the context is JSON
+ * that outlives the build that wrote it, and a run dispatched before
+ * `submittedAt` was recorded has the same shape minus that field. `null` — no
+ * snapshot at all, which is every eval-harness run — degrades to "treat
+ * anything at the head as ours", i.e. exactly the unconditional guard this
+ * replaced.
+ */
+function dispatchReview(ctx: TemplateContext): HeadReview | null {
+  const state = (ctx as Record<string, unknown>).prState;
+  if (!state || typeof state !== "object") return null;
+  const review = (state as Record<string, unknown>).botReviewAtHead;
+  if (!review || typeof review !== "object") return null;
+  const { state: reviewState, submittedAt } = review as Record<string, unknown>;
+  if (typeof reviewState !== "string") return null;
+  return { state: reviewState, submittedAt: typeof submittedAt === "string" ? submittedAt : null };
+}
+
+/**
  * Parse one context-projected boundary number back off its string form.
  * The projection is `specContext`'s (`pr-decisions.ts`); garbage degrades to
  * the caller's default — the direction `config.ts` coerces the same keys.
@@ -237,8 +259,10 @@ function parseThresholds(v: unknown): Record<string, number> {
  *
  * A genuine failure — missing findings after a real review, or a GitHub error
  * that survives the body-only retry — FAILS the phase visibly; only a
- * legitimate `skip` succeeds without posting. Idempotent on resume: it no-ops
- * when a bot review already exists on the current head SHA.
+ * legitimate `skip` succeeds without posting. Idempotent on resume: a review
+ * this run already posted on the head SHA is never posted twice — see
+ * {@link resolveReviewPost}, which is also what keeps that idempotency from
+ * swallowing a maintainer's deliberate re-review of an unchanged head.
  */
 export class GitHubPostReviewHandler implements PhaseTypeHandler {
   constructor(
@@ -290,6 +314,13 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       (typeof ctx.prNumber === "number" ? ctx.prNumber : undefined) ??
       (typeof ctx.issueNumber === "number" && ctx.issueNumber > 0 ? ctx.issueNumber : undefined);
     if (!prNumber) return fail("post-review: no PR number in run context; cannot post review");
+
+    // A human asked for THIS run by name — projected onto the run context at
+    // the dispatch choke point (`src/index.ts`), so every route carries it
+    // identically and a resume of this run still carries the request that
+    // started it. Absent (an eval-harness run, a context written before the
+    // field existed) reads as `false`, which is the pre-existing behaviour.
+    const explicitRequest = ctx.explicitRequest === true;
 
     // Read the agent's findings from the host checkout. The review phase writes
     // it at `.lastlight/pr-review/findings.json` relative to the repo cwd; the
@@ -355,10 +386,26 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
         .getBotReviewHistory(owner, repo, prNumber, headSha, getRuntimeConfig()?.botLogin)
         .catch(() => ({ atHead: null, latest: null }));
 
-      // Idempotency: skip if a bot review already exists on this head SHA
-      // (guards resume / re-entry from double-posting).
-      if (history.atHead) {
-        return succeed(`already reviewed head ${headSha.slice(0, 7)} (${history.atHead.state})`);
+      // "We already reviewed this head" — decided ONCE, by the same module the
+      // dispatch gate asks. Two things are being told apart here and they used
+      // to be one: a resume/re-entry finding the review this run itself posted
+      // (never post again) versus a maintainer's deliberate `@bot review` on a
+      // head we reviewed yesterday (post — that is the whole ask). The
+      // discriminator is the dispatch snapshot, which is why `atDispatch` comes
+      // off the persisted run context rather than a fresh read.
+      const post = resolveReviewPost({
+        atHead: history.atHead,
+        atDispatch: dispatchReview(ctx),
+        explicitRequest,
+      });
+      if (post.decision === "skip") {
+        log.info("Not posting a review", {
+          repo: `${owner}/${repo}`,
+          prNumber,
+          reason: post.reason,
+          inputs: post.inputs,
+        });
+        return succeed(`${post.reason} — ${headSha.slice(0, 7)}`);
       }
 
       const stale = await this.staleAgainstCurrentHead(github, owner, repo, prNumber, headSha);
@@ -426,7 +473,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       this.recordDisposition(hostRepoDir, boundary, review.tiered);
     }
 
-    const repeat = this.repeatOfLastReview(history.latest, review);
+    const repeat = this.repeatOfLastReview(history.latest, review, explicitRequest);
     if (repeat) {
       log.info("Skipping a duplicate review post", { repo: `${owner}/${repo}`, prNumber, summary: repeat });
       return succeed(repeat);
@@ -502,11 +549,22 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
    * suppressing a duplicate APPROVE changes nothing; suppressing a duplicate
    * CHANGES_REQUESTED would turn a `failure` check into a passing one and open
    * a merge gate the review deliberately closed.
+   *
+   * Off for an EXPLICIT request, and that is not a courtesy — it is the same
+   * rule `resolveReviewPost` applies one guard above. The shape this catches is
+   * an unprompted re-review of a push that changed nothing a reviewer can read;
+   * a maintainer who typed `@bot review` on an unchanged head is asking for
+   * precisely the review this would suppress, and would get eight minutes of
+   * pipeline and silence. Suppressing a duplicate APPROVE is safe (the check
+   * concludes `neutral`, which passes) — but so is posting one, and only one of
+   * the two answers the question.
    */
   private repeatOfLastReview(
     last: { state: string; sha: string; body: string | null } | null,
     review: { body: string; event: string; comments: unknown[] },
+    explicitRequest: boolean,
   ): string | null {
+    if (explicitRequest) return null;
     if (review.event !== "APPROVE" || review.comments.length > 0) return null;
     if (!last || last.state !== "APPROVED" || last.body !== review.body) return null;
     return `duplicate: this APPROVE is word-for-word the one we posted on ${last.sha.slice(0, 7)}`;

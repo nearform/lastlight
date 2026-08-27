@@ -153,6 +153,24 @@ export interface PrState {
    * own commit on top of an escalation does not count as intervention).
    */
   headIsOurs: boolean;
+  /**
+   * `authorLogin === botLogin` — did WE OPEN this pull request?
+   *
+   * A DIFFERENT question from {@link headIsOurs}, and the difference is
+   * load-bearing. `headIsOurs` asks who pushed the head COMMIT, so it is true
+   * whenever a fix run landed on someone else's PR — using it here would
+   * suppress reviews of human PRs the agent had merely touched. GitHub's rule
+   * is about the pull request's AUTHOR: it refuses `APPROVE` and
+   * `REQUEST_CHANGES` on a PR you opened (422), which is what made a review of
+   * our own build output run the whole pipeline and then fail at the last step
+   * with "Can not request changes on your own pull request".
+   *
+   * Derived here for the same reason `headIsOurs` is — so the decision
+   * functions stay pure over the snapshot and never need the bot identity.
+   */
+  authorIsOurs: boolean;
+  /** The PR author's GitHub login — `<botName>[bot]` when we opened it. */
+  authorLogin: string;
   /** The PR's head branch — what a fix run clones and pushes to. */
   headRef: string;
   /**
@@ -194,8 +212,13 @@ export interface PrState {
   /**
    * The bot's own most recent review AT THE CURRENT HEAD SHA, or null. A push
    * invalidates it naturally (GitHub records the review's `commit_id`).
+   *
+   * `submittedAt` is carried as an IDENTITY rather than a date — nothing orders
+   * it. It is the only field distinguishing two of our reviews on ONE commit,
+   * which is what lets `resolveReviewPost` tell the review this run was sent to
+   * override from the review this run has just posted.
    */
-  botReviewAtHead: { state: string } | null;
+  botReviewAtHead: { state: string; submittedAt: string | null } | null;
   /**
    * The bot's most recent posted review at ANY head SHA, with the SHA it was
    * submitted against — the baseline the generated-only re-review gate diffs
@@ -543,6 +566,8 @@ export async function resolvePrState(
     headSha: "",
     headAuthor: "",
     headIsOurs: false,
+    authorIsOurs: false,
+    authorLogin: "",
     headRef: "",
     baseRef: "",
     isDraft: false,
@@ -585,6 +610,8 @@ export async function resolvePrState(
       state.headRef = pr.head?.ref ?? "";
       state.baseRef = pr.base?.ref ?? "";
       state.isDraft = !!pr.draft;
+      state.authorLogin = pr.user?.login ?? "";
+      state.authorIsOurs = !!deps.botLogin && state.authorLogin === deps.botLogin;
       state.title = pr.title ?? "";
       state.body = pr.body ?? "";
       state.labels = (pr.labels ?? [])
@@ -644,7 +671,9 @@ export async function resolvePrState(
         state.settledCheckCount = summary.settledCount;
       }
       state.baseChecksState = baseState;
-      state.botReviewAtHead = review.atHead ? { state: review.atHead.state } : null;
+      state.botReviewAtHead = review.atHead
+        ? { state: review.atHead.state, submittedAt: review.atHead.submittedAt }
+        : null;
       state.lastBotReview = review.latest ? { state: review.latest.state, sha: review.latest.sha } : null;
       state.headAuthor = author;
       state.headIsOurs = !!deps.botLogin && author === deps.botLogin;

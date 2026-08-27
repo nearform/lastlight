@@ -181,6 +181,24 @@ export function PrStatePanel({ run }: { run: WorkflowRun }) {
                 life — the same `costBaselineUsd` boundary that re-arms the
                 attempt counter. */}
             <Fact label="spent on this problem" value={`$${spent.toFixed(2)}`} />
+            {/* WHO OPENED IT. Distinct from the head-commit author already on
+                the snapshot: GitHub refuses a review event on a PR you opened,
+                so `ours` here means a review can never post, however green
+                every phase looks. */}
+            <Fact
+              label="pr author"
+              value={`${str(state.authorLogin) || "unknown"}${state.authorIsOurs ? " · ours" : ""}`}
+              tone={state.authorIsOurs ? "warn" : undefined}
+            />
+            {/* WHO ASKED. Recorded beside the snapshot rather than in it: the
+                snapshot is what is true of the PR, this is what was true of the
+                dispatch. It is also the flag that lets a re-review of an
+                already-reviewed head actually post, so "why did this run say
+                nothing" is answerable from here. */}
+            <Fact
+              label="trigger"
+              value={ctx.explicitRequest === true ? "asked for" : "automatic"}
+            />
             <Fact
               label="shape"
               value={[
