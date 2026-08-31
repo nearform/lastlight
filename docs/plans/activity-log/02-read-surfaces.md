@@ -1,5 +1,8 @@
 # Phase 3 — the read surfaces
 
+> **Status: implemented.** See the Execution notes at the end for what actually
+> happened. The steps below are the plan **as originally written**.
+
 The admin endpoint, the dashboard Activity tab + per-run strip, and the
 `lastlight activity` subcommand. All read-only.
 
@@ -199,3 +202,37 @@ clean run here is the proof that item shipped.
 - The per-run strip renders on a run with activity and vanishes on one without.
 - `lastlight activity` and `--json` agree with the dashboard.
 - The dashboard mirror pin passes.
+
+## Execution notes (31 Aug 2026)
+
+Phase 3 landed. `pnpm turbo run typecheck test build` green — 25/25 tasks. The
+plan held up better here than in the earlier phases; four notes:
+
+- **A real bug the plan never contemplated, found by the bot's own review.**
+  `cron.fire` hardcoded `actorType: "admin"` for every manual fire, so a
+  GitHub-authenticated "Run now" wrote `cron.trigger` as `github` and its paired
+  `cron.fire` as `admin` — two rows for one action disagreeing about the same
+  person. The cron context carried `_cronActor` (the login) but nothing about
+  HOW they authenticated. Fixed by threading `_cronActorType` alongside it, with
+  `admin` kept only as the genuine-unknown fallback (which is what `admin`
+  means: a password session). Worth noting the review that caught it was
+  `nearform-lastlight` reviewing its own feature.
+
+- **`?target=` must split on the FIRST colon, not `split(":")`.** A target id
+  can contain one — `container:lastlight-sandbox-a:b` — and a naive split would
+  truncate it. Pinned by a test.
+
+- **`limit=0` falls back to the default rather than clamping to 1**, because
+  `parseInt(...) || 50` short-circuits on zero. That is `/feedback/signals` and
+  `/workflow-runs` verbatim. My first test asserted the tidier rule and failed;
+  the endpoint was right and the test was wrong. Consistency across the list
+  endpoints beats a marginally better rule in one of them.
+
+- **The user enrichment is per distinct login, not per row.** A page of 50 is
+  routinely two or three people, so a per-row `findByLogin` would be up to 50
+  queries for 3 answers.
+
+Two things carried over from the plan and still hold: the per-run strip needed
+no new route (`?target=workflow_run:<id>`), and it self-hides on a run nobody
+has touched, copying `PrStatePanel` so the detail panel does not fill with empty
+sections.

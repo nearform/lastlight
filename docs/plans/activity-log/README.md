@@ -167,7 +167,7 @@ The feature first does something in Phase 2; Phase 3 is what a person can see.
 - [x] **Phase 2** — [01-write-seams.md](01-write-seams.md) — `recordActivity()`
   and its 22 call sites, plus the three `"admin"` literals *(risk: low —
   additive, best-effort, cannot fail an action; but touches many files)*
-- [ ] **Phase 3** — [02-read-surfaces.md](02-read-surfaces.md) — the admin
+- [x] **Phase 3** — [02-read-surfaces.md](02-read-surfaces.md) — the admin
   endpoint, the dashboard tab + per-run strip, the `lastlight activity`
   subcommand *(risk: low — read-only)*
 
@@ -186,11 +186,12 @@ Both are cheap to change now and expensive once rows exist.
 
 ## Status
 
-**Phases 1 and 2 implemented; Phase 3 outstanding.** Written against `main` at
+**All three phases implemented.** Written against `main` at
 `0d167c01`. Each phase doc gains Execution notes as it lands, so this directory
 reads as both a plan and a record.
 
-The two open questions above are still open. The verb vocabulary is declared as
-a closed union in `src/state/activity-store.ts`; changing a verb is now that
-edit plus its call sites, so it is no longer free — but nothing has been
-deployed, so no rows exist yet and nothing needs migrating.
+Both open questions were **answered by @cliftonc on #364**: the verb vocabulary
+is fine as-is ("simple strings that are what they say they are"), and
+`config.edit` stays broad ("there is very little today that is editable"). They
+are recorded here rather than removed, because the reasoning is what a future
+reader needs when a fifteenth verb is proposed.

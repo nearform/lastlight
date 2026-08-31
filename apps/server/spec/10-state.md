@@ -532,6 +532,14 @@ actor is a truer statement than the literal `"admin"` the `updated_by` columns
 fall back to. No FK because the join to `users` is the same additive enrichment
 #205 chose, so a row survives an actor who never logged into the dashboard.
 
+**Read surface.** `GET /admin/api/activity` (paginated, filterable by
+`actor` / `action` / `target` / `since`, envelope `{ activity, total, users }`)
+plus `GET /admin/api/activity/actions` for the filter dropdown. The dashboard's
+Activity tab and its per-run strip are both that one endpoint — the strip is
+`?target=workflow_run:<id>`. Deliberately NOT repo-scoped: `?repos=` on
+`/workflow-runs` is UI declutter rather than authorization, and an audit stream
+silently narrowed by team membership would mislead in a way a run list does not.
+
 Reads tie-break on `id`, which is minted in creation order
 (`activity-store.ts` → `creationOrderedId`, the same helper shape as
 `cron-run-store.ts`). Postgres has no `rowid`, and a merely arbitrary tiebreak
