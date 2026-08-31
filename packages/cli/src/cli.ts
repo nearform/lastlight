@@ -282,6 +282,14 @@ ${chalk.bold("Session")} (read agent session transcripts)
   lastlight session list [--limit n]
   lastlight session log <id> [--follow] [--since n] [--full]   ${chalk.dim("(--full = raw, unformatted dump)")}`,
 
+  activity: `
+${chalk.bold("Activity")} (the audit stream — who did what, when)
+  lastlight activity [--actor login] [--action verb] [--target type:id] [--since iso] [--limit n]
+
+  Verbs: login, workflow.trigger|retry|cancel|toggle, approval.approve|reject,
+         cron.fire|trigger|toggle, config.edit, container.kill, artifact.edit, pr.retry
+  ${chalk.dim("A row with no actor is a password session — authenticated, but carrying no login.")}`,
+
   logs: `
 ${chalk.bold("Logs")} (search the harness logs)
   lastlight logs search "<text>" [--scope errors|messages|all] [--limit n]`,
@@ -412,7 +420,7 @@ ${chalk.bold("Trigger")} (run work on a repo)
   lastlight pr retry <owner/repo#N> [reason]    Have another go at a PR the bot stopped on
 
 ${chalk.bold("Debug")} (read the running instance)   ${chalk.dim("→ lastlight <cmd> help")}
-  workflow · session · logs · approvals · stats · cron
+  workflow · session · logs · approvals · stats · cron · activity
 
 ${chalk.bold("Server")} (host-local docker stack)   ${chalk.dim("→ lastlight server help")}
   setup · build · list · logs · start · stop · restart · update · status
@@ -1305,6 +1313,15 @@ async function cmdRepo(): Promise<void> {
  * repo, the hold label, the run lock, the budgets) is the server's, decided at
  * the same gate a webhook crosses. See src/pr-cli.ts.
  */
+async function cmdActivity(): Promise<void> {
+  const { activityCommand } = await import("./activity-cli.js");
+  const code = await activityCommand(positionals.slice(1), {
+    json: JSON_OUT,
+    apiGet,
+  }).catch((err: unknown) => die(err instanceof Error ? err.message : String(err)));
+  if (code !== 0) process.exit(code);
+}
+
 async function cmdPr(): Promise<void> {
   const { prCommand } = await import("./pr-cli.js");
   const code = await prCommand(positionals.slice(1), {
@@ -1438,6 +1455,7 @@ async function main() {
     case "auth": return cmdOAuth();
     case "server": return cmdServer();
     case "stats": return cmdStats();
+    case "activity": return cmdActivity();
     case "chat": return cmdChat();
     case "build": return cmdBuild();
     case "triage":
