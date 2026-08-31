@@ -46,6 +46,7 @@ import type { StateDb } from "../state/db.js";
 import { runRepoDigest, type RepoDigestDeps } from "./repo-digest.js";
 import { logger } from "../logging/logger.js";
 import { recordActivity } from "../activity.js";
+import { isTriggerActorType } from "../state/db.js";
 
 const log = logger("cron-handlers");
 
@@ -106,7 +107,15 @@ export function withLedger(db: StateDb, cronName: string, handler: CronHandler):
     // on which kind of cron it is looking at (issue #206).
     await recordActivity(db, {
       actorLogin: actor,
-      actorType: source === "manual" ? "admin" : "cron",
+      // Same rule as `runner.ts`: a manual fire carries how the presser
+      // authenticated, so the `cron.trigger` and `cron.fire` rows for one
+      // action cannot disagree about the same person.
+      actorType:
+        source === "manual"
+          ? isTriggerActorType(context._cronActorType)
+            ? context._cronActorType
+            : "admin"
+          : "cron",
       action: "cron.fire",
       targetType: "cron",
       targetId: cronName,

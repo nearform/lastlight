@@ -17,7 +17,7 @@ import {
   getContainerLogs,
   streamContainerLogs,
 } from "./docker.js";
-import { authMiddleware, createToken, verifyTokenForRefresh, decodeToken, actorFromContext } from "./auth.js";
+import { authMiddleware, createToken, verifyTokenForRefresh, decodeToken, actorFromContext, actorTypeFromContext } from "./auth.js";
 import { Cron } from "croner";
 import type { CronScheduler } from "../cron/scheduler.js";
 import {
@@ -2756,6 +2756,11 @@ export function createAdminRoutes(
       [CRON_NAME_KEY]: def.name,
       _cronSource: "manual",
       _cronActor: actor ?? null,
+      // …and HOW they authenticated. Without this the fire's own activity row
+      // could only guess, and guessed `admin` — so a GitHub-authenticated
+      // "Run now" wrote `cron.trigger` as `github` and its paired `cron.fire`
+      // as `admin`, two rows for one action disagreeing about the same person.
+      _cronActorType: actorTypeFromContext(c) ?? null,
       sender: actor,
     };
     const fire = def.handler
