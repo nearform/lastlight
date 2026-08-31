@@ -47,7 +47,7 @@
     "lint:boundaries": "node ../../scripts/lint-import-boundaries.mjs code-facts"
   },
   "dependencies": {
-    "@ast-grep/napi": "^0.45.1",
+    "@ast-grep/napi": "^0.45.2",
     "typescript": "7.0.2",
     "zod": "^4.3.6"
   },
