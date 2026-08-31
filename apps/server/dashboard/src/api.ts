@@ -571,6 +571,34 @@ export interface DailyStat extends OutcomeCounts {
 // copied here by hand.
 
 /** One 👍/👎 on something the bot wrote, scored against the run that wrote it. */
+/**
+ * One row of the audit stream (issue #206).
+ *
+ * HAND-MIRRORED from `src/state/activity-store.ts` — the dashboard has no
+ * import edge to core. `tests/admin/dashboard-activity-mirror.test.ts` pins the
+ * two together, because a mirror like this drifted once before and hid three
+ * config blocks for a release.
+ *
+ * `actorLogin` is optional on purpose: a password session and an auth-disabled
+ * instance both write a row with no verified login. Render that as "no login",
+ * never as an empty cell — the row is not missing data, the login genuinely
+ * does not exist.
+ */
+export interface ActivityRecord {
+  id: string;
+  createdAt: string;
+  actorLogin?: string;
+  actorType?: "github" | "slack" | "cli" | "cron" | "admin" | "system";
+  action: string;
+  targetType?: string;
+  targetId?: string;
+  outcome: "ok" | "denied" | "error";
+  detail?: Record<string, string | number | boolean>;
+}
+
+/** `users.login` → identity, for avatar + real name. Absent when unresolved. */
+export type ActivityUsers = Record<string, { login?: string; name?: string; avatarUrl?: string }>;
+
 export interface FeedbackSignal {
   id: string;
   anchorId: string;
@@ -856,6 +884,31 @@ export const api = {
   dailyStats: (days = 30) => req<{ daily: DailyStat[] }>(`/stats/daily?days=${days}`),
   hourlyStats: (hours = 24) =>
     req<{ hourly: DailyStat[] }>(`/stats/hourly?hours=${hours}`),
+  activity: (
+    opts: {
+      limit?: number;
+      offset?: number;
+      actor?: string;
+      action?: string;
+      /** `<type>:<id>` — e.g. `workflow_run:4f3a…`. Also serves the per-run strip. */
+      target?: string;
+      since?: string;
+    } = {},
+  ) => {
+    const qs = new URLSearchParams();
+    if (opts.limit) qs.set("limit", String(opts.limit));
+    if (opts.offset) qs.set("offset", String(opts.offset));
+    if (opts.actor) qs.set("actor", opts.actor);
+    if (opts.action) qs.set("action", opts.action);
+    if (opts.target) qs.set("target", opts.target);
+    if (opts.since) qs.set("since", opts.since);
+    const q = qs.toString();
+    return req<{ activity: ActivityRecord[]; total: number; users: ActivityUsers }>(
+      `/activity${q ? `?${q}` : ""}`,
+    );
+  },
+  activityActions: () => req<{ actions: string[] }>("/activity/actions"),
+
   feedbackSignals: (opts: { limit?: number; workflow?: string; source?: string } = {}) => {
     const qs = new URLSearchParams();
     if (opts.limit) qs.set("limit", String(opts.limit));
