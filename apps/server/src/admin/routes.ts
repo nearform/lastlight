@@ -1627,6 +1627,54 @@ export function createAdminRoutes(
     return c.json({ names: await db.runs.distinctNames() });
   });
 
+  // ── Activity log — the audit feed (issue #206) ────────────────────────────
+  //
+  // Deliberately NOT repo-scoped, unlike `/workflow-runs` and `/sessions`.
+  // Their `?repos=` is UI declutter rather than authorization (see the note at
+  // the top of `/me/repos`), and an audit stream silently filtered by which
+  // teams you happen to belong to would be misleading in a way a run list is
+  // not. Narrowing this one is a real authorization decision, not a copied
+  // query param.
+  app.get("/activity", async (c) => {
+    const limit = Math.min(Math.max(parseInt(c.req.query("limit") ?? "50", 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(c.req.query("offset") ?? "0", 10) || 0, 0);
+    // `<type>:<id>`, split on the FIRST colon — a target id can contain one
+    // (`repo:acme/widgets#7` does not, but `container:lastlight-sandbox-a:b`
+    // could), and the type never does.
+    const rawTarget = c.req.query("target") || undefined;
+    const sep = rawTarget?.indexOf(":") ?? -1;
+    const targetType = rawTarget ? (sep >= 0 ? rawTarget.slice(0, sep) : rawTarget) : undefined;
+    const targetId = rawTarget && sep >= 0 ? rawTarget.slice(sep + 1) : undefined;
+
+    const { activity, total } = await db.activity.list({
+      limit,
+      offset,
+      actor: c.req.query("actor") || undefined,
+      action: c.req.query("action") || undefined,
+      targetType,
+      targetId,
+      sinceIso: c.req.query("since") || undefined,
+    });
+
+    // Enrich from `users` for name + avatar, the way `GET /workflow-runs/:id`
+    // does for `triggered_by` (issue #205). Resolved ONCE per distinct login
+    // rather than per row: a page of 50 is routinely two or three people.
+    const logins = [...new Set(activity.map((a) => a.actorLogin).filter(Boolean))] as string[];
+    const users: Record<string, { login?: string; name?: string; avatarUrl?: string }> = {};
+    for (const login of logins) {
+      const user = await db.users.findByLogin(login);
+      if (user) users[login] = { login: user.login, name: user.name, avatarUrl: user.avatarUrl };
+    }
+
+    return c.json({ activity, total, users });
+  });
+
+  // The distinct verbs actually present, for the dashboard's filter dropdown —
+  // mirrors `/workflow-names` above.
+  app.get("/activity/actions", async (c) => {
+    return c.json({ actions: await db.activity.actions() });
+  });
+
   app.get("/workflow-runs/:id", async (c) => {
     const id = c.req.param("id");
     const run = await db.runs.getRun(id);
