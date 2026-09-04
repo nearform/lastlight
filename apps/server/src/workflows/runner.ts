@@ -20,7 +20,7 @@ import {
 } from "./loader.js";
 import { renderTemplate, type TemplateContext } from "./templates.js";
 import type { RunRepoConfig } from "./simple.js";
-import { PER_TARGET_RECREATE_WORKFLOWS } from "./target-policy.js";
+import { gitAccessFor, isPerTargetRecreate } from "./target-policy.js";
 import { qaImageAvailable, SANDBOX_IMAGE_QA } from "../sandbox/images.js";
 import { executeAgent, executeCommand } from "../engine/agent-executor.js";
 import { listRunningContainers } from "../admin/docker.js";
@@ -91,36 +91,19 @@ export interface RunnerCallbacks {
   publicUrl?: string;
 }
 
+/**
+ * The permission profile this workflow's GitHub token is minted against.
+ *
+ * A map lookup over each workflow's own `git_access` key, defaulting to `read`
+ * for a name the loader has never heard of (every in-process handler). This was
+ * a `switch` over literal names until issue #368 — see `./target-policy.js` for
+ * why that could not be, and the schema for what each profile buys.
+ *
+ * The signature is unchanged from that switch, so no call site plumbs a
+ * definition through.
+ */
 export function gitAccessProfileForWorkflow(workflowName: string): GitAccessProfile {
-  switch (workflowName) {
-    case "build":
-    case "pr-fix":
-    case "dependabot-ci-fix":
-    // dependabot-pr-merge never pushes code, but it needs `github_enable_auto_merge`,
-    // which lives in the repo-write github-tool profile.
-    case "dependabot-pr-merge":
-      return "repo-write";
-    case "pr-review":
-      return "review-write";
-    case "issue-triage":
-    case "issue-comment":
-    case "pr-comment":
-    case "explore":
-    case "answer":
-    case "security-review":
-    // verify / qa-test / demo read the repo and post a findings/demo comment —
-    // they never push code, so issues-write (contents:read + issues:write +
-    // pull_requests:write, the last needed to comment on a PR at all) is
-    // enough.
-    case "verify":
-    case "qa-test":
-    case "demo":
-      return "issues-write";
-    case "security-feedback":
-      return "repo-write";
-    default:
-      return "read";
-  }
+  return gitAccessFor(workflowName);
 }
 
 export function gitSandboxAccessForWorkflow(
@@ -151,9 +134,10 @@ export function gitSandboxAccessForWorkflow(
     // the code-pushing profiles (build / pr-fix / security-feedback) keep the
     // deeper clone for rebase/amend headroom.
     shallow: profile !== "repo-write",
-    // `build` recreates its workspace from the default branch on a fresh run
-    // (issue #153) rather than refreshing a possibly-stale feature branch.
-    recreateFromBase: PER_TARGET_RECREATE_WORKFLOWS.has(workflowName),
+    // `workspace: per-target-recreate` recreates the workspace from the default
+    // branch on a fresh run (issue #153) rather than refreshing a possibly-stale
+    // feature branch. `build` is the sole built-in that declares it.
+    recreateFromBase: isPerTargetRecreate(workflowName),
   };
 }
 

@@ -23,7 +23,7 @@ vi.mock("child_process", () => ({ execSync: vi.fn() }));
 import { executeAgent, executeCommand } from "#src/engine/agent-executor.js";
 import { getWorkflow } from "#src/workflows/loader.js";
 import { runWorkflow } from "#src/workflows/runner.js";
-import { PR_FIX_SHAPED_WORKFLOWS } from "#src/workflows/target-policy.js";
+import { prFixShapedWorkflows } from "#src/workflows/target-policy.js";
 import { renderAttemptLine } from "#src/engine/fix-markers.js";
 import { VERIFY_SCRIPT_NAME } from "#src/engine/fix-scratch.js";
 
@@ -91,7 +91,7 @@ function fixWorkflow(name: string): AgentWorkflowDefinition {
  * contract — the two workflows are one family and a short-circuit on only one
  * of them is a short-circuit an `@bot fix this` comment routes around.
  */
-describe.each([...PR_FIX_SHAPED_WORKFLOWS])("%s — the gate loop's push short-circuit", (name) => {
+describe.each([...prFixShapedWorkflows()])("%s — the gate loop's push short-circuit", (name) => {
   beforeEach(() => {
     vi.clearAllMocks();
   });

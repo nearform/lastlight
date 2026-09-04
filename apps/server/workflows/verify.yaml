@@ -1,5 +1,15 @@
 kind: verify
 name: verify
+# Runtime policy (issue #368) — reads the repo and posts a CONFIRMED/REFUTED
+# verdict; never pushes code. Pre-populates its synthesized branch so
+# browser-QA artifacts land under `.lastlight/<key>/` where
+# `serverArtifacts()` harvests them; against a real PR it pins to the PR's
+# head ref, or it would verify the base branch and refute a claim the PR
+# actually satisfies. Full prose for each key is in the workflow schema
+# (packages/workflow-engine/src/core/schema.ts).
+git_access: issues-write
+prepopulate_synth_branch: true
+prepopulate_pr_head_ref: true
 classification:
   intent: verify
   description: |

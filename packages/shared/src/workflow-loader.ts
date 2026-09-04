@@ -642,6 +642,91 @@ function warnUnscopedPrRoutes(routes: RouteConfig | undefined, log: LoggerPort):
   }
 }
 
+/**
+ * The five runtime-policy keys of issue #368. A workflow declaring NONE of them
+ * gets the whole default policy — read token, cold per-run workspace, no
+ * head-ref pinning — which is right for most workflows and wrong, silently, for
+ * a fork of one of the built-ins that had those behaviours before the keys
+ * existed. `warnUndeclaredRoutedPolicy` is the safety net for exactly that.
+ */
+const POLICY_KEYS = [
+  "git_access",
+  "workspace",
+  "prepopulate_synth_branch",
+  "prepopulate_pr_head_ref",
+  "pr_fix_shaped",
+] as const;
+
+function declaresAnyPolicy(def: AgentWorkflowDefinition): boolean {
+  return POLICY_KEYS.some((k) => def[k] !== undefined);
+}
+
+/**
+ * Warn — never throw — when a workflow reachable from a configured
+ * `routes.github.*` declares none of the runtime-policy keys.
+ *
+ * This is the chosen alternative to a compatibility floor. The five keys
+ * replaced hardcoded name tables in a HARD cutover (issue #368), so a
+ * deployment that forked, say, `pr-review` before they existed keeps the name
+ * and silently resolves to `git_access: read` — it stops being able to submit
+ * a review, and reviews the base branch. A legacy-name union would have fixed
+ * that at the cost of a permanent dual surface; a loud warning at load fixes it
+ * once. The built-ins are covered instead by the equivalence test, which fails
+ * CI on a missed key.
+ *
+ * Scoped to ROUTED workflows because that is where the exposure is: a workflow
+ * nothing dispatches cannot be silently mis-provisioned, and warning on every
+ * `read`-profile workflow (the correct answer for most of them) would train the
+ * operator to ignore the line.
+ */
+function warnUndeclaredRoutedPolicy(routes: RouteConfig | undefined, log: LoggerPort): void {
+  if (!routes) return;
+  const seen = new Set<string>();
+  for (const values of Object.values(routes) as Array<Record<string, string>>) {
+    for (const target of Object.values(values)) {
+      if (seen.has(target)) continue;
+      seen.add(target);
+      const def = agentCache.get(target);
+      if (!def || declaresAnyPolicy(def)) continue;
+      log.warn(
+        "Routed workflow declares none of the runtime-policy keys — it will get the " +
+        "defaults (git_access: read, workspace: per-run, no pre-populate). If this is a " +
+        "fork of a built-in made before those keys existed, it has SILENTLY lost its " +
+        "token profile, its warm per-PR workspace and its PR head-ref pinning; copy the " +
+        "keys across from the built-in it forked",
+        { workflow: target, keys: [...POLICY_KEYS] },
+      );
+    }
+  }
+}
+
+/**
+ * `pr_fix_shaped` implies `pr_scoped`. Throws — unlike the warnings above, this
+ * is not a choice an operator can coherently make: `pr_fix_shaped` routes the
+ * workflow through `handlePrFix`, which reads the head branch, the fork verdict
+ * and the CI evidence off the `PrState` snapshot that only the PR-scoped
+ * dispatch gate resolves. Outside the gate there is no snapshot, so the
+ * workflow has nothing to fix.
+ */
+function validatePolicyInvariants(): void {
+  for (const [wfName, def] of agentCache) {
+    if (def.pr_fix_shaped === true && def.pr_scoped !== true) {
+      throw new Error(
+        `Workflow "${wfName}" declares pr_fix_shaped: true but not pr_scoped: true — ` +
+        "a pr-fix-shaped workflow is dispatched through handlePrFix, which reads the " +
+        "PrState snapshot only the PR-scoped dispatch gate resolves",
+      );
+    }
+    if (def.workspace === "per-target-recreate" && def.prepopulate_synth_branch !== true && def.prepopulate_pr_head_ref !== true) {
+      throw new Error(
+        `Workflow "${wfName}" declares workspace: per-target-recreate but no pre-populate ` +
+        "source (prepopulate_synth_branch or prepopulate_pr_head_ref) — recreate-from-base " +
+        "only means anything for a workflow whose workspace is pre-cloned",
+      );
+    }
+  }
+}
+
 function validateRouteTargets(routes?: RouteConfig): void {
   if (!routes) return;
   for (const [surface, values] of Object.entries(routes) as Array<[keyof RouteConfig, Record<string, string>]>) {
@@ -755,6 +840,9 @@ export function validateAssets(routes?: RouteConfig, log: LoggerPort = noopLogge
     }
   }
 
+  validatePolicyInvariants();
+
   validateRouteTargets(routes);
   warnUnscopedPrRoutes(routes, log);
+  warnUndeclaredRoutedPolicy(routes, log);
 }

@@ -1,5 +1,9 @@
 kind: explore
 name: explore
+# Runtime policy (issue #368) — reads, researches and publishes a spec as an
+# issue/comment; never pushes code. Full prose for each key is in the workflow
+# schema (packages/workflow-engine/src/core/schema.ts).
+git_access: issues-write
 classification:
   intent: explore
   description: |

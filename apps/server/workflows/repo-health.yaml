@@ -1,5 +1,10 @@
 kind: health
 name: repo-health
+# Runtime policy (issue #368) — the report is delivered by the harness, not
+# written to GitHub by the agent, so this workflow needs nothing beyond
+# contents:read. Full prose for each key is in the workflow schema
+# (packages/workflow-engine/src/core/schema.ts).
+git_access: read
 chat:
   summary: A weekly repo health report
   deflect:

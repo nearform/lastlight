@@ -19,7 +19,7 @@ import {
   defaultDependenciesConfig,
   defaultReviewConfig,
 } from "../config/config.js";
-import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
+import { isPrFixShaped } from "../workflows/target-policy.js";
 import {
   resolvePrState,
   prScopedWorkflows,
@@ -377,7 +377,7 @@ export async function dispatch(
   // classifier — they all need the PR head branch the snapshot resolved, and
   // it dispatches the passed `handler` unchanged.
   if (
-    (routeKey === "github.pr_fix" || PR_FIX_SHAPED_WORKFLOWS.has(handler)) &&
+    (routeKey === "github.pr_fix" || isPrFixShaped(handler)) &&
     context.prNumber &&
     context.repo
   ) {

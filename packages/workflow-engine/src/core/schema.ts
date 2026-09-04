@@ -683,6 +683,144 @@ export const AgentWorkflowSchema = z.object({
    */
   pr_scoped: z.boolean().optional(),
   /**
+   * What the GitHub token minted for this workflow's sandbox may DO.
+   *
+   * A sibling of `pr_scoped` and load-bearing in the same way: it selects the
+   * permission profile (`GITHUB_PERMISSION_PROFILES` in
+   * `apps/server/src/engine/github/profiles.ts`) that the harness mints an
+   * installation token against and forwards as `GITHUB_TOKEN`, and it decides
+   * the agentic github-tool set the sandbox is given.
+   *
+   *   - `read` — contents:read. The default, and the right answer for anything
+   *     that never writes to GitHub.
+   *   - `issues-write` — contents:read + issues:write + pull_requests:write
+   *     (the last is needed to comment on a PR at all). Workflows that read the
+   *     repo and post a findings/answer/demo comment but never push code.
+   *   - `review-write` — as above plus the ability to SUBMIT a formal review on
+   *     a pull request. `pr-review`'s profile.
+   *   - `repo-write` — contents:write. The code-pushing profiles, plus
+   *     `dependabot-pr-merge`, which never pushes but needs
+   *     `github_enable_auto_merge` (that tool lives in the repo-write profile).
+   *
+   * `repo-write` also switches the sandbox pre-clone OFF `--depth 1`: only the
+   * pushing profiles keep the deeper clone for rebase/amend headroom
+   * (`shallow` in `gitSandboxAccessForWorkflow`).
+   *
+   * This used to be a `switch` over literal workflow names in
+   * `workflows/runner.ts`, so a workflow that exists only in a deployment
+   * overlay could never be anything but `read` — a reviewer arm shipped in an
+   * overlay silently could not submit its review (issue #368). Unlike
+   * `pr_scoped`, this key does not merely add restrictions: an overlay
+   * declaring `repo-write` mints itself a push token. That is deliberate —
+   * overlays already own prompts, skills and the agent persona, and are
+   * trusted.
+   */
+  git_access: z.enum(["read", "issues-write", "review-write", "repo-write"]).optional(),
+  /**
+   * How this workflow's sandbox workspace is KEYED and how a re-run treats an
+   * existing checkout.
+   *
+   *   - `per-run` (default) — a fresh workspace per run, keyed by
+   *     (repo, issue, workflow, run-id). Reaped on success.
+   *
+   *   - `per-target-reuse` — the workspace is keyed by **(repo, PR)** rather
+   *     than per-run. The taskId drops the run-id suffix so re-reviews of the
+   *     same PR (push → `synchronize`, cron PR-review fanout) reuse one sandbox
+   *     dir — a warm `node_modules` + an incremental `git fetch` instead of a
+   *     fresh 1.3G clone + full install each time, and N dirs/PR collapse to 1
+   *     (issue #107, cutting the #106 churn at its source). Concurrency is held
+   *     off by the dispatcher's `isRunning(skill, triggerId)` guard plus
+   *     `runs.getByTrigger` reuse — two runs never share the dir live; the
+   *     cross-run refresh in `prePopulateWorkspace` resets it cleanly between
+   *     them. `dependabot-pr-merge` uses this despite having no checkout at
+   *     all: it is always single-PR (webhook or the cron's per-PR fan-out), so
+   *     a repeated `pr.checks_passed` and the daily cron backstop for the same
+   *     PR dedup onto one dir/run rather than stacking.
+   *
+   *   - `per-target-recreate` — keyed by (repo, issue) exactly like
+   *     `per-target-reuse`, but a *different*-run marker triggers a delete +
+   *     fresh clone off the DEFAULT branch, not a `git fetch`/reset of the
+   *     (stale) feature branch. This makes an incomplete `build` disposable:
+   *     re-triggering it starts again from current `main` (issue #153). A
+   *     genuine *resume* of the same run (approval gate) still preserves the
+   *     workspace via the same-run marker — the architect's `plan.md` survives.
+   *     Concurrency is held off by the same `isRunning` guard, so the delete
+   *     only ever hits a leftover from a finished/abandoned run. `build` must
+   *     not merely *refresh* a stale checkout — that would reset onto the old
+   *     feature branch.
+   *
+   * Neither per-target class is reaped on success (`reapOnSuccess`): they are a
+   * warm cache whose eviction belongs to the backstop TTL/LRU sweep.
+   *
+   * Was two hardcoded name sets in `workflows/target-policy.ts`, which could
+   * also express the illegal state "both" (issue #368).
+   */
+  workspace: z.enum(["per-run", "per-target-reuse", "per-target-recreate"]).optional(),
+  /**
+   * This workflow synthesizes its own `lastlight/N-slug` branch (which doesn't
+   * exist on the remote at dispatch time) yet should still PRE-POPULATE the
+   * sandbox: the agent's cwd becomes the repo root (no `git clone`/`cd`), and —
+   * for the read-only `verify`/`qa-test` runs — server-mode artifacts the agent
+   * writes to `.lastlight/<key>/` (e.g. browser-QA screenshots) land where
+   * `serverArtifacts()` harvests them instead of being orphaned a level up.
+   * `build` was the original member; verify/qa-test were added for the harvest
+   * fix, and `demo` for the same reason (its `demo.mp4` is written under
+   * `.lastlight/<key>/` and harvested into the Artifacts store).
+   *
+   * For a fresh (issue-scoped) dispatch the dispatcher leaves
+   * `prePopulateBranch` unset and the missing-branch fallback in
+   * `prePopulateWorkspace` clones the default branch — correct for
+   * `build`/`demo`, which *create* the synth branch off the default. But when
+   * the *same* workflow runs against an existing PR, the synth
+   * `lastlight/<prNumber>-<title-slug>` name won't match the PR's real head ref
+   * (named after the originating issue), so the fallback would clone the
+   * default branch and test/demo code that lacks the PR — see
+   * {@link prepopulate_pr_head_ref}, the orthogonal key that fixes that.
+   */
+  prepopulate_synth_branch: z.boolean().optional(),
+  /**
+   * When there IS a real pull request, pin the pre-populated workspace to the
+   * PR's *real* head ref (via `getPullRequest(...).head.ref`) instead of
+   * letting it fall back to the synthesized `lastlight/N-<title-slug>` name.
+   *
+   * Each workflow that declares this is meaningful only against an existing PR,
+   * and the synth name never matches the PR's actual branch (which is named
+   * after the originating issue, e.g. `lastlight/14-…` for a PR #15). Without
+   * this pinning:
+   *   - `qa-test` / `verify` QA the *base* branch and report the PR's feature
+   *     missing — a false-negative result.
+   *   - `demo`'s "after" collapses onto the default branch, matching "before".
+   *
+   * Orthogonal to {@link prepopulate_synth_branch} — "pre-populate even though
+   * my branch is synthesized" and "when there is a real PR, pin to its head
+   * ref" are different facts, and three workflows declare both. `pr_fix_shaped`
+   * workflows get head-ref pinning implicitly (they also plumb `branch` through
+   * context for the architect/executor to push to), so they need not declare
+   * this. See the resolution block in `dispatchWorkflow` (src/index.ts).
+   */
+  prepopulate_pr_head_ref: z.boolean().optional(),
+  /**
+   * This workflow is shaped like `pr-fix`: dispatched off a PR event, it
+   * resolves the PR's head branch + failed-check details and pushes a fix to
+   * that branch.
+   *
+   * The dispatcher routes every workflow declaring this through `handlePrFix`
+   * (branch resolution, CI failure summary, fork-PR skip), and
+   * `dispatchWorkflow` honours the `branch` they plumb through context as the
+   * pre-populate branch. It is also the family the fix ledger keys on: shared
+   * per-PR workspace (`${repo}-${N}-fix`), the `models["pr-fix-retry"]`
+   * escalation, the fix-marker harvest, and the admin PR-retry route's
+   * "which workflow last worked this PR" lookup.
+   *
+   * `dependabot-ci-fix` (fix a failing dependency-update PR, then auto-merge
+   * trivial ones) is the second member.
+   *
+   * Requires `pr_scoped: true` — the loader enforces it. Being routed through
+   * `handlePrFix` only makes sense inside the PR gate, and the two built-in
+   * members have always been a strict subset of the PR-scoped set.
+   */
+  pr_fix_shaped: z.boolean().optional(),
+  /**
    * Render progress as a single in-place "task list" comment/message that is
    * edited as phases run, instead of posting a new comment per phase. When
    * true, the runner drives `callbacks.reporter` (see `src/notify/`) and the

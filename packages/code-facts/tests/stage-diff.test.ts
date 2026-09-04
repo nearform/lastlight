@@ -228,7 +228,7 @@ describe("the staged diff — one index, one patch per changed file", () => {
   });
 
   it("clears a STALE patch rather than leaving it beside a current index", () => {
-    // The workspace is reused across runs (`PER_TARGET_REUSE_WORKFLOWS`) and the
+    // The workspace is reused across runs (`workspace: per-target-reuse`) and the
     // cross-run refresh is `git clean -fdx -e node_modules`, which keeps
     // `.lastlight/` untracked files. A patch from the previous head sha that
     // survived into this run's directory is a diff of a commit that is no longer

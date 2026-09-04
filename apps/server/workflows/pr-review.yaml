@@ -7,6 +7,15 @@ name: pr-review
 # drops the key silently loses all four; `validateAssets` warns when a
 # `routes.github.pr_*` target is missing it.
 pr_scoped: true
+# Runtime policy (issue #368) — SUBMITS a formal review, which is its own
+# profile above issues-write. Reuses one warm workspace per PR across
+# re-reviews (issue #107), pinned to the PR's real head ref — the synthesized
+# branch name never matches it, so without the pin the review would silently
+# read the BASE branch. Full prose for each key is in the workflow schema
+# (packages/workflow-engine/src/core/schema.ts).
+git_access: review-write
+workspace: per-target-reuse
+prepopulate_pr_head_ref: true
 classification:
   intent: review
   description: |

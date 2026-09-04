@@ -258,7 +258,7 @@ export function stageDiff(options: StageDiffOptions): StageDiffResult {
     const hunksByPath = new Map(options.hunks.map((h) => [h.path, h]));
 
     // A fresh directory per run. The workspace is REUSED across runs
-    // (`PER_TARGET_REUSE_WORKFLOWS`) and the cross-run refresh is
+    // (`workspace: per-target-reuse`) and the cross-run refresh is
     // `git clean -fdx -e node_modules`, so a stale patch from the previous head
     // sha would otherwise survive beside a current index that never names it —
     // and a model that opened it would review a commit that is no longer there.

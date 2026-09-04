@@ -377,7 +377,9 @@ against the run id passed as argv:
   best-effort — a failed fetch preserves the existing checkout rather than
   leaving a half-reset tree — and closes the stale-checkout gap where a re-review
   after new commits reviewed the old head.
-- **Different run + `recreateFromBase`** (`build`, issue #153) → discard the
+- **Different run + `recreateFromBase`** (a workflow declaring
+  `workspace: per-target-recreate`; `build` is the sole packaged member, issue
+  #153) → discard the
   stale checkout and re-clone the default branch, cutting the feature branch
   locally off it, so a re-triggered incomplete build starts again off current
   `main` rather than a stale feature branch.
@@ -801,6 +803,17 @@ agentic-pi registers: only `review-write`+ gets
 registration gate — not the token scope — is what stops a comment workflow
 submitting a formal review.
 
+**Which profile a workflow gets is the workflow's own metadata** — its
+`git_access:` key, read back off the loaded definitions by
+`gitAccessProfileForWorkflow()` (`workflows/runner.ts` → `target-policy.ts`) and
+defaulting to `read`. It was a `switch` over literal names until issue #368, so
+a workflow shipped only in a deployment overlay was stuck at `read` — it could
+not submit a review or push, and the only fix was a core patch. See
+[06-workflow-engine.md → Runtime-policy keys](06-workflow-engine.md#runtime-policy-keys).
+Because this key decides what the minted token *can do* rather than only adding
+restrictions, an overlay declaring `repo-write` mints itself a push token; that
+is deliberate, overlays already own prompts, skills and the agent persona.
+
 Per phase:
 
 1. `refreshGitAuth()` (`git-auth.ts`) mints a GitHub App installation
@@ -1141,8 +1154,9 @@ identity (`GIT_AUTHOR_*`/`GIT_COMMITTER_*`) and the github.com-scoped
    `reapSandboxWorkspace()` (`src/sandbox/reap.ts` — path-escape guard +
    live-container skip). An *ephemeral* run's dir is removed on terminal success
    (`reapOnSuccess`, `workflows/simple.ts`) and on admin cancel
-   (`admin/routes.ts`); failures and the reusable/recreate per-target classes
-   are left for the backstop. An hourly in-harness direct-cron sweep
+   (`admin/routes.ts`); failures and the per-target workspace classes
+   (`workspace: per-target-reuse` / `per-target-recreate`) are left for the
+   backstop. An hourly in-harness direct-cron sweep
    (`src/cron/sandbox-sweep.ts`, config `cleanup.sandbox.*`) removes non-live
    dirs older than `retentionHours` and LRU-evicts beyond `maxDirs`, bounding
    the reusable per-PR cache. Replaces the retired host cron
