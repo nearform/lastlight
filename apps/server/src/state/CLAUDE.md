@@ -1,7 +1,8 @@
 # State layer — schema, migrations, and the two dialects
 
-This is the harness's own database: fifteen tables holding workflow runs,
-executions, approvals, cron history, users, chat sessions and feedback signals.
+This is the harness's own database: sixteen tables holding workflow runs,
+executions, approvals, cron history, users, chat sessions, feedback signals and
+the activity log.
 It is written **once** and runs on **two dialects** — SQLite (via libsql) by
 default, Postgres (node-postgres or Neon) when `DATABASE_URL` says so. Both are
 supported production stores.
@@ -37,6 +38,7 @@ and the PGlite leg replays the entire behavioural suite against real Postgres.
 | `data-migrate.ts` | One-way SQLite → Postgres row copy, FK-ordered and batched. `TABLE_ORDER` is the FK order; the coverage check is what stops a sixteenth table being silently skipped. |
 | `state-cli.ts` | The `lastlight-state` bin (`check` / `migrate`) shipped in the agent image — what `lastlight server db` runs inside the container, since the CLI may never gain an edge to core. |
 | `*-store.ts` | One store class per table, over one shared client. Each destructures its tables from `tablesOf(client)`. |
+| `activity-store.ts` | The `activity_log` audit stream (issue #206) — one row per user-initiated action, append-only. Complements #205's per-run actor columns rather than replacing them. |
 | `repo-ref.ts` | The single expression of the `(owner, BARE repo)` ↔ `owner/repo` join. |
 
 Generated migrations live **outside** `src/`, in
@@ -132,13 +134,35 @@ process.
 
 ### 6. If you added a table
 
-Three places do not update themselves:
+Three places do not update themselves, and all three fail loudly:
 
 1. **`data-migrate.ts`'s `TABLE_ORDER`** — the SQLite→Postgres copy refuses to
    start if a schema export is missing from it, so this fails loudly rather than
    losing data. Place it after anything it references by foreign key.
 2. **`db.ts`** — wire the store in.
 3. **`spec/10-state.md`** — the table inventory and the count.
+
+Plus **`MIGRATION_COUNT`** in `tests/state/schema-equivalence.test.ts`, since
+adding a table means adding a migration. That one is deliberately not derived
+from the journal — see its comment.
+
+**The test suite otherwise learns about a new table by itself**, and that is a
+property worth preserving rather than a coincidence:
+
+- `schema-parity.test.ts` derives its table list from the schema exports, so
+  every per-column and per-index parity check covers a new table for free.
+- `schema-equivalence.test.ts` applies the **baseline alone** when it asserts
+  "nothing changed", then checks the full migration set against the tables
+  `schema/sqlite.ts` declares. So later migrations are free to add things
+  without the test needing a list of what they were allowed to add.
+- `data-migrate.test.ts` leans on `assertCoversEveryTable()`, which already
+  checks both directions (missing from `TABLE_ORDER`, and stale in it).
+
+If you find yourself adding a table name or a count to a test, check whether the
+assertion above it already proves the thing — several used to, and the counts
+were removed in #206 for exactly that reason. Do add a row to `data-migrate`'s
+`seed()` though: that one is not bookkeeping, it is what makes the sqlite→pg
+copy actually exercise your columns instead of merely counting them.
 
 ## Why `db.pg-server.test.ts` exists
 

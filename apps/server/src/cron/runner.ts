@@ -21,12 +21,16 @@ import { CRON_GLOBALLY_ENABLED_KEY, CRON_NAME_KEY, resolveCronRepos } from "./re
 import { logger } from "../logging/logger.js";
 import { recordCronFire, withSpan } from "../telemetry/index.js";
 import type { CronRunStatus } from "../state/cron-run-store.js";
+import { recordActivity } from "../activity.js";
+import { isTriggerActorType } from "../state/db.js";
 
 const log = logger("cron");
 
 /** Context keys the fire path consumes and strips before dispatching. */
 const CRON_SOURCE_KEY = "_cronSource";
 const CRON_ACTOR_KEY = "_cronActor";
+/** How the "Run now" presser authenticated, so the fire's row agrees with the trigger's. */
+const CRON_ACTOR_TYPE_KEY = "_cronActorType";
 
 export type CronDiscoverer = (
   repos: string[],
@@ -101,7 +105,12 @@ export function makeCronRunner(deps: CronRunnerDeps): WorkflowRunner {
     // without this they ride into every dispatched run's context. A dispatched
     // context must stay byte-for-byte what it was before this ledger existed
     // (`fanout.ts` makes the same promise about its own keys).
-    const { [CRON_SOURCE_KEY]: rawSource, [CRON_ACTOR_KEY]: rawActor, ...context } = rawContext;
+    const {
+      [CRON_SOURCE_KEY]: rawSource,
+      [CRON_ACTOR_KEY]: rawActor,
+      [CRON_ACTOR_TYPE_KEY]: rawActorType,
+      ...context
+    } = rawContext;
 
     // No cron name means a caller that built its own context (an eval driver,
     // a direct API call). `resolveCronRepos` already treats that as "use the
@@ -117,6 +126,25 @@ export function makeCronRunner(deps: CronRunnerDeps): WorkflowRunner {
     const actor = typeof rawActor === "string" ? rawActor : null;
 
     const id = await db.cronRuns.start({ cronName, workflow: workflowName, source, actor });
+
+    // The activity log's ONE row for this fire (issue #206). The fan-out below
+    // may dispatch a run per repo, and those dispatches deliberately write no
+    // `workflow.trigger` row — a fan-out is one operational event, not N user
+    // actions, the same reason this ledger is keyed on the cron rather than the
+    // workflow. A scheduled fire has no human actor; a manual one carries the
+    // login of whoever pressed "Run now".
+    await recordActivity(db, {
+      actorLogin: actor,
+      // A scheduled fire has no human actor. A MANUAL one carries how the
+      // presser authenticated, threaded from the trigger route — falling back
+      // to `admin` only when that is genuinely unknown (an older context, or a
+      // password session, which is what `admin` actually means).
+      actorType: source === "manual" ? (isTriggerActorType(rawActorType) ? rawActorType : "admin") : "cron",
+      action: "cron.fire",
+      targetType: "cron",
+      targetId: cronName,
+      detail: { source, workflow: workflowName },
+    });
 
     let counts: FireCounts = {
       reposEligible: null,

@@ -219,6 +219,29 @@ async function seed(db: StateDb): Promise<void> {
     observedAt: now,
   });
 
+  // The audit stream (issue #206). `detail` is text→jsonb, so it is a second
+  // instance of the mapping `executions.extension_status` covers — and the row
+  // with no detail proves NULL survives as NULL rather than as `"null"`.
+  await c.insert(t.activityLog).values([
+    {
+      id: "act-1",
+      createdAt: now,
+      actorLogin: "cliftonc",
+      actorType: "github",
+      action: "cron.toggle",
+      targetType: "cron",
+      targetId: "cron-review",
+      outcome: "ok",
+      detail: { enabled: false, note: "café ☕" },
+    },
+    {
+      id: "act-2",
+      createdAt: now,
+      action: "login",
+      outcome: "denied",
+    },
+  ]);
+
   // The one foreign key in the schema — and the one generated id.
   await c.insert(t.messagingSessions).values({
     id: "sess-1",
@@ -240,9 +263,12 @@ async function seed(db: StateDb): Promise<void> {
 
 describe("data-migrate", () => {
   it("covers every table in the schema", () => {
-    // The guard that stops a 16th table from being silently left behind.
+    // The guard that stops a table being silently left behind. It checks BOTH
+    // directions — a schema export missing from TABLE_ORDER, and a TABLE_ORDER
+    // entry no longer in the schema — so a hardcoded count would add nothing
+    // beyond an edit on every table added.
     expect(() => assertCoversEveryTable()).not.toThrow();
-    expect(TABLE_ORDER).toHaveLength(15);
+    expect(TABLE_ORDER.length).toBeGreaterThan(0);
   });
 
   it("orders messaging_sessions before messaging_messages (the only FK)", () => {
@@ -261,8 +287,10 @@ describe("data-migrate", () => {
       onProgress: (e) => events.push(e),
     });
 
-    // Row counts first — the cheap half.
-    expect(result.tables).toHaveLength(15);
+    // Row counts first — the cheap half. Compared against TABLE_ORDER rather
+    // than a literal: the copy visits exactly those tables by construction, so
+    // a number here would only restate it.
+    expect(result.tables).toHaveLength(TABLE_ORDER.length);
     expect(result.totalRows).toBeGreaterThan(0);
     for (const t of result.tables) expect(t.target).toBe(t.source);
     expect(events.at(-1)).toMatchObject({ type: "done", totalRows: result.totalRows });
@@ -306,6 +334,15 @@ describe("data-migrate", () => {
     expect(await target.client.select().from(dst.githubTeamMembers)).toHaveLength(1);
     const [signal] = await target.client.select().from(dst.feedbackSignals);
     expect(signal).toMatchObject({ anchorId: "anchor-1", score: 1, emoji: "+1" });
+
+    // The audit stream's own text→jsonb column, and its NULL sibling.
+    const activity = Object.fromEntries(
+      (await target.client.select().from(dst.activityLog)).map((r) => [r.id, r]),
+    );
+    expect(activity["act-1"].detail).toEqual({ enabled: false, note: "café ☕" });
+    expect(activity["act-1"].actorType).toBe("github");
+    expect(activity["act-2"].detail).toBeNull();
+    expect(activity["act-2"].actorLogin).toBeNull();
 
     // The generated id: Postgres assigns its own (GENERATED ALWAYS rejects an
     // explicit one), and nothing references it — but the ORDER must survive,

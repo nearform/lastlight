@@ -43,6 +43,12 @@ import {
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 import type { ExtensionStatusMap, SkillsStatus } from "lastlight-workflow-engine";
+import type {
+  ActivityAction,
+  ActivityDetail,
+  ActivityOutcome,
+} from "../activity-store.js";
+import type { TriggerActorType } from "../user-store.js";
 import type { PhaseHistoryEntry } from "../workflow-run-store.js";
 
 /**
@@ -249,6 +255,41 @@ export const users = sqliteTable(
     index("idx_users_login").on(t.login),
     index("idx_users_email").on(t.email),
     index("idx_users_slack").on(t.slackUserId),
+  ],
+);
+
+/**
+ * The cross-cutting audit stream (issue #206) — one row per user-initiated
+ * action, across the dashboard, CLI, Slack, GitHub and cron.
+ *
+ * COMPLEMENTS the per-run actor columns #205 put on `workflow_runs` and
+ * `executions`; it does not replace them. Those stay the hot-path attribution
+ * a run's detail view reads, and this is the chronological stream that answers
+ * "what has this person done?" without joining five ledgers.
+ *
+ * `actor_login` is free text soft-joined to `users.login`, deliberately WITHOUT
+ * a foreign key — the same additive-enrichment choice #205 made, so a row
+ * survives an actor who never logged into the dashboard. It is nullable
+ * because a password login carries no verified login to record.
+ */
+export const activityLog = sqliteTable(
+  "activity_log",
+  {
+    id: text("id").primaryKey(),
+    createdAt: text("created_at").notNull(),
+    actorLogin: text("actor_login"),
+    actorType: text("actor_type").$type<TriggerActorType>(),
+    action: text("action").notNull().$type<ActivityAction>(),
+    // Null together, for an action with no target — `login` is the only one.
+    targetType: text("target_type"),
+    targetId: text("target_id"),
+    outcome: text("outcome").notNull().$type<ActivityOutcome>(),
+    detail: text("detail", { mode: "json" }).$type<ActivityDetail>(),
+  },
+  (t) => [
+    index("idx_activity_created").on(sql`${t.createdAt} DESC`),
+    index("idx_activity_actor_created").on(t.actorLogin, sql`${t.createdAt} DESC`),
+    index("idx_activity_target").on(t.targetType, t.targetId),
   ],
 );
 

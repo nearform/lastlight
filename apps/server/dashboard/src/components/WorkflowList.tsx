@@ -24,6 +24,7 @@ import { WorkflowPipeline } from "./WorkflowPipeline";
 import { ApprovalBanner } from "./ApprovalBanner";
 import { PhaseDetailPanel } from "./PhaseDetailPanel";
 import { PrStatePanel } from "./PrStatePanel";
+import { RunActivityStrip } from "./ActivityPage";
 import { MessageFeed, type MessageOrder } from "./MessageFeed";
 import {
   useUrlState,
@@ -555,6 +556,10 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
           itself away on any run that carries none — i.e. every non-PR-scoped
           workflow — so there is no workflow-name list here to keep in step. */}
       <PrStatePanel run={run} />
+
+      {/* Who acted on this run, and what came of it (issue #206). Self-hiding
+          on a run nobody has touched, same rule as PrStatePanel above. */}
+      <RunActivityStrip runId={run.id} />
 
       <ResizablePipeline
         run={run}

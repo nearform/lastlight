@@ -66,6 +66,9 @@ export const TABLE_ORDER: readonly TableSpec[] = [
   { key: "cronRuns", orderBy: ["id"] },
   { key: "workflowOverrides", orderBy: ["name"] },
   { key: "users", orderBy: ["id"] },
+  // No foreign key — `actor_login` is a SOFT join to `users.login` — but placed
+  // after `users` to match how it reads.
+  { key: "activityLog", orderBy: ["id"] },
   { key: "feedbackAnchors", orderBy: ["id"] },
   { key: "feedbackSignals", orderBy: ["id"] },
   { key: "githubTeams", orderBy: ["org", "slug"] },

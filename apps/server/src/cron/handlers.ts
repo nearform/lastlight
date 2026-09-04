@@ -45,6 +45,8 @@
 import type { StateDb } from "../state/db.js";
 import { runRepoDigest, type RepoDigestDeps } from "./repo-digest.js";
 import { logger } from "../logging/logger.js";
+import { recordActivity } from "../activity.js";
+import { isTriggerActorType } from "../state/db.js";
 
 const log = logger("cron-handlers");
 
@@ -99,6 +101,26 @@ export function withLedger(db: StateDb, cronName: string, handler: CronHandler):
     // what lets `GET /crons` and the scheduler's alert read ONE ledger and stop
     // branching on which kind of cron they are looking at.
     const id = await db.cronRuns.start({ cronName, handler: cronName, source, actor });
+
+    // One activity row per fire, same shape a `workflow:` cron writes from
+    // `runner.ts` — so the audit stream, like the ledger above, does not branch
+    // on which kind of cron it is looking at (issue #206).
+    await recordActivity(db, {
+      actorLogin: actor,
+      // Same rule as `runner.ts`: a manual fire carries how the presser
+      // authenticated, so the `cron.trigger` and `cron.fire` rows for one
+      // action cannot disagree about the same person.
+      actorType:
+        source === "manual"
+          ? isTriggerActorType(context._cronActorType)
+            ? context._cronActorType
+            : "admin"
+          : "cron",
+      action: "cron.fire",
+      targetType: "cron",
+      targetId: cronName,
+      detail: { source, handler: cronName },
+    });
 
     try {
       await handler(context);

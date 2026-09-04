@@ -46,9 +46,14 @@ import { join, resolve, relative } from "node:path";
 // the better code, but it changes the behaviour of a live streaming endpoint
 // and predates this gate by four months (21c6cb0, 2026-04-06). Fix it in a
 // change that is about SSE, not as a drive-by. Remove the entry when you do.
+//
+// NOTE: these are keyed by LINE NUMBER, so any edit that adds or removes lines
+// above them in `routes.ts` silently un-allowlists them and the gate fails
+// pointing at code the change never touched. Shifted by +2 in #206 (two added
+// imports). If that happens again, consider keying on the expression text.
 const ALLOWED = new Set([
-  "src/admin/routes.ts:452",
-  "src/admin/routes.ts:458",
+  "src/admin/routes.ts:454",
+  "src/admin/routes.ts:460",
 ]);
 
 const projectDirs = process.argv.slice(2);
