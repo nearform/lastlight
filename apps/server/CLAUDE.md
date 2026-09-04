@@ -744,8 +744,11 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
     under `agent-sessions/projects/-app/`.
 - **Permission profiles** (`src/engine/github/profiles.ts`) — each workflow maps to
   a `GitAccessProfile`: `read`, `issues-write`, `review-write`, `repo-write`.
-  `runner.ts` picks one per workflow name and the agent-executor mints a
-  downscoped installation token for the sandbox (minting is gated on **boot
+  Each workflow declares its own with the `git_access:` YAML key (issue #368 —
+  it was a `switch` over literal names in `runner.ts`, so a workflow shipped only
+  in a deployment overlay was stuck at `read`: it could neither submit a review
+  nor push). `gitAccessProfileForWorkflow` is the lookup, and the agent-executor
+  mints a downscoped installation token for the sandbox (minting is gated on **boot
   config**, `getRuntimeConfig().githubApp`, never live `process.env`). No profile
   forwards the App PEM today; every run uses that pre-minted scoped token, which
   agentic-pi's built-in github tools (its `github` extension — the
@@ -1119,8 +1122,8 @@ Sandbox egress (docker backend only):
   already-fetched tarballs regardless of which one a repo uses. This is the
   *download* cache only — per-workspace `node_modules` stays per-workspace
   (a shared store can't hardlink across separate container mounts). Disk is
-  bounded instead by per-PR workspace reuse (`PER_TARGET_REUSE_WORKFLOWS`
-  in `src/workflows/simple.ts`) plus #106's reaping.
+  bounded instead by per-PR workspace reuse (`workspace: per-target-reuse`,
+  derived in `src/workflows/target-policy.ts`) plus #106's reaping.
 
 Sandbox (smolvm `smol` backend — experimental, opt-in):
 
@@ -1204,7 +1207,7 @@ Sandbox workspace provisioning (issue #107):
   records the owning run: same run → preserve the checkout for the next
   phase; a different run reusing the dir → `git fetch` + `reset --hard` +
   `git clean -fdx -e node_modules` (deps stay warm). The whole fix family
-  (`PR_FIX_SHAPED_WORKFLOWS`) shares ONE workspace per PR —
+  (the `pr_fix_shaped: true` workflows) shares ONE workspace per PR —
   `${repo}-${prNumber}-fix`, not `…-${workflowName}` — because the PR-scoped
   run lock admits only one of them at a time and routing between `pr-fix` and
   `dependabot-ci-fix` genuinely varies by how the event arrived. See the
@@ -1214,7 +1217,8 @@ Sandbox workspace provisioning (issue #107):
   checkout and re-clone from the default branch** (`recreateFromBase`), so a
   re-triggered incomplete build starts again off current `main` and never
   inherits a stale feature branch. A same-run resume still preserves the
-  checkout. Policy sets: `src/workflows/target-policy.ts`.
+  checkout. Policy is each workflow's own `workspace:` key, derived in
+  `src/workflows/target-policy.ts`.
 
 Sandbox workspace reaping (issue #106):
 
@@ -1227,8 +1231,8 @@ Sandbox workspace reaping (issue #106):
   - **Reap-on-completion** — an *ephemeral* run's workspace is removed the
     moment it finishes successfully (`reapOnSuccess` in
     `src/workflows/simple.ts`). Failures are kept for post-mortem; the
-    reusable/recreate per-target classes (`PER_TARGET_REUSE_WORKFLOWS` /
-    `PER_TARGET_RECREATE_WORKFLOWS`) are NOT reaped here — they're a warm
+    reusable/recreate per-target classes (`workspace: per-target-reuse` /
+    `per-target-recreate`) are NOT reaped here — they're a warm
     cache (issue #107) bounded by the sweep.
   - **Reap-on-cancel** — the admin cancel route
     (`src/admin/routes.ts`) reaps the run's workspace after killing its

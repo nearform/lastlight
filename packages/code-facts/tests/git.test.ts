@@ -145,7 +145,7 @@ describe("repoSlug — owner/name from the remote, else the directory", () => {
 
 /**
  * `withWorktree` is how `contracts` materialises the base tree, and the review
- * workspace it runs in is REUSED across runs (`PER_TARGET_REUSE_WORKFLOWS`). A
+ * workspace it runs in is REUSED across runs (`workspace: per-target-reuse`). A
  * leaked worktree there is not a leaked temp dir — it is an entry in the target
  * repo's own `.git/worktrees` that the next run trips over, ~40 warm workspaces
  * at a time.

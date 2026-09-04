@@ -141,7 +141,7 @@ describe.each(Object.keys(FIXTURES))("%s fixture — checked against git, not ag
 
 /**
  * The load-bearing one. WP1 is explicit that the agent's checkout must not be
- * mutated: the review workspace is reused across runs (`PER_TARGET_REUSE_WORKFLOWS`)
+ * mutated: the review workspace is reused across runs (`workspace: per-target-reuse`)
  * and the agent reads it CONCURRENTLY, so a stray `git checkout` presents as
  * the reviewer quoting the wrong version of a file — a failure that would be
  * blamed on the model. `contracts` is the only extractor that touches git state

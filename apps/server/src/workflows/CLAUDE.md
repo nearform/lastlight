@@ -9,13 +9,14 @@ should require **only a YAML file** in `workflows/`, no runner changes.
 
 | File | Role |
 |---|---|
-| `schema.ts` | Zod schema for `AgentWorkflowDefinition`, `PhaseDefinition`, `PhaseLoop`, `GenericLoop`, `CronWorkflowDefinition`. Source of truth for what a YAML file is allowed to contain. Also home to the optional top-level `classification:` block (`intent`/`description`/`examples`) — how a workflow contributes its category to the composed intent classifier and claims a routable intent (issue #164) — its chat-facing counterpart `chat:` (`trigger`/`summary`/`deflect`/`reply`), which is how a workflow advertises itself in the composed chat system prompt (`src/engine/chat/chat-prompt.ts`; an explicit opt-in, NOT derived from `classification` — see the schema doc for the three workflows where the two diverge), plus `RESERVED_CONTROL_INTENTS` + `intentToken()`, and the top-level `pr_scoped:` flag (see `pr-scope.ts`). |
+| `schema.ts` | Zod schema for `AgentWorkflowDefinition`, `PhaseDefinition`, `PhaseLoop`, `GenericLoop`, `CronWorkflowDefinition`. Source of truth for what a YAML file is allowed to contain. Also home to the optional top-level `classification:` block (`intent`/`description`/`examples`) — how a workflow contributes its category to the composed intent classifier and claims a routable intent (issue #164) — its chat-facing counterpart `chat:` (`trigger`/`summary`/`deflect`/`reply`), which is how a workflow advertises itself in the composed chat system prompt (`src/engine/chat/chat-prompt.ts`; an explicit opt-in, NOT derived from `classification` — see the schema doc for the three workflows where the two diverge), plus `RESERVED_CONTROL_INTENTS` + `intentToken()`, the top-level `pr_scoped:` flag (see `pr-scope.ts`), and the five runtime-policy keys `git_access` / `workspace` / `prepopulate_synth_branch` / `prepopulate_pr_head_ref` / `pr_fix_shaped` (see `target-policy.ts`). |
 | `loader.ts` | Reads `workflows/*.yaml`, validates against the schema, caches parsed definitions. `getWorkflow(name)` is the only lookup the rest of the code uses. |
 | `templates.ts` | Mustache-ish template engine. Handles `{{branch}}`, `{{issueDir}}`, `{{contextSnapshot}}`, `{{models.architect}}`, `{{phaseOutputs.guardrails.output}}`, list iteration, and `unless_*` clauses. |
 | `simple.ts` | Top-of-stack entry: `runSimpleWorkflow(workflowName, request, …)`. Picks the trigger id, builds the template context, creates or reuses a `workflow_runs` row, then calls `runWorkflow`. |
-| `runner.ts` | The **scheduler**. One sequential walk over a chain-synthesized DAG — no separate linear/DAG paths. Owns the `phases[]`/`outputs{}` accumulation, node status, cancel/skip handling, and the terminal `set_phase`/PR wrap-up. Delegates each node's body to `PhaseExecutor`. Also: `gitAccessProfileForWorkflow`, `gitSandboxAccessForWorkflow`. Re-exports `isTerminated`. |
+| `runner.ts` | The **scheduler**. One sequential walk over a chain-synthesized DAG — no separate linear/DAG paths. Owns the `phases[]`/`outputs{}` accumulation, node status, cancel/skip handling, and the terminal `set_phase`/PR wrap-up. Delegates each node's body to `PhaseExecutor`. Also: `gitAccessProfileForWorkflow` (a lookup over each workflow's own `git_access` key — see `target-policy.ts`), `gitSandboxAccessForWorkflow`. Re-exports `isTerminated`. |
 | `phase-executor.ts` | `PhaseExecutor` — owns every per-phase body (context / standard agent / reviewer-loop / generic-loop, plus approval & reply gates) behind `execute(node, outputs) → PhaseOutcome`. Constructed once per run from three collaborators: run-scoped data, a `PhaseReporter`, a `PhaseResolver`. Also home to `runPhase`, `buildPhasePrompt`, `phaseConfigFor`, `isTerminated`. Unit-tested with fakes (`phase-executor.test.ts`). |
 | `dag.ts` | Pure graph logic: `buildDag(phases, { chainIfNoDeps })`, `evaluateTriggerRule`, `getReadyNodes`, `getNodesToSkip`, `isComplete`, `topoSort`. No IO. `chainIfNoDeps` synthesizes a previous-phase chain when no phase declares `depends_on`. |
+| `target-policy.ts` | The other five per-workflow runtime facts, derived the same way and memoised on the same asset version: `git_access` (the token profile a run is minted), `workspace` (`per-run` / `per-target-reuse` / `per-target-recreate`), `prepopulate_synth_branch`, `prepopulate_pr_head_ref`, `pr_fix_shaped`. Each was a hardcoded name table until issue #368, so an overlay-only workflow silently got a `read` token and no head-ref pinning. Hard cutover, no legacy floor — `validateAssets` warns instead when a *routed* workflow declares none of the five. |
 | `pr-scope.ts` | Which workflows are PR-SCOPED, derived from each definition's `pr_scoped: true` and memoised on the loader's asset version. The span of the PR run lock, the per-head-SHA dedup, escalation and the `PrState` snapshot. Metadata rather than a hardcoded name set because the handlers are operator-configurable through `routes.github.*` — remapping a route to a fork used to drop the whole gate silently (issue #256). The four original built-ins are honoured without the key, with a warning. |
 | `phase-ref.ts` | `PhaseRef` value object — the single authority for building loop-iteration labels (`format()`) and parsing them back (`parse()` → base + kind). No IO. |
 | `verdict.ts` | `parseReviewerVerdict(output) → { verdict, viaFallback }` — the one pure parser for a reviewer phase's `VERDICT:` marker (with the fallback heuristic). Both runner verdict sites call it. |
@@ -165,7 +166,7 @@ Phase kinds the runner recognises:
   > `.git/info/exclude` (never committed). Non-pre-cloned workflows run
   > with cwd = the workspace root and clone the repo into a subdir.
   > `build`, `pr-review`, `pr-fix`, **`verify`, and `qa-test`** pre-clone
-  > (`PREPOPULATE_SYNTH_WORKFLOWS` in `simple.ts` + the pr-* dispatcher);
+  > (`prepopulate_synth_branch: true` in their YAML + the pr-* dispatcher);
   > verify/qa-test were added so their browser-QA screenshots, written to
   > `.lastlight/<key>/` under the repo, land where `serverArtifacts()`
   > harvests them rather than orphaned at the workspace root.
@@ -595,8 +596,9 @@ ${repo}-${issueNumber}-${workflowName}-${runId.slice(0, 8)}
 `resume.ts` reconstructs the taskId from the stored `context.taskId` so
 a resumed run lands in the same sandbox dir the original started in.
 
-**Per-PR reuse exception (issue #107).** The workflows in
-`PER_TARGET_REUSE_WORKFLOWS` (`pr-review`, `pr-fix`) **drop** the run-id
+**Per-PR reuse exception (issue #107).** A workflow declaring
+`workspace: per-target-reuse` (`pr-review`, `pr-fix`, `dependabot-ci-fix`,
+`dependabot-pr-merge`) **drops** the run-id
 suffix — their taskId is keyed by (repo, PR) rather than per-run. A
 re-review of the same PR (push → `synchronize`, cron PR-review fanout)
 therefore lands in the **same** sandbox dir, so `prePopulateWorkspace` does
@@ -604,8 +606,8 @@ therefore lands in the **same** sandbox dir, so `prePopulateWorkspace` does
 a fresh 1.3G clone + full install, and N dirs/PR collapse to 1 (cutting the
 #106 churn at its source).
 
-**The fix family shares one workspace.** Every workflow in
-`PR_FIX_SHAPED_WORKFLOWS` (`pr-fix`, `dependabot-ci-fix`) uses the *same*
+**The fix family shares one workspace.** Every workflow declaring
+`pr_fix_shaped: true` (`pr-fix`, `dependabot-ci-fix`) uses the *same*
 key, `${repo}-${prNumber}-fix`, rather than `…-${workflowName}`. The
 PR-scoped run lock (below) means only one of them can be in flight for a PR
 at a time, so two directories were pure waste — and routing genuinely
@@ -616,7 +618,7 @@ differently. Everything else keeps `${repo}-${number}-${workflowName}`;
 `dependabot-pr-merge` has no checkout to share and `pr-review` must not
 share a tree with an agent that is rewriting it.
 
-**Per-target recreate (issue #153).** `PER_TARGET_RECREATE_WORKFLOWS`
+**Per-target recreate (issue #153).** `workspace: per-target-recreate`
 (`build`) *also* drops the run-id suffix (taskId `${repo}-${issueNumber}-build`)
 so a re-triggered build lands in the **same** sandbox dir — but on a
 *different*-run marker it **deletes the leftover checkout and re-clones from the

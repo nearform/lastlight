@@ -20,7 +20,7 @@ const log = logger("reap");
  * Two callers: reap-on-completion (`src/workflows/simple.ts`, on terminal
  * success of an ephemeral run) and the backstop TTL sweep
  * (`src/cron/sandbox-sweep.ts`). The reusable per-target workspaces
- * (`PER_TARGET_REUSE_WORKFLOWS` / `PER_TARGET_RECREATE_WORKFLOWS`) are NOT
+ * (`workspace: per-target-reuse` / `per-target-recreate`) are NOT
  * reaped on completion — they are a warm cache (issue #107) bounded only by the
  * sweep's age + LRU budget.
  */

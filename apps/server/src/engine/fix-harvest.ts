@@ -48,7 +48,7 @@ import type { StateDb } from "../state/db.js";
 import type { WorkflowRun } from "../state/workflow-run-store.js";
 import { getRuntimeConfig } from "../config/config.js";
 import { sandboxRoot } from "../sandbox/reap.js";
-import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
+import { isPrFixShaped } from "../workflows/target-policy.js";
 import {
   parseAttemptMarkers,
   type AttemptMarkers,
@@ -376,7 +376,7 @@ export async function harvestFixMarkers(
   // Only the fix family carries the MARKERS, and only it reads them back. The
   // JOURNAL is wider — see the gate below — so this is no longer an early
   // return for the whole function.
-  const wantsMarkers = PR_FIX_SHAPED_WORKFLOWS.has(workflowName);
+  const wantsMarkers = isPrFixShaped(workflowName);
   try {
     const run = await db.runs.getRun(runId);
     // Which runs may write a note? Every PR-SCOPED one — `pr-review` reading

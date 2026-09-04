@@ -1,5 +1,9 @@
 kind: health
 name: security-review
+# Runtime policy (issue #368) — scans and files findings as issues/comments;
+# never pushes code. Full prose for each key is in the workflow schema
+# (packages/workflow-engine/src/core/schema.ts).
+git_access: issues-write
 classification:
   intent: security
   description: |

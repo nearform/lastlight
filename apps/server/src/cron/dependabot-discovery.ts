@@ -165,7 +165,7 @@ export interface DependencyPr {
   title: string;
   /**
    * PR head ref — set ONLY by the red sweep so `dispatchWorkflow` pre-clones the
-   * PR head for `dependabot-ci-fix`'s checkout (a PR_FIX_SHAPED_WORKFLOWS). The
+   * PR head for `dependabot-ci-fix`'s checkout (a `pr_fix_shaped` workflow). The
    * green sweep leaves it undefined (the merge workflow has no checkout).
    */
   branch?: string;

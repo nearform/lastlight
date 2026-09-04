@@ -7,6 +7,13 @@ name: dependabot-ci-fix
 # drops the key silently loses all four; `validateAssets` warns when a
 # `routes.github.pr_*` target is missing it.
 pr_scoped: true
+# Runtime policy (issue #368) — pushes a fix to the PR's head branch, through
+# `handlePrFix`. Shares the fix family's one workspace per PR
+# (`${repo}-${N}-fix`). Full prose for each key is in the workflow schema
+# (packages/workflow-engine/src/core/schema.ts).
+git_access: repo-write
+workspace: per-target-reuse
+pr_fix_shaped: true
 description: |
   Fix a dependency-update PR (Dependabot / Renovate) that can't merge on its
   own — CI is red, or it's `behind` its base / `dirty` (merge conflict) /

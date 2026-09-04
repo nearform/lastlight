@@ -7,13 +7,13 @@ import {
   renderAttemptLine,
 } from "#src/engine/fix-markers.js";
 import { VERIFY_SCRIPT_NAME } from "#src/engine/fix-scratch.js";
-import { PR_FIX_SHAPED_WORKFLOWS } from "#src/workflows/target-policy.js";
+import { prFixShapedWorkflows } from "#src/workflows/target-policy.js";
 import { defaultFixConfig } from "lastlight-shared";
 
 /**
  * Contract test for the built-in pr-fix workflow. It carries the same
  * diagnose-then-fix shape as `dependabot-ci-fix` (both are in
- * `PR_FIX_SHAPED_WORKFLOWS`, so anything keyed off that set must improve them
+ * `pr_fix_shaped`, so anything keyed off that family must improve them
  * together) but had no contract test at all until now — the divergence would
  * have been silent.
  */
@@ -59,7 +59,7 @@ describe("pr-fix — built-in workflow", () => {
     expect(byName.get("fix")?.skills).toEqual(["fixing", "building"]);
   });
 
-  it("matches dependabot-ci-fix's fix-phase gating (PR_FIX_SHAPED_WORKFLOWS parity)", () => {
+  it("matches dependabot-ci-fix's fix-phase gating (pr_fix_shaped parity)", () => {
     const dep = getWorkflow("dependabot-ci-fix");
     const pick = (d: typeof def) => {
       const fix = d.phases.find((p) => p.name === "fix")!;
@@ -78,7 +78,7 @@ describe("pr-fix — built-in workflow", () => {
 /**
  * The within-run local gate loop (04-retry.md §4.5, 09-state-machine.md §S1).
  * Asserted on BOTH fix workflows together — they are one family
- * (`PR_FIX_SHAPED_WORKFLOWS`) and a gate on only one of them is a gate an
+ * (`pr_fix_shaped`) and a gate on only one of them is a gate an
  * `@bot fix this` comment can route around.
  */
 describe.each(["pr-fix", "dependabot-ci-fix"])("%s — the local push gate", (name) => {
@@ -194,7 +194,7 @@ describe.each(["pr-fix", "dependabot-ci-fix"])("%s — the local push gate", (na
   // self-reported `gate=green` (it runs the script directly, shebang honoured)
   // as the only thing gating a push. Asserted across the whole fix-shaped
   // family: the two workflows carry the same loop and must not diverge.
-  it.each([...PR_FIX_SHAPED_WORKFLOWS])("runs %s's gate under bash, never sh", (name) => {
+  it.each([...prFixShapedWorkflows()])("runs %s's gate under bash, never sh", (name) => {
     const phase = getWorkflow(name).phases.find((p) => p.name === "fix")!;
     const cmd = phase.generic_loop!.until_bash!;
     expect(cmd).toContain(`bash ${VERIFY_SCRIPT_NAME}`);

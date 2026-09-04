@@ -1,5 +1,9 @@
 kind: triage
 name: issue-triage
+# Runtime policy (issue #368) — labels the issue and comments; never pushes
+# code. Full prose for each key is in the workflow schema
+# (packages/workflow-engine/src/core/schema.ts).
+git_access: issues-write
 classification:
   intent: triage
   description: |

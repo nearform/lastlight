@@ -1,5 +1,13 @@
 kind: build
 name: build
+# Runtime policy (issue #368) — pushes code, and recreates its workspace from
+# the default branch so an incomplete build is disposable (issue #153).
+# Pre-populates despite synthesizing its own `lastlight/N-slug` branch — it
+# CREATES that branch off the default. Full prose for each key is in the
+# workflow schema (packages/workflow-engine/src/core/schema.ts).
+git_access: repo-write
+workspace: per-target-recreate
+prepopulate_synth_branch: true
 classification:
   intent: build
   description: |

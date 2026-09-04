@@ -55,8 +55,8 @@ import { screenForInjection, flagPrefix } from "./engine/screen/screen.js";
 import {
   runSimpleWorkflow,
   resolveRepoRunConfig,
-  PR_HEADREF_PREPOPULATE_WORKFLOWS,
-  PR_FIX_SHAPED_WORKFLOWS,
+  prepopulatesPrHeadRef,
+  isPrFixShaped,
   type SimpleWorkflowRequest,
 } from "./workflows/simple.js";
 import {
@@ -778,8 +778,7 @@ async function main() {
     if (
       !prePopulateBranch &&
       prState?.headRef &&
-      (PR_FIX_SHAPED_WORKFLOWS.has(workflowName) ||
-        PR_HEADREF_PREPOPULATE_WORKFLOWS.has(workflowName))
+      (isPrFixShaped(workflowName) || prepopulatesPrHeadRef(workflowName))
     ) {
       prePopulateBranch = prState.headRef;
       log.info("Pre-populating workspace", {
@@ -789,7 +788,7 @@ async function main() {
         base: prState.baseRef || "?",
       });
     }
-    if (!prePopulateBranch && typeof ctxBranch === "string" && ctxBranch && PR_FIX_SHAPED_WORKFLOWS.has(workflowName)) {
+    if (!prePopulateBranch && typeof ctxBranch === "string" && ctxBranch && isPrFixShaped(workflowName)) {
       prePopulateBranch = ctxBranch;
     }
     // PR-scoped read workflows that benefit from a workspace pre-checked-out at
@@ -799,10 +798,10 @@ async function main() {
     // *default* branch — testing/demoing code that lacks the PR's changes
     // (a false-negative QA, or a before/after demo whose "after" matches
     // "before"). Resolving the head ref here pins the workspace to the actual
-    // PR code. See `PR_HEADREF_PREPOPULATE_WORKFLOWS` for the per-workflow why.
+    // PR code. See the `prepopulate_pr_head_ref` schema key for the why.
     if (
       !prePopulateBranch &&
-      PR_HEADREF_PREPOPULATE_WORKFLOWS.has(workflowName) &&
+      prepopulatesPrHeadRef(workflowName) &&
       typeof prNumber === "number" &&
       github &&
       owner &&

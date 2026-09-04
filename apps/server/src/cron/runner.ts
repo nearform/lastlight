@@ -268,7 +268,7 @@ async function fire(
     prNumber: pr.prNumber,
     title: pr.title,
     // Present only for the red sweep — `dispatchWorkflow` pre-clones this head
-    // ref for dependabot-ci-fix's checkout (a PR_FIX_SHAPED_WORKFLOWS).
+    // ref for dependabot-ci-fix's checkout (a `pr_fix_shaped` workflow).
     ...(pr.branch ? { branch: pr.branch } : {}),
     // Also red-sweep only — why it was summoned (checks-failing | behind |
     // dirty | blocked), threaded into the ci-fix prompt as `{{reason}}`.
