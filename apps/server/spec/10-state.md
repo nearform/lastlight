@@ -27,7 +27,7 @@ into the resume state read by every dashboard query.
 ## State tables
 
 The schema is **declared in Drizzle**, not in DDL: `src/state/schema/sqlite.ts`
-is the source of truth for fifteen tables, with `src/state/schema/pg.ts` as its
+is the source of truth for sixteen tables, with `src/state/schema/pg.ts` as its
 name-parity Postgres mirror (see "Dialect posture" below). The per-table stores
 in `src/state/*-store.ts` operate on them; `src/state/db.ts` wires the stores
 together. All rows are append-only unless marked mutable. Migrations are
@@ -478,6 +478,73 @@ routes attribute an action to a real person. **Actor semantics:** a run's
 `triggered_by` is the ORIGINAL trigger; retry / cancel / approve actors land on
 the append-only `executions` ledger (and `workflow_approvals.responded_by`),
 never overwriting the run's origin value. See `src/state/user-store.ts`.
+
+### `activity_log`
+
+One row per **user-initiated action**, across the dashboard, CLI, Slack, GitHub
+and cron (issue #206). Append-only: never updated, never deleted.
+
+```sql
+CREATE TABLE activity_log (
+  id TEXT PRIMARY KEY,                  -- creation-ordered; see the tiebreak note
+  created_at TEXT NOT NULL,
+  actor_login TEXT,                     -- soft join to users.login; null without a verified login
+  actor_type TEXT,                      -- reuses TriggerActorType (#205)
+  action TEXT NOT NULL,                 -- the verb: login, cron.toggle, workflow.cancel, …
+  target_type TEXT,                     -- workflow_run | cron | workflow | repo | approval | pr | container
+  target_id TEXT,                       -- the bare id: a run id, a cron name, owner/repo
+  outcome TEXT NOT NULL,                -- ok | denied | error
+  detail TEXT                           -- small flat JSON summary; jsonb on Postgres
+);
+CREATE INDEX idx_activity_created ON activity_log(created_at DESC);
+CREATE INDEX idx_activity_actor_created ON activity_log(actor_login, created_at DESC);
+CREATE INDEX idx_activity_target ON activity_log(target_type, target_id);
+```
+
+**Why it exists.** #205 put a real actor on every run and execution, but the
+answer to "what has this person done?" was spread across five ledgers —
+`workflow_runs.triggered_by`, `executions`, `workflow_approvals.responded_by`,
+`cron_overrides.updated_by`, `workflow_overrides.updated_by` — and several
+actions (login, config edits, container kills, artifact edits) wrote to none of
+them. This is the chronological stream that answers it without a five-way join.
+
+**It complements #205's columns; it does not replace them.** `triggered_by`
+stays the hot-path per-run attribution the run detail view reads. This is the
+audit stream layered on top, joined to `users` on `login`.
+
+**Why not overload `executions`.** The same three reasons `cron_runs` did not
+(above): `executions` carries no column for an action that is not an agent
+invocation, its `success` flag is binary so `denied` has nowhere to live, and
+its `success = 0` population is dominated by DAG-cascade skips and quota
+deferrals that must stay `success = 0`.
+
+**Why only user-initiated actions.** A cron fan-out dispatches once per repo, so
+recording each as an action would make the dominant row source a thing no human
+did — the same confusion `cron_runs` avoids by keying on `cron_name` rather than
+the workflow. `workflow.trigger` is therefore written only for a human actor
+type (`github` / `slack` / `cli` / `admin`), and a cron fire is recorded once, at
+its cause, as `cron.fire`. The result grows more slowly than `workflow_runs`
+itself, which is what makes deferring a retention policy safe.
+
+**`actor_login` is nullable and has no foreign key.** Nullable because a
+password login and an auth-disabled instance carry no verified login — a null
+actor is a truer statement than the literal `"admin"` the `updated_by` columns
+fall back to. No FK because the join to `users` is the same additive enrichment
+#205 chose, so a row survives an actor who never logged into the dashboard.
+
+**Read surface.** `GET /admin/api/activity` (paginated, filterable by
+`actor` / `action` / `target` / `since`, envelope `{ activity, total, users }`)
+plus `GET /admin/api/activity/actions` for the filter dropdown. The dashboard's
+Activity tab and its per-run strip are both that one endpoint — the strip is
+`?target=workflow_run:<id>`. Deliberately NOT repo-scoped: `?repos=` on
+`/workflow-runs` is UI declutter rather than authorization, and an audit stream
+silently narrowed by team membership would mislead in a way a run list does not.
+
+Reads tie-break on `id`, which is minted in creation order
+(`activity-store.ts` → `creationOrderedId`, the same helper shape as
+`cron-run-store.ts`). Postgres has no `rowid`, and a merely arbitrary tiebreak
+is not enough for a **paged** read: a page boundary falling inside a
+same-millisecond run of rows would skip or repeat them between pages.
 
 ### `messaging_sessions` + `messaging_messages`
 
@@ -1050,6 +1117,7 @@ precisely because of that.
 | `ApprovalStore` — `workflow_approvals` | `src/state/approval-store.ts` |
 | `CronRunStore` — `cron_runs`, one row per cron fire (issues #341/#327) | `src/state/cron-run-store.ts` |
 | `UserStore` — `users` identity + Slack/email matching | `src/state/user-store.ts` |
+| `ActivityStore` — `activity_log`, one row per user action (issue #206) | `src/state/activity-store.ts` |
 | `FeedbackStore` — `feedback_anchors` + `feedback_signals` (issue #255) | `src/state/feedback-store.ts` |
 | `TeamStore` — the four `github_team*` / `github_visibility_sync` tables (issue #169) | `src/state/team-store.ts` |
 | Lazy per-user team→repo resolver (budgets, fail-open, stale-while-revalidate) | `src/engine/github/team-visibility.ts` |

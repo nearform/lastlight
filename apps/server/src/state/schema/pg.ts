@@ -41,6 +41,12 @@ import {
 // The same origin modules `sqlite.ts` imports these from — it does not
 // re-export them, and neither does this file. Type-only, so no runtime edge.
 import type { ExtensionStatusMap, SkillsStatus } from "lastlight-workflow-engine";
+import type {
+  ActivityAction,
+  ActivityDetail,
+  ActivityOutcome,
+} from "../activity-store.js";
+import type { TriggerActorType } from "../user-store.js";
 import type { PhaseHistoryEntry } from "../workflow-run-store.js";
 
 /** @see sqlite.ts → `executions` */
@@ -206,6 +212,27 @@ export const users = pgTable(
     index("idx_users_login").on(t.login),
     index("idx_users_email").on(t.email),
     index("idx_users_slack").on(t.slackUserId),
+  ],
+);
+
+/** @see sqlite.ts → `activityLog` */
+export const activityLog = pgTable(
+  "activity_log",
+  {
+    id: text("id").primaryKey(),
+    createdAt: text("created_at").notNull(),
+    actorLogin: text("actor_login"),
+    actorType: text("actor_type").$type<TriggerActorType>(),
+    action: text("action").notNull().$type<ActivityAction>(),
+    targetType: text("target_type"),
+    targetId: text("target_id"),
+    outcome: text("outcome").notNull().$type<ActivityOutcome>(),
+    detail: jsonb("detail").$type<ActivityDetail>(),
+  },
+  (t) => [
+    index("idx_activity_created").on(t.createdAt.desc()),
+    index("idx_activity_actor_created").on(t.actorLogin, t.createdAt.desc()),
+    index("idx_activity_target").on(t.targetType, t.targetId),
   ],
 );
 

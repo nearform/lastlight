@@ -67,7 +67,7 @@
     "typecheck": "tsc --noEmit && pnpm run lint:boundaries && pnpm run lint:promises"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.84.2",
+    "@earendil-works/pi-ai": "^0.84.3",
     "@hono/node-server": "^2.1.1",
     "@kubernetes/client-node": "1.4.0",
     "@libsql/client": "^0.17.4",
@@ -86,12 +86,12 @@
     "@opentelemetry/semantic-conventions": "^1.41.1",
     "@sinclair/typebox": "^0.34.49",
     "@slack/bolt": "^5.0.0",
-    "@slack/web-api": "^8.0.0",
+    "@slack/web-api": "^8.1.1",
     "agentic-pi": "workspace:*",
     "arctic": "^3.7.0",
     "croner": "^10.0.1",
     "drizzle-orm": "^0.45.2",
-    "hono": "^4.13.3",
+    "hono": "^4.13.5",
     "lastlight-shared": "workspace:*",
     "lastlight-workflow-engine": "workspace:*",
     "octokit": "^5.0.5",

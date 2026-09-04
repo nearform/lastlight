@@ -18,6 +18,7 @@
 import { describe } from "vitest";
 import type { StateDb } from "#src/state/db.js";
 
+import { runActivitySuite } from "./suites/activity-suite.js";
 import { runApprovalsSuite } from "./suites/approvals-suite.js";
 import { runConcurrencySuite } from "./suites/concurrency-suite.js";
 import { runCronRunsSuite } from "./suites/cron-runs-suite.js";
@@ -54,6 +55,7 @@ export function runStateDbSuite(makeDb: MakeDb, opts: SuiteOpts): void {
     runTeamsSuite(makeDb, opts);
     runFeedbackSuite(makeDb, opts);
     runCronRunsSuite(makeDb, opts);
+    runActivitySuite(makeDb, opts);
     runRepoRefSuite(makeDb, opts);
     runConcurrencySuite(makeDb, opts);
   });

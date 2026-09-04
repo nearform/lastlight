@@ -17,43 +17,47 @@ import { createClient, type Client } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
 import { migrate as drizzleMigrate } from "drizzle-orm/libsql/migrator";
 import { fileURLToPath } from "url";
-import { mkdtempSync, readFileSync, rmSync } from "fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { is, getTableName } from "drizzle-orm";
+import { SQLiteTable } from "drizzle-orm/sqlite-core";
 import { applyLegacySqliteCompat } from "#src/state/legacy-sqlite.js";
+import * as sqliteSchema from "#src/state/schema/sqlite.js";
 
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("../../drizzle/sqlite", import.meta.url));
 /**
- * Migrations in `drizzle/sqlite`: the baseline plus the #279 repo-ref backfill.
- * Bump it when one is added — deliberately not derived from the journal, so a
- * migration that fails to record itself shows up here as a diff rather than
- * agreeing with whatever happened.
+ * Migrations in `drizzle/sqlite`: the baseline, the #279 repo-ref backfill, and
+ * the #206 `activity_log` table. Bump it when one is added — deliberately not
+ * derived from the journal, so a migration that fails to record itself shows up
+ * here as a diff rather than agreeing with whatever happened.
  */
-const MIGRATION_COUNT = 2;
+const MIGRATION_COUNT = 3;
 
 const LEGACY_SCHEMA = readFileSync(
   fileURLToPath(new URL("./fixtures/legacy-schema.sql", import.meta.url)),
   "utf8",
 );
 
-/** The 15 tables both paths must produce, and nothing else. */
-const EXPECTED_TABLES = [
-  "cron_overrides",
-  "cron_runs",
-  "executions",
-  "feedback_anchors",
-  "feedback_signals",
-  "github_team_members",
-  "github_team_repos",
-  "github_teams",
-  "github_visibility_sync",
-  "messaging_messages",
-  "messaging_sessions",
-  "users",
-  "workflow_approvals",
-  "workflow_overrides",
-  "workflow_runs",
-];
+/**
+ * The tables the legacy (pre-Drizzle) production database carries, read off the
+ * fixture itself rather than hand-listed. The baseline must leave every one of
+ * them byte-identical — that is the whole proof this file exists for.
+ */
+const LEGACY_TABLES = [...LEGACY_SCHEMA.matchAll(/CREATE TABLE (?:IF NOT EXISTS )?(\w+)/gi)]
+  .map((m) => m[1]!)
+  .sort();
+
+/**
+ * The tables a fully-migrated database holds — derived from the schema module,
+ * so this asserts the stronger thing: **the migrations produce exactly what
+ * `schema/sqlite.ts` declares**, no more and no less. A hand-maintained list
+ * could only ever restate itself.
+ */
+const DECLARED_TABLES = Object.values(sqliteSchema)
+  .filter((v): v is SQLiteTable => is(v, SQLiteTable))
+  .map((t) => getTableName(t))
+  .sort();
 
 /**
  * The five indexes the Drizzle baseline has that the legacy DDL does not.
@@ -224,19 +228,51 @@ async function bootStateLayer(client: Client): Promise<void> {
   await drizzleMigrate(drizzle(client), { migrationsFolder: MIGRATIONS_FOLDER });
 }
 
+/**
+ * A migrations folder holding ONLY `0000_baseline`.
+ *
+ * This is what lets the test assert its actual invariant — *the baseline does
+ * not alter a legacy production database* — instead of applying everything and
+ * then reconciling the difference against hand-maintained lists of what later
+ * migrations were allowed to add. Migrations after the baseline are free to add
+ * tables and indexes; that freedom is the reason the reconciliation existed, and
+ * splitting the run removes the need for it entirely.
+ *
+ * Copied into a temp dir rather than filtered in memory because drizzle's
+ * migrator reads both the journal and the `.sql` files off disk.
+ */
+function baselineOnlyFolder(): string {
+  const dir = mkdtempSync(join(tmpdir(), "lastlight-baseline-only-"));
+  mkdirSync(join(dir, "meta"), { recursive: true });
+  const journal = JSON.parse(readFileSync(join(MIGRATIONS_FOLDER, "meta", "_journal.json"), "utf8"));
+  const first = journal.entries[0];
+  writeFileSync(
+    join(dir, "meta", "_journal.json"),
+    JSON.stringify({ ...journal, entries: [first] }, null, 2),
+  );
+  copyFileSync(join(MIGRATIONS_FOLDER, `${first.tag}.sql`), join(dir, `${first.tag}.sql`));
+  return dir;
+}
+
 describe("the Drizzle baseline over a legacy (production-shaped) database", () => {
-  it("no-ops: the schema is unchanged and the journal records one migration", async () => {
+  it("the BASELINE alone leaves a legacy database untouched", async () => {
     const client = await legacyShapedDb(":memory:");
+    const baselineDir = baselineOnlyFolder();
     try {
       const q = queryOn(client);
       const before = await extract(q);
-      expect(before.tables).toEqual(EXPECTED_TABLES);
+      expect(before.tables).toEqual(LEGACY_TABLES);
       expect(Object.keys(before.indexes)).toHaveLength(25);
 
-      await bootStateLayer(client);
+      // ONLY `0000_baseline` — the migration this file exists to vouch for.
+      // Later migrations are allowed to change the schema, so including them
+      // here would mean subtracting their additions back out again.
+      await applyLegacySqliteCompat(client);
+      await drizzleMigrate(drizzle(client), { migrationsFolder: baselineDir });
 
       const after = await extract(q);
-      expect(after.tables).toEqual(EXPECTED_TABLES);
+      // Nothing added, nothing removed, nothing altered. No exceptions list.
+      expect(after.tables).toEqual(before.tables);
       expect(after.columns).toEqual(before.columns);
       expect(after.pks).toEqual(before.pks);
       expect(after.fks).toEqual(before.fks);
@@ -263,10 +299,24 @@ describe("the Drizzle baseline over a legacy (production-shaped) database", () =
         "users:login",
         "users:slack_user_id",
       ]);
+    } finally {
+      client.close();
+      rmSync(baselineDir, { recursive: true, force: true });
+    }
+  });
 
-      const journal = await client.execute(
-        "SELECT count(*) AS n FROM __drizzle_migrations",
-      );
+  it("the full migration set produces exactly the declared schema", async () => {
+    const client = await legacyShapedDb(":memory:");
+    try {
+      await bootStateLayer(client);
+
+      // Derived from `schema/sqlite.ts`, so a new table needs no edit here —
+      // and the assertion is the stronger one: the migrations and the schema
+      // module agree about what exists.
+      const after = await extract(queryOn(client));
+      expect(after.tables).toEqual(DECLARED_TABLES);
+
+      const journal = await client.execute("SELECT count(*) AS n FROM __drizzle_migrations");
       expect(Number(journal.rows[0].n)).toBe(MIGRATION_COUNT);
     } finally {
       client.close();
@@ -304,8 +354,9 @@ describe("the Drizzle baseline over a legacy (production-shaped) database", () =
       const sess = await client.execute("SELECT id FROM messaging_sessions");
       expect(sess.rows.map((r) => r.id)).toEqual(["sess-1"]);
 
-      // Both migrations recorded exactly once: the baseline, and the #279
-      // repo-ref backfill. The second boot above must not re-apply either.
+      // Every migration recorded exactly once: the baseline, the #279 repo-ref
+      // backfill, and the #206 activity_log table. The second boot above must
+      // not re-apply any of them.
       const journal = await client.execute(
         "SELECT count(*) AS n FROM __drizzle_migrations",
       );

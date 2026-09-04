@@ -16,6 +16,7 @@ import {
 } from "./client.js";
 import { ExecutionStore } from "./execution-store.js";
 import { CronRunStore } from "./cron-run-store.js";
+import { ActivityStore } from "./activity-store.js";
 import { ApprovalStore } from "./approval-store.js";
 import { WorkflowRunStore } from "./workflow-run-store.js";
 import { UserStore } from "./user-store.js";
@@ -32,6 +33,14 @@ export type { WorkflowApproval } from "./approval-store.js";
 export type { WorkflowRun, PhaseHistoryEntry, PhaseMarker } from "./workflow-run-store.js";
 export type { User, TriggerActorType } from "./user-store.js";
 export type { CronRunRecord, CronRunSource, CronRunStatus } from "./cron-run-store.js";
+export type {
+  ActivityAction,
+  ActivityDetail,
+  ActivityEntry,
+  ActivityListOptions,
+  ActivityOutcome,
+  ActivityRecord,
+} from "./activity-store.js";
 export type {
   ResolvedTeam,
   CachedVisibility,
@@ -54,6 +63,7 @@ export { UserStore, TRIGGER_ACTOR_TYPES, isTriggerActorType } from "./user-store
 export { TeamStore } from "./team-store.js";
 export { FeedbackStore } from "./feedback-store.js";
 export { CronRunStore } from "./cron-run-store.js";
+export { ActivityStore, ACTIVITY_ACTIONS, ACTIVITY_OUTCOMES } from "./activity-store.js";
 
 const DEFAULT_DB_PATH = "lastlight.db";
 
@@ -135,6 +145,12 @@ export class StateDb {
    * `workflow_runs` and no `executions` row.
    */
   readonly cronRuns: CronRunStore;
+  /**
+   * One row per user-initiated action, across every surface (issue #206). The
+   * audit stream layered on top of #205's per-run actor columns — which stay
+   * where they are as the hot-path attribution.
+   */
+  readonly activity: ActivityStore;
 
   /**
    * Table objects for THIS client's dialect. Every method destructures what it
@@ -162,6 +178,7 @@ export class StateDb {
     this.teams = new TeamStore(_client, { serialize });
     this.feedback = new FeedbackStore(_client);
     this.cronRuns = new CronRunStore(_client);
+    this.activity = new ActivityStore(_client);
   }
 
   /**

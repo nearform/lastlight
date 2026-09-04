@@ -48,6 +48,7 @@ import { artifactStore } from "./sandbox/artifact-store.js";
 import { writeEgressFirewallConfigs, writeOtelCollectorConfig } from "./sandbox/egress-firewall-config.js";
 import { initTelemetry, shutdownTelemetry } from "./telemetry/index.js";
 import { authMiddleware, authIsEnabled, actorFromContext } from "./admin/auth.js";
+import { recordActivity } from "./activity.js";
 import { readPackageVersion } from "./admin/version.js";
 import { GitHubClient } from "./engine/github/github.js";
 import { setInstallationRepos, isManagedRepo, unmanagedReposInContext } from "./managed-repos.js";
@@ -1133,6 +1134,30 @@ async function main() {
         // what makes it a projection of run state rather than of an in-memory
         // promise, and it is why every terminal path resolves it for free.
         await bindReviewCheck(runId);
+        // The activity log's one workflow seam (issue #206). Here, rather than
+        // at the top of dispatchWorkflow, because this fires only once the run
+        // ROW exists — so every guard has passed and there is a real target to
+        // point at.
+        //
+        // Gated on the actor type: a cron fan-out dispatches once PER REPO, and
+        // those dispatches are not user actions. Logging them would make the
+        // dominant row source a thing no human did, and would bury the actions
+        // somebody actually took. The fire is recorded once, at its cause, as
+        // `cron.fire` from the runner — the same reason `cron_runs` keys on the
+        // cron rather than the workflow (spec/10-state.md → `cron_runs`).
+        if (triggerActorType !== "cron" && triggerActorType !== "system") {
+          await recordActivity(db, {
+            actorLogin: triggeredBy ?? null,
+            actorType: triggerActorType,
+            action: "workflow.trigger",
+            targetType: "workflow_run",
+            targetId: runId,
+            detail: {
+              workflow: workflowName,
+              ...(repoStr ? { repo: repoStr } : {}),
+            },
+          });
+        }
         if (onRunStart) await onRunStart(runId);
       },
     };

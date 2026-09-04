@@ -43,6 +43,7 @@ import {
   type EscalationDeps,
 } from "./pr-escalation.js";
 import { logger } from "../logging/logger.js";
+import { recordActivity } from "../activity.js";
 
 const eventLog = logger("event");
 const dispatchLog = logger("dispatch");
@@ -1077,6 +1078,27 @@ async function handleApprovalResponse(
       `Rejected by ${sender}. Build cycle aborted.${reason ? ` Reason: ${reason}` : ""}`,
     );
   }
+
+  // The activity log's Slack + GitHub approval seam (issue #206). BOTH external
+  // routes land here — a Slack button click and a `@bot approve` comment are
+  // routed to `approval-response` alike — so one call covers them, complementing
+  // the dashboard's own route in `admin/routes.ts`.
+  //
+  // Placed after the branches rather than inside them: every path above that
+  // reaches here actually resolved the gate, and the early `!approval` return
+  // deliberately writes nothing, because nothing was resolved.
+  await recordActivity(deps.db, {
+    actorLogin: sender === "unknown" ? null : sender,
+    actorType: envelope.type === "message" ? "slack" : "github",
+    action: decision === "rejected" ? "approval.reject" : "approval.approve",
+    targetType: "approval",
+    targetId: approval.id,
+    detail: {
+      gate: approval.gate,
+      workflowRunId: approval.workflowRunId,
+      ...(reason ? { reason } : {}),
+    },
+  });
 
   return handled;
 }
