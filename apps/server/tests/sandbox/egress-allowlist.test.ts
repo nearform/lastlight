@@ -1,26 +1,26 @@
 import { describe, it, expect } from "vitest";
 import {
   ALLOW_ALL_SENTINEL,
-  DEFAULT_ALLOWLIST,
+  defaultAllowlist,
   GITHUB_HOSTS,
   PACKAGE_REGISTRY_HOSTS,
-  PROVIDER_HOSTS,
+  providerHosts,
   mergeAllowlist,
   normalizeAllowlistHost,
 } from "#src/sandbox/egress-allowlist.js";
 
 describe("egress-allowlist source of truth", () => {
   it("groups are non-empty and disjoint", () => {
-    for (const group of [GITHUB_HOSTS, PROVIDER_HOSTS, PACKAGE_REGISTRY_HOSTS]) {
+    for (const group of [GITHUB_HOSTS, providerHosts(), PACKAGE_REGISTRY_HOSTS]) {
       expect(group.length).toBeGreaterThan(0);
     }
-    const all = [...GITHUB_HOSTS, ...PROVIDER_HOSTS, ...PACKAGE_REGISTRY_HOSTS];
+    const all = [...GITHUB_HOSTS, ...providerHosts(), ...PACKAGE_REGISTRY_HOSTS];
     expect(new Set(all).size).toBe(all.length);
   });
 
-  it("DEFAULT_ALLOWLIST is the union of the three groups in declaration order", () => {
-    const expected = [...GITHUB_HOSTS, ...PROVIDER_HOSTS, ...PACKAGE_REGISTRY_HOSTS];
-    expect([...DEFAULT_ALLOWLIST]).toEqual(expected);
+  it("defaultAllowlist() is the union of the three groups in declaration order", () => {
+    const expected = [...GITHUB_HOSTS, ...providerHosts(), ...PACKAGE_REGISTRY_HOSTS];
+    expect([...defaultAllowlist()]).toEqual(expected);
   });
 
   it("covers the critical host categories the runtime depends on", () => {
@@ -28,8 +28,8 @@ describe("egress-allowlist source of truth", () => {
     expect(GITHUB_HOSTS).toContain("github.com");
     // Provider hosts — the docker backend dials these from inside the
     // sandbox container.
-    expect(PROVIDER_HOSTS).toContain("openai.com");
-    expect(PROVIDER_HOSTS).toContain("anthropic.com");
+    expect(providerHosts()).toContain("openai.com");
+    expect(providerHosts()).toContain("anthropic.com");
     // npm — covers registry.npmjs.org, auth.npmjs.org, www.npmjs.org.
     expect(PACKAGE_REGISTRY_HOSTS).toContain("npmjs.org");
   });
@@ -39,7 +39,7 @@ describe("egress-allowlist source of truth", () => {
     // docstring. The config generator emits the right syntax for each
     // backend. If someone tries to write `.github.com` or `*.github.com`
     // here, fail fast.
-    for (const host of DEFAULT_ALLOWLIST) {
+    for (const host of defaultAllowlist()) {
       expect(host).toMatch(/^[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]$/);
       expect(host.startsWith(".")).toBe(false);
       expect(host.includes("*")).toBe(false);

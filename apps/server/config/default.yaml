@@ -79,6 +79,31 @@ models:
   # falls through to `models.review` (the phase's template guards it), so a
   # deployment that never sets it keeps today's behaviour exactly.
 
+# Provider endpoints. Ships EMPTY — every provider keeps the endpoint baked into
+# the registry (packages/shared/src/providers.ts), which is exactly today's
+# behaviour. Override in your overlay `config.yaml` to run the model calls
+# through your own LLM gateway (central spend accounting, key custody, rate
+# limiting, audit) or to reach a self-hosted / Azure-fronted model the registry
+# has no entry for:
+#
+#   providers:
+#     anthropic:                                 # a gateway speaking Anthropic's
+#       baseUrl: https://gateway.internal/anth   #   dialect: only the URL moves
+#     acme:                                      # a provider we've never heard of
+#       baseUrl: https://llm.corp.example/v1     #   required — nothing to inherit
+#       api: openai-completions                  #   or anthropic-messages
+#       envKey: ACME_API_KEY                     #   defaults to <PREFIX>_API_KEY
+#
+# On a BUILT-IN provider you may also re-point `envKey` (a gateway holding its
+# own credential), but NOT `api` — a built-in's dialect is fixed, and a gateway
+# that speaks a different one is a provider of your own (the `acme:` shape).
+#
+# The URL is routing, not a secret, so it belongs in this file; the key stays in
+# secrets/.env. The sandbox egress allowlist follows the URL automatically.
+# https is required off loopback. Env equivalents: ANTHROPIC_BASE_URL /
+# OPENAI_BASE_URL / … and LASTLIGHT_PROVIDERS (JSON). See spec/02-configuration.md.
+providers: {}
+
 variants: {}
 
 otel:

@@ -7,6 +7,11 @@
  */
 
 import type { GitHubAuthEnv } from "./extensions/github/auth.js";
+import {
+  parseProviderOverrides,
+  PROVIDER_OVERRIDES_ENV,
+  type ProviderEndpointOverrides,
+} from "./providers.js";
 
 export interface RunConfig {
   /** "provider/model_id", e.g. "anthropic/claude-haiku-4-5" */
@@ -177,6 +182,15 @@ export interface RunConfig {
   otelServiceName?: string;
   /** Override OTEL_EXPORTER_OTLP_ENDPOINT (escape hatch; prefer the env var). */
   otelEndpoint?: string;
+  /**
+   * Point providers at different endpoints — a self-hosted or corporate LLM
+   * gateway rather than the vendor (lastlight#373). `{ "<prefix>": { baseUrl,
+   * api?, apiKeyEnv? } }`. Set via `--providers <json>`, or the
+   * `AGENTIC_PI_PROVIDERS` env var (which is how an orchestrator reaches a run
+   * executing inside a container, where there are no flags to add). Unset =
+   * every provider keeps its built-in endpoint.
+   */
+  providers?: ProviderEndpointOverrides;
 }
 
 export function printHelp(): void {
@@ -263,6 +277,11 @@ Flags:
                               'gondolin-builtin' — stock alpine-base:latest, no extras.
                               <absolute path> — directory produced by 'gondolin build'.
                               Default: 'default'.
+  --providers <json>         Point providers at another endpoint (a gateway), as
+                              {"acme":{"baseUrl":"https://gw/v1","api":"openai-completions",
+                              "apiKeyEnv":"ACME_API_KEY"}}. api/apiKeyEnv are only
+                              needed for a provider pi has no built-in entry for.
+                              Env fallback: AGENTIC_PI_PROVIDERS.
   --dangerously-skip-permissions   Accepted for compat; Pi has no permission prompts anyway
 
 Reads the prompt from stdin. Emits Pi-native JSONL events on stdout, terminating
@@ -469,6 +488,9 @@ export function parseArgs(argv: string[]): RunConfig {
         config.otelEndpoint = v;
         break;
       }
+      case "--providers":
+        config.providers = parseProviderOverrides(next(), "--providers");
+        break;
       case "-h":
       case "--help":
         printHelp();
@@ -477,6 +499,14 @@ export function parseArgs(argv: string[]): RunConfig {
       default:
         throw new Error(`unknown flag: ${arg}`);
     }
+  }
+
+  // Env fallback for the endpoint overrides. The flag wins; this is the route
+  // an orchestrator uses when the run happens inside a container it only hands
+  // an environment to (lastlight's docker / smol / kubernetes backends).
+  const providersEnv = process.env[PROVIDER_OVERRIDES_ENV];
+  if (!config.providers && providersEnv) {
+    config.providers = parseProviderOverrides(providersEnv, PROVIDER_OVERRIDES_ENV);
   }
 
   if (!config.model) {

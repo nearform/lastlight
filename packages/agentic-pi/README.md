@@ -668,6 +668,7 @@ GITHUB_TOKEN=ghp_…
 | `--otel-include-content` | Attach prompt/message/tool content to spans (bounded + truncated). Default: metadata-only. |
 | `--otel-service-name <n>` | Override `OTEL_SERVICE_NAME` (default: `agentic-pi`). |
 | `--otel-endpoint <url>` | Override `OTEL_EXPORTER_OTLP_ENDPOINT` base URL. |
+| `--providers <json>` | Point providers at a different endpoint — a self-hosted or corporate LLM gateway rather than the vendor. `{"anthropic":{"baseUrl":"https://gw.internal/anthropic"}}` is enough for a provider pi knows (models, auth and request shape are inherited); one it doesn't also needs `"api"` (`openai-completions` \| `anthropic-messages`) and `"apiKeyEnv"`, and its model is registered on the fly with zero cost rates, since a gateway publishes no price list. Env fallback: `AGENTIC_PI_PROVIDERS` — the route into a run executing inside a container. |
 
 Reads the prompt from stdin. Emits JSONL on stdout. Exits 0 on `agent_end`,
 1 on fatal error.

@@ -15,6 +15,16 @@ providers.ts          The provider + OAuth registry — the canonical list of
                       `provider/model` prefixes and their env keys (PROVIDERS +
                       OAUTH_PROVIDERS). Single source of truth for "which env var
                       unlocks which provider". Imported by core's runtime + the CLI.
+                      Also the ENDPOINT-OVERRIDE layer (issue #373):
+                      resolveProviderRegistry(overrides) applies a deployment's
+                      `providers:` block over those defaults — moving a built-in
+                      to a gateway, or adding a provider the registry has never
+                      heard of — and returns the ProviderRegistry core installs
+                      process-wide at config load. Pure and total: no overrides
+                      resolves byte-for-byte to the shipped registry. It lives
+                      here for the usual reason — core needs it at runtime and
+                      the CLI needs it offline, for the setup wizard's gateway
+                      option and its URL validation.
 oauth.ts              Shared OAuth token helpers (store shape, refresh/persist)
                       for the subscription-login providers.
 config-types.ts       Shared config TypeScript types (the overlay/runtime config

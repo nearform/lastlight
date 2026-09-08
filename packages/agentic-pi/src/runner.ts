@@ -38,7 +38,7 @@ import {
   isMisconfigurationSkip as isFileSearchMisconfig,
 } from "./extensions/file-search/index.js";
 import { loadSkillsExtension, buildSkillsStatusEvent } from "./extensions/skills/index.js";
-import { resolveModel } from "./models.js";
+import { registerProviderOverrides, resolveModel } from "./models.js";
 import { resolveRetrySettings } from "./retry.js";
 import { buildSandbox, type ImageDescriptor, type SandboxResult } from "./sandbox/index.js";
 import { ensureImage, ImageLoaderError } from "./sandbox/images/loader.js";
@@ -77,8 +77,12 @@ export async function runOnce(
   // fallback can see registered providers.
   const modelRuntime = await ModelRuntime.create({ authPath: config.authFile });
   const modelRegistry = new ModelRegistry(modelRuntime);
+  // Endpoint overrides go on BEFORE the refresh so models.json composes over an
+  // already-moved provider rather than the vendor default (lastlight#373).
+  const providerOverrides = config.providers ?? {};
+  registerProviderOverrides(modelRegistry, providerOverrides, config.model, warn);
   await modelRegistry.refresh();
-  const model = resolveModel(config.model, modelRegistry);
+  const model = resolveModel(config.model, modelRegistry, providerOverrides);
 
   const sessionManager = buildSessionManager(config);
 

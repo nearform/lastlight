@@ -34,6 +34,20 @@ match your `LASTLIGHT_MODEL` / `LASTLIGHT_MODELS` (the legacy `OPENCODE_MODEL` /
 `OPENCODE_MODELS` names are still accepted as aliases). No `claude` CLI, no
 Anthropic SDK in the runtime path.
 
+**Provider endpoints are configurable** (issue #373). The registry ships each
+provider's vendor URL; a deployment moves any of them — or adds a provider the
+registry has never heard of — with a top-level `providers:` block in its overlay
+`config.yaml` (or `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`-style env vars, or the
+`LASTLIGHT_PROVIDERS` JSON map). That is how you run through a self-hosted or
+corporate LLM gateway. `loadConfig()` resolves the registry once into
+`src/config/provider-registry.ts`, and **every** model path reads the resolved
+registry: `llm.ts`, the sandbox (via `AGENTIC_PI_PROVIDERS` / agentic-pi's
+`providers` run option), in-process chat, and the egress allowlist — so the
+firewall follows the gateway automatically. `https` is required except on
+loopback (`LASTLIGHT_ALLOW_INSECURE_PROVIDER_URLS=1` to override), and a bad
+override fails the boot rather than silently falling back to the vendor. Full
+contract: `spec/02-configuration.md` → "Provider endpoints".
+
 **Subscription logins (OAuth).** Besides the API-key providers above, three
 providers authenticate by subscription login instead of a static key —
 `openai-codex` (ChatGPT Plus/Pro), `anthropic` (Claude Pro/Max), and
@@ -295,7 +309,11 @@ src/
                         DockerSandbox adapter wraps.
     smol.ts             smolvm micro-VM driver the SmolSandbox adapter wraps.
     egress-allowlist.ts Single source of truth for HTTP egress hosts.
-                        GITHUB_HOSTS + PROVIDER_HOSTS + PACKAGE_REGISTRY_HOSTS.
+                        GITHUB_HOSTS + providerHosts() + PACKAGE_REGISTRY_HOSTS,
+                        composed by defaultAllowlist(). The provider half is a
+                        FUNCTION, not a constant, because it reads the
+                        deployment-resolved registry — so a `providers:`
+                        endpoint override moves the allowed host with it (#373).
                         Leading-dot entries (e.g. ".github.com") are
                         wildcards matching apex + all subdomains. Both
                         backends import it: gondolin passes the list to
@@ -823,7 +841,9 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
     trace (see the OpenTelemetry section).
 - **Sandbox HTTP egress allowlist** — both backends apply a default-deny
   HTTP egress policy. The host list lives in `src/sandbox/egress-allowlist.ts`
-  (`GITHUB_HOSTS` + `PROVIDER_HOSTS` + `PACKAGE_REGISTRY_HOSTS`).
+  (`GITHUB_HOSTS` + `providerHosts()` + `PACKAGE_REGISTRY_HOSTS`, composed by
+  `defaultAllowlist()`; the provider hosts come from the resolved registry, so a
+  gateway override is allowlisted automatically).
   Entries with a leading dot (e.g. `.github.com`) match the apex AND
   every subdomain.
   - **gondolin**: `agent-executor.ts` passes `allowedHttpHosts` to
@@ -1005,6 +1025,11 @@ Required:
   xAI / Hugging Face / Moonshot / NVIDIA / Fireworks / Together / DeepSeek /
   Z.AI / Kimi / MiniMax) matching your `LASTLIGHT_MODEL` (set multiple if
   `LASTLIGHT_MODELS` routes phases to different providers)
+- `<PREFIX>_BASE_URL` (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`,
+  `KIMI_CODING_BASE_URL`, …) / `LASTLIGHT_PROVIDERS` (JSON) /
+  `LASTLIGHT_ALLOW_INSECURE_PROVIDER_URLS` — endpoint overrides, the env half of
+  the `providers:` config block above. Optional; unset leaves every provider on
+  its vendor endpoint.
 
 Models (the legacy `OPENCODE_MODEL/MODELS/VARIANT/VARIANTS` names are still
 accepted as aliases for the `LASTLIGHT_*` forms below):

@@ -1,5 +1,5 @@
 import { isIP } from "node:net";
-import { PROVIDER_HOSTS as REGISTRY_PROVIDER_HOSTS } from "lastlight-shared/providers";
+import { providerRegistry } from "../config/provider-registry.js";
 
 /**
  * Single source of truth for sandbox HTTP egress allowlists.
@@ -54,12 +54,26 @@ export const GITHUB_HOSTS: readonly string[] = [
  * required inside the VM — they're kept here so a single allowlist can
  * cover both paths without surprises.
  *
- * The list is derived from the provider registry (`src/providers.ts`) —
- * every wizard-able provider has a `host` entry there, so adding a new
- * provider automatically seeds this allowlist. Each entry matches the
- * apex AND all subdomains (see `normalizeAllowlistHost`).
+ * The list is derived from the RESOLVED provider registry
+ * (`src/config/provider-registry.ts`) — every wizard-able provider has a `host`
+ * entry there, so adding a new provider automatically seeds this allowlist.
+ * Each entry matches the apex AND all subdomains (see `normalizeAllowlistHost`).
+ *
+ * A function, not a constant, because the registry is deployment-resolved: a
+ * `providers:` override moves an endpoint to a gateway (issue #373), and the
+ * firewall has to follow it or the sandbox reaches a host it is not allowed to
+ * talk to. Same automation as the OTEL collector hosts, one layer down.
+ *
+ * A gateway on `localhost` or a private IP is dropped by
+ * {@link normalizeAllowlistHost} and never reaches the allowlist — deliberately.
+ * The sandbox has its own loopback, so an in-guest model call could never have
+ * reached the host's gateway anyway; use an in-process backend (`gondolin` /
+ * `none`, where the model call happens host-side), or give the gateway a
+ * resolvable name.
  */
-export const PROVIDER_HOSTS: readonly string[] = REGISTRY_PROVIDER_HOSTS;
+export function providerHosts(): readonly string[] {
+  return providerRegistry().hosts;
+}
 
 /**
  * Public package registries the executor may hit during `npm install`,
@@ -90,14 +104,12 @@ export const PACKAGE_REGISTRY_HOSTS: readonly string[] = [
 
 /**
  * Combined allowlist used by both backends when a phase has not opted into
- * unrestricted egress. Order is preserved across imports so generated
- * configs are stable.
+ * unrestricted egress. Order is stable (github → providers → registries) so
+ * generated firewall configs don't churn.
  */
-export const DEFAULT_ALLOWLIST: readonly string[] = [
-  ...GITHUB_HOSTS,
-  ...PROVIDER_HOSTS,
-  ...PACKAGE_REGISTRY_HOSTS,
-];
+export function defaultAllowlist(): readonly string[] {
+  return [...GITHUB_HOSTS, ...providerHosts(), ...PACKAGE_REGISTRY_HOSTS];
+}
 
 /**
  * Sentinel value recognized by agentic-pi/gondolin (post the `"*"` patch)

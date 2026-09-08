@@ -179,6 +179,14 @@ export interface RunAgentOpts {
    * ignores it (its model call is in-container) and relies on env tokens.
    */
   authFile?: string;
+  /**
+   * Provider endpoint overrides (issue #373) — where the model call actually
+   * goes when a deployment fronts its providers with a gateway. Only the
+   * in-process adapter needs it as an argument; the container backends read the
+   * same payload out of the sandbox env (`AGENTIC_PI_PROVIDERS`), which the
+   * executor sets for every backend.
+   */
+  providers?: Record<string, unknown>;
 }
 
 export interface RunCommandOpts {
@@ -607,6 +615,9 @@ class InProcessSandbox implements Sandbox {
       profile: opts.profile,
       authFile: opts.authFile,
       githubApiBaseUrl: opts.githubApiBaseUrl,
+      // This adapter runs the model call in the harness process, which never
+      // sees the sandbox env — so the endpoint overrides travel as an argument.
+      providers: opts.providers as Parameters<typeof agenticRunType>[0]["providers"],
       // This run's GitHub credential, threaded per-run rather than through the
       // shared process.env. Authoritative even when empty — agentic-pi must
       // never fall back to the harness's ambient App PEM / host PAT for an

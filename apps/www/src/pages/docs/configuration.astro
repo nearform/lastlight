@@ -231,6 +231,91 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 		</div>
 	</div>
 
+	<h3 id="provider-endpoints">Provider endpoints — your own gateway</h3>
+
+	<p>
+		Every provider ships with the vendor's endpoint baked in. Point one somewhere else — a
+		self-hosted gateway, a corporate proxy, an Azure/Bedrock-fronted endpoint — with a
+		<code>providers:</code> block in your overlay <code>config.yaml</code>. That is how a deployment
+		gets central spend accounting, key custody, rate limiting and audit, and it is the only way to
+		reach a model that isn't one of the ~18 registry entries.
+	</p>
+
+	<pre><code>{`providers:
+  # A gateway that speaks Anthropic's dialect: only the URL moves. The models,
+  # the request shape and ANTHROPIC_API_KEY are all inherited.
+  anthropic:
+    baseUrl: https://gateway.internal/anthropic
+
+  # A provider Last Light has never heard of. baseUrl is required; api defaults
+  # to openai-completions and envKey to ACME_API_KEY, derived from the prefix.
+  acme:
+    baseUrl: https://llm.corp.example/v1
+    api: openai-completions        # or anthropic-messages
+    envKey: ACME_API_KEY`}</code></pre>
+
+	<p>
+		On a provider Last Light already knows you may also re-point <code>envKey</code> — that is how a
+		gateway keeps custody of its own credential (<code>GATEWAY_API_KEY</code> rather than the
+		vendor's key). Leave it alone and pi keeps resolving the credential itself, which is what lets an
+		OAuth subscription login keep working behind a moved endpoint. You may <em>not</em> change a
+		known provider's <code>api</code>: its dialect is fixed, and a gateway that speaks a different
+		one is a provider of your own — give it its own prefix, as <code>acme</code> above.
+	</p>
+
+	<p>
+		The endpoint reaches every model call — the cheap screener/classifier helpers, the sandboxed
+		workflow phases, and in-process chat — and the sandbox egress firewall follows it
+		automatically, so no separate allowlist edit is needed. <code>lastlight server setup</code>
+		offers this as a provider choice ("Self-hosted / gateway endpoint") and writes the block for you.
+	</p>
+
+	<table class="docs-table config-table">
+		<colgroup>
+			<col class="col-var" />
+			<col class="col-req" />
+			<col class="col-default" />
+			<col class="col-desc" />
+		</colgroup>
+		<thead>
+			<tr><th>Variable</th><th>Required</th><th>Default</th><th>Description</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>ANTHROPIC_BASE_URL</code>, <code>OPENAI_BASE_URL</code>, …</td>
+				<td>No</td>
+				<td>the vendor endpoint</td>
+				<td>Move one known provider's endpoint from the environment. The name is derived from the model-spec prefix (<code>kimi-coding</code> → <code>KIMI_CODING_BASE_URL</code>), so the two you are most likely to want match the names the vendor SDKs already use.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_PROVIDERS</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>The same overrides as JSON, and the only env route that can declare a provider the registry has never heard of. Merges per prefix with <code>config.yaml</code>. Example: <code>&#123;"acme":&#123;"baseUrl":"https://llm.corp.example/v1","envKey":"ACME_API_KEY"&#125;&#125;</code></td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_ALLOW_INSECURE_PROVIDER_URLS</code></td>
+				<td>No</td>
+				<td>off</td>
+				<td>Permit a plaintext <code>http://</code> endpoint on a non-loopback host. <code>https://</code> is otherwise required, because a base URL carries every prompt and every API key; <code>http://localhost:…</code> needs no opt-in.</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<div class="docs-callout">
+		<div class="docs-callout-body">
+			<strong>A gateway URL is not a secret — but a bad one is fatal at boot.</strong> The URL is
+			deployment routing, so it belongs in the version-controlled overlay <code>config.yaml</code>
+			(unlike <code>DATABASE_URL</code>); the key it authenticates with stays in
+			<code>secrets/.env</code>. An unusable override — a malformed URL, a custom provider with no
+			<code>baseUrl</code>, plaintext HTTP off-loopback — refuses to boot rather than warning,
+			because quietly ignoring it would send your prompts and your key to the vendor instead.
+			One caveat: a gateway on <code>localhost</code> or a private IP is only reachable from the
+			in-process sandbox backends (<code>gondolin</code>, <code>none</code>), where the model call
+			runs on the host — a container sandbox has its own loopback.
+		</div>
+	</div>
+
 	<div class="docs-callout tip">
 		<div class="docs-callout-body">
 			<strong>Legacy env vars.</strong> All <code>OPENCODE_*</code> names from the

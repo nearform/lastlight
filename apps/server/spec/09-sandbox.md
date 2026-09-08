@@ -711,12 +711,13 @@ code, which needs a socket in the sandbox (root on the host).
 ## Egress firewall
 
 The same allowlist drives both backends. Defined in
-`src/sandbox/egress-allowlist.ts`:
+`src/sandbox/egress-allowlist.ts` — `defaultAllowlist()` rather than a constant,
+because the provider hosts are deployment-resolved:
 
 | Group | Hosts (apex + all subdomains) |
 |---|---|
 | `GITHUB_HOSTS` | `github.com`, `githubusercontent.com` |
-| `PROVIDER_HOSTS` | `anthropic.com`, `openai.com`, `openrouter.ai` |
+| `PROVIDER_HOSTS` | `anthropic.com`, `openai.com`, `openrouter.ai` — derived from the RESOLVED provider registry, so a `providers:` endpoint override moves the allowed host with it ([Configuration](/spec/02-configuration)) |
 | `PACKAGE_REGISTRY_HOSTS` | `npmjs.org`, `yarnpkg.com`, `pypi.org`, `pythonhosted.org`, `crates.io`, `golang.org`, `rubygems.org`, `alpinelinux.org`, `debian.org` |
 
 ### gondolin enforcement

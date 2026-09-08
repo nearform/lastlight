@@ -13,6 +13,7 @@
  */
 
 import type { RunConfig } from "./args.js";
+import type { ProviderEndpointOverrides } from "./providers.js";
 import type { GitHubAuthEnv } from "./extensions/github/auth.js";
 
 /**
@@ -199,6 +200,20 @@ export interface RunOptions {
   /** Override the OTLP endpoint base URL (escape hatch; prefer the env var). */
   otelEndpoint?: string;
 
+  // ── Provider endpoints ──────────────────────────────────────────
+  /**
+   * Point providers at a different endpoint — a self-hosted or corporate LLM
+   * gateway rather than the vendor (lastlight#373).
+   * `{ anthropic: { baseUrl: "https://gateway.internal/anthropic" } }` is enough
+   * for a provider pi knows; an unknown one also needs `api` and `apiKeyEnv`.
+   * Unset (the default) leaves every provider on its built-in endpoint.
+   *
+   * In-process equivalent of the CLI's `--providers` /
+   * `AGENTIC_PI_PROVIDERS` — which is the route to a run that executes inside a
+   * container, where the caller only controls the environment.
+   */
+  providers?: ProviderEndpointOverrides;
+
   // ── Observability hooks ─────────────────────────────────────────
   /**
    * Called for every emitted JSONL record in order. Same shape that the
@@ -375,6 +390,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
     otelIncludeContent: options.otelIncludeContent,
     otelServiceName: options.otelServiceName,
     otelEndpoint: options.otelEndpoint,
+    providers: options.providers,
   };
 
   const collector = new CollectorSink(options.onEvent);

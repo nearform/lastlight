@@ -212,7 +212,7 @@ const description = "A self-hosted, MIT-licensed AI software factory for your Gi
 		<h2>How it works</h2>
 		<p class="section-desc">
 			Built on <a href="https://github.com/nearform/lastlight/tree/main/packages/agentic-pi" target="_blank" rel="noopener">agentic-pi</a>,
-			it runs on any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports: Claude, GPT, Gemini, Llama, and more (default <code>anthropic/claude-sonnet-4-6</code>).
+			it runs on any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports: Claude, GPT, Gemini, Llama, and more (default <code>anthropic/claude-sonnet-4-6</code>) — through the vendor, or through your own LLM gateway.
 			Each workflow phase runs in its own sandbox, and five backends sit behind one interface: a gondolin micro-VM by default, or Docker, smolvm, Kubernetes, or none.
 			Authenticates as its own GitHub App, so every action is clearly from the bot, not you.
 		</p>
@@ -297,6 +297,7 @@ OPENAI_API_KEY=sk-...
 # or use one OpenRouter key for Claude / GPT / Gemini / Llama / ...
 OPENROUTER_API_KEY=sk-or-v1-...</code></pre>
 			<p>The default model is <code>anthropic/claude-sonnet-4-6</code>. Override it, globally or per-phase, via <code>LASTLIGHT_MODEL</code> / <code>LASTLIGHT_MODELS</code>.</p>
+			<p>Running your models through a gateway — for central spend accounting, key custody, rate limiting or audit — or self-hosting them? Point any provider at your own endpoint with a <code>providers:</code> block in your overlay <code>config.yaml</code>; the setup wizard offers it as a provider choice, and the sandbox firewall follows the URL for you. See <a href="/docs/configuration#provider-endpoints">Configuration</a>.</p>
 			<p>No API key? You can pay with a subscription you already have instead. <code>lastlight oauth login</code> signs you in with Claude Pro/Max, ChatGPT Plus/Pro, or GitHub Copilot. All three work on the default gondolin sandbox, where the model call runs host-side against your credential store. The one exception is Codex on the Docker and smolvm backends: the call happens inside the guest there, and Codex has no in-guest token route.</p>
 		</div>
 

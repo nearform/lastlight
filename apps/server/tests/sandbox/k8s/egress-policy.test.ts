@@ -11,7 +11,7 @@ import {
   renderOpenEgressPolicy,
   renderEgressPolicies,
 } from "#src/sandbox/k8s/egress-policy.js";
-import { DEFAULT_ALLOWLIST } from "#src/sandbox/egress-allowlist.js";
+import { defaultAllowlist } from "#src/sandbox/egress-allowlist.js";
 
 describe("fqdnRulesFor", () => {
   it("expands each bare host to apex matchName + subdomain matchPattern", () => {
@@ -21,8 +21,8 @@ describe("fqdnRulesFor", () => {
     ]);
   });
   it("preserves order and covers every allowlist host", () => {
-    const rules = fqdnRulesFor(DEFAULT_ALLOWLIST);
-    for (const host of DEFAULT_ALLOWLIST) {
+    const rules = fqdnRulesFor(defaultAllowlist());
+    for (const host of defaultAllowlist()) {
       expect(rules).toContainEqual({ matchName: host });
       expect(rules).toContainEqual({ matchPattern: `*.${host}` });
     }

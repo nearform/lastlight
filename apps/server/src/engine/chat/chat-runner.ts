@@ -33,6 +33,7 @@ import {
   oauthProviderIdForModel,
   resolveOAuthApiKey,
 } from "../oauth.js";
+import { providerRegistry } from "../../config/provider-registry.js";
 import { logger } from "../../logging/logger.js";
 
 const log = logger("chat");
@@ -365,10 +366,15 @@ export class ChatRunner {
     const errors: string[] = [];
     const assistantMessages: AssistantMessage[] = [];
     const toolResults: ToolResultMessage[] = [];
+    // A provider whose key env var this deployment named — a custom provider
+    // (pi-ai knows no convention for it) or a gateway holding its own credential
+    // — has to be handed the key explicitly, over the same per-call channel the
+    // OAuth branch above uses. An OAuth token, when there is one, still wins.
+    const customKey = apiKey ?? endpointApiKey(effectiveModel.provider);
     const opts: SimpleStreamOptions = {
       reasoning: pickReasoning(this.cfg.thinking),
       timeoutMs: this.cfg.timeoutMs ?? 120_000,
-      ...(apiKey ? { apiKey } : {}),
+      ...(customKey ? { apiKey: customKey } : {}),
     };
 
     let finish = "stop";
@@ -489,11 +495,16 @@ export class ChatRunner {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-function resolveModel(spec: string): Model<Api> {
+/** Exported for unit tests — the endpoint-override branches below. */
+export function resolveModel(spec: string): Model<Api> {
   const idx = spec.indexOf("/");
   if (idx < 0) throw new Error(`model spec must be 'provider/id', got '${spec}'`);
   const provider = spec.slice(0, idx);
   const modelId = spec.slice(idx + 1);
+  // Where this deployment says that provider lives (issue #373). Chat is a
+  // model call like any other: if the operator moved the endpoint to a gateway,
+  // this path has to follow it, or chat alone keeps talking to the vendor.
+  const endpoint = providerRegistry().endpoints.find((e) => e.prefix === provider);
   // pi-ai's getModel is typed against its static registry; at runtime it
   // accepts arbitrary strings AND returns undefined for unknown ids rather
   // than throwing. Without this guard the first chat turn crashes deep in
@@ -503,13 +514,53 @@ function resolveModel(spec: string): Model<Api> {
     provider,
     modelId,
   );
-  if (!model) {
-    throw new Error(
-      `Unknown chat model '${spec}'. pi-ai's registry has no '${modelId}' for provider '${provider}'. ` +
-      `Set LASTLIGHT_MODELS (or LASTLIGHT_MODEL) to a registered model id.`,
-    );
+  // Only `baseUrl` moves. `endpoint.api` is provably equal to the catalog
+  // model's for a built-in provider — `resolveProviderRegistry` REFUSES an `api`
+  // override there, precisely so this path and `llm.ts` cannot disagree about
+  // the request shape (a gateway with a different dialect declares its own
+  // prefix, and takes the synthesized branch below).
+  if (model) return endpoint ? { ...model, baseUrl: endpoint.baseUrl } : model;
+  if (endpoint) {
+    // A deployment-declared provider pi-ai has never heard of. Nothing to
+    // inherit, so the model is synthesized from the override: its api family
+    // decides the request shape and the gateway decides everything else. Cost
+    // is zero because a gateway publishes no price list — a chat turn against a
+    // custom provider reports no spend rather than a wrong one.
+    return {
+      id: modelId,
+      name: modelId,
+      api: endpoint.api as Api,
+      provider,
+      baseUrl: endpoint.baseUrl,
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: endpoint.contextWindow ?? 128_000,
+      maxTokens: endpoint.maxTokens ?? 16_384,
+    };
   }
-  return model;
+  throw new Error(
+    `Unknown chat model '${spec}'. pi-ai's registry has no '${modelId}' for provider '${provider}'. ` +
+    `Set LASTLIGHT_MODELS (or LASTLIGHT_MODEL) to a registered model id.`,
+  );
+}
+
+/**
+ * The API key for a provider whose `providers:` entry NAMED its key env var —
+ * a deployment-declared custom provider, or a built-in whose gateway keeps
+ * custody of its own credential (`GATEWAY_API_KEY`, not `ANTHROPIC_API_KEY`).
+ *
+ * Undefined otherwise, including for a provider whose endpoint merely moved:
+ * pi-ai resolves those itself, and handing it a key here would bypass the OAuth
+ * subscription path.
+ *
+ * Exported for unit tests.
+ */
+export function endpointApiKey(provider: string): string | undefined {
+  const endpoint = providerRegistry().endpoints.find(
+    (e) => e.prefix === provider && e.envKeyOverridden,
+  );
+  return endpoint ? process.env[endpoint.envKey] : undefined;
 }
 
 function textMessage(role: string, content: string, timestamp: string): Message {
