@@ -32,6 +32,23 @@ export interface ProviderEndpointOverride {
 export type ProviderEndpointOverrides = Record<string, ProviderEndpointOverride>;
 
 /**
+ * Env var carrying {@link ProviderEndpointOverrides} — the fallback for the
+ * `--providers` flag, and the ONLY channel into a run that executes inside a
+ * container the caller can hand nothing but an environment.
+ *
+ * Exported because it is a contract between two processes, and an orchestrator
+ * that writes the name while this parser reads a different one fails silently:
+ * every run would quietly reach the vendor instead of the operator's gateway.
+ * Last Light imports this rather than repeating the literal
+ * (`apps/server/src/config/provider-registry.ts`).
+ *
+ * This module is deliberately dependency-free so a host can import it without
+ * pulling the agent runtime in (importing agentic-pi's barrel transitively
+ * replaces the global undici dispatcher).
+ */
+export const PROVIDER_OVERRIDES_ENV = "AGENTIC_PI_PROVIDERS";
+
+/**
  * Parse the `--providers` flag / `AGENTIC_PI_PROVIDERS` env value: a JSON object
  * of `{ "<prefix>": { "baseUrl": "…" } }`.
  *

@@ -57,6 +57,30 @@ describe("registerProviderOverrides", () => {
     assert.deepEqual(registry.registered, [["anthropic", { baseUrl: "https://gw.internal/anthropic" }]]);
   });
 
+  test("a known provider gets an explicit key ONLY when the caller named one", () => {
+    // Named: the gateway holds its own credential.
+    const named = fakeRegistry();
+    registerProviderOverrides(
+      named,
+      { anthropic: { baseUrl: "https://gw/anthropic", apiKeyEnv: "GATEWAY_API_KEY" } },
+      "anthropic/claude-haiku-4-5-20251001",
+    );
+    assert.deepEqual(named.registered[0][1], {
+      baseUrl: "https://gw/anthropic",
+      apiKey: "$GATEWAY_API_KEY",
+    });
+
+    // Not named (the endpoint merely moved): pi keeps resolving the credential
+    // itself, which is what lets an OAuth subscription login keep working.
+    const plain = fakeRegistry();
+    registerProviderOverrides(
+      plain,
+      { anthropic: { baseUrl: "https://gw/anthropic" } },
+      "anthropic/claude-haiku-4-5-20251001",
+    );
+    assert.equal("apiKey" in plain.registered[0][1], false);
+  });
+
   test("an unknown provider registers the model being run, with an $ENV key reference", () => {
     const registry = fakeRegistry();
     registerProviderOverrides(
@@ -73,6 +97,22 @@ describe("registerProviderOverrides", () => {
     assert.equal(config.models[0].baseUrl, "https://gw/v1");
     // A gateway publishes no price list, so we report no spend rather than a wrong one.
     assert.deepEqual(config.models[0].cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  });
+
+  test("a known provider running a model pi has no entry for is defined outright", () => {
+    // A gateway exposing its own fine-tune under a familiar prefix: there is no
+    // catalog entry to re-point, so the model is registered like a custom one —
+    // with the provider's normal key env var.
+    const registry = fakeRegistry();
+    registerProviderOverrides(
+      registry,
+      { anthropic: { baseUrl: "https://gw/anthropic", api: "anthropic-messages" } },
+      "anthropic/my-tuned-claude",
+    );
+    const config = registry.registered[0][1];
+    assert.equal(config.apiKey, "$ANTHROPIC_API_KEY");
+    assert.equal(config.models[0].id, "my-tuned-claude");
+    assert.equal(config.models[0].api, "anthropic-messages");
   });
 
   test("a broken override for the model being run fails the run, not silently", () => {

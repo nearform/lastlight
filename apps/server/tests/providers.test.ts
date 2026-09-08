@@ -114,6 +114,7 @@ describe("resolveProviderRegistry — endpoint overrides (issue #373)", () => {
         api: "anthropic-messages",
         envKey: "ANTHROPIC_API_KEY",
         custom: false,
+        envKeyOverridden: false,
       },
     ]);
     // Untouched providers keep their defaults, in registry order.
@@ -135,6 +136,48 @@ describe("resolveProviderRegistry — endpoint overrides (issue #373)", () => {
     // deployment already has keys for (defaultFastModel walks this list).
     expect(registry.providers[registry.providers.length - 1].prefix).toBe("acme");
     expect(registry.endpoints[0].custom).toBe(true);
+  });
+
+  /**
+   * The dialect is the one field a built-in override may NOT change: pi can
+   * re-point a built-in provider's models but not re-declare their API family,
+   * so honouring it in-process while the sandbox ignored it would split the two
+   * halves of one deployment. Refusing names the coherent alternative instead.
+   */
+  it("refuses to change a built-in provider's api family, and points at the alternative", () => {
+    expect(() =>
+      resolveProviderRegistry({ anthropic: { baseUrl: "https://gw/v1", api: "openai-completions" } }),
+    ).toThrow(/api cannot be changed.*declare a provider of your own/s);
+    // Restating the built-in's own dialect is a no-op, not an error.
+    expect(
+      resolveProviderRegistry({ anthropic: { baseUrl: "https://gw/v1", api: "anthropic-messages" } })
+        .byPrefix("anthropic")!.api,
+    ).toBe("anthropic-messages");
+  });
+
+  it("tracks whether the deployment NAMED the key env var, which decides who resolves it", () => {
+    // Endpoint moved only: pi/the SDK keeps resolving the credential, so an
+    // OAuth subscription login on `anthropic` still works.
+    const moved = resolveProviderRegistry({ anthropic: { baseUrl: "https://gw/v1" } });
+    expect(moved.endpoints[0].envKeyOverridden).toBe(false);
+    expect(moved.endpoints[0].envKey).toBe("ANTHROPIC_API_KEY");
+
+    // Gateway holding its own credential: the key must be handed over explicitly.
+    const custody = resolveProviderRegistry({
+      anthropic: { baseUrl: "https://gw/v1", envKey: "GATEWAY_API_KEY" },
+    });
+    expect(custody.byPrefix("anthropic")!.envKey).toBe("GATEWAY_API_KEY");
+    expect(custody.endpoints[0].envKeyOverridden).toBe(true);
+    expect(custody.envKeys).toContain("GATEWAY_API_KEY");
+
+    // A custom provider is always in the second camp — nothing else knows it.
+    expect(resolveProviderRegistry({ acme: { baseUrl: "https://gw/v1" } }).endpoints[0].envKeyOverridden).toBe(true);
+  });
+
+  it("re-keying a built-in alone (no new URL) still registers as an endpoint override", () => {
+    const registry = resolveProviderRegistry({ anthropic: { envKey: "GATEWAY_API_KEY" } });
+    expect(registry.endpoints.map((e) => e.prefix)).toEqual(["anthropic"]);
+    expect(registry.byPrefix("anthropic")!.baseUrl).toBe("https://api.anthropic.com/v1");
   });
 
   it("rejects a custom provider with no baseUrl — there is nothing to inherit", () => {

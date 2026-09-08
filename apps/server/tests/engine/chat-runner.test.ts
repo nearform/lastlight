@@ -1,6 +1,12 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import type { AssistantMessage, Api, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
-import { completeWithRetry, isRetryableModelError } from "#src/engine/chat/chat-runner.js";
+import {
+  completeWithRetry,
+  endpointApiKey,
+  isRetryableModelError,
+  resolveModel,
+} from "#src/engine/chat/chat-runner.js";
+import { installProviderOverrides, resetProviderRegistry } from "#src/config/provider-registry.js";
 
 // Minimal stand-ins — the helper only ever forwards these to `complete`.
 const model = {} as Model<Api>;
@@ -116,5 +122,99 @@ describe("completeWithRetry", () => {
     const res = await completeWithRetry(complete, model, context, opts, { delaysMs: [5], sleepFn: noSleep });
     expect(res.stopReason).toBe("error");
     expect(complete).toHaveBeenCalledTimes(2); // initial + 1 retry, then surfaces the errored assistant
+  });
+});
+
+/**
+ * The chat path is the one an operator meets a gateway through most directly:
+ * the model call happens host-side, so the endpoint AND the credential are
+ * resolved here rather than by pi-ai's own machinery (issue #373).
+ */
+describe("chat model resolution with a provider endpoint override", () => {
+  afterEach(() => {
+    resetProviderRegistry();
+    delete process.env.ACME_API_KEY;
+    delete process.env.GATEWAY_API_KEY;
+  });
+
+  it("with no override, resolves the catalog model untouched", () => {
+    const resolved = resolveModel("anthropic/claude-haiku-4-5-20251001");
+    expect(resolved.provider).toBe("anthropic");
+    expect(resolved.baseUrl).toMatch(/anthropic\.com/);
+  });
+
+  it("re-points a known provider's model at the gateway, keeping its dialect", () => {
+    installProviderOverrides({ anthropic: { baseUrl: "https://gateway.internal/anthropic" } });
+    const resolved = resolveModel("anthropic/claude-haiku-4-5-20251001");
+    expect(resolved.baseUrl).toBe("https://gateway.internal/anthropic");
+    // The catalog model is otherwise intact — same api family as llm.ts will use.
+    expect(resolved.api).toBe("anthropic-messages");
+    expect(resolved.id).toBe("claude-haiku-4-5-20251001");
+  });
+
+  it("synthesizes a model for a provider pi-ai has never heard of", () => {
+    installProviderOverrides({
+      acme: { baseUrl: "https://llm.corp.example/v1", contextWindow: 32_000, maxTokens: 4_096 },
+    });
+    const resolved = resolveModel("acme/my-model");
+    expect(resolved).toMatchObject({
+      id: "my-model",
+      provider: "acme",
+      api: "openai-completions",
+      baseUrl: "https://llm.corp.example/v1",
+      contextWindow: 32_000,
+      maxTokens: 4_096,
+    });
+    // A gateway publishes no price list, so a chat turn reports no spend rather
+    // than a wrong one.
+    expect(resolved.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  });
+
+  it("honours the declared dialect when the gateway speaks Anthropic", () => {
+    installProviderOverrides({ acme: { baseUrl: "https://gw/anthropic", api: "anthropic-messages" } });
+    expect(resolveModel("acme/my-model").api).toBe("anthropic-messages");
+  });
+
+  it("still fails loudly for a model nobody declared", () => {
+    expect(() => resolveModel("openai/not-a-real-model-id")).toThrow(/Unknown chat model/);
+    expect(() => resolveModel("no-slash")).toThrow(/must be 'provider\/id'/);
+  });
+});
+
+describe("endpointApiKey", () => {
+  afterEach(() => {
+    resetProviderRegistry();
+    delete process.env.ACME_API_KEY;
+    delete process.env.GATEWAY_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  it("reads the env var a custom provider's entry names", () => {
+    installProviderOverrides({ acme: { baseUrl: "https://gw/v1" } });
+    process.env.ACME_API_KEY = "custom-key";
+    expect(endpointApiKey("acme")).toBe("custom-key");
+  });
+
+  it("reads a re-keyed built-in — a gateway holding its own credential", () => {
+    installProviderOverrides({ anthropic: { baseUrl: "https://gw/v1", envKey: "GATEWAY_API_KEY" } });
+    process.env.GATEWAY_API_KEY = "gw-key";
+    expect(endpointApiKey("anthropic")).toBe("gw-key");
+  });
+
+  /**
+   * The load-bearing negative: handing pi-ai a key here would bypass its own
+   * resolution, and with it the OAuth subscription logins (Claude Pro/Max,
+   * Codex, Copilot) that the chat path exists to support.
+   */
+  it("returns nothing when the endpoint merely moved, leaving pi-ai to resolve auth", () => {
+    installProviderOverrides({ anthropic: { baseUrl: "https://gw/v1" } });
+    process.env.ANTHROPIC_API_KEY = "vendor-key";
+    expect(endpointApiKey("anthropic")).toBeUndefined();
+  });
+
+  it("returns nothing for an unconfigured provider, or a named var that is unset", () => {
+    expect(endpointApiKey("anthropic")).toBeUndefined();
+    installProviderOverrides({ acme: { baseUrl: "https://gw/v1" } });
+    expect(endpointApiKey("acme")).toBeUndefined();
   });
 });

@@ -53,13 +53,27 @@ describe("providers: config block", () => {
     // The firewall follows the URL — otherwise the sandbox is denied its own gateway.
     expect(defaultAllowlist()).toContain("gateway.internal");
     expect(defaultAllowlist()).not.toContain("anthropic.com");
+    // No `apiKeyEnv`: the endpoint moved but the credential did not, so pi keeps
+    // resolving it in-sandbox — which is what an OAuth login on `anthropic` needs.
     expect(providerEndpointOverrides()).toEqual({
       anthropic: {
         baseUrl: "https://gateway.internal/anthropic",
         api: "anthropic-messages",
-        apiKeyEnv: "ANTHROPIC_API_KEY",
       },
     });
+  });
+
+  it("forwards the key env var only when the deployment named one", () => {
+    vi.stubEnv(
+      "LASTLIGHT_OVERLAY_DIR",
+      overlayWith(
+        "providers:\n  anthropic:\n    baseUrl: https://gateway.internal/anthropic\n    envKey: GATEWAY_API_KEY\n",
+      ),
+    );
+    loadConfig();
+    expect(providerEndpointOverrides()!.anthropic.apiKeyEnv).toBe("GATEWAY_API_KEY");
+    // …and it is the var the harness forwards into the sandbox, too.
+    expect(providerRegistry().envKeys).toContain("GATEWAY_API_KEY");
   });
 
   it("a custom provider carries its own env key into the forwarded env keys", () => {
@@ -69,8 +83,8 @@ describe("providers: config block", () => {
     );
     loadConfig();
     expect(providerRegistry().envKeys).toContain("ACME_KEY");
-    expect(providerEndpointOverrides()!.acme.custom).toBeUndefined(); // wire shape, not the internal flag
     expect(providerEndpointOverrides()!.acme.baseUrl).toBe("https://llm.corp.example/v1");
+    expect(providerEndpointOverrides()!.acme.apiKeyEnv).toBe("ACME_KEY");
   });
 
   it("ANTHROPIC_BASE_URL overrides the overlay, per prefix", () => {
@@ -91,6 +105,27 @@ describe("providers: config block", () => {
     vi.stubEnv("LASTLIGHT_PROVIDERS", JSON.stringify({ acme: { baseUrl: "https://gw/v1", envKey: "ACME_KEY" } }));
     loadConfig();
     expect(providerRegistry().byPrefix("acme")!.baseUrl).toBe("https://gw/v1");
+  });
+
+  /**
+   * Deliberately the same shape as `LASTLIGHT_MODEL` vs `LASTLIGHT_MODELS` in the
+   * same function — the scalar var is written first and the JSON map lands on
+   * top. Consistency across the env layer beats a per-block "more specific wins"
+   * rule that would make one map behave unlike its siblings.
+   */
+  it("LASTLIGHT_PROVIDERS lands on top of the per-provider _BASE_URL var", () => {
+    vi.stubEnv("ANTHROPIC_BASE_URL", "https://named.example/anthropic");
+    vi.stubEnv("LASTLIGHT_PROVIDERS", JSON.stringify({ anthropic: { baseUrl: "https://json.example/anthropic" } }));
+    loadConfig();
+    expect(providerRegistry().byPrefix("anthropic")!.baseUrl).toBe("https://json.example/anthropic");
+  });
+
+  it("the two env sources merge per key when they name different providers", () => {
+    vi.stubEnv("ANTHROPIC_BASE_URL", "https://named.example/anthropic");
+    vi.stubEnv("LASTLIGHT_PROVIDERS", JSON.stringify({ acme: { baseUrl: "https://json.example/v1" } }));
+    loadConfig();
+    expect(providerRegistry().byPrefix("anthropic")!.baseUrl).toBe("https://named.example/anthropic");
+    expect(providerRegistry().byPrefix("acme")!.baseUrl).toBe("https://json.example/v1");
   });
 
   it("fails the boot on a bad override rather than quietly using the vendor", () => {

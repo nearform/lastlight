@@ -255,6 +255,15 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
     envKey: ACME_API_KEY`}</code></pre>
 
 	<p>
+		On a provider Last Light already knows you may also re-point <code>envKey</code> — that is how a
+		gateway keeps custody of its own credential (<code>GATEWAY_API_KEY</code> rather than the
+		vendor's key). Leave it alone and pi keeps resolving the credential itself, which is what lets an
+		OAuth subscription login keep working behind a moved endpoint. You may <em>not</em> change a
+		known provider's <code>api</code>: its dialect is fixed, and a gateway that speaks a different
+		one is a provider of your own — give it its own prefix, as <code>acme</code> above.
+	</p>
+
+	<p>
 		The endpoint reaches every model call — the cheap screener/classifier helpers, the sandboxed
 		workflow phases, and in-process chat — and the sandbox egress firewall follows it
 		automatically, so no separate allowlist edit is needed. <code>lastlight server setup</code>

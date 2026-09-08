@@ -317,9 +317,18 @@ export const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
 export interface ProviderOverride {
   /** Replacement API base URL. Required for a custom (unregistered) prefix. */
   readonly baseUrl?: string;
-  /** Request family. Defaults to the built-in's, or `openai-completions` for a custom prefix. */
+  /**
+   * Request family. Custom prefixes only (default `openai-completions`) — see
+   * {@link resolveProviderRegistry} for why a built-in's dialect cannot be
+   * changed in place.
+   */
   readonly api?: ApiType;
-  /** Env var carrying the API key. Defaults to the built-in's, or `<PREFIX>_API_KEY`. */
+  /**
+   * Env var carrying the API key. Defaults to the built-in's, or
+   * `<PREFIX>_API_KEY` for a custom prefix. Overriding it on a built-in is how a
+   * gateway keeps custody of its own credential (`GATEWAY_API_KEY` rather than
+   * the vendor's `ANTHROPIC_API_KEY`).
+   */
   readonly envKey?: string;
   /** Egress allowlist host. Defaults to the hostname of `baseUrl`. */
   readonly host?: string;
@@ -345,6 +354,14 @@ export interface ProviderEndpoint {
   readonly envKey: string;
   /** True when the prefix is not in {@link PROVIDERS} (nothing to inherit from). */
   readonly custom: boolean;
+  /**
+   * True when this deployment NAMED the key env var — always for a custom
+   * provider, and for a built-in only when the override supplied a different
+   * one. It is the difference between "hand the model call this key explicitly"
+   * and "let the provider SDK resolve its own credential", and the latter is
+   * what keeps an OAuth subscription login working on `anthropic`.
+   */
+  readonly envKeyOverridden: boolean;
   readonly contextWindow?: number;
   readonly maxTokens?: number;
 }
@@ -471,13 +488,28 @@ export function resolveProviderRegistry(
       continue;
     }
     seen.delete(spec.prefix);
+    // A built-in's DIALECT cannot be changed in place, and half-honouring it is
+    // worse than refusing: the in-process helper would switch request shape
+    // while the sandbox did not. pi composes an endpoint override over the
+    // built-in catalog, and its `applyExtension` re-points those models' baseUrl
+    // only — expressing "these models, different API family" requires
+    // enumerating every model, which is exactly what a custom provider entry is.
+    // So an operator whose gateway speaks a different dialect declares their own
+    // prefix, and every path agrees by construction.
+    if (override.api && override.api !== spec.api) {
+      throw new Error(
+        `providers.${spec.prefix}.api cannot be changed: "${spec.prefix}" is a built-in provider that ` +
+          `speaks ${spec.api}. If your gateway proxies it but speaks ${override.api}, declare a provider ` +
+          `of your own instead (a new prefix with baseUrl + api + envKey) and use it in models:.`,
+      );
+    }
     const baseUrl = override.baseUrl
       ? normalizeProviderBaseUrl(override.baseUrl, { prefix: spec.prefix, allowInsecure: opts.allowInsecure })
       : spec.baseUrl;
+    const envKeyOverridden = !!override.envKey && override.envKey !== spec.envKey;
     const patched: ProviderSpec = {
       ...spec,
       baseUrl,
-      api: override.api ?? spec.api,
       envKey: override.envKey ?? spec.envKey,
       host: override.host ?? hostOf(baseUrl),
       displayName: override.displayName ?? spec.displayName,
@@ -485,13 +517,14 @@ export function resolveProviderRegistry(
       sampleModel: override.sampleModel ?? override.fastModel ?? spec.sampleModel,
     };
     providers.push(patched);
-    if (baseUrl !== spec.baseUrl || patched.api !== spec.api || patched.envKey !== spec.envKey) {
+    if (baseUrl !== spec.baseUrl || envKeyOverridden) {
       endpoints.push({
         prefix: patched.prefix,
         baseUrl: patched.baseUrl,
         api: patched.api,
         envKey: patched.envKey,
         custom: false,
+        envKeyOverridden,
       });
     }
   }
@@ -524,6 +557,8 @@ export function resolveProviderRegistry(
       api,
       envKey,
       custom: true,
+      // Nothing else knows this provider, so nothing else can find its key.
+      envKeyOverridden: true,
       contextWindow: override.contextWindow,
       maxTokens: override.maxTokens,
     });

@@ -366,10 +366,11 @@ export class ChatRunner {
     const errors: string[] = [];
     const assistantMessages: AssistantMessage[] = [];
     const toolResults: ToolResultMessage[] = [];
-    // A provider pi-ai has no built-in entry for has no env-var convention it
-    // knows either, so the key has to be handed over explicitly — the same
-    // per-call channel the OAuth branch above uses.
-    const customKey = apiKey ?? customProviderApiKey(effectiveModel.provider);
+    // A provider whose key env var this deployment named — a custom provider
+    // (pi-ai knows no convention for it) or a gateway holding its own credential
+    // — has to be handed the key explicitly, over the same per-call channel the
+    // OAuth branch above uses. An OAuth token, when there is one, still wins.
+    const customKey = apiKey ?? endpointApiKey(effectiveModel.provider);
     const opts: SimpleStreamOptions = {
       reasoning: pickReasoning(this.cfg.thinking),
       timeoutMs: this.cfg.timeoutMs ?? 120_000,
@@ -494,7 +495,8 @@ export class ChatRunner {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-function resolveModel(spec: string): Model<Api> {
+/** Exported for unit tests — the endpoint-override branches below. */
+export function resolveModel(spec: string): Model<Api> {
   const idx = spec.indexOf("/");
   if (idx < 0) throw new Error(`model spec must be 'provider/id', got '${spec}'`);
   const provider = spec.slice(0, idx);
@@ -512,6 +514,11 @@ function resolveModel(spec: string): Model<Api> {
     provider,
     modelId,
   );
+  // Only `baseUrl` moves. `endpoint.api` is provably equal to the catalog
+  // model's for a built-in provider — `resolveProviderRegistry` REFUSES an `api`
+  // override there, precisely so this path and `llm.ts` cannot disagree about
+  // the request shape (a gateway with a different dialect declares its own
+  // prefix, and takes the synthesized branch below).
   if (model) return endpoint ? { ...model, baseUrl: endpoint.baseUrl } : model;
   if (endpoint) {
     // A deployment-declared provider pi-ai has never heard of. Nothing to
@@ -539,12 +546,20 @@ function resolveModel(spec: string): Model<Api> {
 }
 
 /**
- * The API key for a deployment-declared (custom) provider, read from the env var
- * its `providers:` entry names. Undefined for every built-in provider — pi-ai
- * resolves those itself, and overriding would bypass the OAuth path.
+ * The API key for a provider whose `providers:` entry NAMED its key env var —
+ * a deployment-declared custom provider, or a built-in whose gateway keeps
+ * custody of its own credential (`GATEWAY_API_KEY`, not `ANTHROPIC_API_KEY`).
+ *
+ * Undefined otherwise, including for a provider whose endpoint merely moved:
+ * pi-ai resolves those itself, and handing it a key here would bypass the OAuth
+ * subscription path.
+ *
+ * Exported for unit tests.
  */
-function customProviderApiKey(provider: string): string | undefined {
-  const endpoint = providerRegistry().endpoints.find((e) => e.prefix === provider && e.custom);
+export function endpointApiKey(provider: string): string | undefined {
+  const endpoint = providerRegistry().endpoints.find(
+    (e) => e.prefix === provider && e.envKeyOverridden,
+  );
   return endpoint ? process.env[endpoint.envKey] : undefined;
 }
 

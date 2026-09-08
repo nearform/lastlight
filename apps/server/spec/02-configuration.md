@@ -588,6 +588,23 @@ providers:
     fastModel: acme-small          # what the cheap helpers use if they pick this provider
 ```
 
+Two rules about which fields a **built-in** override may carry, and both exist so
+the four paths below cannot disagree:
+
+- **`envKey` may be re-pointed.** That is how a gateway keeps custody of its own
+  credential (`GATEWAY_API_KEY` rather than the vendor's `ANTHROPIC_API_KEY`).
+  Naming it also changes *who resolves the key*: the harness then hands it to the
+  model call explicitly, everywhere. Leaving it alone keeps pi's own resolution —
+  env var, stored credential, **OAuth subscription token** — which is what lets a
+  Claude Pro/Max login keep working on a provider whose endpoint merely moved.
+- **`api` may not be changed.** A built-in's dialect is fixed. pi composes an
+  endpoint override over its built-in catalog and re-points those models' URL
+  only; expressing "these models, a different API family" means enumerating every
+  model, which is precisely what a custom provider entry is. Honouring the field
+  in-process while the sandbox ignored it would split one deployment in half, so
+  it throws at boot and names the alternative: if your gateway proxies Anthropic
+  but speaks OpenAI's dialect, declare your own prefix and point `models:` at it.
+
 Why it matters beyond convenience: a gateway is how a deployment gets central
 spend accounting, key custody, rate limiting and audit — and a self-hosted or
 Azure/Bedrock-fronted model is otherwise unreachable, because it is not one of
@@ -608,7 +625,11 @@ config key reach four independent code paths:
 
 **Precedence** is the ordinary one — `default < overlay < env` — and merges
 **per prefix**, so `ANTHROPIC_BASE_URL` moves one endpoint without dropping a
-custom provider declared in `config.yaml`.
+custom provider declared in `config.yaml`. Within the env layer,
+`LASTLIGHT_PROVIDERS` lands **on top of** the per-provider `<PREFIX>_BASE_URL`
+vars — the same shape as `LASTLIGHT_MODELS` over `LASTLIGHT_MODEL` in the same
+resolver, so the JSON map behaves like its siblings rather than inventing a
+"more specific name wins" rule for one block.
 
 **A gateway URL is not a secret**, so it belongs in the version-controlled
 overlay `config.yaml` (the opposite of `database.url` — see the note there). The

@@ -53,9 +53,16 @@ export function resolveModel(
   throw new Error(`unknown model: ${spec}`);
 }
 
-/** Advertised limits for a model on a provider pi has no catalog entry for. */
-const CUSTOM_MODEL_CONTEXT_WINDOW = 128_000;
-const CUSTOM_MODEL_MAX_TOKENS = 16_384;
+/**
+ * What to ADVERTISE for a model on a provider pi has no catalog entry for, when
+ * the caller didn't say. Defaults, deliberately not ceilings: the gateway is the
+ * only authority on its own limits, so clamping an operator's larger number to
+ * ours would break a legitimately bigger context for no gain — the gateway
+ * rejects an over-long request either way, and it does so with an error about
+ * its real limit rather than one about ours.
+ */
+const DEFAULT_CUSTOM_MODEL_CONTEXT_WINDOW = 128_000;
+const DEFAULT_CUSTOM_MODEL_MAX_TOKENS = 16_384;
 
 /**
  * Register each endpoint override on the model runtime, through pi's own
@@ -65,7 +72,9 @@ const CUSTOM_MODEL_MAX_TOKENS = 16_384;
  *
  *   - **known** — register `{ baseUrl }` alone. pi maps every built-in model of
  *     that provider onto the new base URL and keeps its auth, cost table and
- *     request quirks. One line moves Anthropic to a gateway.
+ *     request quirks. One line moves Anthropic to a gateway. `apiKeyEnv` is
+ *     added only when the caller named one (a gateway holding its own
+ *     credential); leaving it off is what keeps pi's OAuth path working.
  *   - **unknown** — nothing to inherit, so the model being run is defined here:
  *     its api family, its endpoint, and an `$ENV_VAR` API-key reference (pi
  *     resolves that against the process env at request time, so the key is
@@ -93,14 +102,19 @@ export function registerProviderOverrides(
       const builtin = modelId
         ? (getBuiltinModel as unknown as (p: string, m: string) => Model<any> | undefined)(prefix, modelId)
         : undefined;
+      // `apiKeyEnv` is set only when the caller named the key env var. Passing
+      // it takes credential resolution away from pi, so for a provider whose
+      // endpoint merely moved we leave it off and pi's own resolution — env var,
+      // stored credential, OAuth subscription token — keeps working.
+      const auth = override.apiKeyEnv ? { apiKey: `$${override.apiKeyEnv}` } : {};
       if (builtin) {
-        registry.registerProvider(prefix, { baseUrl: override.baseUrl });
+        registry.registerProvider(prefix, { baseUrl: override.baseUrl, ...auth });
         continue;
       }
       if (!modelId) {
         // Not the model we're running and not obviously built-in: a baseUrl-only
         // registration still moves that provider's catalog if it has one.
-        registry.registerProvider(prefix, { baseUrl: override.baseUrl });
+        registry.registerProvider(prefix, { baseUrl: override.baseUrl, ...auth });
         continue;
       }
       registry.registerProvider(prefix, {
@@ -117,8 +131,8 @@ export function registerProviderOverrides(
             reasoning: false,
             input: ["text"],
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            contextWindow: override.contextWindow ?? CUSTOM_MODEL_CONTEXT_WINDOW,
-            maxTokens: override.maxTokens ?? CUSTOM_MODEL_MAX_TOKENS,
+            contextWindow: override.contextWindow ?? DEFAULT_CUSTOM_MODEL_CONTEXT_WINDOW,
+            maxTokens: override.maxTokens ?? DEFAULT_CUSTOM_MODEL_MAX_TOKENS,
           },
         ],
       });

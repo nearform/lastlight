@@ -36,7 +36,7 @@ export type { RunOnceDeps, RunOnceExitCode } from "./runner.js";
 export { parseArgs } from "./args.js";
 export type { RunConfig } from "./args.js";
 
-export { parseProviderOverrides } from "./providers.js";
+export { parseProviderOverrides, PROVIDER_OVERRIDES_ENV } from "./providers.js";
 export type { ProviderEndpointOverride, ProviderEndpointOverrides } from "./providers.js";
 
 export {

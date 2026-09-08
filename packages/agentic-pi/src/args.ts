@@ -7,7 +7,11 @@
  */
 
 import type { GitHubAuthEnv } from "./extensions/github/auth.js";
-import { parseProviderOverrides, type ProviderEndpointOverrides } from "./providers.js";
+import {
+  parseProviderOverrides,
+  PROVIDER_OVERRIDES_ENV,
+  type ProviderEndpointOverrides,
+} from "./providers.js";
 
 export interface RunConfig {
   /** "provider/model_id", e.g. "anthropic/claude-haiku-4-5" */
@@ -500,8 +504,9 @@ export function parseArgs(argv: string[]): RunConfig {
   // Env fallback for the endpoint overrides. The flag wins; this is the route
   // an orchestrator uses when the run happens inside a container it only hands
   // an environment to (lastlight's docker / smol / kubernetes backends).
-  if (!config.providers && process.env.AGENTIC_PI_PROVIDERS) {
-    config.providers = parseProviderOverrides(process.env.AGENTIC_PI_PROVIDERS, "AGENTIC_PI_PROVIDERS");
+  const providersEnv = process.env[PROVIDER_OVERRIDES_ENV];
+  if (!config.providers && providersEnv) {
+    config.providers = parseProviderOverrides(providersEnv, PROVIDER_OVERRIDES_ENV);
   }
 
   if (!config.model) {

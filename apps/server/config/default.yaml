@@ -94,6 +94,10 @@ models:
 #       api: openai-completions                  #   or anthropic-messages
 #       envKey: ACME_API_KEY                     #   defaults to <PREFIX>_API_KEY
 #
+# On a BUILT-IN provider you may also re-point `envKey` (a gateway holding its
+# own credential), but NOT `api` — a built-in's dialect is fixed, and a gateway
+# that speaks a different one is a provider of your own (the `acme:` shape).
+#
 # The URL is routing, not a secret, so it belongs in this file; the key stays in
 # secrets/.env. The sandbox egress allowlist follows the URL automatically.
 # https is required off loopback. Env equivalents: ANTHROPIC_BASE_URL /

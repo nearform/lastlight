@@ -22,6 +22,11 @@ import {
   type ProviderOverrides,
   type ProviderRegistry,
 } from "lastlight-shared/providers";
+// The deep path, not the "agentic-pi" barrel, on purpose: this module loads at
+// config time in EVERY process, and importing that barrel transitively replaces
+// the global undici dispatcher (see the lazy import in `src/sandbox/sandbox.ts`).
+// `dist/providers.js` imports nothing at all.
+import { PROVIDER_OVERRIDES_ENV } from "agentic-pi/dist/providers.js";
 
 let current: ProviderRegistry = BUILTIN_PROVIDER_REGISTRY;
 
@@ -51,39 +56,43 @@ export function resetProviderRegistry(): void {
 }
 
 /**
- * Env var carrying the endpoint overrides into a sandbox (agentic-pi's
- * `--providers` fallback). The container backends run the model call in-guest
- * from a CLI we hand only an environment, so this is the one channel that
- * reaches every backend.
+ * Env var carrying the endpoint overrides into a sandbox — re-exported from
+ * agentic-pi, which owns the name (it is that CLI's `--providers` fallback).
+ * The container backends run the model call in-guest from a binary we hand only
+ * an environment, so this is the one channel that reaches every backend, and a
+ * writer/reader disagreement about the name would silently route every run back
+ * to the vendor.
  */
-export const PROVIDER_OVERRIDES_ENV = "AGENTIC_PI_PROVIDERS";
+export { PROVIDER_OVERRIDES_ENV };
+
+/** One endpoint override in agentic-pi's wire shape. */
+interface WireEndpoint {
+  baseUrl: string;
+  api: string;
+  /**
+   * Present ONLY when this deployment named the key env var. Its absence tells
+   * agentic-pi to leave credential resolution to pi — which is what keeps an
+   * OAuth subscription login working on a provider whose endpoint merely moved.
+   */
+  apiKeyEnv?: string;
+  contextWindow?: number;
+  maxTokens?: number;
+}
 
 /**
  * The endpoint overrides in agentic-pi's wire shape, or `undefined` when this
  * deployment overrode nothing — which is the common case, and the reason
  * nothing is forwarded at all then.
  */
-export function providerEndpointOverrides(): Record<string, {
-  baseUrl: string;
-  api: string;
-  apiKeyEnv: string;
-  contextWindow?: number;
-  maxTokens?: number;
-}> | undefined {
+export function providerEndpointOverrides(): Record<string, WireEndpoint> | undefined {
   const { endpoints } = current;
   if (endpoints.length === 0) return undefined;
-  const out: Record<string, {
-    baseUrl: string;
-    api: string;
-    apiKeyEnv: string;
-    contextWindow?: number;
-    maxTokens?: number;
-  }> = {};
+  const out: Record<string, WireEndpoint> = {};
   for (const e of endpoints) {
     out[e.prefix] = {
       baseUrl: e.baseUrl,
       api: e.api,
-      apiKeyEnv: e.envKey,
+      ...(e.envKeyOverridden ? { apiKeyEnv: e.envKey } : {}),
       ...(e.contextWindow ? { contextWindow: e.contextWindow } : {}),
       ...(e.maxTokens ? { maxTokens: e.maxTokens } : {}),
     };
