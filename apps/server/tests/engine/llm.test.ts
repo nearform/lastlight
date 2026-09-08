@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { callLlm, chat, defaultFastModel, resolveProvider } from "#src/engine/llm.js";
 import { PROVIDER_ENV_KEYS } from "lastlight-shared/providers";
 import { setRuntimeConfig, resetRuntimeConfigForTests, type LastLightConfig } from "#src/config/config.js";
+import { installProviderOverrides, resetProviderRegistry } from "#src/config/provider-registry.js";
 
 describe("resolveProvider", () => {
   it("prefers explicit provider prefix", () => {
@@ -240,5 +241,49 @@ describe("chat", () => {
       }),
     );
     await expect(callLlm("openai/gpt-4o-mini", "s", "u")).resolves.toBe("delegated");
+  });
+});
+
+describe("chat with a provider endpoint override (issue #373)", () => {
+  const ORIGINAL_ENV = { ...process.env };
+  beforeEach(() => {
+    for (const key of PROVIDER_ENV_KEYS) delete process.env[key];
+  });
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+    resetProviderRegistry();
+    vi.restoreAllMocks();
+  });
+
+  async function urlOf(model: string, body: unknown): Promise<string> {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    await chat(model, [{ role: "user", content: "hi" }]);
+    return fetchMock.mock.calls[0][0] as string;
+  }
+
+  it("sends an overridden built-in provider to the gateway, keeping the request shape", async () => {
+    installProviderOverrides({ anthropic: { baseUrl: "https://gateway.internal/anthropic/v1" } });
+    process.env.ANTHROPIC_API_KEY = "k";
+    expect(await urlOf("anthropic/claude-haiku-4-5", { content: [{ type: "text", text: "ok" }] })).toBe(
+      "https://gateway.internal/anthropic/v1/messages",
+    );
+  });
+
+  it("routes a deployment-declared custom provider by its own api family and key", async () => {
+    installProviderOverrides({ acme: { baseUrl: "https://llm.corp.example/v1" } });
+    process.env.ACME_API_KEY = "k";
+    expect(await urlOf("acme/my-model", { choices: [{ message: { content: "ok" } }] })).toBe(
+      "https://llm.corp.example/v1/chat/completions",
+    );
+  });
+
+  it("follows the override even on the bare-model-id fallback, which used to hardcode OpenAI", async () => {
+    installProviderOverrides({ openai: { baseUrl: "https://gateway.internal/openai/v1" } });
+    process.env.OPENAI_API_KEY = "k";
+    expect(await urlOf("mystery-model", { choices: [{ message: { content: "ok" } }] })).toBe(
+      "https://gateway.internal/openai/v1/chat/completions",
+    );
   });
 });

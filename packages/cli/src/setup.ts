@@ -27,6 +27,11 @@ import chalk from "chalk";
 import { OVERLAY_GITIGNORE, detectGh, bootstrapOverlayRepo } from "lastlight-shared";
 import { serverUpdate } from "./cli-server.js";
 import { PROVIDERS, providerByPrefix, OAUTH_PROVIDERS, oauthProviderById, type ProviderSpec } from "lastlight-shared";
+import {
+  defaultProviderEnvKey,
+  normalizeProviderBaseUrl,
+  type ProviderOverrides,
+} from "lastlight-shared/providers";
 import { isPostgresUrl, parsePgEndpoint, resolvePgDriver } from "lastlight-shared/database-url";
 
 // ── Brand colors ───────────────────────────────────────────────────────────
@@ -76,6 +81,14 @@ export interface SetupConfig {
   pemSourcePath?: string;
   /** Repositories the bot manages — written to instance/config.yaml (the overlay). */
   managedRepos: string[];
+  /**
+   * Provider endpoint overrides — how this deployment points its model calls at
+   * its own LLM gateway instead of the vendor (issue #373). Written to the
+   * overlay `config.yaml`, NOT to `.env`: a gateway URL is deployment routing,
+   * not a credential. The key it authenticates with still goes to
+   * `secrets/.env` through `providerApiKey`, like every other provider's.
+   */
+  providers?: ProviderOverrides;
   /**
    * State-database URL, set ONLY when the operator chose external Postgres.
    *
@@ -268,6 +281,21 @@ export function buildOverlayConfig(config: SetupConfig): string {
     lines.push("  []  # add owner/repo entries — the bot ignores repos not listed here");
   } else {
     for (const repo of config.managedRepos) lines.push(`  - ${repo}`);
+  }
+  const providers = config.providers ?? {};
+  const prefixes = Object.keys(providers);
+  if (prefixes.length) {
+    lines.push("");
+    lines.push("# Provider endpoints — where the model calls actually go. Omit a provider");
+    lines.push("# to leave it on its vendor default. The API key stays in secrets/.env.");
+    lines.push("providers:");
+    for (const prefix of prefixes) {
+      const entry = providers[prefix];
+      lines.push(`  ${prefix}:`);
+      if (entry.baseUrl) lines.push(`    baseUrl: ${entry.baseUrl}`);
+      if (entry.api) lines.push(`    api: ${entry.api}`);
+      if (entry.envKey) lines.push(`    envKey: ${entry.envKey}`);
+    }
   }
   lines.push("");
   return lines.join("\n");
@@ -747,6 +775,8 @@ async function collectModelAndKey(): Promise<{
   model: string;
   /** Undefined for OAuth (subscription-login) providers — they use auth.json, not an env key. */
   providerApiKey: { envKey: string; value: string } | undefined;
+  /** Set only when the operator pointed a provider at their own gateway (issue #373). */
+  providers?: ProviderOverrides;
 }> {
   p.log.step(gold("Model provider"));
   p.log.info(
@@ -781,6 +811,10 @@ async function collectModelAndKey(): Promise<{
           label: `${o.displayName} ${dim("(OAuth login)")}`,
           hint: o.modelPrefix,
         })),
+        // A self-hosted / corporate LLM gateway, or any OpenAI- or
+        // Anthropic-compatible endpoint that isn't in the registry at all
+        // (issue #373). Writes a `providers:` block into the overlay.
+        { value: "__gateway__", label: "Self-hosted / gateway endpoint", hint: "OpenAI- or Anthropic-compatible" },
         { value: "__custom__", label: dim("Enter a custom provider/model...") },
       ],
     }),
@@ -814,6 +848,8 @@ async function collectModelAndKey(): Promise<{
     );
     return { model, providerApiKey: undefined };
   }
+
+  if (providerChoice === "__gateway__") return await collectGatewayProvider();
 
   let spec: ProviderSpec;
   let modelId: string;
@@ -884,6 +920,145 @@ async function collectModelAndKey(): Promise<{
 
   p.log.success(`Model: ${teal(model)} — key: ${dim(spec.envKey)}`);
   return { model, providerApiKey: { envKey: spec.envKey, value: key.trim() } };
+}
+
+/**
+ * The gateway branch of the provider picker (issue #373): point the model calls
+ * at a self-hosted or corporate endpoint instead of a vendor.
+ *
+ * Two cases, and the question that separates them is whether the gateway speaks
+ * *as* a provider Last Light already knows:
+ *
+ *   - **fronting a known provider** — the gateway proxies e.g. Anthropic. Pick
+ *     that prefix and only the URL moves; models, request shape and key env var
+ *     are inherited, and model ids stay the vendor's.
+ *   - **its own provider** — a new prefix, so the API family and the key's env
+ *     var have to be stated. This is the case for a local llama.cpp / vLLM /
+ *     LiteLLM endpoint that isn't pretending to be anyone.
+ *
+ * The URL is validated here with the same function the server uses at boot, so
+ * a mistake surfaces in the wizard rather than as a failed first workflow.
+ */
+async function collectGatewayProvider(): Promise<{
+  model: string;
+  providerApiKey: { envKey: string; value: string } | undefined;
+  providers?: ProviderOverrides;
+}> {
+  p.log.info(
+    dim("A gateway gives you central spend accounting, key custody, rate limiting and audit. ") +
+    dim("Last Light only needs its base URL and which API dialect it speaks."),
+  );
+
+  const fronting = required(
+    await p.select({
+      message: "Does the gateway front a provider Last Light already knows?",
+      initialValue: "known",
+      options: [
+        { value: "known", label: "Yes — it proxies a known provider", hint: "anthropic, openai, …" },
+        { value: "custom", label: "No — it's its own provider", hint: "self-hosted, Azure/Bedrock-fronted, …" },
+      ],
+    }),
+  ) as string;
+
+  let prefix: string;
+  let api: "openai-completions" | "anthropic-messages";
+  let envKey: string;
+  let keyPrefixHint: string | undefined;
+  if (fronting === "known") {
+    prefix = required(
+      await p.select({
+        message: "Which provider does it speak as?",
+        initialValue: "anthropic",
+        options: PROVIDERS.map((s) => ({ value: s.prefix, label: s.displayName, hint: s.prefix })),
+      }),
+    ) as string;
+    const base = providerByPrefix(prefix)!;
+    api = base.api;
+    envKey = base.envKey;
+    keyPrefixHint = base.keyPrefix;
+  } else {
+    prefix = (required(
+      await p.text({
+        message: `Provider name ${dim("(the prefix in provider/model — lowercase)")}`,
+        placeholder: "acme",
+        validate: (v) =>
+          v && /^[a-z0-9][a-z0-9._-]*$/.test(v.trim())
+            ? undefined
+            : "Lowercase letters, digits, \".\", \"-\" and \"_\" only (e.g. acme).",
+      }),
+    ) as string).trim();
+    api = required(
+      await p.select({
+        message: "Which API dialect does it speak?",
+        initialValue: "openai-completions",
+        options: [
+          { value: "openai-completions", label: "OpenAI chat completions", hint: "/chat/completions — the common one" },
+          { value: "anthropic-messages", label: "Anthropic messages", hint: "/messages" },
+        ],
+      }),
+    ) as "openai-completions" | "anthropic-messages";
+    const suggestedEnvKey = defaultProviderEnvKey(prefix);
+    envKey = ((required(
+      await p.text({
+        message: `Env var holding its API key ${dim("(stored in secrets/.env)")}`,
+        placeholder: suggestedEnvKey,
+        defaultValue: suggestedEnvKey,
+        validate: (v) =>
+          !v || !v.trim() || /^[A-Z][A-Z0-9_]*$/.test(v.trim())
+            ? undefined
+            : "Use an UPPER_SNAKE_CASE env var name.",
+      }),
+    ) as string) || suggestedEnvKey).trim();
+  }
+
+  const baseUrl = ((required(
+    await p.text({
+      message: `Base URL ${dim("(without /chat/completions or /messages)")}`,
+      placeholder: "https://gateway.internal/v1",
+      validate: (v) => {
+        if (!v || !v.trim()) return "Enter the gateway's base URL.";
+        try {
+          normalizeProviderBaseUrl(v, { prefix });
+          return undefined;
+        } catch (err) {
+          // Same validation the server applies at boot — https, or loopback.
+          return err instanceof Error ? err.message : String(err);
+        }
+      },
+    }),
+  ) as string)).trim();
+
+  const modelId = ((required(
+    await p.text({
+      message: `Model id ${dim("(as the gateway names it; the prefix is added automatically)")}`,
+      placeholder: fronting === "known" ? providerByPrefix(prefix)!.sampleModel : "my-model",
+      validate: (v) =>
+        v && v.trim() && /^[A-Za-z0-9][\w/.:-]*$/.test(v.trim()) ? undefined : "Enter the model id.",
+    }),
+  ) as string)).trim();
+
+  const key = ((required(
+    await p.text({
+      message: envKey,
+      placeholder: keyPrefixHint ? `${keyPrefixHint}…` : "paste the key the gateway expects",
+      validate: (v) => (v && v.trim() ? undefined : "Enter a non-empty API key."),
+    }),
+  ) as string)).trim();
+
+  const model = `${prefix}/${modelId}`;
+  const override = fronting === "known"
+    ? { baseUrl: normalizeProviderBaseUrl(baseUrl, { prefix }) }
+    : { baseUrl: normalizeProviderBaseUrl(baseUrl, { prefix }), api, envKey, fastModel: modelId };
+  p.log.success(`Model: ${teal(model)} via ${teal(override.baseUrl)} — key: ${dim(envKey)}`);
+  p.note(
+    `The endpoint goes in ${teal("instance/config.yaml")} under ${teal("providers:")} — it is routing, not a\n` +
+      `secret, so it is safe to commit. The key stays in ${teal("instance/secrets/.env")}.\n\n` +
+      dim("The sandbox egress firewall follows the URL automatically. A gateway on\n") +
+      dim("localhost or a private IP is only reachable from the in-process sandbox\n") +
+      dim("backends (gondolin / none), where the model call runs on the host."),
+    "Gateway endpoint",
+  );
+  return { model, providerApiKey: { envKey, value: key }, providers: { [prefix]: override } };
 }
 
 async function collectAdminPassword(): Promise<string | undefined> {
@@ -1110,7 +1285,7 @@ export async function runSetup(): Promise<void> {
   const managedRepos = mode === "chat" ? [] : await collectManagedRepos();
   // Infrastructure questions before model questions, matching the order above.
   const { url: databaseUrl } = await collectDatabase();
-  const { model, providerApiKey } = await collectModelAndKey();
+  const { model, providerApiKey, providers } = await collectModelAndKey();
   const adminPassword = await collectAdminPassword();
   const { botToken, appToken, deliveryChannel, allowedUsers } = await collectSlack();
 
@@ -1124,6 +1299,7 @@ export async function runSetup(): Promise<void> {
     DOMAIN: domain,
     LASTLIGHT_MODEL: model,
     providerApiKey,
+    providers,
     ADMIN_PASSWORD: adminPassword,
     SLACK_BOT_TOKEN: botToken,
     SLACK_APP_TOKEN: appToken,

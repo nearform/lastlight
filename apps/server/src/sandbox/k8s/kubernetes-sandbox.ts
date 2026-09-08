@@ -32,7 +32,7 @@ import { buildCloneInitContainer } from "./init-clone.js";
 import { buildSkillsInitContainer } from "./init-skills.js";
 import { buildAgentContextInitContainer } from "./init-agent-context.js";
 import { agentContextRegistry, type AgentContextRegistry } from "./agent-context-registry.js";
-import { DEFAULT_ALLOWLIST, mergeAllowlist } from "../egress-allowlist.js";
+import { defaultAllowlist, mergeAllowlist } from "../egress-allowlist.js";
 import { egressModeFor, type HarnessSelector } from "./egress-policy.js";
 import { EgressEnsurer, egressEnsurer } from "./egress-ensurer.js";
 import {
@@ -251,7 +251,7 @@ export class KubernetesSandbox implements Sandbox, AgentContextSink {
   private strictHosts(): string[] {
     const otel = this.opts.otel;
     const extra = otel?.enabled && otel.forwardToSandbox ? otel.collectorHosts : [];
-    return mergeAllowlist(DEFAULT_ALLOWLIST, extra);
+    return mergeAllowlist(defaultAllowlist(), extra);
   }
 
   /** Apply the egress policy pair once per namespace, via the injected

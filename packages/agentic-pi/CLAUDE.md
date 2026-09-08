@@ -43,6 +43,7 @@ wires a `CollectorSink`. This is what keeps `run()` silent on the process stream
 | Understanding why decisions are opinionated | `README.md` — "What this is opinionated about" |
 | Calling agentic-pi from your own Node code | `README.md` — "Programmatic usage", then `src/run.ts` + `src/index.ts` |
 | Building or modifying the CLI | `src/cli.ts`, `src/args.ts`, `src/runner.ts` |
+| Pointing a provider at a gateway | `src/providers.ts` (parse) + `src/models.ts` (`registerProviderOverrides`) |
 | Touching the JSONL event stream | `src/emitter.ts`, `src/runner.ts` |
 | Adding or modifying a GitHub tool | `src/extensions/github/tools.ts` (one defineTool per tool) |
 | Understanding why we don't sandbox in Docker | `SPIKE-gondolin.md` |
@@ -59,7 +60,18 @@ src/
   stdin.ts                Stdin slurp.
   emitter.ts              Sink abstraction (Stdout/Collector/Tee) + Emitter.
                           The runner emits through this; CLI and run() wire different sinks.
-  models.ts               "provider/id" → getModel(provider, id) from pi-ai.
+  models.ts               "provider/id" → getModel(provider, id) from pi-ai, plus
+                          registerProviderOverrides() — applies `--providers`
+                          endpoint overrides through pi's ModelRuntime
+                          registerProvider seam. A known provider is moved with a
+                          baseUrl-only registration (models/auth inherited); an
+                          unknown one has the run's model registered outright.
+                          resolveModel then prefers the REGISTRY over the static
+                          catalog for an overridden provider — the catalog would
+                          hand back the vendor's baseUrl and ignore the gateway.
+  providers.ts            Parse/validate the `--providers` / AGENTIC_PI_PROVIDERS
+                          JSON. Throws rather than warns: a dropped override
+                          sends the prompt and the key to the vendor.
   retry.ts                resolveRetrySettings() — flag > settings.json > our
                           bumped defaults (5 retries / 4s base) for transient-
                           error backoff. runner builds a SettingsManager and

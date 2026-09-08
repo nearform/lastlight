@@ -13,7 +13,12 @@ import type { PrePopulateSpec, SandboxFactory } from "../sandbox/sandbox.js";
 import { getDockerSandboxOtelEnv, getOtelEnvForSandbox, safeSpanAttributes, withSpan } from "../telemetry/index.js";
 import { OI, SpanKind, splitProviderModel } from "../telemetry/openinference.js";
 import { DEFAULT_MODEL } from "./executors/shared.js";
-import { PROVIDER_ENV_KEYS, providerByPrefix } from "lastlight-shared/providers";
+import { providerByPrefix } from "lastlight-shared/providers";
+import {
+  providerEndpointOverrides,
+  providerRegistry,
+  PROVIDER_OVERRIDES_ENV,
+} from "../config/provider-registry.js";
 import {
   OAUTH_ONLY_PROVIDERS,
   oauthEnvVarForProvider,
@@ -231,14 +236,26 @@ async function prepareRun(
     }
   }
 
-  // Provider API keys. Forwarded in registry order — see `src/providers.ts`
-  // (the single source of truth for wizard-able providers). Every entry a
-  // user can pick in the setup wizard is reachable from the sandbox because
-  // the egress firewall list is also derived from the same registry's hosts.
-  for (const envKey of PROVIDER_ENV_KEYS) {
+  // Provider API keys. Forwarded in registry order — see
+  // `packages/shared/src/providers.ts` (the single source of truth for
+  // wizard-able providers) as RESOLVED for this deployment, so a custom
+  // provider's key env var travels too. Every entry a user can pick in the
+  // setup wizard is reachable from the sandbox because the egress firewall list
+  // is derived from the same registry's hosts.
+  for (const envKey of providerRegistry().envKeys) {
     const v = process.env[envKey];
     if (v) ghEnv[envKey] = v;
   }
+
+  // Endpoint overrides (issue #373). The container backends (docker / smol /
+  // kubernetes) run `agentic-pi run` IN-GUEST, so the only channel that reaches
+  // the model call there is the environment — agentic-pi reads this as the
+  // fallback for its `--providers` flag. The in-process backends get the same
+  // payload as an argument (see `RunAgentOpts.providers`); this is set for every
+  // backend so the two routes can never disagree. Not a secret: a gateway URL is
+  // routing, and the key stays in its own env var.
+  const endpointOverrides = providerEndpointOverrides();
+  if (endpointOverrides) ghEnv[PROVIDER_OVERRIDES_ENV] = JSON.stringify(endpointOverrides);
 
   // OAuth-backed providers (subscription logins: Codex / Claude Pro / Copilot).
   //

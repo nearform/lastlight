@@ -24,7 +24,13 @@ cli-server.ts     `lastlight server` lifecycle (docker compose wrappers). Single
                   source of truth for `server update` (pull/build/prune).
 cli-format.ts     Table / age / color helpers for CLI output.
 cli-timeline.ts   Session timeline renderer.
-setup.ts          First-run setup wizard (client | server).
+setup.ts          First-run setup wizard (client | server). Its provider picker
+                  also offers "Self-hosted / gateway endpoint" (issue #373) —
+                  point a provider at your own LLM gateway, or declare one the
+                  registry has never heard of. That writes a `providers:` block
+                  into the overlay config.yaml (routing, safe to commit) while
+                  the key still goes to secrets/.env, and validates the URL with
+                  the same shared function the server applies at boot.
 fork-cli.ts       `lastlight fork` — copy built-in assets into the overlay.
 pr-cli.ts         `lastlight pr retry` — the admin-API client for the PR retry surface.
 repo-cli.ts       `lastlight repo` — a managed repo's own `.lastlight/` config layer

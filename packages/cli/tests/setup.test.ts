@@ -287,6 +287,32 @@ describe("buildOverlayConfig", () => {
     expect(yaml).not.toContain("hunter2");
     expect(yaml).not.toContain("database");
   });
+
+  /**
+   * The mirror image of the rule above: a gateway URL is routing, not a
+   * credential, so it BELONGS in the committed overlay — while the key that
+   * authenticates against it still rides `.env` (issue #373).
+   */
+  it("writes the gateway endpoint under providers:, and never its key", () => {
+    const withGateway: SetupConfig = {
+      ...cfg(["acme/one"]),
+      providerApiKey: { envKey: "ACME_KEY", value: "secret-value" },
+      providers: {
+        acme: { baseUrl: "https://llm.corp.example/v1", api: "openai-completions", envKey: "ACME_KEY" },
+      },
+    };
+    const yaml = buildOverlayConfig(withGateway);
+    expect(yaml).toContain("providers:");
+    expect(yaml).toContain("  acme:");
+    expect(yaml).toContain("    baseUrl: https://llm.corp.example/v1");
+    expect(yaml).toContain("    api: openai-completions");
+    expect(yaml).toContain("    envKey: ACME_KEY");
+    expect(yaml).not.toContain("secret-value");
+  });
+
+  it("omits the block entirely when no endpoint was overridden", () => {
+    expect(buildOverlayConfig(cfg(["acme/one"]))).not.toContain("providers:");
+  });
 });
 
 // ── The state-database choice (Phase 6) ────────────────────────────────────

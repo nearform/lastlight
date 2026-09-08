@@ -22,8 +22,9 @@
  * supports); only the screener/classifier path is constrained here.
  */
 
-import { PROVIDERS, providerByPrefix, type ApiType, type ProviderSpec } from "lastlight-shared/providers";
+import type { ApiType, ProviderSpec } from "lastlight-shared/providers";
 import { getRuntimeConfig } from "../config/config.js";
+import { providerRegistry } from "../config/provider-registry.js";
 
 export type ChatRole = "system" | "user" | "assistant";
 
@@ -98,7 +99,7 @@ export function resolveProvider(model: string): ResolvedProvider {
   if (slash > 0) {
     const prefix = model.slice(0, slash).toLowerCase();
     const tail = model.slice(slash + 1);
-    const spec = providerByPrefix(prefix);
+    const spec = providerRegistry().byPrefix(prefix);
     if (spec) {
       return {
         provider: spec.prefix,
@@ -108,7 +109,7 @@ export function resolveProvider(model: string): ResolvedProvider {
     }
     throw new Error(
       `llm helper: unsupported provider prefix "${prefix}" ` +
-        `(registered: ${PROVIDERS.map((p) => p.prefix).join(", ")})`,
+        `(registered: ${providerRegistry().providers.map((p) => p.prefix).join(", ")})`,
     );
   }
 
@@ -147,12 +148,14 @@ export function defaultFastModel(taskType?: string): string {
     const override = readOpencodeModelOverride(taskType);
     if (override) return override;
   }
-  for (const spec of PROVIDERS) {
-    if (process.env[spec.envKey]) return `${spec.prefix}/${spec.fastModel}`;
+  for (const spec of providerRegistry().providers) {
+    // A custom (deployment-declared) provider carries no fastModel unless the
+    // operator named one — skip it rather than emit `acme/` and 404 at call time.
+    if (spec.fastModel && process.env[spec.envKey]) return `${spec.prefix}/${spec.fastModel}`;
   }
   // No keys set — fall back to the OpenAI default; chat() will then throw a
   // clear "OPENAI_API_KEY not set" error at call time.
-  const openaiSpec = providerByPrefix("openai")!;
+  const openaiSpec = providerRegistry().byPrefix("openai")!;
   return `${openaiSpec.prefix}/${openaiSpec.fastModel}`;
 }
 
@@ -307,20 +310,25 @@ export async function chat(
   opts: ChatOptions = {},
 ): Promise<string> {
   const { provider, modelId, api } = resolveProvider(model);
-  const spec = providerByPrefix(provider);
+  const registry = providerRegistry();
+  const spec = registry.byPrefix(provider);
   // For bare-id inference where the prefix isn't in the registry (the
   // generic "assume OpenAI" fallback), synthesize a pseudo-spec so the
-  // OpenAI-completions builder still runs.
+  // OpenAI-completions builder still runs. Its endpoint is the registry's
+  // OpenAI entry, NOT a literal — a deployment that moved `openai` to its
+  // gateway would otherwise have this one path leak straight to the vendor.
+  const openaiSpec = registry.byPrefix("openai");
   const resolvedSpec: ProviderSpec =
     spec ?? {
       prefix: provider,
       displayName: provider,
-      envKey: "OPENAI_API_KEY",
-      baseUrl: "https://api.openai.com/v1",
+      envKey: openaiSpec?.envKey ?? "OPENAI_API_KEY",
+      baseUrl: openaiSpec?.baseUrl ?? "https://api.openai.com/v1",
       api,
-      host: "openai.com",
+      host: openaiSpec?.host ?? "openai.com",
       fastModel: modelId,
       sampleModel: modelId,
+      maxTokensField: openaiSpec?.maxTokensField,
     };
   return withRetry(async (signal) => {
     const apiKey = apiKeyFor(resolvedSpec);

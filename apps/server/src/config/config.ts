@@ -16,6 +16,12 @@ import {
   PG_DRIVERS,
   type PgDriver,
 } from "lastlight-shared/database-url";
+import {
+  providerOverridesFromEnv,
+  type ProviderOverride,
+  type ProviderOverrides,
+} from "lastlight-shared/providers";
+import { installProviderOverrides } from "./provider-registry.js";
 import type { SandboxBackend, BuildAssetsLocation, OtelConfig } from "lastlight-workflow-engine";
 import { logger } from "../logging/logger.js";
 
@@ -196,6 +202,13 @@ export interface LastLightConfig {
   sessionsDir: string;
   model: string;
   models: ModelConfig;
+  /**
+   * Per-provider endpoint overrides (issue #373) — how a deployment points the
+   * model calls at its own LLM gateway instead of the vendor. Normalized from
+   * the `providers:` block; the RESOLVED registry (defaults + these) lives in
+   * `src/config/provider-registry.ts` and is what every call site reads.
+   */
+  providers: ProviderOverrides;
   variants: VariantConfig;
   maxTurns: number;
   sandbox: SandboxBackend;
@@ -677,6 +690,16 @@ export function loadConfig(): LastLightConfig {
   const stateDir = resolve(stringEnv("STATE_DIR", "./data"));
   const models = fileCfg.models;
   const model = models.default;
+
+  // Resolve the provider registry ONCE, here, and install it process-wide
+  // (issue #373). Everything downstream — the cheap `llm.ts` helper, the sandbox
+  // egress allowlist, the env keys forwarded into the sandbox — reads the
+  // resolved registry rather than the shipped constants, so a deployment can
+  // point any provider at its own gateway. Throws on a malformed override:
+  // booting anyway would quietly send the traffic to the vendor instead.
+  installProviderOverrides(fileCfg.providers, {
+    allowInsecure: parseBool(process.env.LASTLIGHT_ALLOW_INSECURE_PROVIDER_URLS),
+  });
   const variants = fileCfg.variants;
   const sandbox = fileCfg.sandbox.backend;
   const maxTurns = fileCfg.sandbox.maxTurns;
@@ -778,6 +801,7 @@ export function loadConfig(): LastLightConfig {
     overlayDir,
     model,
     models,
+    providers: fileCfg.providers,
     variants,
     maxTurns,
     sandbox,
@@ -831,6 +855,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   disabled: DisabledConfig;
   crons: CronsConfig;
   models: ModelConfig;
+  providers: ProviderOverrides;
   variants: VariantConfig;
   sandbox: { backend: SandboxBackend; maxTurns: number };
   kubernetes?: Partial<KubernetesConfig>;
@@ -887,6 +912,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
 
   const models: ModelConfig = { default: typeof modelsRaw.default === "string" ? modelsRaw.default : DEFAULT_MODEL };
   for (const [k, v] of Object.entries(modelsRaw)) if (typeof v === "string") models[k] = v;
+  const providers = normalizeProviderOverrides(raw.providers);
   const variants: VariantConfig = {};
   for (const [k, v] of Object.entries(variantsRaw)) if (typeof v === "string") variants[k] = v;
   const approval: Record<string, boolean> = {};
@@ -1200,6 +1226,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     },
     crons,
     models,
+    providers,
     variants,
     sandbox: { backend, maxTurns },
     kubernetes,
@@ -1462,6 +1489,38 @@ function buildAssetsLocation(raw: unknown, path: string): BuildAssetsLocation {
   throw new Error(`${path} must be one of repo, server`);
 }
 
+/**
+ * Normalize the `providers:` block — a map of model-spec prefix → endpoint
+ * override (issue #373). Shape-only: URL/api validation happens in
+ * `resolveProviderRegistry` so the CLI's offline validator and the server agree.
+ */
+function normalizeProviderOverrides(raw: unknown): ProviderOverrides {
+  if (!isPlainObject(raw)) return {};
+  const out: Record<string, ProviderOverride> = {};
+  for (const [prefix, value] of Object.entries(raw)) {
+    if (!isPlainObject(value)) {
+      throw new Error(`providers.${prefix} must be a map (baseUrl, api, envKey, host, …)`);
+    }
+    const entry: Record<string, unknown> = {};
+    for (const key of ["baseUrl", "api", "envKey", "host", "displayName", "fastModel", "sampleModel"]) {
+      const v = value[key];
+      if (typeof v === "string" && v.trim()) entry[key] = v.trim();
+      else if (v !== undefined && v !== null) {
+        throw new Error(`providers.${prefix}.${key} must be a non-empty string`);
+      }
+    }
+    for (const key of ["contextWindow", "maxTokens"]) {
+      const v = value[key];
+      if (typeof v === "number" && Number.isInteger(v) && v > 0) entry[key] = v;
+      else if (v !== undefined && v !== null) {
+        throw new Error(`providers.${prefix}.${key} must be a positive integer`);
+      }
+    }
+    out[prefix] = entry as ProviderOverride;
+  }
+  return out;
+}
+
 function parseBool(raw: string | undefined): boolean {
   if (!raw) return false;
   const v = raw.trim().toLowerCase();
@@ -1487,6 +1546,19 @@ function buildEnvConfigLayer(env: NodeJS.ProcessEnv): Record<string, unknown> {
   if (modelDefault) models.default = modelDefault;
   applyJsonStringMap(models, env.LASTLIGHT_MODELS || env.OPENCODE_MODELS, "LASTLIGHT_MODELS");
   if (Object.keys(models).length) layer.models = models;
+
+  // providers: the per-provider `<PREFIX>_BASE_URL` vars first (ANTHROPIC_BASE_URL,
+  // OPENAI_BASE_URL, … — the names the vendor SDKs already use), then the
+  // LASTLIGHT_PROVIDERS JSON map on top, which is the only env route that can
+  // declare a provider the registry has never heard of. Both merge PER PREFIX
+  // with the config file rather than replacing the block, so a deployment can
+  // keep its custom provider in config.yaml and move one endpoint from the env.
+  const providers: Record<string, Record<string, unknown>> = {};
+  for (const [prefix, override] of Object.entries(providerOverridesFromEnv(env))) {
+    providers[prefix] = { ...override };
+  }
+  applyJsonProviderMap(providers, env.LASTLIGHT_PROVIDERS, "LASTLIGHT_PROVIDERS");
+  if (Object.keys(providers).length) layer.providers = providers;
 
   // variants: catch-all default, then per-task JSON map (non-empty values only).
   const variants: Record<string, string> = {};
@@ -1599,6 +1671,37 @@ function applyJsonStringMap(
       for (const [key, value] of Object.entries(parsed)) {
         if (typeof value === "string" && (!requireNonEmpty || value.length > 0)) target[key] = value;
       }
+    }
+  } catch (err: any) {
+    log.warn("Invalid JSON env var", { label, err });
+  }
+}
+
+/**
+ * Merge a `LASTLIGHT_PROVIDERS` JSON map (`{"acme":{"baseUrl":"…"}}`) into the
+ * env layer, per prefix. Sibling of {@link applyJsonStringMap}; separate because
+ * the values here are objects, not strings. Invalid JSON warns and is ignored —
+ * the same posture as every other JSON env var — while a well-formed but
+ * unusable override still fails loudly later, in `resolveProviderRegistry`.
+ */
+function applyJsonProviderMap(
+  target: Record<string, Record<string, unknown>>,
+  raw: string | undefined,
+  label: string,
+): void {
+  if (!raw) return;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isPlainObject(parsed)) {
+      log.warn("Env var must be a JSON object of prefix → override", { label });
+      return;
+    }
+    for (const [prefix, value] of Object.entries(parsed)) {
+      if (!isPlainObject(value)) {
+        log.warn("Ignoring non-object provider override", { label, prefix });
+        continue;
+      }
+      target[prefix] = { ...(target[prefix] ?? {}), ...value };
     }
   } catch (err: any) {
     log.warn("Invalid JSON env var", { label, err });

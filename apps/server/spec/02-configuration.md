@@ -39,6 +39,8 @@ interface LastLightConfig {
   sessionsDir: string;
   model: string;                          // provider/model, e.g. "anthropic/claude-sonnet-4-6"
   models: ModelConfig;                    // { default: string; [taskType: string]: string }
+  providers: ProviderOverrides;           // prefix → { baseUrl?, api?, envKey?, host?, … }
+                                          //   endpoint overrides; {} = every provider on its vendor default
   variants: VariantConfig;                // { default?: string; [taskType: string]: string | undefined }
   maxTurns: number;
   sandbox: SandboxBackend;                // "gondolin" | "docker" | "smol" | "none" | "kubernetes"
@@ -550,6 +552,9 @@ Without it, the Slack connector never registers.
 | `ANTHROPIC_API_KEY` | provider auth | — |
 | `OPENAI_API_KEY` | provider auth | — |
 | `OPENROUTER_API_KEY` | provider auth | — |
+| `<PREFIX>_BASE_URL` | endpoint override for one provider (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `KIMI_CODING_BASE_URL`, …) | the registry default |
+| `LASTLIGHT_PROVIDERS` | endpoint overrides as JSON — the only env route that can declare a provider the registry has never heard of | `{}` |
+| `LASTLIGHT_ALLOW_INSECURE_PROVIDER_URLS` | permit a plaintext `http://` endpoint on a non-loopback host | off |
 
 `OPENCODE_*` names are kept as legacy aliases — the runtime is now
 agentic-pi / pi-ai, but production deployments may still set the old
@@ -558,6 +563,70 @@ names and we don't want to break them. New deployments should prefer
 
 JSON parse failures on `*_MODELS` / `*_VARIANTS` log a warning and use
 `{}` — they do not crash boot.
+
+### Provider endpoints — pointing at a gateway
+
+`packages/shared/src/providers.ts` ships the endpoint for each of the ~18
+providers Last Light can wire. A deployment overrides any of them, or adds one
+the registry has never heard of, through a top-level `providers:` block:
+
+```yaml
+providers:
+  # A gateway that speaks Anthropic's dialect: only the URL moves. Models,
+  # request shape and ANTHROPIC_API_KEY are inherited from the registry entry.
+  anthropic:
+    baseUrl: https://gateway.internal/anthropic
+
+  # A provider that is not in the registry at all. `baseUrl` is required (there
+  # is nothing to inherit); `api` defaults to openai-completions and `envKey` to
+  # ACME_API_KEY, both derived from the prefix.
+  acme:
+    baseUrl: https://llm.corp.example/v1
+    api: openai-completions        # or anthropic-messages
+    envKey: ACME_API_KEY
+    host: llm.corp.example         # egress allowlist entry; defaults to the URL's hostname
+    fastModel: acme-small          # what the cheap helpers use if they pick this provider
+```
+
+Why it matters beyond convenience: a gateway is how a deployment gets central
+spend accounting, key custody, rate limiting and audit — and a self-hosted or
+Azure/Bedrock-fronted model is otherwise unreachable, because it is not one of
+the registry's entries.
+
+**Resolution.** `loadConfig()` resolves the shipped registry plus this block
+**once**, into a `ProviderRegistry` installed process-wide
+(`apps/server/src/config/provider-registry.ts`). Everything downstream reads the
+resolved registry rather than the shipped constants, which is what makes one
+config key reach four independent code paths:
+
+| Path | What follows the override |
+|---|---|
+| the cheap helpers (`src/engine/llm.ts`) | request URL, api family, key env var — including the bare-model-id fallback, which used to hardcode `api.openai.com` |
+| the sandbox (`agentic-pi`) | `AGENTIC_PI_PROVIDERS` in the sandbox env (container backends) and the `providers` run option (in-process backends); agentic-pi registers the override on pi's `ModelRuntime` |
+| the egress allowlist | the resolved `host` is what `providerHosts()` returns, so the firewall permits the gateway ([Sandbox](/spec/09-sandbox)) |
+| in-process chat (`src/engine/chat/chat-runner.ts`) | the resolved `baseUrl`, and a synthesized model for a custom provider pi-ai has no catalog entry for |
+
+**Precedence** is the ordinary one — `default < overlay < env` — and merges
+**per prefix**, so `ANTHROPIC_BASE_URL` moves one endpoint without dropping a
+custom provider declared in `config.yaml`.
+
+**A gateway URL is not a secret**, so it belongs in the version-controlled
+overlay `config.yaml` (the opposite of `database.url` — see the note there). The
+API key stays in `secrets/.env` under `envKey`.
+
+**Validation is fatal at boot.** An unparseable URL, a custom entry with no
+`baseUrl`, or plaintext `http://` on a non-loopback host throws rather than
+warns: a dropped override would send the operator's prompts and key to the
+vendor, which is exactly what the block exists to prevent.
+`http://localhost:4000` is allowed unqualified (the common self-hosted case);
+`LASTLIGHT_ALLOW_INSECURE_PROVIDER_URLS=1` extends that to any host.
+
+**Caveat — a loopback gateway and the sandbox.** `normalizeAllowlistHost` drops
+`localhost` and private IPs, so such a host never enters the egress allowlist.
+That is deliberate rather than a gap: the sandbox has its own loopback and could
+not have reached the host's gateway anyway. Use an in-process backend
+(`gondolin` / `none`, where the model call runs host-side), or give the gateway
+a resolvable name.
 
 ### Models / variants override JSON
 

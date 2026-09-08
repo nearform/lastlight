@@ -33,6 +33,7 @@ import {
   oauthProviderIdForModel,
   resolveOAuthApiKey,
 } from "../oauth.js";
+import { providerRegistry } from "../../config/provider-registry.js";
 import { logger } from "../../logging/logger.js";
 
 const log = logger("chat");
@@ -365,10 +366,14 @@ export class ChatRunner {
     const errors: string[] = [];
     const assistantMessages: AssistantMessage[] = [];
     const toolResults: ToolResultMessage[] = [];
+    // A provider pi-ai has no built-in entry for has no env-var convention it
+    // knows either, so the key has to be handed over explicitly — the same
+    // per-call channel the OAuth branch above uses.
+    const customKey = apiKey ?? customProviderApiKey(effectiveModel.provider);
     const opts: SimpleStreamOptions = {
       reasoning: pickReasoning(this.cfg.thinking),
       timeoutMs: this.cfg.timeoutMs ?? 120_000,
-      ...(apiKey ? { apiKey } : {}),
+      ...(customKey ? { apiKey: customKey } : {}),
     };
 
     let finish = "stop";
@@ -494,6 +499,10 @@ function resolveModel(spec: string): Model<Api> {
   if (idx < 0) throw new Error(`model spec must be 'provider/id', got '${spec}'`);
   const provider = spec.slice(0, idx);
   const modelId = spec.slice(idx + 1);
+  // Where this deployment says that provider lives (issue #373). Chat is a
+  // model call like any other: if the operator moved the endpoint to a gateway,
+  // this path has to follow it, or chat alone keeps talking to the vendor.
+  const endpoint = providerRegistry().endpoints.find((e) => e.prefix === provider);
   // pi-ai's getModel is typed against its static registry; at runtime it
   // accepts arbitrary strings AND returns undefined for unknown ids rather
   // than throwing. Without this guard the first chat turn crashes deep in
@@ -503,13 +512,40 @@ function resolveModel(spec: string): Model<Api> {
     provider,
     modelId,
   );
-  if (!model) {
-    throw new Error(
-      `Unknown chat model '${spec}'. pi-ai's registry has no '${modelId}' for provider '${provider}'. ` +
-      `Set LASTLIGHT_MODELS (or LASTLIGHT_MODEL) to a registered model id.`,
-    );
+  if (model) return endpoint ? { ...model, baseUrl: endpoint.baseUrl } : model;
+  if (endpoint) {
+    // A deployment-declared provider pi-ai has never heard of. Nothing to
+    // inherit, so the model is synthesized from the override: its api family
+    // decides the request shape and the gateway decides everything else. Cost
+    // is zero because a gateway publishes no price list — a chat turn against a
+    // custom provider reports no spend rather than a wrong one.
+    return {
+      id: modelId,
+      name: modelId,
+      api: endpoint.api as Api,
+      provider,
+      baseUrl: endpoint.baseUrl,
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: endpoint.contextWindow ?? 128_000,
+      maxTokens: endpoint.maxTokens ?? 16_384,
+    };
   }
-  return model;
+  throw new Error(
+    `Unknown chat model '${spec}'. pi-ai's registry has no '${modelId}' for provider '${provider}'. ` +
+    `Set LASTLIGHT_MODELS (or LASTLIGHT_MODEL) to a registered model id.`,
+  );
+}
+
+/**
+ * The API key for a deployment-declared (custom) provider, read from the env var
+ * its `providers:` entry names. Undefined for every built-in provider — pi-ai
+ * resolves those itself, and overriding would bypass the OAuth path.
+ */
+function customProviderApiKey(provider: string): string | undefined {
+  const endpoint = providerRegistry().endpoints.find((e) => e.prefix === provider && e.custom);
+  return endpoint ? process.env[endpoint.envKey] : undefined;
 }
 
 function textMessage(role: string, content: string, timestamp: string): Message {

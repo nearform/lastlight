@@ -14,7 +14,8 @@ import {
   type SandboxFactory,
 } from "../../sandbox/sandbox.js";
 import { SANDBOX_IMAGE_QA } from "../../sandbox/index.js";
-import { DEFAULT_ALLOWLIST, mergeAllowlist } from "../../sandbox/egress-allowlist.js";
+import { defaultAllowlist, mergeAllowlist } from "../../sandbox/egress-allowlist.js";
+import { providerEndpointOverrides } from "../../config/provider-registry.js";
 import {
   AGENTIC_PROFILE_FOR,
   agentContextFor,
@@ -96,7 +97,7 @@ export function egressPolicyFor(config: ExecutorConfig): EgressPolicy {
   if (config.unrestrictedEgress) return { unrestricted: true, hosts: [] };
   const extraHosts =
     config.otel?.enabled && config.otel.forwardToSandbox ? config.otel.collectorHosts : [];
-  return { unrestricted: false, hosts: mergeAllowlist(DEFAULT_ALLOWLIST, extraHosts) };
+  return { unrestricted: false, hosts: mergeAllowlist(defaultAllowlist(), extraHosts) };
 }
 
 /**
@@ -399,6 +400,7 @@ export async function runAgentIn(
           webSearch: config.webSearch === true,
           webSearchProvider: config.webSearchProvider,
           githubApiBaseUrl: config.githubApiBaseUrl,
+          providers: providerEndpointOverrides(),
         },
         onEvent,
       );

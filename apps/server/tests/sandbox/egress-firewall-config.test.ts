@@ -15,7 +15,7 @@ import {
   renderOtelCollectorConfig,
   SANDBOX_EGRESS_SUBNET,
 } from "#src/sandbox/egress-firewall-config.js";
-import { DEFAULT_ALLOWLIST } from "#src/sandbox/egress-allowlist.js";
+import { defaultAllowlist } from "#src/sandbox/egress-allowlist.js";
 import { parse as parseYaml } from "yaml";
 
 describe("static IP constants", () => {
@@ -45,7 +45,7 @@ describe("nginx strict config", () => {
   });
 
   it("emits a leading-dot map entry per allowlist host (apex+subdomain match)", () => {
-    for (const host of DEFAULT_ALLOWLIST) {
+    for (const host of defaultAllowlist()) {
       // nginx's `.foo.com` syntax matches `foo.com` and any subdomain.
       // Upstream is the live SNI value, not pinned at config time.
       expect(conf).toContain(`.${host} $ssl_preread_server_name:443;`);
@@ -89,7 +89,7 @@ describe("coredns strict Corefile", () => {
     const templateBlocks = conf.match(/template\s+IN\s+A\s*\{/g) || [];
     expect(templateBlocks.length).toBe(1);
 
-    for (const host of DEFAULT_ALLOWLIST) {
+    for (const host of defaultAllowlist()) {
       const escaped = host.replaceAll(".", "\\.");
       expect(conf).toContain(`(^|\\.)${escaped}\\.$`);
     }

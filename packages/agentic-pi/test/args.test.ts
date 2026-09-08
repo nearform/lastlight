@@ -317,6 +317,33 @@ describe("parseArgs", () => {
     );
   });
 
+  test("--providers parses endpoint overrides; the env var is the fallback", () => {
+    const cfg = parseArgs([
+      "--model",
+      "openai/gpt-4",
+      "--providers",
+      '{"openai":{"baseUrl":"https://gw.internal/openai/v1"}}',
+    ]);
+    assert.deepEqual(cfg.providers, { openai: { baseUrl: "https://gw.internal/openai/v1" } });
+
+    // The env route is how an orchestrator reaches a run inside a container.
+    const previous = process.env.AGENTIC_PI_PROVIDERS;
+    process.env.AGENTIC_PI_PROVIDERS = '{"acme":{"baseUrl":"https://gw/v1"}}';
+    try {
+      assert.deepEqual(parseArgs(["--model", "acme/m"]).providers, { acme: { baseUrl: "https://gw/v1" } });
+      // …and the flag wins over it.
+      const flagWins = parseArgs(["--model", "acme/m", "--providers", '{"acme":{"baseUrl":"https://flag/v1"}}']);
+      assert.equal(flagWins.providers!.acme.baseUrl, "https://flag/v1");
+    } finally {
+      if (previous === undefined) delete process.env.AGENTIC_PI_PROVIDERS;
+      else process.env.AGENTIC_PI_PROVIDERS = previous;
+    }
+  });
+
+  test("--providers rejects malformed JSON rather than silently using the vendor", () => {
+    assert.throws(() => parseArgs(["--model", "openai/gpt-4", "--providers", "{"]), /must be JSON/);
+  });
+
   test("unknown flag throws", () => {
     assert.throws(() => parseArgs(["--model", "openai/gpt-4", "--bogus"]), /unknown flag/);
   });
