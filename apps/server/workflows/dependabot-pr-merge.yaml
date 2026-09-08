@@ -7,6 +7,13 @@ name: dependabot-pr-merge
 # drops the key silently loses all four; `validateAssets` warns when a
 # `routes.github.pr_*` target is missing it.
 pr_scoped: true
+# Runtime policy (issue #368) — never pushes code, but
+# `github_enable_auto_merge` lives in the repo-write tool profile. Always
+# single-PR, so it keys its (checkout-free) run by (repo, PR) and a repeated
+# webhook + the daily cron backstop dedup onto one run. Full prose for each
+# key is in the workflow schema (packages/workflow-engine/src/core/schema.ts).
+git_access: repo-write
+workspace: per-target-reuse
 description: |
   Assess an already-GREEN dependency-update PR (Dependabot / Renovate) and, when
   the change is trivial, enable GitHub auto-merge (squash) so it lands once its

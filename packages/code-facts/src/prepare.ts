@@ -328,7 +328,7 @@ export function prepareTree(options: PrepareOptions): ProbeEnv {
     });
   } else if (nodeModules()) {
     // The common case on a re-review: `pr-review` is in
-    // PER_TARGET_REUSE_WORKFLOWS and the cross-run refresh is deliberately
+    // `workspace: per-target-reuse` and the cross-run refresh is deliberately
     // `git clean -fdx -e node_modules`, so dependencies survive.
     install = "already-present";
   } else {

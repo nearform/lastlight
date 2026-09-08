@@ -1,5 +1,9 @@
 kind: health
 name: security-feedback
+# Runtime policy (issue #368) — opens issues AND pushes a SECURITY.md
+# suppression PR, so it needs contents:write. Full prose for each key is in
+# the workflow schema (packages/workflow-engine/src/core/schema.ts).
+git_access: repo-write
 description: |
   Process maintainer feedback on a security-labelled issue (usually a
   per-run scan summary). Classifies the comment and acts:

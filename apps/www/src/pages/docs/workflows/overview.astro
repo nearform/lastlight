@@ -325,6 +325,27 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		</tbody>
 	</table>
 
+	<p>
+		A workflow picks its own profile with a <code>git_access:</code> key in its
+		YAML, alongside four sibling keys that decide how its sandbox workspace is
+		keyed and how its checkout is pre-populated
+		(<code>workspace</code>, <code>prepopulate_synth_branch</code>,
+		<code>prepopulate_pr_head_ref</code>, <code>pr_fix_shaped</code>). All five
+		default to the least-privileged answer, so a workflow that declares nothing
+		gets a read-only token and a fresh per-run workspace.
+	</p>
+
+	<p>
+		That matters for an <a href="/docs/configuration">instance overlay</a>: a
+		workflow you ship only in your overlay is first-class. It can mint itself a
+		review or push token and pin its checkout to a pull request's real head ref
+		without any change to Last Light itself. Previously these were tables of
+		literal workflow names compiled into the harness, so an overlay-only
+		workflow silently got a read token — it could not submit its review — and
+		pre-cloned the base branch, reviewing the wrong code with nothing in the
+		output to say so.
+	</p>
+
 	<div class="docs-next">
 		<a href="/docs/pr-state" class="prev">
 			<span class="label">&larr; Prev</span>

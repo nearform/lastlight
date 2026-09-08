@@ -1,5 +1,9 @@
 kind: comment
 name: pr-comment
+# Runtime policy (issue #368) — answers on the PR; never pushes code. Full
+# prose for each key is in the workflow schema
+# (packages/workflow-engine/src/core/schema.ts).
+git_access: issues-write
 description: |
   Answer a maintainer's question about an open PR with concrete, code-cited
   evidence. The PR-side counterpart to `issue-comment` — distinguished

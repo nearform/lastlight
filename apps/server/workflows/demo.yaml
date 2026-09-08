@@ -1,5 +1,15 @@
 kind: demo
 name: demo
+# Runtime policy (issue #368) — reads the repo and posts the demo comment (the
+# mp4 is an artifact, not a push). Pre-populates its synthesized branch so
+# `demo.mp4` lands under `.lastlight/<key>/` where `serverArtifacts()`
+# harvests it; against a real PR it pins to the PR's head ref, or the "after"
+# would collapse onto the default branch and match "before". Full prose for
+# each key is in the workflow schema
+# (packages/workflow-engine/src/core/schema.ts).
+git_access: issues-write
+prepopulate_synth_branch: true
+prepopulate_pr_head_ref: true
 classification:
   intent: demo
   description: |

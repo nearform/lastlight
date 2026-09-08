@@ -50,11 +50,9 @@ import { wrapUntrusted } from "../engine/screen/screen.js";
 import { buildProgressModel, runDashboardUrl } from "../notify/model.js";
 import { buildAssetIssueKey } from "../state/build-assets.js";
 import {
-  PER_TARGET_REUSE_WORKFLOWS,
-  PER_TARGET_RECREATE_WORKFLOWS,
-  PREPOPULATE_SYNTH_WORKFLOWS,
-  PR_HEADREF_PREPOPULATE_WORKFLOWS,
-  PR_FIX_SHAPED_WORKFLOWS,
+  isPerTargetWorkspace,
+  prepopulatesSynthBranch,
+  isPrFixShaped,
 } from "./target-policy.js";
 import { logger } from "../logging/logger.js";
 
@@ -653,17 +651,19 @@ export interface SimpleWorkflowRequest {
   repoConfig?: RunRepoConfig;
 }
 
-// Per-target workspace provisioning policy lives in `./target-policy.js` (a
-// leaf module the runner can share without an import cycle). Imported at the
-// top for local use; re-exported here for existing callers (e.g. src/index.ts
-// imports PR_HEADREF_PREPOPULATE_WORKFLOWS).
+// Per-workflow runtime policy lives in `./target-policy.js` (a leaf module the
+// runner can share without an import cycle), derived from each workflow's own
+// YAML keys rather than a hardcoded name table (issue #368). Re-exported here
+// for existing callers of this module's surface.
 export {
-  PER_TARGET_REUSE_WORKFLOWS,
-  PER_TARGET_RECREATE_WORKFLOWS,
-  PREPOPULATE_SYNTH_WORKFLOWS,
-  PR_HEADREF_PREPOPULATE_WORKFLOWS,
-  PR_FIX_SHAPED_WORKFLOWS,
-};
+  isPerTargetWorkspace,
+  isPerTargetReuse,
+  isPerTargetRecreate,
+  prepopulatesSynthBranch,
+  prepopulatesPrHeadRef,
+  isPrFixShaped,
+  prFixShapedWorkflows,
+} from "./target-policy.js";
 
 export function workflowScopedTaskId(
   repo: string,
@@ -679,17 +679,14 @@ export function workflowScopedTaskId(
   // attempt 2 would otherwise re-clone and re-install from cold just because
   // the event arrived differently. `dependabot-pr-merge` keeps its own key
   // below: it has no checkout to share.
-  if (number !== undefined && PR_FIX_SHAPED_WORKFLOWS.has(workflowName)) {
+  if (number !== undefined && isPrFixShaped(workflowName)) {
     return `${repo}-${number}-fix`;
   }
   // Reusable / recreatable per-target workspaces are keyed by (repo, issue)
   // only — no run suffix — so a re-run lands on the same dir (reused for
-  // pr-review/pr-fix, recreated-from-base for build; see the two sets above).
-  if (
-    number !== undefined &&
-    (PER_TARGET_REUSE_WORKFLOWS.has(workflowName) ||
-      PER_TARGET_RECREATE_WORKFLOWS.has(workflowName))
-  ) {
+  // pr-review/pr-fix, recreated-from-base for build; the two are the non-
+  // `per-run` arms of the workflow's own `workspace:` key).
+  if (number !== undefined && isPerTargetWorkspace(workflowName)) {
     return `${repo}-${number}-${workflowName}`;
   }
   const suffix = workflowId.slice(0, 8);
@@ -701,8 +698,8 @@ export function workflowScopedTaskId(
 /**
  * Reap the sandbox workspace of a run that just finished **successfully**
  * (issue #106). Only ephemeral per-run workspaces are removed here: the
- * reusable per-target ones (`PER_TARGET_REUSE_WORKFLOWS` /
- * `PER_TARGET_RECREATE_WORKFLOWS`) are a warm cache (issue #107) whose eviction
+ * reusable per-target ones (`workspace: per-target-reuse` /
+ * `per-target-recreate`) are a warm cache (issue #107) whose eviction
  * is owned by the backstop TTL/LRU sweep, so re-review fanout keeps its warm
  * `node_modules`. Failures are left for the sweep too (post-mortem debugging).
  * Best-effort — never throws into the already-succeeded run.
@@ -720,9 +717,7 @@ export function workflowScopedTaskId(
 export function reapOnSuccess(workflowName: string, taskId: string, config: ExecutorConfig): void {
   const rt = getRuntimeConfig();
   if (rt?.cleanup?.sandbox?.reapOnCompletion === false) return;
-  if (PER_TARGET_REUSE_WORKFLOWS.has(workflowName) || PER_TARGET_RECREATE_WORKFLOWS.has(workflowName)) {
-    return;
-  }
+  if (isPerTargetWorkspace(workflowName)) return;
   try {
     const { removed } = reapSandboxWorkspace({
       taskId,
@@ -778,13 +773,13 @@ export function resolveRunBranch(args: {
       ? `lastlight/${issueNumber}-${slugify(issueTitle || `issue-${issueNumber}`)}`
       : `lastlight/${workflowName}`);
 
-  // Pre-populate (clone into the sandbox, cwd = repo root) for the workflows in
-  // PREPOPULATE_SYNTH_WORKFLOWS even though they synthesize a not-yet-pushed
-  // branch — see that const's doc comment for why (the verify/qa-test harvest
-  // fix in particular).
+  // Pre-populate (clone into the sandbox, cwd = repo root) for a workflow that
+  // declares `prepopulate_synth_branch: true` even though it synthesizes a
+  // not-yet-pushed branch — see that key's doc comment for why (the
+  // verify/qa-test harvest fix in particular).
   const prePopulateBranch = storedPrePopulate
     ?? requestPrePopulateBranch
-    ?? (PREPOPULATE_SYNTH_WORKFLOWS.has(workflowName) ? branch : undefined);
+    ?? (prepopulatesSynthBranch(workflowName) ? branch : undefined);
 
   return { branch, prePopulateBranch };
 }
@@ -895,7 +890,7 @@ export function escalateFixModel(
   // carries a journal (the snapshot is resolved for `pr-review` and
   // `dependabot-pr-merge` too), so without this guard a review run would record
   // a rewritten map it never used.
-  if (!PR_FIX_SHAPED_WORKFLOWS.has(workflowName)) return models;
+  if (!isPrFixShaped(workflowName)) return models;
   if (!models) return models;
   const retry = models[FIX_RETRY_MODEL_KEY];
   if (!retry) return models;

@@ -1,113 +1,188 @@
 /**
- * Per-target sandbox-workspace provisioning policy — which workflows key their
- * workspace by (repo, issue/PR) and how a re-run treats an existing checkout.
+ * Per-workflow RUNTIME POLICY — the git-token profile a run is minted, how its
+ * sandbox workspace is keyed and refreshed, whether it pre-populates a
+ * synthesized branch or pins to a PR's real head ref, and whether it is shaped
+ * like `pr-fix`.
  *
- * This is a leaf module (no imports of the runner or the simple entrypoint) so
- * both `simple.ts` (taskId keying) and `runner.ts` (`gitSandboxAccessForWorkflow`)
- * can read the same source of truth without an import cycle. `simple.ts`
- * re-exports these for existing callers (e.g. `src/index.ts`).
+ * ## Why this is a workflow's own metadata
+ *
+ * All five of these used to be literal name tables in compiled core code — a
+ * `switch` in `runner.ts` and four `new Set([...])`s here. A workflow that
+ * exists only in a deployment OVERLAY could therefore never register itself
+ * into any of them: it silently got `git_access: read` (cannot submit a
+ * review, cannot push), a cold per-run clone, and no head-ref pinning (it
+ * reviews the BASE branch and says nothing about it). The only way to ship a
+ * first-class overlay workflow was a core patch naming an arm core does not
+ * ship (issue #368).
+ *
+ * The failure mode is the one `./pr-scope.ts` documents for `pr_scoped`, and
+ * this is the same refactor: everything these tables control is invisible in a
+ * run's output until it isn't. So each is declared on the workflow — see
+ * `git_access` / `workspace` / `prepopulate_synth_branch` /
+ * `prepopulate_pr_head_ref` / `pr_fix_shaped` in
+ * `packages/workflow-engine/src/core/schema.ts`, which carry the full prose —
+ * and read back off the loaded definitions here.
+ *
+ * ## Resolution
+ *
+ * Derived from the loader's merged layer stack (built-ins + the deployment
+ * overlay) and memoised on `getAssetVersion()`, so an admin asset reload
+ * re-derives it without a callback registry — exactly as `prScopedWorkflows()`
+ * does. Unlike `pr_scoped` there is NO legacy-name floor: this was a hard
+ * cutover, with every built-in YAML declaring its behaviour explicitly and a
+ * test pinning the derived policy entry-for-entry. What guards an overlay that
+ * forked a workflow before these keys existed is `validateAssets`, which warns
+ * when a workflow reachable from a configured `routes.github.*` declares none
+ * of them.
+ *
+ * A name the loader has never heard of — every in-process handler
+ * (`chat`, `approval-response`, …), and any caller passing a bare skill name —
+ * resolves to {@link DEFAULT_POLICY}, which is what the old tables' `default:`
+ * arm and `Set.has() === false` gave it.
+ *
+ * This stays a LEAF module (it imports the loader, but no importer of it —
+ * `runner.ts`, `simple.ts`, the engine — is imported by the loader) so both
+ * `simple.ts` (taskId keying) and `runner.ts` (`gitSandboxAccessForWorkflow`)
+ * can read one source of truth without an import cycle.
  */
+
+import type { GitAccessProfile } from "lastlight-workflow-engine";
+import { getAssetVersion, listAgentWorkflows } from "./loader.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("target-policy");
+
+/** How a workflow's sandbox workspace is keyed, and how a re-run treats it. */
+export type WorkspacePolicy = "per-run" | "per-target-reuse" | "per-target-recreate";
+
+/** The resolved runtime policy for one workflow. */
+export interface WorkflowTargetPolicy {
+  /** Permission profile the run's GitHub token is minted against. */
+  readonly gitAccess: GitAccessProfile;
+  /** Workspace keying + re-run refresh strategy. */
+  readonly workspace: WorkspacePolicy;
+  /** Pre-populate even though the branch is synthesized and not on the remote. */
+  readonly prepopulateSynthBranch: boolean;
+  /** Against a real PR, pin the pre-clone to the PR's head ref. */
+  readonly prepopulatePrHeadRef: boolean;
+  /** Dispatched through `handlePrFix`; member of the per-PR fix family. */
+  readonly prFixShaped: boolean;
+}
 
 /**
- * Workflows whose workspace is keyed by **(repo, PR)** rather than per-run.
- * For these the taskId drops the run-id suffix so re-reviews of the same PR
- * (push → `synchronize`, cron PR-review fanout) reuse one sandbox dir — a
- * warm `node_modules` + an incremental `git fetch` instead of a fresh
- * 1.3G clone + full install each time, and N dirs/PR collapse to 1 (issue
- * #107, cutting the #106 churn at its source). Concurrency is held off by
- * the dispatcher's `isRunning(skill, triggerId)` guard plus
- * `runs.getByTrigger` reuse — two runs never share the dir live; the
- * cross-run refresh in `prePopulateWorkspace` resets it cleanly between them.
- * `build` is handled by `PER_TARGET_RECREATE_WORKFLOWS` instead — it must not
- * *refresh* a stale checkout (that would reset onto the old feature branch);
- * it recreates the workspace from the default branch.
+ * What an undeclared — or unknown — workflow gets.
+ *
+ * Every field is the value the deleted hardcoded tables produced for a name
+ * they did not list, so a workflow that declares nothing behaves exactly as one
+ * missing from all five did.
  */
-export const PER_TARGET_REUSE_WORKFLOWS = new Set([
-  "pr-review",
-  "pr-fix",
-  "dependabot-ci-fix",
-  // dependabot-pr-merge is always single-PR (webhook or the cron's per-PR
-  // fan-out), so it keys its (checkout-free) run by (repo, PR): a repeated
-  // `pr.checks_passed` and the daily cron backstop for the same PR dedup onto
-  // one dir/run rather than stacking.
-  "dependabot-pr-merge",
-]);
+export const DEFAULT_POLICY: WorkflowTargetPolicy = {
+  gitAccess: "read",
+  workspace: "per-run",
+  prepopulateSynthBranch: false,
+  prepopulatePrHeadRef: false,
+  prFixShaped: false,
+};
+
+let cached: ReadonlyMap<string, WorkflowTargetPolicy> | null = null;
+let cachedAtVersion = -1;
+
+function derive(): ReadonlyMap<string, WorkflowTargetPolicy> {
+  const byName = new Map<string, WorkflowTargetPolicy>();
+  for (const def of listAgentWorkflows()) {
+    byName.set(def.name, {
+      gitAccess: def.git_access ?? DEFAULT_POLICY.gitAccess,
+      workspace: def.workspace ?? DEFAULT_POLICY.workspace,
+      prepopulateSynthBranch: def.prepopulate_synth_branch === true,
+      prepopulatePrHeadRef: def.prepopulate_pr_head_ref === true,
+      prFixShaped: def.pr_fix_shaped === true,
+    });
+  }
+  return byName;
+}
+
+function policies(): ReadonlyMap<string, WorkflowTargetPolicy> {
+  const version = getAssetVersion();
+  if (cached && cachedAtVersion === version) return cached;
+  let byName: ReadonlyMap<string, WorkflowTargetPolicy>;
+  try {
+    byName = derive();
+  } catch (err: unknown) {
+    // A loader that cannot read its workflows must not take the process with
+    // it: every lookup then falls through to DEFAULT_POLICY, the least
+    // privileged answer (read token, cold per-run workspace, no pinning).
+    log.warn("Could not read the workflow definitions — every workflow falls back to the default policy", { err });
+    byName = new Map();
+  }
+  cached = byName;
+  cachedAtVersion = version;
+  return cached;
+}
 
 /**
- * Workflows shaped like `pr-fix`: dispatched off a PR event, they resolve the
- * PR's head branch + failed-check details and push a fix to that branch. The
- * dispatcher routes all of them through `handlePrFix` (branch resolution, CI
- * failure summary, fork-PR skip), and `dispatchWorkflow` honours the `branch`
- * they plumb through context as the pre-populate branch. `dependabot-ci-fix`
- * (fix a failing dependency-update PR, then auto-merge trivial ones) is the
- * second member. Kept here so the dispatcher and `src/index.ts` share one list.
+ * The resolved policy for one workflow, by name.
+ *
+ * Cheap to call — memoised per asset version, and every caller is on a dispatch
+ * path that already resolves config.
  */
-export const PR_FIX_SHAPED_WORKFLOWS = new Set(["pr-fix", "dependabot-ci-fix"]);
+export function workflowTargetPolicy(workflowName: string): WorkflowTargetPolicy {
+  return policies().get(workflowName) ?? DEFAULT_POLICY;
+}
 
-// `DEPENDENCY_WEBHOOK_WORKFLOWS` lived here: the set the dispatcher's
-// pre-sandbox idempotency guard was scoped to (skip a PR carrying
-// `requires-human`, or one already assessed at its current head SHA). Both
-// signals are now fields of the resolved `PrState` snapshot and the guard is a
-// pure decision over it (`engine/pr-decisions.ts` → `resolveFixDisposition`),
-// which applies to every PR-scoped workflow and every route rather than to two
-// workflows on the webhook path — so the set had no readers left. The span the
-// snapshot covers is `prScopedWorkflows()` in `./pr-scope.ts`, derived from each
-// workflow's own `pr_scoped: true` metadata.
+/** What the GitHub token minted for this workflow's sandbox may do. */
+export function gitAccessFor(workflowName: string): GitAccessProfile {
+  return workflowTargetPolicy(workflowName).gitAccess;
+}
 
-/**
- * Workflows whose per-target workspace is **recreated from the default branch**
- * on a fresh run rather than refreshed onto an existing feature branch. Like
- * `PER_TARGET_REUSE_WORKFLOWS`, these key the taskId by (repo, issue) only (no
- * run-id suffix) so a re-run lands on the same dir — but a *different*-run
- * marker triggers a delete + fresh clone off the default branch, not a
- * `git fetch`/reset of the (stale) feature branch. This makes an incomplete
- * `build` disposable: re-triggering it starts again from current `main`
- * (issue #153). A genuine *resume* of the same run (approval gate) still
- * preserves the workspace via the same-run marker — the architect's `plan.md`
- * survives. Concurrency is held off by the dispatcher's
- * `isRunning(skill, triggerId)` guard, so the delete only ever hits a leftover
- * from a finished/abandoned run.
- */
-export const PER_TARGET_RECREATE_WORKFLOWS = new Set(["build"]);
+/** Is this workflow's workspace keyed by (repo, target) rather than per-run? */
+export function isPerTargetWorkspace(workflowName: string): boolean {
+  return workflowTargetPolicy(workflowName).workspace !== "per-run";
+}
+
+/** Keyed by (repo, target) and REFRESHED across runs (`per-target-reuse`). */
+export function isPerTargetReuse(workflowName: string): boolean {
+  return workflowTargetPolicy(workflowName).workspace === "per-target-reuse";
+}
 
 /**
- * Workflows that synthesize their own `lastlight/N-slug` branch (which doesn't
- * exist on the remote at dispatch time) yet should still pre-populate the
- * sandbox: the agent's cwd becomes the repo root (no `git clone`/`cd`), and —
- * for the read-only `verify`/`qa-test` runs — server-mode artifacts the agent
- * writes to `.lastlight/<key>/` (e.g. browser-QA screenshots) land where
- * `serverArtifacts()` harvests them instead of being orphaned a level up.
- * `build` was the original member; verify/qa-test were added for the harvest
- * fix, and `demo` for the same reason (its `demo.mp4` is written under
- * `.lastlight/<key>/` and harvested into the Artifacts store). For a fresh
- * (issue-scoped) dispatch the dispatcher leaves `prePopulateBranch` unset and
- * the missing-branch fallback in `prePopulateWorkspace` clones the default
- * branch — correct for `build`/`demo`, which *create* the synth branch off the
- * default. But when the *same* workflow runs against an existing PR, the synth
- * `lastlight/<prNumber>-<title-slug>` name won't match the PR's real head ref
- * (named after the originating issue), so the fallback would clone the default
- * branch and test/demo code that lacks the PR — see
- * `PR_HEADREF_PREPOPULATE_WORKFLOWS`.
+ * Keyed by (repo, target) and RECREATED from the default branch on a fresh run
+ * (`per-target-recreate`) — read as `recreateFromBase` by the sandbox.
  */
-export const PREPOPULATE_SYNTH_WORKFLOWS = new Set(["build", "verify", "qa-test", "demo"]);
+export function isPerTargetRecreate(workflowName: string): boolean {
+  return workflowTargetPolicy(workflowName).workspace === "per-target-recreate";
+}
+
+/** Pre-populate the sandbox even though this workflow's branch is synthesized. */
+export function prepopulatesSynthBranch(workflowName: string): boolean {
+  return workflowTargetPolicy(workflowName).prepopulateSynthBranch;
+}
+
+/** Against a real PR, pin the pre-clone to the PR's actual head ref. */
+export function prepopulatesPrHeadRef(workflowName: string): boolean {
+  return workflowTargetPolicy(workflowName).prepopulatePrHeadRef;
+}
+
+/** Is this workflow dispatched through `handlePrFix`? */
+export function isPrFixShaped(workflowName: string): boolean {
+  return workflowTargetPolicy(workflowName).prFixShaped;
+}
 
 /**
- * The subset of PR-scoped read workflows the dispatcher pins to the PR's *real*
- * head ref (via `getPullRequest(...).head.ref`) before pre-populating, instead
- * of letting them fall back to the synthesized `lastlight/N-<title-slug>` name.
- * Each of these is meaningful only against an existing PR, and the synth name
- * never matches the PR's actual branch (which is named after the originating
- * issue, e.g. `lastlight/14-…` for a PR #15). Without this pinning:
- *   - `qa-test` / `verify` QA the *base* branch and report the PR's feature
- *     missing — a false-negative result.
- *   - `demo`'s "after" collapses onto the default branch, matching "before".
- * `pr-fix` is handled separately (it plumbs `branch` through context for the
- * architect/executor to push to). See the resolution block in
- * `dispatchWorkflow` (src/index.ts).
+ * Every `pr_fix_shaped` workflow, by name — the fix FAMILY.
+ *
+ * Kept as a set (not just the predicate) because several callers need to
+ * ENUMERATE it rather than test one name: the shared per-PR workspace key, the
+ * fix ledger's per-family scan (`engine/pr-state.ts`) and the admin PR-retry
+ * route's `latestForTrigger` all ask "which of these last worked this PR".
  */
-export const PR_HEADREF_PREPOPULATE_WORKFLOWS = new Set([
-  "pr-review",
-  "demo",
-  "qa-test",
-  "verify",
-]);
+export function prFixShapedWorkflows(): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const [name, policy] of policies()) if (policy.prFixShaped) names.add(name);
+  return names;
+}
+
+/** Drop the memo. Tests only — production invalidates on `getAssetVersion()`. */
+export function __resetTargetPolicyCacheForTest(): void {
+  cached = null;
+  cachedAtVersion = -1;
+}

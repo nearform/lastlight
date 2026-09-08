@@ -1,5 +1,15 @@
 kind: qa-test
 name: qa-test
+# Runtime policy (issue #368) — reads the repo and posts a step-level QA
+# report; never pushes code. Pre-populates its synthesized branch so
+# browser-QA screenshots land under `.lastlight/<key>/` where
+# `serverArtifacts()` harvests them; against a real PR it pins to the PR's
+# head ref, or it would QA the base branch and report the PR's feature
+# missing. Full prose for each key is in the workflow schema
+# (packages/workflow-engine/src/core/schema.ts).
+git_access: issues-write
+prepopulate_synth_branch: true
+prepopulate_pr_head_ref: true
 classification:
   intent: qa-test
   description: |

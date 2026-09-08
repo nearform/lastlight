@@ -19,14 +19,21 @@ vi.mock("#src/logging/logger.js", () => {
   return { logger: () => noopLogger };
 });
 
-import { workflowScopedTaskId, resolveRunBranch, artifactIssueDir, reapOnSuccess, PER_TARGET_REUSE_WORKFLOWS, PER_TARGET_RECREATE_WORKFLOWS, PREPOPULATE_SYNTH_WORKFLOWS, PR_HEADREF_PREPOPULATE_WORKFLOWS } from "#src/workflows/simple.js";
+import { workflowScopedTaskId, resolveRunBranch, artifactIssueDir, reapOnSuccess, prepopulatesSynthBranch, prepopulatesPrHeadRef } from "#src/workflows/simple.js";
+
+// Policy is now derived from each workflow's own YAML keys (issue #368), so
+// these are the built-in members spelled out rather than an imported Set. That
+// the derivation still produces exactly them is pinned entry-for-entry by
+// tests/workflows/target-policy.test.ts.
+const PER_TARGET_REUSE = ["pr-review", "pr-fix", "dependabot-ci-fix", "dependabot-pr-merge"];
+const PER_TARGET_RECREATE = ["build"];
 import type { ExecutorConfig } from "#src/engine/github/profiles.js";
 
 const RUN = "abcdef12-3456-7890-abcd-ef1234567890";
 
 describe("workflowScopedTaskId", () => {
   it("keys per-target workflows by (repo, PR) with no run suffix so they reuse one workspace", () => {
-    for (const wf of PER_TARGET_REUSE_WORKFLOWS) {
+    for (const wf of PER_TARGET_REUSE) {
       const a = workflowScopedTaskId("drizzle-cube", 918, wf, RUN);
       const b = workflowScopedTaskId("drizzle-cube", 918, wf, "different-run-id");
       // Two separate runs on the same PR resolve to the same dir → reuse.
@@ -57,7 +64,7 @@ describe("workflowScopedTaskId", () => {
   });
 
   it("keys build (recreate-from-base) by (repo, issue) with no run suffix so a re-run lands on the same dir", () => {
-    for (const wf of PER_TARGET_RECREATE_WORKFLOWS) {
+    for (const wf of PER_TARGET_RECREATE) {
       const a = workflowScopedTaskId("drizzle-cube", 918, wf, RUN);
       const b = workflowScopedTaskId("drizzle-cube", 918, wf, "different-run-id");
       expect(a).toBe(`drizzle-cube-918-${wf}`);
@@ -182,39 +189,39 @@ describe("resolveRunBranch", () => {
   });
 });
 
-describe("PREPOPULATE_SYNTH_WORKFLOWS", () => {
+describe("prepopulate_synth_branch", () => {
   it("includes verify and qa-test so their browser-QA screenshots harvest correctly", () => {
     // The harvest fix hinges on these pre-populating like build (cwd = repo
     // root), so server-mode artifacts land where serverArtifacts() reads them.
-    expect(PREPOPULATE_SYNTH_WORKFLOWS.has("verify")).toBe(true);
-    expect(PREPOPULATE_SYNTH_WORKFLOWS.has("qa-test")).toBe(true);
-    expect(PREPOPULATE_SYNTH_WORKFLOWS.has("build")).toBe(true);
+    expect(prepopulatesSynthBranch("verify")).toBe(true);
+    expect(prepopulatesSynthBranch("qa-test")).toBe(true);
+    expect(prepopulatesSynthBranch("build")).toBe(true);
   });
 
   it("does not pre-populate read-only scan workflows that clone in-session", () => {
-    expect(PREPOPULATE_SYNTH_WORKFLOWS.has("triage")).toBe(false);
-    expect(PREPOPULATE_SYNTH_WORKFLOWS.has("answer")).toBe(false);
+    expect(prepopulatesSynthBranch("triage")).toBe(false);
+    expect(prepopulatesSynthBranch("answer")).toBe(false);
   });
 });
 
-describe("PR_HEADREF_PREPOPULATE_WORKFLOWS", () => {
+describe("prepopulate_pr_head_ref", () => {
   it("pins qa-test and verify to the PR head ref so they QA the PR, not the base branch", () => {
     // Regression: when run against an existing PR these synthesize a
     // `lastlight/<prNumber>-<title-slug>` branch that doesn't match the PR's
     // real head ref (named after the originating issue). Without head-ref
     // pinning the sandbox cloned the *default* branch and reported the PR's
     // feature missing — a false-negative QA result.
-    expect(PR_HEADREF_PREPOPULATE_WORKFLOWS.has("qa-test")).toBe(true);
-    expect(PR_HEADREF_PREPOPULATE_WORKFLOWS.has("verify")).toBe(true);
+    expect(prepopulatesPrHeadRef("qa-test")).toBe(true);
+    expect(prepopulatesPrHeadRef("verify")).toBe(true);
   });
 
   it("also pins pr-review and demo (the original members)", () => {
-    expect(PR_HEADREF_PREPOPULATE_WORKFLOWS.has("pr-review")).toBe(true);
-    expect(PR_HEADREF_PREPOPULATE_WORKFLOWS.has("demo")).toBe(true);
+    expect(prepopulatesPrHeadRef("pr-review")).toBe(true);
+    expect(prepopulatesPrHeadRef("demo")).toBe(true);
   });
 
   it("does not pin build — it creates the synth branch off the default branch", () => {
-    expect(PR_HEADREF_PREPOPULATE_WORKFLOWS.has("build")).toBe(false);
+    expect(prepopulatesPrHeadRef("build")).toBe(false);
   });
 });
 
@@ -242,7 +249,7 @@ describe("reapOnSuccess (issue #106)", () => {
   });
 
   it("keeps reusable per-target workspaces (they are a warm cache)", () => {
-    for (const wf of [...PER_TARGET_REUSE_WORKFLOWS, ...PER_TARGET_RECREATE_WORKFLOWS]) {
+    for (const wf of [...PER_TARGET_REUSE, ...PER_TARGET_RECREATE]) {
       const taskId = `acme-9-${wf}`;
       const { config, workDir } = seed(taskId);
       reapOnSuccess(wf, taskId, config);

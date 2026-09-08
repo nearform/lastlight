@@ -7,6 +7,13 @@ name: pr-fix
 # drops the key silently loses all four; `validateAssets` warns when a
 # `routes.github.pr_*` target is missing it.
 pr_scoped: true
+# Runtime policy (issue #368) — pushes a fix to the PR's head branch, through
+# `handlePrFix`. Shares the fix family's one workspace per PR
+# (`${repo}-${N}-fix`). Full prose for each key is in the workflow schema
+# (packages/workflow-engine/src/core/schema.ts).
+git_access: repo-write
+workspace: per-target-reuse
+pr_fix_shaped: true
 description: "Lightweight PR fix — no architect/reviewer, just fix and push"
 trigger: pr-fix
 # Single in-place task-list comment/message instead of a comment per phase.

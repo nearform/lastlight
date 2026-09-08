@@ -4,7 +4,11 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-vi.mock("#src/workflows/loader.js", () => ({
+// PARTIAL — `simple.ts` now derives the run's workspace/pre-populate policy off
+// the real loaded definitions (issue #368), so `listAgentWorkflows` /
+// `getAssetVersion` must stay real.
+vi.mock("#src/workflows/loader.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("#src/workflows/loader.js")>()),
   getWorkflow: vi.fn(() => ({
     name: "explore",
     kind: "agent",

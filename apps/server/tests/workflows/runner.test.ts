@@ -19,7 +19,11 @@ vi.mock("#src/admin/docker.js", () => ({
 }));
 
 // Mock the loader so templates come from strings, not files
-vi.mock("#src/workflows/loader.js", () => ({
+// PARTIAL — only the template load is faked. `gitAccessProfileForWorkflow` now
+// derives each workflow's `git_access` off the real loaded definitions (issue
+// #368), so `listAgentWorkflows` / `getAssetVersion` must stay real.
+vi.mock("#src/workflows/loader.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("#src/workflows/loader.js")>()),
   loadPromptTemplate: vi.fn((path: string) => `TEMPLATE:${path}`),
 }));
 

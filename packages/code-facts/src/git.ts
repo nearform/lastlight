@@ -17,7 +17,7 @@
  * here for materialising an arbitrary commit. WP1's rule stands whoever calls
  * it: the agent's checkout must never be mutated, because a `git checkout` in
  * the review workspace would race the agent's own reads and the workspace is
- * reused across runs (`PER_TARGET_REUSE_WORKFLOWS`).
+ * reused across runs (`workspace: per-target-reuse`).
  *
  * **Git also enumerates the files this package scans** — see `listFiles`. That
  * is not a tidiness preference: `.gitignore` is the only description of "what in

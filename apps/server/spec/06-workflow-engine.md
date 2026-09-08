@@ -65,6 +65,12 @@ as `src/workflows/schema.ts`):
   description?: string;
   trigger?: string;      // informational
   pr_scoped?: boolean;   // this workflow runs against a PULL REQUEST — see below
+  // Runtime policy (issue #368) — see "Runtime-policy keys" below
+  git_access?: "read" | "issues-write" | "review-write" | "repo-write";
+  workspace?: "per-run" | "per-target-reuse" | "per-target-recreate";
+  prepopulate_synth_branch?: boolean;
+  prepopulate_pr_head_ref?: boolean;
+  pr_fix_shaped?: boolean;
   variables?: Record<string, string>;
   classification?: {     // how the intent classifier routes to this workflow (issue #164)
     intent: string;      //   the intent token this workflow owns (unique; not a control intent)
@@ -81,7 +87,7 @@ as `src/workflows/schema.ts`):
 }
 ```
 
-`pr_scoped: true` is the one key here the runner acts on. It puts a workflow
+`pr_scoped: true` is the first of six keys here the runner acts on. It puts a workflow
 inside the PR-scoped dispatch gate: the run lock shared with every other
 PR-scoped workflow, the per-head-SHA dedup, escalation, and the resolved
 `PrState` snapshot on `context.prState`. `prScopedWorkflows()`
@@ -98,6 +104,56 @@ branch (issue #256). `validateAssets` now warns at boot when a configured
 names are also honoured without the key, for overlays that forked them before it
 existed, with a warning naming the file. See
 [05-router.md → the PR-scoped dispatch gate](05-router.md#the-pr-scoped-dispatch-gate).
+
+### Runtime-policy keys
+
+The five keys beside `pr_scoped` answer the same question for the rest of a
+workflow's runtime behaviour: what its GitHub token may do, how its sandbox
+workspace is keyed, and how its checkout is pre-populated. All five default to
+the value a workflow got by being absent from the hardcoded tables they
+replaced, so a workflow declaring none of them behaves exactly as an unlisted
+one did.
+
+| Key | Type | Default | What it decides |
+|---|---|---|---|
+| `git_access` | `read` \| `issues-write` \| `review-write` \| `repo-write` | `read` | The permission profile the run's installation token is minted against (`GITHUB_PERMISSION_PROFILES`, `src/engine/github/profiles.ts`) and the agentic github-tool set the sandbox gets. `repo-write` also switches the pre-clone off `--depth 1`. |
+| `workspace` | `per-run` \| `per-target-reuse` \| `per-target-recreate` | `per-run` | How the taskId is keyed and how a re-run treats an existing checkout: a fresh reaped workspace per run; one warm dir per (repo, target) refreshed across runs (issue #107); or one dir per (repo, target) **deleted and re-cloned from the default branch** on a different-run marker (issue #153). |
+| `prepopulate_synth_branch` | boolean | `false` | Pre-clone into the sandbox (cwd = repo root) even though the workflow synthesizes a `lastlight/N-slug` branch that is not on the remote — so server-mode artifacts written to `.lastlight/<key>/` land where `serverArtifacts()` harvests them. |
+| `prepopulate_pr_head_ref` | boolean | `false` | Against a real PR, pin the pre-clone to the PR's **actual** head ref instead of the synthesized name. Without it the missing-branch fallback clones the base branch and the workflow QAs/reviews/demos the wrong code, silently. |
+| `pr_fix_shaped` | boolean | `false` | Route the workflow through `handlePrFix`, and make it a member of the fix family: the shared `${repo}-${N}-fix` workspace, the `models["pr-fix-retry"]` escalation, the fix-marker harvest, and the admin PR-retry lookup. Requires `pr_scoped: true`. |
+
+`workflowTargetPolicy()` (`src/workflows/target-policy.ts`) derives them from the
+loaded definitions and memoises on the loader's asset version, exactly as
+`prScopedWorkflows()` does; `gitAccessProfileForWorkflow()` keeps its signature
+and becomes a lookup over the same map.
+
+The reason they are metadata is the reason `pr_scoped` is. Each was a literal
+name table in compiled core code — a `switch` in `runner.ts` and four `Set`s in
+`target-policy.ts` — so a workflow shipped only in a deployment **overlay** could
+never register itself into any of them. It got a `read` token (cannot submit a
+review, cannot push) and no head-ref pinning (reviews the base branch), and the
+only fix was a core patch naming an arm core does not ship (issue #368). Note
+that `git_access` differs from `pr_scoped` in kind: it is not a gate that only
+adds restrictions, it decides what the minted token can do, so an overlay
+declaring `repo-write` mints itself a push token. That is deliberate — overlays
+already own prompts, skills and the agent persona.
+
+Two loader invariants, both throwing at boot:
+
+- **`pr_fix_shaped` ⇒ `pr_scoped`.** `handlePrFix` reads the head branch, the
+  fork verdict and the CI evidence off the `PrState` snapshot that only the
+  PR-scoped dispatch gate resolves; outside the gate there is nothing to fix.
+- **`workspace: per-target-recreate` ⇒ a pre-populate source.**
+  Recreate-from-base only means anything for a workflow whose workspace is
+  pre-cloned.
+
+The cutover was **hard** — the tables were deleted, not unioned in, so unlike
+`pr_scoped` there is no legacy-name floor. All sixteen packaged workflows declare
+their behaviour explicitly and `tests/workflows/target-policy.test.ts` pins the
+derived policy against the deleted tables entry-for-entry. For an overlay that
+forked a built-in before these keys existed, `validateAssets` **warns** at boot
+when a workflow reachable from a configured `routes.github.*` declares none of
+the five.
 
 The optional `classification` block makes a workflow **self-describing to the
 router**: its `description`/`examples` are composed into the classifier prompt

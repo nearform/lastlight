@@ -200,8 +200,12 @@ describe("validateAssets warns when a PR route loses the gate", () => {
 
     validateAssets({ github: { pr_review: "my-review" } } as never, log);
 
-    expect(log.warn).toHaveBeenCalledTimes(1);
-    const [msg, fields] = log.warn.mock.calls[0]!;
+    // `validateAssets` also warns that the fork declares none of the #368
+    // runtime-policy keys, which is true and separate; this suite is about the
+    // pr_scoped one, so select it by its field shape.
+    const scoped = log.warn.mock.calls.filter((c) => "routeKey" in (c[1] as object));
+    expect(scoped).toHaveLength(1);
+    const [msg, fields] = scoped[0]!;
     expect(fields).toMatchObject({ routeKey: "github.pr_review", target: "my-review" });
     expect(msg).toContain("pr_scoped: true");
   });
@@ -212,7 +216,7 @@ describe("validateAssets warns when a PR route loses the gate", () => {
 
     validateAssets({ github: { pr_review: "my-review" } } as never, log);
 
-    expect(log.warn).not.toHaveBeenCalled();
+    expect(log.warn.mock.calls.filter((c) => "routeKey" in (c[1] as object))).toHaveLength(0);
   });
 
   it("does not warn for routes that are not PR-scoped by design", () => {
@@ -223,7 +227,7 @@ describe("validateAssets warns when a PR route loses the gate", () => {
 
     validateAssets({ github: { pr_comment: "pr-comment" } } as never, log);
 
-    expect(log.warn).not.toHaveBeenCalled();
+    expect(log.warn.mock.calls.filter((c) => "routeKey" in (c[1] as object))).toHaveLength(0);
   });
 
   it("warns rather than throwing, so a deliberate remap still boots", () => {

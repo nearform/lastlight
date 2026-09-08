@@ -25,7 +25,7 @@ import type { WorkflowRun } from "../state/workflow-run-store.js";
 import type { GitHubClient } from "./github/github.js";
 import type { CiFailureReport } from "./github/github.js";
 import type { SpecLinkedIssue } from "./review-spec.js";
-import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
+import { prFixShapedWorkflows } from "../workflows/target-policy.js";
 import { prScopedWorkflows } from "../workflows/pr-scope.js";
 import { readHarvestedMarkers, type HarvestedFixMarkers } from "./fix-harvest.js";
 import {
@@ -118,7 +118,7 @@ export const INTERVENTION_PHASE = "retry-requested";
  *   precondition re-evaluates every event, whereas a stored verdict freezes
  *   (see `resolveFixDisposition` and 09 → D1).
  * - **derived from our own history, keyed on the PR** — what WE have already
- *   done about it. Keyed on (`PR_FIX_SHAPED_WORKFLOWS`, PR), never on one
+ *   done about it. Keyed on (`pr_fix_shaped` workflows, PR), never on one
  *   workflow, because "how many times have we tried to fix this PR" is a fact
  *   about the pull request (09 → S1).
  *
@@ -789,7 +789,7 @@ export async function resolveSpecContext(
  * table without touching GitHub.
  */
 export async function applyDerivedState(state: PrState, deps: PrStateDeps): Promise<void> {
-  const family = [...PR_FIX_SHAPED_WORKFLOWS];
+  const family = [...prFixShapedWorkflows()];
   const prScoped = [...prScopedWorkflows()];
   const triggerId = prTriggerId(state.repo, state.prNumber);
 
@@ -922,7 +922,7 @@ function unassessForPendingRetry(state: PrState, succeeded: Record<string, Workf
   const ask = state.intervention;
   if (!ask || !state.headSha || ask.atSha !== state.headSha) return;
   const asked = interventionKey(ask);
-  for (const name of PR_FIX_SHAPED_WORKFLOWS) {
+  for (const name of prFixShapedWorkflows()) {
     if (state.assessedHeadShaByWorkflow[name] !== state.headSha) continue;
     const seen = interventionKey(
       coerceIntervention(priorPrState(succeeded[name]?.context)?.intervention),

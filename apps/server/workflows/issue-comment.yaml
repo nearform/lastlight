@@ -1,5 +1,9 @@
 kind: comment
 name: issue-comment
+# Runtime policy (issue #368) — replies in-thread; never pushes code. Full
+# prose for each key is in the workflow schema
+# (packages/workflow-engine/src/core/schema.ts).
+git_access: issues-write
 description: |
   Respond conversationally to a comment on an issue. Used when a maintainer
   comments on an issue without explicitly asking for a build — the bot

@@ -11,7 +11,11 @@ vi.mock("#src/engine/agent-executor.js", () => ({
 vi.mock("#src/admin/docker.js", () => ({
   listRunningContainers: vi.fn(async () => []),
 }));
-vi.mock("#src/workflows/loader.js", () => ({
+// PARTIAL — only the template load is faked. The runner now derives each
+// workflow's runtime policy off the real loaded definitions (issue #368), so
+// `listAgentWorkflows` / `getAssetVersion` must stay real.
+vi.mock("#src/workflows/loader.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("#src/workflows/loader.js")>()),
   loadPromptTemplate: vi.fn((path: string) => `TEMPLATE:${path}`),
 }));
 vi.mock("child_process", () => ({ execSync: vi.fn() }));

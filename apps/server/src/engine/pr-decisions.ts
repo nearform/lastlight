@@ -28,7 +28,7 @@
 import type { DependenciesConfig, FixConfig, ReviewConfig } from "../config/config.js";
 import type { PrState } from "./pr-state.js";
 import { renderCiFailureReport } from "./github/github.js";
-import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
+import { isPrFixShaped, prFixShapedWorkflows } from "../workflows/target-policy.js";
 import { HOLD_LABEL } from "../cron/dependabot-discovery.js";
 import { ATTEMPT_FREE_CLASSES } from "./fix-markers.js";
 import { renderPrNotes } from "./pr-notes.js";
@@ -612,7 +612,7 @@ export function resolveFixDisposition(
   // while a run that correctly concluded "not fixable from here" recorded
   // `succeeded` and is not.
   if (opts.dedupOnHeadSha && !opts.explicitRequest && state.headSha) {
-    const assessedBy = [...PR_FIX_SHAPED_WORKFLOWS].find(
+    const assessedBy = [...prFixShapedWorkflows()].find(
       (w) => state.assessedHeadShaByWorkflow[w] === state.headSha,
     );
     if (assessedBy) {
@@ -1373,7 +1373,7 @@ export function resolveDispatchDisposition(
     if (held) return held;
   }
 
-  if (PR_FIX_SHAPED_WORKFLOWS.has(workflowName)) {
+  if (isPrFixShaped(workflowName)) {
     return resolveFixDisposition(state, cfg.fix, opts);
   }
   if (workflowName === "dependabot-pr-merge") {

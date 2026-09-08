@@ -41,7 +41,7 @@ import { routeEvent, type Route } from "../engine/router.js";
 import { applyPrDispatchGate, prPolicyConfig } from "../engine/dispatcher.js";
 import { resolvePrState, prTriggerId } from "../engine/pr-state.js";
 import { holdReply, type PrPolicyConfig } from "../engine/pr-decisions.js";
-import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
+import { prFixShapedWorkflows } from "../workflows/target-policy.js";
 import type { GitHubClient } from "../engine/github/github.js";
 import { classifyComment, type ClassificationResult } from "../engine/screen/classifier.js";
 import type { EventEnvelope, EventType } from "../connectors/types.js";
@@ -2900,7 +2900,7 @@ export function createAdminRoutes(
     // stuck (`dependabot-ci-fix` for a dependency PR, `pr-fix` otherwise)
     // without a second GitHub read to re-derive what the router already decided
     // once. A PR we have never fixed falls back to the configured `pr_fix` route.
-    const prior = await db.runs.latestForTrigger([...PR_FIX_SHAPED_WORKFLOWS], prTriggerId(repo, prNumber));
+    const prior = await db.runs.latestForTrigger([...prFixShapedWorkflows()], prTriggerId(repo, prNumber));
     const workflowName = prior?.workflowName ?? getRoutes().github?.pr_fix ?? "pr-fix";
 
     const state = await resolvePrState(owner, name, prNumber, {

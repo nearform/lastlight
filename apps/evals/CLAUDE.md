@@ -516,7 +516,8 @@ provider just needs its key set + a registry id — no harness change.
 ## Adding a workflow/tier
 
 When pointing the harness at a new real workflow, check:
-- `gitAccessProfileForWorkflow` (in core, `lastlight`'s `workflows/runner.ts`)
+- `gitAccessProfileForWorkflow` (in core, `lastlight`'s `workflows/runner.ts`;
+  a lookup over each workflow's own `git_access:` YAML key since issue #368)
   maps it to a profile → which `github_*` tools the agent gets. This lives in
   the installed `lastlight` package now, not here.
 - `fake-github.ts` implements every REST endpoint that profile's tools call.
