@@ -463,6 +463,24 @@ async function main() {
       return { success: false, error: msg };
     }
 
+    // Choke-point admin kill switch. `runSimpleWorkflow` reads it too — and
+    // stays the backstop, since it is the function `apps/evals` calls — but it
+    // reads it at the BOTTOM of the stack, after everything below has already
+    // been paid for: the repo config layer, `resolvePrState`'s GitHub reads,
+    // `resolveSpecContext`'s obligation reads, and the review gate, whose
+    // `carried-over` placeholder is exempt from the `attention` route limit and
+    // so could post a check on behalf of a workflow that is switched off. This
+    // is the cron / `/api/run` / resume half of the same fix the dispatcher
+    // makes for the webhook and Slack routes.
+    //
+    // `success: true`, matching `runSimpleWorkflow`: a disabled workflow is a
+    // deliberate setting, not a failure, and a cron fan-out must not paint
+    // itself red or count the skip against `failures`.
+    if (!(await db.isWorkflowEnabled(workflowName))) {
+      log.info("Skipped — disabled in admin dashboard", { workflowName, repo: repoStr });
+      return { success: true };
+    }
+
     // Per-repository config layer (issue #180). Resolved at the SAME choke
     // point and for the same reason as the guard above: every trigger path
     // funnels through here, so one call covers webhook, router, cron, `/api/*`

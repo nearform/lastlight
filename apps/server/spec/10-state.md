@@ -437,6 +437,17 @@ CREATE TABLE IF NOT EXISTS workflow_overrides (
 
 Workflow-level kill switch. Absence of a row = enabled by default.
 
+Read at **three** points, and the earliest of them is the one that matters.
+`dispatch` reads it the moment the router names a workflow — before the 👀 ack,
+before the PR state machine, before the `last-light/review` placeholder;
+`dispatchWorkflow` reads it before the snapshot spends its GitHub reads, which
+covers the cron and `/api/run` routes that never cross the dispatcher; and
+`runSimpleWorkflow` reads it last, stating the invariant at the only place that
+creates a `workflow_runs` row. Reading it *only* in the last of those is a
+defect, not an optimisation: a disabled `pr-review` still reacted 👀 and still
+posted a `queued` `last-light/review` check that nothing could ever conclude,
+because the run that concludes it is precisely the run the switch drops.
+
 ### `users`
 
 First-class user identity, populated on every dashboard login (GitHub +

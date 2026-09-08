@@ -988,10 +988,19 @@ export async function runSimpleWorkflow(
   variants?: VariantConfig,
   concurrency?: { maxWorkflows: number; maxQueueWaitMs: number },
 ): Promise<WorkflowResult & { backpressure?: boolean }> {
-  // Kill switch — if an admin has disabled this workflow in the dashboard,
-  // skip every trigger source (cron, webhooks, mentions, Slack) without
-  // creating a workflow_runs row. Returning success=true keeps callers
-  // (router, cron tick, etc.) from treating this as an error.
+  // Kill switch — the BACKSTOP copy.
+  //
+  // The switch is read twice above this line, and has to be: `dispatch` reads
+  // it before it reacts 👀 or posts the `last-light/review` placeholder, and
+  // `dispatchWorkflow` reads it before the PR state machine spends its GitHub
+  // reads. Both of those are about side effects this function is far too late
+  // to prevent. This read is kept anyway: it is the invariant itself — no run
+  // row is ever created for a disabled workflow — stated at the only place
+  // that creates one, rather than only at the two gates that happen to sit in
+  // front of today's callers.
+  //
+  // Returning success=true keeps callers (router, cron tick, etc.) from
+  // treating a deliberate setting as an error.
   if (!(await db.isWorkflowEnabled(workflowName))) {
     workflowLog.info("Skipped — disabled in admin dashboard", { workflowName });
     return { success: true, phases: [] };

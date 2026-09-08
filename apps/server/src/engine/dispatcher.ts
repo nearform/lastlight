@@ -50,6 +50,27 @@ const dispatchLog = logger("dispatch");
 const approvalLog = logger("approval");
 
 /**
+ * Route handlers that are NOT workflows.
+ *
+ * Everything else the router can name — `pr-review`, `issue-triage`, a fork
+ * named in `routes.github.*` — is a workflow definition, and is therefore
+ * subject to the admin kill switch below. These five are in-process branches of
+ * `dispatch` itself: they have no YAML, no `workflow_runs` row, and no
+ * definition for `getWorkflow` to resolve, so the admin toggle route already
+ * refuses to persist an override for them (it validates the name first). Naming
+ * them here keeps `isWorkflowEnabled`'s "enabled unless explicitly disabled"
+ * default from being the only thing standing between them and a kill switch
+ * they were never meant to have.
+ */
+const IN_PROCESS_HANDLERS = new Set([
+  "chat",
+  "chat-reset",
+  "status-report",
+  "explore-reply",
+  "approval-response",
+]);
+
+/**
  * Hand a workflow to the runner. Matches `dispatchWorkflow` in index.ts — the
  * dispatcher names workflows and accumulates their outcome but owns none of the
  * sandbox/runner plumbing.
@@ -189,6 +210,41 @@ export async function dispatch(
   // route.action === "handler"
   const { handler, context } = route;
   const routeKey = typeof context._routeKey === "string" ? context._routeKey : undefined;
+
+  // ── The admin kill switch, read BEFORE the first side effect ──────────────
+  //
+  // `runSimpleWorkflow` reads it too and remains the backstop for the paths
+  // that never reach this function (cron ticks, `/api/run`), but that read is
+  // the LAST step of a dispatch — and by the time it says "disabled" this one
+  // has already: reacted 👀 on the triggering comment (immediately below),
+  // resolved the PR state machine at the cost of several GitHub reads, and —
+  // for `pr-review` under `review.trigger: after-checks` — posted the
+  // `last-light/review` "Waiting for CI" placeholder from the skip path.
+  //
+  // That last one is not cosmetic. Nothing ever concludes that check: the run
+  // that would conclude it is the run the kill switch drops, and the 30-minute
+  // sweep cannot post a superseding one (`postReviewCheckForSkip` is limited to
+  // the `attention` route). A disabled `pr-review` therefore left every newly
+  // opened PR wearing a permanently `queued` check — unmergeable, if the
+  // deployment requires it.
+  //
+  // So the switch is read here, at the one point every GitHub and Slack route
+  // crosses on its way to a workflow, before anything observable happens.
+  if (!IN_PROCESS_HANDLERS.has(handler) && !(await deps.db.isWorkflowEnabled(handler))) {
+    eventLog.info("Skipped — workflow disabled in admin dashboard", {
+      workflowName: handler,
+      type: envelope.type,
+      repo: envelope.repo,
+    });
+    // Silence on GitHub is the whole point of the switch: no reaction, no
+    // comment, no check. A messaging turn is a synchronous conversation
+    // though, and answering a direct request with nothing at all reads as a
+    // broken bot rather than as a deliberate setting, so it gets one line.
+    if (envelope.source !== "github") {
+      await envelope.reply(`The \`${handler}\` workflow is currently disabled.`);
+    }
+    return { kind: "skipped", reason: `workflow disabled: ${handler}` };
+  }
 
   // Instant ack: the moment we've classified a GitHub event as something we'll
   // act on, react 👀 on the triggering comment/issue so the user sees feedback

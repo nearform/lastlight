@@ -67,9 +67,12 @@ function mockDb(over: Record<string, any> = {}) {
     respond: vi.fn(),
     getPendingByTrigger: vi.fn(),
     getPendingForWorkflow: vi.fn(),
+    // top-level — the admin kill switch, read before the 👀 ack
+    isWorkflowEnabled: vi.fn().mockResolvedValue(true),
     ...over,
   };
   return {
+    isWorkflowEnabled: m.isWorkflowEnabled,
     executions: {
       isRunning: m.isRunning,
       runningExecutions: m.runningExecutions,
@@ -1852,5 +1855,137 @@ describe('dispatch — the dependency-merge disposition', () => {
 
     expect(outcome.kind).toBe('dispatched');
     expect(deps.dispatchWorkflow).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('dispatch — the admin kill switch', () => {
+  // The switch used to be read only by `runSimpleWorkflow`, at the BOTTOM of
+  // the dispatch stack. Everything a disabled workflow is supposed not to do —
+  // the 👀 ack, the PR state machine's GitHub reads, the `last-light/review`
+  // placeholder — had already happened by the time it said "disabled", and the
+  // placeholder in particular was never concluded, because the run that would
+  // conclude it is the one the switch drops. These cases pin the read to the
+  // point BEFORE the first side effect.
+  afterEach(() => resetRuntimeConfigForTests());
+
+  const off = () => mockDb({ isWorkflowEnabled: vi.fn().mockResolvedValue(false) }) as any;
+
+  it('does not react 👀 on a comment routed to a disabled workflow', async () => {
+    const github = {
+      reactToComment: vi.fn().mockResolvedValue(undefined),
+      reactToIssue: vi.fn().mockResolvedValue(undefined),
+    };
+    const dispatchWorkflow = vi.fn();
+    const envelope = makeEnvelope({
+      type: 'comment.created',
+      issueNumber: 7,
+      raw: { comment: { id: 999 } },
+    });
+    const deps = makeDeps(
+      { action: 'handler', handler: 'issue-comment', context: { repo: 'cliftonc/lastlight', issueNumber: 7 } },
+      { db: off(), github: github as any, dispatchWorkflow },
+    );
+
+    expect(await dispatch(envelope, deps)).toEqual({
+      kind: 'skipped',
+      reason: 'workflow disabled: issue-comment',
+    });
+    expect(github.reactToComment).not.toHaveBeenCalled();
+    expect(github.reactToIssue).not.toHaveBeenCalled();
+    expect(dispatchWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('does not post the `last-light/review` placeholder for a disabled pr-review', async () => {
+    // The exact production shape: `after-checks` + a pending CI suite, which
+    // is what posts the `queued` "Waiting for CI" check on PR attention.
+    setRuntimeConfig({
+      botName: 'last-light',
+      botLogin: 'last-light[bot]',
+      fix: defaultFixConfig(),
+      dependencies: defaultDependenciesConfig(),
+      review: { ...defaultReviewConfig(), trigger: 'after-checks', postsCheck: true },
+    } as any);
+    const github = prGithubStub(
+      { checksState: 'pending' },
+      { createCheckRun: vi.fn().mockResolvedValue(4242), reactToIssue: vi.fn() },
+    );
+    const dispatchWorkflow = vi.fn();
+    const envelope = makeEnvelope({ type: 'pr.opened', repo: 'cliftonc/lastlight', prNumber: 8 });
+    const deps = makeDeps(
+      {
+        action: 'handler',
+        handler: 'pr-review',
+        context: { _routeKey: 'github.pr_opened', repo: 'cliftonc/lastlight', prNumber: 8 },
+      },
+      { db: off(), github, dispatchWorkflow },
+    );
+
+    expect((await dispatch(envelope, deps)).kind).toBe('skipped');
+    expect(github.createCheckRun).not.toHaveBeenCalled();
+    expect(github.reactToIssue).not.toHaveBeenCalled();
+    expect(dispatchWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('stays silent on GitHub but answers a messaging turn', async () => {
+    const ghEnvelope = makeEnvelope({ type: 'issue.opened', issueNumber: 7 });
+    await dispatch(
+      ghEnvelope,
+      makeDeps(
+        { action: 'handler', handler: 'issue-triage', context: { repo: 'cliftonc/lastlight', issueNumber: 7 } },
+        { db: off(), github: { reactToIssue: vi.fn() } as any },
+      ),
+    );
+    expect(ghEnvelope.reply).not.toHaveBeenCalled();
+
+    const slackEnvelope = makeEnvelope({ source: 'slack', type: 'message' });
+    await dispatch(
+      slackEnvelope,
+      makeDeps(
+        { action: 'handler', handler: 'build', context: { repo: 'cliftonc/lastlight', issueNumber: 7 } },
+        { db: off(), sessionManager: { addMessage: vi.fn() } as any },
+      ),
+    );
+    expect(slackEnvelope.reply).toHaveBeenCalledWith(expect.stringMatching(/`build`.*disabled/i));
+  });
+
+  it('does not gate the in-process handlers, which have no definition to toggle', async () => {
+    // `isWorkflowEnabled` defaults to "enabled unless explicitly disabled", so
+    // a `false` here can only come from an override row the admin toggle route
+    // would refuse to write. The exemption is what keeps chat reachable if one
+    // ever appears.
+    const runChat = vi.fn().mockResolvedValue(chatResult());
+    const outcome = await dispatch(
+      makeEnvelope({ type: 'message' }),
+      makeDeps(
+        { action: 'handler', handler: 'chat', context: { sessionId: 'sess-1', message: 'hi', sender: 'octocat' } },
+        {
+          db: off(),
+          sessionManager: { getSession: vi.fn(), setAgentSessionId: vi.fn() } as any,
+          runChat,
+        },
+      ),
+    );
+
+    expect(outcome).toEqual({ kind: 'handled', handler: 'chat' });
+    expect(runChat).toHaveBeenCalled();
+  });
+
+  it('an enabled workflow dispatches exactly as before', async () => {
+    const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
+    const isWorkflowEnabled = vi.fn().mockResolvedValue(true);
+    const outcome = await dispatch(
+      makeEnvelope({ type: 'issue.opened', issueNumber: 7 }),
+      makeDeps(
+        { action: 'handler', handler: 'issue-triage', context: { repo: 'cliftonc/lastlight', issueNumber: 7 } },
+        {
+          db: mockDb({ isWorkflowEnabled }) as any,
+          github: { reactToIssue: vi.fn().mockResolvedValue(undefined) } as any,
+          dispatchWorkflow,
+        },
+      ),
+    );
+
+    expect(isWorkflowEnabled).toHaveBeenCalledWith('issue-triage');
+    expect(outcome).toEqual({ kind: 'dispatched', workflow: 'issue-triage' });
   });
 });
