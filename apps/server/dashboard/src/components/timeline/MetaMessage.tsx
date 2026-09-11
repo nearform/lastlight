@@ -25,14 +25,14 @@ export function MetaMessage({ msg, isNew }: Props) {
       dense
       title={
         <>
-          <RowIcon Icon={Icon} color="text-base-content/60" bg="bg-base-content/10" />
-          <span className="text-2xs font-semibold uppercase tracking-wider text-base-content/60 shrink-0">
+          <RowIcon Icon={Icon} color="text-muted" bg="bg-base-content/10" />
+          <span className="text-2xs font-semibold uppercase tracking-wider text-muted shrink-0">
             {label}
           </span>
           {isSystem && text && (
             <>
-              <span className="text-base-content/25 shrink-0">-</span>
-              <span className="text-2xs text-base-content/60 truncate flex-1">
+              <span className="text-faint shrink-0">-</span>
+              <span className="text-2xs text-muted truncate flex-1">
                 {text.split("\n")[0]?.slice(0, 140)}
               </span>
             </>
@@ -42,7 +42,7 @@ export function MetaMessage({ msg, isNew }: Props) {
       headerRight={
         <button
           onClick={() => setExpanded(!expanded)}
-          className="text-2xs text-base-content/40 hover:text-base-content font-mono shrink-0"
+          className="text-2xs text-faint hover:text-base-content font-mono shrink-0"
         >
           {expanded ? "-" : "+"}
         </button>

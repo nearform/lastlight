@@ -70,10 +70,10 @@ export function CliAuthorize({
 
   return (
     <div className="h-full flex items-center justify-center p-6">
-      <div className="card bg-base-200 shadow-xl w-full max-w-md">
+      <div className="card bg-base-200 border border-hairline rounded-panel shadow-pop w-full max-w-md">
         <div className="card-body">
           <h2 className="card-title">Authorize CLI login</h2>
-          <p className="text-sm text-base-content/70">
+          <p className="text-sm text-strong">
             A command-line tool on this machine (<code className="text-xs">{host}</code>) is
             requesting access to this Last Light instance. Authorizing sends it a session token
             valid for ~30 days (and the CLI keeps it renewed while you use it).

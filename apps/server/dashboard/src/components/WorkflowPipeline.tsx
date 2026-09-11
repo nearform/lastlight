@@ -18,6 +18,7 @@ import type {
   WorkflowApproval,
 } from "../api";
 import {
+  edgeStyle,
   pipelineNodeTypes,
   type PhaseStatus,
   type PipelineNodeData,
@@ -38,7 +39,13 @@ function nodeDataEqual(a: PhaseNodeData, b: PhaseNodeData): boolean {
     a.selected === b.selected &&
     a.kind === b.kind &&
     a.pulse === b.pulse &&
-    a.summary === b.summary
+    a.summary === b.summary &&
+    // Constant per node id in practice (the definition is fetched once), but
+    // this function is exactly the shape that produces "silently never
+    // updates" bugs, so a field it renders belongs in the comparison.
+    a.phaseType === b.phaseType &&
+    a.hasGate === b.hasGate &&
+    a.iterates === b.iterates
   );
 }
 
@@ -124,12 +131,25 @@ function reconcileEdges(prev: Edge[], next: Edge[]): Edge[] {
  * was a different height. Width is the cheap lever on that — it buys uniform
  * height without truncating anything.
  */
-const NODE_WIDTH = 150;
+const NODE_WIDTH = 190;
 const NODE_GAP = 40;
-// Approximate rendered height of a nested node (label + the combined
-// time·duration line + padding). Sets the vertical pitch inside a container.
-const NODE_ROW_HEIGHT = 62;
+// Approximate rendered height of a NESTED node (header strip + the combined
+// time·duration line). Sets the vertical pitch inside a container. Deliberately
+// a few px over the measured height: too small and rows collide, too large and
+// the container just breathes, so over is the cheap direction to be wrong in.
+//
+// Known gap: a nested APPROVAL DIAMOND is taller than this (36px diamond plus a
+// two-line caption), so an interactive `generic_loop` gate inside a loop stack
+// overlaps the row below it. Pre-existing. The fix is per-item heights in the
+// stack loop, not inflating the pitch for every ordinary iteration to cover the
+// rare case.
+const NODE_ROW_HEIGHT = 66;
 const ROW_GAP = 20;
+/**
+ * Rendered height of a TOP-ROW card — which, unlike a nested one, also carries
+ * the outcome summary. Only used to floor the canvas height; see `canvasHeight`.
+ */
+const TOP_NODE_HEIGHT = 106;
 // ── Container geometry (fan-out branches and loop iterations) ─────────────
 // A phase with dynamic children is drawn as a box they sit INSIDE (React Flow
 // `parentId`), rather than as a card with a vertical stack hanging off it. The
@@ -145,7 +165,7 @@ const GROUP_PAD = 10;
  * leaves a little slack, which is the cheap direction to be wrong in — too
  * small and the header sits on top of the first child.
  */
-const GROUP_HEADER = 76;
+const GROUP_HEADER = 88;
 /** Vertical pitch between branches inside the container. */
 const BRANCH_GAP = 12;
 
@@ -280,8 +300,10 @@ interface Props {
    * resolve the clicked gate back to its record.
    */
   approvals?: WorkflowApproval[];
-  /** Pixel height of the pipeline canvas. Defaults to 180. */
+  /** Starting pixel height for the canvas. The caller owns the real height. */
   height?: number | string;
+  /** Reports the graph's intrinsic height, so a caller can size itself to fit. */
+  onPreferredHeight?: (px: number) => void;
   /** Optional: phase name currently selected (for visual indicator). */
   selectedPhase?: string | null;
   /** Optional: invoked when the user clicks a phase node. */
@@ -305,6 +327,7 @@ export function WorkflowPipeline({
   executions,
   approvals,
   height = 180,
+  onPreferredHeight,
   selectedPhase,
   onPhaseClick,
 }: Props) {
@@ -333,6 +356,11 @@ export function WorkflowPipeline({
     const declaredLabelByName = new Map(
       definition.phases.map((p) => [p.name, p.label] as const),
     );
+    // The whole declaration, for the fields the CARD reads rather than the
+    // layout: `type` (header accent + icon), `approvalGate` and `hasLoop` (the
+    // header markers). Kept beside the label map rather than folded into it so
+    // the label lookup stays a lookup.
+    const declaredByName = new Map(definition.phases.map((p) => [p.name, p] as const));
 
     // Dynamic phases that don't appear in the YAML — loop iterations like
     // `reviewer_recheck_1` (re-reviews) and `reviewer_fix_1` (fix attempts).
@@ -387,6 +415,13 @@ export function WorkflowPipeline({
       // of the node above it.
       const derived = declaredLabelByName.has(name) ? null : parseDerived(name);
       const label = declaredLabelByName.get(name) ?? (derived ? derivedLabel(derived) : name);
+      // A derived node INHERITS its parent's declaration: a fan-out branch of an
+      // agent phase is itself an agent run, so it should carry the same icon.
+      // Falls through to undefined for a true orphan, which the card renders
+      // with the generic accent rather than throwing.
+      const declared =
+        declaredByName.get(name) ??
+        declaredByName.get(findParentDeclared(name, declaredNames) ?? "");
       const histEntry = historyMap.get(name);
       const exec = execByPhase.get(name);
 
@@ -505,6 +540,9 @@ export function WorkflowPipeline({
           duration,
           summary,
           summaryNoOp: summary ? isNoOpSummary(summary) : undefined,
+          phaseType: declared?.type,
+          hasGate: !!declared?.approvalGate,
+          iterates: !!declared?.hasLoop,
           selected: selectedPhase === name,
         },
         style: { width: NODE_WIDTH },
@@ -536,7 +574,10 @@ export function WorkflowPipeline({
 
     const reactFlowNodes: Node<PhaseNodeData>[] = [];
     const reactFlowEdges: Edge[] = [];
-    const linkTo = (target: string, prev: string | undefined) => {
+    // `prevStatus` is the status of the node the edge LEAVES, which is what
+    // tints it — see `edgeStyle`. Tinting by target would leave the whole
+    // pipeline grey until the very last node.
+    const linkTo = (target: string, prev: string | undefined, prevStatus: PhaseStatus) => {
       if (!prev) return;
       reactFlowEdges.push({
         id: `${prev}->${target}`,
@@ -544,7 +585,7 @@ export function WorkflowPipeline({
         target,
         sourceHandle: "right",
         targetHandle: "left",
-        style: { stroke: "var(--color-base-300, #ccc)", strokeWidth: 1.5 },
+        style: edgeStyle(prevStatus),
         animated: false,
       });
     };
@@ -611,13 +652,17 @@ export function WorkflowPipeline({
     // container rather than a stack depth.
     let maxGroupHeight = 0;
     let prevId: string | undefined;
+    let prevStatus: PhaseStatus = "pending";
     slots.forEach((slot, col) => {
       const x = col * (NODE_WIDTH + NODE_GAP);
       if (slot.kind === "approval") {
         const node = buildApprovalNode(slot.a, x);
         reactFlowNodes.push(node);
-        linkTo(node.id, prevId);
+        // linkTo reads the OUTGOING status of the previous node, so the
+        // assignment has to come after the call.
+        linkTo(node.id, prevId, prevStatus);
         prevId = node.id;
+        prevStatus = node.data.status;
         return;
       }
       const name = slot.name;
@@ -625,9 +670,11 @@ export function WorkflowPipeline({
 
       // No dynamic children — an ordinary card in the row.
       if (children.length === 0) {
-        reactFlowNodes.push(buildNode(name, x, 0, { withSummary: true }));
-        linkTo(name, prevId);
+        const node = buildNode(name, x, 0, { withSummary: true });
+        reactFlowNodes.push(node);
+        linkTo(name, prevId, prevStatus);
         prevId = name;
+        prevStatus = node.data.status;
         return;
       }
 
@@ -698,8 +745,9 @@ export function WorkflowPipeline({
         },
         style: { width: groupWidth, height: groupHeight },
       });
-      linkTo(name, prevId);
+      linkTo(name, prevId, prevStatus);
       prevId = name;
+      prevStatus = parent.data.status;
 
       let childPrev: string | undefined;
       stackItems.forEach((item, idx) => {
@@ -710,7 +758,15 @@ export function WorkflowPipeline({
           item.kind === "phase"
             ? buildNode(item.name, GROUP_PAD, y, { gate: gateFor.get(item.name) })
             : buildApprovalNode(item.a, GROUP_PAD, y);
-        reactFlowNodes.push({ ...node, parentId: name, extent: "parent", draggable: false });
+        reactFlowNodes.push({
+          ...node,
+          // Only a LOOP chains child→child, so only a loop's children have
+          // vertical edges to grow connector dots for.
+          data: { ...node.data, stacked: !isFanout },
+          parentId: name,
+          extent: "parent",
+          draggable: false,
+        });
 
         // A LOOP chains child→child, because iteration 2 really did wait for
         // iteration 1 — that edge is the only thing on this canvas that says
@@ -724,7 +780,7 @@ export function WorkflowPipeline({
             target: childId,
             sourceHandle: "bottom",
             targetHandle: "top",
-            style: { stroke: "var(--color-base-300, #ccc)", strokeWidth: 1.5 },
+            style: edgeStyle(node.data.status),
             animated: false,
             // React Flow renders edges in a layer BENEATH nodes, so an edge
             // between two children of a container is drawn behind the
@@ -738,7 +794,11 @@ export function WorkflowPipeline({
       if (groupHeight > maxGroupHeight) maxGroupHeight = groupHeight;
     });
 
-    const canvasHeight = Math.max(maxGroupHeight, NODE_ROW_HEIGHT + ROW_GAP) + 20;
+    // Floored on the TOP-ROW height, not the nested one: every node on this
+    // canvas that isn't inside a container is a top-row card, and those carry a
+    // summary line the nested ones don't. Using NODE_ROW_HEIGHT here was always
+    // slightly wrong and got worse when the cards grew.
+    const canvasHeight = Math.max(maxGroupHeight, TOP_NODE_HEIGHT + ROW_GAP) + 20;
 
     return { nodes: reactFlowNodes, edges: reactFlowEdges, canvasHeight };
   }, [definition, run, executions, approvals, selectedPhase]);
@@ -772,7 +832,9 @@ export function WorkflowPipeline({
     if (!flow) return;
     try {
       if (flow.getNodes().length === 0) return;
-      flow.fitView({ padding: 0.2, minZoom: 0.4, maxZoom: 1 });
+      // 0.12 rather than 0.2: a fifth of the canvas as margin on every side is
+      // a lot of empty space once the section is dragged tall.
+      flow.fitView({ padding: 0.12, minZoom: 0.4, maxZoom: 1 });
     } catch {
       if (retry) requestAnimationFrame(() => safeFitView(false));
     }
@@ -788,14 +850,25 @@ export function WorkflowPipeline({
     const el = wrapperRef.current;
     if (!el) return undefined;
     let raf = 0;
+    let raf2 = 0;
     const ro = new ResizeObserver(() => {
+      // DOUBLE rAF, deliberately. React Flow keeps its own ResizeObserver on
+      // the same element and updates its stored viewport width/height from it.
+      // Both observers fire for one layout change with no defined order, so a
+      // single frame's delay often measured the PREVIOUS size — the graph then
+      // "refit" to the box it used to be, which reads as not refitting at all.
+      // One more frame guarantees we run after their callback has landed.
       cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(() => safeFitView());
+      cancelAnimationFrame(raf2);
+      raf = requestAnimationFrame(() => {
+        raf2 = requestAnimationFrame(() => safeFitView());
+      });
     });
     ro.observe(el);
     return () => {
       mountedRef.current = false;
       cancelAnimationFrame(raf);
+      cancelAnimationFrame(raf2);
       ro.disconnect();
       flowRef.current = null;
     };
@@ -820,20 +893,38 @@ export function WorkflowPipeline({
     };
   }, [topoKey, safeFitView]);
 
+  // The canvas always fills its container, so the CALLER owns the height. The
+  // `height` prop is only the default the caller starts from; the graph's own
+  // intrinsic height — which grows when loop iterations stack vertically — is
+  // reported back so a caller with no opinion can adopt it.
+  //
+  // ABOVE the `!definition` short-circuit, with the other hooks: a hook below a
+  // conditional return runs on some renders and not others, which is exactly
+  // the "Rendered more hooks than during the previous render" crash.
+  const preferredHeight = Math.max(
+    typeof height === "number" ? height : 180,
+    computed.canvasHeight,
+  );
+  useEffect(() => {
+    onPreferredHeight?.(preferredHeight);
+  }, [preferredHeight, onPreferredHeight]);
+
   if (!definition) {
     return (
-      <div className="p-4 text-sm text-base-content/50">Loading workflow definition…</div>
+      <div className="p-4 text-sm text-muted">Loading workflow definition…</div>
     );
   }
 
-  // Grow the canvas when loop iterations stack vertically. The default
-  // `height` prop is the minimum (used by simple linear runs); when there
-  // are children, expand to fit them.
-  const numericHeight = typeof height === "number" ? height : 180;
-  const effectiveHeight = Math.max(numericHeight, computed.canvasHeight);
-
   return (
-    <div ref={wrapperRef} style={{ width: "100%", height: effectiveHeight }}>
+    <div
+      ref={wrapperRef}
+      // `flex-1 min-h-0`, not `height: 100%`: the canvas is the second child of
+      // a flex column whose first child is the "Pipeline" label, so a full
+      // 100% would overflow the section by exactly the label's height. The
+      // parent carries a definite height, which is what lets flex-1 resolve —
+      // and `min-h-0` is what lets it shrink when the divider is dragged up.
+      className="ll-canvas rounded-panel flex-1 min-h-0 w-full"
+    >
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -844,7 +935,7 @@ export function WorkflowPipeline({
         // Cap auto-fit zoom so single-node workflows (e.g. triage) don't
         // expand to fill the whole canvas. 1.0 keeps nodes at their declared
         // pixel size; min keeps very long pipelines readable.
-        fitViewOptions={{ padding: 0.2, minZoom: 0.4, maxZoom: 1 }}
+        fitViewOptions={{ padding: 0.12, minZoom: 0.4, maxZoom: 1 }}
         minZoom={0.3}
         maxZoom={1.5}
         nodesDraggable={false}
@@ -862,7 +953,7 @@ export function WorkflowPipeline({
         onNodeClick={(_, node) => onPhaseClick?.(node.id)}
         proOptions={{ hideAttribution: true }}
       >
-        <Background variant={BackgroundVariant.Dots} gap={16} size={0.5} color="var(--color-base-300, #ccc)" />
+        <Background variant={BackgroundVariant.Dots} gap={16} size={0.5} color="var(--ll-canvas-dot, #ccc)" />
       </ReactFlow>
     </div>
   );

@@ -10,6 +10,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import { phaseSkillNames, type WorkflowFullDefinition, type WorkflowFullPhase } from "../api";
 import {
+  edgeStyle,
   pipelineNodeTypes,
   type PipelineNodeData,
   type PhaseTag,
@@ -25,20 +26,24 @@ const nodeTypes = pipelineNodeTypes;
  */
 function phaseTags(phase: WorkflowFullPhase): PhaseTag[] {
   const tags: PhaseTag[] = [];
-  if (phase.type === "context") tags.push({ label: "context", tone: "ghost" });
   for (const skill of phaseSkillNames(phase)) {
     tags.push({ label: `skill: ${skill}`, tone: "skill", mono: true });
   }
   if (phase.prompt) tags.push({ label: "prompt", tone: "info", mono: true });
-  if (phase.loop || phase.generic_loop) tags.push({ label: "loop", tone: "warning" });
-  const gate = phase.approval_gate ?? phase.loop?.approval_gate;
-  if (gate) tags.push({ label: "gate", tone: "error" });
+  // `loop`, `gate` and `context` used to be badges here. They moved into the
+  // card's header — loop and gate as markers, the type as the header icon —
+  // and saying each thing twice cost every card a tag row of height, which is
+  // exactly what `ROW_HEIGHT` has to pay for.
   return tags;
 }
 
-const NODE_WIDTH = 150;
+// Must match WorkflowPipeline's — it is literally the same card.
+const NODE_WIDTH = 190;
 const NODE_GAP = 50;
-const ROW_HEIGHT = 120;
+// The PITCH between DAG rows. It has to clear the tallest definition card AND
+// the LoopArc, which hangs ~14px below a looping phase; at the old 120 that arc
+// already crowded the row beneath it.
+const ROW_HEIGHT = 150;
 
 /**
  * Compute layered positions for a DAG. Each phase's column is `1 + max(column
@@ -113,6 +118,10 @@ export function WorkflowDefinitionDiagram({
           accent: "brand" as const,
           subtitle: phase.name !== label ? phase.name : undefined,
           tags: phaseTags(phase),
+          phaseType: phase.type,
+          hasGate: !!(phase.approval_gate ?? phase.loop?.approval_gate),
+          iterates: !!(phase.loop || phase.generic_loop),
+          // Distinct from `iterates`: this one draws the return arc.
           loops: !!(phase.loop || phase.generic_loop),
           selected: phase.name === selectedPhase,
         },
@@ -134,7 +143,7 @@ export function WorkflowDefinitionDiagram({
             sourceHandle: "right",
             targetHandle: "left",
             animated: false,
-            style: { stroke: "var(--color-base-300, #ccc)", strokeWidth: 1.5 },
+            style: edgeStyle("pending", true),
           });
         }
       }
@@ -149,7 +158,7 @@ export function WorkflowDefinitionDiagram({
           sourceHandle: "right",
           targetHandle: "left",
           animated: false,
-          style: { stroke: "var(--color-base-300, #ccc)", strokeWidth: 1.5 },
+          style: edgeStyle("pending", true),
         });
       }
     }
@@ -196,7 +205,7 @@ export function WorkflowDefinitionDiagram({
   }, []);
 
   return (
-    <div ref={wrapperRef} style={{ width: "100%", height }}>
+    <div ref={wrapperRef} className="ll-canvas" style={{ width: "100%", height }}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -218,7 +227,7 @@ export function WorkflowDefinitionDiagram({
         }}
         onNodeClick={(_, node) => onPhaseClick(node.id)}
       >
-        <Background variant={BackgroundVariant.Dots} gap={16} size={0.5} color="var(--color-base-300, #ccc)" />
+        <Background variant={BackgroundVariant.Dots} gap={16} size={0.5} color="var(--ll-canvas-dot, #ccc)" />
       </ReactFlow>
     </div>
   );

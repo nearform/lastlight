@@ -56,9 +56,13 @@ export function isNoOpSummary(summary: string): boolean {
 }
 
 /**
- * Shorten a summary to fit a pipeline node (110px wide — one clipped line is
- * all that fits without bloating the graph). The untruncated text still reaches
- * the user through the node's `title` and, in full, the phase detail panel.
+ * Shorten a summary to fit a pipeline node's body — about 170px of usable width
+ * across two clamped lines. The untruncated text still reaches the user through
+ * the node's `title` and, in full, the phase detail panel.
+ *
+ * The default is the old single-line budget; the node card passes a larger max,
+ * since the two-part card gave the summary a body to live in rather than a
+ * single clipped line under the label.
  */
 export function truncateSummary(summary: string, max = 40): string {
   const oneLine = summary.replace(/\s+/g, " ").trim();

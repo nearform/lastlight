@@ -60,7 +60,7 @@ export function ArtifactEditor({ owner, repo, docKey, doc }: ArtifactEditorProps
   const statusLabel = useMemo(() => {
     if (!ready) return null;
     if (metadataLoading) {
-      return <span className="text-[11px] text-base-content/50">Checking approval…</span>;
+      return <span className="text-[11px] text-muted">Checking approval…</span>;
     }
     if (canEdit) {
       if (dirty) return <span className="text-[11px] text-warning">Unsaved changes</span>;
@@ -68,7 +68,7 @@ export function ArtifactEditor({ owner, repo, docKey, doc }: ArtifactEditorProps
       return null;
     }
     if (metadata?.lock) {
-      return <span className="text-[11px] text-base-content/60">Read-only</span>;
+      return <span className="text-[11px] text-muted">Read-only</span>;
     }
     return null;
   }, [ready, metadataLoading, canEdit, dirty, savedAt, metadata]);
@@ -175,13 +175,13 @@ export function ArtifactEditor({ owner, repo, docKey, doc }: ArtifactEditorProps
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
-      <div className="flex items-center justify-between border-b border-base-300 px-4 py-2">
+      <div className="flex items-center justify-between border-b border-hairline px-4 py-2">
         <div className="min-w-0">
           <h2 className="truncate text-sm font-semibold text-base-content">
             {doc ? doc : "Artifacts"}
           </h2>
           {repoFull && docKey && (
-            <p className="truncate text-[11px] text-base-content/50">{repoFull} · {docKey}</p>
+            <p className="truncate text-[11px] text-muted">{repoFull} · {docKey}</p>
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -190,7 +190,7 @@ export function ArtifactEditor({ owner, repo, docKey, doc }: ArtifactEditorProps
             <button
               onClick={handleRevert}
               disabled={saving}
-              className="rounded border border-base-300 px-3 py-1 text-xs font-medium text-base-content/80 hover:bg-base-300 disabled:opacity-40"
+              className="rounded border border-hairline px-3 py-1 text-xs font-medium text-strong hover:bg-base-300 disabled:opacity-40"
             >
               Revert
             </button>
@@ -239,13 +239,13 @@ export function ArtifactEditor({ owner, repo, docKey, doc }: ArtifactEditorProps
 
       <div className="flex-1 overflow-auto">
         {!doc ? (
-          <div className="flex h-full items-center justify-center p-6 text-sm text-base-content/40">
+          <div className="flex h-full items-center justify-center p-6 text-sm text-faint">
             {repoFull
               ? "Select a build asset doc to view or edit."
               : "Enter a repository (owner/repo) to browse its build assets."}
           </div>
         ) : loadingDoc ? (
-          <div className="p-6 text-sm text-base-content/50">Loading…</div>
+          <div className="p-6 text-sm text-muted">Loading…</div>
         ) : showEditor ? (
           <MDXEditor
             ref={editorRef}

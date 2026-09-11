@@ -29,7 +29,7 @@ export function UserMessage({ msg, isNew }: Props) {
       {text ? (
         <Markdown source={text} />
       ) : (
-        <span className="text-2xs text-base-content/40 italic">(empty)</span>
+        <span className="text-2xs text-faint italic">(empty)</span>
       )}
     </MessageCard>
   );

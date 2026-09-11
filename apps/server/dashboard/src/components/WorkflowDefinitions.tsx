@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { AtSign, Clock, Code2, MessagesSquare, RefreshCw, X } from "lucide-react";
 import clsx from "clsx";
-import { XMarkIcon } from "@heroicons/react/24/outline";
 import {
   api,
   phaseSkillNames,
@@ -10,13 +10,6 @@ import {
   type TriggerInfo,
   type TriggerKind,
 } from "../api";
-import {
-  ClockIcon,
-  CodeBracketIcon,
-  AtSymbolIcon,
-  ChatBubbleLeftRightIcon,
-  ArrowPathIcon,
-} from "@heroicons/react/24/outline";
 import { CodeBlock } from "./timeline/CodeBlock";
 import {
   useUrlState,
@@ -157,15 +150,15 @@ export function WorkflowDefinitions() {
   return (
     <div className="flex flex-1 overflow-hidden">
       {/* List panel */}
-      <aside className="w-72 shrink-0 border-r border-base-300 bg-base-200/40 overflow-y-auto flex flex-col">
+      <aside className="w-72 shrink-0 border-r border-hairline bg-base-200/40 overflow-y-auto flex flex-col">
         {listError && (
-          <div className="px-3 py-2 text-2xs text-error border-b border-base-300">{listError}</div>
+          <div className="px-3 py-2 text-2xs text-error border-b border-hairline">{listError}</div>
         )}
         <ul className="flex-1">
           {workflows.map((wf) => {
             const active = wf.name === selectedName;
             return (
-              <li key={wf.name} className="border-b border-base-300/40">
+              <li key={wf.name} className="border-b border-hairline">
                 <button
                   onClick={() => setSelectedName(wf.name)}
                   className={clsx(
@@ -179,20 +172,20 @@ export function WorkflowDefinitions() {
                     <span
                       className={clsx(
                         "text-sm font-mono truncate",
-                        wf.enabled === false ? "text-base-content/40 line-through" : "text-base-content/90",
+                        wf.enabled === false ? "text-faint line-through" : "text-strong",
                       )}
                     >
                       {wf.name}
                     </span>
                     {wf.enabled === false && (
-                      <span className="badge badge-error badge-xs font-mono">disabled</span>
+                      <span className="ll-status badge text-error badge-xs font-mono">disabled</span>
                     )}
                     <span className="ml-auto badge badge-ghost badge-xs font-mono">{wf.kind}</span>
                   </div>
                   {wf.description && (
-                    <span className="text-2xs text-base-content/50 line-clamp-2">{wf.description}</span>
+                    <span className="text-2xs text-muted line-clamp-2">{wf.description}</span>
                   )}
-                  <div className="flex gap-2 items-center text-2xs text-base-content/40 font-mono">
+                  <div className="flex gap-2 items-center text-2xs text-faint font-mono">
                     <span>{wf.phaseCount} phases</span>
                     {wf.hasDag && <span className="text-info">dag</span>}
                     {wf.triggerKinds.length > 0 && (
@@ -208,7 +201,7 @@ export function WorkflowDefinitions() {
             );
           })}
           {workflows.length === 0 && !listError && (
-            <li className="p-6 text-center text-base-content/40 text-xs">no workflows</li>
+            <li className="p-6 text-center text-faint text-xs">no workflows</li>
           )}
         </ul>
       </aside>
@@ -251,7 +244,7 @@ export function WorkflowDefinitions() {
                 </label>
               </div>
               {definition?.description && (
-                <p className="text-sm text-base-content/60 mt-1">{definition.description}</p>
+                <p className="text-sm text-muted mt-1">{definition.description}</p>
               )}
               {!enabled && (
                 <p className="text-2xs text-error/80 mt-1">
@@ -267,7 +260,7 @@ export function WorkflowDefinitions() {
           </div>
 
           {/* View tabs */}
-          <div className="flex gap-1 border-b border-base-300 shrink-0">
+          <div className="flex gap-1 border-b border-hairline shrink-0">
             {VIEW_TABS.map((v) => (
               <button
                 key={v}
@@ -276,7 +269,7 @@ export function WorkflowDefinitions() {
                   "px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors",
                   view === v
                     ? "border-primary text-primary"
-                    : "border-transparent text-base-content/60 hover:text-base-content",
+                    : "border-transparent text-muted hover:text-base-content",
                 )}
               >
                 {v === "diagram" ? "Diagram" : "YAML"}
@@ -314,7 +307,7 @@ export function WorkflowDefinitions() {
           </div>
         </div>
       ) : (
-        <div className="flex-1 flex items-center justify-center text-base-content/30 text-sm">
+        <div className="flex-1 flex items-center justify-center text-faint text-sm">
           select a workflow
         </div>
       )}
@@ -533,7 +526,7 @@ interface PhaseDetailBoxProps {
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <>
-      <dt className="text-base-content/50">{label}</dt>
+      <dt className="text-muted">{label}</dt>
       <dd className="wrap-break-word whitespace-pre-wrap min-w-0">{children}</dd>
     </>
   );
@@ -545,7 +538,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
  */
 function SubGrid({ children }: { children: React.ReactNode }) {
   return (
-    <dl className="grid grid-cols-[max-content_1fr] gap-x-2 gap-y-0.5 pl-2 border-l border-base-300/60 ml-1 mt-0.5">
+    <dl className="grid grid-cols-[max-content_1fr] gap-x-2 gap-y-0.5 pl-2 border-l border-hairline ml-1 mt-0.5">
       {children}
     </dl>
   );
@@ -556,15 +549,15 @@ function PhaseDetailBox({ phase, onClose }: PhaseDetailBoxProps) {
   const loopMessageEntries = phase.loop?.messages ? Object.entries(phase.loop.messages) : [];
 
   return (
-    <div className="border border-base-300 rounded bg-base-100 p-3 text-xs h-full overflow-auto">
+    <div className="border border-hairline rounded bg-base-100 p-3 text-xs h-full overflow-auto">
       <div className="flex items-center gap-2 mb-2 sticky top-0 bg-base-100 pb-1 z-10">
         <span className="font-semibold text-sm">{phase.label ?? phase.name}</span>
         {phase.label && phase.label !== phase.name && (
-          <span className="text-2xs text-base-content/50 font-mono">{phase.name}</span>
+          <span className="text-2xs text-muted font-mono">{phase.name}</span>
         )}
         <span className="badge badge-ghost badge-xs ml-auto">{phase.type}</span>
         <button className="btn btn-xs btn-ghost btn-square" onClick={onClose} title="close">
-          <XMarkIcon className="w-4 h-4" />
+          <X className="w-4 h-4" />
         </button>
       </div>
 
@@ -786,17 +779,17 @@ function PhaseContentView({ phase, workflowName }: PhaseContentViewProps) {
 
   if (sources.length === 0) {
     return (
-      <div className="flex-1 flex items-center justify-center text-2xs text-base-content/40 border border-base-300/60 rounded bg-base-200/30">
+      <div className="flex-1 flex items-center justify-center text-2xs text-faint border border-hairline rounded bg-base-200/30">
         this phase has no skill or prompt
       </div>
     );
   }
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 border border-base-300 rounded bg-base-100 overflow-hidden">
+    <div className="flex-1 flex flex-col min-h-0 border border-hairline rounded bg-base-100 overflow-hidden">
       {/* Source tabs (only when there's more than one) */}
       {sources.length > 1 && (
-        <div className="flex gap-1 border-b border-base-300 px-2 shrink-0">
+        <div className="flex gap-1 border-b border-hairline px-2 shrink-0">
           {sources.map((s) => (
             <button
               key={s.key}
@@ -805,7 +798,7 @@ function PhaseContentView({ phase, workflowName }: PhaseContentViewProps) {
                 "px-2 py-1 text-2xs font-mono border-b-2 -mb-px transition-colors",
                 s.key === activeKey
                   ? "border-primary text-primary"
-                  : "border-transparent text-base-content/60 hover:text-base-content",
+                  : "border-transparent text-muted hover:text-base-content",
               )}
             >
               {s.label}
@@ -815,7 +808,7 @@ function PhaseContentView({ phase, workflowName }: PhaseContentViewProps) {
       )}
 
       <div className="flex-1 overflow-auto min-h-0">
-        {loading && <div className="text-base-content/40 text-sm p-3">loading…</div>}
+        {loading && <div className="text-faint text-sm p-3">loading…</div>}
         {error && (
           <div className="m-3 text-sm text-error border border-error/40 bg-error/5 rounded p-3">
             {error}
@@ -831,18 +824,18 @@ function PhaseContentView({ phase, workflowName }: PhaseContentViewProps) {
 
 const TRIGGER_KIND_META: Record<
   TriggerKind,
-  { label: string; Icon: typeof ClockIcon; tone: string; sigil: string }
+  { label: string; Icon: typeof Clock; tone: string; sigil: string }
 > = {
-  cron: { label: "cron", Icon: ClockIcon, tone: "text-info", sigil: "⏰" },
-  github: { label: "GitHub event", Icon: CodeBracketIcon, tone: "text-success", sigil: "🪝" },
-  mention: { label: "@mention", Icon: AtSymbolIcon, tone: "text-warning", sigil: "@" },
+  cron: { label: "cron", Icon: Clock, tone: "text-info", sigil: "⏰" },
+  github: { label: "GitHub event", Icon: Code2, tone: "text-success", sigil: "🪝" },
+  mention: { label: "@mention", Icon: AtSign, tone: "text-warning", sigil: "@" },
   slack: {
     label: "Slack command",
-    Icon: ChatBubbleLeftRightIcon,
+    Icon: MessagesSquare,
     tone: "text-secondary",
     sigil: "/",
   },
-  internal: { label: "internal chain", Icon: ArrowPathIcon, tone: "text-base-content/60", sigil: "↻" },
+  internal: { label: "internal chain", Icon: RefreshCw, tone: "text-muted", sigil: "↻" },
 };
 
 /** Tiny icon used in the workflow list to summarise trigger types at a glance. */
@@ -862,7 +855,7 @@ function TriggerKindIcon({ kind }: { kind: TriggerKind }) {
 function TriggerList({ triggers }: { triggers: TriggerInfo[] }) {
   return (
     <div className="flex flex-col gap-0.5">
-      <span className="text-2xs font-semibold uppercase tracking-wider text-base-content/50">
+      <span className="text-2xs font-semibold uppercase tracking-wider text-muted">
         Triggered by
       </span>
       <ul className="flex flex-col gap-0.5 text-2xs">
@@ -885,25 +878,25 @@ function TriggerLine({ trigger }: { trigger: TriggerInfo }) {
       return (
         <span>
           <span className="font-mono text-info">{trigger.schedule}</span>{" "}
-          <span className="text-base-content/50">— cron `{trigger.name}`</span>
+          <span className="text-muted">— cron `{trigger.name}`</span>
         </span>
       );
     case "github":
       return (
         <span>
           <span className="font-mono text-success">{trigger.event}</span>{" "}
-          <span className="text-base-content/60">— {trigger.description}</span>
+          <span className="text-muted">— {trigger.description}</span>
         </span>
       );
     case "slack":
       return (
         <span>
           <span className="font-mono text-secondary">/{trigger.command}</span>{" "}
-          <span className="text-base-content/60">— {trigger.description}</span>
+          <span className="text-muted">— {trigger.description}</span>
         </span>
       );
     case "mention":
     case "internal":
-      return <span className="text-base-content/70">{trigger.description}</span>;
+      return <span className="text-strong">{trigger.description}</span>;
   }
 }

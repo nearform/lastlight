@@ -133,7 +133,7 @@ function CronRow({ cron, onChanged, onOpenRuns }: RowProps) {
         >
           {cron.name}
         </button>
-        <div className="text-2xs text-base-content/50">{label}</div>
+        <div className="text-2xs text-muted">{label}</div>
       </td>
       <td>
         <div className="flex items-center gap-1">
@@ -168,7 +168,7 @@ function CronRow({ cron, onChanged, onOpenRuns }: RowProps) {
           )}
         </div>
         {hasOverride && (
-          <div className="text-2xs text-base-content/40 mt-0.5">
+          <div className="text-2xs text-faint mt-0.5">
             override · default <span className="font-mono">{cron.originalSchedule}</span>
           </div>
         )}
@@ -185,7 +185,7 @@ function CronRow({ cron, onChanged, onOpenRuns }: RowProps) {
       </td>
       <td>
         <div className="text-xs">{showNextRun ? formatRel(cron.nextRun) : "—"}</div>
-        <div className="text-2xs text-base-content/40">
+        <div className="text-2xs text-faint">
           {showNextRun && cron.nextRun ? new Date(cron.nextRun).toLocaleString() : ""}
         </div>
         {optInOnly && (
@@ -210,16 +210,17 @@ function CronRow({ cron, onChanged, onOpenRuns }: RowProps) {
           <span className="text-xs">{cron.lastRun ? formatRel(cron.lastRun) : "never"}</span>
           {cron.lastStatus && (
             <span
-              className={`badge badge-2xs ${
+              // Tinted chip, not a filled badge — see `.ll-status` in index.css.
+              className={`ll-status badge badge-2xs ${
                 cron.lastStatus === "ok" || cron.lastStatus === "succeeded"
-                  ? "badge-success"
+                  ? "text-success"
                   : cron.lastStatus === "failed"
-                    ? "badge-error"
+                    ? "text-error"
                     : cron.lastStatus === "partial"
-                      ? "badge-warning"
+                      ? "text-warning"
                       : cron.lastStatus === "running"
-                        ? "badge-info"
-                        : ""
+                        ? "text-info"
+                        : "text-muted"
               }`}
             >
               {cron.lastStatus}
@@ -227,7 +228,7 @@ function CronRow({ cron, onChanged, onOpenRuns }: RowProps) {
           )}
         </button>
         {cron.reposScanned !== null && (
-          <div className="text-2xs text-base-content/40">
+          <div className="text-2xs text-faint">
             scanned {cron.reposScanned}
             {cron.reposEligible !== null &&
               cron.reposEligible !== cron.reposScanned &&
@@ -239,9 +240,9 @@ function CronRow({ cron, onChanged, onOpenRuns }: RowProps) {
       </td>
       <td className="text-right">
         {cron.recentFailures > 0 ? (
-          <span className="badge badge-xs badge-error">{cron.recentFailures}</span>
+          <span className="ll-status badge badge-xs text-error">{cron.recentFailures}</span>
         ) : (
-          <span className="text-base-content/30">0</span>
+          <span className="text-faint">0</span>
         )}
       </td>
       <td className="text-right">
@@ -282,15 +283,15 @@ export function CronsList({ onOpenRuns }: { onOpenRuns: (workflow: string) => vo
     return <div className="p-4 text-error text-sm">{error}</div>;
   }
   if (!crons) {
-    return <div className="p-4 text-base-content/50 text-sm">Loading…</div>;
+    return <div className="p-4 text-muted text-sm">Loading…</div>;
   }
   if (crons.length === 0) {
-    return <div className="p-4 text-base-content/50 text-sm">No cron jobs registered.</div>;
+    return <div className="p-4 text-muted text-sm">No cron jobs registered.</div>;
   }
 
   return (
     <div className="flex-1 overflow-auto p-4">
-      <div className="text-xs text-base-content/60 mb-2">
+      <div className="text-xs text-muted mb-2">
         Toggle to enable/disable a cron, or edit its schedule. Overrides persist across restarts;
         Reset reverts to the YAML default. Run now fires the cron immediately (runs in the
         background — its run appears under Last run).

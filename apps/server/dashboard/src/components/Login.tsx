@@ -69,13 +69,13 @@ export function Login({ onAuthed, slackOAuth, githubOAuth, passwordLogin = true,
 
   return (
     <div className="h-full flex items-center justify-center bg-base-100">
-      <div className="card bg-base-200 border border-base-300 w-80 shadow-sm">
+      <div className="card bg-base-200 border border-hairline rounded-panel w-80 shadow-panel">
         <div className="card-body gap-4">
           <div className="flex items-center gap-2.5">
             <NearformLogo size={32} className="nf-logo" />
             <div className="flex-1">
               <div className="text-lg font-semibold tracking-tight">Last Light</div>
-              <div className="text-xs text-base-content/50">Sign in to continue</div>
+              <div className="text-xs text-muted">Sign in to continue</div>
             </div>
             <ThemeToggle />
           </div>
@@ -109,7 +109,7 @@ export function Login({ onAuthed, slackOAuth, githubOAuth, passwordLogin = true,
           )}
 
           {passwordLogin && (slackOAuth || githubOAuth) && (
-            <div className="divider text-xs text-base-content/40 my-0">or</div>
+            <div className="divider text-xs text-faint my-0">or</div>
           )}
 
           {passwordLogin && (

@@ -15,15 +15,15 @@ function str(v: unknown): string {
 
 function Mono({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
-    <span className={clsx("font-mono text-xs text-base-content/85", className)}>{children}</span>
+    <span className={clsx("font-mono text-xs text-strong", className)}>{children}</span>
   );
 }
 
 function KV({ k, v }: { k: string; v: React.ReactNode }) {
   return (
     <span className="inline-flex items-baseline gap-1 min-w-0">
-      <span className="text-2xs text-base-content/45">{k}:</span>
-      <span className="font-mono text-xs text-base-content/85 truncate">{v}</span>
+      <span className="text-2xs text-faint">{k}:</span>
+      <span className="font-mono text-xs text-strong truncate">{v}</span>
     </span>
   );
 }
@@ -50,7 +50,7 @@ const renderers: Record<string, ToolRenderer> = {
         <span className="flex items-center gap-2 min-w-0 flex-1">
           <Mono className="truncate flex-1"><Trunc max={140}>{cmd}</Trunc></Mono>
           {timeout != null && (
-            <span className="text-2xs text-base-content/40 shrink-0">{String(timeout)}s</span>
+            <span className="text-2xs text-faint shrink-0">{String(timeout)}s</span>
           )}
         </span>
       );
@@ -65,7 +65,7 @@ const renderers: Record<string, ToolRenderer> = {
         <span className="flex items-center gap-3 min-w-0 flex-1">
           <Mono className="truncate">{path}</Mono>
           {offset != null && (
-            <span className="text-2xs text-base-content/45 shrink-0 font-mono">
+            <span className="text-2xs text-faint shrink-0 font-mono">
               L{String(offset)}
               {limit != null ? `-${String(limit)}` : ""}
             </span>
@@ -83,7 +83,7 @@ const renderers: Record<string, ToolRenderer> = {
         <span className="flex items-center gap-3 min-w-0 flex-1">
           <Mono className="truncate flex-1">{path}</Mono>
           {lines > 0 && (
-            <span className="text-2xs text-base-content/45 shrink-0 font-mono">{lines} lines</span>
+            <span className="text-2xs text-faint shrink-0 font-mono">{lines} lines</span>
           )}
         </span>
       );
@@ -123,7 +123,7 @@ const renderers: Record<string, ToolRenderer> = {
       }
       return (
         <span className="flex items-center gap-2 text-2xs shrink-0">
-          <span className="text-base-content/60 font-mono">{todos.length} todos</span>
+          <span className="text-muted font-mono">{todos.length} todos</span>
           {Object.entries(byStatus).map(([k, v]) => (
             <span
               key={k}
@@ -169,14 +169,14 @@ const renderers: Record<string, ToolRenderer> = {
     summary: (i) => (
       <span className="flex items-center gap-2 min-w-0 flex-1">
         <span className="badge badge-xs badge-secondary shrink-0">{str(i.subagent_type) || "agent"}</span>
-        <span className="text-xs text-base-content/80 truncate"><Trunc max={100}>{str(i.description) || str(i.prompt)}</Trunc></span>
+        <span className="text-xs text-strong truncate"><Trunc max={100}>{str(i.description) || str(i.prompt)}</Trunc></span>
       </span>
     ),
   },
   todowrite: {
     summary: (i) => {
       const todos = Array.isArray(i.todos) ? i.todos : [];
-      return <span className="text-2xs text-base-content/60 font-mono">{todos.length} todos</span>;
+      return <span className="text-2xs text-muted font-mono">{todos.length} todos</span>;
     },
   },
   webfetch: { summary: (i) => <Mono className="truncate">{str(i.url)}</Mono> },
@@ -186,7 +186,7 @@ const renderers: Record<string, ToolRenderer> = {
 function mcpSummary(_toolName: string, input: Input): JSX.Element {
   const entries = Object.entries(input).slice(0, 3);
   if (entries.length === 0) {
-    return <span className="text-2xs text-base-content/40">no params</span>;
+    return <span className="text-2xs text-faint">no params</span>;
   }
   return (
     <span className="flex items-center gap-3 min-w-0 flex-1 flex-wrap">
@@ -212,7 +212,7 @@ export function renderToolSummary(toolName: string, input: Input): JSX.Element {
   }
   const entries = Object.entries(input).slice(0, 2);
   if (entries.length === 0) {
-    return <span className="text-2xs text-base-content/40">no args</span>;
+    return <span className="text-2xs text-faint">no args</span>;
   }
   return (
     <span className="flex items-center gap-3 min-w-0 flex-1">

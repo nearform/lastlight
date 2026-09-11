@@ -51,8 +51,8 @@ export function UpdateBanner() {
   return (
     <div className="flex items-center gap-2 px-4 py-1.5 text-xs bg-warning/15 text-warning-content border-b border-warning/30">
       <span className="font-medium">{info.pinned && info.core.behind ? "Redeploy needed" : "Update available"}</span>
-      <span className="text-base-content/70">{parts.join(" · ")}</span>
-      <span className="ml-auto text-base-content/60">
+      <span className="text-strong">{parts.join(" · ")}</span>
+      <span className="ml-auto text-muted">
         run <code className="px-1 rounded bg-base-300/60">lastlight server update</code> on the host
       </span>
     </div>

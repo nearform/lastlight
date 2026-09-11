@@ -84,16 +84,16 @@ export function SessionList({
   const displayed = showLiveOnly ? visible.filter((s) => s.live) : visible;
 
   return (
-    <aside className="w-80 shrink-0 border-r border-base-300 bg-base-200/40 overflow-y-auto flex flex-col">
+    <aside className="w-80 shrink-0 border-r border-hairline bg-base-200/40 overflow-y-auto flex flex-col">
       {error && (
-        <div className="px-3 py-2 text-2xs text-error border-b border-base-300">{error}</div>
+        <div className="px-3 py-2 text-2xs text-error border-b border-hairline">{error}</div>
       )}
       <ul className="flex-1">
         {displayed.map((s) => {
           const active = s.id === selectedId;
           const title = titleFor(s);
           return (
-            <li key={s.id} className="border-b border-base-300/40">
+            <li key={s.id} className="border-b border-hairline">
               <button
                 onClick={() => onSelect(s.id)}
                 className={clsx(
@@ -115,7 +115,7 @@ export function SessionList({
                   })()}
                   {s.platform && (
                     <span
-                      className="px-1.5 rounded bg-base-content/10 text-base-content/60 font-semibold uppercase tracking-wider"
+                      className="px-1.5 rounded bg-base-content/10 text-muted font-semibold uppercase tracking-wider"
                       title={`Originated from ${s.platform}`}
                     >
                       {s.platform}
@@ -124,17 +124,17 @@ export function SessionList({
                   {s.live && (
                     <span className="w-2 h-2 rounded-full bg-success animate-pulse" title="Live" />
                   )}
-                  <span className="text-base-content/50">
+                  <span className="text-muted">
                     {s.live ? "live" : `${timeAgo(s.last_message_at ?? s.started_at)} ago`}
                   </span>
-                  <span className="ml-auto text-base-content/40 font-mono">
+                  <span className="ml-auto text-faint font-mono">
                     {s.message_count}
                   </span>
                 </div>
-                <div className="text-sm truncate w-full text-base-content/90">
+                <div className="text-sm truncate w-full text-strong">
                   {highlight(title, query)}
                 </div>
-                <div className="flex gap-2 text-2xs text-base-content/40 w-full font-mono">
+                <div className="flex gap-2 text-2xs text-faint w-full font-mono">
                   <span className="inline-flex items-center gap-1 min-w-0">
                     {s.model && <ProviderIcon model={s.model} size={11} />}
                     <span className="truncate">{s.model ?? "---"}</span>
@@ -146,16 +146,16 @@ export function SessionList({
           );
         })}
         {displayed.length === 0 && (
-          <li className="p-6 text-center text-base-content/40 text-xs">
+          <li className="p-6 text-center text-faint text-xs">
             {showLiveOnly ? "no live sessions" : "no sessions match"}
           </li>
         )}
       </ul>
-      <div className="sticky bottom-0 border-t border-base-300 bg-base-200 p-2 flex items-center justify-between text-2xs">
-        <span className="text-base-content/50 font-mono">
+      <div className="sticky bottom-0 border-t border-hairline bg-base-200 p-2 flex items-center justify-between text-2xs">
+        <span className="text-muted font-mono">
           {visible.length} / {totalAvailable}
         </span>
-        <button className="btn btn-xs btn-ghost h-6 min-h-0" onClick={onLoadMore}>
+        <button className="btn btn-xs btn-ghost ll-control-sm" onClick={onLoadMore}>
           load more
         </button>
       </div>

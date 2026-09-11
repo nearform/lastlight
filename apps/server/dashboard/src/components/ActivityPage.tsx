@@ -41,24 +41,24 @@ export function ActivityRow({ row, users }: { row: ActivityRecord; users: Activi
   const user = row.actorLogin ? users[row.actorLogin] : undefined;
   return (
     <tr className="hover:bg-base-200/40">
-      <td className="whitespace-nowrap text-base-content/50 text-xs">{timeAgo(row.createdAt)}</td>
+      <td className="whitespace-nowrap text-muted text-xs">{timeAgo(row.createdAt)}</td>
       <td className="whitespace-nowrap">
         {row.actorLogin ? (
           <ActorChip login={row.actorLogin} actorType={row.actorType} user={user ?? null} />
         ) : (
           // NOT an empty cell: the row is complete, the login genuinely does
           // not exist (a password session, or auth disabled entirely).
-          <span className="text-base-content/40 italic text-xs" title="No verified login on this session">
+          <span className="text-faint italic text-xs" title="No verified login on this session">
             no login
             {row.actorType ? ` · ${row.actorType}` : ""}
           </span>
         )}
       </td>
       <td className="whitespace-nowrap font-mono text-xs">{row.action}</td>
-      <td className="text-xs text-base-content/70 max-w-[22rem] truncate" title={row.targetId}>
+      <td className="text-xs text-strong max-w-[22rem] truncate" title={row.targetId}>
         {row.targetType ? (
           <>
-            <span className="text-base-content/40">{row.targetType}:</span>
+            <span className="text-faint">{row.targetType}:</span>
             {row.targetId}
           </>
         ) : null}
@@ -67,7 +67,7 @@ export function ActivityRow({ row, users }: { row: ActivityRecord; users: Activi
         <span style={{ color: OUTCOME_COLOR[row.outcome] }}>● </span>
         {row.outcome}
       </td>
-      <td className="text-xs text-base-content/50 font-mono truncate max-w-[18rem]">
+      <td className="text-xs text-muted font-mono truncate max-w-[18rem]">
         {renderDetail(row.detail)}
       </td>
     </tr>
@@ -139,7 +139,7 @@ export function ActivityPage() {
     <div className="p-4 space-y-3 overflow-auto">
       <div className="flex items-center gap-2 flex-wrap">
         <h2 className="text-lg font-semibold">Activity</h2>
-        <span className="text-xs text-base-content/50">
+        <span className="text-xs text-muted">
           every user-initiated action, newest first
         </span>
         <div className="grow" />
@@ -182,13 +182,13 @@ export function ActivityPage() {
           </tbody>
         </table>
         {rows.length === 0 && (
-          <div className="text-center text-base-content/50 text-sm py-8">
+          <div className="text-center text-muted text-sm py-8">
             No activity recorded yet.
           </div>
         )}
       </div>
 
-      <div className="flex items-center gap-3 text-xs text-base-content/50">
+      <div className="flex items-center gap-3 text-xs text-muted">
         <span>
           {rows.length} of {total}
         </span>
@@ -232,8 +232,8 @@ export function RunActivityStrip({ runId }: { runId: string }) {
   if (rows.length === 0) return null;
 
   return (
-    <div className="border-t border-base-300 px-4 py-2">
-      <div className="text-xs font-semibold text-base-content/60 mb-1">Activity</div>
+    <div className="border-t border-hairline px-4 py-2">
+      <div className="text-xs font-semibold text-muted mb-1">Activity</div>
       <ul className="space-y-1">
         {rows.map((row) => (
           <li key={row.id} className="flex items-center gap-2 text-xs">
@@ -246,9 +246,9 @@ export function RunActivityStrip({ runId }: { runId: string }) {
                 user={users[row.actorLogin] ?? null}
               />
             ) : (
-              <span className="text-base-content/40 italic">no login</span>
+              <span className="text-faint italic">no login</span>
             )}
-            <span className="text-base-content/40">{timeAgo(row.createdAt)}</span>
+            <span className="text-faint">{timeAgo(row.createdAt)}</span>
           </li>
         ))}
       </ul>

@@ -30,20 +30,23 @@ const RouterPlayground = lazy(() =>
 );
 import { FeedbackPage } from "./components/FeedbackPage";
 import { ActivityPage } from "./components/ActivityPage";
+// Lucide, not Heroicons: the header and toolbars were already Lucide, and the
+// two libraries' stroke weights and optical sizes differ enough to read as a
+// mismatch where they sit side by side.
 import {
-  HomeIcon,
-  PlayCircleIcon,
-  CubeTransparentIcon,
-  ChatBubbleLeftRightIcon,
-  ClockIcon,
-  Cog6ToothIcon,
-  RectangleGroupIcon,
-  FolderIcon,
-  CommandLineIcon,
-  ShareIcon,
-  HandThumbUpIcon,
-  ListBulletIcon,
-} from "@heroicons/react/24/outline";
+  Home,
+  PlayCircle,
+  Box,
+  MessagesSquare,
+  Clock,
+  Settings,
+  LayoutGrid,
+  Folder,
+  Terminal,
+  Share2,
+  ThumbsUp,
+  List,
+} from "lucide-react";
 import {
   useUrlState,
   enumParser,
@@ -296,21 +299,21 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       />
       <UpdateBanner />
       <div className="flex flex-1 overflow-hidden">
-        <nav className="flex flex-col shrink-0 w-14 border-r border-base-300 bg-base-200/60 py-2 gap-1">
+        <nav className="flex flex-col shrink-0 w-14 border-r border-hairline bg-base-200/60 py-2 gap-0.5">
           {(
             [
-              { id: "home", label: "Home", Icon: HomeIcon },
-              { id: "workflows", label: "Workflows", Icon: RectangleGroupIcon },
-              { id: "runs", label: "Workflow Runs", Icon: PlayCircleIcon },
-              { id: "sessions", label: "Sandbox Sessions", Icon: CubeTransparentIcon },
-              { id: "chat-sessions", label: "Chat Sessions", Icon: ChatBubbleLeftRightIcon },
-              { id: "repos", label: "Repos", Icon: FolderIcon },
-              { id: "crons", label: "Crons", Icon: ClockIcon },
-              { id: "feedback", label: "Feedback", Icon: HandThumbUpIcon },
-              { id: "activity", label: "Activity", Icon: ListBulletIcon },
-              { id: "logs", label: "Logs", Icon: CommandLineIcon },
-              { id: "router-playground", label: "Router Playground", Icon: ShareIcon },
-              { id: "config", label: "Config", Icon: Cog6ToothIcon },
+              { id: "home", label: "Home", Icon: Home },
+              { id: "workflows", label: "Workflows", Icon: LayoutGrid },
+              { id: "runs", label: "Workflow Runs", Icon: PlayCircle },
+              { id: "sessions", label: "Sandbox Sessions", Icon: Box },
+              { id: "chat-sessions", label: "Chat Sessions", Icon: MessagesSquare },
+              { id: "repos", label: "Repos", Icon: Folder },
+              { id: "crons", label: "Crons", Icon: Clock },
+              { id: "feedback", label: "Feedback", Icon: ThumbsUp },
+              { id: "activity", label: "Activity", Icon: List },
+              { id: "logs", label: "Logs", Icon: Terminal },
+              { id: "router-playground", label: "Router Playground", Icon: Share2 },
+              { id: "config", label: "Config", Icon: Settings },
             ] as const
           ).map(({ id, label, Icon }) => {
             const active = tab === id;
@@ -320,14 +323,23 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                 onClick={() => setTab(id as Tab)}
                 aria-label={label}
                 title={label}
-                className={`group relative flex items-center justify-center mx-2 h-10 rounded-md border-l-2 transition-colors ${
+                className={`group relative flex items-center justify-center mx-1.5 h-10 rounded-panel transition-[background-color,color,box-shadow] duration-150 ${
                   active
-                    ? "border-primary text-primary bg-primary/10"
-                    : "border-transparent text-base-content/70 hover:text-base-content hover:bg-base-300/50"
+                    ? "text-primary bg-primary/12 shadow-raise"
+                    : "text-muted hover:text-strong hover:bg-base-300/40"
                 }`}
               >
-                <Icon className={`h-5 w-5 ${active ? "" : "opacity-70"}`} />
-                <span className="pointer-events-none absolute left-full ml-2 z-20 whitespace-nowrap rounded-md bg-base-300 px-2 py-1 text-xs font-medium text-base-content shadow-lg opacity-0 -translate-x-1 transition-all duration-100 group-hover:opacity-100 group-hover:translate-x-0">
+                {/* The active indicator is a rail on the nav's own edge rather
+                    than a border on the button, so it can slide rather than
+                    blink between tabs — and so the pill keeps a clean radius. */}
+                {active && (
+                  <span
+                    aria-hidden
+                    className="absolute -left-1.5 top-1.5 bottom-1.5 w-0.5 rounded-full bg-primary"
+                  />
+                )}
+                <Icon className="h-[18px] w-[18px]" strokeWidth={active ? 2.2 : 1.9} />
+                <span className="pointer-events-none absolute left-full ml-2 z-20 whitespace-nowrap rounded-control border border-hairline bg-base-300 px-2 py-1 text-xs font-medium text-strong shadow-pop opacity-0 -translate-x-1 transition-all duration-100 group-hover:opacity-100 group-hover:translate-x-0">
                   {label}
                 </span>
               </button>
@@ -398,7 +410,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       ) : tab === "workflows" ? (
         <WorkflowDefinitions />
       ) : tab === "router-playground" ? (
-        <Suspense fallback={<div className="p-6 text-sm text-base-content/50">Loading…</div>}>
+        <Suspense fallback={<div className="p-6 text-sm text-muted">Loading…</div>}>
           <RouterPlayground />
         </Suspense>
       ) : tab === "logs" ? (
@@ -410,7 +422,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       ) : tab === "config" ? (
         <ConfigPage />
       ) : tab === "repos" ? (
-        <Suspense fallback={<div className="p-6 text-sm text-base-content/50">Loading…</div>}>
+        <Suspense fallback={<div className="p-6 text-sm text-muted">Loading…</div>}>
           <ReposPage timeRange={timeRange} query={debouncedQuery} />
         </Suspense>
       ) : (
@@ -569,7 +581,7 @@ export default function App() {
 
   if (authState === "checking") {
     return (
-      <div className="h-full flex items-center justify-center text-base-content/40">...</div>
+      <div className="h-full flex items-center justify-center text-faint">...</div>
     );
   }
   if (authState === "required") {
@@ -601,7 +613,7 @@ export default function App() {
   }
   if (approvalId) {
     return (
-      <Suspense fallback={<div className="h-full flex items-center justify-center text-base-content/40">Loading…</div>}>
+      <Suspense fallback={<div className="h-full flex items-center justify-center text-faint">Loading…</div>}>
         <FocusedApprovalView
           approvalId={approvalId}
           onClose={() => {

@@ -406,7 +406,7 @@ export function RouterPlayground() {
     );
   }
   if (!graph) {
-    return <div className="flex items-center justify-center flex-1 text-base-content/50">Loading…</div>;
+    return <div className="flex items-center justify-center flex-1 text-muted">Loading…</div>;
   }
 
   const isSlackClassifier = selectedInput === "slack";
@@ -416,9 +416,9 @@ export function RouterPlayground() {
 
   return (
     <div className="flex flex-col flex-1 overflow-hidden bg-base-100">
-      <div className="border-b border-base-300 px-4 py-3">
+      <div className="border-b border-hairline px-4 py-3">
         <h2 className="text-sm font-semibold text-base-content">Event Router Playground</h2>
-        <p className="text-xs text-base-content/60">
+        <p className="text-xs text-muted">
           Thread a synthetic event through the real classifier + router. Nothing runs — it only shows
           where the event would route, and why.
         </p>
@@ -451,16 +451,16 @@ export function RouterPlayground() {
         </div>
 
         {/* Form + why panel */}
-        <div className="w-80 shrink-0 border-l border-base-300 overflow-auto p-4 space-y-4 bg-base-100">
+        <div className="w-80 shrink-0 border-l border-hairline overflow-auto p-4 space-y-4 bg-base-100">
           {!selectedType || !fields ? (
-            <p className="text-xs text-base-content/50">
+            <p className="text-xs text-muted">
               Pick an input on the left, then click an event type to configure and trigger a test.
             </p>
           ) : (
             <>
               <div>
                 <div className="text-xs font-semibold text-base-content">{selectedType}</div>
-                <div className="text-2xs text-base-content/50">
+                <div className="text-2xs text-muted">
                   {eventType?.routing === "classifier"
                     ? "Classifier-routed — the LLM decides the intent."
                     : "Deterministic — a fixed router branch decides."}
@@ -468,7 +468,7 @@ export function RouterPlayground() {
               </div>
 
               {isSlackClassifier && (
-                <div className="rounded border border-info/30 bg-info/10 p-2 text-2xs text-base-content/70">
+                <div className="rounded border border-info/30 bg-info/10 p-2 text-2xs text-strong">
                   A Slack message carries no repo or issue — the classifier parses them from the text
                   itself (e.g. <span className="font-mono">review cliftonc/drizby#42</span>). Whatever it
                   extracts shows up in the result below.
@@ -494,7 +494,7 @@ export function RouterPlayground() {
                 </Field>
               )}
               {fields.mention && (
-                <p className="text-2xs text-base-content/40 -mt-2">
+                <p className="text-2xs text-faint -mt-2">
                   Tip: GitHub comments only route when they mention{" "}
                   <span className="font-mono">{botHandle}</span> exactly; otherwise they’re ignored.
                 </p>
@@ -511,7 +511,7 @@ export function RouterPlayground() {
                 </Field>
               )}
               {fields.checks && (
-                <p className="text-2xs text-base-content/40 -mt-2">
+                <p className="text-2xs text-faint -mt-2">
                   The connector only emits checks events for Dependabot/Renovate PRs — set the PR author
                   to <span className="font-mono">dependabot[bot]</span> and a bump title so it routes to the
                   CI-fix workflow.
@@ -579,7 +579,7 @@ export function RouterPlayground() {
               )}
 
               {fields.prToggle && (
-                <label className="flex items-center gap-2 text-xs text-base-content/70 cursor-pointer">
+                <label className="flex items-center gap-2 text-xs text-strong cursor-pointer">
                   <input
                     type="checkbox"
                     className="checkbox checkbox-xs"
@@ -638,7 +638,7 @@ export function RouterPlayground() {
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="block">
-      <span className="block text-2xs uppercase tracking-wider text-base-content/50 mb-1">{label}</span>
+      <span className="block text-2xs uppercase tracking-wider text-muted mb-1">{label}</span>
       {children}
     </label>
   );
@@ -652,7 +652,7 @@ function WhyPanel({ result }: { result: RouteTestResponse }) {
     explanation.reason?.startsWith("classifier error") ||
     explanation.reason?.includes("no parseable INTENT");
   return (
-    <div className="rounded border border-base-300 bg-base-200/40 p-3 space-y-2 text-xs">
+    <div className="rounded border border-hairline bg-base-200/40 p-3 space-y-2 text-xs">
       {classifierErrored && (
         <div className="rounded border border-error/40 bg-error/10 p-2 text-2xs text-error">
           The classifier didn’t really run — this fell back to <span className="font-mono">chat</span>.
@@ -665,35 +665,35 @@ function WhyPanel({ result }: { result: RouteTestResponse }) {
         <span className="badge badge-xs badge-ghost">{explanation.routingKind}</span>
         <span className={`font-semibold ${actionTone}`}>{route.action}</span>
       </div>
-      <div className="text-base-content/80 font-mono text-2xs wrap-break-word">{explanation.branchLabel}</div>
+      <div className="text-strong font-mono text-2xs wrap-break-word">{explanation.branchLabel}</div>
       {route.action === "handler" && (
         <div>
-          <span className="text-base-content/50">handler: </span>
+          <span className="text-muted">handler: </span>
           <span className="font-mono">{route.handler}</span>
           {explanation.routeKey && (
-            <span className="text-base-content/40 font-mono"> ({explanation.routeKey})</span>
+            <span className="text-faint font-mono"> ({explanation.routeKey})</span>
           )}
         </div>
       )}
       {route.action === "reply" && (
-        <div className="text-base-content/70 whitespace-pre-wrap">{route.message}</div>
+        <div className="text-strong whitespace-pre-wrap">{route.message}</div>
       )}
-      {route.action === "ignore" && <div className="text-base-content/70">{route.reason}</div>}
+      {route.action === "ignore" && <div className="text-strong">{route.reason}</div>}
       {classification && (
-        <div className="border-t border-base-300 pt-2 space-y-1">
+        <div className="border-t border-hairline pt-2 space-y-1">
           <div>
-            <span className="text-base-content/50">intent: </span>
+            <span className="text-muted">intent: </span>
             <span className="font-mono">{classification.intent}</span>
           </div>
           {classification.model && (
             <div>
-              <span className="text-base-content/50">model: </span>
+              <span className="text-muted">model: </span>
               <span className="font-mono break-all">{classification.model}</span>
             </div>
           )}
           {classification.repo && (
             <div>
-              <span className="text-base-content/50">extracted: </span>
+              <span className="text-muted">extracted: </span>
               <span className="font-mono">
                 {classification.repo}
                 {classification.issueNumber ? `#${classification.issueNumber}` : ""}
@@ -701,12 +701,12 @@ function WhyPanel({ result }: { result: RouteTestResponse }) {
             </div>
           )}
           {explanation.reason && !classifierErrored && (
-            <div className="text-base-content/70 italic">“{explanation.reason}”</div>
+            <div className="text-strong italic">“{explanation.reason}”</div>
           )}
         </div>
       )}
       {explanation.notes.length > 0 && (
-        <ul className="border-t border-base-300 pt-2 space-y-0.5 text-base-content/60">
+        <ul className="border-t border-hairline pt-2 space-y-0.5 text-muted">
           {explanation.notes.map((n, i) => (
             <li key={i}>• {n}</li>
           ))}

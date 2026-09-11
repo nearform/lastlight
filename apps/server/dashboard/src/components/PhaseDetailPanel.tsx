@@ -110,10 +110,10 @@ function fmtExtension(v: {
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-0.5">
-      <span className="text-2xs font-semibold uppercase tracking-wider text-base-content/40">
+      <span className="text-2xs font-semibold uppercase tracking-wider text-faint">
         {label}
       </span>
-      <span className="text-xs text-base-content/80 font-mono wrap-break-word">{children}</span>
+      <span className="text-xs text-strong font-mono wrap-break-word">{children}</span>
     </div>
   );
 }
@@ -172,12 +172,13 @@ export function PhaseDetailPanel({
           : "active"
         : "pending";
 
-  const statusClass = clsx("badge badge-xs font-mono", {
-    "badge-success": statusLabel === "succeeded",
-    "badge-error": statusLabel === "failed",
-    "badge-info": statusLabel === "active" || statusLabel === "running",
-    "badge-warning": statusLabel === "paused",
-    "badge-ghost":
+  // Tinted chip, not a filled badge — see `.ll-status` in index.css.
+  const statusClass = clsx("ll-status badge badge-xs font-mono", {
+    "text-success": statusLabel === "succeeded",
+    "text-error": statusLabel === "failed",
+    "text-info": statusLabel === "active" || statusLabel === "running",
+    "text-warning": statusLabel === "paused",
+    "text-muted":
       statusLabel === "pending" || statusLabel === "skipped" || statusLabel === "not met",
   });
 
@@ -226,7 +227,7 @@ export function PhaseDetailPanel({
   return (
     <div className="flex flex-col gap-3 p-3 text-xs">
       <div>
-        <div className="text-2xs font-semibold uppercase tracking-wider text-base-content/40 mb-1">
+        <div className="text-2xs font-semibold uppercase tracking-wider text-faint mb-1">
           Phase
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -236,12 +237,12 @@ export function PhaseDetailPanel({
           <span className={statusClass}>{statusLabel}</span>
         </div>
         {phaseDef?.label && phaseDef.label !== phaseName && (
-          <div className="text-2xs text-base-content/40 font-mono mt-0.5">{phaseName}</div>
+          <div className="text-2xs text-faint font-mono mt-0.5">{phaseName}</div>
         )}
       </div>
 
       {/* Tabs — Details (execution/usage/session) vs Loaded (extensions/skills) */}
-      <div className="flex gap-1 border-b border-base-300 -mx-3 px-3">
+      <div className="flex gap-1 border-b border-hairline -mx-3 px-3">
         <TabButton active={tab === "details"} onClick={() => setTab("details")}>
           Details
         </TabButton>
@@ -267,15 +268,15 @@ export function PhaseDetailPanel({
             * nothing at all rather than an empty box. */}
           {summary && (
             <div>
-              <div className="text-2xs font-semibold uppercase tracking-wider text-base-content/40 mb-1">
+              <div className="text-2xs font-semibold uppercase tracking-wider text-faint mb-1">
                 Outcome
               </div>
               <div
                 className={clsx(
                   "text-xs wrap-break-word whitespace-pre-wrap rounded border px-3 py-2",
                   noOp
-                    ? "border-base-300/60 bg-base-200/40 text-base-content/60 italic"
-                    : "border-base-300/40 bg-base-200/30 text-base-content/80",
+                    ? "border-hairline bg-base-200/40 text-muted italic"
+                    : "border-hairline bg-base-200/30 text-strong",
                 )}
               >
                 {noOp && (
@@ -299,7 +300,7 @@ export function PhaseDetailPanel({
           )}
 
           {!phaseDef && (
-            <div className="text-2xs text-base-content/50 italic">
+            <div className="text-2xs text-muted italic">
               Dynamic phase (not declared in the workflow YAML — likely a loop iteration).
             </div>
           )}
@@ -310,7 +311,7 @@ export function PhaseDetailPanel({
             * yet." beside a phase that just posted a review is the opposite of
             * what happened. */}
           {!execution && !summary && (
-            <div className="text-xs text-base-content/50 border border-base-300/40 bg-base-200/30 rounded px-3 py-2">
+            <div className="text-xs text-muted border border-hairline bg-base-200/30 rounded px-3 py-2">
               No execution recorded yet.
             </div>
           )}
@@ -318,7 +319,7 @@ export function PhaseDetailPanel({
           {execution && (
             <>
               <div>
-                <div className="text-2xs font-semibold uppercase tracking-wider text-base-content/40 mb-2">
+                <div className="text-2xs font-semibold uppercase tracking-wider text-faint mb-2">
                   Execution
                 </div>
                 <div className="grid grid-cols-2 gap-3">
@@ -332,7 +333,7 @@ export function PhaseDetailPanel({
               </div>
 
               <div>
-                <div className="text-2xs font-semibold uppercase tracking-wider text-base-content/40 mb-2">
+                <div className="text-2xs font-semibold uppercase tracking-wider text-faint mb-2">
                   Usage
                 </div>
                 <div className="grid grid-cols-2 gap-3">
@@ -356,22 +357,22 @@ export function PhaseDetailPanel({
               )}
 
               <div>
-                <div className="text-2xs font-semibold uppercase tracking-wider text-base-content/40 mb-1">
+                <div className="text-2xs font-semibold uppercase tracking-wider text-faint mb-1">
                   Session
                 </div>
                 {execution.sessionId ? (
-                  <div className="text-2xs font-mono text-base-content/70 break-all">
+                  <div className="text-2xs font-mono text-strong break-all">
                     {execution.sessionId}
                   </div>
                 ) : (
-                  <div className="text-2xs text-base-content/50 italic">
+                  <div className="text-2xs text-muted italic">
                     Session not captured for this run.
                   </div>
                 )}
               </div>
 
               {totalExecutions > 1 && (
-                <div className="text-2xs text-base-content/40 italic">
+                <div className="text-2xs text-faint italic">
                   {totalExecutions} executions recorded for this phase — showing the most recent.
                 </div>
               )}
@@ -383,20 +384,20 @@ export function PhaseDetailPanel({
       {tab === "loaded" && (
         <div className="flex flex-col gap-4">
           {!execution && (
-            <div className="text-xs text-base-content/50 border border-base-300/40 bg-base-200/30 rounded px-3 py-2">
+            <div className="text-xs text-muted border border-hairline bg-base-200/30 rounded px-3 py-2">
               No execution recorded yet.
             </div>
           )}
 
           {execution && loadedCount === 0 && (
-            <div className="text-2xs text-base-content/40 italic">
+            <div className="text-2xs text-faint italic">
               No extensions or skills were loaded for this run.
             </div>
           )}
 
           {extensionCount > 0 && (
             <div>
-              <div className="text-2xs font-semibold uppercase tracking-wider text-base-content/40 mb-2">
+              <div className="text-2xs font-semibold uppercase tracking-wider text-faint mb-2">
                 Extensions
               </div>
               <div className="grid grid-cols-2 gap-3">
@@ -415,7 +416,7 @@ export function PhaseDetailPanel({
 
       {tab === "artifacts" && (
         <div className="flex flex-col gap-2">
-          <div className="text-2xs text-base-content/40">
+          <div className="text-2xs text-faint">
             Handoff docs for this run — click to open in the editor.
           </div>
           <ul className="flex flex-col gap-1">
@@ -450,10 +451,10 @@ function ApprovalDetail({
   run: WorkflowRun;
   fullRepo: string;
 }) {
-  const statusClass = clsx("badge badge-xs font-mono", {
-    "badge-success": approval.status === "approved",
-    "badge-error": approval.status === "rejected",
-    "badge-warning": approval.status === "pending",
+  const statusClass = clsx("ll-status badge badge-xs font-mono", {
+    "text-success": approval.status === "approved",
+    "text-error": approval.status === "rejected",
+    "text-warning": approval.status === "pending",
   });
   const decisionVerb =
     approval.status === "approved"
@@ -465,7 +466,7 @@ function ApprovalDetail({
   return (
     <div className="flex flex-col gap-3 p-3 text-xs">
       <div>
-        <div className="text-2xs font-semibold uppercase tracking-wider text-base-content/40 mb-1">
+        <div className="text-2xs font-semibold uppercase tracking-wider text-faint mb-1">
           Approval Gate
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -473,7 +474,7 @@ function ApprovalDetail({
           <span className={statusClass}>{approval.status}</span>
         </div>
         {approval.summary && (
-          <div className="text-2xs text-base-content/60 mt-1">{approval.summary}</div>
+          <div className="text-2xs text-muted mt-1">{approval.summary}</div>
         )}
       </div>
 
@@ -490,10 +491,10 @@ function ApprovalDetail({
 
       {approval.response && (
         <div>
-          <div className="text-2xs font-semibold uppercase tracking-wider text-base-content/40 mb-1">
+          <div className="text-2xs font-semibold uppercase tracking-wider text-faint mb-1">
             {approval.kind === "reply" ? "Reply" : "Comment"}
           </div>
-          <div className="text-xs text-base-content/80 whitespace-pre-wrap wrap-break-word border border-base-300/40 bg-base-200/30 rounded px-2 py-1.5">
+          <div className="text-xs text-strong whitespace-pre-wrap wrap-break-word border border-hairline bg-base-200/30 rounded px-2 py-1.5">
             {approval.response}
           </div>
         </div>
@@ -509,7 +510,7 @@ function ApprovalDetail({
         </button>
       )}
 
-      <div className="text-2xs text-base-content/30 font-mono break-all">
+      <div className="text-2xs text-faint font-mono break-all">
         {(() => {
           const rHref = repoUrl(fullRepo);
           const iHref = issueUrl(fullRepo, run.issueNumber, run.workflowName);
@@ -557,7 +558,7 @@ function TabButton({
         "px-2 py-1 text-2xs font-mono border-b-2 -mb-px transition-colors",
         active
           ? "border-primary text-primary"
-          : "border-transparent text-base-content/60 hover:text-base-content",
+          : "border-transparent text-muted hover:text-base-content",
       )}
     >
       {children}
@@ -578,21 +579,21 @@ function SkillsSection({
   ].join(" · ");
   return (
     <div>
-      <div className="text-2xs font-semibold uppercase tracking-wider text-base-content/40 mb-1">
+      <div className="text-2xs font-semibold uppercase tracking-wider text-faint mb-1">
         Skills
       </div>
-      <div className="text-2xs text-base-content/50 font-mono mb-1.5">{summary}</div>
+      <div className="text-2xs text-muted font-mono mb-1.5">{summary}</div>
       {skills.skills.length > 0 ? (
         <ul className="flex flex-col gap-1">
           {skills.skills.map((s) => (
             <li key={s.source} className="flex items-center gap-1.5">
-              <span className="text-xs font-mono text-base-content/80 break-all">{s.name}</span>
+              <span className="text-xs font-mono text-strong break-all">{s.name}</span>
               {!s.modelInvocable && <span className="badge badge-ghost badge-xs">manual</span>}
             </li>
           ))}
         </ul>
       ) : (
-        <div className="text-2xs text-base-content/40 italic">No skills discovered.</div>
+        <div className="text-2xs text-faint italic">No skills discovered.</div>
       )}
     </div>
   );

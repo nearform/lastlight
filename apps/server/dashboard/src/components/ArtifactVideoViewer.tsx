@@ -52,14 +52,14 @@ export function ArtifactVideoViewer({ owner, repo, docKey, doc }: ArtifactVideoV
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
-      <div className="flex items-center justify-between border-b border-base-300 px-4 py-2">
+      <div className="flex items-center justify-between border-b border-hairline px-4 py-2">
         <div className="min-w-0">
           <h2 className="truncate text-sm font-semibold text-base-content">{doc}</h2>
           {repoFull && docKey && (
-            <p className="truncate text-[11px] text-base-content/50">{repoFull} · {docKey}</p>
+            <p className="truncate text-[11px] text-muted">{repoFull} · {docKey}</p>
           )}
         </div>
-        <span className="text-[11px] text-base-content/50">Read-only evidence</span>
+        <span className="text-[11px] text-muted">Read-only evidence</span>
       </div>
 
       {error && (
@@ -70,15 +70,15 @@ export function ArtifactVideoViewer({ owner, repo, docKey, doc }: ArtifactVideoV
 
       <div className="flex flex-1 items-center justify-center overflow-auto bg-base-300/40 p-6">
         {loading ? (
-          <div className="text-sm text-base-content/50">Loading…</div>
+          <div className="text-sm text-muted">Loading…</div>
         ) : url ? (
           <video
             src={url}
             controls
-            className="max-h-full max-w-full rounded border border-base-300 bg-base-100 object-contain shadow"
+            className="max-h-full max-w-full rounded border border-hairline bg-base-100 object-contain shadow"
           />
         ) : !error ? (
-          <div className="text-sm text-base-content/40">No video to display.</div>
+          <div className="text-sm text-faint">No video to display.</div>
         ) : null}
       </div>
     </div>

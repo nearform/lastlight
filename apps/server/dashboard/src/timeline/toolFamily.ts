@@ -98,7 +98,7 @@ export const FAMILY_VISUAL: Record<ToolFamily, FamilyVisual> = {
   mcp: { Icon: Plug, color: "text-success", bg: "bg-success/15" },
   other: {
     Icon: Wrench,
-    color: "text-base-content/60",
+    color: "text-muted",
     bg: "bg-base-content/10",
   },
 };

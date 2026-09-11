@@ -1,15 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CircleCheck, CircleHelp, CircleMinus, CirclePause, CircleX, Clock, FileSearch, RefreshCw } from "lucide-react";
 import clsx from "clsx";
-import { DocumentMagnifyingGlassIcon } from "@heroicons/react/24/outline";
-import {
-  CheckCircleIcon,
-  XCircleIcon,
-  PauseCircleIcon,
-  MinusCircleIcon,
-  ClockIcon,
-  ArrowPathIcon,
-  QuestionMarkCircleIcon,
-} from "@heroicons/react/24/solid";
 import {
   api,
   type WorkflowRun,
@@ -55,23 +46,30 @@ function elapsed(run: WorkflowRun): string {
 
 /** Status → solid icon + colour. Used both in the dense list rows and the
  *  detail-panel header (the text chip was too heavy). Title carries the word. */
-type StatusIconMeta = { Icon: typeof CheckCircleIcon; cls: string };
+type StatusIconMeta = { Icon: typeof CircleCheck; cls: string };
 const STATUS_ICON: Record<WorkflowRun["status"], StatusIconMeta> = {
-  queued: { Icon: ClockIcon, cls: "text-base-content/50" },
-  running: { Icon: ArrowPathIcon, cls: "text-info animate-spin" },
-  paused: { Icon: PauseCircleIcon, cls: "text-warning" },
-  succeeded: { Icon: CheckCircleIcon, cls: "text-success" },
-  failed: { Icon: XCircleIcon, cls: "text-error" },
-  cancelled: { Icon: MinusCircleIcon, cls: "text-base-content/40" },
+  queued: { Icon: Clock, cls: "text-muted" },
+  running: { Icon: RefreshCw, cls: "text-info animate-spin" },
+  paused: { Icon: CirclePause, cls: "text-warning" },
+  succeeded: { Icon: CircleCheck, cls: "text-success" },
+  failed: { Icon: CircleX, cls: "text-error" },
+  cancelled: { Icon: CircleMinus, cls: "text-faint" },
 };
 // Neutral fallback so an unrecognised runtime status (e.g. a new server-side
 // status shipped before the dashboard) degrades gracefully instead of crashing
 // the list with a destructure-of-undefined TypeError.
-const STATUS_ICON_FALLBACK: StatusIconMeta = { Icon: QuestionMarkCircleIcon, cls: "text-base-content/40" };
+const STATUS_ICON_FALLBACK: StatusIconMeta = { Icon: CircleHelp, cls: "text-faint" };
 
 function StatusIcon({ status, className }: { status: WorkflowRun["status"]; className?: string }) {
   const { Icon, cls } = STATUS_ICON[status] ?? STATUS_ICON_FALLBACK;
-  return <Icon className={clsx("shrink-0", cls, className ?? "w-4 h-4")} title={status} />;
+  // Wrapped rather than passing `title` to the icon: lucide's props don't
+  // include it, and the status is rendered icon-only here — so losing the
+  // tooltip would leave no way to read the state at all.
+  return (
+    <span title={status} aria-label={status} className="inline-flex shrink-0">
+      <Icon className={clsx("shrink-0", cls, className ?? "w-4 h-4")} />
+    </span>
+  );
 }
 
 /** The emoji a canonical reaction name renders as (issue #255). */
@@ -106,7 +104,7 @@ function FeedbackBadge({ signals }: { signals: FeedbackSignal[] }) {
     ? scored.reduce((n, s) => n + s.score, 0) / scored.length
     : null;
   const tone =
-    average === null ? "text-base-content/50" : average > 0 ? "text-success" : average < 0 ? "text-error" : "text-base-content/50";
+    average === null ? "text-muted" : average > 0 ? "text-success" : average < 0 ? "text-error" : "text-muted";
   const glyphs = signals.map((s) => FEEDBACK_GLYPH[s.emoji] ?? `:${s.emoji}:`).join("");
   return (
     <span
@@ -172,6 +170,10 @@ function ResizablePipeline({
 }: ResizablePipelineProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [pipelineHeight, setPipelineHeight] = useState<number | null>(null);
+  // What the graph says it needs, before anyone drags. Bounded so a very tall
+  // fan-out can't take the whole view on open.
+  const [preferredHeight, setPreferredHeight] = useState(180);
+  const autoPipelineHeight = Math.min(Math.max(preferredHeight, 180), 420);
   const dragging = useRef(false);
   const startY = useRef(0);
   const startH = useRef(0);
@@ -227,7 +229,7 @@ function ResizablePipeline({
             {run.status === "cancelled" ? "Cancelled" : "Failed"}
             {run.currentPhase ? ` · ${run.currentPhase}` : ""}
           </div>
-          <div className="mt-1 text-xs text-base-content/80 break-words whitespace-pre-wrap font-mono">
+          <div className="mt-1 text-xs text-strong break-words whitespace-pre-wrap font-mono">
             {runFailureReason}
           </div>
         </div>
@@ -236,10 +238,18 @@ function ResizablePipeline({
       {/* Pipeline section — capped at 50% by default */}
       <div
         data-pipeline
-        className="shrink-0 overflow-auto"
-        style={{ maxHeight: pipelineHeight ?? "50%", height: pipelineHeight ?? undefined }}
+        // `flex flex-col` so the canvas below can flex to fill — it used to
+        // render at a fixed pixel height, so dragging the divider grew this
+        // box and left an empty gap under the graph.
+        // A DEFINITE height, always. The canvas inside is `height: 100%`, which
+        // collapses to nothing against an `auto` parent — so the percentage
+        // max-height this used to rely on is not an option. `pipelineHeight` is
+        // null until the divider is first dragged; until then the graph's own
+        // intrinsic height (reported by the pipeline) is the default.
+        className="shrink-0 overflow-hidden flex flex-col"
+        style={{ height: pipelineHeight ?? autoPipelineHeight }}
       >
-        <div className="text-2xs font-semibold uppercase tracking-wider text-base-content/40 mb-2">
+        <div className="text-2xs font-semibold uppercase tracking-wider text-faint mb-2">
           Pipeline
         </div>
         {definitionError ? (
@@ -253,6 +263,7 @@ function ResizablePipeline({
             executions={executions}
             approvals={approvals}
             height={180}
+            onPreferredHeight={setPreferredHeight}
             selectedPhase={selectedPhase}
             onPhaseClick={onPhaseClick}
           />
@@ -269,8 +280,8 @@ function ResizablePipeline({
 
       {/* Detail panels */}
       {selectedPhase ? (
-        <div className="flex flex-1 gap-4 min-h-0 border-t border-base-300 pt-3">
-          <div className="w-80 shrink-0 overflow-y-auto border border-base-300/60 rounded bg-base-200/30">
+        <div className="flex flex-1 gap-4 min-h-0 border-t border-hairline pt-3">
+          <div className="w-80 shrink-0 overflow-y-auto border border-hairline rounded bg-base-200/30">
             <PhaseDetailPanel
               phaseName={selectedPhase}
               run={run}
@@ -280,7 +291,7 @@ function ResizablePipeline({
               approvals={approvals}
             />
           </div>
-          <div className="flex-1 overflow-hidden flex flex-col border border-base-300/60 rounded bg-base-100">
+          <div className="flex-1 overflow-hidden flex flex-col border border-hairline rounded bg-base-100">
             {selectedExecution?.sessionId ? (
               <MessageFeed
                 key={selectedExecution.sessionId}
@@ -290,7 +301,7 @@ function ResizablePipeline({
                 searchQuery=""
               />
             ) : (
-              <div className="flex-1 flex items-center justify-center text-base-content/40 text-sm p-6 text-center">
+              <div className="flex-1 flex items-center justify-center text-faint text-sm p-6 text-center">
                 {selectedPhase?.startsWith("approval:")
                   ? "Approval gate — no agent session. See the gate details on the left."
                   : selectedExecution
@@ -301,7 +312,7 @@ function ResizablePipeline({
           </div>
         </div>
       ) : (
-        <div className="flex-1 flex items-center justify-center text-base-content/30 text-xs border-t border-base-300 pt-3">
+        <div className="flex-1 flex items-center justify-center text-faint text-xs border-t border-hairline pt-3">
           click a phase above to inspect it
         </div>
       )}
@@ -486,7 +497,7 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
             title="View workflow definition"
             onClick={() => onOpenDefinition(run.workflowName)}
           >
-            <DocumentMagnifyingGlassIcon className="w-4 h-4" />
+            <FileSearch className="w-4 h-4" />
           </button>
         )}
         <StatusIcon status={run.status} className="w-5 h-5" />
@@ -494,7 +505,7 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
         {run.repo &&
           (() => {
             const href = repoUrl(runRepoPath(run));
-            const cls = "text-xs text-base-content/50 font-mono";
+            const cls = "text-xs text-muted font-mono";
             return href ? (
               <GhLink href={href} className={cls} title={`Open ${run.repo} on GitHub`}>
                 {run.repo}
@@ -506,7 +517,7 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
         {run.issueNumber &&
           (() => {
             const href = issueUrl(runRepoPath(run), run.issueNumber, run.workflowName);
-            const cls = "text-xs text-base-content/50 font-mono";
+            const cls = "text-xs text-muted font-mono";
             return href ? (
               <GhLink href={href} className={cls} title={`Open #${run.issueNumber} on GitHub`}>
                 #{run.issueNumber}
@@ -516,7 +527,7 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
             );
           })()}
         {run.triggeredBy && (
-          <span className="inline-flex items-center gap-1.5 text-xs text-base-content/50">
+          <span className="inline-flex items-center gap-1.5 text-xs text-muted">
             <span className="opacity-70">by</span>
             <ActorChip
               login={run.triggeredBy}
@@ -526,7 +537,7 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
             />
           </span>
         )}
-        <span className="text-2xs text-base-content/40 font-mono flex gap-3 items-center">
+        <span className="text-2xs text-faint font-mono flex gap-3 items-center">
           <span>started {timeAgo(run.startedAt)} ago</span>
           <span>elapsed {elapsed(run)}</span>
           {run.finishedAt && <span>finished {timeAgo(run.finishedAt)} ago</span>}
@@ -817,12 +828,12 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
     <div className="flex flex-col flex-1 overflow-hidden">
       {/* Filter row — workflow type chips, mirrors the session-type strip on
           the sessions tab. */}
-      <div className="flex items-center gap-1 px-4 py-2 border-b border-base-300 bg-base-200/40 shrink-0 overflow-x-auto flex-nowrap">
+      <div className="flex items-center gap-1 px-4 py-2 border-b border-hairline bg-base-200/40 shrink-0 overflow-x-auto flex-nowrap">
         <button
           onClick={() => setWorkflowFilter(null)}
           className={clsx(
-            "btn btn-xs h-7 min-h-0 font-medium shrink-0",
-            workflowFilter === null ? "btn-primary" : "btn-ghost text-base-content/60",
+            "btn btn-xs ll-control font-medium shrink-0",
+            workflowFilter === null ? "btn-primary" : "btn-ghost text-muted",
           )}
         >
           all <span className="text-2xs opacity-60 ml-0.5">{total}</span>
@@ -832,8 +843,8 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
             key={name}
             onClick={() => setWorkflowFilter(name)}
             className={clsx(
-              "btn btn-xs h-7 min-h-0 font-medium shrink-0 font-mono",
-              workflowFilter === name ? "btn-primary" : "btn-ghost text-base-content/60",
+              "btn btn-xs ll-control font-medium shrink-0 font-mono",
+              workflowFilter === name ? "btn-primary" : "btn-ghost text-muted",
             )}
           >
             <span className="text-2xs">{name}</span>
@@ -843,9 +854,9 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
 
       <div className="flex flex-1 overflow-hidden">
         {/* List panel */}
-        <aside className="w-80 shrink-0 border-r border-base-300 bg-base-200/40 overflow-y-auto flex flex-col">
+        <aside className="w-80 shrink-0 border-r border-hairline bg-base-200/40 overflow-y-auto flex flex-col">
           {error && (
-            <div className="px-3 py-2 text-2xs text-error border-b border-base-300">{error}</div>
+            <div className="px-3 py-2 text-2xs text-error border-b border-hairline">{error}</div>
           )}
           {queuedTotal > 0 && (
             <button
@@ -853,10 +864,10 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
               onClick={() => setShowQueued((v) => !v)}
               title={showQueued ? "Hide queued workflow runs" : "Show queued workflow runs"}
               className={clsx(
-                "flex items-center justify-between gap-2 px-3 py-1.5 text-2xs border-b border-base-300 transition-colors",
+                "flex items-center justify-between gap-2 px-3 py-1.5 text-2xs border-b border-hairline transition-colors",
                 showQueued
                   ? "bg-primary/10 text-primary"
-                  : "text-base-content/50 hover:bg-base-300/40",
+                  : "text-muted hover:bg-base-300/40",
               )}
             >
               <span className="font-mono">
@@ -870,7 +881,7 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
               const active = run.id === selectedId;
               const hasApprovals = approvals.some((a) => a.workflowRunId === run.id);
               return (
-                <li key={run.id} className="border-b border-base-300/40">
+                <li key={run.id} className="border-b border-hairline">
                   {/* Row uses role="button" instead of <button> so the
                       embedded "cancel" action can be a real <button> without
                       tripping React's no-nested-button DOM warning. */}
@@ -897,23 +908,23 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
                     )}
                   >
                     <div className="flex items-center gap-2 w-full text-2xs">
-                      <span className="text-xs font-medium truncate text-base-content/90 min-w-0">
+                      <span className="text-xs font-medium truncate text-strong min-w-0">
                         {run.workflowName}
                       </span>
                       {run.status === "running" && run.currentPhase && (
-                        <span className="text-2xs italic text-base-content/50 shrink-0">
+                        <span className="text-2xs italic text-muted shrink-0">
                           {run.currentPhase}
                         </span>
                       )}
                       {hasApprovals && (
-                        <span className="badge badge-warning badge-xs shrink-0">approval</span>
+                        <span className="ll-status badge text-warning badge-xs shrink-0">approval</span>
                       )}
-                      <span className="ml-auto text-base-content/40 font-mono shrink-0">
+                      <span className="ml-auto text-faint font-mono shrink-0">
                         {timeAgo(run.startedAt)} ago
                       </span>
                       <StatusIcon status={run.status} />
                     </div>
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-2xs text-base-content/40 w-full font-mono">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-2xs text-faint w-full font-mono">
                       {run.repo &&
                         (() => {
                           const href = repoUrl(runRepoPath(run));
@@ -949,15 +960,15 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
               );
             })}
             {visibleRuns.length === 0 && !error && (
-              <li className="p-6 text-center text-base-content/40 text-xs">no workflow runs</li>
+              <li className="p-6 text-center text-faint text-xs">no workflow runs</li>
             )}
           </ul>
-          <div className="sticky bottom-0 border-t border-base-300 bg-base-200 p-2 flex items-center justify-between text-2xs">
-            <span className="text-base-content/50 font-mono">
+          <div className="sticky bottom-0 border-t border-hairline bg-base-200 p-2 flex items-center justify-between text-2xs">
+            <span className="text-muted font-mono">
               {visibleRuns.length} / {total}
             </span>
             <button
-              className="btn btn-xs btn-ghost h-6 min-h-0"
+              className="btn btn-xs btn-ghost ll-control-sm"
               onClick={() => setLimit((l) => l + WORKFLOW_PAGE_SIZE)}
               disabled={!hasMore}
             >
@@ -978,7 +989,7 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
             onOpenDefinition={onOpenDefinition}
           />
         ) : (
-          <div className="flex-1 flex items-center justify-center text-base-content/30 text-sm">
+          <div className="flex-1 flex items-center justify-center text-faint text-sm">
             select a workflow run
           </div>
         )}

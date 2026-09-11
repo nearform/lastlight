@@ -39,14 +39,14 @@ export function AssistantMessage({ msg, isNew }: Props) {
       }
     >
       {showReasoning && reasoning && (
-        <div className="mb-2 p-2 border-l-2 border-accent/40 bg-base-300/40 rounded text-xs text-base-content/70 italic">
+        <div className="mb-2 p-2 border-l-2 border-accent/40 bg-base-300/40 rounded text-xs text-strong italic">
           <Markdown source={reasoning} />
         </div>
       )}
       {text ? (
         <Markdown source={text} />
       ) : (
-        <span className="text-2xs text-base-content/40 italic">(empty)</span>
+        <span className="text-2xs text-faint italic">(empty)</span>
       )}
     </MessageCard>
   );

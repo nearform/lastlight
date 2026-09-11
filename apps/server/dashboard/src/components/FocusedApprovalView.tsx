@@ -71,19 +71,19 @@ export function FocusedApprovalView({ approvalId, onClose }: Props) {
   return (
     <div className="h-full flex flex-col bg-base-100">
       {/* ── Top bar ──────────────────────────────────────────────────────── */}
-      <div className="flex items-center gap-3 border-b border-base-300 px-4 py-2.5">
+      <div className="flex items-center gap-3 border-b border-hairline px-4 py-2.5">
         <button className="btn btn-xs btn-ghost" onClick={onClose}>← Dashboard</button>
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className="text-sm font-semibold text-base-content">Approval</span>
-            {approval && <span className="badge badge-warning badge-sm">{approval.gate}</span>}
+            {approval && <span className="ll-status badge text-warning badge-sm">{approval.gate}</span>}
           </div>
           {run &&
             (() => {
               const rHref = repoUrl(run.repo);
               const iHref = issueUrl(run.repo, run.issueNumber, run.workflowName);
               return (
-                <p className="truncate text-[11px] text-base-content/50">
+                <p className="truncate text-[11px] text-muted">
                   {run.workflowName}
                   {run.repo && (
                     <>
@@ -122,16 +122,16 @@ export function FocusedApprovalView({ approvalId, onClose }: Props) {
       )}
 
       {!data && !loadError && (
-        <div className="p-6 text-sm text-base-content/50">Loading…</div>
+        <div className="p-6 text-sm text-muted">Loading…</div>
       )}
 
       {approval && (
         <>
           {/* ── Summary ─────────────────────────────────────────────────── */}
-          <div className="border-b border-base-300 px-4 py-3">
-            <p className="text-sm text-base-content/80">{approval.summary}</p>
+          <div className="border-b border-hairline px-4 py-3">
+            <p className="text-sm text-strong">{approval.summary}</p>
             {approval.artifact && (
-              <p className="mt-1 text-xs text-base-content/50">
+              <p className="mt-1 text-xs text-muted">
                 Artifact: <span className="font-mono">{approval.artifact}</span>
               </p>
             )}
@@ -148,8 +148,8 @@ export function FocusedApprovalView({ approvalId, onClose }: Props) {
               />
             ) : artifactRef?.mode === "repo" ? (
               <div className="p-6">
-                <div className="rounded-lg border border-base-300 ll-surface p-4">
-                  <p className="text-sm text-base-content/70">
+                <div className="rounded-panel border border-hairline ll-surface p-4">
+                  <p className="text-sm text-strong">
                     This artifact is committed to the repository. Review it on GitHub:
                   </p>
                   {artifactRef.githubUrl ? (
@@ -162,7 +162,7 @@ export function FocusedApprovalView({ approvalId, onClose }: Props) {
                       🔗 {artifactRef.doc} on GitHub
                     </a>
                   ) : (
-                    <p className="mt-2 text-xs text-base-content/50">
+                    <p className="mt-2 text-xs text-muted">
                       <span className="font-mono">{artifactRef.doc}</span> — no branch link
                       available for this run.
                     </p>
@@ -170,20 +170,20 @@ export function FocusedApprovalView({ approvalId, onClose }: Props) {
                 </div>
               </div>
             ) : (
-              <div className="p-6 text-sm text-base-content/50">
+              <div className="p-6 text-sm text-muted">
                 No artifact is linked to this gate — approve or reject below.
               </div>
             )}
           </div>
 
           {/* ── Footer: approve / reject ────────────────────────────────── */}
-          <div className="border-t border-base-300 px-4 py-3">
+          <div className="border-t border-hairline px-4 py-3">
             {isDone ? (
               <div className="flex items-center gap-3">
-                <span className={`badge ${(resolved ?? approval.status) === "approved" ? "badge-success" : "badge-error"}`}>
+                <span className={`ll-status badge ${(resolved ?? approval.status) === "approved" ? "text-success" : "text-error"}`}>
                   {resolved ?? approval.status}
                 </span>
-                <span className="text-sm text-base-content/70">
+                <span className="text-sm text-strong">
                   This approval is resolved.
                 </span>
                 <button className="btn btn-xs btn-ghost ml-auto" onClick={onClose}>

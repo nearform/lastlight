@@ -37,7 +37,7 @@ function highlightLogLine(raw: string): ReactNode {
   const body = tsMatch?.[2] ?? raw;
 
   const nodes: ReactNode[] = [];
-  if (ts) nodes.push(<span key="ts" className="text-base-content/40">{ts} </span>);
+  if (ts) nodes.push(<span key="ts" className="text-faint">{ts} </span>);
 
   let last = 0;
   let key = 0;
@@ -56,7 +56,7 @@ function highlightLogLine(raw: string): ReactNode {
           ? "text-warning font-semibold"
           : /info/i.test(tok)
             ? "text-info"
-            : "text-base-content/50";
+            : "text-muted";
     nodes.push(
       <span key={key++} className={cls}>
         {tok}
@@ -146,7 +146,7 @@ export function LogsPage() {
   return (
     <div className="flex flex-col flex-1 overflow-hidden">
       {/* Controls */}
-      <div className="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-base-300 bg-base-200/40 text-sm">
+      <div className="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-hairline bg-base-200/40 text-sm">
         <select
           className="select select-sm select-bordered"
           value={container ?? ""}
@@ -213,7 +213,7 @@ export function LogsPage() {
           </button>
         )}
 
-        <span className="text-xs text-base-content/50 tabular-nums">
+        <span className="text-xs text-muted tabular-nums">
           {visible.length.toLocaleString()}
           {filter.trim() && `/${lines.length.toLocaleString()}`} lines
           {live && (
@@ -229,7 +229,7 @@ export function LogsPage() {
       <div className="flex-1 overflow-auto bg-base-100 font-mono text-xs leading-relaxed p-3">
         {snapshotError && <div className="text-error mb-2">Failed to load logs: {snapshotError}</div>}
         {visible.length === 0 && !loading && (
-          <div className="text-base-content/40 italic">
+          <div className="text-faint italic">
             {filter.trim() ? "No lines match the filter." : "No log lines."}
           </div>
         )}
