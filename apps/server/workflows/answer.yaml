@@ -1,8 +1,5 @@
 kind: answer
 name: answer
-# Runtime policy (issue #368) — read + post the answer as a comment; never
-# pushes code. Full prose for each key is in the workflow schema
-# (packages/workflow-engine/src/core/schema.ts).
 git_access: issues-write
 classification:
   intent: question
@@ -14,18 +11,11 @@ classification:
     This downgrade applies to CHAT/SLACK MESSAGES ONLY, where a chat path exists to catch it. A newly-opened GitHub ISSUE that asks a question is always QUESTION: an issue has no chat surface, and the alternative is silently triaging a question as a work item.
     EXPLORE shapes a NEW idea into a spec; QUESTION answers an EXISTING question that needs research beyond a few file reads.
   examples:
-    # (a) the web — no amount of repo reading answers this.
     - '"how does cliftonc/lastlight compare to Vercel''s Eve framework?" → INTENT: QUESTION, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE'
-    # (b) a checkout — "actually" / "trace it" is asking for the code path, not a file.
     - '"why does the dependency cron sometimes skip a PR in cliftonc/lastlight? trace it through the code" → INTENT: QUESTION, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE'
-    # Counter-examples: serious, repo-scoped, and answerable from chat''s own
-    # GitHub reads. These are the ones that used to burn a sandbox.
     - '"what does the pr-review workflow do in cliftonc/lastlight?" → INTENT: CHAT, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE'
     - '"what changed in cliftonc/lastlight#273?" → INTENT: CHAT, REPO: cliftonc/lastlight, ISSUE: 273, REASON: NONE'
     - '"why was cliftonc/lastlight#40 closed?" → INTENT: CHAT, REPO: cliftonc/lastlight, ISSUE: 40, REASON: NONE'
-    # The GitHub carve-out, deliberately near-identical to the CHAT
-    # counter-example above: on an ISSUE there is no chat to downgrade TO, and
-    # the alternative is triaging a question as a work item.
     - '"what does the pr-review workflow actually do?" with ISSUE TITLE "Question: what does pr-review do?" → INTENT: QUESTION, REPO: NONE, ISSUE: NONE, REASON: NONE'
 chat:
   summary: Research a question that needs the web or a deep read of a checkout
@@ -40,27 +30,11 @@ chat:
     researched and posted back here. Don't attempt the deep research yourself
     in-process.
 description: |
-  Answer a question issue directly. Used when a newly-opened issue asks for
-  information, an explanation, or a comparison rather than a code change — the
-  bot researches (repo docs + web search) and posts a single sourced answer
-  comment, labels the issue `question`, and leaves it open. No agent brief, no
-  ready-for-agent, no PR.
+  Answer a question issue directly: research the repo and the web, then post a
+  single sourced answer comment and label the issue `question`. No PR.
 
-  Delivery is uniform: the agent's final message (the answer) is captured as
-  `answerResult` and posted by the harness via `postComment` — as a comment on
-  the originating issue for GitHub-initiated runs, or into the Slack thread for
-  Slack-initiated runs. The skill therefore does NOT post the answer itself; it
-  only applies the `question` label when answering a GitHub issue.
-
-  Triggered by:
-    - issue.opened webhook when the router classifies the issue as a question
-    - a Slack message classified as a question against a managed repo — only
-      one chat cannot answer itself; see the `classification:` block above.
-      Chat reads GitHub directly (issues, PR diffs, file contents, code
-      search), so this workflow's edge is the WEB (`web_search: true`) and a
-      real checkout to explore. A question needing neither is CHAT, which
-      answers in-process in seconds instead of provisioning a sandbox.
-    - manual override via routes.github.issue_answer / routes.slack.answer
+  The harness posts the agent's final message (`answerResult`) — to the issue
+  for GitHub runs, into the thread for Slack runs. The skill never posts it.
 
 phases:
   - name: phase_0

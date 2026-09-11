@@ -1,9 +1,5 @@
 kind: health
 name: repo-health
-# Runtime policy (issue #368) — the report is delivered by the harness, not
-# written to GitHub by the agent, so this workflow needs nothing beyond
-# contents:read. Full prose for each key is in the workflow schema
-# (packages/workflow-engine/src/core/schema.ts).
 git_access: read
 chat:
   summary: A weekly repo health report
@@ -18,11 +14,7 @@ chat:
     trigger; do not suggest typing it here.)
 description: |
   Generate a health report for a repository: open issues, stale issues, PR
-  velocity, label distribution, etc. Repo-scoped (no specific issue/PR).
-
-  Triggered by:
-    - weekly cron (default Monday 09:00)
-    - manual CLI: tsx src/cli.ts health owner/repo
+  velocity, label distribution. Repo-scoped, with no specific issue or PR.
 
 phases:
   - name: report

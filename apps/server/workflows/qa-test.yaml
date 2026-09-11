@@ -1,12 +1,5 @@
 kind: qa-test
 name: qa-test
-# Runtime policy (issue #368) — reads the repo and posts a step-level QA
-# report; never pushes code. Pre-populates its synthesized branch so
-# browser-QA screenshots land under `.lastlight/<key>/` where
-# `serverArtifacts()` harvests them; against a real PR it pins to the PR's
-# head ref, or it would QA the base branch and report the PR's feature
-# missing. Full prose for each key is in the workflow schema
-# (packages/workflow-engine/src/core/schema.ts).
 git_access: issues-write
 prepopulate_synth_branch: true
 prepopulate_pr_head_ref: true
@@ -25,28 +18,15 @@ chat:
     - run through <flow> and tell me what breaks
     - smoke-test the CLI commands
 description: |
-  Run an automated QA flow against a repo's CLI or locally-served app and report
-  step-level pass/fail with evidence. It installs and runs the code in the
-  sandbox, exercises a flow (CLI invocations or curl against a dev-server),
-  optionally drives the UI in a real browser, then posts a single per-step QA
-  report. Does not modify code.
+  Run an automated QA flow against a repo's CLI or locally-served app and
+  report step-level pass/fail with evidence. Installs and runs the code in the
+  sandbox, exercises the flow, and posts one QA report. Never modifies code.
 
-  Delivery is a single in-place status comment (`status_checklist`): the run
-  shows its phases ticking off, then a final `synthesize` phase folds the text
-  report and (when it ran) the browser evidence into ONE combined report,
-  delivered as the comment's footer via `final_message`. No comment-per-phase.
-  Posted on the originating issue/PR for GitHub runs, or into the Slack thread
-  for Slack runs. The agents therefore do NOT post anything themselves.
-
-  When the host runs the docker backend with the browser-QA image built, the
-  gated `qa_browser` phase drives a real headless Chromium against the
-  locally-served app and captures step-level screenshot evidence; everywhere
-  else it is silently skipped (graceful degradation) and the text report stands
-  alone. The synthesis runs either way.
-
-  Triggered by:
-    - a `@last-light qa-test <target> [-- steps]` comment on an issue/PR
-    - manual CLI: tsx src/cli.ts qa-test owner/repo#N -- "<steps>"
+  A final `synthesize` phase folds the text report and, when it ran, the
+  browser evidence into ONE report delivered as the status comment's footer —
+  no comment per phase, and the agents post nothing themselves. The browser
+  phase needs the docker backend and the browser-QA image; anywhere else it is
+  skipped and the text report stands alone.
 
 status_checklist: true
 final_message: "{{synthesisResult}}"
@@ -61,8 +41,6 @@ phases:
     label: QA Test
     depends_on: [phase_0]
     prompt: prompts/qa-test.md
-    # qa-test: the flow procedure + report shape (primary).
-    # building: install + run the repo to exercise the flow.
     skills: [qa-test, building]
     model: "{{models.qa-test}}"
     variant: "{{variants.qa-test}}"
@@ -72,12 +50,6 @@ phases:
       on_success: "Text QA flow complete."
       on_failure: "I couldn't complete the QA run — see the logs for details."
 
-  # Browser-QA pass (Tier B). Gated to the docker backend AND the enriched
-  # `lastlight-sandbox-qa:latest` image (Playwright + Chromium). On gondolin, or
-  # a docker host without that image, the scheduler silently skips this phase.
-  # It is terminal (nothing depends on it) — `synthesize` depends only on
-  # `qa_test`, so it still runs (after this phase, by declaration order) and
-  # folds in `qaBrowserResult` only when this phase actually produced it.
   - name: qa_browser
     label: QA Test (browser)
     depends_on: [qa_test]
@@ -93,11 +65,6 @@ phases:
       on_success: "Browser QA complete — screenshots captured."
       on_skipped_done: "Browser QA unavailable on this host — text report stands."
 
-  # Synthesis. Depends only on `qa_test` (always runs after the gated browser
-  # phase by declaration order, and never skips when that phase is gated out).
-  # Reads the prior reports from phaseOutputs and writes ONE combined report;
-  # its output (`synthesisResult`) becomes the comment footer via the
-  # workflow-level `final_message`. Pure composition — no skills, no repo work.
   - name: synthesize
     label: Summary
     depends_on: [qa_test, qa_browser]

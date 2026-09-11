@@ -1,42 +1,24 @@
 kind: pr-merge
 name: dependabot-pr-merge
-# PR-scoped (09-state-machine.md §S1/§S4): this workflow runs against a pull
-# request, so it crosses the PR-scoped dispatch gate — the run lock shared with
-# every other PR-scoped workflow, the per-head-SHA dedup, escalation, and the
-# resolved `PrState` snapshot on `context.prState`. A fork of this workflow that
-# drops the key silently loses all four; `validateAssets` warns when a
-# `routes.github.pr_*` target is missing it.
+# Crosses the PR-scoped dispatch gate: the run lock, per-head-SHA dedup,
+# escalation, and the resolved `PrState` snapshot on `context.prState`. Always
+# single-PR, so a repeated webhook and the daily cron backstop dedup onto one
+# run.
 pr_scoped: true
-# Runtime policy (issue #368) — never pushes code, but
-# `github_enable_auto_merge` lives in the repo-write tool profile. Always
-# single-PR, so it keys its (checkout-free) run by (repo, PR) and a repeated
-# webhook + the daily cron backstop dedup onto one run. Full prose for each
-# key is in the workflow schema (packages/workflow-engine/src/core/schema.ts).
+# Never pushes code, but `github_enable_auto_merge` lives in the repo-write
+# tool profile.
 git_access: repo-write
 workspace: per-target-reuse
 description: |
-  Assess an already-GREEN dependency-update PR (Dependabot / Renovate) and, when
-  the change is trivial, enable GitHub auto-merge (squash) so it lands once its
-  checks pass. When a bump is merely behind the base branch or has a lockfile
-  conflict, it asks the bot that opened the PR to rebase/recreate its own branch
-  (@dependabot rebase|recreate, or Renovate's rebase label) — it never pushes or
-  rebases itself. That branch request is independent of the merge verdict: a
-  non-trivial bump (e.g. a major version) still gets its branch regenerated,
-  since regenerating is safe and pre-empts no review, but does NOT get
-  auto-merge — only trivial bumps do. The companion to dependabot-ci-fix: that
-  one repairs a RED bump and pushes a fix; this one merges a GREEN one that
-  needs no fix at all.
+  Assess an already-GREEN dependency-update PR and, when the change is trivial,
+  enable GitHub auto-merge (squash). Always runs against a single PR.
 
-  Always runs against a SINGLE PR (`{{prNumber}}`). Triggered by:
-    - pr.checks_passed webhook (a check_suite completed with a success
-      conclusion on a Dependabot/Renovate PR) → routed here by the router's
-      deterministic intent lookup (src/engine/router.ts + this file's
-      `classification`).
-    - the cron-dependabot-merge backstop: the cron runner finds the green
-      dependency PRs across managed repos IN CODE
-      (src/cron/dependabot-discovery.ts) and fans out one run per PR — same
-      single-PR shape as the webhook. (This replaced an agent `mode: scan`
-      sweep that assessed a whole repo at once and overflowed on busy repos.)
+  When a bump is merely behind its base or has a lockfile conflict it asks the
+  bot that opened the PR to rebase or recreate its own branch; it never pushes
+  or rebases itself. That request is independent of the merge verdict — a major
+  version still gets its branch regenerated, but only a trivial bump is merged.
+  The companion to dependabot-ci-fix, which repairs a RED bump instead.
+
 classification:
   intent: dependabot-pr-merge
   description: |
@@ -55,53 +37,23 @@ classification:
     - 'PR AUTHOR: renovate[bot], PR CHECKS: passing, COMMENT: "@bot can you look at this?" → INTENT: DEPENDABOTPRMERGE, REPO: NONE, ISSUE: NONE, REASON: NONE'
 
 phases:
-  # Single phase. Runs under this workflow's repo-write profile, so agentic-pi's
-  # `github_enable_auto_merge` (+ `github_add_issue_comment` / `github_add_labels`
-  # for the rebase nudge) tools are available. Conservative by design: enable
-  # auto-merge ONLY for trivial, non-functional dependency bumps; anything with
-  # runtime-logic impact is left for a human. No repo checkout — the agent
-  # inspects the ONE PR via `github_list_pull_request_files` (file list + line
-  # counts) and skips lockfile diffs, only pulling `github_get_pull_request_diff`
-  # for a small non-lockfile source change. It never pushes or rebases itself: a
-  # PR that is `behind`/`dirty` is nudged to rebase via the bot's own command
-  # (@dependabot rebase|recreate) or Renovate's rebase label. That nudge is NOT
-  # gated on the verdict — regenerating a bot's own branch is safe and says
-  # nothing about merge-safety — but only a trivial PR also gets auto-merge
-  # enabled to land it once GitHub re-runs the checks green. Because
-  # each run assesses a single PR, its context is bounded — the overflow that
-  # killed the old whole-repo scan can't happen.
+  # One phase, and no repo checkout: the agent reads the PR's file list, skips
+  # lockfile diffs, and pulls the diff only for a small non-lockfile source
+  # change — so its context is bounded by construction.
   #
-  # It is also the BACKSTOP for issue #264 — a fix that made CI green by
-  # disabling the check. The prohibition lives in `agent-context/rules.md` and
-  # nothing enforces it in code, so the last gate before the merge has to look:
-  # STEP 1e reads the file list it already fetched for CI config, test files,
-  # type/lint/build config and manifest `scripts`, and STEP 2 makes "nothing
-  # weakens verification" a TRIVIAL-disqualifying conjunct. This workflow is
-  # where such a PR necessarily lands — suppression turns the checks GREEN, so
-  # `pr.checks_failed` never fires and the fix family never sees it again.
-  # See prompts/dependabot-pr-merge.md.
+  # It is also the last gate before a merge, and therefore the backstop against
+  # a fix that made CI green by DISABLING the check: suppression turns the
+  # checks green, so `pr.checks_failed` never fires again and the fix family
+  # never sees the PR. "Nothing weakens verification" is a trivial-disqualifying
+  # conjunct in the prompt; nothing enforces it in code.
   - name: assess
     label: Assess & maybe auto-merge
     prompt: prompts/dependabot-pr-merge.md
-    # `code-review`: the finding-tier / what-to-check rubric for reading a diff.
-    # `dependency-impact`: the low/medium/high rubric for a MAJOR bump (#252) —
-    # a skill rather than more prompt prose because it is needed ONLY when the
-    # PR is a major, and pi surfaces skills as an on-demand catalogue. It is
-    # also per-repo overridable (`.lastlight/skills/dependency-impact/SKILL.md`)
-    # without the operator having to widen `repoConfig.allowKeys`.
+    # `dependency-impact` is a skill rather than more prompt prose because it is
+    # needed only for a MAJOR bump, and skills are surfaced on demand.
     skills: [code-review, dependency-impact]
     model: "{{models.review}}"
-    # Postcondition: the assess run MUST sign off with this marker (see the
-    # prompt's OUTPUT contract). Its absence means the agent inspected files then
-    # stopped without reaching a verdict or acting — a silent no-op that used to
-    # report a false green (e.g. after a context-overflow retry). Fail loudly.
     on_output:
       requires_marker: "ASSESSMENT_COMPLETE"
-    # Deliberately NO on_start / on_success acks: they posted a comment on the PR
-    # on EVERY run (a green suite fires per check-reporting app, plus the daily
-    # cron), which flooded dependency PRs with "Assessing…/Assessed…" noise. The
-    # run now comments only when it has something to say — a real verdict
-    # (functional / requires-human) or a rebase nudge from the prompt, or the
-    # on_failure notice below.
     messages:
       on_failure: "Couldn't assess the dependency PR — leaving for a human."
