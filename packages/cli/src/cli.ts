@@ -265,6 +265,44 @@ function num(flag: string | boolean | undefined, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+// ── trigger commands — shape tables ────────────────────────────────────────
+//
+// Shared by the help screens and by `cmdSkill`, so the usage a user is shown is
+// the usage the dispatcher actually enforces. Declared here (above HELP_TOPICS)
+// because the topic strings below are built from them at module load.
+
+const SKILL_MAP: Record<string, string> = {
+  triage: "issue-triage", review: "pr-review", health: "repo-health", security: "security-review",
+  verify: "verify", "qa-test": "qa-test", demo: "demo",
+};
+
+/** Commands that scan a whole repository — an issue/PR number means nothing. */
+const REPO_LEVEL_ONLY = new Set(["health", "security"]);
+/** Commands that take free text after the target (a claim, steps, demo notes). */
+const TAKES_CLAIM = new Set(["verify", "qa-test", "demo"]);
+
+/** A well-formed `owner/repo` — no ref, no number, no stray path segment. */
+const OWNER_REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+
+/** Words a user types when they want help, never a repository. */
+const HELP_WORDS = new Set(["help", "--help", "-h", "-?", "?"]);
+
+function triggerUsage(name: string): string {
+  const target = REPO_LEVEL_ONLY.has(name) ? "<owner/repo>" : "<owner/repo[#N]> | <github-url>";
+  const claim = TAKES_CLAIM.has(name) ? ` [-- "<claim or steps>"]` : "";
+  return `lastlight ${name} ${target}${claim}`;
+}
+
+const TRIGGER_BLURB: Record<string, string> = {
+  triage: "Triage one issue, or every open issue in the repo",
+  review: "Review one PR, or every open PR in the repo",
+  health: "Weekly repository health report",
+  security: "Security review of the repository",
+  verify: "Test a claim against the code → pass/fail",
+  "qa-test": "Drive a flow end-to-end → pass/fail",
+  demo: "Record a demo of the change",
+};
+
 // ── help ───────────────────────────────────────────────────────────────────
 
 // Per-command detail, shown by `lastlight <cmd> help` (or `<cmd> --help`). The
@@ -395,6 +433,22 @@ ${chalk.bold("OAuth")} (host-local — subscription logins for the model provide
   lastlight oauth logout [provider]  Remove one (or all) stored logins
                                      Writes auth.json under $STATE_DIR; restart the agent after.`,
 };
+// The seven trigger commands get a topic each, built from the same tables the
+// dispatcher validates against. Without an entry here `lastlight review help`
+// fell through to `cmdSkill`, where "help" became a target and fired a real
+// workflow dispatch (issue #361).
+for (const name of Object.keys(SKILL_MAP)) {
+  const claimLine = TAKES_CLAIM.has(name)
+    ? `\n  ${chalk.dim('The text after `--` is passed to the agent as the claim / steps to follow.')}`
+    : "";
+  const scanLine = REPO_LEVEL_ONLY.has(name)
+    ? ""
+    : `\n  ${chalk.dim("Omit #N to scan the whole repo; a full github.com URL works too.")}`;
+  HELP_TOPICS[name] = `
+${chalk.bold(name)} (${TRIGGER_BLURB[name]})
+  ${triggerUsage(name)}${scanLine}${claimLine}`;
+}
+
 // Aliases so `<alias> help` resolves to the same topic as the primary command.
 HELP_TOPICS.workflows = HELP_TOPICS.workflow;
 HELP_TOPICS.sessions = HELP_TOPICS.session;
@@ -1166,23 +1220,35 @@ async function cmdBuild(): Promise<void> {
 
 async function cmdSkill(name: string): Promise<void> {
   const target = positionals[1];
-  const skillMap: Record<string, string> = {
-    triage: "issue-triage", review: "pr-review", health: "repo-health", security: "security-review",
-    verify: "verify", "qa-test": "qa-test", demo: "demo",
-  };
-  const skill = skillMap[name];
-  const repoLevelOnly = name === "health" || name === "security";
+  const skill = SKILL_MAP[name];
+  const repoLevelOnly = REPO_LEVEL_ONLY.has(name);
   // verify / qa-test / demo take a free-text argument after the target (claim,
   // steps, or demo notes) — accept it either as trailing positionals or as a
   // quoted `-- "<text>"` (the arg parser folds the latter into flags[""]).
-  const takesClaim = name === "verify" || name === "qa-test" || name === "demo";
+  const takesClaim = TAKES_CLAIM.has(name);
   const claim = takesClaim
     ? (positionals.slice(2).join(" ") || (typeof flags[""] === "string" ? flags[""] : "")).trim()
     : "";
-  if (!target) {
-    die(`Usage: lastlight ${name} <owner/repo${repoLevelOnly ? "" : "#N"}>${takesClaim ? ` [-- "<claim or steps>"]` : ""}`);
+  if (!target) die(`Usage: ${triggerUsage(name)}`);
+  // A help word is never a repository. `main` already routes `<cmd> help` and
+  // `<cmd> --help` to the topic, so reaching here means an odd spelling — print
+  // the same topic rather than dispatching it (issue #361: "help" used to sail
+  // through as a repo-wide scan target and POST /api/run for real).
+  if (HELP_WORDS.has(target.toLowerCase())) {
+    console.log(HELP_TOPICS[name]);
+    process.exit(0);
   }
   const parsed = repoLevelOnly ? null : parseGitHubRef(target);
+  // Anything that is neither a parseable ref nor a bare `owner/repo` is a typo,
+  // not a scan target. Dispatching it costs a real workflow run on the instance,
+  // so fail here — before the network — the way `build` always has.
+  if (!parsed && !OWNER_REPO_RE.test(target)) {
+    die(
+      `Not a repository: ${target}\n` +
+        `Usage: ${triggerUsage(name)}` +
+        (repoLevelOnly ? `\n${name} scans a whole repository — drop any #N.` : ""),
+    );
+  }
   // `pr-review` is PR-SCOPED (`pr_scoped: true` in its workflow YAML), and the
   // server resolves the `PrState` snapshot only when the dispatch context
   // carries `prNumber` **as a number**. `issueNumber` alone does not satisfy

@@ -86,6 +86,15 @@ Per-command help: `lastlight <cmd> help` (e.g. `lastlight cron help`) — the
 top-level `lastlight` / `--help` is a compact index; detail lives under each
 command's help.
 
+The seven trigger commands (`triage`, `review`, `health`, `security`, `verify`,
+`qa-test`, `demo`) share one shape table near the top of `cli.ts`: `SKILL_MAP`,
+`REPO_LEVEL_ONLY`, `TAKES_CLAIM` and `triggerUsage()` build both their
+`HELP_TOPICS` entries and the validation `cmdSkill` enforces, so the usage a
+user is shown is the usage that is checked. A target must parse as a GitHub ref
+or match bare `owner/repo`; anything else (a typo, or the word `help`) dies
+before the POST. It used to become a repo-wide scan target and dispatch a real
+workflow — issue #361, covered by `tests/trigger-help.test.ts`.
+
 ## Un-stick a PR (`pr-cli.ts`)
 
 `lastlight pr retry <owner/repo#N> [reason]` — the third of the three surfaces
