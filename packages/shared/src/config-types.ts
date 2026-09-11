@@ -530,8 +530,69 @@ export interface ReviewConfig {
    * that also touched a hand-written file — see `resolveReviewTrigger`.
    */
   generatedPaths: string[];
+  /**
+   * Skip a re-review whose effective diff is UNCHANGED — the PR's own
+   * `base...head` three-dot diff is byte-identical to the one we reviewed
+   * (issue #378).
+   *
+   * The case this covers and `generatedPaths` cannot is a merge from the base
+   * branch. A `Merge branch 'main' into feature` push changes no line the
+   * author wrote, but it is a new head SHA, and the delta since our last review
+   * is every file the base brought in — hundreds of hand-written ones, which
+   * the generated-only gate is right to refuse to suppress. `PrState` answers
+   * the other question directly by fingerprinting the three-dot diff at both
+   * head SHAs. It also covers a rebase that preserves the tree and an empty
+   * force-push, and it correctly does NOT fire when the base touched a file the
+   * PR also touches, because the merged patch then genuinely differs.
+   *
+   * `false` turns the gate off. It never suppresses a first review or an
+   * explicit `@bot review` / request label / check Re-run, and every degraded
+   * read (a truncated compare, a file GitHub gave no patch for) dispatches.
+   *
+   * Repo-settable only DOWNWARD: a repo may set it `false` and buy itself more
+   * review runs, never `true` over an operator who turned it off.
+   */
+  skipUnchangedDiff: boolean;
+  /** The depth-triage phase. See {@link ReviewTriageConfig}. */
+  triage: ReviewTriageConfig;
   /** The evidence pipeline. Off by default — see {@link ReviewAnalysisConfig}. */
   analysis: ReviewAnalysisConfig;
+}
+
+/**
+ * The cheap model pass at the head of `pr-review.yaml` that decides how much
+ * review a re-review is owed (issue #378).
+ *
+ * Between "the diff did not move at all" (which `skipUnchangedDiff` suppresses
+ * outright) and "this is a substantial new push" there is a grey middle: a real
+ * but small delta since the last review. Running the full evidence pipeline
+ * over it costs roughly what the first review cost — the survey fan-out is ~75%
+ * of a review's spend and ~90% of its branch-seconds — to re-derive findings
+ * that have not changed.
+ *
+ * The phase emits one `REVIEW_DEPTH: full|light` marker, which the harvest
+ * writes to `scratch.reviewTriage`; the seven analysis phases carry
+ * `skip_if: "scratch.reviewTriage.depth == 'light'"` and the review prompt
+ * renders a focused single-pass arm. It runs ONLY on a re-review, so a first
+ * review of a PR is untouched.
+ *
+ * OPERATOR-ONLY, the same reasoning {@link ReviewAnalysisConfig} records: it is
+ * spend, and there is no "more conservative" direction for a repo to clamp it
+ * toward.
+ */
+export interface ReviewTriageConfig {
+  /**
+   * Run the triage phase on a re-review.
+   *
+   * ON by default, unlike `analysis`. It is not the same trade: the pipeline is
+   * an unmeasured addition that buys more analysis, while triage is one cheap
+   * pass that can only ever REMOVE work from a run that would otherwise have
+   * happened in full. Its worst case — the model says `full`, or emits no
+   * marker at all — is today's review plus one short prompt.
+   */
+  enabled: boolean;
+  /** Phase timeout. The pass reads a diff and answers with one line. */
+  timeoutSeconds: number;
 }
 
 /**
@@ -589,6 +650,13 @@ export function defaultReviewConfig(): ReviewConfig {
       "*.generated.*",
       "**/__generated__/**",
     ],
+    // ON, and it is the conservative direction: the gate fires only where the
+    // PR's own patch is byte-identical to the one we already reviewed, and
+    // every uncertain read dispatches.
+    skipUnchangedDiff: true,
+    // ON by default — one cheap pass that can only remove work from a
+    // re-review. See {@link ReviewTriageConfig.enabled}.
+    triage: { enabled: true, timeoutSeconds: 300 },
     analysis: {
       enabled: false,
       // A safety bound, not a budget — see config/default.yaml for why this is

@@ -26,6 +26,12 @@ models:
   # override this in its overlay `config.yaml`, or these six phases reach for a
   # provider it has no key for.
   review-survey: anthropic/claude-haiku-4-5-20251001
+  # The `triage` phase of `pr-review.yaml` — "how much review is this push
+  # owed?". SET, not an example: the phase exists to save spend, so it must
+  # never default to the deployment's main review model. Same tier as
+  # `review-survey`, and the task is smaller — read a bounded diff, answer with
+  # one word.
+  review-triage: anthropic/claude-haiku-4-5-20251001
   # Per-task overrides keyed by phase or helper name, e.g.:
   #   architect: anthropic/claude-opus-4-8
   #   classifier: anthropic/claude-haiku-4-5-20251001   # the intent-routing helper
@@ -348,6 +354,52 @@ review:
     - "*.min.css"
     - "*.generated.*"
     - "**/__generated__/**"
+  # Skip a re-review whose EFFECTIVE DIFF is unchanged (issue #378).
+  #
+  # `generatedPaths` above asks "is the delta since our last review all derived
+  # output?". This asks the other question: is the PR's own three-dot diff
+  # (`base...head`) byte-identical to the one we already reviewed? A
+  # `Merge branch 'main' into feature` push changes no line the author wrote,
+  # but it is a new head SHA, and the delta since the last review is every file
+  # main brought in — so nothing above could ever suppress it. It also covers a
+  # rebase that preserves the tree and an empty force-push, and it correctly
+  # does NOT fire when the base touched a file the PR also touches, because the
+  # merged patch then genuinely differs.
+  #
+  # Never suppresses a FIRST review or an explicit `@bot review` / request
+  # label / check Re-run. Every degraded read — GitHub truncating the compare at
+  # 300 files, a binary file with no patch, a failed request — dispatches a full
+  # review. Set to `false` to turn the gate off.
+  #
+  # Repo-settable DOWNWARD only: a repo may turn it off and buy itself more
+  # review runs, never on over an operator who turned it off.
+  skipUnchangedDiff: true
+  # The DEPTH TRIAGE phase (issue #378) — one cheap pass at the head of
+  # `pr-review.yaml`, on a RE-REVIEW only.
+  #
+  # Between "the diff did not move at all" (which `skipUnchangedDiff` suppresses
+  # outright) and "this is a substantial new push" sits a real but small delta.
+  # Re-running the full evidence pipeline over it costs about what the first
+  # review cost — the survey fan-out is ~75% of a review's spend and ~90% of its
+  # branch-seconds, and on the gondolin backend the branches run serially — to
+  # re-derive findings that have not changed.
+  #
+  # The phase reads the diff since our last posted review and ends with one
+  # `REVIEW_DEPTH: full` or `REVIEW_DEPTH: light` line. On `light`, the seven
+  # analysis phases skip and the review prompt renders a focused single pass
+  # that names the prior verdict. On `full`, on no marker, on a first review, or
+  # with this switch off, the run is exactly what it is today.
+  #
+  # ON by default, unlike `analysis:` below. It is not the same trade: the
+  # pipeline is an addition that buys more analysis, while triage can only
+  # REMOVE work from a run that would otherwise have happened in full, and its
+  # worst case is today's review plus one short prompt.
+  #
+  # OPERATOR-ONLY, same reasoning as `analysis:` — it is spend, and there is no
+  # "more conservative" direction for a repo to clamp it toward.
+  triage:
+    enabled: true
+    timeoutSeconds: 300
   # The review evidence pipeline (docs/plans/deterministic-pr-levers.md).
   #
   # OFF by default and that is a locked decision: `enabled: false` reproduces

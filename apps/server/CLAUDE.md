@@ -689,22 +689,27 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
     subset-only for `retryableClasses`, the lower tier for
     `autoMergeMaxImpact` and `review.trigger`
     (`on-request < after-checks < eager`), union-only for
-    `review.generatedPaths`, add-only `true` for `requireSettledChecks` /
-    `postsCheck` / `skipDraft` / `auditComment`, free for `requestLabel`
-    alone. (`trigger` and `auditComment` were free until #256: the three
+    `review.generatedPaths`, downward-only for `review.skipUnchangedDiff`
+    (a repo may turn the unchanged-diff gate OFF and buy itself more review
+    runs, never on over an operator who turned it off), add-only `true` for
+    `requireSettledChecks` / `postsCheck` / `skipDraft` / `auditComment`, free
+    for `requestLabel` alone. (`trigger` and `auditComment` were free until #256: the three
     review modes are equally *safe* but not equally *expensive* — `eager`
     buys a full agent review per push on the operator's budget — and the
     audit comment is the record of a major this deployment auto-merged,
-    whose only silenceable party is the one being audited.) Four leaves are
+    whose only silenceable party is the one being audited.) Five leaves are
     **operator-only** and answer `key-not-allowed` instead:
     `fix.escalateModelAfterAttempt` (spend),
     `fix.gateTimeoutSeconds` (shared resource),
     `dependencies.minSettledChecks` — where a `max(repo, operator)` clamp would
     weld the escape hatch shut for a repo with no CI at all — and
     `review.analysis` (the review evidence pipeline: spend, with no
-    more-conservative direction to clamp towards, and the one `review:` leaf
-    that NESTS, so its provenance reports under a dotted `analysis.enabled`
-    key like `notifications.slack.channel`). `fix` +
+    more-conservative direction to clamp towards) and `review.triage` (the
+    depth pass, #378 — spend in BOTH directions: on buys a cheap pass on the
+    operator's budget, off buys the full pipeline on every re-review). Those
+    two are also the `review:` leaves that NEST, so their provenance reports
+    under dotted `analysis.enabled` / `triage.enabled` keys like
+    `notifications.slack.channel`. `fix` +
     `dependencies` are now **live**: the PR dispatch gate (below) reads the
     run's repo-clamped blocks — on every route, webhook included — and enforces
     `fix.maxAttempts` / `fix.maxCostUsd` and

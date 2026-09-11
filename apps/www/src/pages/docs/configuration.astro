@@ -212,9 +212,10 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 
 	<div class="docs-callout">
 		<div class="docs-callout-body">
-			<strong>One per-task model key ships <em>set</em>.</strong> Every entry in
+			<strong>Two per-task model keys ship <em>set</em>.</strong> Every entry in
 			the <code>models:</code> block of <code>config/default.yaml</code> is a
-			commented-out example except <code>review-survey</code>, which is pinned to
+			commented-out example except <code>review-survey</code> and
+			<code>review-triage</code>, both pinned to
 			<code>anthropic/claude-haiku-4-5-20251001</code>. It is the key the five
 			survey branches of the <a href="#workflow-policy">review evidence
 			pipeline</a> declare, and — having no key of its own — its
@@ -227,7 +228,11 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 			<code>config.yaml</code> as well, or those six phases reach for a provider
 			you have no key for. Nothing happens either way until
 			<code>review.analysis.enabled</code> is on — those phases skip while it is
-			off.
+			off. <code>review-triage</code> is pinned for a different reason and is
+			<em>not</em> gated on that switch: it is the pass that decides how much
+			review a re-review is owed, so falling through to your main review model
+			would put the expensive model on the one phase whose whole value is being
+			cheap. Override it too on a non-Anthropic deployment.
 		</div>
 	</div>
 
@@ -512,6 +517,10 @@ review:
     - "*.min.js"
     - "*.generated.*"
     - "**/__generated__/**"
+  skipUnchangedDiff: true      # skip a re-review whose own diff did not move
+  triage:                      # how much review a RE-review is owed
+    enabled: true
+    timeoutSeconds: 300
   analysis:
     enabled: false             # the review evidence pipeline — off, and inert
     maxSpecObligations: 40     # SAFETY BOUND for the `spec` family — should never bind
@@ -632,6 +641,42 @@ dependencies:
 		leaves the PR alone, but this one would otherwise strand a required check on
 		a head nobody reviewed. Its conclusion mirrors that earlier review, so a
 		<code>CHANGES_REQUESTED</code> carried forward still blocks the merge.
+	</p>
+
+	<p>
+		<code>skipUnchangedDiff</code> answers the case no list of paths can.
+		Merging <code>main</code> into your branch changes no line you wrote, but it
+		is a new head SHA — and the delta since the last review is then every file
+		<code>main</code> brought in, which is exactly what
+		<code>generatedPaths</code> must refuse to suppress. One 73-file pull
+		request was reviewed, had a merge commit land eleven minutes later, and paid
+		for the whole review again. So this gate asks the question directly:
+		<strong>is the diff of your branch against its base byte-identical to the
+		one we already reviewed?</strong> It covers a merge from the base, a rebase
+		that preserves the tree, and an empty force-push — and it does <em>not</em>
+		fire when the base touched a file you also touched, because the merged patch
+		then really is different.
+	</p>
+
+	<p>
+		It is as hard to trip as the gate above, and fails the same way. A first
+		review, an explicit request and the check's Re-run button all override it,
+		and any read it cannot trust — a compare GitHub truncated, a binary file it
+		gave no patch for — dispatches a full review. Set it to
+		<code>false</code> to turn it off. It leaves the same carried-over check.
+	</p>
+
+	<p>
+		<code>triage</code> is the middle tier, and it ships <strong>on</strong>.
+		Between "nothing moved at all" and "this is a substantial new push" sits a
+		real but small delta, and re-running the full review over it costs about
+		what the first one cost. So a re-review starts with one cheap pass that
+		reads only what changed since the last review and decides whether the rest
+		is worth running. On <code>light</code> the analysis phases skip and the
+		reviewer makes a single focused pass over the delta; on <code>full</code>,
+		on a first review, or with this off, you get exactly the review you get
+		today. It errs hard toward <code>full</code>: an unclear answer, an
+		unrecognised one and no answer at all are all read as "review everything".
 	</p>
 
 	<p>

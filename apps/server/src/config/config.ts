@@ -899,6 +899,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const exploreRaw = isPlainObject(raw.explore) ? raw.explore : {};
   const reviewRaw = isPlainObject(raw.review) ? raw.review : {};
   const analysisRaw = isPlainObject(reviewRaw.analysis) ? reviewRaw.analysis : {};
+  const triageRaw = isPlainObject(reviewRaw.triage) ? reviewRaw.triage : {};
   const fixRaw = isPlainObject(raw.fix) ? raw.fix : {};
   const dependenciesRaw = isPlainObject(raw.dependencies) ? raw.dependencies : {};
   const approvalRaw = isPlainObject(raw.approval) ? raw.approval : {};
@@ -1011,6 +1012,18 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     generatedPaths: Array.isArray(reviewRaw.generatedPaths)
       ? reviewRaw.generatedPaths.filter((p): p is string => typeof p === "string" && !!p.trim()).map((p) => p.trim())
       : reviewDefaults.generatedPaths,
+    // The unchanged-diff gate (issue #378). `!== false` rather than `=== true`
+    // because this one ships ON: a typo must leave the shipped suppression in
+    // place, and the gate's own failure direction is already conservative —
+    // every degraded fingerprint read dispatches a full review.
+    skipUnchangedDiff: reviewRaw.skipUnchangedDiff !== false,
+    // The depth-triage phase. `enabled` reads `!== false` for the same reason:
+    // it ships on, and its worst case is one cheap pass plus today's review.
+    triage: {
+      enabled: triageRaw.enabled !== false,
+      timeoutSeconds:
+        nonNegativeNumber(triageRaw.timeoutSeconds) ?? reviewDefaults.triage.timeoutSeconds,
+    },
     // The evidence pipeline. `enabled` reads exactly like `postsCheck` above —
     // anything that is not literally `true` is OFF — because locked decision 8
     // makes "off" the byte-for-byte-today path, and a truthy-ish string in an

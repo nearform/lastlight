@@ -714,6 +714,47 @@ describe("resolveRepoConfig — review policy", () => {
     expect(result.merged.review.trigger).toBe(defaultReviewConfig().trigger);
     expect(codes(result.warnings)).toEqual(["key-not-allowed"]);
   });
+
+  // `skipUnchangedDiff` is clamped DOWNWARD only (issue #378) — the mirror of
+  // `generatedPaths` above. Turning the gate off buys the repo MORE review runs
+  // on its own attention, which is entirely its call; turning it on over an
+  // operator who disabled it would suppress reviews the deployment asked to
+  // keep.
+  it("lets a repo turn the unchanged-diff gate OFF", () => {
+    const result = resolveRepoConfig(
+      policyBase(),
+      policyBlocks(),
+      layerWith({ review: { skipUnchangedDiff: false } }),
+    );
+
+    expect(result.merged.review.skipUnchangedDiff).toBe(false);
+    expect(codes(result.warnings)).toEqual([]);
+  });
+
+  it("refuses to let a repo turn it ON over an operator who turned it off", () => {
+    const result = resolveRepoConfig(
+      policyBase({ review: { ...defaultReviewConfig(), skipUnchangedDiff: false } }),
+      policyBlocks(),
+      layerWith({ review: { skipUnchangedDiff: true } }),
+    );
+
+    expect(result.merged.review.skipUnchangedDiff).toBe(false);
+    expect(codes(result.warnings)).toEqual(["policy-downgrade"]);
+  });
+
+  // `triage` is operator-only for the same reason `analysis` is: it is spend,
+  // in both directions. Turning it on buys a cheap pass on the operator's
+  // budget; turning it off buys the full evidence pipeline on every re-review.
+  it("refuses a repo's triage block outright", () => {
+    const result = resolveRepoConfig(
+      policyBase(),
+      policyBlocks(),
+      layerWith({ review: { triage: { enabled: false } } }),
+    );
+
+    expect(result.merged.review.triage).toEqual(defaultReviewConfig().triage);
+    expect(codes(result.warnings)).toEqual(["key-not-allowed"]);
+  });
 });
 
 // ---------------------------------------------------------------------------

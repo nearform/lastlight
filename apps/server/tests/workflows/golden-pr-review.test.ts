@@ -55,6 +55,9 @@ import {
  */
 
 const DECLARED = [
+  // The depth-triage root (issue #378). Declared first, and `prepare` now
+  // depends on it — so the chain the rest of this file resolves starts here.
+  "triage",
   "prepare",
   "facts",
   "seed",
@@ -76,7 +79,22 @@ const DECLARED = [
  * phases are no longer a contiguous prefix and spelling them as one would be a
  * quietly wrong assertion.
  */
-const ANALYSIS_PHASES = DECLARED.filter((n) => n !== "review" && n !== "post-review");
+const ANALYSIS_PHASES = DECLARED.filter(
+  (n) => n !== "review" && n !== "post-review" && n !== "triage",
+);
+
+/**
+ * The context that makes the `triage` phase RUN (issue #378).
+ *
+ * Two keys, both required: the deployment has to have triage on, and this has
+ * to be a re-review. Every test below that does not spread this gets a skipped
+ * triage phase, which is the shape of a first review and of a deployment that
+ * turned it off — and is exactly today's behaviour for everything downstream.
+ */
+const TRIAGE_ON = { triageEnabled: "true", reviewIsRereview: "true" };
+
+/** The tier guard the seven analysis phases carry beside their own switch. */
+const TIER_GUARD = "scratch.reviewTriage.depth == 'light'";
 
 /**
  * WP4's two phases are gated SEPARATELY, on `probesEnabled`, so they skip even
@@ -164,7 +182,7 @@ function simulate(phases: PhaseDefinition[], ctx: Record<string, unknown>) {
 describe("golden — pr-review.yaml is an explicit chain, and the chain is unbroken", () => {
   const def = getWorkflow("pr-review");
 
-  it("declares the nine phases in the pinned order", () => {
+  it("declares the ten phases in the pinned order", () => {
     expect(def.phases.map((p) => p.name)).toEqual(DECLARED);
   });
 
@@ -182,7 +200,8 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
     // invariant that a failed review must not post. Pinning the edges by name
     // rather than by index is what keeps that readable.
     const expected: Record<string, string[]> = {
-      prepare: [],
+      triage: [],
+      prepare: ["triage"],
       facts: ["prepare"],
       seed: ["facts"],
       survey: ["seed"],
@@ -197,7 +216,7 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
 
     const dag = buildDag(def.phases, { chainIfNoDeps: true });
     // Exactly one root, and it is the first declared phase.
-    expect(dag.filter((n) => n.depends_on.length === 0).map((n) => n.name)).toEqual(["prepare"]);
+    expect(dag.filter((n) => n.depends_on.length === 0).map((n) => n.name)).toEqual(["triage"]);
     expect(Object.fromEntries(dag.map((n) => [n.name, n.depends_on]))).toEqual(expected);
   });
 
@@ -207,7 +226,10 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
     // inert configuration would post no review at all. `all_done` is the rule
     // the schema names for exactly this.
     const byName = new Map(def.phases.map((p) => [p.name, p]));
-    const allDone = ["facts", "seed", "survey", "falsify", "review", "reconcile"];
+    // `prepare` joined the list when `triage` became its dependency: triage
+    // SKIPS on a first review and wherever the deployment turned it off, and a
+    // skipped node is not `succeeded`.
+    const allDone = ["prepare", "facts", "seed", "survey", "falsify", "review", "reconcile"];
     for (const name of allDone) {
       expect(byName.get(name)?.trigger_rule, `${name}.trigger_rule`).toBe("all_done");
     }
@@ -224,9 +246,19 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
 
   it("guards WP3's phases on `analysisEnabled`, WP4's on `probesEnabled`, and neither legacy phase", () => {
     const byName = new Map(def.phases.map((p) => [p.name, p]));
+    // Triage's own two guards, in the BARE-BOOLEAN form: an absent key is run
+    // through `coerceBool`, matches `!= true`, and skips the phase — leaving a
+    // full review. The tier guard below is the quoted form, which an absent
+    // value never matches, so the phase RUNS. Both failure directions are
+    // "review everything".
+    expect(phaseSkipIfExpressions(byName.get("triage")!), "triage.skip_if").toEqual([
+      "triageEnabled != true",
+      "reviewIsRereview != true",
+    ]);
     for (const name of WP3_PHASES) {
       expect(phaseSkipIfExpressions(byName.get(name)!), `${name}.skip_if`).toEqual([
         "analysisEnabled != true",
+        TIER_GUARD,
       ]);
     }
     // Two switches, not one. `prepare` is the phase that puts a `node_modules`
@@ -240,6 +272,7 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
       expect(phaseSkipIfExpressions(byName.get(name)!), `${name}.skip_if`).toEqual([
         "analysisEnabled != true",
         "probesEnabled != true",
+        TIER_GUARD,
       ]);
     }
     // WP6's two ride the pipeline switch alone: they neither install anything
@@ -247,6 +280,7 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
     for (const name of WP6_PHASES) {
       expect(phaseSkipIfExpressions(byName.get(name)!), `${name}.skip_if`).toEqual([
         "analysisEnabled != true",
+        TIER_GUARD,
       ]);
     }
     for (const name of LEGACY_PHASES) {
@@ -265,11 +299,15 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
     const { ran, skipped } = simulate(def.phases, { owner: "acme", repo: "widgets" });
 
     expect(ran).toEqual(LEGACY_PHASES);
-    expect(skipped.map((s) => s.name)).toEqual(ANALYSIS_PHASES);
+    expect(skipped.map((s) => s.name)).toEqual(["triage", ...ANALYSIS_PHASES]);
     // Every skip is the CONDITIONAL one (which keeps the run green), never a
     // trigger-rule cascade (which would drag `review` down with it).
     for (const s of skipped) {
-      expect(s.reason, s.name).toBe("skip_if matched: analysisEnabled != true");
+      expect(s.reason, s.name).toBe(
+        s.name === "triage"
+          ? "skip_if matched: triageEnabled != true"
+          : "skip_if matched: analysisEnabled != true",
+      );
     }
   });
 
@@ -277,12 +315,16 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
     // The shipping shape of WP4: the pipeline on, probes off. `prepare` skips
     // and everything downstream still runs, because `facts` takes `all_done`.
     const { ran, skipped } = simulate(def.phases, { analysisEnabled: "true" });
-    expect(ran).toEqual(DECLARED.filter((n) => !WP4_PHASES.includes(n)));
-    expect(skipped.map((s) => s.name)).toEqual(WP4_PHASES);
+    expect(ran).toEqual(DECLARED.filter((n) => !WP4_PHASES.includes(n) && n !== "triage"));
+    expect(skipped.map((s) => s.name)).toEqual(["triage", ...WP4_PHASES]);
   });
 
-  it("runs all nine in declaration order once both flags are on", () => {
-    const { ran, skipped } = simulate(def.phases, { analysisEnabled: "true", probesEnabled: "true" });
+  it("runs all ten in declaration order once every flag is on", () => {
+    const { ran, skipped } = simulate(def.phases, {
+      analysisEnabled: "true",
+      probesEnabled: "true",
+      ...TRIAGE_ON,
+    });
     expect(ran).toEqual(DECLARED);
     expect(skipped).toEqual([]);
   });
@@ -305,7 +347,11 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
     // together, because `prepare` requires both and the sweep below pins that
     // `probesEnabled` reads through the same coercion.
     for (const value of ["true", "TRUE", "1", true]) {
-      const { ran } = simulate(def.phases, { analysisEnabled: value, probesEnabled: value });
+      const { ran } = simulate(def.phases, {
+        analysisEnabled: value,
+        probesEnabled: value,
+        ...TRIAGE_ON,
+      });
       expect(ran, `both=${JSON.stringify(value)}`).toEqual(DECLARED);
     }
   });
@@ -314,7 +360,7 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
     for (const value of ["false", "", "0", "no", "TRUE-ish"]) {
       const { ran } = simulate(def.phases, { analysisEnabled: "true", probesEnabled: value });
       expect(ran, `probesEnabled=${JSON.stringify(value)}`).toEqual(
-        DECLARED.filter((n) => !WP4_PHASES.includes(n)),
+        DECLARED.filter((n) => !WP4_PHASES.includes(n) && n !== "triage"),
       );
     }
   });
@@ -462,7 +508,7 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
     expect(postReview.calls).toEqual(["post-review"]);
   });
 
-  it("records all nine phases — seven skipped, two done — so the dashboard is not silent", async () => {
+  it("records all ten phases — eight skipped, two done — so the dashboard is not silent", async () => {
     const { result, reporter } = await runPrReview({ owner: "acme", repo: "widgets", prNumber: 7 });
 
     expect(result.phases.map((p) => p.phase)).toEqual(DECLARED);
@@ -477,7 +523,7 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
     }
     expect(reporter.failures).toEqual([]);
     const skippedSteps = reporter.steps.filter((s) => s.status === "skipped").map((s) => s.key);
-    expect(skippedSteps).toEqual(ANALYSIS_PHASES);
+    expect(skippedSteps).toEqual(["triage", ...ANALYSIS_PHASES]);
   });
 
   it("runs every phase once both flags are on — the pipeline is wired, not decorative", async () => {
@@ -487,6 +533,7 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
       prNumber: 7,
       analysisEnabled: "true",
       probesEnabled: "true",
+      ...TRIAGE_ON,
     });
 
     // A node with sub-units reports under the sub-unit's label, never its own
@@ -495,6 +542,7 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
     // under their own names and everything else appears as its sub-units.
     const seen = result.phases.map((p) => p.phase);
     expect(seen.filter((n) => DECLARED.includes(n))).toEqual([
+      "triage",
       "prepare",
       "facts",
       "seed",
@@ -523,8 +571,8 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
     // Four deterministic bash phases + seven `until_bash` gates (five branch
     // gates + the falsify and adjudicate loops).
     expect(agent.calls.filter((c) => c.kind === "command").length).toBeGreaterThanOrEqual(4);
-    // Five survey passes + the oracle + the review + the adjudicator.
-    expect(agent.calls.filter((c) => c.kind === "agent")).toHaveLength(8);
+    // Five survey passes + the oracle + the review + the adjudicator + triage.
+    expect(agent.calls.filter((c) => c.kind === "agent")).toHaveLength(9);
   });
 
   it("posts the review even when the ADJUDICATOR hard-fails — the money property", async () => {
@@ -634,8 +682,26 @@ describe("golden — the `review` phase's two-mode brief", () => {
     expect(pRest).toEqual(PRE_WP3_POST_REVIEW_PHASE);
   });
 
+  /**
+   * The three arms are chosen by `scratch.reviewTriage`, not by
+   * `analysisEnabled` (issue #378).
+   *
+   * The template engine has no `else` and no nesting, so a three-way choice is
+   * three mutually exclusive keys. `runner.ts` seeds exactly one of `deep` /
+   * `baseline` at run start and the triage harvest replaces the namespace with
+   * `light`, which is what makes "exactly one arm renders" true by
+   * construction rather than by the triage phase having run.
+   */
+  const withTriage = (slot: Record<string, unknown>) =>
+    ({ ...baseCtx, scratch: { reviewTriage: slot } }) as unknown as TemplateContext;
+
   it("analysis OFF: the skill nudge and the curated context, nothing pipeline-shaped", () => {
-    const off = buildPhasePrompt(review, baseCtx, assets, { phaseOutputs: {} });
+    const off = buildPhasePrompt(
+      review,
+      withTriage({ depth: "full", baseline: true }),
+      assets,
+      { phaseOutputs: {} },
+    );
 
     expect(off).toContain("Use the **pr-review** skill to handle this request.");
     expect(off).toContain("Other skills available if you need them: code-review.");
@@ -658,7 +724,7 @@ describe("golden — the `review` phase's two-mode brief", () => {
   it("analysis ON: the abbreviated independent pass replaces the full procedure", () => {
     const on = buildPhasePrompt(
       review,
-      { ...baseCtx, analysisEnabled: "true" } as unknown as TemplateContext,
+      withTriage({ depth: "full", deep: true }),
       assets,
       { phaseOutputs: {} },
     );
@@ -676,5 +742,55 @@ describe("golden — the `review` phase's two-mode brief", () => {
     expect(on).toContain(".lastlight/pr-review/findings.json");
     expect(on).toMatch(/empty `findings` array is a valid outcome/i);
     expect(on).not.toContain("{{");
+  });
+
+  it("LIGHT: one focused pass over the delta, naming the review it follows", () => {
+    // The tier the triage phase writes. It must not claim the pipeline ran —
+    // on a light run it did not, which is the whole reason this arm exists
+    // rather than reusing the abbreviated one.
+    const light = buildPhasePrompt(
+      review,
+      {
+        ...baseCtx,
+        scratch: { reviewTriage: { depth: "light", light: true } },
+        priorReviewSha: "1e8bea8",
+        priorReviewState: "APPROVED",
+        priorReviewBody: "Looks good, one nit about the retry bound.",
+      } as unknown as TemplateContext,
+      assets,
+      { phaseOutputs: {} },
+    );
+
+    // Neither of the other two arms renders.
+    expect(light).not.toContain("Use the **pr-review** skill to handle this request.");
+    expect(light).not.toContain("abbreviated");
+    expect(light).not.toContain("hypotheses");
+    // It names what it is following, which is the whole of its extra context.
+    expect(light).toContain("1e8bea8");
+    expect(light).toContain("APPROVED");
+    expect(light).toContain("Looks good, one nit about the retry bound.");
+    // And it still owes the same artifact — post-review fails loudly without it.
+    expect(light).toContain(".lastlight/pr-review/findings.json");
+    expect(light).not.toContain("{{");
+  });
+
+  it("renders EXACTLY ONE arm for each seeded tier", () => {
+    // The property the three keys exist for. A prompt with two arms tells the
+    // model both that the pipeline ran and that it did not; a prompt with none
+    // hands it a bare Context block and no brief at all.
+    const marker = {
+      baseline: "Use the **pr-review** skill to handle this request.",
+      deep: "abbreviated",
+      light: "single focused pass",
+    };
+    for (const [tier, needle] of Object.entries(marker)) {
+      const slot =
+        tier === "light" ? { depth: "light", light: true } : { depth: "full", [tier]: true };
+      const rendered = buildPhasePrompt(review, withTriage(slot), assets, { phaseOutputs: {} });
+      for (const [other, otherNeedle] of Object.entries(marker)) {
+        if (other === tier) expect(rendered, `${tier} renders`).toContain(needle);
+        else expect(rendered, `${tier} does not render ${other}`).not.toContain(otherNeedle);
+      }
+    }
   });
 });

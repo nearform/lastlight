@@ -105,7 +105,7 @@ describe("adjudicate — the phase", () => {
   });
 
   it("rides the pipeline switch alone — it installs nothing and executes nothing", () => {
-    expect(adjudicate!.skip_if).toBe("analysisEnabled != true");
+    expect(adjudicate!.skip_if).toEqual(["analysisEnabled != true", "scratch.reviewTriage.depth == 'light'"]);
   });
 });
 
@@ -162,7 +162,7 @@ describe("reconcile — §D12's floor", () => {
   it("still skips entirely on a deployment that never opted in", () => {
     // `all_done` on a SKIPPED dep is satisfied, so without its own `skip_if`
     // this phase would run a sandbox command on every pr-review in production.
-    expect(reconcile!.skip_if).toBe("analysisEnabled != true");
+    expect(reconcile!.skip_if).toEqual(["analysisEnabled != true", "scratch.reviewTriage.depth == 'light'"]);
   });
 });
 

@@ -27,17 +27,63 @@ description: |
   formal review. Never modifies code.
 
 phases:
-  # Everything up to `reconcile` is the evidence pipeline, and all of it is
-  # INERT unless `review.analysis.enabled` — each phase carries
+  # HOW MUCH REVIEW IS THIS PUSH OWED? (issue #378) — the new root, and the only
+  # phase that runs before the workspace is put to work.
+  #
+  # A RE-REVIEW only. On a first review there is nothing to compare against, so
+  # `reviewIsRereview != true` skips the phase and the full brief runs. Both
+  # guards use the BARE-BOOLEAN `!= true` form deliberately: that form runs an
+  # absent value through `coerceBool`, so a missing or misspelled context key
+  # matches the guard and the phase skips — leaving a full review. The
+  # quoted-string form has the opposite behaviour and must not be used here.
+  #
+  # The phase ends with one `REVIEW_DEPTH: full|light` line, which
+  # `engine/review-triage.ts` harvests onto `scratch.reviewTriage` from the same
+  # `onPhaseEnd` hook the fix markers ride. On `light`, the seven phases below
+  # skip and `prompts/review.md` renders its single-pass arm. On `full`, on no
+  # marker, or on a failed phase, the dispatch-time seed stands and the run is
+  # exactly what it is today.
+  - name: triage
+    label: Triage · how much review is owed
+    prompt: prompts/review-triage.md
+    model: "{{models.review-triage}}"
+    skip_if:
+      - "triageEnabled != true"
+      - "reviewIsRereview != true"
+    timeout_seconds: { from: triageTimeoutSeconds, default: 300 }
+    # NO `on_output.requires_marker`, deliberately — see AC2 in
+    # `tests/workflows/pr-review-probes.test.ts`: nothing in this workflow may
+    # declare an `on_output` action, because a red run posts
+    # `messages.on_failure`, offers a Retry that cannot succeed, pollutes the
+    # cost stats and defeats the SHA dedup. A missing marker already means
+    # "full review" — the harvest leaves the dispatch-time seed standing — so
+    # failing the run over one would trade a free correct answer for a broken
+    # review.
+
+  # Everything from here up to `reconcile` is the evidence pipeline, and all of
+  # it is INERT unless `review.analysis.enabled` — each phase carries
   # `skip_if: analysisEnabled != true`, and an absent variable reads as false,
   # so a typo skips the analysis rather than running an unasked-for one.
   # `prepare` and `falsify` need `review.analysis.probes` on top.
+  #
+  # Each also carries the TIER guard, `scratch.reviewTriage.depth == 'light'`.
+  # Quoted `==` there, the mirror image of the bare-boolean form above: an
+  # absent value never matches, so the phase RUNS — again failing toward a full
+  # review. `review` and `post-review` carry no tier guard and always run.
   - name: prepare
     label: Prepare · probe environment
     type: bash
+    # `all_done`, not `all_success`: `triage` skips on a first review and on
+    # every deployment that turned it off, and a skipped node is not
+    # `succeeded`. A triage phase that FAILED must not take the review with it
+    # — the run then owes a full review, which is what the un-replaced seed
+    # already says.
+    depends_on: [triage]
+    trigger_rule: all_done
     skip_if:
       - "analysisEnabled != true"
       - "probesEnabled != true"
+      - "scratch.reviewTriage.depth == 'light'"
     timeout_seconds: { from: probePhaseTimeoutSeconds, default: 300 }
     command: |
       set -u
@@ -67,7 +113,9 @@ phases:
   - name: facts
     label: Facts · deterministic
     type: bash
-    skip_if: "analysisEnabled != true"
+    skip_if:
+      - "analysisEnabled != true"
+      - "scratch.reviewTriage.depth == 'light'"
     # `all_done`, not `all_success`: `prepare` SKIPS wherever probes are off,
     # and a skipped node is not `succeeded`.
     depends_on: [prepare]
@@ -115,7 +163,9 @@ phases:
   - name: seed
     label: Seed · obligations
     type: bash
-    skip_if: "analysisEnabled != true"
+    skip_if:
+      - "analysisEnabled != true"
+      - "scratch.reviewTriage.depth == 'light'"
     depends_on: [facts]
     trigger_rule: all_done
     timeout_seconds: 120
@@ -167,7 +217,9 @@ phases:
     type: fanout
     skills: [survey-pass]
     model: "{{models.review-survey}}"
-    skip_if: "analysisEnabled != true"
+    skip_if:
+      - "analysisEnabled != true"
+      - "scratch.reviewTriage.depth == 'light'"
     depends_on: [seed]
     trigger_rule: all_done
     # A CEILING the run clamps further per backend: gondolin boots a micro-VM
@@ -230,6 +282,7 @@ phases:
     skip_if:
       - "analysisEnabled != true"
       - "probesEnabled != true"
+      - "scratch.reviewTriage.depth == 'light'"
     depends_on: [survey]
     trigger_rule: all_done
     generic_loop:
@@ -278,7 +331,9 @@ phases:
     # than to `models.review`.
     model: "{{#if models.review-adjudicate}}{{models.review-adjudicate}}{{/if}}{{#if !models.review-adjudicate}}{{models.review}}{{/if}}"
     variant: "{{variants.review}}"
-    skip_if: "analysisEnabled != true"
+    skip_if:
+      - "analysisEnabled != true"
+      - "scratch.reviewTriage.depth == 'light'"
     # `all_success` (the default) where `review` uses `all_done`: a failed
     # review must NOT post.
     depends_on: [review]
@@ -302,7 +357,9 @@ phases:
   - name: reconcile
     label: Reconcile · the conservation floor
     type: bash
-    skip_if: "analysisEnabled != true"
+    skip_if:
+      - "analysisEnabled != true"
+      - "scratch.reviewTriage.depth == 'light'"
     depends_on: [adjudicate]
     # `all_done`: the floor must apply even when the adjudicator failed — that
     # is precisely when there is something to repair.

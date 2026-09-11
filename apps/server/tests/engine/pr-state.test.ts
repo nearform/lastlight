@@ -628,6 +628,9 @@ describe("resolvePrState — the review-delta compare", () => {
     latest?: { state: string; sha: string } | null;
     paths?: string[] | null;
     comparesThrow?: boolean;
+    /** Fingerprints keyed by the SHA the three-dot diff was taken at. */
+    prints?: Record<string, string | null>;
+    printsThrow?: boolean;
   }) {
     return {
       getPullRequest: async () => ({
@@ -649,6 +652,10 @@ describe("resolvePrState — the review-delta compare", () => {
         if (history.comparesThrow) throw new Error("422 no common ancestor");
         return history.paths ?? null;
       }),
+      getPrDiffFingerprint: vi.fn(async (_o: string, _r: string, _base: string, sha: string) => {
+        if (history.printsThrow) throw new Error("502 upstream");
+        return history.prints?.[sha] ?? null;
+      }),
     } as any;
   }
 
@@ -667,7 +674,7 @@ describe("resolvePrState — the review-delta compare", () => {
       "oldhead",
       "newhead",
     );
-    expect(state.lastBotReview).toEqual({ state: "APPROVED", sha: "oldhead" });
+    expect(state.lastBotReview).toEqual({ state: "APPROVED", sha: "oldhead", body: null });
     expect(state.pathsSinceLastBotReview).toEqual(["pnpm-lock.yaml"]);
   });
 
@@ -691,9 +698,101 @@ describe("resolvePrState — the review-delta compare", () => {
   // Never throws, and degrades to the value that cannot cause a skip — the same
   // contract every other read in this resolver holds to.
   it("degrades a failed compare to null and notes it", async () => {
-    const github = githubStub({ latest: { state: "APPROVED", sha: "oldhead" }, comparesThrow: true });
+    const github = githubStub({
+      latest: { state: "APPROVED", sha: "oldhead" },
+      comparesThrow: true,
+      printsThrow: true,
+    });
     const state = await resolve(github);
     expect(state.pathsSinceLastBotReview).toBeNull();
+    expect(state.prDiffUnchangedSinceLastReview).toBeNull();
     expect(state.readErrors.join()).toMatch(/getChangedPathsBetween/);
+  });
+});
+
+/**
+ * The unchanged-diff fingerprint (issue #378) — the second half of that same
+ * conditional read.
+ *
+ * It rides the very block above, under the same three preconditions, because
+ * the question it answers only exists on that one shape of PR: we reviewed
+ * this before, and the head has moved past it. What it costs is two compares
+ * where the delta read already spends one.
+ */
+describe("resolvePrState — the unchanged-diff fingerprint", () => {
+  const emptyDb = {
+    runs: {
+      activeForTrigger: () => null,
+      latestSucceededForTriggers: () => ({}),
+      latestForTrigger: () => null,
+    },
+    executions: { costForTriggerWorkflows: () => 0, phaseSucceededInRun: () => false },
+  } as unknown as StateDb;
+
+  function stub(prints: Record<string, string | null>, opts: { throws?: boolean } = {}) {
+    return {
+      getPullRequest: async () => ({
+        title: "t",
+        body: "",
+        draft: false,
+        labels: [],
+        head: { ref: "feature", sha: "newhead", repo: { full_name: "cliftonc/lastlight" } },
+        base: { ref: "main", repo: { full_name: "cliftonc/lastlight" } },
+      }),
+      getChecksSummary: async () => ({ state: "passing", settledCount: 1, pendingCount: 0 }),
+      getBaseChecksState: async () => "passing",
+      getBotReviewHistory: async () => ({
+        atHead: null,
+        latest: { state: "APPROVED", sha: "oldhead", body: "looks good" },
+      }),
+      getCommitAuthorName: async () => "octocat",
+      getChangedPathsBetween: async () => ["src/a.ts"],
+      getPrDiffFingerprint: vi.fn(async (_o: string, _r: string, base: string, sha: string) => {
+        if (opts.throws) throw new Error("502 upstream");
+        expect(base).toBe("main");
+        return prints[sha] ?? null;
+      }),
+    } as any;
+  }
+
+  const resolve = (github: any) =>
+    resolvePrState("cliftonc", "lastlight", 190, { github, db: emptyDb, botLogin: BOT });
+
+  it("is TRUE when the merge changed nothing the author wrote", async () => {
+    const state = await resolve(stub({ oldhead: "abc123", newhead: "abc123" }));
+    expect(state.prDiffUnchangedSinceLastReview).toBe(true);
+    // The delta read still happened and still reports every file the base
+    // brought in — which is exactly why it could not answer this question.
+    expect(state.pathsSinceLastBotReview).toEqual(["src/a.ts"]);
+  });
+
+  it("is FALSE when the merged patch genuinely differs", async () => {
+    const state = await resolve(stub({ oldhead: "abc123", newhead: "def456" }));
+    expect(state.prDiffUnchangedSinceLastReview).toBe(false);
+  });
+
+  // Both degraded cases land on `null`, the value the gate cannot skip on.
+  it("is NULL when either fingerprint was degraded", async () => {
+    expect(
+      (await resolve(stub({ oldhead: null, newhead: "abc123" }))).prDiffUnchangedSinceLastReview,
+    ).toBeNull();
+    expect(
+      (await resolve(stub({ oldhead: "abc123", newhead: null }))).prDiffUnchangedSinceLastReview,
+    ).toBeNull();
+  });
+
+  it("is NULL, and noted, when the compare threw", async () => {
+    const state = await resolve(stub({}, { throws: true }));
+    expect(state.prDiffUnchangedSinceLastReview).toBeNull();
+    expect(state.readErrors.join()).toMatch(/getPrDiffFingerprint/);
+  });
+
+  it("carries the prior review's BODY, which the history read used to discard", async () => {
+    const state = await resolve(stub({ oldhead: "abc123", newhead: "abc123" }));
+    expect(state.lastBotReview).toEqual({
+      state: "APPROVED",
+      sha: "oldhead",
+      body: "looks good",
+    });
   });
 });
