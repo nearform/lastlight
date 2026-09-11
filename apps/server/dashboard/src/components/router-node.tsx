@@ -1,14 +1,6 @@
 import { Position, Handle, type Node, type NodeProps } from "@xyflow/react";
+import { Ban, Code2, Filter, LayoutGrid, MessagesSquare, Sparkles, Zap } from "lucide-react";
 import clsx from "clsx";
-import {
-  SparklesIcon,
-  CodeBracketIcon,
-  FunnelIcon,
-  RectangleGroupIcon,
-  BoltIcon,
-  NoSymbolIcon,
-  ChatBubbleLeftRightIcon,
-} from "@heroicons/react/24/solid";
 import { handleClass } from "./pipeline-node";
 
 /**
@@ -74,19 +66,19 @@ function iconFor(variant: RouterVariant) {
     case "slack":
       return { Icon: SlackMark, tile: "bg-[#4A154B] text-white" };
     case "deterministic":
-      return { Icon: CodeBracketIcon, tile: "bg-base-content/55 text-base-100" };
+      return { Icon: Code2, tile: "bg-base-content/55 text-base-100" };
     case "classifier":
-      return { Icon: SparklesIcon, tile: "bg-info text-info-content" };
+      return { Icon: Sparkles, tile: "bg-info text-info-content" };
     case "router":
-      return { Icon: FunnelIcon, tile: "bg-primary text-primary-content" };
+      return { Icon: Filter, tile: "bg-primary text-primary-content" };
     case "workflow":
-      return { Icon: RectangleGroupIcon, tile: "bg-success text-success-content" };
+      return { Icon: LayoutGrid, tile: "bg-success text-success-content" };
     case "in-process":
-      return { Icon: BoltIcon, tile: "bg-warning text-warning-content" };
+      return { Icon: Zap, tile: "bg-warning text-warning-content" };
     case "ignore":
-      return { Icon: NoSymbolIcon, tile: "bg-base-content/45 text-base-100" };
+      return { Icon: Ban, tile: "bg-base-content/45 text-base-100" };
     case "reply":
-      return { Icon: ChatBubbleLeftRightIcon, tile: "bg-info text-info-content" };
+      return { Icon: MessagesSquare, tile: "bg-info text-info-content" };
   }
 }
 
@@ -95,7 +87,7 @@ function idleSurface(data: RouterNodeData): string {
   if (data.column === "router") return "border-primary/45 bg-primary/5";
   if (data.variant === "workflow") return "border-success/25 bg-success/4";
   if (data.variant === "in-process") return "border-warning/30 bg-warning/5";
-  return "border-base-300 bg-base-100"; // inputs + event types
+  return "border-hairline bg-base-100"; // inputs + event types
 }
 
 export function RouterFlowNode({ data }: NodeProps<Node<RouterNodeData>>) {
@@ -106,7 +98,7 @@ export function RouterFlowNode({ data }: NodeProps<Node<RouterNodeData>>) {
   const isTerminal = data.variant === "ignore" || data.variant === "reply";
 
   const card = clsx(
-    "relative flex items-center gap-2.5 rounded-lg border px-2.5 shadow-sm cursor-pointer",
+    "relative flex items-center gap-2.5 rounded-panel border px-2.5 shadow-sm cursor-pointer",
     "overflow-hidden whitespace-nowrap transition-all duration-150",
     isRouter ? "py-2.5" : "py-2",
     // Layer precedence: matched (hot path) beats selected beats idle.
@@ -142,7 +134,7 @@ export function RouterFlowNode({ data }: NodeProps<Node<RouterNodeData>>) {
           {data.label}
         </div>
         {data.subtitle && (
-          <div className="truncate font-mono text-[10px] text-base-content/50" title={data.subtitle}>
+          <div className="truncate font-mono text-[10px] text-muted" title={data.subtitle}>
             {data.subtitle}
           </div>
         )}

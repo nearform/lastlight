@@ -120,7 +120,7 @@ export function MessageFeed({ sessionId, order, onOrderChange, searchQuery, isLi
 
   if (!sessionId) {
     return (
-      <div className="flex-1 flex items-center justify-center text-base-content/40 text-sm">
+      <div className="flex-1 flex items-center justify-center text-faint text-sm">
         Select a session from the left to view its messages.
       </div>
     );
@@ -128,23 +128,23 @@ export function MessageFeed({ sessionId, order, onOrderChange, searchQuery, isLi
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="px-4 py-2 border-b border-base-300 bg-base-200/80 backdrop-blur flex items-center gap-3 shrink-0">
+      <div className="px-4 py-2 border-b border-hairline bg-base-200/80 backdrop-blur flex items-center gap-3 shrink-0">
         <div className={clsx("w-1.5 h-1.5 rounded-full shrink-0", STATUS_DOT[status])} title={status} />
-        <span className="text-xs font-mono text-base-content/60 truncate">{sessionId}</span>
+        <span className="text-xs font-mono text-muted truncate">{sessionId}</span>
         {model && (
           <span
-            className="inline-flex items-center gap-1 text-2xs font-mono text-base-content/70 bg-base-300/60 rounded px-1.5 py-0.5 shrink-0"
+            className="inline-flex items-center gap-1 text-2xs font-mono text-strong bg-base-300/60 rounded px-1.5 py-0.5 shrink-0"
             title="Model used for this session"
           >
             <ProviderIcon model={model} size={12} />
             {model}
           </span>
         )}
-        <span className="text-base-content/30 text-xs">-</span>
-        <span className="text-xs text-base-content/60">
+        <span className="text-faint text-xs">-</span>
+        <span className="text-xs text-muted">
           <span className="text-base-content font-semibold">{items.length}</span>
           {searchQuery && (
-            <span className="text-base-content/50"> / {messages.length}</span>
+            <span className="text-muted"> / {messages.length}</span>
           )}{" "}
           {searchQuery ? "matching" : "messages"}
         </span>
@@ -153,7 +153,7 @@ export function MessageFeed({ sessionId, order, onOrderChange, searchQuery, isLi
           {isLive && onTerminate && (
             <button
               onClick={() => setShowConfirm(true)}
-              className="btn btn-xs h-6 min-h-0 btn-error btn-outline gap-1"
+              className="btn btn-xs ll-control-sm btn-error btn-outline gap-1"
               title="Terminate this session"
             >
               <OctagonX size={12} />
@@ -163,8 +163,8 @@ export function MessageFeed({ sessionId, order, onOrderChange, searchQuery, isLi
           <button
             onClick={() => onOrderChange("newest")}
             className={clsx(
-              "btn btn-xs h-6 min-h-0",
-              order === "newest" ? "btn-primary" : "btn-ghost text-base-content/60",
+              "btn btn-xs ll-control-sm",
+              order === "newest" ? "btn-primary" : "btn-ghost text-muted",
             )}
           >
             newest
@@ -172,8 +172,8 @@ export function MessageFeed({ sessionId, order, onOrderChange, searchQuery, isLi
           <button
             onClick={() => onOrderChange("oldest")}
             className={clsx(
-              "btn btn-xs h-6 min-h-0",
-              order === "oldest" ? "btn-primary" : "btn-ghost text-base-content/60",
+              "btn btn-xs ll-control-sm",
+              order === "oldest" ? "btn-primary" : "btn-ghost text-muted",
             )}
           >
             oldest
@@ -202,7 +202,7 @@ export function MessageFeed({ sessionId, order, onOrderChange, searchQuery, isLi
           return <TimelineItem key={item.id} item={item} isNew={isNew} />;
         })}
         {items.length === 0 && (
-          <div className="p-6 text-center text-base-content/40 text-sm">
+          <div className="p-6 text-center text-faint text-sm">
             {searchQuery ? "no messages match search" : "no messages yet"}
           </div>
         )}
@@ -211,9 +211,9 @@ export function MessageFeed({ sessionId, order, onOrderChange, searchQuery, isLi
       {/* Terminate confirmation modal */}
       {showConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="bg-base-200 border border-base-300 rounded-xl p-6 max-w-sm w-full mx-4 shadow-2xl">
+          <div className="bg-base-200 border border-hairline rounded-panel p-6 max-w-sm w-full mx-4 shadow-2xl">
             <h3 className="text-base font-semibold text-base-content mb-2">Terminate session?</h3>
-            <p className="text-sm text-base-content/60 mb-4">
+            <p className="text-sm text-muted mb-4">
               This will kill the Docker sandbox container and mark the execution as failed. The agent's work in progress will be lost.
             </p>
             <div className="flex justify-end gap-2">

@@ -20,10 +20,10 @@ export function pretty(value: unknown): string {
 const TYPE_ORDER: OverlayAsset["type"][] = ["workflow", "cron", "prompt", "skill", "agent-context"];
 
 function OverridesPane({ data }: { data: OverridesBundle | null }) {
-  if (!data) return <div className="text-sm text-base-content/60">Loading overrides…</div>;
+  if (!data) return <div className="text-sm text-muted">Loading overrides…</div>;
   if (data.overrides.length === 0) {
     return (
-      <div className="rounded border border-base-300 ll-surface p-3 text-sm text-base-content/70">
+      <div className="rounded border border-hairline ll-surface p-3 text-sm text-strong">
         No overlay overrides active.{" "}
         {data.overlayDir ? (
           <>Fork a built-in with <code className="text-xs">lastlight fork &lt;name&gt;</code>.</>
@@ -39,13 +39,13 @@ function OverridesPane({ data }: { data: OverridesBundle | null }) {
   return (
     <div className="overflow-auto">
       {data.overlayDir && (
-        <p className="text-xs text-base-content/60 mb-3">
+        <p className="text-xs text-muted mb-3">
           Overlay: <code className="text-xs">{data.overlayDir}</code>
         </p>
       )}
       <table className="w-full text-xs">
         <thead>
-          <tr className="text-left text-base-content/60 border-b border-base-300">
+          <tr className="text-left text-muted border-b border-hairline">
             <th className="py-1.5 pr-4 font-medium">Asset</th>
             <th className="py-1.5 pr-4 font-medium">Type</th>
             <th className="py-1.5 font-medium">Status</th>
@@ -53,9 +53,9 @@ function OverridesPane({ data }: { data: OverridesBundle | null }) {
         </thead>
         <tbody>
           {sorted.map((a) => (
-            <tr key={`${a.type}:${a.name}`} className="border-b border-base-300/50">
+            <tr key={`${a.type}:${a.name}`} className="border-b border-hairline">
               <td className="py-1.5 pr-4 font-mono text-base-content">{a.name}</td>
-              <td className="py-1.5 pr-4 text-base-content/70">{a.type}</td>
+              <td className="py-1.5 pr-4 text-strong">{a.type}</td>
               <td className="py-1.5">
                 <span
                   className={`inline-block rounded px-1.5 py-0.5 text-[11px] font-medium ${
@@ -76,10 +76,10 @@ function OverridesPane({ data }: { data: OverridesBundle | null }) {
 }
 
 function ManagedReposPane({ data }: { data: ManagedRepos | null }) {
-  if (!data) return <div className="text-sm text-base-content/60">Loading managed repos…</div>;
+  if (!data) return <div className="text-sm text-muted">Loading managed repos…</div>;
   return (
     <div className="overflow-auto space-y-3">
-      <div className="rounded border border-base-300 ll-surface p-3 text-sm text-base-content/70">
+      <div className="rounded border border-hairline ll-surface p-3 text-sm text-strong">
         Events are gated to the <strong>effective</strong> list below. Source:{" "}
         <span className="font-medium text-base-content">
           {data.source === "config"
@@ -95,7 +95,7 @@ function ManagedReposPane({ data }: { data: ManagedRepos | null }) {
           own tokens — so an owner with no installation can't be acted on at all.
           Surfaced here because the alternative is finding out from a 422 in the
           middle of a run. */}
-      <div className="rounded border border-base-300 ll-surface p-3">
+      <div className="rounded border border-hairline ll-surface p-3">
         <div className="text-sm font-medium text-base-content mb-2">App installations</div>
         {data.installations.length === 0 ? (
           <div className="text-sm text-warning">
@@ -106,7 +106,7 @@ function ManagedReposPane({ data }: { data: ManagedRepos | null }) {
             {data.installations.map((i) => (
               <li
                 key={i.id}
-                className="rounded border border-base-300/50 px-2 py-1 text-base-content flex gap-2 items-center"
+                className="rounded border border-hairline px-2 py-1 text-base-content flex gap-2 items-center"
               >
                 {/* Deep link to the install's own settings page — where the repo
                     grant, suspension and uninstall live. That page is the next
@@ -124,8 +124,8 @@ function ManagedReposPane({ data }: { data: ManagedRepos | null }) {
                 ) : (
                   <span className="font-medium">{i.account}</span>
                 )}
-                <span className="text-base-content/50">#{i.id}</span>
-                <span className="text-base-content/50">
+                <span className="text-muted">#{i.id}</span>
+                <span className="text-muted">
                   {i.repoCount} repo{i.repoCount === 1 ? "" : "s"} · {i.repositorySelection}
                 </span>
                 {i.suspended && <span className="text-warning">suspended</span>}
@@ -154,11 +154,11 @@ function ManagedReposPane({ data }: { data: ManagedRepos | null }) {
       ) : (
         <ul className="text-xs font-mono grid gap-1">
           {data.effective.map((r) => (
-            <li key={r} className="rounded border border-base-300/50 px-2 py-1 text-base-content">{r}</li>
+            <li key={r} className="rounded border border-hairline px-2 py-1 text-base-content">{r}</li>
           ))}
         </ul>
       )}
-      <p className="text-xs text-base-content/50">
+      <p className="text-xs text-muted">
         {data.configured.length} configured · {data.installation.length} accessible across{" "}
         {data.installations.length} installation{data.installations.length === 1 ? "" : "s"}
       </p>
@@ -191,9 +191,9 @@ export function ConfigPage() {
 
   return (
     <div className="flex flex-col flex-1 overflow-hidden bg-base-100">
-      <div className="border-b border-base-300 px-4 py-3">
+      <div className="border-b border-hairline px-4 py-3">
         <h2 className="text-sm font-semibold text-base-content">Configuration</h2>
-        <p className="text-xs text-base-content/60 mt-1">
+        <p className="text-xs text-muted mt-1">
           Read-only startup config. Secrets are omitted; changes require a harness restart.
           The Sources pane shows each value's provenance (default / overlay / env); the
           Overrides pane lists assets the deployment overlay forks; the Managed repos pane
@@ -201,12 +201,12 @@ export function ConfigPage() {
           account the GitHub App is installed on.
         </p>
       </div>
-      <div className="flex gap-1 border-b border-base-300 bg-base-200/60 px-4 py-2">
+      <div className="flex gap-1 border-b border-hairline bg-base-200/60 px-4 py-2">
         {(["default", "overlay", "merged", "sources", "overrides", "repos"] as const).map((id) => (
           <button
             key={id}
             onClick={() => setPane(id)}
-            className={`px-3 py-1.5 rounded text-xs font-medium ${pane === id ? "bg-primary text-primary-content" : "hover:bg-base-300 text-base-content/70"}`}
+            className={`px-3 py-1.5 rounded text-xs font-medium ${pane === id ? "bg-primary text-primary-content" : "hover:bg-base-300 text-strong"}`}
           >
             {PANE_LABELS[id]}
           </button>
@@ -220,13 +220,13 @@ export function ConfigPage() {
         ) : pane === "repos" ? (
           <ManagedReposPane data={repos} />
         ) : !config ? (
-          <div className="text-sm text-base-content/60">Loading configuration…</div>
+          <div className="text-sm text-muted">Loading configuration…</div>
         ) : value === null ? (
-          <div className="rounded border border-base-300 ll-surface p-3 text-sm text-base-content/70">
+          <div className="rounded border border-hairline ll-surface p-3 text-sm text-strong">
             No overlay config is active.
           </div>
         ) : (
-          <pre className="whitespace-pre-wrap rounded border border-base-300 ll-surface p-4 text-xs leading-relaxed text-base-content overflow-auto">
+          <pre className="whitespace-pre-wrap rounded border border-hairline ll-surface p-4 text-xs leading-relaxed text-base-content overflow-auto">
             {pretty(value)}
           </pre>
         )}

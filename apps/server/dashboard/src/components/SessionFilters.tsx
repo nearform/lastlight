@@ -23,14 +23,14 @@ export function SessionFilters({
   onFilterChange,
 }: Props) {
   return (
-    <div className="flex items-center gap-2 px-4 py-2 border-b border-base-300 bg-base-200/40 shrink-0">
+    <div className="flex items-center gap-2 px-4 py-2 border-b border-hairline bg-base-200/40 shrink-0">
       <div className="flex items-center gap-1 flex-1 min-w-0 overflow-x-auto flex-nowrap">
-        <SlidersHorizontal size={12} className="text-base-content/40 shrink-0" />
+        <SlidersHorizontal size={12} className="text-faint shrink-0" />
         <button
           onClick={() => onFilterChange(null)}
           className={clsx(
-            "btn btn-xs h-7 min-h-0 font-medium shrink-0",
-            sourceFilter === null ? "btn-primary" : "btn-ghost text-base-content/60",
+            "btn btn-xs ll-control font-medium shrink-0",
+            sourceFilter === null ? "btn-primary" : "btn-ghost text-muted",
           )}
         >
           all <span className="text-2xs opacity-60 ml-0.5">{totalCount}</span>
@@ -42,8 +42,8 @@ export function SessionFilters({
               key={src}
               onClick={() => onFilterChange(src)}
               className={clsx(
-                "btn btn-xs h-7 min-h-0 font-medium gap-1 shrink-0",
-                sourceFilter === src ? "btn-primary" : "btn-ghost text-base-content/60",
+                "btn btn-xs ll-control font-medium gap-1 shrink-0",
+                sourceFilter === src ? "btn-primary" : "btn-ghost text-muted",
               )}
             >
               <Icon size={12} className={sourceFilter === src ? "" : color} />

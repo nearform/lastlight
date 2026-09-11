@@ -32,7 +32,7 @@ export function VersionPin() {
 
   return (
     <code
-      className="font-mono text-2xs text-base-content/40 shrink-0"
+      className="font-mono text-2xs text-faint shrink-0"
       title={`Pinned to ${info.pinned}`}
     >
       {info.pinned}

@@ -106,6 +106,329 @@
   --text-lg--line-height: 1.625rem;
 }
 
+/* ─────────────────────────────────────────────────────────────────────────
+   Per-theme surface tokens.
+
+   These live in plain `[data-theme]` blocks rather than inside the daisyUI
+   `@plugin "daisyui/theme"` blocks above, because that plugin only understands
+   its own token vocabulary — an unrecognised property is not guaranteed to
+   survive into the generated rule. daisyUI owns the colour ramp; this owns the
+   things it has no opinion about: elevation, hairlines and the text tiers.
+
+   Elevation is two-layer on purpose: a wide, very low-alpha ambient shadow that
+   says "this is off the page", plus a tight key shadow that gives the edge a
+   readable contact line. A single blurred shadow reads as a smudge at these
+   sizes. The alphas differ per theme because a shadow on a near-black page is
+   doing a different job than one on white — in dark mode it is mostly the
+   hairline that separates surfaces, so the shadow can be nearly absent.
+   ───────────────────────────────────────────────────────────────────────── */
+[data-theme="lastlight"] {
+  /* Lighter than base-300 so a 1px rule reads as a drawn line rather than as a
+     seam between two flat fills. */
+  --ll-hairline: #2a313c;
+  --ll-hairline-strong: #39424f;
+
+  --ll-shadow-raise: 0 1px 2px rgb(0 0 0 / 0.32);
+  --ll-shadow-panel: 0 1px 2px rgb(0 0 0 / 0.28), 0 6px 16px -6px rgb(0 0 0 / 0.45);
+  --ll-shadow-pop: 0 2px 4px rgb(0 0 0 / 0.35), 0 14px 32px -10px rgb(0 0 0 / 0.6);
+
+  /* The three text tiers. These replace the ad-hoc `text-base-content/25…/60`
+     alpha ladder, which was authored dark-first and needed a per-utility lift
+     in light mode to stay legible. */
+  --ll-text-strong: color-mix(in oklab, var(--color-base-content) 92%, transparent);
+  --ll-text-muted: color-mix(in oklab, var(--color-base-content) 62%, transparent);
+  --ll-text-faint: color-mix(in oklab, var(--color-base-content) 40%, transparent);
+
+  /* Workflow graph. The canvas is RECESSED below the page and a node card is
+     RAISED above it, so a card reads as an object sitting on a surface. Both
+     are explicit tokens rather than base-100/200, because daisyUI's ramp runs
+     in opposite directions in the two themes — base-200 is lighter than the
+     page in dark and darker than it in light — so neither one can mean "raised"
+     in both. */
+  --ll-canvas-bg: #0a0e13;
+  --ll-node-bg: #171d26;
+  /* A node card's edge. Separate from `--ll-hairline` (which rules tables and
+     panel dividers) because a card floating on a canvas needs a stronger edge
+     than a divider inside a dense list. */
+  --ll-node-border: #333c49;
+  --ll-canvas-dot: #232b36;
+  --ll-canvas-glow: rgb(255 255 255 / 0.03);
+
+  /* ── Syntax colours ──────────────────────────────────────────────────
+     Own tokens rather than the brand ramp. A palette chosen to brand a UI
+     has no obligation to be legible as CODE, and in the light theme it is
+     not: `primary` and `success` are the SAME green there, so keys and
+     strings became indistinguishable, and `accent` is a highlighter green on
+     white. These are the only colours in the app whose job is to separate
+     eight token classes from each other on one surface. */
+  --ll-code-surface: #10151c;
+  --ll-code-comment: #7d8590;
+  --ll-code-punctuation: #9aa4b1;
+  --ll-code-key: #7dd3fc;
+  --ll-code-string: #a5d6a7;
+  --ll-code-number: #fcd34d;
+  --ll-code-keyword: #ff9d9d;
+  --ll-code-function: #c4b5fd;
+  --ll-code-variable: #f0b67f;
+  --ll-code-template: #fcd34d;
+}
+
+[data-theme="neaform"] {
+  --ll-hairline: #dde3ea;
+  --ll-hairline-strong: #c3cdd8;
+
+  --ll-shadow-raise: 0 1px 2px rgb(15 26 46 / 0.08);
+  --ll-shadow-panel: 0 1px 2px rgb(15 26 46 / 0.10), 0 4px 10px -3px rgb(15 26 46 / 0.12);
+  --ll-shadow-pop: 0 2px 4px rgb(15 26 46 / 0.12), 0 14px 30px -8px rgb(15 26 46 / 0.24);
+
+  --ll-text-strong: color-mix(in oklab, var(--color-base-content) 96%, transparent);
+  --ll-text-muted: color-mix(in oklab, var(--color-base-content) 74%, transparent);
+  --ll-text-faint: color-mix(in oklab, var(--color-base-content) 55%, transparent);
+
+  /* Light mode needs MORE separation, not less. A white card on a near-white
+     canvas with a pale border is invisible, so the canvas is a real grey, the
+     card edge is a real line, and the elevation below does actual work. */
+  --ll-canvas-bg: #e7ecf2;
+  --ll-node-bg: #ffffff;
+  --ll-node-border: #c3ccd8;
+  --ll-canvas-dot: #c9d2dd;
+  --ll-canvas-glow: rgb(255 255 255 / 0.45);
+
+  /* The light half of the syntax palette — see the dark block above for why
+     these are their own tokens. Tuned for a near-white code surface: one hue
+     per token class, each dark enough to read at 12px. */
+  --ll-code-surface: #f6f8fa;
+  --ll-code-comment: #6a737d;
+  --ll-code-punctuation: #57606a;
+  --ll-code-key: #0550ae;
+  --ll-code-string: #0a5f38;
+  --ll-code-number: #8250df;
+  --ll-code-keyword: #cf222e;
+  --ll-code-function: #6639ba;
+  --ll-code-variable: #953800;
+  --ll-code-template: #953800;
+}
+
+@theme inline {
+  /* Expose the per-theme tokens above as Tailwind utilities — `border-hairline`,
+     `text-muted`, `shadow-panel`, `rounded-panel`. `@theme inline` (rather than
+     plain `@theme`) is what makes each generated utility REFERENCE the variable
+     instead of snapshotting its value, which is the whole point: the value
+     changes with `data-theme`. The raw tokens above carry an `--ll-` prefix so
+     this mapping is not self-referential. */
+  --color-hairline: var(--ll-hairline);
+  --color-hairline-strong: var(--ll-hairline-strong);
+  --color-node-border: var(--ll-node-border);
+  --color-node-border: var(--ll-node-border);
+  --color-strong: var(--ll-text-strong);
+  --color-muted: var(--ll-text-muted);
+  --color-faint: var(--ll-text-faint);
+
+  --shadow-raise: var(--ll-shadow-raise);
+  --shadow-panel: var(--ll-shadow-panel);
+  --shadow-pop: var(--ll-shadow-pop);
+
+  /* A deliberate three-step radius ramp, so the app stops mixing `rounded-sm`,
+     `rounded-md`, `rounded-lg` and `rounded-box` for the same kind of object.
+     `control` is buttons/inputs/badges, `panel` is cards and popovers, and
+     `node` is a workflow canvas card — softer than a panel because it floats
+     on a dotted field rather than sitting in a grid. */
+  --radius-control: 0.375rem;
+  --radius-panel: 0.625rem;
+  --radius-node: 0.5rem;
+}
+
+/* ── Status chips ──────────────────────────────────────────────────────────
+   A status label that sits at the same visual weight as everything else on the
+   page. daisyUI's filled `badge-success` / `badge-info` were the loudest thing
+   on Home and Crons — a run that merely succeeded shouted louder than a run
+   that failed, because both were solid blocks of saturated colour. A tinted
+   chip keeps the hue (the hue IS the status) and drops the shout. */
+.ll-status {
+  border: 1px solid color-mix(in oklab, currentColor 22%, transparent);
+  background-color: color-mix(in oklab, currentColor 8%, transparent);
+  /* The label itself carries the hue, so it is the only part at full strength;
+     the fill and border are there to make it a chip, not to be seen. */
+  font-weight: 500;
+}
+
+/* Light mode needs LESS, not more. The dark theme's status colours are pastels
+   that sit quietly behind text; neaform's are fully saturated (`--color-error`
+   is #dc2626), so the same 8% fill reads as a solid block of colour. */
+[data-theme="neaform"] .ll-status {
+  border-color: color-mix(in oklab, currentColor 20%, transparent);
+  background-color: color-mix(in oklab, currentColor 6%, transparent);
+}
+
+/* ── Workflow canvas ───────────────────────────────────────────────────────
+   A soft radial lift behind the graph, so the node cards sit ON something
+   rather than floating in a void. Very low contrast on purpose: the dotted
+   grid is the texture, this is only the suggestion of a light source. */
+.ll-canvas {
+  background-color: var(--ll-canvas-bg);
+  background-image: radial-gradient(
+    120% 90% at 50% 0%,
+    var(--ll-canvas-glow) 0%,
+    transparent 60%
+  );
+}
+
+/* A node card's own surface. Opaque, so the status wash and the header tint
+   layer ON TOP of it rather than compositing against the canvas — which is why
+   the cards were previously almost invisible against the background. */
+.ll-node {
+  background-color: var(--ll-node-bg);
+}
+
+/* The connector dot's halo is the CANVAS colour, not the page's — the dot sits
+   on the canvas, and a ring in the wrong surface draws a visible notch. */
+.ll-dot-ring {
+  box-shadow: 0 0 0 2px var(--ll-canvas-bg);
+}
+
+/* ── Control primitives ────────────────────────────────────────────────────
+   The SPA had ~50 hand-written `btn …` strings that did not agree on height:
+   some pinned `h-7 min-h-0`, some `h-6 min-h-0`, the rest rode daisyUI's own
+   `btn-xs`/`btn-sm` sizing. StatsHeader alone rendered four different heights
+   in a single row. These two utilities are the sanctioned sizes; reach for a
+   raw `h-*` on a button only when there is a reason to say so out loud. */
+@utility ll-control {
+  height: 1.75rem;
+  min-height: 0;
+  padding-inline: 0.5rem;
+  border-radius: var(--radius-control);
+}
+@utility ll-control-sm {
+  height: 1.5rem;
+  min-height: 0;
+  padding-inline: 0.375rem;
+  border-radius: var(--radius-control);
+}
+
+/* ── Workflow node type accents ────────────────────────────────────────────
+   The hue behind a phase card's header strip and on its type icon.
+
+   These are their OWN tokens rather than daisyUI's `primary`/`secondary`/
+   `accent`, because borrowing those collapses in the light theme: `neaform`'s
+   primary (#07a06f) and accent (#00e6a4) are both green, so an agent phase and
+   a post-review phase became the same colour — losing the one distinction this
+   channel exists to make. Four deliberately separated hues instead, held apart
+   from each other first and from the status ramp (success/error/warning/info)
+   second, which is affordable because type and status never share a channel:
+   type is only ever a ~15% wash plus a 14px glyph, while status owns the rail,
+   the border and the body.
+
+   `bash` and `script` deliberately SHARE a hue — they are siblings, and it is
+   the glyph that tells them apart. */
+[data-theme="lastlight"] {
+  --ll-type-agent: #c4b5fd; /* violet */
+  --ll-type-review: #5eead4; /* teal */
+  --ll-type-cmd: #7dd3fc; /* blue — bash + script */
+  --ll-type-context: #94a3b8; /* slate */
+}
+
+[data-theme="neaform"] {
+  --ll-type-agent: #6d28d9;
+  --ll-type-review: #0f766e;
+  --ll-type-cmd: #0369a1;
+  --ll-type-context: #64748b;
+}
+
+.ll-type-agent { --ll-type: var(--ll-type-agent); }
+.ll-type-review { --ll-type: var(--ll-type-review); }
+.ll-type-cmd { --ll-type: var(--ll-type-cmd); }
+.ll-type-context { --ll-type: var(--ll-type-context); }
+
+/* Type is carried by the ICON ALONE — a coloured glyph, never a filled surface.
+   A tinted header strip was tried and abandoned: a phase with no body content
+   renders as header-only, so the wash became the whole card, and a solid
+   lavender block reads as a STATUS. The hint ended up louder than the signal it
+   was supposed to sit under. A 14px glyph cannot make that mistake. */
+.ll-type-ink {
+  color: var(--ll-type);
+}
+
+/* The header's separation from the body is neutral and tiny — enough to read as
+   two zones, not enough to compete with the status wash underneath it. */
+.ll-head {
+  background-color: color-mix(in oklab, var(--color-base-content) 4%, transparent);
+}
+
+/* Node metadata chips (skill / prompt). Quiet on purpose — they are the least
+   important thing on the card, and daisyUI's filled `badge-secondary` rendered
+   as a heavy near-black pill on the light theme, which inverted that. */
+.ll-chip {
+  background-color: color-mix(in oklab, var(--color-base-content) 8%, transparent);
+  color: var(--ll-text-muted);
+  border: 1px solid var(--ll-hairline);
+}
+
+/* ── Workflow canvas ───────────────────────────────────────────────────────
+   A soft radial lift behind the graph, so the node cards sit ON something
+   rather than floating in a void. Very low contrast on purpose: the dotted
+   grid is the texture, this is only the suggestion of a light source. */
+.ll-canvas {
+  background-color: var(--ll-canvas-bg);
+  background-image: radial-gradient(
+    120% 90% at 50% 0%,
+    var(--ll-canvas-glow) 0%,
+    transparent 60%
+  );
+}
+
+/* A node card's own surface. Opaque, so the status wash and the header tint
+   layer ON TOP of it rather than compositing against the canvas — which is why
+   the cards were previously almost invisible against the background. */
+.ll-node {
+  background-color: var(--ll-node-bg);
+}
+
+/* The connector dot's halo is the CANVAS colour, not the page's — the dot sits
+   on the canvas, and a ring in the wrong surface draws a visible notch. */
+.ll-dot-ring {
+  box-shadow: 0 0 0 2px var(--ll-canvas-bg);
+}
+
+/* ── Control primitives ────────────────────────────────────────────────────
+   The SPA had ~50 hand-written `btn …` strings that did not agree on height:
+   some pinned `h-7 min-h-0`, some `h-6 min-h-0`, the rest rode daisyUI's own
+   `btn-xs`/`btn-sm` sizing. StatsHeader alone rendered four different heights
+   in a single row. These two utilities are the sanctioned sizes; reach for a
+   raw `h-*` on a button only when there is a reason to say so out loud. */
+@utility ll-control {
+  height: 1.75rem;
+  min-height: 0;
+  padding-inline: 0.5rem;
+  border-radius: var(--radius-control);
+}
+@utility ll-control-sm {
+  height: 1.5rem;
+  min-height: 0;
+  padding-inline: 0.375rem;
+  border-radius: var(--radius-control);
+}
+
+/* ── Workflow node header washes ───────────────────────────────────────────
+   The TYPE tint behind a phase card's header strip.
+
+   Named classes rather than `bg-primary/10` utilities for two reasons. Tailwind
+   cannot see a class assembled by interpolation, and — the real reason — the
+   two themes need different alphas. On `lastlight` the accents are luminous
+   pastels that need only a hint. On `neaform` the same 10% gives a bright mint
+   that vanishes into white and a near-black navy that reads as a grey bar, so
+   accent is lifted hard and secondary is pulled back. Same retrofit shape as
+   the muted-text block below, and the `[data-theme]` prefix out-specifies the
+   utility layer, so no `!important` is needed. */
+.ll-head-primary { background-color: color-mix(in oklab, var(--color-primary) 10%, transparent); }
+.ll-head-secondary { background-color: color-mix(in oklab, var(--color-secondary) 10%, transparent); }
+.ll-head-accent { background-color: color-mix(in oklab, var(--color-accent) 10%, transparent); }
+.ll-head-neutral { background-color: color-mix(in oklab, var(--color-base-content) 8%, transparent); }
+
+[data-theme="neaform"] .ll-head-primary { background-color: color-mix(in oklab, var(--color-primary) 12%, transparent); }
+[data-theme="neaform"] .ll-head-secondary { background-color: color-mix(in oklab, var(--color-secondary) 8%, transparent); }
+[data-theme="neaform"] .ll-head-accent { background-color: color-mix(in oklab, var(--color-accent) 24%, transparent); }
+[data-theme="neaform"] .ll-head-neutral { background-color: color-mix(in oklab, var(--color-base-content) 7%, transparent); }
+
 /*
   The default border color has changed to `currentcolor` in Tailwind CSS v4,
   so we've added these compatibility styles to make sure everything still
@@ -145,24 +468,6 @@ body {
    both. The green bar in the mark is fixed and needs no override. */
 [data-theme="neaform"] .nf-logo { color: #000e38; }
 [data-theme="lastlight"] .nf-logo { color: #ffffff; }
-
-/* Light-theme muted-text lift.
-   The UI was designed dark-first with heavily translucent secondary text
-   (text-base-content/40–60). On the near-black dark bg those read fine, but on
-   the neaform white bg the same low alphas wash out. Scope a bump to the light
-   theme only, lifting the faint tiers while preserving the /40 < /50 < /60
-   hierarchy. daisyUI v5 exposes base-content as the whole colour in
-   `--color-base-content` (v4's raw-oklch-components `--bc` is gone), so the
-   alpha is applied with color-mix() rather than by re-wrapping in oklch();
-   the `[data-theme]` prefix out-specifies the generated utility, so no
-   !important is needed. */
-[data-theme="neaform"] .text-base-content\/25 { color: color-mix(in oklab, var(--color-base-content) 50%, transparent); }
-[data-theme="neaform"] .text-base-content\/30 { color: color-mix(in oklab, var(--color-base-content) 55%, transparent); }
-[data-theme="neaform"] .text-base-content\/40 { color: color-mix(in oklab, var(--color-base-content) 62%, transparent); }
-[data-theme="neaform"] .text-base-content\/45 { color: color-mix(in oklab, var(--color-base-content) 66%, transparent); }
-[data-theme="neaform"] .text-base-content\/50 { color: color-mix(in oklab, var(--color-base-content) 70%, transparent); }
-[data-theme="neaform"] .text-base-content\/55 { color: color-mix(in oklab, var(--color-base-content) 73%, transparent); }
-[data-theme="neaform"] .text-base-content\/60 { color: color-mix(in oklab, var(--color-base-content) 78%, transparent); }
 
 /* Inline code. `.ll-prose code` is text-accent on a bg-base-300 chip — the
    bright mint green + grey chip reads fine on the dark theme but is muddy and

@@ -77,7 +77,7 @@ function Pane({
       <div
         className={clsx(
           "text-2xs uppercase tracking-wider font-semibold mb-1 shrink-0",
-          tone === "error" ? "text-error" : "text-base-content/55",
+          tone === "error" ? "text-error" : "text-muted",
         )}
       >
         {label}
@@ -88,7 +88,7 @@ function Pane({
 }
 
 function PaneNote({ children }: { children: ReactNode }) {
-  return <div className="text-2xs text-base-content/40 italic py-2">{children}</div>;
+  return <div className="text-2xs text-faint italic py-2">{children}</div>;
 }
 
 function ToolPanes({
@@ -186,16 +186,16 @@ export function ToolPair({ pair, isNew }: Props) {
       <span
         className={clsx(
           "text-2xs uppercase tracking-wider font-semibold shrink-0",
-          isError ? "text-error" : "text-base-content/55",
+          isError ? "text-error" : "text-muted",
         )}
       >
         {isError ? "Error" : "Result"}
       </span>
       {summary.kind === "empty" ? (
-        <span className="text-2xs text-base-content/40 italic">(empty)</span>
+        <span className="text-2xs text-faint italic">(empty)</span>
       ) : (
         <>
-          <span className="text-base-content/25 shrink-0">-</span>
+          <span className="text-faint shrink-0">-</span>
           {!expanded && (() => {
             const preview =
               summary.kind === "text" ? summary.preview :
@@ -212,14 +212,14 @@ export function ToolPair({ pair, isNew }: Props) {
               <span
                 className={clsx(
                   "text-xs font-mono truncate flex-1",
-                  summary.kind === "json" ? "text-base-content/60" : "text-base-content/75",
+                  summary.kind === "json" ? "text-muted" : "text-strong",
                 )}
               >
                 {preview}
               </span>
             );
           })()}
-          <span className="ml-auto text-2xs text-base-content/40 font-mono shrink-0 flex items-center gap-2">
+          <span className="ml-auto text-2xs text-faint font-mono shrink-0 flex items-center gap-2">
             {summary.kind === "text" && summary.lines && summary.lines > 1 && (
               <span>{summary.lines.toLocaleString()} lines</span>
             )}
@@ -250,29 +250,29 @@ export function ToolPair({ pair, isNew }: Props) {
         title={
           <>
             <RowIcon Icon={Icon} color={vis.color} bg={vis.bg} />
-            <span className="text-2xs font-semibold uppercase tracking-wider text-base-content/80 shrink-0 font-mono">
+            <span className="text-2xs font-semibold uppercase tracking-wider text-strong shrink-0 font-mono">
               {title}
             </span>
-            <span className="text-base-content/25 shrink-0">-</span>
+            <span className="text-faint shrink-0">-</span>
             {renderToolSummary(pair.toolName, input)}
           </>
         }
         headerRight={
           <div className="flex items-center gap-1.5 shrink-0">
             {pair.result == null && (
-              <span className="badge badge-xs badge-warning animate-pulse">running</span>
+              <span className="ll-status badge badge-xs text-warning animate-pulse">running</span>
             )}
-            {isError && <span className="badge badge-xs badge-error">error</span>}
+            {isError && <span className="ll-status badge badge-xs text-error">error</span>}
             <button
               onClick={() => setExpanded(!expanded)}
-              className="text-2xs text-base-content/45 hover:text-base-content font-mono"
+              className="text-2xs text-faint hover:text-base-content font-mono"
               title="Toggle input and output"
             >
               {expanded ? "- io" : "+ io"}
             </button>
             <button
               onClick={() => setMaximized(true)}
-              className="text-base-content/40 hover:text-base-content"
+              className="text-faint hover:text-base-content"
               title="Open full screen"
             >
               <Maximize2 size={12} />
@@ -293,19 +293,19 @@ export function ToolPair({ pair, isNew }: Props) {
             onClick={() => setMaximized(false)}
           >
             <div
-              className="ll-surface border border-base-300 rounded-xl shadow-2xl w-full h-full flex flex-col overflow-hidden"
+              className="ll-surface border border-hairline rounded-panel shadow-2xl w-full h-full flex flex-col overflow-hidden"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="flex items-center gap-2 px-4 py-2 border-b border-base-300/60 shrink-0">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-hairline shrink-0">
                 <RowIcon Icon={Icon} color={vis.color} bg={vis.bg} />
-                <span className="text-2xs font-semibold uppercase tracking-wider text-base-content/80 shrink-0 font-mono">
+                <span className="text-2xs font-semibold uppercase tracking-wider text-strong shrink-0 font-mono">
                   {title}
                 </span>
-                <span className="text-base-content/25 shrink-0">-</span>
+                <span className="text-faint shrink-0">-</span>
                 <div className="flex items-center gap-2 min-w-0 flex-1">
                   {renderToolSummary(pair.toolName, input)}
                 </div>
-                {isError && <span className="badge badge-xs badge-error shrink-0">error</span>}
+                {isError && <span className="ll-status badge badge-xs text-error shrink-0">error</span>}
                 <button
                   onClick={() => setMaximized(false)}
                   className="btn btn-xs btn-ghost shrink-0"

@@ -1,29 +1,9 @@
 kind: cron
 name: fix-red-dependency-prs
-# Once a day, one hour after the 14:00 green sweep (merge-green-dependency-prs).
-# The pr.checks_failed webhook does the real-time fixing; this sweep is only a
-# backstop for dependency PRs that went red before boot or during a missed
-# delivery. dependabot-ci-fix is the EXPENSIVE dependency path — it pre-clones
-# the PR head and runs the full install + test/lint/typecheck gate per PR — so a
-# daily cadence is plenty, and offsetting it from the green sweep keeps the two
-# bounded (concurrency-3) heavy fan-outs from stacking on the host.
 schedule: "0 15 * * *"
 workflow: dependabot-ci-fix
 context:
-  # `discover: red-dependency-prs` makes the cron runner (src/index.ts) find the
-  # SETTLED-red dependency PRs across managed repos IN CODE
-  # (src/cron/dependabot-discovery.ts → discoverRedDependencyPrs) and fan out one
-  # bounded single-PR `dependabot-ci-fix` run per PR — the same shape the
-  # pr.checks_failed webhook produces. Each context carries the PR head `branch`
-  # so dispatchWorkflow pre-clones the checkout the fix phase needs. "Red" is a
-  # settled failing check conclusion (GitHubClient.getChecksConclusion), NOT
-  # mergeable_state, so we never fire while checks are still running.
+  # Fans out one run per PR whose checks are settled-failing, or whose
+  # `mergeable_state` is `behind` / `dirty` / `blocked`. The nightly backstop
+  # for the `pr.checks_failed` webhook.
   discover: red-dependency-prs
-# NOTE: like merge-green-dependency-prs (and like cron-review, which dropped its
-# own condition), this sweep intentionally has NO `condition.unless:
-# webhooksEnabled`. It's an additive backstop that also runs with webhooks on.
-# Per-PR runs dedup by (repo, PR). Discovery does NOT filter on `requires-human`:
-# it is a candidate finder, and whether we may act on an escalated PR is decided
-# once at the dispatch gate off the PR-state snapshot (see
-# src/cron/dependabot-discovery.ts's module header) — which is what lets a
-# maintainer's push re-arm a PR we gave up on, with no label to remove.

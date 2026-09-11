@@ -10,10 +10,12 @@ import {
 import "@xyflow/react/dist/style.css";
 import { phaseSkillNames, type WorkflowFullDefinition, type WorkflowFullPhase } from "../api";
 import {
+  edgeStyle,
   pipelineNodeTypes,
   type PipelineNodeData,
   type PhaseTag,
 } from "./pipeline-node";
+import { cardHeight, mainHandles, place, NODE_WIDTH, type FlowDir } from "../lib/graph-axis";
 
 type PhaseNodeData = PipelineNodeData;
 
@@ -25,54 +27,90 @@ const nodeTypes = pipelineNodeTypes;
  */
 function phaseTags(phase: WorkflowFullPhase): PhaseTag[] {
   const tags: PhaseTag[] = [];
-  if (phase.type === "context") tags.push({ label: "context", tone: "ghost" });
   for (const skill of phaseSkillNames(phase)) {
     tags.push({ label: `skill: ${skill}`, tone: "skill", mono: true });
   }
   if (phase.prompt) tags.push({ label: "prompt", tone: "info", mono: true });
-  if (phase.loop || phase.generic_loop) tags.push({ label: "loop", tone: "warning" });
-  const gate = phase.approval_gate ?? phase.loop?.approval_gate;
-  if (gate) tags.push({ label: "gate", tone: "error" });
+  // `loop`, `gate` and `context` used to be badges here. They moved into the
+  // card's header — loop and gate as markers, the type as the header icon —
+  // and saying each thing twice cost every card a tag row of height, which is
+  // exactly what `ROW_HEIGHT` has to pay for.
   return tags;
 }
 
-const NODE_WIDTH = 150;
-const NODE_GAP = 50;
-const ROW_HEIGHT = 120;
+/** Clear space between one card and the next, along the flow. */
+const MAIN_GAP = 34;
+/** Pitch ACROSS it — the sibling rows of one DAG layer. */
+const CROSS_PITCH = NODE_WIDTH + 50;
 
 /**
- * Compute layered positions for a DAG. Each phase's column is `1 + max(column
- * of its dependencies)`; rows within a column are assigned in declaration
- * order. Used when any phase has `depends_on`.
+ * Height of one definition card. Definition cards vary a lot — the phase id
+ * line plus a tag chip per skill and per prompt — so the pitch follows the
+ * content rather than a constant that has to cover the worst case everywhere.
+ */
+function phaseHeight(phase: WorkflowFullPhase): number {
+  return cardHeight({
+    label: phase.label ?? phase.name,
+    // The phase id, shown whenever it differs from the label.
+    bodyLines: (phase.label ?? phase.name) !== phase.name ? 1 : 0,
+    tagRows: phaseTags(phase).length,
+    loops: !!(phase.loop || phase.generic_loop),
+  });
+}
+
+/** Both views flow top-to-bottom; the card and the handles support either. */
+const FLOW: FlowDir = "TB";
+
+/**
+ * Compute layered positions for a DAG. Each phase's LAYER is `1 + max(layer of
+ * its dependencies)`, one step further along the flow; siblings within a layer
+ * fan out across it in declaration order. Used when any phase has `depends_on`.
  */
 function layoutDag(phases: WorkflowFullPhase[]): Map<string, { x: number; y: number }> {
-  const colByName = new Map<string, number>();
+  const layerByName = new Map<string, number>();
   for (const phase of phases) {
     const deps = phase.depends_on ?? [];
-    let col = 0;
+    let layer = 0;
     for (const dep of deps) {
-      const depCol = colByName.get(dep);
-      if (depCol !== undefined) col = Math.max(col, depCol + 1);
+      const depLayer = layerByName.get(dep);
+      if (depLayer !== undefined) layer = Math.max(layer, depLayer + 1);
     }
-    colByName.set(phase.name, col);
+    layerByName.set(phase.name, layer);
   }
-  const rowByCol = new Map<number, number>();
+  // A layer starts where the deepest card of the layer before it ended, so a
+  // layer holding one tall card pushes the next one down and a layer of bare
+  // cards costs only what it needs.
+  const deepestByLayer = new Map<number, number>();
+  for (const phase of phases) {
+    const layer = layerByName.get(phase.name) ?? 0;
+    deepestByLayer.set(layer, Math.max(deepestByLayer.get(layer) ?? 0, phaseHeight(phase)));
+  }
+  const mainByLayer = new Map<number, number>();
+  let main = 0;
+  for (const layer of [...deepestByLayer.keys()].sort((a, b) => a - b)) {
+    mainByLayer.set(layer, main);
+    main += deepestByLayer.get(layer)! + MAIN_GAP;
+  }
+
+  const seatsByLayer = new Map<number, number>();
   const out = new Map<string, { x: number; y: number }>();
   for (const phase of phases) {
-    const col = colByName.get(phase.name) ?? 0;
-    const row = rowByCol.get(col) ?? 0;
-    rowByCol.set(col, row + 1);
-    out.set(phase.name, { x: col * (NODE_WIDTH + NODE_GAP), y: row * ROW_HEIGHT });
+    const layer = layerByName.get(phase.name) ?? 0;
+    const seat = seatsByLayer.get(layer) ?? 0;
+    seatsByLayer.set(layer, seat + 1);
+    out.set(phase.name, place(FLOW, mainByLayer.get(layer) ?? 0, seat * CROSS_PITCH));
   }
   return out;
 }
 
-/** Linear left-to-right layout — every phase one column to the right of the previous. */
+/** Linear layout — every phase one step further along the flow than the last. */
 function layoutLinear(phases: WorkflowFullPhase[]): Map<string, { x: number; y: number }> {
   const out = new Map<string, { x: number; y: number }>();
-  phases.forEach((p, i) => {
-    out.set(p.name, { x: i * (NODE_WIDTH + NODE_GAP), y: 0 });
-  });
+  let main = 0;
+  for (const phase of phases) {
+    out.set(phase.name, place(FLOW, main, 0));
+    main += phaseHeight(phase) + MAIN_GAP;
+  }
   return out;
 }
 
@@ -87,7 +125,7 @@ export function WorkflowDefinitionDiagram({
   definition,
   selectedPhase,
   onPhaseClick,
-  height = 320,
+  height = "100%",
 }: Props) {
   const isDag = useMemo(
     () => definition.phases.some((p) => Array.isArray(p.depends_on) && p.depends_on.length > 0),
@@ -113,8 +151,13 @@ export function WorkflowDefinitionDiagram({
           accent: "brand" as const,
           subtitle: phase.name !== label ? phase.name : undefined,
           tags: phaseTags(phase),
+          phaseType: phase.type,
+          hasGate: !!(phase.approval_gate ?? phase.loop?.approval_gate),
+          iterates: !!(phase.loop || phase.generic_loop),
+          // Distinct from `iterates`: this one draws the return arc.
           loops: !!(phase.loop || phase.generic_loop),
           selected: phase.name === selectedPhase,
+          flow: FLOW,
         },
         draggable: false,
         style: { width: NODE_WIDTH },
@@ -131,10 +174,10 @@ export function WorkflowDefinitionDiagram({
             id: `${dep}->${phase.name}`,
             source: dep,
             target: phase.name,
-            sourceHandle: "right",
-            targetHandle: "left",
+            sourceHandle: mainHandles(FLOW).source,
+            targetHandle: mainHandles(FLOW).target,
             animated: false,
-            style: { stroke: "var(--color-base-300, #ccc)", strokeWidth: 1.5 },
+            style: edgeStyle("pending", true),
           });
         }
       }
@@ -146,10 +189,10 @@ export function WorkflowDefinitionDiagram({
           id: `${prev}->${cur}`,
           source: prev,
           target: cur,
-          sourceHandle: "right",
-          targetHandle: "left",
+          sourceHandle: mainHandles(FLOW).source,
+          targetHandle: mainHandles(FLOW).target,
           animated: false,
-          style: { stroke: "var(--color-base-300, #ccc)", strokeWidth: 1.5 },
+          style: edgeStyle("pending", true),
         });
       }
     }
@@ -196,7 +239,7 @@ export function WorkflowDefinitionDiagram({
   }, []);
 
   return (
-    <div ref={wrapperRef} style={{ width: "100%", height }}>
+    <div ref={wrapperRef} className="ll-canvas" style={{ width: "100%", height }}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -218,7 +261,7 @@ export function WorkflowDefinitionDiagram({
         }}
         onNodeClick={(_, node) => onPhaseClick(node.id)}
       >
-        <Background variant={BackgroundVariant.Dots} gap={16} size={0.5} color="var(--color-base-300, #ccc)" />
+        <Background variant={BackgroundVariant.Dots} gap={16} size={0.5} color="var(--ll-canvas-dot, #ccc)" />
       </ReactFlow>
     </div>
   );

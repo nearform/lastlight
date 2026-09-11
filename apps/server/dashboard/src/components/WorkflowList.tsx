@@ -1,15 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CircleCheck, CircleHelp, CircleMinus, CirclePause, CircleX, Clock, FileSearch, RefreshCw } from "lucide-react";
 import clsx from "clsx";
-import { DocumentMagnifyingGlassIcon } from "@heroicons/react/24/outline";
-import {
-  CheckCircleIcon,
-  XCircleIcon,
-  PauseCircleIcon,
-  MinusCircleIcon,
-  ClockIcon,
-  ArrowPathIcon,
-  QuestionMarkCircleIcon,
-} from "@heroicons/react/24/solid";
 import {
   api,
   type WorkflowRun,
@@ -23,7 +14,10 @@ import { ActorChip } from "./ActorChip";
 import { WorkflowPipeline } from "./WorkflowPipeline";
 import { ApprovalBanner } from "./ApprovalBanner";
 import { PhaseDetailPanel } from "./PhaseDetailPanel";
-import { PrStatePanel } from "./PrStatePanel";
+import { PrStatePanel, hasPrState } from "./PrStatePanel";
+import { Split, SplitPane, SplitHandle } from "./Split";
+import { Tabs, TabButton } from "./Tabs";
+import { useIsNarrow } from "../hooks/useIsNarrow";
 import { RunActivityStrip } from "./ActivityPage";
 import { MessageFeed, type MessageOrder } from "./MessageFeed";
 import {
@@ -55,23 +49,30 @@ function elapsed(run: WorkflowRun): string {
 
 /** Status → solid icon + colour. Used both in the dense list rows and the
  *  detail-panel header (the text chip was too heavy). Title carries the word. */
-type StatusIconMeta = { Icon: typeof CheckCircleIcon; cls: string };
+type StatusIconMeta = { Icon: typeof CircleCheck; cls: string };
 const STATUS_ICON: Record<WorkflowRun["status"], StatusIconMeta> = {
-  queued: { Icon: ClockIcon, cls: "text-base-content/50" },
-  running: { Icon: ArrowPathIcon, cls: "text-info animate-spin" },
-  paused: { Icon: PauseCircleIcon, cls: "text-warning" },
-  succeeded: { Icon: CheckCircleIcon, cls: "text-success" },
-  failed: { Icon: XCircleIcon, cls: "text-error" },
-  cancelled: { Icon: MinusCircleIcon, cls: "text-base-content/40" },
+  queued: { Icon: Clock, cls: "text-muted" },
+  running: { Icon: RefreshCw, cls: "text-info animate-spin" },
+  paused: { Icon: CirclePause, cls: "text-warning" },
+  succeeded: { Icon: CircleCheck, cls: "text-success" },
+  failed: { Icon: CircleX, cls: "text-error" },
+  cancelled: { Icon: CircleMinus, cls: "text-faint" },
 };
 // Neutral fallback so an unrecognised runtime status (e.g. a new server-side
 // status shipped before the dashboard) degrades gracefully instead of crashing
 // the list with a destructure-of-undefined TypeError.
-const STATUS_ICON_FALLBACK: StatusIconMeta = { Icon: QuestionMarkCircleIcon, cls: "text-base-content/40" };
+const STATUS_ICON_FALLBACK: StatusIconMeta = { Icon: CircleHelp, cls: "text-faint" };
 
 function StatusIcon({ status, className }: { status: WorkflowRun["status"]; className?: string }) {
   const { Icon, cls } = STATUS_ICON[status] ?? STATUS_ICON_FALLBACK;
-  return <Icon className={clsx("shrink-0", cls, className ?? "w-4 h-4")} title={status} />;
+  // Wrapped rather than passing `title` to the icon: lucide's props don't
+  // include it, and the status is rendered icon-only here — so losing the
+  // tooltip would leave no way to read the state at all.
+  return (
+    <span title={status} aria-label={status} className="inline-flex shrink-0">
+      <Icon className={clsx("shrink-0", cls, className ?? "w-4 h-4")} />
+    </span>
+  );
 }
 
 /** The emoji a canonical reaction name renders as (issue #255). */
@@ -106,7 +107,7 @@ function FeedbackBadge({ signals }: { signals: FeedbackSignal[] }) {
     ? scored.reduce((n, s) => n + s.score, 0) / scored.length
     : null;
   const tone =
-    average === null ? "text-base-content/50" : average > 0 ? "text-success" : average < 0 ? "text-error" : "text-base-content/50";
+    average === null ? "text-muted" : average > 0 ? "text-success" : average < 0 ? "text-error" : "text-muted";
   const glyphs = signals.map((s) => FEEDBACK_GLYPH[s.emoji] ?? `:${s.emoji}:`).join("");
   return (
     <span
@@ -124,6 +125,25 @@ function FeedbackBadge({ signals }: { signals: FeedbackSignal[] }) {
   );
 }
 
+/**
+ * The panes of the run view, in tab order.
+ *
+ * Wide, the first two are columns — the run list and the pipeline — and only
+ * the rest are tabs. Narrow, all five are tabs in one strip. One vocabulary
+ * either way, so there is no second notion of "which pane" to keep in step.
+ */
+export const RUN_PANES = ["runs", "workflow", "transcript", "phase", "prstate"] as const;
+export type RunPane = (typeof RUN_PANES)[number];
+const PANE_LABEL: Record<RunPane, string> = {
+  runs: "Runs",
+  workflow: "Workflow",
+  transcript: "Transcript",
+  phase: "Phase",
+  prstate: "PR State",
+};
+/** The tabs the detail panel itself owns — the two column panes are not tabs there. */
+const DETAIL_PANES: RunPane[] = ["transcript", "phase", "prstate"];
+
 interface DetailPanelProps {
   run: WorkflowRun;
   /** Resolved `users`-table identity for the run's actor (avatar/name), issue #205. */
@@ -133,11 +153,18 @@ interface DetailPanelProps {
   onRetry: (id: string) => void;
   onApprovalResponded: () => void;
   onOpenDefinition?: (name: string) => void;
+  /** Below the three-column threshold — render one pane, not a split. */
+  narrow: boolean;
+  /** The pane being shown, owned by the parent (it renders the narrow strip). */
+  pane: RunPane;
+  onPaneChange: (pane: RunPane) => void;
+  /** Which panes exist for this run — PR State is absent on a non-PR run. */
+  panes: readonly RunPane[];
 }
 
-// ── Resizable pipeline + detail panels ──────────────────────────────────
+// ── Pipeline + the tabbed side panel ────────────────────────────────────
 
-interface ResizablePipelineProps {
+interface RunBodyProps {
   run: WorkflowRun;
   definition: WorkflowDefinition | null;
   definitionError: string | null;
@@ -150,14 +177,21 @@ interface ResizablePipelineProps {
   selectedExecutions: WorkflowRunExecution[];
   feedOrder: MessageOrder;
   onFeedOrderChange: (o: MessageOrder) => void;
+  narrow: boolean;
+  pane: RunPane;
+  onPaneChange: (pane: RunPane) => void;
+  panes: readonly RunPane[];
 }
 
 /**
- * Renders the pipeline visualization and the detail panels below it with a
- * draggable divider. The pipeline section is capped at 50% of the available
- * height and can be resized down further by dragging the divider bar.
+ * The pipeline and everything you can read beside it.
+ *
+ * The pipeline runs top-to-bottom in a column of its own, which is what frees
+ * the whole right-hand side for the transcript, the phase detail and the PR
+ * state snapshot as tabs. Both boundaries are draggable and both sizes are
+ * remembered (see `Split`).
  */
-function ResizablePipeline({
+function RunBody({
   run,
   definition,
   definitionError,
@@ -169,36 +203,11 @@ function ResizablePipeline({
   selectedExecutions,
   feedOrder,
   onFeedOrderChange,
-}: ResizablePipelineProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [pipelineHeight, setPipelineHeight] = useState<number | null>(null);
-  const dragging = useRef(false);
-  const startY = useRef(0);
-  const startH = useRef(0);
-
-  const onDragStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    dragging.current = true;
-    startY.current = e.clientY;
-    startH.current = pipelineHeight ?? containerRef.current?.querySelector("[data-pipeline]")?.clientHeight ?? 180;
-
-    const onMove = (ev: MouseEvent) => {
-      if (!dragging.current || !containerRef.current) return;
-      const containerH = containerRef.current.clientHeight;
-      const maxH = Math.floor(containerH * 0.7);
-      const minH = 80;
-      const delta = ev.clientY - startY.current;
-      setPipelineHeight(Math.max(minH, Math.min(maxH, startH.current + delta)));
-    };
-    const onUp = () => {
-      dragging.current = false;
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-    };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  }, [pipelineHeight]);
-
+  narrow,
+  pane,
+  onPaneChange,
+  panes,
+}: RunBodyProps) {
   // The harness records a terminal failure as a string on the run context.
   // Shown only for a terminal run: a `running` run can carry a stale `error`
   // from an earlier phase that was since retried, and banner-ing that would
@@ -209,8 +218,8 @@ function ResizablePipeline({
       ? contextError
       : null;
 
-  return (
-    <div ref={containerRef} className="flex flex-col flex-1 min-h-0">
+  const pipeline = (
+    <div className="flex flex-col h-full min-h-0 min-w-0">
       {/* Why the run failed.
        *
        * Not every failure has a phase node to hang off. A handler phase that
@@ -227,91 +236,136 @@ function ResizablePipeline({
             {run.status === "cancelled" ? "Cancelled" : "Failed"}
             {run.currentPhase ? ` · ${run.currentPhase}` : ""}
           </div>
-          <div className="mt-1 text-xs text-base-content/80 break-words whitespace-pre-wrap font-mono">
+          <div className="mt-1 text-xs text-strong break-words whitespace-pre-wrap font-mono">
             {runFailureReason}
           </div>
         </div>
       )}
-
-      {/* Pipeline section — capped at 50% by default */}
-      <div
-        data-pipeline
-        className="shrink-0 overflow-auto"
-        style={{ maxHeight: pipelineHeight ?? "50%", height: pipelineHeight ?? undefined }}
-      >
-        <div className="text-2xs font-semibold uppercase tracking-wider text-base-content/40 mb-2">
-          Pipeline
-        </div>
-        {definitionError ? (
-          <div className="p-4 text-sm text-error border border-error/40 bg-error/5 rounded">
-            {definitionError}
-          </div>
-        ) : (
-          <WorkflowPipeline
-            run={run}
-            definition={definition}
-            executions={executions}
-            approvals={approvals}
-            height={180}
-            selectedPhase={selectedPhase}
-            onPhaseClick={onPhaseClick}
-          />
-        )}
-      </div>
-
-      {/* Draggable divider */}
-      <div
-        className="shrink-0 flex items-center justify-center cursor-row-resize group py-0.5"
-        onMouseDown={onDragStart}
-      >
-        <div className="w-12 h-1 rounded-full bg-base-300 group-hover:bg-primary/50 transition-colors" />
-      </div>
-
-      {/* Detail panels */}
-      {selectedPhase ? (
-        <div className="flex flex-1 gap-4 min-h-0 border-t border-base-300 pt-3">
-          <div className="w-80 shrink-0 overflow-y-auto border border-base-300/60 rounded bg-base-200/30">
-            <PhaseDetailPanel
-              phaseName={selectedPhase}
-              run={run}
-              definition={definition}
-              execution={selectedExecution}
-              totalExecutions={selectedExecutions.length}
-              approvals={approvals}
-            />
-          </div>
-          <div className="flex-1 overflow-hidden flex flex-col border border-base-300/60 rounded bg-base-100">
-            {selectedExecution?.sessionId ? (
-              <MessageFeed
-                key={selectedExecution.sessionId}
-                sessionId={selectedExecution.sessionId}
-                order={feedOrder}
-                onOrderChange={onFeedOrderChange}
-                searchQuery=""
-              />
-            ) : (
-              <div className="flex-1 flex items-center justify-center text-base-content/40 text-sm p-6 text-center">
-                {selectedPhase?.startsWith("approval:")
-                  ? "Approval gate — no agent session. See the gate details on the left."
-                  : selectedExecution
-                    ? "Session not captured for this run."
-                    : "No execution recorded for this phase yet."}
-              </div>
-            )}
-          </div>
+      {definitionError ? (
+        <div className="p-4 text-sm text-error border border-error/40 bg-error/5 rounded">
+          {definitionError}
         </div>
       ) : (
-        <div className="flex-1 flex items-center justify-center text-base-content/30 text-xs border-t border-base-300 pt-3">
-          click a phase above to inspect it
-        </div>
+        <WorkflowPipeline
+          run={run}
+          definition={definition}
+          executions={executions}
+          approvals={approvals}
+          selectedPhase={selectedPhase}
+          onPhaseClick={(phaseName) => {
+            onPhaseClick(phaseName);
+            // On a phone the pipeline is covering the transcript, and asking
+            // about a phase means asking what it did.
+            if (narrow) onPaneChange("transcript");
+          }}
+        />
       )}
+    </div>
+  );
+
+  const transcript = selectedExecution?.sessionId ? (
+    <MessageFeed
+      key={selectedExecution.sessionId}
+      sessionId={selectedExecution.sessionId}
+      order={feedOrder}
+      onOrderChange={onFeedOrderChange}
+      searchQuery=""
+    />
+  ) : (
+    <div className="flex-1 flex items-center justify-center text-faint text-sm p-6 text-center">
+      {selectedPhase?.startsWith("approval:")
+        ? "Approval gate — no agent session. See the gate details on the Phase tab."
+        : selectedExecution
+          ? "Session not captured for this run."
+          : "No execution recorded for this phase yet."}
+    </div>
+  );
+
+  const sidePanel = (current: RunPane) => {
+    if (!selectedPhase && current !== "prstate") {
+      return (
+        <div className="flex-1 flex items-center justify-center text-faint text-xs p-6 text-center">
+          click a phase to inspect it
+        </div>
+      );
+    }
+    if (current === "prstate") {
+      return (
+        <div className="flex-1 overflow-y-auto">
+          <PrStatePanel run={run} defaultOpen />
+        </div>
+      );
+    }
+    if (current === "phase") {
+      return (
+        <div className="flex-1 overflow-y-auto">
+          <PhaseDetailPanel
+            phaseName={selectedPhase!}
+            run={run}
+            definition={definition}
+            execution={selectedExecution}
+            totalExecutions={selectedExecutions.length}
+            approvals={approvals}
+          />
+        </div>
+      );
+    }
+    return transcript;
+  };
+
+  if (narrow) {
+    return (
+      <div className="flex-1 min-h-0 flex flex-col">
+        {pane === "workflow" ? pipeline : sidePanel(pane)}
+      </div>
+    );
+  }
+
+  const sideTabs = panes.filter((p) => DETAIL_PANES.includes(p));
+  const side = sideTabs.includes(pane) ? pane : "transcript";
+
+  return (
+    // The wrapper, not the Split, is what `flex-1` sizes: the group sets its
+    // own `height: 100%`, which only means anything against a parent whose
+    // height is already resolved.
+    <div className="flex-1 min-h-0">
+      <Split id="ll-run-detail" panelIds={["pipeline", "side"]}>
+      <SplitPane id="pipeline" defaultSize="38%" minSize="15%">
+        {pipeline}
+      </SplitPane>
+      <SplitHandle />
+      <SplitPane id="side" minSize="20%">
+        <div className="flex flex-col h-full min-h-0 border border-hairline rounded bg-base-100 overflow-hidden">
+          <Tabs className="px-2">
+            {sideTabs.map((p) => (
+              <TabButton key={p} active={side === p} onClick={() => onPaneChange(p)}>
+                {PANE_LABEL[p]}
+              </TabButton>
+            ))}
+          </Tabs>
+          {sidePanel(side)}
+        </div>
+      </SplitPane>
+      </Split>
     </div>
   );
 }
 
 // ── Detail panel ────────────────────────────────────────────────────────
 
-function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApprovalResponded, onOpenDefinition }: DetailPanelProps) {
+function DetailPanel({
+  run,
+  triggeredByUser,
+  approvals,
+  onCancel,
+  onRetry,
+  onApprovalResponded,
+  onOpenDefinition,
+  narrow,
+  pane,
+  onPaneChange,
+  panes,
+}: DetailPanelProps) {
   const canCancel = run.status === "running" || run.status === "paused";
   const canRetry = run.status === "failed";
 
@@ -477,8 +531,8 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
     selectedExecutions.length > 0 ? selectedExecutions[selectedExecutions.length - 1]! : null;
 
   return (
-    <div className="flex-1 overflow-hidden flex flex-col p-4 gap-4 min-h-0">
-      <div className="flex items-center gap-3 flex-wrap shrink-0">
+    <div className="h-full overflow-hidden flex flex-col p-4 gap-4 min-h-0 min-w-0">
+      <div className="flex items-center gap-3 flex-wrap shrink-0 min-w-0">
         <span className="font-semibold text-base-content">{run.workflowName}</span>
         {onOpenDefinition && (
           <button
@@ -486,7 +540,7 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
             title="View workflow definition"
             onClick={() => onOpenDefinition(run.workflowName)}
           >
-            <DocumentMagnifyingGlassIcon className="w-4 h-4" />
+            <FileSearch className="w-4 h-4" />
           </button>
         )}
         <StatusIcon status={run.status} className="w-5 h-5" />
@@ -494,7 +548,7 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
         {run.repo &&
           (() => {
             const href = repoUrl(runRepoPath(run));
-            const cls = "text-xs text-base-content/50 font-mono";
+            const cls = "text-xs text-muted font-mono";
             return href ? (
               <GhLink href={href} className={cls} title={`Open ${run.repo} on GitHub`}>
                 {run.repo}
@@ -506,7 +560,7 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
         {run.issueNumber &&
           (() => {
             const href = issueUrl(runRepoPath(run), run.issueNumber, run.workflowName);
-            const cls = "text-xs text-base-content/50 font-mono";
+            const cls = "text-xs text-muted font-mono";
             return href ? (
               <GhLink href={href} className={cls} title={`Open #${run.issueNumber} on GitHub`}>
                 #{run.issueNumber}
@@ -516,7 +570,7 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
             );
           })()}
         {run.triggeredBy && (
-          <span className="inline-flex items-center gap-1.5 text-xs text-base-content/50">
+          <span className="inline-flex items-center gap-1.5 text-xs text-muted">
             <span className="opacity-70">by</span>
             <ActorChip
               login={run.triggeredBy}
@@ -526,7 +580,7 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
             />
           </span>
         )}
-        <span className="text-2xs text-base-content/40 font-mono flex gap-3 items-center">
+        <span className="text-2xs text-faint font-mono flex gap-3 items-center">
           <span>started {timeAgo(run.startedAt)} ago</span>
           <span>elapsed {elapsed(run)}</span>
           {run.finishedAt && <span>finished {timeAgo(run.finishedAt)} ago</span>}
@@ -552,16 +606,13 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
 
       <ApprovalBanner approvals={pendingApprovals} onResponded={handleApprovalResponded} />
 
-      {/* The snapshot the dispatch decision was taken on (09 §S3). Renders
-          itself away on any run that carries none — i.e. every non-PR-scoped
-          workflow — so there is no workflow-name list here to keep in step. */}
-      <PrStatePanel run={run} />
-
       {/* Who acted on this run, and what came of it (issue #206). Self-hiding
-          on a run nobody has touched, same rule as PrStatePanel above. */}
+          on a run nobody has touched. The PR-state snapshot that used to sit
+          here is now a tab beside the transcript — it is a wide block of facts,
+          and above the pipeline it pushed the run itself off the screen. */}
       <RunActivityStrip runId={run.id} />
 
-      <ResizablePipeline
+      <RunBody
         run={run}
         definition={definition}
         definitionError={definitionError}
@@ -573,12 +624,176 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
         selectedExecutions={selectedExecutions}
         feedOrder={feedOrder}
         onFeedOrderChange={setFeedOrder}
+        narrow={narrow}
+        pane={pane}
+        onPaneChange={onPaneChange}
+        panes={panes}
       />
     </div>
   );
 }
 
 const WORKFLOW_PAGE_SIZE = 20;
+
+interface RunListPaneProps {
+  runs: WorkflowRun[];
+  approvals: WorkflowApproval[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  error: string | null;
+  queuedTotal: number;
+  showQueued: boolean;
+  onToggleQueued: () => void;
+  total: number;
+  hasMore: boolean;
+  onLoadMore: () => void;
+}
+
+/**
+ * The run list. Its own component because it is a PANE when there is room for
+ * three columns and a TAB when there is not, and those two parents are in
+ * different places in the tree.
+ */
+function RunListPane({
+  runs: visibleRuns,
+  approvals,
+  selectedId,
+  onSelect: setSelectedId,
+  error,
+  queuedTotal,
+  showQueued,
+  onToggleQueued,
+  total,
+  hasMore,
+  onLoadMore,
+}: RunListPaneProps) {
+  return (
+    <div className="h-full bg-base-200/40 overflow-y-auto flex flex-col">
+        {error && (
+          <div className="px-3 py-2 text-2xs text-error border-b border-hairline">{error}</div>
+        )}
+        {queuedTotal > 0 && (
+          <button
+            type="button"
+            onClick={onToggleQueued}
+            title={showQueued ? "Hide queued workflow runs" : "Show queued workflow runs"}
+            className={clsx(
+              "flex items-center justify-between gap-2 px-3 py-1.5 text-2xs border-b border-hairline transition-colors",
+              showQueued
+                ? "bg-primary/10 text-primary"
+                : "text-muted hover:bg-base-300/40",
+            )}
+          >
+            <span className="font-mono">
+              {queuedTotal} queued workflow{queuedTotal === 1 ? "" : "s"}
+            </span>
+            <span className="badge badge-ghost badge-xs">{showQueued ? "hide" : "show"}</span>
+          </button>
+        )}
+        <ul className="flex-1">
+          {visibleRuns.map((run) => {
+            const active = run.id === selectedId;
+            const hasApprovals = approvals.some((a) => a.workflowRunId === run.id);
+            return (
+              <li key={run.id} className="border-b border-hairline">
+                {/* Row uses role="button" instead of <button> so the
+                    embedded "cancel" action can be a real <button> without
+                    tripping React's no-nested-button DOM warning. */}
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setSelectedId(run.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setSelectedId(run.id);
+                    }
+                  }}
+                  className={clsx(
+                    "w-full flex flex-col items-start gap-0.5 py-1.5 px-3 text-left transition-colors cursor-pointer border-l-2 -ml-px pl-[10px]",
+                    active
+                      ? "bg-primary/15 border-l-primary"
+                      : clsx("border-l-transparent", {
+                          // Faint red tint on unselected FAILED rows so they
+                          // stand out at a glance; everything else is neutral.
+                          "bg-error/10 hover:bg-error/20": run.status === "failed",
+                          "hover:bg-base-300/40": run.status !== "failed",
+                        }),
+                  )}
+                >
+                  <div className="flex items-center gap-2 w-full text-2xs">
+                    <span className="text-xs font-medium truncate text-strong min-w-0">
+                      {run.workflowName}
+                    </span>
+                    {run.status === "running" && run.currentPhase && (
+                      <span className="text-2xs italic text-muted shrink-0">
+                        {run.currentPhase}
+                      </span>
+                    )}
+                    {hasApprovals && (
+                      <span className="ll-status badge text-warning badge-xs shrink-0">approval</span>
+                    )}
+                    <span className="ml-auto text-faint font-mono shrink-0">
+                      {timeAgo(run.startedAt)} ago
+                    </span>
+                    <StatusIcon status={run.status} />
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-2xs text-faint w-full font-mono">
+                    {run.repo &&
+                      (() => {
+                        const href = repoUrl(runRepoPath(run));
+                        return href ? (
+                          <GhLink href={href} className="truncate shrink-0" title={`Open ${run.repo} on GitHub`}>
+                            {run.repo}
+                          </GhLink>
+                        ) : (
+                          <span className="truncate shrink-0">{run.repo}</span>
+                        );
+                      })()}
+                    {run.issueNumber &&
+                      (() => {
+                        const href = issueUrl(runRepoPath(run), run.issueNumber, run.workflowName);
+                        return href ? (
+                          <GhLink href={href} className="shrink-0" title={`Open #${run.issueNumber} on GitHub`}>
+                            #{run.issueNumber}
+                          </GhLink>
+                        ) : (
+                          <span className="shrink-0">#{run.issueNumber}</span>
+                        );
+                      })()}
+                    {run.triggeredBy && (
+                      <ActorChip
+                        login={run.triggeredBy}
+                        actorType={run.triggerActorType}
+                        className="min-w-0"
+                      />
+                    )}
+                  </div>
+                </div>
+              </li>
+            );
+          })}
+          {visibleRuns.length === 0 && !error && (
+            <li className="p-6 text-center text-faint text-xs">no workflow runs</li>
+          )}
+        </ul>
+        <div className="sticky bottom-0 border-t border-hairline bg-base-200 p-2 flex items-center justify-between text-2xs">
+          <span className="text-muted font-mono">
+            {visibleRuns.length} / {total}
+          </span>
+          <button
+            className="btn btn-xs btn-ghost ll-control-sm"
+            onClick={onLoadMore}
+            disabled={!hasMore}
+          >
+            load more
+          </button>
+        </div>
+    </div>
+  );
+}
+
+
 
 interface WorkflowListProps {
   /** Header date filter. */
@@ -614,6 +829,7 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
     nullableStringSerializer,
   );
   const [availableWorkflows, setAvailableWorkflows] = useState<string[]>([]);
+  const narrow = useIsNarrow();
   const { allowed: allowedRepos } = useVisibleRepos();
   // Per-repo visibility (issue #169) is applied SERVER-side, via the `repos`
   // query param, so paging and the `total` count stay honest — filtering after
@@ -813,16 +1029,66 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
     : detailForSelected;
   const hasMore = runs.length < total;
 
+  // Which pane the user is looking at. Lives here rather than in `DetailPanel`
+  // because on a narrow screen the run list and the pipeline are two more tabs
+  // in the same strip, and those are not the detail panel's to render.
+  const [pane, setPane] = useState<RunPane>("transcript");
+  const showPrState = !!selectedRun && hasPrState(selectedRun);
+  const visiblePanes = useMemo(
+    () => RUN_PANES.filter((p) => p !== "prstate" || showPrState),
+    [showPrState],
+  );
+  // A pane can stop existing under the user — the PR State tab on switching to
+  // a non-PR run — so fall back rather than render nothing.
+  const activePane = visiblePanes.includes(pane) ? pane : "transcript";
+
+  const listPane = (
+    <RunListPane
+      runs={visibleRuns}
+      approvals={approvals}
+      selectedId={selectedId}
+      onSelect={(id) => {
+        setSelectedId(id);
+        // Picking a run on a phone means "show me that run", and the list is
+        // covering it.
+        if (narrow) setPane("workflow");
+      }}
+      error={error}
+      queuedTotal={queuedTotal}
+      showQueued={showQueued}
+      onToggleQueued={() => setShowQueued((v) => !v)}
+      total={total}
+      hasMore={hasMore}
+      onLoadMore={() => setLimit((l) => l + WORKFLOW_PAGE_SIZE)}
+    />
+  );
+
+  const detailPanel = selectedRun ? (
+    <DetailPanel
+      run={selectedRun}
+      triggeredByUser={detailForSelected ? triggeredByUser : null}
+      approvals={approvals}
+      onCancel={handleCancel}
+      onRetry={handleRetry}
+      onApprovalResponded={load}
+      onOpenDefinition={onOpenDefinition}
+      narrow={narrow}
+      pane={activePane}
+      onPaneChange={setPane}
+      panes={visiblePanes}
+    />
+  ) : null;
+
   return (
     <div className="flex flex-col flex-1 overflow-hidden">
       {/* Filter row — workflow type chips, mirrors the session-type strip on
           the sessions tab. */}
-      <div className="flex items-center gap-1 px-4 py-2 border-b border-base-300 bg-base-200/40 shrink-0 overflow-x-auto flex-nowrap">
+      <div className="flex items-center gap-1 px-4 py-2 border-b border-hairline bg-base-200/40 shrink-0 overflow-x-auto flex-nowrap">
         <button
           onClick={() => setWorkflowFilter(null)}
           className={clsx(
-            "btn btn-xs h-7 min-h-0 font-medium shrink-0",
-            workflowFilter === null ? "btn-primary" : "btn-ghost text-base-content/60",
+            "btn btn-xs ll-control font-medium shrink-0",
+            workflowFilter === null ? "btn-primary" : "btn-ghost text-muted",
           )}
         >
           all <span className="text-2xs opacity-60 ml-0.5">{total}</span>
@@ -832,8 +1098,8 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
             key={name}
             onClick={() => setWorkflowFilter(name)}
             className={clsx(
-              "btn btn-xs h-7 min-h-0 font-medium shrink-0 font-mono",
-              workflowFilter === name ? "btn-primary" : "btn-ghost text-base-content/60",
+              "btn btn-xs ll-control font-medium shrink-0 font-mono",
+              workflowFilter === name ? "btn-primary" : "btn-ghost text-muted",
             )}
           >
             <span className="text-2xs">{name}</span>
@@ -841,148 +1107,52 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
         ))}
       </div>
 
-      <div className="flex flex-1 overflow-hidden">
-        {/* List panel */}
-        <aside className="w-80 shrink-0 border-r border-base-300 bg-base-200/40 overflow-y-auto flex flex-col">
-          {error && (
-            <div className="px-3 py-2 text-2xs text-error border-b border-base-300">{error}</div>
+      {narrow ? (
+        // One column, one pane at a time. The list and the pipeline — panes
+        // when there is room for three columns — become the first two tabs, so
+        // everything on this page is reachable without a horizontal scrollbar.
+        <div className="flex flex-col flex-1 min-h-0">
+          <Tabs className="px-2 bg-base-200/40">
+            {visiblePanes.map((pane) => (
+              <TabButton key={pane} active={activePane === pane} onClick={() => setPane(pane)}>
+                {PANE_LABEL[pane]}
+              </TabButton>
+            ))}
+          </Tabs>
+          {activePane === "runs" ? (
+            <div className="flex-1 min-h-0">{listPane}</div>
+          ) : selectedRun ? (
+            detailPanel
+          ) : (
+            <div className="flex-1 flex items-center justify-center text-faint text-sm">
+              select a workflow run
+            </div>
           )}
-          {queuedTotal > 0 && (
-            <button
-              type="button"
-              onClick={() => setShowQueued((v) => !v)}
-              title={showQueued ? "Hide queued workflow runs" : "Show queued workflow runs"}
-              className={clsx(
-                "flex items-center justify-between gap-2 px-3 py-1.5 text-2xs border-b border-base-300 transition-colors",
-                showQueued
-                  ? "bg-primary/10 text-primary"
-                  : "text-base-content/50 hover:bg-base-300/40",
-              )}
-            >
-              <span className="font-mono">
-                {queuedTotal} queued workflow{queuedTotal === 1 ? "" : "s"}
-              </span>
-              <span className="badge badge-ghost badge-xs">{showQueued ? "hide" : "show"}</span>
-            </button>
-          )}
-          <ul className="flex-1">
-            {visibleRuns.map((run) => {
-              const active = run.id === selectedId;
-              const hasApprovals = approvals.some((a) => a.workflowRunId === run.id);
-              return (
-                <li key={run.id} className="border-b border-base-300/40">
-                  {/* Row uses role="button" instead of <button> so the
-                      embedded "cancel" action can be a real <button> without
-                      tripping React's no-nested-button DOM warning. */}
-                  <div
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => setSelectedId(run.id)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        setSelectedId(run.id);
-                      }
-                    }}
-                    className={clsx(
-                      "w-full flex flex-col items-start gap-0.5 py-1.5 px-3 text-left transition-colors cursor-pointer border-l-2 -ml-px pl-[10px]",
-                      active
-                        ? "bg-primary/15 border-l-primary"
-                        : clsx("border-l-transparent", {
-                            // Faint red tint on unselected FAILED rows so they
-                            // stand out at a glance; everything else is neutral.
-                            "bg-error/10 hover:bg-error/20": run.status === "failed",
-                            "hover:bg-base-300/40": run.status !== "failed",
-                          }),
-                    )}
-                  >
-                    <div className="flex items-center gap-2 w-full text-2xs">
-                      <span className="text-xs font-medium truncate text-base-content/90 min-w-0">
-                        {run.workflowName}
-                      </span>
-                      {run.status === "running" && run.currentPhase && (
-                        <span className="text-2xs italic text-base-content/50 shrink-0">
-                          {run.currentPhase}
-                        </span>
-                      )}
-                      {hasApprovals && (
-                        <span className="badge badge-warning badge-xs shrink-0">approval</span>
-                      )}
-                      <span className="ml-auto text-base-content/40 font-mono shrink-0">
-                        {timeAgo(run.startedAt)} ago
-                      </span>
-                      <StatusIcon status={run.status} />
-                    </div>
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-2xs text-base-content/40 w-full font-mono">
-                      {run.repo &&
-                        (() => {
-                          const href = repoUrl(runRepoPath(run));
-                          return href ? (
-                            <GhLink href={href} className="truncate shrink-0" title={`Open ${run.repo} on GitHub`}>
-                              {run.repo}
-                            </GhLink>
-                          ) : (
-                            <span className="truncate shrink-0">{run.repo}</span>
-                          );
-                        })()}
-                      {run.issueNumber &&
-                        (() => {
-                          const href = issueUrl(runRepoPath(run), run.issueNumber, run.workflowName);
-                          return href ? (
-                            <GhLink href={href} className="shrink-0" title={`Open #${run.issueNumber} on GitHub`}>
-                              #{run.issueNumber}
-                            </GhLink>
-                          ) : (
-                            <span className="shrink-0">#{run.issueNumber}</span>
-                          );
-                        })()}
-                      {run.triggeredBy && (
-                        <ActorChip
-                          login={run.triggeredBy}
-                          actorType={run.triggerActorType}
-                          className="min-w-0"
-                        />
-                      )}
-                    </div>
-                  </div>
-                </li>
-              );
-            })}
-            {visibleRuns.length === 0 && !error && (
-              <li className="p-6 text-center text-base-content/40 text-xs">no workflow runs</li>
+        </div>
+      ) : (
+        <div className="flex-1 min-h-0">
+        <Split id="ll-runs" panelIds={["runs", "detail"]}>
+          <SplitPane
+            id="runs"
+            defaultSize="22%"
+            minSize="12%"
+            className="border-r border-hairline"
+          >
+            {listPane}
+          </SplitPane>
+          <SplitHandle />
+          <SplitPane id="detail" minSize="30%">
+            {selectedRun ? (
+              detailPanel
+            ) : (
+              <div className="h-full flex items-center justify-center text-faint text-sm">
+                select a workflow run
+              </div>
             )}
-          </ul>
-          <div className="sticky bottom-0 border-t border-base-300 bg-base-200 p-2 flex items-center justify-between text-2xs">
-            <span className="text-base-content/50 font-mono">
-              {visibleRuns.length} / {total}
-            </span>
-            <button
-              className="btn btn-xs btn-ghost h-6 min-h-0"
-              onClick={() => setLimit((l) => l + WORKFLOW_PAGE_SIZE)}
-              disabled={!hasMore}
-            >
-              load more
-            </button>
-          </div>
-        </aside>
-
-        {/* Detail panel */}
-        {selectedRun ? (
-          <DetailPanel
-            run={selectedRun}
-            triggeredByUser={detailForSelected ? triggeredByUser : null}
-            approvals={approvals}
-            onCancel={handleCancel}
-            onRetry={handleRetry}
-            onApprovalResponded={load}
-            onOpenDefinition={onOpenDefinition}
-          />
-        ) : (
-          <div className="flex-1 flex items-center justify-center text-base-content/30 text-sm">
-            select a workflow run
-          </div>
-        )}
-      </div>
+          </SplitPane>
+        </Split>
+        </div>
+      )}
     </div>
   );
 }

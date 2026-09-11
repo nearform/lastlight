@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import { useState } from "react";
-import { BookOpen, Clock, Filter, GitBranch, LogOut, Radio, RefreshCw } from "lucide-react";
+import { BookOpen, Clock, Filter, GitBranch, LogOut, Radio, RefreshCw, Search, X } from "lucide-react";
 import type { MeRepos } from "../api";
 import type { StreamStatus } from "../hooks/useSessionStream";
 import { useVisibleRepos } from "../hooks/useVisibleRepos";
@@ -108,7 +108,7 @@ function RepoScopeToggle() {
           void resync().finally(() => setResyncing(false));
         }}
         disabled={resyncing}
-        className="btn btn-xs h-7 min-h-0 gap-1 px-2 text-2xs btn-ghost text-base-content/40"
+        className="btn btn-xs ll-control gap-1 btn-ghost text-faint"
         title={`${unresolvedHint(meta?.reason)} Nothing is filtered. Click to re-check.`}
       >
         <RefreshCw className={clsx("w-3.5 h-3.5", resyncing && "animate-spin")} />
@@ -121,8 +121,8 @@ function RepoScopeToggle() {
     <button
       onClick={() => setScope(on ? "all" : "mine")}
       className={clsx(
-        "btn btn-xs h-7 min-h-0 gap-1 px-2 text-2xs btn-ghost",
-        on ? "text-base-content/70" : "text-base-content/40",
+        "btn btn-xs ll-control gap-1 btn-ghost",
+        on ? "text-muted" : "text-faint",
       )}
       title={
         on
@@ -149,7 +149,7 @@ export function StatsHeader({
   const statusInfo = STATUS_LABEL[streamStatus];
 
   return (
-    <header className="bg-base-200 border-b border-base-300 flex items-center gap-3 px-4 h-12 shrink-0">
+    <header className="bg-base-200/85 backdrop-blur-sm border-b border-hairline flex items-center gap-3 px-4 h-12 shrink-0 z-30">
       <div className="flex items-center gap-2.5 shrink-0">
         <NearformLogo size={28} className="nf-logo" />
         <span className="text-base font-bold tracking-tight">Last Light</span>
@@ -164,38 +164,32 @@ export function StatsHeader({
           type="text"
           value={query}
           onChange={(e) => onQueryChange(e.target.value)}
-          placeholder="Search..."
-          className="input input-sm input-bordered w-full bg-base-100 text-sm pl-7 pr-7 h-8"
+          placeholder="Search…"
+          className="input input-sm w-full bg-base-100 border border-hairline rounded-control text-sm pl-7 pr-7 h-7 focus:outline-none focus:border-primary/60 focus:ring-1 focus:ring-primary/30 transition-colors"
         />
-        <svg
-          className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-base-content/40 pointer-events-none"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <circle cx="11" cy="11" r="7" />
-          <path d="m21 21-4.3-4.3" />
-        </svg>
+        <Search
+          size={13}
+          className="absolute left-2 top-1/2 -translate-y-1/2 text-faint pointer-events-none"
+        />
         {query && (
           <button
             onClick={() => onQueryChange("")}
-            className="absolute right-2 top-1/2 -translate-y-1/2 text-base-content/40 hover:text-base-content text-xs"
+            className="absolute right-1.5 top-1/2 -translate-y-1/2 text-faint hover:text-strong transition-colors"
             aria-label="clear search"
           >
-            x
+            <X size={13} />
           </button>
         )}
       </div>
 
-      <div className="flex items-center gap-1 shrink-0 border-l border-base-300 pl-3">
-        <Clock size={12} className="text-base-content/40 shrink-0" />
+      <div className="flex items-center gap-0.5 shrink-0 border-l border-hairline pl-3">
+        <Clock size={12} className="text-faint shrink-0 mr-0.5" />
         {!hideLive && (
           <button
             onClick={() => onTimeRangeChange("live")}
             className={clsx(
-              "btn btn-xs h-7 min-h-0 font-medium gap-1 px-2",
-              timeRange === "live" ? "btn-success" : "btn-ghost text-base-content/50",
+              "btn btn-xs ll-control font-medium gap-1",
+              timeRange === "live" ? "btn-success" : "btn-ghost text-muted",
             )}
           >
             <Radio size={12} className={liveCount > 0 ? "animate-pulse text-success" : ""} />
@@ -207,8 +201,8 @@ export function StatsHeader({
             key={r.key}
             onClick={() => onTimeRangeChange(r.key)}
             className={clsx(
-              "btn btn-xs h-7 min-h-0 font-mono text-2xs px-2",
-              timeRange === r.key ? "btn-primary" : "btn-ghost text-base-content/50",
+              "btn btn-xs ll-control font-mono",
+              timeRange === r.key ? "btn-primary" : "btn-ghost text-muted",
             )}
           >
             {r.label}
@@ -224,7 +218,7 @@ export function StatsHeader({
         href="https://lastlight.dev/docs"
         target="_blank"
         rel="noopener noreferrer"
-        className="btn btn-ghost btn-xs h-7 min-h-0 px-2 text-base-content/50 hover:text-base-content"
+        className="btn btn-ghost btn-xs ll-control text-faint hover:text-strong"
         title="Documentation"
         aria-label="Open the documentation in a new tab"
       >
@@ -235,7 +229,7 @@ export function StatsHeader({
         href="https://github.com/nearform/lastlight/issues"
         target="_blank"
         rel="noopener noreferrer"
-        className="btn btn-ghost btn-xs h-7 min-h-0 px-2 text-base-content/50 hover:text-base-content"
+        className="btn btn-ghost btn-xs ll-control text-faint hover:text-strong"
         title="GitHub issues"
         aria-label="Open GitHub issues in a new tab"
       >
@@ -249,7 +243,7 @@ export function StatsHeader({
       {onLogout && (
         <button
           onClick={onLogout}
-          className="btn btn-ghost btn-xs h-7 min-h-0 px-2 text-base-content/50 hover:text-base-content"
+          className="btn btn-ghost btn-xs ll-control text-faint hover:text-strong"
           title="Log out"
           aria-label="Log out"
         >

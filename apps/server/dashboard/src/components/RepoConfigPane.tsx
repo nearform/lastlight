@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
+import { RefreshCw } from "lucide-react";
 import clsx from "clsx";
-import { ArrowPathIcon } from "@heroicons/react/24/outline";
 import {
   api,
   type ConfigSource,
@@ -59,7 +59,7 @@ interface Leaf {
 }
 
 const SOURCE_STYLE: Record<ConfigSource, string> = {
-  default: "bg-base-200 text-base-content/60",
+  default: "bg-base-200 text-muted",
   overlay: "bg-info/20 text-info",
   env: "bg-warning/20 text-warning",
   // The one value the view exists to communicate — solid, not a tint.
@@ -140,7 +140,7 @@ function WarningsBlock({ warnings }: { warnings: RepoConfigWarning[] }) {
         {warnings.length} item{warnings.length === 1 ? "" : "s"} dropped from this repo's{" "}
         <code className="text-[11px]">.lastlight/</code>
       </div>
-      <p className="mt-1 text-[11px] text-base-content/60">
+      <p className="mt-1 text-[11px] text-muted">
         Last Light warns and keeps going rather than failing the run, so these were ignored — the
         instance value stands.
       </p>
@@ -151,9 +151,9 @@ function WarningsBlock({ warnings }: { warnings: RepoConfigWarning[] }) {
               <span className="rounded bg-warning/20 px-1.5 py-0.5 text-[10px] font-medium text-warning">
                 {w.code}
               </span>
-              <code className="font-mono text-[11px] text-base-content/80">{w.path}</code>
+              <code className="font-mono text-[11px] text-strong">{w.path}</code>
             </div>
-            <div className="mt-1 text-base-content/70">{w.message}</div>
+            <div className="mt-1 text-strong">{w.message}</div>
           </li>
         ))}
       </ul>
@@ -173,7 +173,7 @@ function AssetsBlock({ assets }: { assets: OverlayAsset[] }) {
       <h3 className="mb-2 text-xs font-semibold text-base-content">Assets contributed by this repo</h3>
       <table className="w-full text-xs">
         <thead>
-          <tr className="border-b border-base-300 text-left text-base-content/60">
+          <tr className="border-b border-hairline text-left text-muted">
             <th className="py-1.5 pr-4 font-medium">Asset</th>
             <th className="py-1.5 pr-4 font-medium">Type</th>
             <th className="py-1.5 font-medium">Status</th>
@@ -181,9 +181,9 @@ function AssetsBlock({ assets }: { assets: OverlayAsset[] }) {
         </thead>
         <tbody>
           {sorted.map((a) => (
-            <tr key={`${a.type}:${a.name}`} className="border-b border-base-300/50">
+            <tr key={`${a.type}:${a.name}`} className="border-b border-hairline">
               <td className="py-1.5 pr-4 font-mono text-base-content">{a.name}</td>
-              <td className="py-1.5 pr-4 text-base-content/70">{a.type}</td>
+              <td className="py-1.5 pr-4 text-strong">{a.type}</td>
               <td className="py-1.5">
                 <span
                   className={clsx(
@@ -235,7 +235,7 @@ export function RepoConfigPane({ repo }: { repo: string }) {
     );
   }
   if (!data) {
-    return <div className="flex-1 p-4 text-sm text-base-content/60">Loading repository configuration…</div>;
+    return <div className="flex-1 p-4 text-sm text-muted">Loading repository configuration…</div>;
   }
 
   const leaves = toLeaves(data);
@@ -247,20 +247,20 @@ export function RepoConfigPane({ repo }: { repo: string }) {
       <div className="flex items-start gap-3">
         <div className="flex-1">
           {data.repoLayer || data.assets.length > 0 ? (
-            <div className="rounded border border-base-300 ll-surface p-3 text-sm text-base-content/70">
+            <div className="rounded border border-hairline ll-surface p-3 text-sm text-strong">
               <span className="font-medium text-base-content">{repo}</span> commits a{" "}
               <code className="text-xs">.lastlight/</code> layer, read from{" "}
               <code className="text-xs">{data.defaultBranch ?? "the default branch"}</code>
               {data.treeSha && <> at <code className="text-xs">{data.treeSha.slice(0, 7)}</code></>}
               {data.fetchedAt && <> · fetched {new Date(data.fetchedAt).toLocaleString()}</>}.
-              <div className="mt-1 text-xs text-base-content/60">
+              <div className="mt-1 text-xs text-muted">
                 {fromRepo === 0
                   ? "No effective value currently comes from the repo."
                   : `${fromRepo} of ${leaves.length} effective values come from this repo.`}
               </div>
             </div>
           ) : (
-            <div className="rounded border border-base-300 ll-surface p-3 text-sm text-base-content/70">
+            <div className="rounded border border-hairline ll-surface p-3 text-sm text-strong">
               No repo config — <span className="font-medium text-base-content">{repo}</span> has no{" "}
               <code className="text-xs">.lastlight/</code> directory on its default branch, so it
               inherits the instance configuration in full. Commit{" "}
@@ -272,10 +272,10 @@ export function RepoConfigPane({ repo }: { repo: string }) {
         <button
           onClick={() => void load(true)}
           disabled={busy}
-          className="btn btn-xs h-7 min-h-0 btn-ghost gap-1 text-base-content/60"
+          className="btn btn-xs ll-control btn-ghost gap-1 text-muted"
           title="Re-read .lastlight/ from the default branch now, bypassing the 60s cache"
         >
-          <ArrowPathIcon className={clsx("h-3.5 w-3.5", busy && "animate-spin")} />
+          <RefreshCw className={clsx("h-3.5 w-3.5", busy && "animate-spin")} />
           Refresh
         </button>
       </div>
@@ -290,13 +290,13 @@ export function RepoConfigPane({ repo }: { repo: string }) {
           Effective configuration for this repo
         </h3>
         {leaves.length === 0 ? (
-          <div className="rounded border border-base-300 ll-surface p-3 text-sm text-base-content/70">
+          <div className="rounded border border-hairline ll-surface p-3 text-sm text-strong">
             No repo-settable values are configured on this instance.
           </div>
         ) : (
           <table className="w-full text-xs">
             <thead>
-              <tr className="border-b border-base-300 text-left text-base-content/60">
+              <tr className="border-b border-hairline text-left text-muted">
                 <th className="py-1.5 pr-4 font-medium">Key</th>
                 <th className="py-1.5 pr-4 font-medium">Value</th>
                 <th className="py-1.5 font-medium">Source</th>
@@ -307,7 +307,7 @@ export function RepoConfigPane({ repo }: { repo: string }) {
                 <tr
                   key={leaf.path}
                   className={clsx(
-                    "border-b border-base-300/50",
+                    "border-b border-hairline",
                     // Second, non-badge signal for the same fact — scannable
                     // without reading the Source column.
                     leaf.source === "repo" && "bg-secondary/10",
@@ -321,7 +321,7 @@ export function RepoConfigPane({ repo }: { repo: string }) {
                   >
                     {leaf.path}
                   </td>
-                  <td className="py-1.5 pr-4 font-mono text-base-content/80">{renderValue(leaf.value)}</td>
+                  <td className="py-1.5 pr-4 font-mono text-strong">{renderValue(leaf.value)}</td>
                   <td className="py-1.5">
                     <SourceBadge source={leaf.source} />
                   </td>
@@ -340,11 +340,11 @@ export function RepoConfigPane({ repo }: { repo: string }) {
           <h3 className="mb-2 text-xs font-semibold text-base-content">
             Committed <code className="text-[11px]">.lastlight/lastlight.yml</code>
           </h3>
-          <p className="mb-2 text-[11px] text-base-content/50">
+          <p className="mb-2 text-[11px] text-muted">
             As committed, before validation — compare against the warnings above. Secret-looking
             keys are redacted.
           </p>
-          <pre className="overflow-auto whitespace-pre-wrap rounded border border-base-300 ll-surface p-4 text-xs leading-relaxed text-base-content">
+          <pre className="overflow-auto whitespace-pre-wrap rounded border border-hairline ll-surface p-4 text-xs leading-relaxed text-base-content">
             {pretty(data.repoLayer)}
           </pre>
         </section>
@@ -353,12 +353,12 @@ export function RepoConfigPane({ repo }: { repo: string }) {
       {/* ── Operator bounds ──────────────────────────────────────────────── */}
       <section>
         <h3 className="mb-2 text-xs font-semibold text-base-content">Policy (operator bounds)</h3>
-        <p className="mb-2 text-[11px] text-base-content/50">
+        <p className="mb-2 text-[11px] text-muted">
           {data.policy.enabled
             ? "What a repo is allowed to set on this instance — anything outside these bounds is dropped with a warning."
             : "Per-repository configuration is DISABLED on this instance; committed .lastlight/ config is ignored."}
         </p>
-        <pre className="overflow-auto whitespace-pre-wrap rounded border border-base-300 ll-surface p-4 text-xs leading-relaxed text-base-content">
+        <pre className="overflow-auto whitespace-pre-wrap rounded border border-hairline ll-surface p-4 text-xs leading-relaxed text-base-content">
           {pretty(data.policy)}
         </pre>
       </section>

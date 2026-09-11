@@ -1,12 +1,5 @@
 kind: demo
 name: demo
-# Runtime policy (issue #368) — reads the repo and posts the demo comment (the
-# mp4 is an artifact, not a push). Pre-populates its synthesized branch so
-# `demo.mp4` lands under `.lastlight/<key>/` where `serverArtifacts()`
-# harvests it; against a real PR it pins to the PR's head ref, or the "after"
-# would collapse onto the default branch and match "before". Full prose for
-# each key is in the workflow schema
-# (packages/workflow-engine/src/core/schema.ts).
 git_access: issues-write
 prepopulate_synth_branch: true
 prepopulate_pr_head_ref: true
@@ -28,24 +21,11 @@ chat:
 description: |
   Record a short demo VIDEO of a PR or feature and post it. Drives the repo's
   web UI in a real headless browser, screen-records the session, and composites
-  a titled, size-capped mp4 with ffmpeg — delivered inline on the originating
-  issue/PR (and in the dashboard Artifacts view). Does not modify code.
+  a titled, size-capped mp4 with ffmpeg. Never modifies code.
 
-  This workflow's demo phase runs ENTIRELY on the docker backend with the
-  browser-QA image (Playwright + Chromium + ffmpeg baked in). On gondolin, or a
-  docker host without that image, the demo phase is silently SKIPPED (graceful
-  degradation) and the run completes without a video — it never fails the
-  trigger. Compositing is ffmpeg-only (title card, optional before/after,
-  trim/speed, size cap) — there is no Remotion / cinematic pipeline.
-
-  Delivery is a single in-place status comment (`status_checklist`): the run
-  shows its phases ticking off, then the demo phase's report — with the playable
-  video embedded — becomes the comment footer via `final_message`. The agent
-  does NOT post anything itself.
-
-  Triggered by:
-    - a `@last-light demo [notes]` comment on an issue/PR
-    - manual CLI: tsx src/cli.ts demo owner/repo#N [-- "notes"]
+  The demo phase needs the docker backend and the browser-QA image; anywhere
+  else it is SKIPPED and the run completes without a video rather than failing.
+  Delivery is one in-place status comment whose footer becomes the report.
 
 status_checklist: true
 final_message: "{{demoResult}}"
@@ -56,17 +36,10 @@ phases:
     type: context
     depends_on: []
 
-  # The demo phase. Gated to the docker backend AND the enriched
-  # `lastlight-sandbox-qa:latest` image (Playwright + Chromium + ffmpeg). On
-  # gondolin, or a docker host without that image, the scheduler silently skips
-  # it (the run still completes — there is no text fallback for a video).
   - name: demo
     label: Demo
     depends_on: [phase_0]
     prompt: prompts/demo.md
-    # demo: the director procedure + compose-demo.sh wrapper (primary).
-    # browser-qa: the headless driver (agent-browser.mjs) with --record-dir.
-    # building: install + run the repo's dev-server to drive.
     skills: [demo, browser-qa, building]
     model: "{{models.demo}}"
     variant: "{{variants.demo}}"

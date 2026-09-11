@@ -29,7 +29,7 @@ export const SESSION_TYPES: Record<string, SessionTypeConfig> = {
   fix:         { label: "Fix",         Icon: Wrench,         color: "text-warning" },
   pr:          { label: "PR",          Icon: GitPullRequest,  color: "text-accent" },
   "pr-fix":    { label: "PR Fix",     Icon: Wrench,         color: "text-accent" },
-  resume:      { label: "Resume",      Icon: FastForward,    color: "text-base-content/50" },
+  resume:      { label: "Resume",      Icon: FastForward,    color: "text-muted" },
   // Skills
   triage:      { label: "Triage",      Icon: Tag,            color: "text-warning" },
   review:      { label: "Review",      Icon: FileText,       color: "text-info" },
@@ -37,7 +37,7 @@ export const SESSION_TYPES: Record<string, SessionTypeConfig> = {
   // Chat
   chat:        { label: "Chat",        Icon: MessageSquare,  color: "text-primary" },
   // Default
-  agent:       { label: "Agent",       Icon: Bot,            color: "text-base-content/60" },
+  agent:       { label: "Agent",       Icon: Bot,            color: "text-muted" },
 };
 
 export function getSessionType(sessionType?: string): SessionTypeConfig {

@@ -35,7 +35,7 @@ export function MessageCard({
   return (
     <div
       className={clsx(
-        "border border-base-300/60 rounded-md overflow-hidden",
+        "border border-hairline rounded-md overflow-hidden",
         // Assistant/tool blocks use the shared content surface: a subtle card in
         // dark mode, flat white on the page in light mode. User messages keep
         // their faint info tint in both.
@@ -45,13 +45,13 @@ export function MessageCard({
     >
       <div
         className={clsx(
-          "flex items-center gap-2 px-3 border-b border-base-300/40",
+          "flex items-center gap-2 px-3 border-b border-hairline",
           dense ? "py-1" : "py-1.5",
         )}
       >
         <div className="flex items-center gap-2 min-w-0 flex-1">{title}</div>
         {headerRight}
-        <span className="text-2xs text-base-content/40 font-mono shrink-0">
+        <span className="text-2xs text-faint font-mono shrink-0">
           {formatTime(timestamp)}
         </span>
       </div>

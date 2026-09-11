@@ -1,8 +1,5 @@
 kind: explore
 name: explore
-# Runtime policy (issue #368) — reads, researches and publishes a spec as an
-# issue/comment; never pushes code. Full prose for each key is in the workflow
-# schema (packages/workflow-engine/src/core/schema.ts).
 git_access: issues-write
 classification:
   intent: explore
@@ -20,15 +17,12 @@ chat:
     - brainstorm <idea>
     - spec this out
 description: |
-  Socratic idea-shaping loop: read the existing issue/thread for context, ask
-  clarifying questions in a reply-gated loop until the shape is clear, then
-  synthesize a detailed spec and publish it (as a comment on the originating
-  issue for GitHub-initiated runs, or as a new issue in EXPLORE_DEFAULT_REPO
-  for Slack-initiated runs).
+  Socratic idea-shaping loop: read the issue or thread, ask clarifying
+  questions in a reply-gated loop until the shape is clear, then synthesize a
+  spec and publish it — as a comment for GitHub runs, or as a new issue in
+  EXPLORE_DEFAULT_REPO for Slack runs.
 
 trigger: explore
-# Single in-place task-list comment/message instead of a comment per phase.
-# Reply-gate questions and the published spec still post as standalone notes.
 status_checklist: true
 
 phases:
@@ -59,9 +53,6 @@ phases:
       interactive: true
       gate_kind: reply
       scratch_key: socratic
-      # A degenerate turn (agent exits with no question) retries once; if it's
-      # still empty, advance to synthesis with the Q&A gathered so far instead
-      # of hard-failing the whole explore run.
       on_soft_failure:
         retries: 1
         then: complete

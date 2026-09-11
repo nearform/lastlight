@@ -1,10 +1,5 @@
 kind: build
 name: build
-# Runtime policy (issue #368) — pushes code, and recreates its workspace from
-# the default branch so an incomplete build is disposable (issue #153).
-# Pre-populates despite synthesizing its own `lastlight/N-slug` branch — it
-# CREATES that branch off the default. Full prose for each key is in the
-# workflow schema (packages/workflow-engine/src/core/schema.ts).
 git_access: repo-write
 workspace: per-target-recreate
 prepopulate_synth_branch: true
@@ -33,9 +28,6 @@ chat:
   reply: 'reply: "tell me `build owner/repo#N` (open the GitHub issue first if needed)"'
 description: "Architect -> Executor -> Reviewer build cycle"
 trigger: build
-# Render progress as a single in-place task-list comment/message that updates
-# as phases run, instead of a new comment per phase. The per-phase
-# `messages.on_*` below become the one-line detail on each checklist step.
 status_checklist: true
 
 phases:
@@ -86,8 +78,6 @@ phases:
       **Review & decide:** {{approvalUrl}}
       **Or comment:** `{{botMention}} approve` / `{{botMention}} reject [reason]`
     messages:
-      # Single-line messages become the one-line detail on the checklist step,
-      # so keep them concise and link the artifact on the branch.
       on_success: "Plan ready — [architect-plan.md]({{artifactUrl architect-plan.md}})"
 
   - name: executor
@@ -104,8 +94,6 @@ phases:
   - name: reviewer
     label: Reviewer
     prompt: prompts/reviewer.md
-    # code-review: rubric for the review + re-review prompts.
-    # building: the fix cycle (fix.md) runs under this node and needs the gate.
     skills: [code-review, building]
     model: "{{models.reviewer}}"
     variant: "{{variants.reviewer}}"

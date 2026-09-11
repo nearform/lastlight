@@ -37,10 +37,10 @@ function ApprovalItem({ approval, onResponded }: { approval: WorkflowApproval; o
   };
 
   return (
-    <div className="border border-warning/40 bg-warning/5 rounded-lg p-3 flex flex-col gap-2">
+    <div className="border border-warning/40 bg-warning/5 rounded-panel p-3 flex flex-col gap-2">
       <div className="flex items-center gap-2">
-        <span className="badge badge-warning badge-sm">{approval.gate}</span>
-        <span className="text-xs text-base-content/70">{approval.summary}</span>
+        <span className="ll-status badge text-warning badge-sm">{approval.gate}</span>
+        <span className="text-xs text-strong">{approval.summary}</span>
         {approval.artifact && (
           <button
             className="btn btn-xs btn-ghost text-primary ml-auto"

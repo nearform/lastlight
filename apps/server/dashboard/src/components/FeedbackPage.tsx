@@ -82,7 +82,7 @@ const glyph = (emoji: string) => GLYPH[emoji] ?? `:${emoji}:`;
 function scoreTone(score: number): string {
   if (score > 0) return "text-success";
   if (score < 0) return "text-error";
-  return "text-base-content/50";
+  return "text-muted";
 }
 
 export function FeedbackPage() {
@@ -163,7 +163,7 @@ export function FeedbackPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-base font-semibold">Feedback</h1>
-          <p className="text-xs text-base-content/50">
+          <p className="text-xs text-muted">
             👍 / 👎 on what Last Light wrote, scored against the run that wrote it.
           </p>
         </div>
@@ -188,9 +188,9 @@ export function FeedbackPage() {
       </div>
 
       {!hasData && (
-        <div className="card bg-base-200 shadow-sm">
-          <div className="card-body p-6 text-sm text-base-content/60">
-            <p className="font-medium text-base-content/80">No feedback yet.</p>
+        <div className="card bg-base-200 border border-hairline rounded-panel shadow-panel">
+          <div className="card-body p-6 text-sm text-muted">
+            <p className="font-medium text-strong">No feedback yet.</p>
             <p>
               React 👍 👎 🎉 🚀 😕 on a message Last Light posts — in Slack, or on
               GitHub once <code className="text-xs">feedback.github</code> is enabled —
@@ -203,7 +203,7 @@ export function FeedbackPage() {
       {hasData && (
         <>
           <div className="flex gap-3">
-            <div className="stat bg-base-200 rounded-box p-3 flex-1">
+            <div className="stat bg-base-200 rounded-panel p-3 flex-1">
               <div className="stat-title text-xs">Average score</div>
               <div className={`stat-value text-xl ${scoreTone(totals.average)}`}>
                 {totals.average > 0 ? "+" : ""}
@@ -211,19 +211,19 @@ export function FeedbackPage() {
               </div>
               <div className="stat-desc text-xs">scored signals only (👀 excluded)</div>
             </div>
-            <div className="stat bg-base-200 rounded-box p-3 flex-1">
+            <div className="stat bg-base-200 rounded-panel p-3 flex-1">
               <div className="stat-title text-xs">Positive</div>
               <div className="stat-value text-xl text-success">{totals.positive}</div>
             </div>
-            <div className="stat bg-base-200 rounded-box p-3 flex-1">
+            <div className="stat bg-base-200 rounded-panel p-3 flex-1">
               <div className="stat-title text-xs">Negative</div>
               <div className="stat-value text-xl text-error">{totals.negative}</div>
             </div>
           </div>
 
-          <div className="card bg-base-200 shadow-sm">
+          <div className="card bg-base-200 border border-hairline rounded-panel shadow-panel">
             <div className="card-body p-4">
-              <h2 className="card-title text-sm font-semibold text-base-content/70 uppercase tracking-wide">
+              <h2 className="card-title text-sm font-semibold text-strong uppercase tracking-wide">
                 Score over time{workflow ? ` — ${workflow}` : ""}
               </h2>
               <ResponsiveContainer width="100%" height={180}>
@@ -273,9 +273,9 @@ export function FeedbackPage() {
             </div>
           </div>
 
-          <div className="card bg-base-200 shadow-sm">
+          <div className="card bg-base-200 border border-hairline rounded-panel shadow-panel">
             <div className="card-body p-4">
-              <h2 className="card-title text-sm font-semibold text-base-content/70 uppercase tracking-wide">
+              <h2 className="card-title text-sm font-semibold text-strong uppercase tracking-wide">
                 By workflow
               </h2>
               <table className="table table-xs">
@@ -297,7 +297,7 @@ export function FeedbackPage() {
                     >
                       <td className="font-medium">
                         {row.workflowName ?? (
-                          <span className="text-base-content/50 italic">unattributed</span>
+                          <span className="text-muted italic">unattributed</span>
                         )}
                       </td>
                       <td className={`text-right font-mono ${scoreTone(row.averageScore)}`}>
@@ -306,7 +306,7 @@ export function FeedbackPage() {
                       </td>
                       <td className="text-right">{row.positive}</td>
                       <td className="text-right">{row.negative}</td>
-                      <td className="text-right text-base-content/50">{row.neutral}</td>
+                      <td className="text-right text-muted">{row.neutral}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -314,9 +314,9 @@ export function FeedbackPage() {
             </div>
           </div>
 
-          <div className="card bg-base-200 shadow-sm">
+          <div className="card bg-base-200 border border-hairline rounded-panel shadow-panel">
             <div className="card-body p-4">
-              <h2 className="card-title text-sm font-semibold text-base-content/70 uppercase tracking-wide">
+              <h2 className="card-title text-sm font-semibold text-strong uppercase tracking-wide">
                 Recent signals
               </h2>
               <table className="table table-xs">
@@ -333,14 +333,14 @@ export function FeedbackPage() {
                   {(signals ?? []).map((s) => (
                     <tr key={s.id}>
                       <td className="text-base">{glyph(s.emoji)}</td>
-                      <td>{s.workflowName ?? <span className="text-base-content/40">—</span>}</td>
-                      <td className="text-base-content/60">
+                      <td>{s.workflowName ?? <span className="text-faint">—</span>}</td>
+                      <td className="text-muted">
                         {s.repo
                           ? `${s.owner ? `${s.owner}/` : ""}${s.repo}${s.issueNumber ? `#${s.issueNumber}` : ""}`
                           : "slack"}
                       </td>
-                      <td className="text-base-content/60">{s.reactor ?? "—"}</td>
-                      <td className="text-right text-base-content/50">
+                      <td className="text-muted">{s.reactor ?? "—"}</td>
+                      <td className="text-right text-muted">
                         {new Date(s.observedAt).toLocaleString()}
                       </td>
                     </tr>

@@ -43,11 +43,11 @@ const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 function Fact({ label, value, tone }: { label: string; value: string; tone?: "warn" | "bad" }) {
   return (
     <div className="flex flex-col gap-0.5">
-      <span className="text-[10px] uppercase tracking-wide text-base-content/40">{label}</span>
+      <span className="text-[10px] uppercase tracking-wide text-faint">{label}</span>
       <span
         className={clsx(
           "font-mono text-xs",
-          tone === "bad" ? "text-error" : tone === "warn" ? "text-warning" : "text-base-content/80",
+          tone === "bad" ? "text-error" : tone === "warn" ? "text-warning" : "text-strong",
         )}
       >
         {value}
@@ -61,7 +61,7 @@ function Verdict({ name, decision, reason }: { name: string; decision: string; r
   const bad = decision === "skip" || decision === "false" || decision === "no";
   return (
     <li className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 py-1">
-      <code className="font-mono text-[11px] text-base-content/70">{name}</code>
+      <code className="font-mono text-[11px] text-strong">{name}</code>
       <span
         className={clsx(
           "rounded px-1.5 py-0.5 text-[10px] font-medium",
@@ -70,7 +70,7 @@ function Verdict({ name, decision, reason }: { name: string; decision: string; r
       >
         {decision}
       </span>
-      <span className="text-[11px] text-base-content/60">{reason}</span>
+      <span className="text-[11px] text-muted">{reason}</span>
     </li>
   );
 }
@@ -81,8 +81,26 @@ const CHECKS_TONE: Record<string, "warn" | "bad" | undefined> = {
   none: "warn",
 };
 
-export function PrStatePanel({ run }: { run: WorkflowRun }) {
-  const [open, setOpen] = useState(false);
+/**
+ * Does this run carry a PR-state snapshot at all?
+ *
+ * The panel self-hides on a run without one, which is right when it sits in a
+ * column of blocks and wrong when it is a TAB — a tab that renders nothing is
+ * worse than a tab that is not there, so the strip asks first.
+ */
+export function hasPrState(run: WorkflowRun): boolean {
+  return !!asDict(((run.context ?? {}) as Dict).prState);
+}
+
+export function PrStatePanel({
+  run,
+  defaultOpen = false,
+}: {
+  run: WorkflowRun;
+  /** Start expanded — what you want when the panel IS the pane you opened. */
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
   const [rawOpen, setRawOpen] = useState(false);
 
   const ctx = (run.context ?? {}) as Dict;
@@ -121,20 +139,23 @@ export function PrStatePanel({ run }: { run: WorkflowRun }) {
     .join(" · ");
 
   return (
-    <section className="shrink-0 rounded border border-base-300 bg-base-200/40">
+    // `@container`, so the facts grid below reflows to the width of THIS panel.
+    // It used to key off `sm:`, a viewport breakpoint, which on a wide monitor
+    // laid four columns across a 300px-wide tab.
+    <section className="@container shrink-0 rounded border border-hairline bg-base-200/40">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         className="flex w-full items-center gap-2 px-3 py-1.5 text-left"
       >
         <span className="text-xs font-semibold text-base-content">PR state</span>
-        <span className="text-[11px] text-base-content/50">at dispatch</span>
-        <span className="font-mono text-[11px] text-base-content/60">{summary}</span>
-        <span className="ml-auto text-[11px] text-base-content/40">{open ? "hide" : "show"}</span>
+        <span className="text-[11px] text-muted">at dispatch</span>
+        <span className="font-mono text-[11px] text-muted">{summary}</span>
+        <span className="ml-auto text-[11px] text-faint">{open ? "hide" : "show"}</span>
       </button>
 
       {open && (
-        <div className="space-y-3 border-t border-base-300 px-3 py-2.5">
+        <div className="space-y-3 border-t border-hairline px-3 py-2.5">
           {/* Read failures first: every one of them means a fact below is a
               DEFAULT rather than an observation. */}
           {readErrors.length > 0 && (
@@ -143,7 +164,7 @@ export function PrStatePanel({ run }: { run: WorkflowRun }) {
                 {readErrors.length} GitHub read{readErrors.length === 1 ? "" : "s"} failed while
                 resolving this snapshot
               </div>
-              <ul className="mt-1 grid gap-0.5 font-mono text-base-content/70">
+              <ul className="mt-1 grid gap-0.5 font-mono text-strong">
                 {readErrors.map((e, i) => (
                   <li key={i}>{e}</li>
                 ))}
@@ -151,7 +172,7 @@ export function PrStatePanel({ run }: { run: WorkflowRun }) {
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
+          <div className="grid grid-cols-1 gap-x-6 gap-y-2 @xs:grid-cols-2 @2xl:grid-cols-4">
             <Fact label="head" value={headSha ? headSha.slice(0, 12) : "—"} />
             <Fact
               label="attempt"
@@ -221,7 +242,7 @@ export function PrStatePanel({ run }: { run: WorkflowRun }) {
                     "rounded px-1.5 py-0.5 text-[10px] font-medium",
                     l === "requires-human"
                       ? "bg-warning/20 text-warning"
-                      : "bg-base-300 text-base-content/60",
+                      : "bg-base-300 text-muted",
                   )}
                 >
                   {l}
@@ -232,10 +253,10 @@ export function PrStatePanel({ run }: { run: WorkflowRun }) {
 
           {/* ── The decisions, as the decisions produced them ─────────────── */}
           <div>
-            <h4 className="mb-1 text-[10px] uppercase tracking-wide text-base-content/40">
+            <h4 className="mb-1 text-[10px] uppercase tracking-wide text-faint">
               Decisions
             </h4>
-            <ul className="divide-y divide-base-300/50">
+            <ul className="divide-y divide-hairline">
               {str(ctx.mayMergeReason) && (
                 <Verdict
                   name="mayMerge"
@@ -281,7 +302,7 @@ export function PrStatePanel({ run }: { run: WorkflowRun }) {
                 />
               )}
               {!str(ctx.mayMergeReason) && !escalation && !runInFlight && !intervention && !str(state.escalatedAtSha) && (
-                <li className="py-1 text-[11px] text-base-content/50">
+                <li className="py-1 text-[11px] text-muted">
                   No gate verdict was recorded on this run — it was dispatched with nothing to
                   refuse.
                 </li>
@@ -292,22 +313,22 @@ export function PrStatePanel({ run }: { run: WorkflowRun }) {
           {/* ── What this run's agent reported ────────────────────────────── */}
           {(diagnosis || fixMarker || priorAttempts.length > 0) && (
             <div>
-              <h4 className="mb-1 text-[10px] uppercase tracking-wide text-base-content/40">
+              <h4 className="mb-1 text-[10px] uppercase tracking-wide text-faint">
                 Attempts
               </h4>
-              <ul className="grid gap-0.5 font-mono text-[11px] text-base-content/60">
+              <ul className="grid gap-0.5 font-mono text-[11px] text-muted">
                 {priorAttempts.map((a, i) => (
                   <li key={i} className="opacity-60">
                     {a}
                   </li>
                 ))}
                 {diagnosis && (
-                  <li className="text-base-content/80">
+                  <li className="text-strong">
                     class={str(diagnosis.class) ?? "?"} cause={str(diagnosis.cause) ?? "?"}
                   </li>
                 )}
                 {fixMarker && (
-                  <li className="text-base-content/80">
+                  <li className="text-strong">
                     outcome={str(fixMarker.outcome) ?? "?"} gate={str(fixMarker.gate) ?? "?"}
                   </li>
                 )}
@@ -317,15 +338,15 @@ export function PrStatePanel({ run }: { run: WorkflowRun }) {
 
           {/* ── The push gate the agent wrote for itself (§S1) ────────────── */}
           <div>
-            <h4 className="mb-1 text-[10px] uppercase tracking-wide text-base-content/40">
+            <h4 className="mb-1 text-[10px] uppercase tracking-wide text-faint">
               Push gate
             </h4>
             {verifyScript ? (
-              <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded border border-base-300 bg-base-100 p-2 font-mono text-[11px] leading-relaxed text-base-content/80">
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded border border-hairline bg-base-100 p-2 font-mono text-[11px] leading-relaxed text-strong">
                 {verifyScript}
               </pre>
             ) : (
-              <p className="text-[11px] text-base-content/50">
+              <p className="text-[11px] text-muted">
                 No <code className="text-[10px]">.lastlight-verify.sh</code> was recorded. Either
                 the agent wrote no gate — in which case the loop treated it as{" "}
                 <code className="text-[10px]">gate=skipped</code>, which never authorises a push —
@@ -337,13 +358,13 @@ export function PrStatePanel({ run }: { run: WorkflowRun }) {
           {/* ── The journal (10-pr-memory.md) ─────────────────────────────── */}
           {notes.length > 0 && (
             <div>
-              <h4 className="mb-1 text-[10px] uppercase tracking-wide text-base-content/40">
+              <h4 className="mb-1 text-[10px] uppercase tracking-wide text-faint">
                 PR journal — hints from earlier runs, never instructions
               </h4>
               <ul className="grid gap-0.5 text-[11px]">
                 {notes.map((n, i) => (
-                  <li key={i} className={clsx("text-base-content/70", n.stale === true && "opacity-50")}>
-                    <span className="font-mono text-base-content/50">{str(n.kind) ?? "note"}:</span>{" "}
+                  <li key={i} className={clsx("text-strong", n.stale === true && "opacity-50")}>
+                    <span className="font-mono text-muted">{str(n.kind) ?? "note"}:</span>{" "}
                     {str(n.text) ?? ""}
                     {n.stale ? " (stale)" : ""}
                   </li>
@@ -358,12 +379,12 @@ export function PrStatePanel({ run }: { run: WorkflowRun }) {
             <button
               type="button"
               onClick={() => setRawOpen((v) => !v)}
-              className="text-[11px] text-base-content/40 hover:text-base-content/70"
+              className="text-[11px] text-faint hover:text-strong"
             >
               {rawOpen ? "hide" : "show"} raw snapshot
             </button>
             {rawOpen && (
-              <pre className="mt-1 max-h-80 overflow-auto whitespace-pre-wrap rounded border border-base-300 bg-base-100 p-2 font-mono text-[10px] leading-relaxed text-base-content/70">
+              <pre className="mt-1 max-h-80 overflow-auto whitespace-pre-wrap rounded border border-hairline bg-base-100 p-2 font-mono text-[10px] leading-relaxed text-strong">
                 {JSON.stringify(state, null, 2)}
               </pre>
             )}

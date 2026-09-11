@@ -1,25 +1,18 @@
 import { useState } from "react";
-import {
-  UserCircleIcon,
-  ChatBubbleLeftRightIcon,
-  CommandLineIcon,
-  ClockIcon,
-  ShieldCheckIcon,
-  CpuChipIcon,
-} from "@heroicons/react/24/outline";
+import { CircleUserRound, Clock, Cpu, MessagesSquare, ShieldCheck, Terminal } from "lucide-react";
 import { GhLink } from "./GhLink";
 import type { WorkflowRun, TriggeredByUser } from "../api";
 
 type ActorType = NonNullable<WorkflowRun["triggerActorType"]>;
 
 /** Per-actor-type fallback icon (used when there's no avatar), + a tooltip label. */
-const ACTOR_META: Record<ActorType, { Icon: typeof UserCircleIcon; label: string }> = {
-  github: { Icon: UserCircleIcon, label: "GitHub" },
-  slack: { Icon: ChatBubbleLeftRightIcon, label: "Slack" },
-  cli: { Icon: CommandLineIcon, label: "CLI / API" },
-  cron: { Icon: ClockIcon, label: "Cron" },
-  admin: { Icon: ShieldCheckIcon, label: "Admin" },
-  system: { Icon: CpuChipIcon, label: "System" },
+const ACTOR_META: Record<ActorType, { Icon: typeof CircleUserRound; label: string }> = {
+  github: { Icon: CircleUserRound, label: "GitHub" },
+  slack: { Icon: MessagesSquare, label: "Slack" },
+  cli: { Icon: Terminal, label: "CLI / API" },
+  cron: { Icon: Clock, label: "Cron" },
+  admin: { Icon: ShieldCheck, label: "Admin" },
+  system: { Icon: Cpu, label: "System" },
 };
 
 export interface ActorChipProps {
@@ -48,7 +41,7 @@ export function ActorChip({ login, actorType, user, size = "sm", className }: Ac
   if (!display && !actorType) return null;
 
   const meta = actorType ? ACTOR_META[actorType] : undefined;
-  const Icon = meta?.Icon ?? UserCircleIcon;
+  const Icon = meta?.Icon ?? CircleUserRound;
   const dim = size === "md" ? "w-5 h-5" : "w-4 h-4";
   const textCls = size === "md" ? "text-xs" : "text-2xs";
   const avatarUrl = user?.avatarUrl && !imgFailed ? user.avatarUrl : null;
@@ -61,7 +54,7 @@ export function ActorChip({ login, actorType, user, size = "sm", className }: Ac
       onError={() => setImgFailed(true)}
     />
   ) : (
-    <Icon className={`${dim} shrink-0 text-base-content/50`} />
+    <Icon className={`${dim} shrink-0 text-muted`} />
   );
 
   // When an avatar stands in for the identity, the per-type icon it replaced
@@ -72,7 +65,7 @@ export function ActorChip({ login, actorType, user, size = "sm", className }: Ac
   const channelIcon =
     avatarUrl && meta && actorType !== "github" ? (
       <Icon
-        className={`${size === "md" ? "w-4 h-4" : "w-3 h-3"} shrink-0 text-base-content/40`}
+        className={`${size === "md" ? "w-4 h-4" : "w-3 h-3"} shrink-0 text-faint`}
       />
     ) : null;
 
@@ -91,7 +84,7 @@ export function ActorChip({ login, actorType, user, size = "sm", className }: Ac
         {label}
       </GhLink>
     ) : (
-      <span className={`${textCls} font-mono text-base-content/70 truncate`} title={title}>
+      <span className={`${textCls} font-mono text-strong truncate`} title={title}>
         {label}
       </span>
     );

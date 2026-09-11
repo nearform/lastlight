@@ -1,39 +1,24 @@
 kind: pr-fix
 name: dependabot-ci-fix
-# PR-scoped (09-state-machine.md §S1/§S4): this workflow runs against a pull
-# request, so it crosses the PR-scoped dispatch gate — the run lock shared with
-# every other PR-scoped workflow, the per-head-SHA dedup, escalation, and the
-# resolved `PrState` snapshot on `context.prState`. A fork of this workflow that
-# drops the key silently loses all four; `validateAssets` warns when a
-# `routes.github.pr_*` target is missing it.
+# Crosses the PR-scoped dispatch gate: the run lock shared with every other
+# PR-scoped workflow, per-head-SHA dedup, escalation, and the resolved
+# `PrState` snapshot on `context.prState`.
 pr_scoped: true
-# Runtime policy (issue #368) — pushes a fix to the PR's head branch, through
-# `handlePrFix`. Shares the fix family's one workspace per PR
-# (`${repo}-${N}-fix`). Full prose for each key is in the workflow schema
-# (packages/workflow-engine/src/core/schema.ts).
 git_access: repo-write
 workspace: per-target-reuse
+# Shares the fix family's ONE workspace per PR (`${repo}-${N}-fix`), which the
+# run lock admits one of at a time.
 pr_fix_shaped: true
 description: |
-  Fix a dependency-update PR (Dependabot / Renovate) that can't merge on its
-  own — CI is red, or it's `behind` its base / `dirty` (merge conflict) /
-  `blocked`: bring the branch up to date with its base, make CI green, and push.
-  It never classifies or merges — once the pushed fix turns the checks green the
-  `pr.checks_passed` webhook hands off to `dependabot-pr-merge`, the single owner
-  of the classify → label → auto-merge decision. The one label it may apply is
-  `requires-human`, when it can't land the PR (a fix it can't complete, or a
-  `blocked` PR it can't unblock), so the nightly sweep stops re-attempting it.
+  Fix a dependency-update PR (Dependabot / Renovate) that cannot merge on its
+  own — CI is red, or it is `behind` its base / `dirty` / `blocked`. Brings the
+  branch up to date, makes CI green, and pushes.
 
-  Triggered by:
-    - pr.checks_failed webhook (a check_suite completed with a failure
-      conclusion) → routed here by the classifier when it recognises a
-      dependency-update PR (src/engine/router.ts + this file's `classification`).
-    - cron-dependabot-ci-fix backstop (`discover: red-dependency-prs`) → fans
-      out one run per PR whose checks are settled-failing OR whose
-      `mergeable_state` is `behind` / `dirty` / `blocked`
-      (src/cron/dependabot-discovery.ts). The `{{reason}}` says which.
-# One in-place task-list comment that updates as the diagnose/fix phases run,
-# rather than a comment per phase.
+  It never classifies or merges: once the checks go green the
+  `pr.checks_passed` webhook hands off to `dependabot-pr-merge`, the single
+  owner of the classify → label → auto-merge decision. The one label it applies
+  is `requires-human`, when it cannot land the PR at all.
+
 status_checklist: true
 classification:
   intent: dependabot-ci-fix
@@ -52,48 +37,28 @@ classification:
     - 'PR AUTHOR: dependabot[bot], PR CHECKS: failing, COMMENT: "@bot can you take a look at this?" → INTENT: DEPENDABOTCIFIX, REPO: NONE, ISSUE: NONE, REASON: NONE'
 
 phases:
-  # Diagnose before repairing: classify the failure against the pre-cloned
-  # workspace (cheap) BEFORE the install + test cycle (expensive), so a failure
-  # no amount of fixing can address costs one short call. See the `fixing` skill.
+  # Classify the failure against the pre-cloned workspace (cheap) BEFORE the
+  # install + test cycle (expensive), so a failure no amount of fixing can
+  # address costs one short call.
   - name: diagnose
     label: Diagnose the failing checks
     prompt: prompts/diagnose-ci.md
     skill: fixing
-    # Cheap by intent — it reads logs and reproduces a command, it doesn't write
-    # code. Unset in config/default.yaml, so this falls through to models.default
-    # until an operator pins a cheaper model for it.
     model: "{{models.diagnose}}"
     output_var: diagnosis
-    # Nothing to diagnose when the PR isn't red — it's merge-BLOCKED, and the
-    # repair (merge the base in, regenerate the conflicted lockfile) is
-    # mechanical. Diagnosing it anyway was actively harmful, not merely wasteful:
-    # this phase's taxonomy is CI-failure-shaped, so an agent looking at green
-    # checks and no failing job honestly answered `infra-dependent` ("nothing
-    # here to repair") — one of the three stopping classes in the `fix` phase's
-    # `skip_if` below. The fix phase was skipped and the conflict left in place,
-    # on a `succeeded` run.
-    #
-    # Safe as a bare OR-ed list (the grammar has no negation) because
-    # `reason` carries CI's verdict FIRST: `dependabot-discovery.ts` resolves it
-    # as `conclusion === "failing" ? "checks-failing" : mergeableState`, so these
-    # three values imply CI is not settled-failing. A PR that is both red and
-    # behind arrives as `checks-failing` and still gets diagnosed.
-    #
-    # The fix phase's own `skip_if` rows read `scratch.fixMarkers.diagnosis.class`,
-    # which is absent when this phase is skipped — and an absent variable fails
-    # OPEN, so the fix phase runs. Its step 1 does the base merge + conflict
-    # resolution before it consults the diagnosis, and the prompt already guards
-    # the diagnosis behind `{{#if phaseOutputs.diagnosis}}`.
+    # Nothing to diagnose when the PR is not red: it is merge-BLOCKED, and the
+    # repair is mechanical. Diagnosing anyway was harmful rather than wasteful —
+    # this phase's taxonomy is CI-failure-shaped, so an agent seeing green
+    # checks answers `infra-dependent`, which is one of the stopping classes the
+    # fix phase skips on. `reason` carries CI's verdict first, so a PR that is
+    # both red and behind still arrives as `checks-failing` and is diagnosed.
     skip_if:
       - "reason == 'dirty'"
       - "reason == 'behind'"
       - "reason == 'blocked'"
-    # The tag WITH its colon, which is what the parser looks for
-    # (`lastMarkerLine`). The engine enforces the postcondition as a plain
-    # substring, so the bare tag let an output that merely MENTIONS
-    # `DIAGNOSIS_COMPLETE` pass a gate it then parsed to nothing — a green phase,
-    # a null diagnosis, and an attempt counter that never advanced. Pinned to
-    # `DIAGNOSIS_MARKER_POSTCONDITION` in src/engine/fix-markers.ts by test.
+    # The tag WITH its colon, which is what the parser looks for. The engine
+    # enforces the postcondition as a plain substring, so a bare tag lets an
+    # output that merely MENTIONS it pass a gate that then parses to nothing.
     on_output:
       requires_marker: "DIAGNOSIS_COMPLETE:"
     messages:
@@ -103,121 +68,52 @@ phases:
   - name: fix
     label: Fix failing checks
     prompt: prompts/dependabot-ci-fix.md
-    # `fixing` is primary (minimal repair + push discipline + the markers);
-    # `building`: install deps with the repo's package manager, then run the
-    # test/lint/typecheck gate before committing.
     skills: [fixing, building]
     model: "{{models.pr-fix}}"
-    # The three stopping classes: there is nothing here for a fix phase to do,
-    # so it must not provision a sandbox and run a 900-second gate for one. A
-    # non-failing skip — the RUN still records `succeeded`, so `on_failure`
-    # below ("leaving it for a human") does NOT post and the PR is never
-    # poisoned with `requires-human` for a failure that isn't its fault.
+    # The three stopping classes: there is nothing for a fix phase to do, so it
+    # must not provision a sandbox and run a 900-second gate. A non-failing
+    # skip — the run still records `succeeded`, so `on_failure` does not post
+    # and the PR is never labelled `requires-human` for someone else's problem.
     #
-    # Read off the PARSED class the marker harvest persisted
-    # (`scratch.fixMarkers.diagnosis.class`), not off the diagnose phase's whole
-    # output. Substring-matching the output was wrong three ways: prose like
-    # "this is not class=flaky, it's reproducible" skipped the fix; a replayed
-    # `{{priorAttempts}}` line from an earlier attempt matched too; and
-    # `phaseOutputs` is EMPTY across a resume boundary, so the guard failed open
-    # and ran the full sandbox + gate on a verdict that said not to. `scratch`
-    # is reloaded from the run row, so it survives resume.
+    # Read off the PARSED class in `scratch`, never the phase's raw output:
+    # prose like "this is not class=flaky" matches a substring, a replayed
+    # attempt-journal line matches too, and `phaseOutputs` is EMPTY across a
+    # resume boundary. `scratch` is reloaded from the run row.
     #
-    # `class=flaky` is the one BOUNDED row: after `fix.maxFlakyDeferrals` (2)
-    # consecutive `flaky` verdicts on the same problem the harness drops this
-    # expression for that run, so the third one is attempted as `reproducible`
-    # (09-state-machine.md §S1 — three flaky reports running is an intermittent
-    # real failure, and an unbounded series of free full runs otherwise).
-    # `promoteFlakyDiagnosis` in src/workflows/simple.ts matches the expression
-    # below LITERALLY; the other two rows always apply.
+    # `flaky` is BOUNDED: after `fix.maxFlakyDeferrals` consecutive flaky
+    # verdicts on the same problem the harness drops that row for the run, so
+    # the next attempt treats it as reproducible. The match is literal.
     skip_if:
       - "scratch.fixMarkers.diagnosis.class == 'flaky'"
       - "scratch.fixMarkers.diagnosis.class == 'infra-dependent'"
       - "scratch.fixMarkers.diagnosis.class == 'upstream-broken'"
-    # Load-bearing, not cosmetic: `runUntilBash` defaults to
-    # `timeout_seconds ?? 30`, and thirty seconds kills any real test suite
-    # mid-run and reports a false red. READ from `fix.gateTimeoutSeconds` — the
-    # run's effective, repo-clamped config block — with the packaged value as
-    # the fallback for a context that carries no `fix:` at all (#256). The two
-    # no longer have to be kept in step by hand.
+    # Load-bearing: the gate command otherwise inherits a 30-second default,
+    # which kills any real test suite mid-run and reports a false red. Read
+    # from the run's repo-clamped `fix:` block, with the packaged value as the
+    # fallback for a context that carries none.
     timeout_seconds: { from: fix.gateTimeoutSeconds, default: 900 }
-    # Closes the missing-postcondition gap: without a marker, a run that
-    # inspects the PR and stops without pushing or labelling reports green.
-    # The tag WITH its colon — see the `diagnose` phase above.
     on_output:
       requires_marker: "CI_FIX_COMPLETE:"
-    # The within-run local gate loop (04-retry.md §4.5). The gate command isn't
-    # statically knowable — package manager from the lockfile, commands from the
-    # repo's CI workflow — so the `fixing` skill has the agent write it to
-    # `.git/lastlight-verify.sh` inside the checkout (under `.git/`, so no
-    # `git add -A` can ever commit it, and deleted at the start of every attempt
-    # so a superseded diagnosis can't gate this one). No script yet ⇒ an EXPLICIT non-zero exit: `gate=skipped`
-    # is treated as red and never authorises a push (09-state-machine.md §S1).
-    # `max_iterations` reads `fix.localIterations`, same as `timeout_seconds`
-    # above; `2` is the packaged fallback, not the operative value.
-    #
-    # Run the gate with `bash`, NOT `sh`. `/bin/sh` in the sandbox image is
-    # dash, and the script the agent writes is the one the `fixing` skill asks
-    # for — a shell script that opens `set -euo pipefail`. dash rejects
-    # `-o pipefail` on line 2 and exits 2 before the first real command, so
-    # `sh <script>` made the gate a CONSTANT RED in milliseconds: every loop
-    # burned all its iterations, no iteration could ever satisfy the condition,
-    # and the harness's half of "no green gate ⇒ no push" never fired — leaving
-    # the agent's own self-reported `gate=green` (it runs the script directly,
-    # so its shebang IS honoured) as the only thing gating a push. `sh` also
-    # discards the script's `#!` line, which is precisely what let the harness
-    # and the agent disagree about the same file; `bash` is a superset of the
-    # shell any gate script here targets, so it agrees with a `#!/bin/sh`,
-    # `#!/usr/bin/env bash`, or shebang-less script alike.
-    #
-    # `until:` is checked FIRST and short-circuits `until_bash` entirely
-    # (phase-executor.ts: `if (!conditionMet && loop.until_bash)`), so it is
-    # where "there is nothing left for the gate to gate" belongs. The one case
-    # that qualifies is `outcome=pushed`: the commit is already ON the branch,
-    # GitHub's checks started against it the moment it landed, and they are the
-    # strictly better authority — the real CI environment rather than a sandbox
-    # approximation of it, warm rather than a cold container, and running
-    # against every matrix leg we cannot reproduce here. Run `49c101aa` is the
-    # bill for not saying so: the agent pushed at 11:03:31 having already run
-    # the whole suite itself, GitHub went fully green at 11:06:25, and the
-    # harness spent 11:04:00–11:10:48 in a fresh container re-running the same
-    # suite a third time before agreeing. The gate's exit code could not have
-    # changed anything by then — all it decides is whether to spend ANOTHER
-    # agent iteration, and a pushed fix has nothing left to iterate on.
-    #
-    # It short-circuits on `pushed` ONLY. `no-change` / `gave-up` still pay for
-    # the gate, deliberately: nothing was pushed, so there is no new commit, no
-    # new check run and no external authority — the local gate is the only
-    # evidence that exists, and its RED verdict is precisely what earns the
-    # agent the next iteration. Short-circuiting all three outcomes would exit
-    # every loop at iteration 1 and quietly turn `fix.localIterations` into
-    # dead config.
-    #
-    # The needle carries `tried=` on purpose. `outcome=pushed` on its own also
-    # appears in a rendered `{{priorAttempts}}` journal line from an EARLIER
-    # attempt (`renderAttemptLine`: `… | outcome=pushed gate=green`), which this
-    # prompt replays — the same replayed-line false match that forced the
-    # `skip_if` rows above off `phaseOutputs` and onto the parsed `scratch`
-    # value. Inside a loop iteration `scratch` is not an option (the scheduler
-    # refreshes it per PHASE node, not per iteration, so it is stale here), but
-    # `renderAttemptLine` deliberately omits `tried=`, so `outcome=pushed tried=`
-    # matches a LIVE `CI_FIX_COMPLETE:` line and nothing else. A marker that
-    # reorders its fields simply fails to match and the gate runs exactly as
-    # before — the fallback is the old behaviour, which is the right way round.
-    #
-    # What this gives up, stated plainly: after a push the harness no longer has
-    # an independent check on the agent's self-reported `gate=green`. That reads
-    # like the `sh`-vs-`bash` bug above and is not the same thing, because the
-    # gate in this flow runs AFTER the push and therefore never gated it — the
-    # agent's self-report was already the only thing between a bad fix and the
-    # branch, on every run this workflow has ever done. What actually catches a
-    # bad fix is untouched: GitHub's checks go red, `pr.checks_failed`
-    # re-dispatches this family, and `fix.maxAttempts` / `fix.maxCostUsd` bound
-    # the retries. The `bash`-not-`sh` fix still matters for the UNPUSHED path,
-    # which is where the loop's iterations actually live.
     generic_loop:
       max_iterations: { from: fix.localIterations, default: 2 }
+      # `until` is checked FIRST and short-circuits the gate below entirely.
+      # `pushed` is the one outcome that qualifies: the commit is on the branch
+      # and GitHub's own checks are the better authority, so re-running the
+      # suite locally can no longer change anything. `no-change` / `gave-up`
+      # still pay for the gate — its RED verdict is what earns the next
+      # iteration. The `tried=` needle matters: a bare `outcome=pushed` also
+      # appears in a replayed attempt-journal line from an EARLIER attempt.
       until: "output.contains('outcome=pushed tried=')"
+      # The gate command is not statically knowable — package manager from the
+      # lockfile, commands from the repo's CI — so the agent writes it to
+      # `.git/lastlight-verify.sh`, which `git add -A` can never commit. No
+      # script means an explicit non-zero exit: a skipped gate is treated as
+      # red and never authorises a push.
+      #
+      # `bash`, NOT `sh`. `/bin/sh` in the sandbox is dash, the script opens
+      # `set -euo pipefail`, and dash exits 2 on line 2 — a constant red in
+      # milliseconds, which burns every iteration and leaves the agent's own
+      # self-report as the only thing gating the push.
       until_bash: "if [ -f .git/lastlight-verify.sh ]; then bash .git/lastlight-verify.sh; else echo 'no .git/lastlight-verify.sh — gate=skipped, treated as RED'; exit 1; fi"
       fresh_context: false
     messages:

@@ -1,26 +1,15 @@
 kind: health
 name: security-feedback
-# Runtime policy (issue #368) — opens issues AND pushes a SECURITY.md
-# suppression PR, so it needs contents:write. Full prose for each key is in
-# the workflow schema (packages/workflow-engine/src/core/schema.ts).
 git_access: repo-write
 description: |
-  Process maintainer feedback on a security-labelled issue (usually a
-  per-run scan summary). Classifies the comment and acts:
+  Process maintainer feedback on a security-labelled issue, usually a scan
+  summary. Classifies the comment and acts: break selected findings out into
+  their own issues (the primary flow), update SECURITY.md via PR to suppress a
+  finding as accepted-risk or a false positive, ask for a re-run, or simply
+  reply.
 
-    - create-issues — break selected findings out into individual issues
-      that can later be fed to the `build` skill (the primary flow)
-    - accept-risk / false-positive — update SECURITY.md via PR to
-      suppress the finding in future scans
-    - reopen — ask the maintainer to re-run `@last-light security-review`
-    - discuss / ignore — reply conversationally or do nothing
-
-  The scan-summary issue grammar is defined in
-  `skills/security-review/SKILL.md § Issue format`; this skill's parser
-  mirrors it (version-checked on entry).
-
-  Triggered by:
-    - @last-light mention on issues labelled "security"
+  The scan-summary grammar it parses is defined in
+  `skills/security-review/SKILL.md § Issue format` and version-checked on entry.
 
 phases:
   - name: feedback

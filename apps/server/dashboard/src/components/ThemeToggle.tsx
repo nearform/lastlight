@@ -44,7 +44,7 @@ export function ThemeToggle({ className }: { className?: string }) {
       onClick={toggleTheme}
       className={
         className ??
-        "btn btn-ghost btn-xs h-7 min-h-0 px-2 text-base-content/50 hover:text-base-content"
+        "btn btn-ghost btn-xs ll-control text-muted hover:text-base-content"
       }
       title={TITLE[preference]}
       aria-label={TITLE[preference]}

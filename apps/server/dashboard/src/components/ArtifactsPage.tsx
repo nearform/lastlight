@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { ExternalLink } from "lucide-react";
 import {
   api,
   isImageArtifact,
@@ -6,7 +7,6 @@ import {
   type ArtifactRepoEntry,
   type ArtifactKeyEntry,
 } from "../api";
-import { ArrowTopRightOnSquareIcon } from "@heroicons/react/24/outline";
 import { ArtifactEditor } from "./ArtifactEditor";
 import { ArtifactImageViewer } from "./ArtifactImageViewer";
 import { ArtifactVideoViewer } from "./ArtifactVideoViewer";
@@ -151,13 +151,13 @@ export function ArtifactsPage({ timeRange, query, lockedRepo }: ArtifactsPagePro
   return (
     <div className="flex flex-1 overflow-hidden bg-base-100">
       {/* ── Left list pane ──────────────────────────────────────────────── */}
-      <div className="w-72 shrink-0 border-r border-base-300 flex flex-col overflow-hidden">
+      <div className="w-72 shrink-0 border-r border-hairline flex flex-col overflow-hidden">
         {/* When locked to a repo (embedded in the Repos tab), the repo picker
             and "all repositories" back-link are hidden — the parent owns repo
             selection. Just show the run-key list. */}
         {!lockedRepo && (
-          <div className="border-b border-base-300 px-3 py-3 space-y-2">
-            <label className="text-xs font-semibold text-base-content/70">Repository</label>
+          <div className="border-b border-hairline px-3 py-3 space-y-2">
+            <label className="text-xs font-semibold text-strong">Repository</label>
             <div className="flex gap-1">
               <input
                 type="text"
@@ -165,7 +165,7 @@ export function ArtifactsPage({ timeRange, query, lockedRepo }: ArtifactsPagePro
                 onChange={(e) => setRepoInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter") applyRepo(); }}
                 placeholder="owner/repo"
-                className="flex-1 min-w-0 rounded border border-base-300 bg-base-200 px-2 py-1 text-xs"
+                className="flex-1 min-w-0 rounded border border-hairline bg-base-200 px-2 py-1 text-xs"
               />
               <button
                 onClick={applyRepo}
@@ -177,7 +177,7 @@ export function ArtifactsPage({ timeRange, query, lockedRepo }: ArtifactsPagePro
             {!browsingRepos && (
               <button
                 onClick={backToRepos}
-                className="text-[11px] text-base-content/60 hover:text-base-content"
+                className="text-[11px] text-muted hover:text-base-content"
               >
                 ← All repositories
               </button>
@@ -195,7 +195,7 @@ export function ArtifactsPage({ timeRange, query, lockedRepo }: ArtifactsPagePro
           {browsingRepos ? (
             /* ── Repo list ─────────────────────────────────────────────── */
             repos.length === 0 && !error ? (
-              <div className="p-3 text-xs text-base-content/50">
+              <div className="p-3 text-xs text-muted">
                 {query ? "No repositories match your search." : "No repositories have stored artifacts."}
               </div>
             ) : (
@@ -217,22 +217,22 @@ export function ArtifactsPage({ timeRange, query, lockedRepo }: ArtifactsPagePro
                               openRepo(r.slug);
                             }
                           }}
-                          className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-xs text-base-content/80 hover:bg-base-300/50"
+                          className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-xs text-strong hover:bg-base-300/50"
                         >
                           <span className="flex-1 truncate font-medium">{r.slug}</span>
                           {href && (
                             <GhLink
                               href={href}
-                              className="shrink-0 text-base-content/40 hover:text-primary"
+                              className="shrink-0 text-faint hover:text-primary"
                               title={`Open ${r.owner}/${r.repo} on GitHub`}
                             >
-                              <ArrowTopRightOnSquareIcon className="h-3.5 w-3.5" />
+                              <ExternalLink className="h-3.5 w-3.5" />
                             </GhLink>
                           )}
-                          <span className="shrink-0 rounded bg-base-200 px-1 text-[10px] text-base-content/60">
+                          <span className="shrink-0 rounded bg-base-200 px-1 text-[10px] text-muted">
                             {r.keyCount}
                           </span>
-                          <span className="shrink-0 text-[10px] text-base-content/40">
+                          <span className="shrink-0 text-[10px] text-faint">
                             {timeAgo(r.updatedAt)}
                           </span>
                         </div>
@@ -246,7 +246,7 @@ export function ArtifactsPage({ timeRange, query, lockedRepo }: ArtifactsPagePro
           ) : (
             /* ── Run keys for the selected repo ────────────────────────── */
             keys.length === 0 && !error ? (
-              <div className="p-3 text-xs text-base-content/50">
+              <div className="p-3 text-xs text-muted">
                 {query || timeRange !== "all"
                   ? "No artifacts match the current search / time range."
                   : "No build assets stored for this repo."}
@@ -261,18 +261,18 @@ export function ArtifactsPage({ timeRange, query, lockedRepo }: ArtifactsPagePro
                         <button
                           onClick={() => { setDoc(""); setKey(isOpen ? "" : k.key); }}
                           className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs font-medium ${
-                            isOpen ? "bg-primary/10 text-primary" : "text-base-content/80 hover:bg-base-300/50"
+                            isOpen ? "bg-primary/10 text-primary" : "text-strong hover:bg-base-300/50"
                           }`}
                         >
                           <span className="flex-1 truncate">{k.key}</span>
-                          <span className="shrink-0 text-[10px] text-base-content/40">
+                          <span className="shrink-0 text-[10px] text-faint">
                             {timeAgo(k.updatedAt)}
                           </span>
                         </button>
                         {isOpen && (
                           <ul className="pb-1">
                             {files.length === 0 ? (
-                              <li className="px-5 py-1 text-[11px] text-base-content/40">No docs</li>
+                              <li className="px-5 py-1 text-[11px] text-faint">No docs</li>
                             ) : (
                               files.map((f) => (
                                 <li key={f}>
@@ -281,7 +281,7 @@ export function ArtifactsPage({ timeRange, query, lockedRepo }: ArtifactsPagePro
                                     className={`w-full text-left px-5 py-1 text-[11px] truncate ${
                                       f === doc
                                         ? "text-primary font-semibold"
-                                        : "text-base-content/60 hover:text-base-content"
+                                        : "text-muted hover:text-base-content"
                                     }`}
                                   >
                                     {f}
@@ -319,7 +319,7 @@ function ListFooter({ shown, total, onLoadMore }: { shown: number; total: number
   if (total === 0) return null;
   const hasMore = shown < total;
   return (
-    <div className="sticky bottom-0 border-t border-base-300 bg-base-100 px-3 py-1.5 text-[11px] text-base-content/50">
+    <div className="sticky bottom-0 border-t border-hairline bg-base-100 px-3 py-1.5 text-[11px] text-muted">
       {hasMore ? (
         <button onClick={onLoadMore} className="text-primary hover:underline">
           Load more · {shown} / {total}

@@ -137,15 +137,25 @@ const KIND_ICON: Record<ContainerKind | "host", LucideIcon> = {
   infra: Network,
 };
 
+/**
+ * The status label, as a TINTED chip rather than daisyUI's filled badge.
+ *
+ * `ll-status` reads its tint from `currentColor`, so the hue below is set once
+ * as a text colour and the border and background follow. Filled badges made a
+ * succeeded run as loud as a failed one — both were solid saturated blocks —
+ * which is exactly backwards for the thing you scan a list for.
+ */
 function StatusBadge({ status }: { status: WorkflowRun["status"] }) {
-  const cls = clsx("badge badge-xs font-mono", {
-    "badge-neutral": status === "queued",
-    "badge-info": status === "running",
-    "badge-warning": status === "paused",
-    "badge-success": status === "succeeded",
-    "badge-error": status === "failed",
-    "badge-ghost": status === "cancelled",
-  });
+  const cls = clsx(
+    "ll-status badge badge-xs font-mono",
+    {
+      "text-muted": status === "queued" || status === "cancelled",
+      "text-info": status === "running",
+      "text-warning": status === "paused",
+      "text-success": status === "succeeded",
+      "text-error": status === "failed",
+    },
+  );
   return <span className={cls}>{status}</span>;
 }
 
@@ -247,17 +257,17 @@ function UsageRow({
   emphasis?: boolean;
 }) {
   return (
-    <div className={clsx("bg-base-100 rounded p-2", emphasis && "border border-base-300/70")}>
+    <div className={clsx("bg-base-100 rounded p-2", emphasis && "border border-hairline")}>
       <div className="flex items-center justify-between text-xs mb-1">
         <span className="flex items-center gap-1.5 min-w-0">
-          <Icon className="w-3.5 h-3.5 shrink-0 text-base-content/50" />
-          <span className="font-mono text-base-content/80 truncate">{label}</span>
+          <Icon className="w-3.5 h-3.5 shrink-0 text-muted" />
+          <span className="font-mono text-strong truncate">{label}</span>
         </span>
-        <span className="text-base-content/40 font-mono shrink-0 ml-2">{detail}</span>
+        <span className="text-faint font-mono shrink-0 ml-2">{detail}</span>
       </div>
       <div className="flex gap-2 items-center">
         <div className="flex-1">
-          <div className="flex justify-between text-2xs text-base-content/50 mb-0.5">
+          <div className="flex justify-between text-2xs text-muted mb-0.5">
             <span>CPU</span>
             <span className="font-mono">{cpuPercent.toFixed(1)}%</span>
           </div>
@@ -268,7 +278,7 @@ function UsageRow({
           />
         </div>
         <div className="flex-1">
-          <div className="flex justify-between text-2xs text-base-content/50 mb-0.5">
+          <div className="flex justify-between text-2xs text-muted mb-0.5">
             <span>MEM</span>
             <span className="font-mono">{memPercent.toFixed(1)}%</span>
           </div>
@@ -297,15 +307,15 @@ function ResourceUsageSection({
   const visible = showInfra ? stats : stats.filter((s) => s.kind !== "infra");
 
   return (
-    <div className="card bg-base-200 shadow-sm">
+    <div className="card bg-base-200 border border-hairline rounded-panel shadow-panel">
       <div className="card-body p-4">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="card-title text-sm font-semibold text-base-content/70 uppercase tracking-wide">
+          <h2 className="card-title text-sm font-semibold text-strong uppercase tracking-wide">
             Resource Usage
           </h2>
           {infraCount > 0 && (
             <label className="label cursor-pointer gap-1.5 py-0">
-              <span className="label-text text-2xs text-base-content/50">
+              <span className="label-text text-2xs text-muted">
                 infra ({infraCount})
               </span>
               <input
@@ -319,7 +329,7 @@ function ResourceUsageSection({
         </div>
         {!loaded ? (
           <div className="flex items-center justify-center py-8">
-            <span className="loading loading-spinner loading-sm text-base-content/30" />
+            <span className="loading loading-spinner loading-sm text-faint" />
           </div>
         ) : (
           <>
@@ -336,7 +346,7 @@ function ResourceUsageSection({
               </div>
             )}
             {visible.length === 0 ? (
-              <p className="text-xs text-base-content/40 text-center py-4">No container stats</p>
+              <p className="text-xs text-faint text-center py-4">No container stats</p>
             ) : (
               <div className="space-y-2">
                 {visible.map((s) => (
@@ -400,7 +410,7 @@ function RunTarget({ run }: { run: WorkflowRun }) {
   const rHref = repoUrl(repoPath);
   const iHref = issueUrl(repoPath, run.issueNumber, run.workflowName);
   return (
-    <span className="font-mono text-base-content/50 truncate flex-1">
+    <span className="font-mono text-muted truncate flex-1">
       {run.repo &&
         (rHref ? (
           <GhLink href={rHref} title={`Open ${run.repo} on GitHub`}>
@@ -436,34 +446,34 @@ function LiveActivitySection({
   onSelect: (id: string) => void;
 }) {
   return (
-    <div className="card bg-base-200 shadow-sm">
+    <div className="card bg-base-200 border border-hairline rounded-panel shadow-panel">
       <div className="card-body p-4">
-        <h2 className="card-title text-sm font-semibold text-base-content/70 uppercase tracking-wide mb-3">
+        <h2 className="card-title text-sm font-semibold text-strong uppercase tracking-wide mb-3">
           Live Activity
         </h2>
         <div className="flex gap-4 mb-4">
-          <div className="stat bg-base-100 rounded-box p-3 flex-1">
+          <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1">
             <div className="stat-title text-xs">Active Workflows</div>
             <div className="stat-value text-2xl text-primary">{workflowCount}</div>
           </div>
-          <div className="stat bg-base-100 rounded-box p-3 flex-1">
+          <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1">
             <div className="stat-title text-xs">Queued Workflows</div>
             <div
               className={clsx(
                 "stat-value text-2xl",
-                queuedCount > 0 ? "text-warning" : "text-base-content/40",
+                queuedCount > 0 ? "text-warning" : "text-faint",
               )}
             >
               {queuedCount}
             </div>
           </div>
-          <div className="stat bg-base-100 rounded-box p-3 flex-1">
+          <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1">
             <div className="stat-title text-xs">Running Containers</div>
             <div className="stat-value text-2xl text-secondary">{containerCount}</div>
           </div>
         </div>
         {liveWorkflows.length === 0 ? (
-          <p className="text-xs text-base-content/40 text-center py-4">No active workflows</p>
+          <p className="text-xs text-faint text-center py-4">No active workflows</p>
         ) : (
           <div className="space-y-1">
             {liveWorkflows.map((run) => (
@@ -481,7 +491,7 @@ function LiveActivitySection({
                 className="flex items-center gap-2 px-3 py-2 bg-base-100 rounded text-xs w-full text-left cursor-pointer hover:bg-base-300/60 transition-colors"
               >
                 <StatusBadge status={run.status} />
-                <span className="font-mono text-base-content/90 shrink-0">
+                <span className="font-mono text-strong shrink-0">
                   {run.workflowName}
                 </span>
                 <RunTarget run={run} />
@@ -492,8 +502,8 @@ function LiveActivitySection({
                     className="shrink-0 max-w-32"
                   />
                 )}
-                <span className="text-base-content/50 shrink-0">{run.currentPhase}</span>
-                <span className="text-base-content/40 shrink-0">{timeAgo(run.startedAt)}</span>
+                <span className="text-muted shrink-0">{run.currentPhase}</span>
+                <span className="text-faint shrink-0">{timeAgo(run.startedAt)}</span>
               </div>
             ))}
           </div>
@@ -511,13 +521,13 @@ function RecentWorkflowsSection({
   onSelect: (id: string) => void;
 }) {
   return (
-    <div className="card bg-base-200 shadow-sm">
+    <div className="card bg-base-200 border border-hairline rounded-panel shadow-panel">
       <div className="card-body p-4">
-        <h2 className="card-title text-sm font-semibold text-base-content/70 uppercase tracking-wide mb-3">
+        <h2 className="card-title text-sm font-semibold text-strong uppercase tracking-wide mb-3">
           Recent Workflows
         </h2>
         {runs.length === 0 ? (
-          <p className="text-xs text-base-content/40 text-center py-4">No workflows yet</p>
+          <p className="text-xs text-faint text-center py-4">No workflows yet</p>
         ) : (
           <div className="space-y-1">
             {runs.map((run) => {
@@ -544,7 +554,7 @@ function RecentWorkflowsSection({
                   className="flex items-center gap-2 px-3 py-2 bg-base-100 rounded text-xs w-full text-left cursor-pointer hover:bg-base-300/60 transition-colors"
                 >
                   <StatusBadge status={run.status} />
-                  <span className="font-mono text-base-content/90 shrink-0">
+                  <span className="font-mono text-strong shrink-0">
                     {run.workflowName}
                   </span>
                   <RunTarget run={run} />
@@ -556,7 +566,7 @@ function RecentWorkflowsSection({
                     />
                   )}
                   {run.totalTokens ? (
-                    <span className="text-base-content/40 font-mono shrink-0 tabular-nums" title="tokens">
+                    <span className="text-faint font-mono shrink-0 tabular-nums" title="tokens">
                       {formatTokens(run.totalTokens)} tok
                     </span>
                   ) : null}
@@ -566,9 +576,9 @@ function RecentWorkflowsSection({
                     </span>
                   ) : null}
                   {duration && (
-                    <span className="text-base-content/50 shrink-0">{duration}</span>
+                    <span className="text-muted shrink-0">{duration}</span>
                   )}
-                  <span className="text-base-content/40 shrink-0">{timeAgo(run.startedAt)}</span>
+                  <span className="text-faint shrink-0">{timeAgo(run.startedAt)}</span>
                 </div>
               );
             })}
@@ -621,10 +631,10 @@ function StatsChartsSection() {
   const hasData = chartData.some((d) => d.executions > 0);
 
   return (
-    <div className="card bg-base-200 shadow-sm">
+    <div className="card bg-base-200 border border-hairline rounded-panel shadow-panel">
       <div className="card-body p-4">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="card-title text-sm font-semibold text-base-content/70 uppercase tracking-wide">
+          <h2 className="card-title text-sm font-semibold text-strong uppercase tracking-wide">
             Stats
           </h2>
           <div className="join">
@@ -643,15 +653,15 @@ function StatsChartsSection() {
         {/* Summary stat cards */}
         {summary && (
           <div className="flex gap-3 mb-4">
-            <div className="stat bg-base-100 rounded-box p-3 flex-1">
+            <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1">
               <div className="stat-title text-xs">Executions</div>
               <div className="stat-value text-xl">{summary.executions}</div>
             </div>
-            <div className="stat bg-base-100 rounded-box p-3 flex-1">
+            <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1">
               <div className="stat-title text-xs">Tokens</div>
               <div className="stat-value text-xl">{formatTokens(summary.tokens)}</div>
             </div>
-            <div className="stat bg-base-100 rounded-box p-3 flex-1">
+            <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1">
               <div className="stat-title text-xs">Cost</div>
               <div className="stat-value text-xl">{formatCost(summary.cost)}</div>
             </div>
@@ -659,13 +669,13 @@ function StatsChartsSection() {
         )}
 
         {loading && (
-          <div className="flex items-center justify-center h-32 text-base-content/40 text-xs">
+          <div className="flex items-center justify-center h-32 text-faint text-xs">
             Loading…
           </div>
         )}
 
         {!loading && !hasData && (
-          <div className="flex items-center justify-center h-32 text-base-content/40 text-xs">
+          <div className="flex items-center justify-center h-32 text-faint text-xs">
             No data yet
           </div>
         )}
@@ -674,7 +684,7 @@ function StatsChartsSection() {
           <div className="space-y-4">
             {/* Execution count bar chart */}
             <div>
-              <p className="text-xs text-base-content/50 mb-1 font-medium">Executions per {granularity}</p>
+              <p className="text-xs text-muted mb-1 font-medium">Executions per {granularity}</p>
               <ResponsiveContainer width="100%" height={120}>
                 <BarChart data={chartData} margin={{ top: 2, right: 4, left: 0, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke={CHART.grid} />
@@ -765,7 +775,7 @@ function StatsChartsSection() {
 
             {/* Token usage stacked area */}
             <div>
-              <p className="text-xs text-base-content/50 mb-1 font-medium">Token usage per {granularity}</p>
+              <p className="text-xs text-muted mb-1 font-medium">Token usage per {granularity}</p>
               <ResponsiveContainer width="100%" height={120}>
                 <ComposedChart data={chartData} margin={{ top: 2, right: 4, left: 0, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke={CHART.grid} />
@@ -799,7 +809,7 @@ function StatsChartsSection() {
 
             {/* Cost area chart */}
             <div>
-              <p className="text-xs text-base-content/50 mb-1 font-medium">Cost per {granularity} (USD)</p>
+              <p className="text-xs text-muted mb-1 font-medium">Cost per {granularity} (USD)</p>
               <ResponsiveContainer width="100%" height={100}>
                 <BarChart data={chartData} margin={{ top: 2, right: 4, left: 0, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke={CHART.grid} />

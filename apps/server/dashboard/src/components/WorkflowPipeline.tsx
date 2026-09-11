@@ -18,11 +18,21 @@ import type {
   WorkflowApproval,
 } from "../api";
 import {
+  edgeStyle,
   pipelineNodeTypes,
   type PhaseStatus,
   type PipelineNodeData,
 } from "./pipeline-node";
 import { isNoOpSummary, phaseSummary } from "../lib/phase-outcome";
+import {
+  cardHeight,
+  crossHandles,
+  extent,
+  mainHandles,
+  place,
+  NODE_WIDTH,
+  type FlowDir,
+} from "../lib/graph-axis";
 
 type PhaseNodeData = PipelineNodeData;
 
@@ -38,7 +48,13 @@ function nodeDataEqual(a: PhaseNodeData, b: PhaseNodeData): boolean {
     a.selected === b.selected &&
     a.kind === b.kind &&
     a.pulse === b.pulse &&
-    a.summary === b.summary
+    a.summary === b.summary &&
+    // Constant per node id in practice (the definition is fetched once), but
+    // this function is exactly the shape that produces "silently never
+    // updates" bugs, so a field it renders belongs in the comparison.
+    a.phaseType === b.phaseType &&
+    a.hasGate === b.hasGate &&
+    a.iterates === b.iterates
   );
 }
 
@@ -118,18 +134,35 @@ function reconcileEdges(prev: Edge[], next: Edge[]): Edge[] {
 }
 
 /**
- * Card width. Wider than it needs to be for the text, deliberately: the phase
- * labels are sentences ("Reconcile · the conservation floor"), and at a narrow
- * width each one wraps to a different number of lines, so every card in the row
- * was a different height. Width is the cheap lever on that — it buys uniform
- * height without truncating anything.
+ * The graph runs top-to-bottom. Everything below is expressed against the two
+ * abstract axes of `lib/graph-axis.ts` — MAIN along the pipeline, CROSS across
+ * it — so the direction is stated once rather than implied by which of `x` and
+ * `y` each expression happens to use.
  */
-const NODE_WIDTH = 150;
-const NODE_GAP = 40;
-// Approximate rendered height of a nested node (label + the combined
-// time·duration line + padding). Sets the vertical pitch inside a container.
-const NODE_ROW_HEIGHT = 62;
-const ROW_GAP = 20;
+const FLOW: FlowDir = "TB";
+
+/**
+ * Gap between one slot and the next, along the flow. Kept tight: flowing
+ * vertically the pitch is `card height + this`, and a card is half the height
+ * it is wide, so the generous horizontal gap read as a column of islands.
+ */
+const NODE_GAP = 28;
+// Approximate rendered height of a NESTED node (header strip + the combined
+// time·duration line). Sets the vertical pitch inside a container. Deliberately
+// a few px over the measured height: too small and rows collide, too large and
+// the container just breathes, so over is the cheap direction to be wrong in.
+//
+// Known gap: a nested APPROVAL DIAMOND is taller than this (36px diamond plus a
+// two-line caption), so an interactive `generic_loop` gate inside a loop stack
+// overlaps the row below it. Pre-existing. The fix is per-item heights in the
+// stack loop, not inflating the pitch for every ordinary iteration to cover the
+// rare case.
+const NODE_ROW_HEIGHT = 66;
+/**
+ * Fallback extent along the flow for a node whose height nothing estimated —
+ * the approval diamond, which is a fixed shape plus a two-line caption.
+ */
+const APPROVAL_NODE_EXTENT = 76;
 // ── Container geometry (fan-out branches and loop iterations) ─────────────
 // A phase with dynamic children is drawn as a box they sit INSIDE (React Flow
 // `parentId`), rather than as a card with a vertical stack hanging off it. The
@@ -145,9 +178,44 @@ const GROUP_PAD = 10;
  * leaves a little slack, which is the cheap direction to be wrong in — too
  * small and the header sits on top of the first child.
  */
-const GROUP_HEADER = 76;
-/** Vertical pitch between branches inside the container. */
+const GROUP_HEADER = 88;
+/** Pitch between branches inside the container, across the flow. */
 const BRANCH_GAP = 12;
+
+/**
+ * Extents of one node, resolved per axis. A card is 190 wide and ~106 tall, so
+ * which of those the layout has to step over depends entirely on the direction.
+ */
+/** The extent of a NESTED node along the flow — how deep a container has to be. */
+const CHILD_MAIN_EXTENT = FLOW === "TB" ? NODE_ROW_HEIGHT : NODE_WIDTH;
+/** And across it — the pitch from one stacked sibling to the next. */
+const STACK_ITEM_EXTENT = FLOW === "TB" ? NODE_WIDTH : NODE_ROW_HEIGHT;
+
+/**
+ * How much room a main-chain card takes ALONG the flow.
+ *
+ * Flowing vertically the pitch between phases IS the card height, and run
+ * cards are not a uniform height — a two-line label, an outcome summary that
+ * wraps, the time·duration line. Estimated from the content for the same
+ * reason the definition diagram estimates its own: a constant tall enough for
+ * the worst card leaves a lake of dead space after every ordinary one.
+ *
+ * Flowing horizontally every card is `NODE_WIDTH` wide and the content is
+ * irrelevant.
+ */
+function mainExtentOf(node: Node<PhaseNodeData>): number {
+  if (FLOW !== "TB") return NODE_WIDTH;
+  const d = node.data;
+  return cardHeight({
+    label: d.label,
+    // The summary clamps at two lines; the meta line is always drawn on a card
+    // that has a body at all.
+    bodyLines:
+      (d.summary ? (d.summary.length > 56 ? 2 : 1) : 0) +
+      (d.timestamp || d.duration !== undefined ? 1 : 0) +
+      (d.subtitle ? 1 : 0),
+  });
+}
 
 /**
  * Map a dynamic phase name (e.g. "reviewer_fix_1", "reviewer_recheck_1") back
@@ -280,8 +348,6 @@ interface Props {
    * resolve the clicked gate back to its record.
    */
   approvals?: WorkflowApproval[];
-  /** Pixel height of the pipeline canvas. Defaults to 180. */
-  height?: number | string;
   /** Optional: phase name currently selected (for visual indicator). */
   selectedPhase?: string | null;
   /** Optional: invoked when the user clicks a phase node. */
@@ -304,13 +370,12 @@ export function WorkflowPipeline({
   definition,
   executions,
   approvals,
-  height = 180,
   selectedPhase,
   onPhaseClick,
 }: Props) {
   const computed = useMemo(() => {
     if (!definition) {
-      return { nodes: [] as Node<PhaseNodeData>[], edges: [] as Edge[], canvasHeight: 0 };
+      return { nodes: [] as Node<PhaseNodeData>[], edges: [] as Edge[] };
     }
 
     const historyMap = new Map<string, PhaseHistoryEntry>();
@@ -333,6 +398,11 @@ export function WorkflowPipeline({
     const declaredLabelByName = new Map(
       definition.phases.map((p) => [p.name, p.label] as const),
     );
+    // The whole declaration, for the fields the CARD reads rather than the
+    // layout: `type` (header accent + icon), `approvalGate` and `hasLoop` (the
+    // header markers). Kept beside the label map rather than folded into it so
+    // the label lookup stays a lookup.
+    const declaredByName = new Map(definition.phases.map((p) => [p.name, p] as const));
 
     // Dynamic phases that don't appear in the YAML — loop iterations like
     // `reviewer_recheck_1` (re-reviews) and `reviewer_fix_1` (fix attempts).
@@ -371,8 +441,8 @@ export function WorkflowPipeline({
 
     const buildNode = (
       name: string,
-      x: number,
-      y: number,
+      main: number,
+      cross: number,
       opts: {
         /** Render the outcome summary line. Top-row nodes only — see below. */
         withSummary?: boolean;
@@ -387,6 +457,13 @@ export function WorkflowPipeline({
       // of the node above it.
       const derived = declaredLabelByName.has(name) ? null : parseDerived(name);
       const label = declaredLabelByName.get(name) ?? (derived ? derivedLabel(derived) : name);
+      // A derived node INHERITS its parent's declaration: a fan-out branch of an
+      // agent phase is itself an agent run, so it should carry the same icon.
+      // Falls through to undefined for a true orphan, which the card renders
+      // with the generic accent rather than throwing.
+      const declared =
+        declaredByName.get(name) ??
+        declaredByName.get(findParentDeclared(name, declaredNames) ?? "");
       const histEntry = historyMap.get(name);
       const exec = execByPhase.get(name);
 
@@ -497,7 +574,7 @@ export function WorkflowPipeline({
       return {
         id: name,
         type: "phase",
-        position: { x, y },
+        position: place(FLOW, main, cross),
         data: {
           label,
           status,
@@ -505,7 +582,11 @@ export function WorkflowPipeline({
           duration,
           summary,
           summaryNoOp: summary ? isNoOpSummary(summary) : undefined,
+          phaseType: declared?.type,
+          hasGate: !!declared?.approvalGate,
+          iterates: !!declared?.hasLoop,
           selected: selectedPhase === name,
+          flow: FLOW,
         },
         style: { width: NODE_WIDTH },
       };
@@ -514,14 +595,18 @@ export function WorkflowPipeline({
     // An approval gate, rendered in place of the generic `waiting_approval`
     // history marker. Colored by approval status; a pending gate pulses to
     // signal it's blocking the run.
-    const buildApprovalNode = (a: WorkflowApproval, x: number, y = 0): Node<PhaseNodeData> => {
+    const buildApprovalNode = (
+      a: WorkflowApproval,
+      main: number,
+      cross = 0,
+    ): Node<PhaseNodeData> => {
       const id = `approval:${a.id}`;
       const status: PhaseStatus =
         a.status === "approved" ? "done" : a.status === "rejected" ? "failed" : "paused";
       return {
         id,
         type: "phase",
-        position: { x, y },
+        position: place(FLOW, main, cross),
         data: {
           label: a.gate,
           status,
@@ -529,6 +614,7 @@ export function WorkflowPipeline({
           pulse: a.status === "pending",
           timestamp: a.respondedAt ?? a.createdAt,
           selected: selectedPhase === id,
+          flow: FLOW,
         },
         style: { width: NODE_WIDTH },
       };
@@ -536,15 +622,18 @@ export function WorkflowPipeline({
 
     const reactFlowNodes: Node<PhaseNodeData>[] = [];
     const reactFlowEdges: Edge[] = [];
-    const linkTo = (target: string, prev: string | undefined) => {
+    // `prevStatus` is the status of the node the edge LEAVES, which is what
+    // tints it — see `edgeStyle`. Tinting by target would leave the whole
+    // pipeline grey until the very last node.
+    const linkTo = (target: string, prev: string | undefined, prevStatus: PhaseStatus) => {
       if (!prev) return;
       reactFlowEdges.push({
         id: `${prev}->${target}`,
         source: prev,
         target,
-        sourceHandle: "right",
-        targetHandle: "left",
-        style: { stroke: "var(--color-base-300, #ccc)", strokeWidth: 1.5 },
+        sourceHandle: mainHandles(FLOW).source,
+        targetHandle: mainHandles(FLOW).target,
+        style: edgeStyle(prevStatus),
         animated: false,
       });
     };
@@ -606,28 +695,43 @@ export function WorkflowPipeline({
       slots.push({ kind: "phase", name });
     }
 
-    // Lay the slots out left-to-right. A fan-out or loop phase becomes a
-    // CONTAINER holding its children, so a column's height is the tallest
-    // container rather than a stack depth.
-    let maxGroupHeight = 0;
+    // Lay the slots out along the flow. A fan-out or loop phase becomes a
+    // CONTAINER holding its children, so a slot's extent is the container's
+    // rather than a stack depth.
+    //
+    // The position is ACCUMULATED rather than `index * pitch`, because the
+    // slots are not all the same size: a container is taller than a card, and
+    // stepping by a fixed pitch would either overlap the next phase or leave a
+    // gap after every plain one.
+    let mainPos = 0;
     let prevId: string | undefined;
-    slots.forEach((slot, col) => {
-      const x = col * (NODE_WIDTH + NODE_GAP);
+    let prevStatus: PhaseStatus = "pending";
+    /** Centre a slot on the chain, so a wide container doesn't shove it over. */
+    const centreCross = (crossExtent: number) => (NODE_WIDTH - crossExtent) / 2;
+    slots.forEach((slot) => {
+      const x = mainPos;
       if (slot.kind === "approval") {
         const node = buildApprovalNode(slot.a, x);
+        mainPos += APPROVAL_NODE_EXTENT + NODE_GAP;
         reactFlowNodes.push(node);
-        linkTo(node.id, prevId);
+        // linkTo reads the OUTGOING status of the previous node, so the
+        // assignment has to come after the call.
+        linkTo(node.id, prevId, prevStatus);
         prevId = node.id;
+        prevStatus = node.data.status;
         return;
       }
       const name = slot.name;
       const children = childrenByParent.get(name) ?? [];
 
-      // No dynamic children — an ordinary card in the row.
+      // No dynamic children — an ordinary card on the chain.
       if (children.length === 0) {
-        reactFlowNodes.push(buildNode(name, x, 0, { withSummary: true }));
-        linkTo(name, prevId);
+        const node = buildNode(name, x, 0, { withSummary: true });
+        mainPos += mainExtentOf(node) + NODE_GAP;
+        reactFlowNodes.push(node);
+        linkTo(name, prevId, prevStatus);
         prevId = name;
+        prevStatus = node.data.status;
         return;
       }
 
@@ -673,16 +777,20 @@ export function WorkflowPipeline({
         }
       }
 
-      const groupWidth = NODE_WIDTH + GROUP_PAD * 2;
-      const groupHeight =
-        GROUP_HEADER +
-        stackItems.length * NODE_ROW_HEIGHT +
-        Math.max(0, stackItems.length - 1) * BRANCH_GAP +
-        GROUP_PAD;
+      // The container is one node deep along the flow and as wide across it as
+      // the stack needs — so flowing vertically, concurrent branches sit side
+      // by side, which is what "these ran at once" looks like.
+      const groupMain = GROUP_HEADER + CHILD_MAIN_EXTENT + GROUP_PAD;
+      const groupCross =
+        GROUP_PAD * 2 +
+        stackItems.length * STACK_ITEM_EXTENT +
+        Math.max(0, stackItems.length - 1) * BRANCH_GAP;
+      const groupCrossOffset = centreCross(groupCross);
+      mainPos += groupMain + NODE_GAP;
 
       // PARENT FIRST — React Flow requires a parent to appear before its
       // children in the nodes array or the containment is not processed.
-      const parent = buildNode(name, x, 0, { withSummary: true });
+      const parent = buildNode(name, x, groupCrossOffset, { withSummary: true });
       reactFlowNodes.push({
         ...parent,
         type: "fanout",
@@ -696,21 +804,32 @@ export function WorkflowPipeline({
             ? `${stackItems.length} branches`
             : `${rows.length} iteration${rows.length === 1 ? "" : "s"}`,
         },
-        style: { width: groupWidth, height: groupHeight },
+        style: extent(FLOW, groupMain, groupCross),
       });
-      linkTo(name, prevId);
+      linkTo(name, prevId, prevStatus);
       prevId = name;
+      prevStatus = parent.data.status;
 
       let childPrev: string | undefined;
       stackItems.forEach((item, idx) => {
-        // Positions are RELATIVE to the container once `parentId` is set.
-        const y = GROUP_HEADER + idx * (NODE_ROW_HEIGHT + BRANCH_GAP);
+        // Positions are RELATIVE to the container once `parentId` is set. The
+        // header eats the first slice ALONG the flow; the items then fan out
+        // across it.
+        const itemCross = GROUP_PAD + idx * (STACK_ITEM_EXTENT + BRANCH_GAP);
         const childId = item.kind === "phase" ? item.name : `approval:${item.a.id}`;
         const node =
           item.kind === "phase"
-            ? buildNode(item.name, GROUP_PAD, y, { gate: gateFor.get(item.name) })
-            : buildApprovalNode(item.a, GROUP_PAD, y);
-        reactFlowNodes.push({ ...node, parentId: name, extent: "parent", draggable: false });
+            ? buildNode(item.name, GROUP_HEADER, itemCross, { gate: gateFor.get(item.name) })
+            : buildApprovalNode(item.a, GROUP_HEADER, itemCross);
+        reactFlowNodes.push({
+          ...node,
+          // Only a LOOP chains child→child, so only a loop's children have
+          // vertical edges to grow connector dots for.
+          data: { ...node.data, stacked: !isFanout },
+          parentId: name,
+          extent: "parent",
+          draggable: false,
+        });
 
         // A LOOP chains child→child, because iteration 2 really did wait for
         // iteration 1 — that edge is the only thing on this canvas that says
@@ -722,9 +841,9 @@ export function WorkflowPipeline({
             id: `${childPrev}->${childId}`,
             source: childPrev,
             target: childId,
-            sourceHandle: "bottom",
-            targetHandle: "top",
-            style: { stroke: "var(--color-base-300, #ccc)", strokeWidth: 1.5 },
+            sourceHandle: crossHandles(FLOW).source,
+            targetHandle: crossHandles(FLOW).target,
+            style: edgeStyle(node.data.status),
             animated: false,
             // React Flow renders edges in a layer BENEATH nodes, so an edge
             // between two children of a container is drawn behind the
@@ -735,12 +854,9 @@ export function WorkflowPipeline({
         childPrev = childId;
       });
 
-      if (groupHeight > maxGroupHeight) maxGroupHeight = groupHeight;
     });
 
-    const canvasHeight = Math.max(maxGroupHeight, NODE_ROW_HEIGHT + ROW_GAP) + 20;
-
-    return { nodes: reactFlowNodes, edges: reactFlowEdges, canvasHeight };
+    return { nodes: reactFlowNodes, edges: reactFlowEdges };
   }, [definition, run, executions, approvals, selectedPhase]);
 
   // ── Live React Flow state ──────────────────────────────────────────────
@@ -772,14 +888,23 @@ export function WorkflowPipeline({
     if (!flow) return;
     try {
       if (flow.getNodes().length === 0) return;
-      flow.fitView({ padding: 0.2, minZoom: 0.4, maxZoom: 1 });
+      // 0.12 rather than 0.2: a fifth of the canvas as margin on every side is
+      // a lot of empty space once the section is dragged tall.
+      flow.fitView({ padding: 0.12, minZoom: 0.4, maxZoom: 1 });
     } catch {
       if (retry) requestAnimationFrame(() => safeFitView(false));
     }
   }, []);
 
-  // Re-center on resize. The pipeline section is wrapped in a draggable
-  // divider; without this the nodes drift off-screen as the section shrinks.
+  // Re-center on resize. The pipeline lives in a resizable pane; without this
+  // the nodes sit where they were framed for the pane's old width and the
+  // neighbouring panel simply covers them.
+  //
+  // Keyed on `definition` — NOT `[]`. The canvas does not exist on the first
+  // render (the definition is still being fetched), so a mount-only effect
+  // found `wrapperRef.current === null`, observed nothing, and never ran
+  // again. Every resize then did nothing, while the initial framing still
+  // looked right because the topology effect below fits when the nodes land.
   //
   // Hooks must be declared before any conditional return — keep these above
   // the `!definition` short-circuit to satisfy the rules of hooks.
@@ -789,6 +914,17 @@ export function WorkflowPipeline({
     if (!el) return undefined;
     let raf = 0;
     const ro = new ResizeObserver(() => {
+      // Fit NOW, then once more on the next frame.
+      //
+      // React Flow keeps its own ResizeObserver on the same element and
+      // updates its stored viewport size from it; the two fire for one layout
+      // change in no defined order, so this first fit may measure the box as
+      // it was a frame ago. That is fine while a divider is being dragged —
+      // the graph tracks the pointer and each frame corrects the last — and
+      // the trailing frame is what lands the final, correct fit once the drag
+      // stops. Deferring BOTH passes (the old double-rAF) was correct and two
+      // frames behind the pointer, which read as lurching.
+      safeFitView();
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => safeFitView());
     });
@@ -797,9 +933,8 @@ export function WorkflowPipeline({
       mountedRef.current = false;
       cancelAnimationFrame(raf);
       ro.disconnect();
-      flowRef.current = null;
     };
-  }, [safeFitView]);
+  }, [safeFitView, definition]);
 
   // Re-fit whenever the graph's *topology* changes — a phase or loop iteration
   // appearing / disappearing shifts every downstream node, so the previous fit
@@ -820,20 +955,26 @@ export function WorkflowPipeline({
     };
   }, [topoKey, safeFitView]);
 
+  // The canvas always fills its container — the CALLER owns the height. It used
+  // to report its own intrinsic height back up so a caller with no opinion
+  // could size a horizontal band to it; flowing vertically the graph occupies a
+  // full-height column instead, and anything taller than that is what fitView
+  // and panning are for.
   if (!definition) {
     return (
-      <div className="p-4 text-sm text-base-content/50">Loading workflow definition…</div>
+      <div className="p-4 text-sm text-muted">Loading workflow definition…</div>
     );
   }
 
-  // Grow the canvas when loop iterations stack vertically. The default
-  // `height` prop is the minimum (used by simple linear runs); when there
-  // are children, expand to fit them.
-  const numericHeight = typeof height === "number" ? height : 180;
-  const effectiveHeight = Math.max(numericHeight, computed.canvasHeight);
-
   return (
-    <div ref={wrapperRef} style={{ width: "100%", height: effectiveHeight }}>
+    <div
+      ref={wrapperRef}
+      // `flex-1 min-h-0`, not `height: 100%`: the canvas is the second child of
+      // a flex column whose first child is the "Pipeline" label, so a full
+      // 100% would overflow the column by exactly the label's height, and
+      // `min-h-0` is what lets it shrink when the pane is dragged narrower.
+      className="ll-canvas rounded-panel flex-1 min-h-0 w-full"
+    >
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -844,7 +985,7 @@ export function WorkflowPipeline({
         // Cap auto-fit zoom so single-node workflows (e.g. triage) don't
         // expand to fill the whole canvas. 1.0 keeps nodes at their declared
         // pixel size; min keeps very long pipelines readable.
-        fitViewOptions={{ padding: 0.2, minZoom: 0.4, maxZoom: 1 }}
+        fitViewOptions={{ padding: 0.12, minZoom: 0.4, maxZoom: 1 }}
         minZoom={0.3}
         maxZoom={1.5}
         nodesDraggable={false}
@@ -862,7 +1003,7 @@ export function WorkflowPipeline({
         onNodeClick={(_, node) => onPhaseClick?.(node.id)}
         proOptions={{ hideAttribution: true }}
       >
-        <Background variant={BackgroundVariant.Dots} gap={16} size={0.5} color="var(--color-base-300, #ccc)" />
+        <Background variant={BackgroundVariant.Dots} gap={16} size={0.5} color="var(--ll-canvas-dot, #ccc)" />
       </ReactFlow>
     </div>
   );
