@@ -5,7 +5,7 @@
 <h1 align="center">Last Light</h1>
 
 <p align="center">
-  <strong>GitHub Repository Maintenance Agent</strong><br/>
+  <strong>Self-host your own software factory</strong><br/>
   <a href="https://lastlight.dev">lastlight.dev</a> · <a href="https://github.com/orgs/nearform/projects/112">Roadmap</a>
 </p>
 
