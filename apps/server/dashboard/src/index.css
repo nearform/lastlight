@@ -153,6 +153,24 @@
   --ll-node-border: #333c49;
   --ll-canvas-dot: #232b36;
   --ll-canvas-glow: rgb(255 255 255 / 0.03);
+
+  /* ── Syntax colours ──────────────────────────────────────────────────
+     Own tokens rather than the brand ramp. A palette chosen to brand a UI
+     has no obligation to be legible as CODE, and in the light theme it is
+     not: `primary` and `success` are the SAME green there, so keys and
+     strings became indistinguishable, and `accent` is a highlighter green on
+     white. These are the only colours in the app whose job is to separate
+     eight token classes from each other on one surface. */
+  --ll-code-surface: #10151c;
+  --ll-code-comment: #7d8590;
+  --ll-code-punctuation: #9aa4b1;
+  --ll-code-key: #7dd3fc;
+  --ll-code-string: #a5d6a7;
+  --ll-code-number: #fcd34d;
+  --ll-code-keyword: #ff9d9d;
+  --ll-code-function: #c4b5fd;
+  --ll-code-variable: #f0b67f;
+  --ll-code-template: #fcd34d;
 }
 
 [data-theme="neaform"] {
@@ -175,6 +193,20 @@
   --ll-node-border: #c3ccd8;
   --ll-canvas-dot: #c9d2dd;
   --ll-canvas-glow: rgb(255 255 255 / 0.45);
+
+  /* The light half of the syntax palette — see the dark block above for why
+     these are their own tokens. Tuned for a near-white code surface: one hue
+     per token class, each dark enough to read at 12px. */
+  --ll-code-surface: #f6f8fa;
+  --ll-code-comment: #6a737d;
+  --ll-code-punctuation: #57606a;
+  --ll-code-key: #0550ae;
+  --ll-code-string: #0a5f38;
+  --ll-code-number: #8250df;
+  --ll-code-keyword: #cf222e;
+  --ll-code-function: #6639ba;
+  --ll-code-variable: #953800;
+  --ll-code-template: #953800;
 }
 
 @theme inline {

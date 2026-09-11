@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AtSign, Clock, Code2, MessagesSquare, RefreshCw, X } from "lucide-react";
 import clsx from "clsx";
 import {
@@ -19,9 +19,31 @@ import {
   enumSerializer,
 } from "../hooks/useUrlState";
 import { WorkflowDefinitionDiagram } from "./WorkflowDefinitionDiagram";
+import { Split, SplitPane, SplitHandle } from "./Split";
+import { Tabs, TabButton } from "./Tabs";
+import { useIsNarrow } from "../hooks/useIsNarrow";
 
-type ViewTab = "diagram" | "yaml";
-const VIEW_TABS = ["diagram", "yaml"] as const;
+/**
+ * The panes of this page, in tab order.
+ *
+ * Wide, they are columns: the workflow list, the diagram, what the selected
+ * phase declares, and the YAML — which stays open beside the diagram rather
+ * than hiding behind a tab, because the diagram is a rendering OF the YAML and
+ * reading one against the other is the point of the page. Narrow, they are
+ * tabs in one strip.
+ *
+ * `wfview` predates this and carried `diagram | yaml`; both are still members,
+ * so existing deep links keep working.
+ */
+const DEF_PANES = ["workflows", "diagram", "phase", "content", "yaml"] as const;
+type DefPane = (typeof DEF_PANES)[number];
+const DEF_PANE_LABEL: Record<DefPane, string> = {
+  workflows: "Workflows",
+  diagram: "Diagram",
+  phase: "Phase",
+  content: "Content",
+  yaml: "YAML",
+};
 
 /**
  * Workflow Definitions browser. Lists every YAML workflow definition under
@@ -40,11 +62,17 @@ export function WorkflowDefinitions() {
     nullableStringParser,
     nullableStringSerializer,
   );
-  const [view, setView] = useUrlState<ViewTab>(
+  const narrow = useIsNarrow();
+  // Two independent selections when there is room for two content columns: the
+  // centre shows the workflow (diagram or YAML) and the right shows the phase
+  // (its fields or its rendered prompt). Narrow, `pane` alone drives the single
+  // strip and this is unused.
+  const [phaseTab, setPhaseTab] = useState<"phase" | "content">("phase");
+  const [pane, setPane] = useUrlState<DefPane>(
     "wfview",
     "diagram",
-    enumParser(VIEW_TABS, "diagram"),
-    enumSerializer<ViewTab>("diagram"),
+    enumParser(DEF_PANES, "diagram"),
+    enumSerializer<DefPane>("diagram"),
   );
 
   const [definition, setDefinition] = useState<WorkflowFullDefinition | null>(null);
@@ -147,70 +175,124 @@ export function WorkflowDefinitions() {
     }
   }, [selectedName, toggleBusy]);
 
-  return (
-    <div className="flex flex-1 overflow-hidden">
-      {/* List panel */}
-      <aside className="w-72 shrink-0 border-r border-hairline bg-base-200/40 overflow-y-auto flex flex-col">
-        {listError && (
-          <div className="px-3 py-2 text-2xs text-error border-b border-hairline">{listError}</div>
-        )}
-        <ul className="flex-1">
-          {workflows.map((wf) => {
-            const active = wf.name === selectedName;
-            return (
-              <li key={wf.name} className="border-b border-hairline">
-                <button
-                  onClick={() => setSelectedName(wf.name)}
-                  className={clsx(
-                    "w-full flex flex-col items-start gap-0.5 py-2 px-3 text-left transition-colors",
-                    active
-                      ? "bg-primary/15 border-l-2 border-l-primary -ml-px pl-[10px]"
-                      : "hover:bg-base-300/40 border-l-2 border-l-transparent -ml-px pl-[10px]",
+  const listPane = (
+    <div className="h-full bg-base-200/40 overflow-y-auto flex flex-col">
+      {listError && (
+        <div className="px-3 py-2 text-2xs text-error border-b border-hairline">{listError}</div>
+      )}
+      <ul className="flex-1">
+        {workflows.map((wf) => {
+          const active = wf.name === selectedName;
+          return (
+            <li key={wf.name} className="border-b border-hairline">
+              <button
+                onClick={() => setSelectedName(wf.name)}
+                className={clsx(
+                  "w-full flex flex-col items-start gap-0.5 py-2 px-3 text-left transition-colors",
+                  active
+                    ? "bg-primary/15 border-l-2 border-l-primary -ml-px pl-[10px]"
+                    : "hover:bg-base-300/40 border-l-2 border-l-transparent -ml-px pl-[10px]",
+                )}
+              >
+                <div className="flex items-center gap-2 w-full">
+                  <span
+                    className={clsx(
+                      "text-sm font-mono truncate",
+                      wf.enabled === false ? "text-faint line-through" : "text-strong",
+                    )}
+                  >
+                    {wf.name}
+                  </span>
+                  {wf.enabled === false && (
+                    <span className="ll-status badge text-error badge-xs font-mono">disabled</span>
                   )}
-                >
-                  <div className="flex items-center gap-2 w-full">
-                    <span
-                      className={clsx(
-                        "text-sm font-mono truncate",
-                        wf.enabled === false ? "text-faint line-through" : "text-strong",
-                      )}
-                    >
-                      {wf.name}
+                  <span className="ml-auto badge badge-ghost badge-xs font-mono">{wf.kind}</span>
+                </div>
+                {wf.description && (
+                  <span className="text-2xs text-muted line-clamp-2">{wf.description}</span>
+                )}
+                <div className="flex gap-2 items-center text-2xs text-faint font-mono">
+                  <span>{wf.phaseCount} phases</span>
+                  {wf.hasDag && <span className="text-info">dag</span>}
+                  {wf.triggerKinds.length > 0 && (
+                    <span className="ml-auto flex items-center gap-1">
+                      {wf.triggerKinds.map((k) => (
+                        <TriggerKindIcon key={k} kind={k} />
+                      ))}
                     </span>
-                    {wf.enabled === false && (
-                      <span className="ll-status badge text-error badge-xs font-mono">disabled</span>
-                    )}
-                    <span className="ml-auto badge badge-ghost badge-xs font-mono">{wf.kind}</span>
-                  </div>
-                  {wf.description && (
-                    <span className="text-2xs text-muted line-clamp-2">{wf.description}</span>
                   )}
-                  <div className="flex gap-2 items-center text-2xs text-faint font-mono">
-                    <span>{wf.phaseCount} phases</span>
-                    {wf.hasDag && <span className="text-info">dag</span>}
-                    {wf.triggerKinds.length > 0 && (
-                      <span className="ml-auto flex items-center gap-1">
-                        {wf.triggerKinds.map((k) => (
-                          <TriggerKindIcon key={k} kind={k} />
-                        ))}
-                      </span>
-                    )}
-                  </div>
-                </button>
-              </li>
-            );
-          })}
-          {workflows.length === 0 && !listError && (
-            <li className="p-6 text-center text-faint text-xs">no workflows</li>
-          )}
-        </ul>
-      </aside>
+                </div>
+              </button>
+            </li>
+          );
+        })}
+        {workflows.length === 0 && !listError && (
+          <li className="p-6 text-center text-faint text-xs">no workflows</li>
+        )}
+      </ul>
+    </div>
+  );
 
-      {/* Detail panel */}
-      {selectedName ? (
-        <div className="flex-1 overflow-hidden flex flex-col p-4 gap-3 min-h-0">
-          {/* Header — name & description on the left, triggers on the right
-              so they share vertical space instead of stacking. */}
+  const diagramPane = (
+    <div className="h-full min-h-0 flex flex-col">
+      {definitionError ? (
+        <div className="p-4 text-sm text-error border border-error/40 bg-error/5 rounded">
+          {definitionError}
+        </div>
+      ) : (
+        definition && (
+          <WorkflowDefinitionDiagram
+            definition={definition}
+            selectedPhase={selectedPhaseName}
+            onPhaseClick={(name) => {
+              setSelectedPhaseName(name);
+              // On a phone the diagram is covering everything else, and
+              // clicking a phase is a request to read about it.
+              if (narrow) setPane("phase");
+            }}
+            height="100%"
+          />
+        )
+      )}
+    </div>
+  );
+
+  /** The YAML the rest of this page is a rendering of. */
+  const yamlPane = (
+    <div className="h-full min-h-0 overflow-auto">
+      {yamlError ? (
+        <div className="p-4 text-sm text-error border border-error/40 bg-error/5 rounded">
+          {yamlError}
+        </div>
+      ) : yamlText !== null ? (
+        <CodeBlock code={yamlText} language="yaml" />
+      ) : (
+        <div className="p-4 text-xs text-faint">loading…</div>
+      )}
+    </div>
+  );
+
+  const phaseBox = selectedPhase ? (
+    <PhaseDetailBox phase={selectedPhase} onClose={() => setSelectedPhaseName(null)} />
+  ) : (
+    <div className="h-full flex items-center justify-center text-faint text-xs p-6 text-center">
+      click a phase to inspect it
+    </div>
+  );
+
+  const contentBox = selectedPhase ? (
+    <div className="h-full min-h-0 overflow-hidden flex flex-col">
+      <PhaseContentView phase={selectedPhase} workflowName={selectedName ?? ""} />
+    </div>
+  ) : (
+    <div className="h-full flex items-center justify-center text-faint text-xs p-6 text-center">
+      click a phase to read its prompt or skill
+    </div>
+  );
+
+  // Header — name & description on the left, triggers on the right so they
+  // share vertical space instead of stacking.
+  const detailHeader = (
           <div className="shrink-0 flex items-start gap-6">
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-3 flex-wrap">
@@ -258,256 +340,116 @@ export function WorkflowDefinitions() {
               </div>
             )}
           </div>
-
-          {/* View tabs */}
-          <div className="flex gap-1 border-b border-hairline shrink-0">
-            {VIEW_TABS.map((v) => (
-              <button
-                key={v}
-                onClick={() => setView(v)}
-                className={clsx(
-                  "px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors",
-                  view === v
-                    ? "border-primary text-primary"
-                    : "border-transparent text-muted hover:text-base-content",
-                )}
-              >
-                {v === "diagram" ? "Diagram" : "YAML"}
-              </button>
-            ))}
-          </div>
-
-          {/* View body */}
-          <div className="flex-1 overflow-hidden min-h-0">
-            {view === "diagram" && definitionError && (
-              <div className="p-4 text-sm text-error border border-error/40 bg-error/5 rounded">
-                {definitionError}
-              </div>
-            )}
-            {view === "diagram" && definition && (
-              <DiagramView
-                definition={definition}
-                workflowName={selectedName}
-                selectedPhaseName={selectedPhaseName}
-                onPhaseClick={setSelectedPhaseName}
-                onClearPhase={() => setSelectedPhaseName(null)}
-                selectedPhase={selectedPhase}
-              />
-            )}
-            {view === "yaml" && yamlError && (
-              <div className="p-4 text-sm text-error border border-error/40 bg-error/5 rounded">
-                {yamlError}
-              </div>
-            )}
-            {view === "yaml" && yamlText !== null && (
-              <div className="h-full overflow-auto">
-                <CodeBlock code={yamlText} language="yaml" />
-              </div>
-            )}
-          </div>
-        </div>
-      ) : (
-        <div className="flex-1 flex items-center justify-center text-faint text-sm">
-          select a workflow
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Resizable diagram view (3 vertical sections) ───────────────────────
-
-interface DiagramViewProps {
-  definition: WorkflowFullDefinition;
-  workflowName: string;
-  selectedPhaseName: string | null;
-  selectedPhase: WorkflowFullPhase | null;
-  onPhaseClick: (name: string) => void;
-  onClearPhase: () => void;
-}
-
-const MIN_SECTION_HEIGHT = 80;
-const DIVIDER_HEIGHT = 8;
-
-/**
- * Default split — small diagram (typically one row of nodes), same-size phase
- * info, larger markdown section since prompts/skills are usually multi-page.
- */
-const DEFAULT_RATIOS: [number, number, number] = [0.2, 0.2, 0.6];
-const RATIOS_STORAGE_KEY = "lastlight-wf-def-ratios";
-
-/** Read the persisted ratios, falling back to the default if anything is off. */
-function loadRatios(): [number, number, number] {
-  if (typeof window === "undefined") return DEFAULT_RATIOS;
-  try {
-    const raw = window.localStorage.getItem(RATIOS_STORAGE_KEY);
-    if (!raw) return DEFAULT_RATIOS;
-    const parsed = JSON.parse(raw) as unknown;
-    if (
-      Array.isArray(parsed) &&
-      parsed.length === 3 &&
-      parsed.every((v) => typeof v === "number" && v > 0 && v < 1)
-    ) {
-      const sum = (parsed[0] as number) + (parsed[1] as number) + (parsed[2] as number);
-      if (Math.abs(sum - 1) < 0.05) {
-        return [parsed[0] as number, parsed[1] as number, parsed[2] as number];
-      }
-    }
-  } catch {
-    /* ignore — fall through to default */
-  }
-  return DEFAULT_RATIOS;
-}
-
-function saveRatios(ratios: [number, number, number]): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(RATIOS_STORAGE_KEY, JSON.stringify(ratios));
-  } catch {
-    /* localStorage may be disabled — ignore */
-  }
-}
-
-/**
- * Diagram + (when a phase is selected) phase details + rendered prompt/skill,
- * stacked vertically with two draggable horizontal dividers between them.
- *
- * Heights are stored as ratios (sum = 1) of the available section space (the
- * container height minus divider heights). Storing ratios — instead of px —
- * keeps the layout sensible across window resizes without needing a
- * ResizeObserver.
- */
-function DiagramView({
-  definition,
-  workflowName,
-  selectedPhaseName,
-  selectedPhase,
-  onPhaseClick,
-  onClearPhase,
-}: DiagramViewProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [containerH, setContainerH] = useState(0);
-
-  // Persisted across reloads: the user's last divider positions feel personal
-  // (like the message-feed sort order), so we store and restore them.
-  const [ratios, setRatios] = useState<[number, number, number]>(loadRatios);
-
-  useLayoutEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const update = () => setContainerH(el.clientHeight);
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  const showPhaseSections = !!selectedPhase;
-  const dividerCount = showPhaseSections ? 2 : 0;
-  const usableH = Math.max(0, containerH - dividerCount * DIVIDER_HEIGHT);
-
-  const heights = useMemo<[number, number, number]>(() => {
-    if (!showPhaseSections) return [usableH, 0, 0];
-    return [
-      Math.max(MIN_SECTION_HEIGHT, ratios[0] * usableH),
-      Math.max(MIN_SECTION_HEIGHT, ratios[1] * usableH),
-      Math.max(MIN_SECTION_HEIGHT, ratios[2] * usableH),
-    ];
-  }, [showPhaseSections, ratios, usableH]);
-
-  // Drag handler for either divider. `which` is 0 for the divider between
-  // section 0 and 1, and 1 for the one between 1 and 2.
-  const onDragStart = useCallback(
-    (which: 0 | 1) => (e: React.MouseEvent) => {
-      e.preventDefault();
-      const startY = e.clientY;
-      const startRatios: [number, number, number] = [ratios[0], ratios[1], ratios[2]];
-      const total = usableH;
-      if (total <= 0) return;
-
-      let lastRatios = startRatios;
-      const onMove = (ev: MouseEvent) => {
-        const deltaPx = ev.clientY - startY;
-        const deltaR = deltaPx / total;
-        // Clamp so neither neighbour drops below the minimum ratio.
-        const minR = MIN_SECTION_HEIGHT / total;
-        let r0 = startRatios[0];
-        let r1 = startRatios[1];
-        let r2 = startRatios[2];
-        if (which === 0) {
-          r0 = Math.max(minR, Math.min(startRatios[0] + startRatios[1] - minR, startRatios[0] + deltaR));
-          r1 = startRatios[0] + startRatios[1] - r0;
-        } else {
-          r1 = Math.max(minR, Math.min(startRatios[1] + startRatios[2] - minR, startRatios[1] + deltaR));
-          r2 = startRatios[1] + startRatios[2] - r1;
-        }
-        lastRatios = [r0, r1, r2];
-        setRatios(lastRatios);
-      };
-      const onUp = () => {
-        document.removeEventListener("mousemove", onMove);
-        document.removeEventListener("mouseup", onUp);
-        // Persist only on drag end — saving on every mousemove would write to
-        // localStorage at frame rate.
-        saveRatios(lastRatios);
-      };
-      document.addEventListener("mousemove", onMove);
-      document.addEventListener("mouseup", onUp);
-    },
-    [ratios, usableH],
   );
 
-  return (
-    <div ref={containerRef} className="flex flex-col h-full min-h-0">
-      {/* Section 1: diagram */}
-      <div
-        className="overflow-hidden"
-        style={{ height: showPhaseSections ? heights[0] : "100%" }}
-      >
-        <WorkflowDefinitionDiagram
-          definition={definition}
-          selectedPhase={selectedPhaseName}
-          onPhaseClick={onPhaseClick}
-          height="100%"
-        />
+  if (narrow) {
+    return (
+      <div className="flex flex-col flex-1 min-h-0">
+        <Tabs className="px-2 bg-base-200/40">
+          {DEF_PANES.map((p) => (
+            <TabButton key={p} active={pane === p} onClick={() => setPane(p)}>
+              {DEF_PANE_LABEL[p]}
+            </TabButton>
+          ))}
+        </Tabs>
+        {pane === "workflows" ? (
+          <div className="flex-1 min-h-0">{listPane}</div>
+        ) : !selectedName ? (
+          <div className="flex-1 flex items-center justify-center text-faint text-sm">
+            select a workflow
+          </div>
+        ) : (
+          <div className="flex-1 min-h-0 flex flex-col p-3 gap-3">
+            {detailHeader}
+            <div className="flex-1 min-h-0">
+              {pane === "diagram"
+                ? diagramPane
+                : pane === "phase"
+                  ? phaseBox
+                  : pane === "content"
+                    ? contentBox
+                    : yamlPane}
+            </div>
+          </div>
+        )}
       </div>
+    );
+  }
 
-      {showPhaseSections && (
-        <>
-          <ResizeDivider onMouseDown={onDragStart(0)} />
-
-          {/* Section 2: phase metadata. The PhaseDetailBox owns its own
-              scroll so the sticky header binds to that scroll container —
-              don't add a second overflow here, otherwise sticky misbinds. */}
-          <div style={{ height: heights[1] }} className="min-h-0">
-            <PhaseDetailBox phase={selectedPhase!} onClose={onClearPhase} />
-          </div>
-
-          <ResizeDivider onMouseDown={onDragStart(1)} />
-
-          {/* Section 3: rendered prompt/skill */}
-          <div className="overflow-hidden flex flex-col" style={{ height: heights[2] }}>
-            <PhaseContentView phase={selectedPhase!} workflowName={workflowName} />
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-interface ResizeDividerProps {
-  onMouseDown: (e: React.MouseEvent) => void;
-}
-
-function ResizeDivider({ onMouseDown }: ResizeDividerProps) {
   return (
-    <div
-      role="separator"
-      className="shrink-0 flex items-center justify-center cursor-row-resize group"
-      style={{ height: DIVIDER_HEIGHT }}
-      onMouseDown={onMouseDown}
-    >
-      <div className="w-12 h-1 rounded-full bg-base-300 group-hover:bg-primary/50 transition-colors" />
+    // The wrapper, not the Split, is what `flex-1` sizes: the group sets its
+    // own `height: 100%`, which only means anything against a parent whose
+    // height is already resolved.
+    <div className="flex-1 min-h-0">
+    <Split id="ll-wf-defs" panelIds={["workflows", "detail"]}>
+      <SplitPane
+        id="workflows"
+        defaultSize="18%"
+        minSize="10%"
+        className="border-r border-hairline"
+      >
+        {listPane}
+      </SplitPane>
+      <SplitHandle />
+      <SplitPane id="detail" minSize="40%">
+        {selectedName ? (
+          <div className="h-full overflow-hidden flex flex-col p-4 gap-3 min-h-0 min-w-0">
+            {detailHeader}
+            {/* Two content columns, both tabbed. The centre is the workflow —
+                the diagram and the YAML it renders — and the right is the
+                phase you picked. Three columns of content was one too many to
+                scan, so the source sits behind the picture rather than beside
+                it. */}
+            <div className="flex-1 min-h-0">
+            <Split id="ll-wf-def-body" panelIds={["workflow", "phase"]}>
+              <SplitPane id="workflow" defaultSize="55%" minSize="20%">
+                <div className="flex flex-col h-full min-h-0 border border-hairline rounded bg-base-100 overflow-hidden">
+                  <Tabs className="px-2">
+                    <TabButton active={pane !== "yaml"} onClick={() => setPane("diagram")}>
+                      Diagram
+                    </TabButton>
+                    <TabButton active={pane === "yaml"} onClick={() => setPane("yaml")}>
+                      YAML
+                    </TabButton>
+                  </Tabs>
+                  <div className="flex-1 min-h-0">
+                    {pane === "yaml" ? yamlPane : diagramPane}
+                  </div>
+                </div>
+              </SplitPane>
+              {selectedPhase && (
+                <>
+                  <SplitHandle />
+                  {/* ONE pane for the phase: its fields and its rendered
+                      prompt are two readings of the same thing, so they are
+                      tabs rather than another divider. */}
+                  <SplitPane id="phase" defaultSize="45%" minSize="20%">
+                    <div className="flex flex-col h-full min-h-0 border border-hairline rounded bg-base-100 overflow-hidden">
+                      <Tabs className="px-2">
+                        <TabButton active={phaseTab === "phase"} onClick={() => setPhaseTab("phase")}>
+                          Phase
+                        </TabButton>
+                        <TabButton active={phaseTab === "content"} onClick={() => setPhaseTab("content")}>
+                          Content
+                        </TabButton>
+                      </Tabs>
+                      <div className="flex-1 min-h-0">
+                        {phaseTab === "content" ? contentBox : phaseBox}
+                      </div>
+                    </div>
+                  </SplitPane>
+                </>
+              )}
+            </Split>
+            </div>
+          </div>
+        ) : (
+          <div className="h-full flex items-center justify-center text-faint text-sm">
+            select a workflow
+          </div>
+        )}
+      </SplitPane>
+    </Split>
     </div>
   );
 }
@@ -549,7 +491,7 @@ function PhaseDetailBox({ phase, onClose }: PhaseDetailBoxProps) {
   const loopMessageEntries = phase.loop?.messages ? Object.entries(phase.loop.messages) : [];
 
   return (
-    <div className="border border-hairline rounded bg-base-100 p-3 text-xs h-full overflow-auto">
+    <div className="bg-base-100 p-3 text-xs h-full overflow-auto">
       <div className="flex items-center gap-2 mb-2 sticky top-0 bg-base-100 pb-1 z-10">
         <span className="font-semibold text-sm">{phase.label ?? phase.name}</span>
         {phase.label && phase.label !== phase.name && (

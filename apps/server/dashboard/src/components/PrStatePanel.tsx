@@ -81,8 +81,26 @@ const CHECKS_TONE: Record<string, "warn" | "bad" | undefined> = {
   none: "warn",
 };
 
-export function PrStatePanel({ run }: { run: WorkflowRun }) {
-  const [open, setOpen] = useState(false);
+/**
+ * Does this run carry a PR-state snapshot at all?
+ *
+ * The panel self-hides on a run without one, which is right when it sits in a
+ * column of blocks and wrong when it is a TAB — a tab that renders nothing is
+ * worse than a tab that is not there, so the strip asks first.
+ */
+export function hasPrState(run: WorkflowRun): boolean {
+  return !!asDict(((run.context ?? {}) as Dict).prState);
+}
+
+export function PrStatePanel({
+  run,
+  defaultOpen = false,
+}: {
+  run: WorkflowRun;
+  /** Start expanded — what you want when the panel IS the pane you opened. */
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
   const [rawOpen, setRawOpen] = useState(false);
 
   const ctx = (run.context ?? {}) as Dict;
@@ -121,7 +139,10 @@ export function PrStatePanel({ run }: { run: WorkflowRun }) {
     .join(" · ");
 
   return (
-    <section className="shrink-0 rounded border border-hairline bg-base-200/40">
+    // `@container`, so the facts grid below reflows to the width of THIS panel.
+    // It used to key off `sm:`, a viewport breakpoint, which on a wide monitor
+    // laid four columns across a 300px-wide tab.
+    <section className="@container shrink-0 rounded border border-hairline bg-base-200/40">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -151,7 +172,7 @@ export function PrStatePanel({ run }: { run: WorkflowRun }) {
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
+          <div className="grid grid-cols-1 gap-x-6 gap-y-2 @xs:grid-cols-2 @2xl:grid-cols-4">
             <Fact label="head" value={headSha ? headSha.slice(0, 12) : "—"} />
             <Fact
               label="attempt"

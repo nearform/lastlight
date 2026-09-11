@@ -1,6 +1,7 @@
 import { Position, Handle, type Node, type NodeProps } from "@xyflow/react";
 import clsx from "clsx";
 import { truncateSummary } from "../lib/phase-outcome";
+import { type FlowDir } from "../lib/graph-axis";
 
 /**
  * Shared pipeline node presentation, used by BOTH the workflow-run pipeline
@@ -128,10 +129,17 @@ export interface PipelineNodeData extends Record<string, unknown> {
    */
   iterates?: boolean;
   /**
-   * Draw the vertical (top/bottom) connector dots. Set on loop-stack children,
-   * the only nodes whose edges run vertically.
+   * Draw the CROSS-axis connector dots as well as the main ones. Set on
+   * loop-stack children, the only nodes whose edges run across the flow.
    */
   stacked?: boolean;
+  /**
+   * Which way the graph flows, so the card knows which pair of connector dots
+   * is the one its pipeline edges actually use. Defaults to `TB` — both views
+   * run vertically — and the dots are purely decorative, so a node that omits
+   * it renders the right thing anyway.
+   */
+  flow?: FlowDir;
 }
 
 export function formatDuration(secs: number): string {
@@ -416,6 +424,20 @@ function ConnectorDot({
   );
 }
 
+/**
+ * The two connector-dot sides for each axis. The MAIN pair is where the
+ * pipeline's own edges land; the CROSS pair only appears on a stacked node,
+ * whose siblings chain across the flow.
+ */
+function dotSides(flow: FlowDir | undefined): {
+  main: [keyof typeof DOT_SIDE, keyof typeof DOT_SIDE];
+  cross: [keyof typeof DOT_SIDE, keyof typeof DOT_SIDE];
+} {
+  return flow === "LR"
+    ? { main: ["left", "right"], cross: ["top", "bottom"] }
+    : { main: ["top", "bottom"], cross: ["left", "right"] };
+}
+
 /** Tiny lock glyph for the approval-gate node header. */
 function LockIcon() {
   return (
@@ -559,8 +581,9 @@ export function PhaseFlowNode({ data }: NodeProps<Node<PipelineNodeData>>) {
       title={data.summary ?? data.label}
     >
       {data.loops && <LoopArc />}
-      {/* Horizontal handles carry the main left-to-right pipeline; the vertical
-          handles carry loop-iteration stacks so those edges run straight down. */}
+      {/* All four handles exist on every card; which pair the pipeline uses is
+          the layout's choice (see lib/graph-axis.ts). Vertically, the top and
+          bottom carry the main chain and the sides carry loop stacks. */}
       <Handle type="target" position={Position.Left} id="left" className={handleClass} />
       <Handle type="target" position={Position.Top} id="top" className={handleClass} />
 
@@ -595,14 +618,13 @@ export function PhaseFlowNode({ data }: NodeProps<Node<PipelineNodeData>>) {
 
       <Handle type="source" position={Position.Right} id="right" className={handleClass} />
       <Handle type="source" position={Position.Bottom} id="bottom" className={handleClass} />
-      <ConnectorDot side="left" status={data.status} brand={brand} />
-      <ConnectorDot side="right" status={data.status} brand={brand} />
-      {data.stacked && (
-        <>
-          <ConnectorDot side="top" status={data.status} brand={brand} />
-          <ConnectorDot side="bottom" status={data.status} brand={brand} />
-        </>
-      )}
+      {dotSides(data.flow).main.map((side) => (
+        <ConnectorDot key={side} side={side} status={data.status} brand={brand} />
+      ))}
+      {data.stacked &&
+        dotSides(data.flow).cross.map((side) => (
+          <ConnectorDot key={side} side={side} status={data.status} brand={brand} />
+        ))}
     </div>
   );
 }
@@ -640,14 +662,13 @@ export function ApprovalDiamondNode({ data }: { data: PipelineNodeData }) {
         <Handle type="source" position={Position.Bottom} id="bottom" className={handleClass} />
         {/* The rotated square's vertices ARE these midpoints, which is what
             makes a diamond↔card connection read as one continuous line. */}
-        <ConnectorDot side="left" status={data.status} />
-        <ConnectorDot side="right" status={data.status} />
-        {data.stacked && (
-          <>
-            <ConnectorDot side="top" status={data.status} />
-            <ConnectorDot side="bottom" status={data.status} />
-          </>
-        )}
+        {dotSides(data.flow).main.map((side) => (
+          <ConnectorDot key={side} side={side} status={data.status} />
+        ))}
+        {data.stacked &&
+          dotSides(data.flow).cross.map((side) => (
+            <ConnectorDot key={side} side={side} status={data.status} />
+          ))}
       </div>
       {/* No "approval" eyebrow: the lock glyph already says it, and the line it
           cost was height inside a loop stack, where pitch is a fixed constant. */}
@@ -705,8 +726,9 @@ export function FanoutGroupNode({ data }: NodeProps<Node<PipelineNodeData>>) {
       </div>
       <Handle type="source" position={Position.Right} id="right" className={handleClass} />
       <Handle type="source" position={Position.Bottom} id="bottom" className={handleClass} />
-      <ConnectorDot side="left" status={data.status} />
-      <ConnectorDot side="right" status={data.status} />
+      {dotSides(data.flow).main.map((side) => (
+        <ConnectorDot key={side} side={side} status={data.status} />
+      ))}
     </div>
   );
 }
