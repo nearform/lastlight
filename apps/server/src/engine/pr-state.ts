@@ -228,7 +228,7 @@ export interface PrState {
    * run HAPPENED. A run whose `post-review` skipped said nothing, so it must not
    * become the baseline — see `GitHubClient.getBotReviewHistory`.
    */
-  lastBotReview: { state: string; sha: string } | null;
+  lastBotReview: { state: string; sha: string; body: string | null } | null;
   /**
    * Every path that changed between {@link lastBotReview}'s SHA and the current
    * head — what a re-review would actually be reviewing.
@@ -239,6 +239,23 @@ export interface PrState {
    * exclusively generated paths suppresses a review.
    */
   pathsSinceLastBotReview: string[] | null;
+  /**
+   * Is the PR's OWN three-dot diff byte-identical to what it was at
+   * {@link lastBotReview}'s SHA?
+   *
+   * The question {@link pathsSinceLastBotReview} cannot answer. A
+   * `Merge branch 'main' into feature` push changes no line the author wrote,
+   * but the last reviewed SHA is an ancestor of the merge commit, so the delta
+   * since it is every file the base brought in — and the generated-only gate
+   * correctly refuses to suppress hundreds of hand-written paths. Comparing the
+   * `base...head` diff at the two head SHAs asks about the author's
+   * contribution directly.
+   *
+   * `null` whenever either fingerprint was degraded, and that is the value that
+   * cannot cause a skip: the gate tests `=== true`, so both `null` and `false`
+   * dispatch a full review.
+   */
+  prDiffUnchangedSinceLastReview: boolean | null;
   /**
    * Structured CI evidence for the head SHA (Phase 1), or null when the checks
    * are not failing — the report costs one Actions job-log download per failed
@@ -582,6 +599,7 @@ export async function resolvePrState(
     botReviewAtHead: null,
     lastBotReview: null,
     pathsSinceLastBotReview: null,
+    prDiffUnchangedSinceLastReview: null,
     ciReport: null,
     // Both stay at their "not read" values unless `resolveSpecContext` is
     // called — see their field docs, and locked decision 8.
@@ -674,7 +692,13 @@ export async function resolvePrState(
       state.botReviewAtHead = review.atHead
         ? { state: review.atHead.state, submittedAt: review.atHead.submittedAt }
         : null;
-      state.lastBotReview = review.latest ? { state: review.latest.state, sha: review.latest.sha } : null;
+      // `body` rides along because `getBotReviewHistory` already reads it and
+      // then threw it away: the triage phase is asked "what has changed since
+      // we said THIS?", and the verdict without its reasoning is not enough to
+      // answer that.
+      state.lastBotReview = review.latest
+        ? { state: review.latest.state, sha: review.latest.sha, body: review.latest.body ?? null }
+        : null;
       state.headAuthor = author;
       state.headIsOurs = !!deps.botLogin && author === deps.botLogin;
 
@@ -684,12 +708,34 @@ export async function resolvePrState(
       // must have moved since it, and the per-head dedup must not already be
       // about to skip. Best-effort like every read here; `null` dispatches.
       if (review.latest && !review.atHead && review.latest.sha !== state.headSha) {
-        state.pathsSinceLastBotReview = await github
-          .getChangedPathsBetween(owner, repo, review.latest.sha, state.headSha)
-          .catch((err: unknown) => {
+        const priorSha = review.latest.sha;
+        const baseRef = state.baseRef;
+        const [paths, priorPrint, headPrint] = await Promise.all([
+          github.getChangedPathsBetween(owner, repo, priorSha, state.headSha).catch((err: unknown) => {
             note("getChangedPathsBetween", err);
             return null;
-          });
+          }),
+          // The unchanged-diff gate's two ends. Both compares run on exactly
+          // the path that can use them — the same budget the read above
+          // already spends one call on — and both degrade to `null`, which the
+          // gate reads as "unknown" and dispatches on. A PR whose base ref we
+          // could not read has no three-dot diff to fingerprint at all.
+          baseRef
+            ? github.getPrDiffFingerprint(owner, repo, baseRef, priorSha).catch((err: unknown) => {
+                note("getPrDiffFingerprint(prior)", err);
+                return null;
+              })
+            : Promise.resolve(null),
+          baseRef
+            ? github.getPrDiffFingerprint(owner, repo, baseRef, state.headSha).catch((err: unknown) => {
+                note("getPrDiffFingerprint(head)", err);
+                return null;
+              })
+            : Promise.resolve(null),
+        ]);
+        state.pathsSinceLastBotReview = paths;
+        state.prDiffUnchangedSinceLastReview =
+          priorPrint === null || headPrint === null ? null : priorPrint === headPrint;
       }
 
       // The heavy read (one Actions job-log download per failed check) only

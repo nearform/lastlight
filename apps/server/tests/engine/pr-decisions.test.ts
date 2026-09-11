@@ -1022,6 +1022,178 @@ describe("resolveReviewTrigger — nothing new to say", () => {
   });
 });
 
+/**
+ * The unchanged-diff re-review gate (issue #378).
+ *
+ * The gate above asks "is the delta since our last review all derived output?".
+ * A merge from the base branch defeats it: the last reviewed SHA is an ancestor
+ * of the merge commit, so the delta is every file the base brought in — on a
+ * busy repo, hundreds of hand-written ones. `nearform/lastlight#377` was
+ * reviewed at `1e8bea8`, a `Merge branch 'main'` landed eleven minutes later,
+ * and the whole 73-file pipeline ran again over a push that changed no line the
+ * author wrote.
+ *
+ * This gate asks the other question directly, and the cases below are again
+ * about the SAFETY DIRECTION: only a positive `true` suppresses.
+ */
+describe("resolveReviewTrigger — the diff did not move", () => {
+  const merged = (unchanged: boolean | null, over: Partial<PrState> = {}) =>
+    state({
+      checksState: "passing",
+      lastBotReview: { state: "APPROVED", sha: "1e8bea8000000000", body: null },
+      // The delta a merge push really produces: many hand-written files, so the
+      // generated-only gate correctly declines to suppress it.
+      pathsSinceLastBotReview: ["src/auth.ts", "src/router.ts", "docs/README.md"],
+      prDiffUnchangedSinceLastReview: unchanged,
+      ...over,
+    });
+
+  const eager = { ...review, trigger: "eager" as const };
+
+  it("skips a merge that added nothing the author wrote", () => {
+    const d = resolveReviewTrigger(merged(true), eager);
+    expect(d.decision).toBe("skip");
+    expect(d.reason).toMatch(/^unchanged-diff: .*identical to the one we reviewed at 1e8bea8/);
+    // The prior verdict rides the typed field onto the new head's check run —
+    // the same plumbing the generated-only gate already uses.
+    expect(d.reviewUnchanged).toEqual({ sha: "1e8bea8000000000", state: "APPROVED" });
+  });
+
+  it("dispatches on FALSE — the merged patch genuinely differs", () => {
+    const d = resolveReviewTrigger(merged(false), eager);
+    expect(d.decision).toBe("dispatch");
+    expect(d.reviewUnchanged).toBeUndefined();
+  });
+
+  it("dispatches on NULL — a degraded fingerprint is not evidence", () => {
+    expect(resolveReviewTrigger(merged(null), eager).decision).toBe("dispatch");
+  });
+
+  it("dispatches a FIRST review — there is no prior diff to be identical to", () => {
+    const d = resolveReviewTrigger(
+      state({ checksState: "passing", prDiffUnchangedSinceLastReview: true }),
+      eager,
+    );
+    expect(d.decision).toBe("dispatch");
+  });
+
+  it("dispatches when the operator turned the gate off", () => {
+    const d = resolveReviewTrigger(merged(true), { ...eager, skipUnchangedDiff: false });
+    expect(d.decision).toBe("dispatch");
+  });
+
+  // Below the explicit-request branch, inherited from its placement — the gate
+  // answers "was this push worth an unprompted review?", never "may a human ask?".
+  it("an explicit @bot review overrides it", () => {
+    const d = resolveReviewTrigger(merged(true), eager, { explicitRequest: true });
+    expect(d.decision).toBe("dispatch");
+    expect(d.reason).toMatch(/^requested:/);
+  });
+
+  // ABOVE the generated-only gate, because it is the stronger claim:
+  // generated-only says the delta is not worth reading, this says there is no
+  // delta. Both would skip here; the reason must be this one.
+  it("outranks the generated-only gate when both would fire", () => {
+    const d = resolveReviewTrigger(merged(true, { pathsSinceLastBotReview: ["pnpm-lock.yaml"] }), eager);
+    expect(d.reason).toMatch(/^unchanged-diff:/);
+  });
+
+  it("stays behind the per-head dedup", () => {
+    const d = resolveReviewTrigger(merged(true, { botReviewAtHead: { state: "APPROVED" } }), eager);
+    expect(d.reason).toMatch(/^already-reviewed:/);
+  });
+
+  it("records the input on the decision, so the log and the dashboard can show it", () => {
+    expect(resolveReviewTrigger(merged(true), eager).inputs.prDiffUnchangedSinceLastReview).toBe(true);
+    expect(resolveReviewTrigger(merged(null), eager).inputs.prDiffUnchangedSinceLastReview).toBeNull();
+  });
+
+  it("projects onto a carried-over check so a required check is never missing", () => {
+    const d = resolveDispatchDisposition("pr-review", merged(true), {
+      fix,
+      dependencies: deps,
+      review: eager,
+    });
+    expect(d.decision).toBe("skip");
+    expect(d.reviewUnchanged).toEqual({ sha: "1e8bea8000000000", state: "APPROVED" });
+    expect(reviewCheckPlacement(d.review!, eager, { unchanged: true })).toBe("carried-over");
+  });
+});
+
+/**
+ * The triage projection (issue #378) — the keys `pr-review.yaml`'s `triage`
+ * phase gates on and its prompt renders.
+ *
+ * Nothing projected `lastBotReview` or `pathsSinceLastBotReview` onto a
+ * template context before this, so no prompt could see what we last said about
+ * a pull request.
+ */
+describe("renderContext — the triage axis", () => {
+  const reviewed = (over: Partial<PrState> = {}) =>
+    state({
+      lastBotReview: { state: "APPROVED", sha: "1e8bea8000000000", body: "Looks good." },
+      pathsSinceLastBotReview: ["src/a.ts", "src/b.ts"],
+      ...over,
+    });
+
+  it("says this is a re-review, and carries the prior verdict with its body", () => {
+    const ctx = renderContext(reviewed(), fix, deps, review);
+    expect(ctx.reviewIsRereview).toBe("true");
+    expect(ctx.priorReviewSha).toBe("1e8bea8000000000");
+    expect(ctx.priorReviewState).toBe("APPROVED");
+    expect(ctx.priorReviewBody).toBe("Looks good.");
+    expect(ctx.pathsSinceLastReview).toBe("src/a.ts\nsrc/b.ts");
+  });
+
+  // A FIRST review: the phase has nothing to compare against, so it must skip.
+  // Strings, because the guard is `reviewIsRereview != true` and the render
+  // context is projected to strings.
+  it("says `false` on a first review, and leaves the prior fields empty", () => {
+    const ctx = renderContext(state(), fix, deps, review);
+    expect(ctx.reviewIsRereview).toBe("false");
+    expect(ctx.priorReviewSha).toBe("");
+    expect(ctx.priorReviewBody).toBe("");
+  });
+
+  it("projects the switch and its timeout from config", () => {
+    const on = renderContext(reviewed(), fix, deps, review);
+    expect(on.triageEnabled).toBe("true");
+    expect(on.triageTimeoutSeconds).toBe("300");
+    const off = renderContext(reviewed(), fix, deps, {
+      ...review,
+      triage: { enabled: false, timeoutSeconds: 120 },
+    });
+    expect(off.triageEnabled).toBe("false");
+    expect(off.triageTimeoutSeconds).toBe("120");
+  });
+
+  // A degraded delta read must not read as "nothing changed" — a prompt handed
+  // an empty list would downgrade a review it has no basis to downgrade.
+  it("renders an unreadable delta as the empty string, not as an empty list", () => {
+    expect(renderContext(reviewed({ pathsSinceLastBotReview: null }), fix, deps, review)
+      .pathsSinceLastReview).toBe("");
+    expect(renderContext(reviewed({ pathsSinceLastBotReview: [] }), fix, deps, review)
+      .pathsSinceLastReview).toBe("");
+  });
+
+  it("bounds a merge-sized path list and says that it did", () => {
+    const many = Array.from({ length: 140 }, (_, i) => `src/f${i}.ts`);
+    const rendered = renderContext(reviewed({ pathsSinceLastBotReview: many }), fix, deps, review)
+      .pathsSinceLastReview as string;
+    expect(rendered.split("\n")).toHaveLength(101);
+    expect(rendered).toContain("… and 40 more");
+  });
+
+  it("bounds a runaway prior-review body", () => {
+    const body = "x".repeat(9000);
+    const rendered = renderContext(reviewed({
+      lastBotReview: { state: "COMMENTED", sha: "abc", body },
+    }), fix, deps, review).priorReviewBody as string;
+    expect(rendered.length).toBeLessThan(body.length);
+    expect(rendered).toContain("truncated at 4000 characters");
+  });
+});
+
 describe("isGeneratedPath", () => {
   const patterns = defaultReviewConfig().generatedPaths;
 
@@ -1410,6 +1582,20 @@ describe("renderContext", () => {
  * still gets `buildPhasePrompt`'s whole-context dump, where present-but-empty
  * IS a prompt change.
  */
+/**
+ * Every key {@link triageContext} projects (issue #378) — the second, always-on
+ * axis, which the analysis axis's inertness assertions therefore exclude.
+ */
+const TRIAGE_KEYS = [
+  "reviewIsRereview",
+  "triageEnabled",
+  "triageTimeoutSeconds",
+  "priorReviewSha",
+  "priorReviewState",
+  "priorReviewBody",
+  "pathsSinceLastReview",
+];
+
 describe("renderContext — the spec axis", () => {
   const analysisOff = defaultReviewConfig();
   const analysisOn = {
@@ -1444,9 +1630,17 @@ describe("renderContext — the spec axis", () => {
 
     // …and the whole projection is key-for-key what a pre-WP0 caller got. This
     // is the byte-for-byte guarantee, asserted rather than asserted-about.
+    //
+    // Minus the TRIAGE keys (issue #378), which are a second, independent axis:
+    // triage ships ON and is deliberately not gated on `review.analysis`, so a
+    // deployment running the plain two-phase review still gets a cheap
+    // re-review. What this assertion still pins is what it was written for —
+    // that turning the analysis pipeline off contributes nothing.
     const legacy = renderContext(reviewable(), fix, defaultDependenciesConfig());
-    expect(Object.keys(off).sort()).toEqual(Object.keys(legacy).sort());
-    expect(off).toEqual(legacy);
+    const withoutTriage = (ctx: Record<string, unknown>) =>
+      Object.fromEntries(Object.entries(ctx).filter(([k]) => !TRIAGE_KEYS.includes(k)));
+    expect(Object.keys(withoutTriage(off)).sort()).toEqual(Object.keys(withoutTriage(legacy)).sort());
+    expect(withoutTriage(off)).toEqual(withoutTriage(legacy));
   });
 
   it("adds nothing when no review policy is passed at all (every pre-WP0 caller)", () => {

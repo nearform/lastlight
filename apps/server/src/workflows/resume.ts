@@ -12,6 +12,7 @@ import {
 } from "./simple.js";
 import { slugify, type TemplateContext } from "./templates.js";
 import { harvestFixMarkers } from "../engine/fix-harvest.js";
+import { harvestReviewTriage } from "../engine/review-triage.js";
 import {
   ProgressNotifier,
   GitHubTransport,
@@ -138,6 +139,7 @@ function makeCallbacks(
       // `diagnose`/`fix` phases HERE — harvesting only in `index.ts` would lose
       // every marker on exactly the runs whose attempt counter matters most.
       await harvestFixMarkers(db, runId, workflowName, phase, result.output);
+      await harvestReviewTriage(db, runId, phase, result.output);
     },
   };
 }
@@ -352,6 +354,7 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
         onPhaseEnd: async (phase, result) => {
           logPhaseEnd(log, run.workflowName, phase, result);
           await harvestFixMarkers(opts.db, run.id, run.workflowName, phase, result.output);
+          await harvestReviewTriage(opts.db, run.id, phase, result.output);
         },
       };
     }

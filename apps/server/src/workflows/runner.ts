@@ -42,6 +42,10 @@ import type {
   WorkflowResult,
 } from "lastlight-workflow-engine";
 import { makePostReviewHandler } from "./handlers/post-review.js";
+import {
+  REVIEW_TRIAGE_SCRATCH_KEY,
+  type ReviewTriageScratch,
+} from "../engine/review-triage.js";
 import { makeFanoutHandler } from "./handlers/fanout.js";
 import { fileVerdictReader } from "./handlers/verdict-reader.js";
 import { QuotaExceededError } from "../sandbox/k8s/quota.js";
@@ -295,6 +299,60 @@ const RUN_SPAN_NAME = "lastlight.workflow.run";
  * default engine ports, the reporter/resolver collaborators, and the run-scoped
  * {@link PhaseRunContext}, then delegates the DAG walk to `runWorkflowCore`.
  */
+/**
+ * Seed `scratch.reviewTriage` before the first phase of a review run (#378).
+ *
+ * The whole tier mechanism hangs off this namespace, and it must never be
+ * ABSENT. An absent value in a `skip_if` coerces to false, so
+ * `scratch.reviewTriage.depth == 'light'` would not match — which is the safe
+ * direction for the pipeline phases — but `prompts/review.md` chooses between
+ * three mutually exclusive `{{#if}}` arms, and with none of the three keys set
+ * it would render NO brief at all. Seeding is what makes "exactly one arm" true
+ * by construction rather than by the triage phase having run.
+ *
+ * `deep` / `baseline` mirror today's two arms: the pipeline has already run, or
+ * it has not. `harvestReviewTriage` replaces the whole namespace with
+ * `{ depth: "light", light: true }` when the triage phase asks for a single
+ * pass, which is what clears the other two.
+ *
+ * Scoped to REVIEW-SHAPED workflows by the structural fact rather than by name:
+ * a workflow that declares a `post-review` phase is one that posts a review, so
+ * an overlay fork keeps the seed without declaring anything new, and nothing
+ * else ever gets an unused namespace stamped on its scratch.
+ *
+ * Idempotent, and deliberately does not overwrite: a resumed run re-enters here
+ * after its triage phase already wrote `light`, and re-seeding would re-arm the
+ * pipeline it had decided to skip.
+ *
+ * Best-effort — a scratch write that fails leaves the run on the full path,
+ * which is the same direction every other failure here points.
+ */
+async function seedReviewTriage(
+  definition: AgentWorkflowDefinition,
+  ctx: TemplateContext,
+  scratch: Record<string, unknown>,
+  db: StateDb | undefined,
+  workflowId: string | undefined,
+): Promise<void> {
+  const posts = definition.phases.some((p) => p.type === "post-review");
+  if (!posts || scratch[REVIEW_TRIAGE_SCRATCH_KEY]) return;
+  // The same projection the phases gate on, read the same way: the render
+  // context carries the literal string "true".
+  const analysisEnabled = ctx.analysisEnabled === "true" || ctx.analysisEnabled === true;
+  const seed: ReviewTriageScratch = {
+    depth: "full",
+    deep: analysisEnabled,
+    baseline: !analysisEnabled,
+  };
+  scratch[REVIEW_TRIAGE_SCRATCH_KEY] = seed;
+  if (!db || !workflowId) return;
+  try {
+    await db.runs.mergeScratch(workflowId, { [REVIEW_TRIAGE_SCRATCH_KEY]: seed });
+  } catch (err: unknown) {
+    logger("runner").warn("Could not seed the review triage namespace", { runId: workflowId, err });
+  }
+}
+
 export async function runWorkflow(
   definition: AgentWorkflowDefinition,
   ctx: TemplateContext,
@@ -325,6 +383,8 @@ export async function runWorkflow(
     ? { ...(ctx.scratch as Record<string, unknown>) }
     : (db && workflowId ? { ...((await db.runs.getRun(workflowId))?.scratch ?? {}) } : {});
   ctx.scratch = scratch;
+
+  await seedReviewTriage(definition, ctx, scratch, db, workflowId);
 
   const prePopulateBranch = typeof ctx.prePopulateBranch === "string"
     ? ctx.prePopulateBranch

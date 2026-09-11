@@ -89,6 +89,26 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		<a href="/docs/pr-state">the PR state model</a>.
 	</p>
 
+	<h2>How much review a re-review is owed</h2>
+
+	<p>
+		A second review of the same pull request is priced by how much the change
+		actually moved, not by the fact that the commit did. Three tiers, and the
+		first two ship on:
+	</p>
+
+	<ul>
+		<li><strong>No review.</strong> A push whose own diff against the base is byte-identical to the one we already reviewed — a merge from <code>main</code>, a rebase that preserves the tree, an empty force-push — is skipped, and the standing verdict is repeated on the new commit. So is a push that touched only generated files. See <a href="/docs/configuration"><code>review.skipUnchangedDiff</code></a> and <code>review.generatedPaths</code>.</li>
+		<li><strong>A light review.</strong> For a real but small delta, one cheap pass decides the rest of the run is not worth re-deriving, and the reviewer makes a single focused pass over what changed since the last review — a new defect, a flagged point the delta claims to fix but does not, and one it genuinely fixed. See <a href="/docs/configuration"><code>review.triage</code></a>.</li>
+		<li><strong>The full review.</strong> Everything else, and every uncertain case: a large or spread-out delta, anything touching an interface, a schema, auth or error handling, and any answer the triage pass was unsure about.</li>
+	</ul>
+
+	<p>
+		A <strong>first</strong> review of a pull request is never affected by any of
+		this, and an explicit <code>@last-light review</code> always buys the full
+		one.
+	</p>
+
 	<div class="docs-next">
 		<a href="/docs/workflows/pr-comment" class="prev">
 			<span class="label">&larr; Prev</span>

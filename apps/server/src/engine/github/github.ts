@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import type { Octokit } from "octokit";
 import { githubAppClient, githubTokenClient } from "./github-app-client.js";
 import { getInstallationDirectory } from "./installations.js";
@@ -1457,6 +1458,59 @@ export class GitHubClient {
     const files = res.data.files;
     if (!files || files.length >= 300) return null;
     return files.map((f) => f.filename);
+  }
+
+  /**
+   * A hash of the PR's OWN contribution at one commit — the three-dot diff
+   * `baseRef...sha`, file by file, patch by patch.
+   *
+   * The question this exists to answer is "did the author's change move?", and
+   * a merge commit is the case that makes it hard: `Merge branch 'main' into
+   * feature` produces a new head SHA and, compared against the last reviewed
+   * SHA, a delta of every file main brought in — hundreds of hand-written ones
+   * on a busy repo. {@link getChangedPathsBetween} therefore reports a large
+   * authored delta for a push that changed nothing the author wrote, and the
+   * generated-only gate correctly refuses to suppress it. Comparing the
+   * three-dot diff at two head SHAs asks the question directly instead: equal
+   * fingerprints mean the merged patch is byte-identical, which is true of a
+   * clean merge from the base, a rebase that preserves the tree, and an empty
+   * force-push — and false, correctly, when the base touched a file the PR also
+   * touches, because the merged patch then genuinely differs.
+   *
+   * `null` — never a hash — for every degraded read, the same discipline
+   * {@link getChangedPathsBetween} documents and for a stronger reason: the one
+   * caller turns equality into a SKIP, so a hash computed over a partial answer
+   * could suppress a review of a change nobody ever read. GitHub truncates
+   * `files` at 300 entries and omits `patch` on binary and very large files, so
+   * either shape is "unknown", and unknown must dispatch.
+   */
+  async getPrDiffFingerprint(
+    owner: string,
+    repo: string,
+    baseRef: string,
+    sha: string,
+  ): Promise<string | null> {
+    const kit = await this.kit(owner);
+    const res = await kit.rest.repos.compareCommitsWithBasehead({
+      owner,
+      repo,
+      basehead: `${baseRef}...${sha}`,
+    });
+    const files = res.data.files;
+    if (!files || files.length >= 300) return null;
+    const hash = createHash("sha256");
+    for (const f of files) {
+      // A file GitHub declined to give us a patch for makes the WHOLE
+      // fingerprint unusable: two different binaries would hash identically,
+      // and "the diff did not change" would then be a claim about the files we
+      // could read rather than about the diff.
+      if (typeof f.patch !== "string") return null;
+      hash.update(f.filename);
+      hash.update("\0");
+      hash.update(f.patch);
+      hash.update("\0");
+    }
+    return hash.digest("hex");
   }
 
   /**

@@ -337,6 +337,14 @@ review:
 				<td><strong>add</strong> patterns — its own generator output, say. A longer list suppresses more re-reviews, which is the conservative direction. Dropping one of yours buys the repo an extra agent run per lock-file bump on your budget, so an omitted pattern is put back.</td>
 			</tr>
 			<tr>
+				<td><code>review.skipUnchangedDiff</code></td>
+				<td>turn it <strong>off</strong>. Doing so buys the repo more review runs on its own attention, which is entirely its call; turning it on over an operator who disabled it would suppress reviews you asked to keep.</td>
+			</tr>
+			<tr>
+				<td><code>review.triage</code></td>
+				<td><strong>nothing</strong> — operator-only, for the same reason as <code>analysis</code> below and in both directions. Turning triage on buys a cheap pass on your budget; turning it off buys the full evidence pipeline on every re-review, which is far more of the same.</td>
+			</tr>
+			<tr>
 				<td><code>review.analysis</code></td>
 				<td><strong>nothing</strong> — operator-only. The review evidence pipeline is spend, and there's no "more conservative" direction to move it in: switching it <em>on</em> buys extra analysis on your budget, switching it <em>off</em> opts the repo out of the review machinery you chose.</td>
 			</tr>

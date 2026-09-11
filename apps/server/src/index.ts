@@ -75,6 +75,7 @@ import {
 } from "./engine/review-check.js";
 import { runDashboardUrl } from "./notify/model.js";
 import { harvestFixMarkers } from "./engine/fix-harvest.js";
+import { harvestReviewTriage } from "./engine/review-triage.js";
 import { handleSlackReaction, registerSlackAnchor } from "./engine/feedback/slack.js";
 import { feedbackAnchorObserver, pollFeedbackReactions } from "./cron/feedback-poll.js";
 import { drainFeedbackExport } from "./engine/feedback/ingest.js";
@@ -1137,6 +1138,10 @@ async function main() {
         // boundary and the shared per-PR workspace is `reset --hard`-ed between
         // runs, so a marker not persisted here is gone for good.
         if (harvestRunId) await harvestFixMarkers(db, harvestRunId, workflowName, phase, result.output);
+        // The review DEPTH marker rides the same hook (issue #378), and must:
+        // the tier it writes is read by every later phase's `skip_if`, so it
+        // has to land before the scheduler's next pass.
+        if (harvestRunId) await harvestReviewTriage(db, harvestRunId, phase, result.output);
       },
       onRunStart: async (runId: string) => {
         // The run id is not knowable when this object is built — the row is

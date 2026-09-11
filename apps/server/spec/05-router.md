@@ -845,7 +845,7 @@ the check say" are different questions:
 |---|---|---|
 | `dispatch` | an explicit request, the `review.requestLabel`, `eager` on PR attention, or a settled suite under `after-checks` | `in_progress`, completed from the run's terminal transition |
 | `defer` | `on-request` with nobody asking; `after-checks` waiting for CI (on every route but the sweep — see below), or reached on PR attention rather than a settle | `queued` under `after-checks`, `neutral` under `on-request` — and only on a PR-attention event, since a placeholder is a statement about a head SHA and the 30-minute sweep would otherwise re-post one per tick |
-| `skip` | draft (`review.skipDraft`), already reviewed at this head, a `pr-review` run that already assessed this head without posting, only generated files changed since the review we posted (`review.generatedPaths`), or another PR-scoped run in flight | **nothing** — except the generated-only case, which posts a completed `carried-over` check restating the prior verdict. A run that never dispatches must otherwise not create a check and immediately conclude it |
+| `skip` | draft (`review.skipDraft`), already reviewed at this head, a `pr-review` run that already assessed this head without posting, a re-review whose own diff is unchanged (`review.skipUnchangedDiff`), only generated files changed since the review we posted (`review.generatedPaths`), or another PR-scoped run in flight | **nothing** — except the unchanged-diff and generated-only cases, which post a completed `carried-over` check restating the prior verdict. A run that never dispatches must otherwise not create a check and immediately conclude it |
 
 Two consequences worth stating outright:
 
@@ -895,6 +895,29 @@ Two consequences worth stating outright:
   on every degraded or truncated read, which dispatches. It is `skip` and not
   `defer` because no future event turns *this* delta into a review. The check
   run is the one place this skip is not silent — see `carried-over` below.
+- **A merge from the base is not a new change** (issue #378). The gate above
+  asks whether the delta since our last review is all derived output, and a
+  merge push defeats it structurally: the last reviewed SHA is an ancestor of
+  the merge commit, so the delta *is* every file the base brought in. On a busy
+  repo that is hundreds of hand-written files, which the generated-only gate is
+  right to refuse to suppress. `nearform/lastlight#377` was reviewed at
+  `1e8bea8`, a `Merge branch 'main' into ux-improvements` landed eleven minutes
+  later, and the whole 73-file pipeline ran again over a push that changed no
+  line the author wrote. So the resolver asks the other question directly:
+  **is the PR's own three-dot diff `base...head` byte-identical to the one we
+  reviewed?** `GitHubClient.getPrDiffFingerprint` hashes the ordered
+  filename + patch list from the same compare endpoint, at both head SHAs, and
+  `PrState.prDiffUnchangedSinceLastReview` is `true` only when the two agree.
+  That covers a clean merge from the base, a rebase that preserves the tree and
+  an empty force-push, and it correctly *fails* when the base touched a file the
+  PR also touches, because the merged patch then genuinely differs. It sits
+  **above** the generated-only gate — the stronger claim of the two: that one
+  says the delta is not worth reading, this one says there is no delta — and
+  below the explicit-request branch, so a human can always force a review. The
+  fingerprint is `null` on every degraded read (GitHub truncates `files` at 300
+  entries and omits `patch` on binary and very large files), and the gate tests
+  `=== true`, so `null` and `false` both dispatch. It reuses the same
+  `carried-over` check as the gate below.
 - **A run that posted nothing still counts as having looked.** `botReviewAtHead`
   is evidence of a POSTED review, so for a long time it was the only per-head
   dedup the review path had — and any run that completed without posting left no
@@ -958,10 +981,11 @@ Boot-time reconciliation is deliberately not needed — terminal-transition
 completion plus the existing `MAX_RESTART_RESUMES` resume path covers
 restart.
 
-**`carried-over` — the one skip that still leaves a check.** Every other
+**`carried-over` — the two skips that still leave a check.** Every other
 review skip either already has a check on this head (`already-reviewed`) or
-must not have one (draft, hold, run lock). The generated-only skip above is
-different: it leaves a brand-new head SHA with no `last-light/review` at all,
+must not have one (draft, hold, run lock). The unchanged-diff and generated-only
+skips above are different: each leaves a brand-new head SHA with no
+`last-light/review` at all,
 and on a deployment whose branch protection requires that check, a missing
 check is an unmergeable PR. So it posts a **completed** check restating the
 review that still stands, naming the SHA it was posted against and how to force

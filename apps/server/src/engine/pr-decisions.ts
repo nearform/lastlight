@@ -845,6 +845,7 @@ export function resolveReviewTrigger(
     lastBotReviewSha: state.lastBotReview?.sha ?? null,
     assessedHeadSha: state.assessedHeadShaByWorkflow["pr-review"] ?? null,
     pathsSinceLastBotReview: state.pathsSinceLastBotReview,
+    prDiffUnchangedSinceLastReview: state.prDiffUnchangedSinceLastReview,
     generatedPaths: cfg.generatedPaths,
     runInFlight: state.runInFlight,
     route,
@@ -997,6 +998,36 @@ export function resolveReviewTrigger(
   // before this field existed — and the review it would name is the whole
   // justification for the skip.
   const prior = state.lastBotReview;
+
+  // NOTHING NEW AT ALL (issue #378). The stronger claim of the two, so it sits
+  // ABOVE the generated-only gate: generated-only says the delta is not worth
+  // reading, unchanged-diff says there IS no delta.
+  //
+  // The case it exists for is a merge from the base branch. nearform/lastlight#377
+  // was reviewed at `1e8bea8`, a `Merge branch 'main'` landed eleven minutes
+  // later, and the whole 73-file pipeline ran again over a push that changed no
+  // line the author wrote. The delta `pathsSinceLastBotReview` reports there is
+  // every file main brought in, which is exactly what the generated-only gate
+  // must refuse to suppress — so the answer is a different question, asked in
+  // `PrState.prDiffUnchangedSinceLastReview`.
+  //
+  // `=== true` explicitly: `null` (a degraded or truncated fingerprint read)
+  // and `false` both dispatch. It inherits its placement below the
+  // explicit-request branch, so `@bot review`, the request label and the
+  // check's Re-run button still force a full review. Reusing `reviewUnchanged`
+  // means the `last-light/review` check run mirrors the prior verdict with no
+  // new plumbing.
+  if (prior && cfg.skipUnchangedDiff && state.prDiffUnchangedSinceLastReview === true) {
+    return {
+      decision: "skip",
+      reason:
+        `unchanged-diff: the PR's own diff is identical to the one we reviewed at ` +
+        `${prior.sha.slice(0, 7)}`,
+      reviewUnchanged: { sha: prior.sha, state: prior.state },
+      inputs,
+    };
+  }
+
   if (prior && allPathsGenerated(state.pathsSinceLastBotReview, cfg.generatedPaths)) {
     const n = state.pathsSinceLastBotReview?.length ?? 0;
     return {
@@ -1458,6 +1489,7 @@ export function renderContext(
   const failedChecks = state.ciReport ? renderCiFailureReport(state.ciReport) : "";
   return {
     ...specContext(state, review),
+    ...triageContext(state, review),
     // Identity / targeting.
     headSha: state.headSha,
     branch: state.headRef,
@@ -1562,6 +1594,80 @@ export function renderContext(
  * is precisely what locked decision 8 forbids. WP1+ can un-gate them the moment
  * a second consumer exists.
  */
+/**
+ * The TRIAGE half of {@link renderContext} — what the `triage` phase of
+ * `pr-review.yaml` gates on and renders (issue #378).
+ *
+ * Emitted unconditionally rather than from {@link specContext}, because triage
+ * is independent of `review.analysis.enabled`: a deployment running the plain
+ * two-phase review still wants a re-review of a one-line push to cost one pass
+ * rather than the full brief. That is also why it cannot ride the analysis
+ * block's inertness rule — there is nothing here that changes a FIRST review's
+ * prompt, since every key below is either a switch the phase reads or a fact
+ * that only exists once we have reviewed this PR before.
+ *
+ * Strings, like `analysisEnabled` and for the same reason: the render context is
+ * projected to strings and `coerceBool` reads `"true"` either way. The phase's
+ * guards are written `!= true` (the bare-boolean form), so an ABSENT key skips
+ * triage and leaves a full review — the direction every failure here points.
+ */
+function triageContext(state: PrState, review?: ReviewConfig): Record<string, unknown> {
+  const prior = state.lastBotReview;
+  const triage = review?.triage;
+  return {
+    /**
+     * Have we posted a review on this PR before? The triage phase has nothing
+     * to compare against on a first review, so it skips and the full brief
+     * runs.
+     */
+    reviewIsRereview: prior ? "true" : "false",
+    triageEnabled: triage?.enabled ? "true" : "false",
+    triageTimeoutSeconds: String(triage?.timeoutSeconds ?? 300),
+    // The prior verdict, projected for the first time: neither `lastBotReview`
+    // nor `pathsSinceLastBotReview` has ever reached a template context, so no
+    // prompt could see what we last said about this PR. Empty strings rather
+    // than absent keys where there is no prior review, so the `{{#if}}` guards
+    // in the triage prompt read as false.
+    priorReviewSha: prior?.sha ?? "",
+    priorReviewState: prior?.state ?? "",
+    priorReviewBody: prior?.body ? boundPriorReviewBody(prior.body) : "",
+    // A BOUNDED list. The delta since our last review can be hundreds of paths
+    // on a merge push, which is precisely the case triage is being asked to
+    // judge — so it is capped here, where the cap can say it applied, rather
+    // than by whatever truncates the prompt.
+    pathsSinceLastReview: renderPathsSinceLastReview(state.pathsSinceLastBotReview),
+  };
+}
+
+/** How much of a prior review body a triage prompt is handed. */
+const MAX_PRIOR_REVIEW_BODY_CHARS = 4000;
+
+/** How many changed paths the triage prompt is handed. */
+const MAX_TRIAGE_PATHS = 100;
+
+function boundPriorReviewBody(body: string): string {
+  return body.length > MAX_PRIOR_REVIEW_BODY_CHARS
+    ? `${body.slice(0, MAX_PRIOR_REVIEW_BODY_CHARS)}\n… truncated at ${MAX_PRIOR_REVIEW_BODY_CHARS} characters`
+    : body;
+}
+
+/**
+ * Render the delta since the last review as a bounded list.
+ *
+ * `""` when the read was degraded or there is no prior review — the same
+ * "unknown, so assume nothing" the gate above takes `null` to mean. A prompt
+ * handed an empty list would otherwise read it as "nothing changed" and
+ * downgrade a review it has no basis to downgrade.
+ */
+function renderPathsSinceLastReview(paths: string[] | null): string {
+  if (!paths || paths.length === 0) return "";
+  const shown = paths.slice(0, MAX_TRIAGE_PATHS);
+  const rest = paths.length - shown.length;
+  return rest > 0
+    ? `${shown.join("\n")}\n… and ${rest} more`
+    : shown.join("\n");
+}
+
 function specContext(state: PrState, review?: ReviewConfig): Record<string, unknown> {
   if (!review?.analysis?.enabled) return {};
   const rendered = renderSpecObligations(

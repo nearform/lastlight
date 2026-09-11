@@ -232,6 +232,9 @@ export function buildPrState(args: {
     // handed, every time.
     lastBotReview: null,
     pathsSinceLastBotReview: null,
+    // No prior review, so nothing to compare a diff fingerprint against. `null`
+    // is "unknown", which is the value that cannot suppress a review.
+    prDiffUnchangedSinceLastReview: null,
     ciReport: toCiReport(s.ci_jobs),
     // The `spec` axis's two ends. Both inert unless the case seeds them AND the
     // arm turns `review.analysis` on — with the axis off, `renderContext` omits

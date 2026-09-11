@@ -56,6 +56,7 @@ import {
   type FixConfig,
   type NotificationsConfig,
   type ReviewAnalysisConfig,
+  type ReviewTriageConfig,
   type ReviewConfig,
 } from "./config-types.js";
 import { ImageAllowlist, parseServiceSpec } from "./sandbox-services.js";
@@ -1207,6 +1208,38 @@ function sanitizeReview(
         out.generatedPaths = [...operator, ...names.filter((p) => !operator.includes(p))];
         break;
       }
+      case "skipUnchangedDiff": {
+        // Clamped DOWNWARD only, the mirror of `generatedPaths` above: turning
+        // the gate off buys the repo more review runs, which is entirely its
+        // call, on its own attention. Turning it ON over an operator who
+        // disabled it would suppress reviews the deployment asked to keep.
+        if (typeof value !== "boolean") {
+          warn("invalid-value", path, `Ignored "${path}": it must be true or false.`);
+          continue;
+        }
+        if (value === true && operatorRaw.skipUnchangedDiff === false) {
+          warn(
+            "policy-downgrade",
+            path,
+            `Ignored "${path}: true": this deployment has the unchanged-diff gate off, and a repo ` +
+              `may only ask for MORE review than the operator runs.`,
+          );
+          continue;
+        }
+        out.skipUnchangedDiff = value;
+        break;
+      }
+      case "triage":
+        // Operator-only for the same reason `analysis` is, one line below: it
+        // is spend. A repo turning triage ON would buy a cheap pass on the
+        // operator's budget; turning it OFF would buy the full evidence
+        // pipeline on every re-review, which is far more of the same.
+        warn(
+          "key-not-allowed",
+          path,
+          `Ignored "${path}": this key is set by the deployment operator only.`,
+        );
+        break;
       case "analysis":
         // Operator-only, for the same reason `fix.escalateModelAfterAttempt` is:
         // it is spend, and there is no "how careful is this repo" direction to
@@ -1538,10 +1571,23 @@ function shapeReview(raw: unknown): ReviewConfig {
     generatedPaths: Array.isArray(node.generatedPaths)
       ? node.generatedPaths.filter((p): p is string => typeof p === "string" && !!p.trim()).map((p) => p.trim())
       : d.generatedPaths,
-    // The one nested node in `review:` — operator-only, so a repo layer never
-    // contributes to it, but a merged view still has to project it leaf by leaf
-    // (the same totality rule the blocks above follow).
+    skipUnchangedDiff:
+      typeof node.skipUnchangedDiff === "boolean" ? node.skipUnchangedDiff : d.skipUnchangedDiff,
+    // The two nested nodes in `review:` — both operator-only, so a repo layer
+    // never contributes to either, but a merged view still has to project them
+    // leaf by leaf (the same totality rule the blocks above follow).
+    triage: shapeReviewTriage(node.triage, d.triage),
     analysis: shapeReviewAnalysis(node.analysis, d.analysis),
+  };
+}
+
+function shapeReviewTriage(raw: unknown, d: ReviewTriageConfig): ReviewTriageConfig {
+  const node = isPlainObject(raw) ? raw : {};
+  return {
+    // `!== false`, not `=== true`: this one ships ON, so an absent or garbled
+    // value must land on the shipped answer rather than silently disabling it.
+    enabled: node.enabled !== false,
+    timeoutSeconds: num(node.timeoutSeconds, d.timeoutSeconds),
   };
 }
 

@@ -607,7 +607,7 @@ const ladderH = guards.length * rowH + 80;
 		<tbody>
 			<tr><td><code>dispatch</code></td><td>An explicit request or the request label; <code>eager</code> on PR attention; a settled check suite under <code>after-checks</code></td><td><code>in_progress</code>, completed from the run's terminal transition</td></tr>
 			<tr><td><code>defer</code></td><td><code>on-request</code> with nobody asking; <code>after-checks</code> still waiting for CI; or reached on PR attention rather than a settle</td><td><code>queued</code>, or <code>neutral</code> under <code>on-request</code> — and only on a PR-attention event</td></tr>
-			<tr><td><code>skip</code></td><td>A draft, a commit we already reviewed, a push that changed only generated files since the review we posted, or another run in flight</td><td><strong>Nothing</strong> — except the generated-only case, which repeats the standing verdict on the new head. A run that never dispatches must otherwise not create a check and immediately conclude it</td></tr>
+			<tr><td><code>skip</code></td><td>A draft, a commit we already reviewed, a re-review whose own diff did not move, a push that changed only generated files since the review we posted, or another run in flight</td><td><strong>Nothing</strong> — except the unchanged-diff and generated-only cases, which repeat the standing verdict on the new head. A run that never dispatches must otherwise not create a check and immediately conclude it</td></tr>
 		</tbody>
 	</table>
 
@@ -630,8 +630,33 @@ const ladderH = guards.length * rowH + 80;
 		resolver skips. It measures from the review we posted rather than the last
 		commit we ran against, so a run that declined to post can't suppress the
 		change it never reviewed; and an unreadable or truncated diff dispatches.
-		This is the one skip that still leaves a check, because it is the only one
-		that would otherwise strand a required check on a commit nobody reviewed.
+		It is one of two skips that still leave a check, because they are the only
+		ones that would otherwise strand a required check on a commit nobody
+		reviewed.
+	</p>
+
+	<p>
+		<strong>Neither does a merge from your base branch.</strong> Merging
+		<code>main</code> into your branch changes no line you wrote, but it is a new
+		commit — and the delta since the last review is then every file
+		<code>main</code> brought in, so no list of paths could ever suppress it. The
+		resolver therefore asks the question directly: is the diff of your branch
+		against its base byte-identical to the one we already reviewed? It compares a
+		hash of that diff at both commits, which also covers a rebase that preserves
+		the tree and an empty force-push — and correctly does <em>not</em> fire when
+		the base touched a file you also touched, because the merged patch is then
+		genuinely different. Any read it cannot trust dispatches a full review.
+	</p>
+
+	<p>
+		<strong>And a small push does not earn a full one.</strong> Between those two
+		and a substantial new push sits a real but small delta, so a re-review begins
+		with one cheap pass that reads only what changed since the last review and
+		decides how much is owed. On its <code>light</code> answer the evidence
+		pipeline skips and the reviewer makes a single focused pass over the delta,
+		naming what the last review said. Every other outcome — an unclear answer, a
+		first review, or the switch turned off — is the review you get today. See
+		<a href="/docs/configuration"><code>review.triage</code></a>.
 	</p>
 
 	<p>
