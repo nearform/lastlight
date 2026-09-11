@@ -129,7 +129,7 @@ one slow or unreproducible check. Run tests cheaply per the **building** skill
 
 AFTER FIXING:
 1. Publish with `github_publish` — `{ owner: "{{owner}}", repo: "{{repo}}",
-   message: "fix(deps): make #{{prNumber}} mergeable" }`. It commits the whole
+   message: "chore(deps): make #{{prNumber}} mergeable" }`. It commits the whole
    working tree (the merge from step 1 and/or your CI fix) and pushes it in one
    step. Do NOT use `git commit` / `git push`: a commit built by git here is
    unsigned, and on a repo that requires signed commits one unsigned commit
