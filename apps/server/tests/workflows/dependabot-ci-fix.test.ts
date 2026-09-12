@@ -106,6 +106,26 @@ describe("dependabot-ci-fix — the publish step", () => {
     expect(prompt).not.toContain("git push origin HEAD");
   });
 
+  it("types the repair commit so it cannot cut a release", () => {
+    // The repair commit lands in the MANAGED repo, not here — this repo cuts
+    // releases by hand. On a managed repo that derives releases from commit
+    // types (release-please, semantic-release), `fix` is releasable, so a bump
+    // that merely needed a base-branch merge cut a patch release whose
+    // changelog read "make #123 mergeable". `chore` is hidden by the
+    // conventional-changelog presets.
+    //
+    // Asserted as the TYPE of the published message, not as
+    // `not.toContain("fix(deps):")`: that guards only the one value this
+    // replaced, and a later `feat(deps):` would sail through it while cutting a
+    // MINOR release — the same bug, one notch worse. Anchoring the type rejects
+    // every releasable type at once, and `chore(deps)!:` with them, since a `!`
+    // breaking marker cuts a MAJOR whatever the type in front of it.
+    const prompt = loadPromptTemplate("prompts/dependabot-ci-fix.md");
+    const message = prompt.match(/message:\s*"([^"]+)"/);
+    expect(message).not.toBeNull();
+    expect(message![1]).toMatch(/^chore\(deps\):/);
+  });
+
   it("tells the agent not to work around a refused publish", () => {
     const prompt = loadPromptTemplate("prompts/dependabot-ci-fix.md");
     expect(prompt).toMatch(/do NOT (fall back to |work around)/i);
