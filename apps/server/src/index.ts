@@ -1416,18 +1416,30 @@ async function main() {
               : undefined,
             config: config.digest,
             escalationLabel: REQUIRES_HUMAN_LABEL,
-            post: async (channel, text, blocks) => {
+            post: async (channel, top, thread) => {
               // No unfurls: a digest cites several PRs, and a preview card per
-              // citation buries the six lines of summary they annotate.
-              const ts = await slackConnector!.sendMessage(channel, null, text, blocks as KnownBlock[], {
+              // citation buries the summary they annotate.
+              const ts = await slackConnector!.sendMessage(channel, null, top.text, top.blocks as KnownBlock[], {
                 unfurl: false,
               });
-              // A digest is a thing the bot wrote, so a 👍/👎 on it is a real
-              // signal about whether it is worth sending (issue #255). The `ts`
-              // exists only in this response — a send site that drops it makes
-              // the reaction unattributable.
-              if (typeof ts === "string" && config.feedback.enabled) {
-                await registerSlackAnchor(db, { channelId: channel, messageId: ts, workflowName: "repo-digest" });
+              // Thread the detail under the top-level post (issue #383). If the top-level
+              // send returned no ts we cannot thread — post the detail to the channel
+              // unthreaded rather than drop it, and warn.
+              if (typeof ts === "string") {
+                await slackConnector!.sendMessage(channel, ts, thread.text, thread.blocks as KnownBlock[], {
+                  unfurl: false,
+                });
+                // A digest is a thing the bot wrote, so a 👍/👎 on it is a real signal
+                // (issue #255). Anchor on the TOP-LEVEL message — that is what a reader
+                // reacts to in the channel — and the ts exists only in this response.
+                if (config.feedback.enabled) {
+                  await registerSlackAnchor(db, { channelId: channel, messageId: ts, workflowName: "repo-digest" });
+                }
+              } else {
+                logger("repo-digest").warn("Digest top-level post returned no ts — posting detail unthreaded", { channel });
+                await slackConnector!.sendMessage(channel, null, thread.text, thread.blocks as KnownBlock[], {
+                  unfurl: false,
+                });
               }
             },
           }

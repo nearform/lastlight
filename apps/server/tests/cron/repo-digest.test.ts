@@ -40,7 +40,7 @@ import {
   type RepoDigestDeps,
 } from "#src/cron/repo-digest.js";
 import { resolveRepoChannel } from "#src/notify/repo-channel.js";
-import { renderDigest, type RepoFacts } from "#src/notify/digest-blocks.js";
+import { renderDigest, type DigestMessage, type RepoFacts } from "#src/notify/digest-blocks.js";
 import { CRON_NAME_KEY } from "#src/cron/repo-crons.js";
 
 let db: StateDb;
@@ -265,8 +265,8 @@ describe("repo digest — the tick", () => {
 
     expect(summarize).toHaveBeenCalled();
     expect(post).toHaveBeenCalledTimes(1);
-    const [, text] = post.mock.calls[0] as unknown as [string, string];
-    expect(text).toContain("acme/widgets");
+    const [, top] = post.mock.calls[0] as unknown as [string, DigestMessage, DigestMessage];
+    expect(top.text).toContain("acme/widgets");
   });
 
   it("includes the narrative when the model succeeds", async () => {
@@ -279,8 +279,8 @@ describe("repo digest — the tick", () => {
       }),
       { repos: ["acme/widgets"] },
     );
-    const [, text] = post.mock.calls[0] as unknown as [string, string];
-    expect(text).toContain("A quiet week");
+    const [, top] = post.mock.calls[0] as unknown as [string, DigestMessage, DigestMessage];
+    expect(top.text).toContain("A quiet week");
   });
 
   it("skips the model entirely when narrative is off", async () => {
@@ -305,8 +305,8 @@ describe("repo digest — the tick", () => {
       runRepoDigest(deps({ post, github }), { repos: ["acme/widgets"] }),
     ).resolves.toBeUndefined();
     expect(post).toHaveBeenCalledTimes(1);
-    const [, text] = post.mock.calls[0] as unknown as [string, string];
-    expect(text).toContain("acme/widgets");
+    const [, top] = post.mock.calls[0] as unknown as [string, DigestMessage, DigestMessage];
+    expect(top.text).toContain("acme/widgets");
   });
 
   it("posts the week's content when the fetch succeeds", async () => {
@@ -334,9 +334,9 @@ describe("repo digest — the tick", () => {
       ]),
     });
     await runRepoDigest(deps({ post, github }), { repos: ["acme/widgets"] });
-    const [, text] = post.mock.calls[0] as unknown as [string, string];
-    expect(text).toContain("Stop Slack unfurling every PR link");
-    expect(text).toContain("<https://github.com/acme/widgets/pull/342|#342>");
+    const [,, thread] = post.mock.calls[0] as unknown as [string, DigestMessage, DigestMessage];
+    expect(thread.text).toContain("Stop Slack unfurling every PR link");
+    expect(thread.text).toContain("<https://github.com/acme/widgets/pull/342|#342>");
   });
 
   it("serves the other repos when ONE fails, then FAILS the tick", async () => {
@@ -393,6 +393,19 @@ describe("repo digest — the tick", () => {
     const post = vi.fn(async () => {});
     await runRepoDigest(deps({ post }), {});
     expect(post).not.toHaveBeenCalled();
+  });
+
+  it("posts a brief top-level message and threads the detail (issue #383)", async () => {
+    const post = vi.fn(async () => {});
+    await runRepoDigest(deps({ post }), { repos: ["acme/widgets"] });
+    expect(post).toHaveBeenCalledTimes(1);
+    const [channel, top, thread] = post.mock.calls[0] as unknown as [string, DigestMessage, DigestMessage];
+    expect(channel).toBe("C0FALLBACK");
+    // top-level = header only (no channel/stat detail); thread = the stats.
+    expect(top.blocks[0]).toMatchObject({ type: "header" });
+    expect(JSON.stringify(top.blocks)).not.toContain("Last Light");
+    expect(thread.text).toContain("Repo");
+    expect(thread.text).toContain("Last Light");
   });
 });
 
@@ -727,27 +740,27 @@ describe("repo digest — rendering", () => {
   };
 
   it("renders the facts into both the text and the blocks", () => {
-    const { text, blocks } = renderDigest(facts);
-    expect(text).toContain("7 PRs merged, 3 opened, 1 closed unmerged");
-    expect(text).toContain("14 runs — 12 ok, 2 failed");
-    expect(text).toContain("$4.12");
-    expect(text).toContain("#412");
-    expect(text).toContain("waiting on a human:");
-    expect(blocks[0]).toMatchObject({ type: "header" });
-    expect(JSON.stringify(blocks)).toContain("Last Light");
+    const { top, thread } = renderDigest(facts);
+    expect(thread.text).toContain("7 PRs merged, 3 opened, 1 closed unmerged");
+    expect(thread.text).toContain("14 runs — 12 ok, 2 failed");
+    expect(thread.text).toContain("$4.12");
+    expect(thread.text).toContain("#412");
+    expect(thread.text).toContain("waiting on a human:");
+    expect(top.blocks[0]).toMatchObject({ type: "header" });
+    expect(JSON.stringify(thread.blocks)).toContain("Last Light");
   });
 
   it("links every PR number to GitHub, in Slack's <url|text> form", () => {
-    const { text } = renderDigest(facts);
-    expect(text).toContain("<https://github.com/acme/widgets/pull/412|#412>");
-    expect(text).toContain("<https://github.com/acme/widgets/pull/401|#401>");
+    const { thread } = renderDigest(facts);
+    expect(thread.text).toContain("<https://github.com/acme/widgets/pull/412|#412>");
+    expect(thread.text).toContain("<https://github.com/acme/widgets/pull/401|#401>");
   });
 
   it("links them in the BLOCK bodies too, not just the fallback text", () => {
     // The two are built from the same lines, so they cannot disagree — but the
     // blocks are what anyone actually reads, so assert them directly.
-    const { blocks } = renderDigest(facts);
-    const sections = blocks
+    const { thread } = renderDigest(facts);
+    const sections = thread.blocks
       .filter((b): b is Extract<typeof b, { type: "section" }> => b.type === "section")
       .map((b) => (b.text as { text: string }).text)
       .join("\n");
@@ -758,21 +771,21 @@ describe("repo digest — rendering", () => {
   it("never emits `<#412>` — that is Slack's CHANNEL reference syntax", () => {
     // The bug the link syntax has to avoid: `<#N>` renders as a broken channel
     // link, not a PR link.
-    const { text } = renderDigest(facts);
-    expect(text).not.toContain("<#412>");
-    expect(text).not.toContain("<#401>");
+    const { thread } = renderDigest(facts);
+    expect(thread.text).not.toContain("<#412>");
+    expect(thread.text).not.toContain("<#401>");
   });
 
   it("puts the narrative above the bullets, and omits the block when absent", () => {
     const withNarrative = renderDigest(facts, "Busy week.");
-    expect(JSON.stringify(withNarrative.blocks)).toContain("Busy week.");
+    expect(JSON.stringify(withNarrative.top.blocks)).toContain("Busy week.");
     const without = renderDigest(facts);
-    expect(JSON.stringify(without.blocks)).not.toContain("Busy week.");
+    expect(JSON.stringify(without.top.blocks)).not.toContain("Busy week.");
   });
 
   it("says so plainly when the bot did nothing", () => {
     const quiet = { ...facts, botFacts: { runs: 0, failed: 0, byWorkflow: {}, costUsd: 0, phases: 0 } };
-    expect(renderDigest(quiet).text).toContain("No runs this period");
+    expect(renderDigest(quiet).thread.text).toContain("No runs this period");
   });
 
   it("pluralizes a count of one", () => {
@@ -780,7 +793,7 @@ describe("repo digest — rendering", () => {
       ...facts,
       repoFacts: { ...facts.repoFacts, prsMerged: 1, prsClosedUnmerged: 0 },
     };
-    expect(renderDigest(one).text).toContain("1 PR merged");
+    expect(renderDigest(one).thread.text).toContain("1 PR merged");
   });
 
   // ── the week's content ───────────────────────────────────────────────────
@@ -794,7 +807,7 @@ describe("repo digest — rendering", () => {
     // The old renderer hardcoded `/pull/` because every number it printed was
     // an open PR. Issues broke that assumption, so the URL is now the API's
     // answer rather than a guess.
-    const { text } = renderDigest(
+    const { thread } = renderDigest(
       withContent({
         merged: [
           { number: 342, title: "Stop unfurling", url: "https://github.com/acme/widgets/pull/342", author: "cliftonc" },
@@ -804,13 +817,13 @@ describe("repo digest — rendering", () => {
         ],
       }),
     );
-    expect(text).toContain("<https://github.com/acme/widgets/pull/342|#342>");
-    expect(text).toContain("<https://github.com/acme/widgets/issues/345|#345>");
-    expect(text).toContain("Stop unfurling");
+    expect(thread.text).toContain("<https://github.com/acme/widgets/pull/342|#342>");
+    expect(thread.text).toContain("<https://github.com/acme/widgets/issues/345|#345>");
+    expect(thread.text).toContain("Stop unfurling");
   });
 
   it("shows what a merged PR closed, and how many were folded away", () => {
-    const { text } = renderDigest(
+    const { thread } = renderDigest(
       withContent({
         issuesClosed: 4,
         merged: [
@@ -828,12 +841,12 @@ describe("repo digest — rendering", () => {
         closedByMergedPr: 3,
       }),
     );
-    expect(text).toContain("(closes <https://github.com/acme/widgets/issues/50|#50>)");
-    expect(text).toContain("3 by merged PRs above");
+    expect(thread.text).toContain("(closes <https://github.com/acme/widgets/issues/50|#50>)");
+    expect(thread.text).toContain("3 by merged PRs above");
   });
 
   it("counts the real total in the heading and tails the remainder", () => {
-    const { text } = renderDigest(
+    const { thread } = renderDigest(
       withContent({
         prsMerged: 20,
         merged: [
@@ -842,25 +855,25 @@ describe("repo digest — rendering", () => {
         mergedByBots: 6,
       }),
     );
-    expect(text).toContain("Merged (20)");
-    expect(text).toContain("…and 19 more");
-    expect(text).toContain("plus 6 bot PRs");
+    expect(thread.text).toContain("Merged (20)");
+    expect(thread.text).toContain("…and 19 more");
+    expect(thread.text).toContain("plus 6 bot PRs");
   });
 
   it("omits a content section entirely when there is nothing in it", () => {
     // A quiet week, or a failed enrichment fetch, must not print three empty
     // headings — the digest degrades to exactly what it was before the lists.
-    const { text, blocks } = renderDigest(facts);
-    expect(text).not.toContain("Merged (");
-    expect(text).not.toContain("New issues");
-    expect(JSON.stringify(blocks)).toContain("Repo");
+    const { thread } = renderDigest(facts);
+    expect(thread.text).not.toContain("Merged (");
+    expect(thread.text).not.toContain("New issues");
+    expect(JSON.stringify(thread.blocks)).toContain("Repo");
   });
 
   it("links a summary's #references only when the digest knows the number", () => {
     // The model is asked to cite work by number and forbidden to write URLs,
     // so a hallucinated `#999` must read as plain text rather than as a
     // confident link to somebody else's pull request.
-    const { text } = renderDigest(
+    const { top } = renderDigest(
       withContent({
         merged: [
           { number: 342, title: "Stop unfurling", url: "https://github.com/acme/widgets/pull/342", author: "d" },
@@ -868,16 +881,16 @@ describe("repo digest — rendering", () => {
       }),
       "Review reliability dominated (#342), unlike #999.",
     );
-    expect(text).toContain("<https://github.com/acme/widgets/pull/342|#342>");
-    expect(text).toContain("#999");
-    expect(text).not.toContain("|#999>");
+    expect(top.text).toContain("<https://github.com/acme/widgets/pull/342|#342>");
+    expect(top.text).toContain("#999");
+    expect(top.text).not.toContain("|#999>");
   });
 
   it("neutralizes Slack control sequences in untrusted titles and in the summary", () => {
     // An issue title is written by anyone who can open an issue, and it lands
     // in a channel unedited. `<!channel>` is not markup a formatter strips —
     // Slack acts on it — so it must never survive as a literal `<`.
-    const { text } = renderDigest(
+    const { top, thread } = renderDigest(
       withContent({
         newIssues: [
           {
@@ -890,8 +903,9 @@ describe("repo digest — rendering", () => {
       }),
       "Someone asked for <!here> attention.",
     );
-    expect(text).not.toContain("<!channel>");
-    expect(text).not.toContain("<!here>");
-    expect(text).toContain("&lt;!channel&gt;");
+    // Issue title (untrusted) lands in the thread; narrative in the top.
+    expect(thread.text).not.toContain("<!channel>");
+    expect(top.text).not.toContain("<!here>");
+    expect(thread.text).toContain("&lt;!channel&gt;");
   });
 });
