@@ -45,8 +45,9 @@ import {
   defaultDependenciesConfig,
   defaultFixConfig,
   defaultNotificationsConfig,
-  defaultReviewConfig,
+  defaultReviewPolicy,
   dependencyImpactRank,
+  GATE_OPERATOR_ONLY_KEYS,
   isDependencyImpact,
   isDiagnosisClass,
   isReviewTrigger,
@@ -54,10 +55,9 @@ import {
   type DependenciesConfig,
   type DisabledConfig,
   type FixConfig,
+  type GateConfig,
   type NotificationsConfig,
-  type ReviewAnalysisConfig,
-  type ReviewTriageConfig,
-  type ReviewConfig,
+  type ReviewPolicy,
 } from "./config-types.js";
 import { ImageAllowlist, parseServiceSpec } from "./sandbox-services.js";
 
@@ -155,6 +155,7 @@ export const DEFAULT_REPO_CONFIG_ALLOW_KEYS: readonly string[] = [
   "review",
   "notifications",
   "services",
+  "gate",
 ];
 
 /**
@@ -310,7 +311,21 @@ export interface RepoMergedConfig {
    */
   fix: FixConfig;
   dependencies: DependenciesConfig;
-  review: ReviewConfig;
+  /**
+   * The review POLICY — without its duration leaves (`triage.timeoutSeconds`,
+   * the `analysis.*TimeoutSeconds` budgets). Those are operator-only and their
+   * only default lives in `config/default.yaml` (issue #385), so this pure
+   * merge neither needs nor carries them; core re-attaches the operator's.
+   */
+  review: ReviewPolicy;
+  /**
+   * The `gate:` leaves the base carried, with the repo's clamped
+   * `timeoutSeconds` folded in (issue #385). PARTIAL on purpose: there is no TS
+   * default for a timeout, so a base with no `gate:` node (the CLI's offline
+   * validator, a hand-built test base) yields only what the repo set. Core
+   * composes the effective block over the operator's resolved one.
+   */
+  gate: Partial<GateConfig>;
   /**
    * Where this repo's outbound notifications go (the weekly Slack digest).
    * Routing, not policy — see {@link NotificationsConfig} for why the one-way
@@ -341,6 +356,7 @@ export interface RepoConfigSources {
   dependencies: Record<string, ConfigSource>;
   review: Record<string, ConfigSource>;
   notifications: Record<string, ConfigSource>;
+  gate: Record<string, ConfigSource>;
 }
 
 /** Result of {@link resolveRepoConfig}. */
@@ -658,6 +674,9 @@ export function sanitizeRepoConfigLayer(
       case "services":
         assignIfAny(layer, "services", sanitizeServices(value, policy, warn));
         break;
+      case "gate":
+        assignIfAny(layer, "gate", sanitizeGate(value, policy, base, warn));
+        break;
       default:
         // Allow-listed by the operator but not a key this module knows how to
         // bound. Refusing is the safe direction: an unbounded pass-through
@@ -823,8 +842,8 @@ function sanitizeApproval(
 // value, so a dropped leaf resolves to exactly it.
 //
 // A handful of leaves are operator-only rather than clamped — they control spend
-// (`fix.escalateModelAfterAttempt`), a shared resource (`fix.gateTimeoutSeconds`)
-// or an escape hatch that a `max()` clamp would weld shut for CI-less repos
+// (`fix.escalateModelAfterAttempt`), a resource ceiling (`gate.maxTimeoutSeconds`,
+// `gate.phaseTimeoutSeconds`) or an escape hatch that a `max()` clamp would weld shut for CI-less repos
 // (`dependencies.minSettledChecks`). Those are reported as `key-not-allowed`,
 // the same code an operator narrowing `allowKeys` produces, because from the
 // repo's point of view it is the same answer: this key is not yours to set.
@@ -966,9 +985,10 @@ function sanitizeFix(
         break;
       }
       case "escalateModelAfterAttempt":
-      case "gateTimeoutSeconds":
-        // Operator-only: one is spend control, the other is a shared-resource
-        // budget. Neither is a "how careful is this repo" dial.
+        // Operator-only: spend control, not a "how careful is this repo" dial.
+        // (`gateTimeoutSeconds` is no longer a fix key at all — the gate budget
+        // is `gate.timeoutSeconds`, and the old spelling is an operator-overlay
+        // alias only, so a repo writing it falls to the default branch below.)
         warn(
           "key-not-allowed",
           path,
@@ -1106,7 +1126,7 @@ function sanitizeReview(
     warn("invalid-value", "review", `Ignored "review" in .lastlight/${REPO_CONFIG_FILE}: it must be a mapping.`);
     return undefined;
   }
-  const defaults = defaultReviewConfig();
+  const defaults = defaultReviewPolicy();
   const operatorRaw = operatorBlockNode(base, "review");
   const out: Record<string, unknown> = {};
 
@@ -1256,6 +1276,69 @@ function sanitizeReview(
       default:
         warn("invalid-value", path, `Ignored "${path}": it is not a key of the review policy.`);
     }
+  }
+  return out;
+}
+
+/**
+ * `gate:` — the build/test gate budget (issue #385).
+ *
+ * THE ONE DELIBERATE EXCEPTION to "a repo may only be more conservative": a
+ * repo may RAISE `gate.timeoutSeconds` above the operator's value, because only
+ * the repo knows how long its own suite takes, and a budget below the suite's
+ * real duration is not conservative — it is a guaranteed false red. What bounds
+ * it is the operator's ceiling instead: `min(repo, gate.maxTimeoutSeconds)`,
+ * clamped (kept at the ceiling, with a `policy-downgrade` warning) rather than
+ * dropped, so a repo asking for too much still gets the most it may have.
+ *
+ * `maxTimeoutSeconds` and `phaseTimeoutSeconds` are operator-only (resource
+ * ceilings), dropped as `key-not-allowed`.
+ *
+ * With no operator ceiling in reach (the CLI's offline validator merges against
+ * an empty base) the value is shape-checked only; core re-clamps against the
+ * resolved operator ceiling when it composes the run's effective gate.
+ */
+function sanitizeGate(
+  raw: unknown,
+  policy: RepoConfigPolicy,
+  base: RepoConfigBase,
+  warn: Warn,
+): Record<string, unknown> | undefined {
+  if (!isPlainObject(raw)) {
+    warn("invalid-value", "gate", `Ignored "gate" in .lastlight/${REPO_CONFIG_FILE}: it must be a mapping.`);
+    return undefined;
+  }
+  const operatorRaw = operatorBlockNode(base, "gate");
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const path = `gate.${key}`;
+    if (!isAllowedKey(path, policy.allowKeys)) {
+      warn("key-not-allowed", path, `Ignored "${path}": a repo may not set this key.`);
+      continue;
+    }
+    if (GATE_OPERATOR_ONLY_KEYS.includes(key)) {
+      warn("key-not-allowed", path, `Ignored "${path}": this key is set by the deployment operator only.`);
+      continue;
+    }
+    if (key !== "timeoutSeconds") {
+      warn("invalid-value", path, `Ignored "${path}": it is not a key of the gate block.`);
+      continue;
+    }
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+      warn("invalid-value", path, `Ignored "${path}": it must be a positive number of seconds.`);
+      continue;
+    }
+    const ceiling = operatorRaw.maxTimeoutSeconds;
+    if (typeof ceiling === "number" && Number.isFinite(ceiling) && value > ceiling) {
+      warn(
+        "policy-downgrade",
+        path,
+        `Clamped "${path}: ${value}" to ${ceiling}: this deployment's gate.maxTimeoutSeconds.`,
+      );
+      out.timeoutSeconds = ceiling;
+      continue;
+    }
+    out.timeoutSeconds = value;
   }
   return out;
 }
@@ -1502,7 +1585,22 @@ function shapeMerged(value: Record<string, unknown>): RepoMergedConfig {
     review: shapeReview(value.review),
     notifications: shapeNotifications(value.notifications),
     services: shapeServices(value.services),
+    gate: shapeGate(value.gate),
   };
+}
+
+/**
+ * The positive numeric `gate:` leaves present in the merged node — no fallback
+ * (see {@link RepoMergedConfig.gate}).
+ */
+function shapeGate(raw: unknown): Partial<GateConfig> {
+  const node = isPlainObject(raw) ? raw : {};
+  const out: Partial<GateConfig> = {};
+  for (const key of ["timeoutSeconds", "maxTimeoutSeconds", "phaseTimeoutSeconds"] as const) {
+    const v = node[key];
+    if (typeof v === "number" && Number.isFinite(v) && v > 0) out[key] = v;
+  }
+  return out;
 }
 
 /** Total over `services:` — keeps each well-formed declaration as opaque plain data. */
@@ -1541,7 +1639,6 @@ function shapeFix(raw: unknown): FixConfig {
   return {
     maxAttempts: num(node.maxAttempts, d.maxAttempts),
     localIterations: num(node.localIterations, d.localIterations),
-    gateTimeoutSeconds: num(node.gateTimeoutSeconds, d.gateTimeoutSeconds),
     escalateModelAfterAttempt: num(node.escalateModelAfterAttempt, d.escalateModelAfterAttempt),
     maxCostUsd: node.maxCostUsd === null ? null : num(node.maxCostUsd, d.maxCostUsd ?? 0),
     maxFlakyDeferrals: num(node.maxFlakyDeferrals, d.maxFlakyDeferrals),
@@ -1560,8 +1657,8 @@ function shapeDependencies(raw: unknown): DependenciesConfig {
   };
 }
 
-function shapeReview(raw: unknown): ReviewConfig {
-  const d = defaultReviewConfig();
+function shapeReview(raw: unknown): ReviewPolicy {
+  const d = defaultReviewPolicy();
   const node = isPlainObject(raw) ? raw : {};
   return {
     postsCheck: typeof node.postsCheck === "boolean" ? node.postsCheck : d.postsCheck,
@@ -1581,17 +1678,16 @@ function shapeReview(raw: unknown): ReviewConfig {
   };
 }
 
-function shapeReviewTriage(raw: unknown, d: ReviewTriageConfig): ReviewTriageConfig {
+function shapeReviewTriage(raw: unknown, _d: ReviewPolicy["triage"]): ReviewPolicy["triage"] {
   const node = isPlainObject(raw) ? raw : {};
   return {
     // `!== false`, not `=== true`: this one ships ON, so an absent or garbled
     // value must land on the shipped answer rather than silently disabling it.
     enabled: node.enabled !== false,
-    timeoutSeconds: num(node.timeoutSeconds, d.timeoutSeconds),
   };
 }
 
-function shapeReviewAnalysis(raw: unknown, d: ReviewAnalysisConfig): ReviewAnalysisConfig {
+function shapeReviewAnalysis(raw: unknown, d: ReviewPolicy["analysis"]): ReviewPolicy["analysis"] {
   const node = isPlainObject(raw) ? raw : {};
   return {
     enabled: node.enabled === true,
@@ -1609,8 +1705,6 @@ function shapeReviewAnalysis(raw: unknown, d: ReviewAnalysisConfig): ReviewAnaly
     probeLifecycleScripts: node.probeLifecycleScripts === true,
     probeTypecheck: node.probeTypecheck === true,
     probeCoverage: node.probeCoverage === true,
-    prepareTimeoutSeconds: num(node.prepareTimeoutSeconds, d.prepareTimeoutSeconds),
-    coverageTimeoutSeconds: num(node.coverageTimeoutSeconds, d.coverageTimeoutSeconds),
     probeRounds: num(node.probeRounds, d.probeRounds),
     maxInlineComments: num(node.maxInlineComments, d.maxInlineComments),
     // Total, leaf-by-leaf like everything else here, but the KEY SET is the
@@ -1663,6 +1757,7 @@ function shapeSources(sources: Record<string, unknown>): RepoConfigSources {
     // the FIRST block that nests, and `RepoConfigSources` is deliberately flat —
     // the dashboard renders provenance as a leaf→layer table, not a tree.
     notifications: nestedSourceMap(sources.notifications),
+    gate: sourceMap(sources.gate),
   };
 }
 

@@ -6,8 +6,9 @@ import {
   defaultDependenciesConfig,
   defaultFixConfig,
   defaultNotificationsConfig,
-  defaultReviewConfig,
 } from "lastlight-shared/config-types";
+// The COMPLETE review block (durations included) is derived from config/default.yaml by core (#385).
+import { defaultGateConfig, defaultReviewConfig } from "#src/config/config.js";
 import {
   DEFAULT_REPO_CONFIG_ALLOW_KEYS,
   defaultRepoConfigPolicy,
@@ -136,6 +137,81 @@ describe("the fix / dependencies / review defaults", () => {
     // 09 locked decision 14 deleted `review.afterChecks`; it must not come back.
     expect(defaultReviewConfig()).not.toHaveProperty("afterChecks");
     expect(defaultYaml().review).not.toHaveProperty("afterChecks");
+  });
+});
+
+describe("a repo's gate: block (#385) — the one leaf a repo may LOOSEN, to a ceiling", () => {
+  // The SHIPPED allow-list, exactly as a deployment that says nothing gets it.
+  const policy = defaultRepoConfigPolicy();
+  // The operator's block as boot resolves it from config/default.yaml.
+  const operator = defaultGateConfig();
+  const gateBase = (): RepoConfigBase => {
+    const b = base();
+    b.value.gate = { ...operator };
+    b.sources.gate = { timeoutSeconds: "default", maxTimeoutSeconds: "default", phaseTimeoutSeconds: "default" };
+    return b;
+  };
+
+  it("is on the default allow-list", () => {
+    expect(DEFAULT_REPO_CONFIG_ALLOW_KEYS).toContain("gate");
+    expect(defaultYamlAllowKeys()).toContain("gate");
+  });
+
+  it("honours a repo RAISING gate.timeoutSeconds within the operator ceiling", () => {
+    const raised = operator.timeoutSeconds + 1;
+    expect(raised).toBeLessThanOrEqual(operator.maxTimeoutSeconds);
+    const resolved = resolveRepoConfig(gateBase(), policy, layer({ gate: { timeoutSeconds: raised } }));
+
+    expect(resolved.warnings).toEqual([]);
+    expect(resolved.merged.gate.timeoutSeconds).toBe(raised);
+    expect(resolved.sources.gate.timeoutSeconds).toBe("repo");
+  });
+
+  it("clamps a value above gate.maxTimeoutSeconds to the ceiling, and says so", () => {
+    const resolved = resolveRepoConfig(
+      gateBase(),
+      policy,
+      layer({ gate: { timeoutSeconds: operator.maxTimeoutSeconds * 10 } }),
+    );
+
+    expect(resolved.merged.gate.timeoutSeconds).toBe(operator.maxTimeoutSeconds);
+    expect(resolved.warnings.map((w) => [w.code, w.path])).toEqual([["policy-downgrade", "gate.timeoutSeconds"]]);
+  });
+
+  it("drops the operator-only ceilings with key-not-allowed", () => {
+    const resolved = resolveRepoConfig(
+      gateBase(),
+      policy,
+      layer({ gate: { maxTimeoutSeconds: 99_999, phaseTimeoutSeconds: 99_999 } }),
+    );
+
+    expect(resolved.merged.gate).toEqual(operator);
+    expect(resolved.warnings.map((w) => [w.code, w.path])).toEqual([
+      ["key-not-allowed", "gate.maxTimeoutSeconds"],
+      ["key-not-allowed", "gate.phaseTimeoutSeconds"],
+    ]);
+  });
+
+  it("rejects a non-positive or non-numeric value", () => {
+    const { layer: sanitized, warnings } = sanitizeRepoConfigLayer(
+      { gate: { timeoutSeconds: "a while" } },
+      policy,
+      gateBase(),
+      "acme/widget",
+    );
+    expect(sanitized).toEqual({});
+    expect(warnings.map((w) => w.code)).toEqual(["invalid-value"]);
+  });
+
+  it("offline (no operator ceiling in reach) validates shape only — core re-clamps at run time", () => {
+    const { layer: sanitized, warnings } = sanitizeRepoConfigLayer(
+      { gate: { timeoutSeconds: 5000 } },
+      policy,
+      { value: {}, sources: {} },
+      "acme/widget",
+    );
+    expect(warnings).toEqual([]);
+    expect(sanitized).toEqual({ gate: { timeoutSeconds: 5000 } });
   });
 });
 

@@ -41,6 +41,12 @@ export interface RunAgentScriptInput {
    *  The artifact bearer token travels via env (`LASTLIGHT_ARTIFACT_TOKEN`,
    *  in the pod's creds Secret), never as an argv value. */
   readonly artifactUpload: boolean;
+  /**
+   * The run's effective `gate.timeoutSeconds` — always emitted as
+   * `--gate-timeout <n>` (issue #385). A NUMBER, validated and rounded up by
+   * {@link buildRunAgentScript}, so it is safe to splice into the script text.
+   */
+  readonly gateTimeoutSeconds: number;
 }
 
 function agentRunFlags(input: RunAgentScriptInput): string {
@@ -50,6 +56,7 @@ function agentRunFlags(input: RunAgentScriptInput): string {
       : ""
     : "--no-web-search";
   return [
+    `--gate-timeout ${Math.ceil(input.gateTimeoutSeconds)}`,
     input.profile ? `--profile "$3"` : "",
     input.thinking ? `--thinking "$4"` : "",
     webSearchFlag,
@@ -77,6 +84,15 @@ function agentRunFlags(input: RunAgentScriptInput): string {
  * 3. `exit $rc` — restores the agent's own result regardless of step 2.
  */
 export function buildRunAgentScript(input: RunAgentScriptInput): string {
+  if (
+    typeof input.gateTimeoutSeconds !== "number" ||
+    !Number.isFinite(input.gateTimeoutSeconds) ||
+    input.gateTimeoutSeconds <= 0
+  ) {
+    throw new Error(
+      `Refusing to build the agent script: gateTimeoutSeconds must be a positive number (got ${String(input.gateTimeoutSeconds)})`,
+    );
+  }
   const flags = agentRunFlags(input);
   const runAgent =
     `agentic-pi run --model "$1" --sandbox none --no-session ${flags} ` +

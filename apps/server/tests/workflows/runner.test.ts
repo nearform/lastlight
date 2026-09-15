@@ -55,6 +55,9 @@ const BASE_CTX: TemplateContext = {
   taskId: "widget-42",
   issueDir: ".lastlight/issue-42",
   bootstrapLabel: "lastlight:bootstrap",
+  // Seeded from resolved config in production (#385) — the until_bash check
+  // with no phase `timeout_seconds` reads it; there is no engine fallback.
+  timeouts: { agentSeconds: 1800, commandSeconds: 300, untilBashSeconds: 30 },
 };
 
 function makeSuccessResult(output = "success output") {

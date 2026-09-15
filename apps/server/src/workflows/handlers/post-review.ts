@@ -23,7 +23,7 @@ import {
   type TieredFindings,
 } from "../../engine/github/review-poster.js";
 import { getRuntimeConfig } from "../../config/config.js";
-import { defaultReviewConfig } from "lastlight-shared/config-types";
+import { defaultReviewPolicy } from "lastlight-shared/config-types";
 import {
   hasMaterialChange,
   resolveReviewPost,
@@ -802,12 +802,12 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       return {
         maxInlineComments: toBudget(
           ctx.maxInlineComments,
-          defaultReviewConfig().analysis.maxInlineComments,
+          defaultReviewPolicy().analysis.maxInlineComments,
         ),
         thresholds: parseThresholds(ctx.boundaryThresholds),
         internalFloor: toFloor(
           ctx.internalFloor,
-          defaultReviewConfig().analysis.internalFloor,
+          defaultReviewPolicy().analysis.internalFloor,
         ),
         // `"null"` is the literal the projection writes for the documented
         // "unlimited body overflow" value; anything else degrades to the
@@ -819,12 +819,12 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
             ? null
             : toBudget(
                 ctx.maxBodyComments,
-                defaultReviewConfig().analysis.maxBodyComments ?? 0,
+                defaultReviewPolicy().analysis.maxBodyComments ?? 0,
               ),
       };
     }
     const analysis =
-      getRuntimeConfig()?.review?.analysis ?? defaultReviewConfig().analysis;
+      getRuntimeConfig()?.review?.analysis ?? defaultReviewPolicy().analysis;
     return {
       maxInlineComments: analysis.maxInlineComments,
       thresholds: analysis.thresholds ?? {},

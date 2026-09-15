@@ -100,6 +100,13 @@ If any step fails, fix it and re-run only what failed until clean. Do not commit
 or report done until the full build, test suite, lint, and typecheck all pass.
 Cite the actual command output — static reasoning is not verification.
 
+**Long commands are judged by exit code, under one bounded timeout.** Give
+installs, builds and the full test suite a bash `timeout` of the gate budget your
+prompt states (never a guessed chat-sized number), and run them as
+`<cmd> > /tmp/gate.log 2>&1; echo EXIT=$?` — `EXIT=0` is a pass, anything else a
+fail; read the log tail only to diagnose. A timed-out full suite is reported as
+timed out, never re-run with a larger timeout or a narrower `grep`/filter.
+
 ## TDD (when implementing)
 
 When you are *writing* code (not just verifying a PR): write the **failing test

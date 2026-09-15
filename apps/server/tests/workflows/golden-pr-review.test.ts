@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { getWorkflow, loadPromptTemplate } from "#src/workflows/loader.js";
+import { defaultReviewConfig, defaultSandboxTimeouts } from "#src/config/config.js";
 import {
   buildDag,
   getReadyNodes,
@@ -445,6 +446,28 @@ class FailOnePromptAgent extends FakeAgentPort {
   }
 }
 
+/**
+ * The config-derived budgets `dispatchWorkflow` + `renderContext` seed on every
+ * real pr-review run (issue #385). This harness drives the scheduler directly,
+ * so it seeds them itself — from the same resolved defaults, never a literal.
+ */
+function timeoutContext(): Record<string, unknown> {
+  const review = defaultReviewConfig();
+  const sandbox = defaultSandboxTimeouts();
+  return {
+    timeouts: {
+      agentSeconds: sandbox.agentTimeoutSeconds,
+      commandSeconds: sandbox.commandTimeoutSeconds,
+      untilBashSeconds: sandbox.untilBashTimeoutSeconds,
+    },
+    triageTimeoutSeconds: String(review.triage.timeoutSeconds),
+    probePhaseTimeoutSeconds: String(review.analysis.prepareTimeoutSeconds),
+    factsTimeoutSeconds: String(review.analysis.factsTimeoutSeconds),
+    seedTimeoutSeconds: String(review.analysis.seedTimeoutSeconds),
+    reconcileTimeoutSeconds: String(review.analysis.reconcileTimeoutSeconds),
+  };
+}
+
 async function runPrReview(ctx: Record<string, unknown>, agentPort?: FakeAgentPort) {
   const def = getWorkflow("pr-review");
   const store = new InMemoryStateStore(RUN_ID);
@@ -456,7 +479,7 @@ async function runPrReview(ctx: Record<string, unknown>, agentPort?: FakeAgentPo
 
   const runScope: PhaseRunContext = {
     definition: def,
-    ctx: ctx as unknown as TemplateContext,
+    ctx: { ...timeoutContext(), ...ctx } as unknown as TemplateContext,
     config: { sandbox: "none" } as unknown as ExecutorConfig,
     taskId: "task-1",
     triggerId: "acme/widgets#7",

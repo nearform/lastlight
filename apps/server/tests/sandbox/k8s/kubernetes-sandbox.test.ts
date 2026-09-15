@@ -162,7 +162,6 @@ const factoryOpts = {
   egress: { unrestricted: false, hosts: [] },
   env: {},
   stateDir: "/tmp",
-  timeoutSeconds: 60,
 } as any;
 
 /** Full `K8sAdapterConfig` — `storageClassName`/`workspaceSize`/`runAsUser`
@@ -183,6 +182,23 @@ function cfg(apis: any, overrides: Partial<Record<string, unknown>> = {}) {
 }
 
 describe("KubernetesSandbox", () => {
+  it("bounds the agent pod by the run's resolved timeoutSeconds and passes --gate-timeout (#385)", async () => {
+    const { apis, created } = fakeApis();
+    const sbx = new KubernetesSandbox(factoryOpts, cfg(apis, { namespace: "lastlight-sandboxes" }));
+    await sbx.provision();
+    await sbx.runAgent(
+      "t1",
+      "hello",
+      { model: "openai/x", sandboxEnv: {}, agentCwd: "/home/agent/workspace", timeoutSeconds: 1234, gateTimeoutSeconds: 777 } as any,
+      () => {},
+    );
+    const pod = JSON.stringify(created[0]);
+    // The factory opts carry no timeout at all: the deadline can only have come
+    // from the per-run value the orchestrator resolved from config.
+    expect(pod).toContain('"activeDeadlineSeconds":1234');
+    expect(pod).toContain("--gate-timeout 777");
+  });
+
   it("runAgent creates a pod, streams parsed events, and deletes the pod", async () => {
     const { apis, created, deleted, secretsCreated, secretsDeleted, pvcsRead, pvcsCreated } =
       fakeApis();
@@ -196,7 +212,7 @@ describe("KubernetesSandbox", () => {
       "t1",
       "hello",
       {
-        model: "openai/x",
+        model: "openai/x", timeoutSeconds: 60, gateTimeoutSeconds: 900,
         sandboxEnv: { GITHUB_TOKEN: "ghs_abc" },
         agentCwd: "/home/agent/workspace",
       } as any,
@@ -229,7 +245,7 @@ describe("KubernetesSandbox", () => {
     await sbx.runAgent(
       "t1",
       "hello",
-      { model: "openai/x", profile: "issues-write", agentCwd: "/home/agent/workspace" } as any,
+      { model: "openai/x", timeoutSeconds: 60, gateTimeoutSeconds: 900, profile: "issues-write", agentCwd: "/home/agent/workspace" } as any,
       () => {},
     );
     const cmd = created[0].spec.containers[0].command as string[];
@@ -250,7 +266,7 @@ describe("KubernetesSandbox", () => {
       sbx.runAgent(
         "t1",
         "hello",
-        { model: "openai/x", profile: "admin", agentCwd: "/home/agent/workspace" } as any,
+        { model: "openai/x", timeoutSeconds: 60, gateTimeoutSeconds: 900, profile: "admin", agentCwd: "/home/agent/workspace" } as any,
         () => {},
       ),
     ).rejects.toThrow(/Refusing to pass profile "admin"/);
@@ -264,7 +280,7 @@ describe("KubernetesSandbox", () => {
     await sbx.runAgent(
       "t1",
       "hello",
-      { model: "openai/x", agentCwd: "/home/agent/workspace" } as any,
+      { model: "openai/x", timeoutSeconds: 60, gateTimeoutSeconds: 900, agentCwd: "/home/agent/workspace" } as any,
       () => {},
     );
     const cmd = created[0].spec.containers[0].command as string[];
@@ -285,7 +301,7 @@ describe("KubernetesSandbox", () => {
       "t1",
       "hello",
       {
-        model: "openai/x",
+        model: "openai/x", timeoutSeconds: 60, gateTimeoutSeconds: 900,
         sandboxEnv: { TAVILY_API_KEY: "tvly-x" },
         agentCwd: "/home/agent/workspace",
       } as any,
@@ -305,7 +321,7 @@ describe("KubernetesSandbox", () => {
       "t1",
       "hello",
       {
-        model: "openai/x",
+        model: "openai/x", timeoutSeconds: 60, gateTimeoutSeconds: 900,
         webSearch: true,
         webSearchProvider: "tavily",
         agentCwd: "/home/agent/workspace",
@@ -328,7 +344,7 @@ describe("KubernetesSandbox", () => {
     await sbx.runAgent(
       "t1",
       "hello",
-      { model: "openai/x", thinking: "high", agentCwd: "/home/agent/workspace" } as any,
+      { model: "openai/x", timeoutSeconds: 60, gateTimeoutSeconds: 900, thinking: "high", agentCwd: "/home/agent/workspace" } as any,
       () => {},
     );
     const cmd = created[0].spec.containers[0].command as string[];
@@ -347,7 +363,7 @@ describe("KubernetesSandbox", () => {
       sbx.runAgent(
         "t1",
         "hello",
-        { model: "openai/x", thinking: "extreme", agentCwd: "/home/agent/workspace" } as any,
+        { model: "openai/x", timeoutSeconds: 60, gateTimeoutSeconds: 900, thinking: "extreme", agentCwd: "/home/agent/workspace" } as any,
         () => {},
       ),
     ).rejects.toThrow(/Refusing to pass thinking/);
@@ -362,7 +378,7 @@ describe("KubernetesSandbox", () => {
         "t1",
         "hello",
         {
-          model: "openai/x",
+          model: "openai/x", timeoutSeconds: 60, gateTimeoutSeconds: 900,
           webSearch: true,
           webSearchProvider: "duckduckgo",
           agentCwd: "/home/agent/workspace",
@@ -503,7 +519,7 @@ describe("KubernetesSandbox", () => {
     await sbx.runAgent(
       "t1",
       "hello",
-      { model: "openai/x", sandboxEnv: {}, agentCwd: "/home/agent/workspace" } as any,
+      { model: "openai/x", timeoutSeconds: 60, gateTimeoutSeconds: 900, sandboxEnv: {}, agentCwd: "/home/agent/workspace" } as any,
       () => {},
     );
     const before = (apis.core.readNamespacedPodStatus as any).mock.calls.length;
@@ -521,7 +537,7 @@ describe("KubernetesSandbox", () => {
     await sbx.runAgent(
       "t1",
       "hello",
-      { model: "openai/x", sandboxEnv: {}, agentCwd: "/home/agent/workspace" } as any,
+      { model: "openai/x", timeoutSeconds: 60, gateTimeoutSeconds: 900, sandboxEnv: {}, agentCwd: "/home/agent/workspace" } as any,
       () => {},
     );
     const before = (apis.core.readNamespacedPodStatus as any).mock.calls.length;
@@ -540,7 +556,7 @@ describe("KubernetesSandbox", () => {
     await sbx.runAgent(
       "t1",
       "hello",
-      { model: "openai/x", sandboxEnv: {}, agentCwd: "/home/agent/workspace" } as any,
+      { model: "openai/x", timeoutSeconds: 60, gateTimeoutSeconds: 900, sandboxEnv: {}, agentCwd: "/home/agent/workspace" } as any,
       () => {},
     );
 
@@ -784,7 +800,7 @@ describe("KubernetesSandbox (agent-context delivery — HTTP init-fetch, nearfor
     await sbx.runAgent(
       "t1",
       "hello",
-      { model: "openai/x", sandboxEnv: {}, agentCwd: "/home/agent/workspace/web" } as any,
+      { model: "openai/x", timeoutSeconds: 60, gateTimeoutSeconds: 900, sandboxEnv: {}, agentCwd: "/home/agent/workspace/web" } as any,
       () => {},
     );
 
@@ -844,7 +860,7 @@ describe("KubernetesSandbox (agent-context delivery — HTTP init-fetch, nearfor
     await sbx.runAgent(
       "t1",
       "hello",
-      { model: "openai/x", sandboxEnv: {}, agentCwd: "/home/agent/workspace/web" } as any,
+      { model: "openai/x", timeoutSeconds: 60, gateTimeoutSeconds: 900, sandboxEnv: {}, agentCwd: "/home/agent/workspace/web" } as any,
       () => {},
     );
 
@@ -890,7 +906,7 @@ describe("KubernetesSandbox (agent-context delivery — HTTP init-fetch, nearfor
     await sbx.runAgent(
       "t1",
       "hello",
-      { model: "openai/x", sandboxEnv: {}, agentCwd: "/home/agent/workspace/web" } as any,
+      { model: "openai/x", timeoutSeconds: 60, gateTimeoutSeconds: 900, sandboxEnv: {}, agentCwd: "/home/agent/workspace/web" } as any,
       () => {},
     );
 
@@ -926,7 +942,7 @@ describe("KubernetesSandbox (creds + workspace + prompt)", () => {
         "acme-web-pr12",
         "REVIEW THIS PR",
         {
-          model: "anthropic/claude-sonnet-4-6",
+          model: "anthropic/claude-sonnet-4-6", timeoutSeconds: 60, gateTimeoutSeconds: 900,
           sandboxEnv: {},
           agentCwd: "/home/agent/workspace/web",
         } as any,
@@ -1038,7 +1054,7 @@ describe("KubernetesSandbox (creds + workspace + prompt)", () => {
       sbx.runAgent(
         "t1",
         "hello",
-        { model: "anthropic/x", sandboxEnv: {}, agentCwd: "/home/agent/workspace" } as any,
+        { model: "anthropic/x", timeoutSeconds: 60, gateTimeoutSeconds: 900, sandboxEnv: {}, agentCwd: "/home/agent/workspace" } as any,
         () => {},
       ),
     ).rejects.toThrow(/pod create failed/);
@@ -1079,7 +1095,7 @@ describe("KubernetesSandbox skills staging", () => {
         "t-skills",
         "hello",
         {
-          model: "anthropic/x",
+          model: "anthropic/x", timeoutSeconds: 60, gateTimeoutSeconds: 900,
           sandboxEnv: {},
           agentCwd: "/home/agent/workspace",
           skillDirs: dirs,
@@ -1138,7 +1154,7 @@ describe("KubernetesSandbox artifact upload", () => {
       await sbx.runAgent(
         "t1",
         "hello",
-        { model: "anthropic/x", sandboxEnv: {}, agentCwd: "/home/agent/workspace" } as any,
+        { model: "anthropic/x", timeoutSeconds: 60, gateTimeoutSeconds: 900, sandboxEnv: {}, agentCwd: "/home/agent/workspace" } as any,
         () => {},
       );
 
@@ -1194,7 +1210,7 @@ describe("KubernetesSandbox artifact upload", () => {
       await sbx.runAgent(
         "t1",
         "hello",
-        { model: "anthropic/x", sandboxEnv: {}, agentCwd: "/home/agent/workspace" } as any,
+        { model: "anthropic/x", timeoutSeconds: 60, gateTimeoutSeconds: 900, sandboxEnv: {}, agentCwd: "/home/agent/workspace" } as any,
         () => {},
       );
 

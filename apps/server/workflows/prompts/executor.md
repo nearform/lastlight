@@ -14,10 +14,16 @@ commands:
 - Use the test/lint/typecheck commands the plan copied from the guardrails
   report — no need to re-open guardrails-report.md unless the plan omitted them.
 
-Follow the **building** skill for the mechanics: install dependencies first,
-write the failing test before implementing (TDD), and run the full
-gate (mirror CI — build + test + lint + typecheck) once before committing —
-all of it must pass before you commit or claim done.
+Follow the **building** skill for the mechanics: install dependencies first and
+write the failing test before implementing (TDD). Guardrails already proved the
+full suite green before you started, so before committing: run the targeted
+tests for the areas you touched, plus typecheck, lint and build — these must
+pass. Then run the full test suite ONCE with bash `timeout: {{gate.timeoutSeconds}}`, as
+`<full test command> > /tmp/gate.log 2>&1; echo EXIT=$?` — the exit code is the
+verdict; read the log tail only to diagnose a failure. If it times out, record
+"full suite timed out after {{gate.timeoutSeconds}}s" in the summary and carry on
+to publish (CI runs the full suite on the PR). Never re-run it with a larger
+timeout or a different filter.
 
 Before committing, also honour the building skill's **decomposition budget** and
 **type-safety** rules: keep functions under ~15 cyclomatic complexity (a
@@ -27,7 +33,7 @@ to skip a validator the same code defines. If the repo's only test path needs an
 unavailable external service, add a runnable unit/CLI test with in-memory
 fixtures rather than declaring the change unverified.
 
-AFTER THE GATE PASSES:
+AFTER THE GATE (targeted tests, typecheck, lint, build green; full suite passed or timed out):
 1. Write {{issueDir}}/executor-summary.md:
    - What was done, files changed
    - Test / lint / typecheck results (paste actual output)

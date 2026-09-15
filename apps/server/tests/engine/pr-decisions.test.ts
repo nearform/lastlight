@@ -30,8 +30,9 @@ import {
 import {
   defaultDependenciesConfig,
   defaultFixConfig,
-  defaultReviewConfig,
 } from "lastlight-shared/config-types";
+// The COMPLETE review block (durations included) is derived from config/default.yaml by core (#385).
+import { defaultReviewConfig } from "#src/config/config.js";
 
 /** An ordinary same-repo PR with a red build and no history. Override per case. */
 function state(over: Partial<PrState> = {}): PrState {

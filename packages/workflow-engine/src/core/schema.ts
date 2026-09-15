@@ -271,15 +271,17 @@ const PhaseDefinitionSchema = z
      */
     runtime: z.enum(["js", "ts", "python"]).optional(),
     /**
-     * Per-step timeout in seconds for `bash`/`script` phases, and for an agent
-     * phase's `generic_loop.until_bash` gate. Defaults to the sandbox's
-     * configured timeout (fallback 300s for deterministic steps, 30s for a
-     * loop condition).
+     * Timeout in seconds. What it bounds depends on the phase:
+     *  - `bash`/`script` phase: the command.
+     *  - standard or reviewer-`loop` agent phase: each agent run (forwarded to
+     *    `AgentPort.runAgent` as `opts.timeoutSeconds`).
+     *  - `generic_loop` agent phase: the `until_bash` gate ONLY (the agent keeps
+     *    the backend's agent limit). With no `timeout_seconds` the gate reads
+     *    `timeouts.untilBashSeconds` from the run context — never a literal.
      *
-     * Accepts `{ from: <ctx path>, default: N }` — see
-     * {@link TemplatedNumberSchema}. `pr-fix` / `dependabot-ci-fix` read
-     * `fix.gateTimeoutSeconds` that way, so the repo-clamped config value is
-     * what actually bounds the gate.
+     * Accepts `{ from: <ctx path> }` — see {@link TemplatedNumberSchema}; an
+     * unresolvable key fails the phase. `pr-fix` / `dependabot-ci-fix` read
+     * `fix.gateTimeoutSeconds` that way, and build reads `gate.phaseTimeoutSeconds`.
      */
     timeout_seconds: TemplatedNumberSchema.optional(),
     /**

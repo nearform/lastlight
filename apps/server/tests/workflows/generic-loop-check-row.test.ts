@@ -181,7 +181,7 @@ async function runLoop(definition: AgentWorkflowDefinition, opts: RunOpts = {}) 
 
   const runScope: PhaseRunContext = {
     definition,
-    ctx: { prNumber: 7 } as unknown as TemplateContext,
+    ctx: { prNumber: 7, timeouts: { untilBashSeconds: 30 } } as unknown as TemplateContext,
     config: { sandbox: "none" } as unknown as ExecutorConfig,
     taskId: "task-1",
     triggerId: TRIGGER,
@@ -376,7 +376,7 @@ describe("generic loop — a not-met condition records the verdict and iterates 
     const agent = new ThrowingGate([agentOk("attempt 1")], []);
     const runScope: PhaseRunContext = {
       definition: defineLoop({ max_iterations: 1, until_bash: GATE_CMD }),
-      ctx: {} as unknown as TemplateContext,
+      ctx: { timeouts: { untilBashSeconds: 30 } } as unknown as TemplateContext,
       config: { sandbox: "none" } as unknown as ExecutorConfig,
       taskId: "task-1",
       triggerId: TRIGGER,

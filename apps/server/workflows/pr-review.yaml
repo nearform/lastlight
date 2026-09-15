@@ -50,7 +50,7 @@ phases:
     skip_if:
       - "triageEnabled != true"
       - "reviewIsRereview != true"
-    timeout_seconds: { from: triageTimeoutSeconds, default: 300 }
+    timeout_seconds: { from: triageTimeoutSeconds }
     # NO `on_output.requires_marker`, deliberately — see AC2 in
     # `tests/workflows/pr-review-probes.test.ts`: nothing in this workflow may
     # declare an `on_output` action, because a red run posts
@@ -84,7 +84,7 @@ phases:
       - "analysisEnabled != true"
       - "probesEnabled != true"
       - "scratch.reviewTriage.depth == 'light'"
-    timeout_seconds: { from: probePhaseTimeoutSeconds, default: 300 }
+    timeout_seconds: { from: probePhaseTimeoutSeconds }
     command: |
       set -u
       FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
@@ -120,7 +120,7 @@ phases:
     # and a skipped node is not `succeeded`.
     depends_on: [prepare]
     trigger_rule: all_done
-    timeout_seconds: 300
+    timeout_seconds: { from: factsTimeoutSeconds }
     command: |
       set -u
       FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
@@ -168,7 +168,7 @@ phases:
       - "scratch.reviewTriage.depth == 'light'"
     depends_on: [facts]
     trigger_rule: all_done
-    timeout_seconds: 120
+    timeout_seconds: { from: seedTimeoutSeconds }
     command: |
       set -u
       FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
@@ -364,7 +364,7 @@ phases:
     # `all_done`: the floor must apply even when the adjudicator failed — that
     # is precisely when there is something to repair.
     trigger_rule: all_done
-    timeout_seconds: 120
+    timeout_seconds: { from: reconcileTimeoutSeconds }
     command: |
       set -u
       FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"

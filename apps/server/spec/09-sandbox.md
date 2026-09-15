@@ -122,7 +122,8 @@ agentic-pi's VM. Container name: `lastlight-sandbox-{taskId}-{uuid}`.
 - Network: `lastlight_sandbox-egress` (internal — no host route).
 - DNS: `--dns 172.30.0.10` (strict) or `--dns 172.30.0.11` (open).
 - Memory: `--memory 2g --memory-swap 2g` by default.
-- Timeout: 30 min default; runs longer than that are killed.
+- Timeout: the phase's `timeout_seconds`, else `sandbox.agentTimeoutSeconds`
+  (1800 in `config/default.yaml`; no code default); runs longer are killed.
 - Image: the lean `lastlight-sandbox:latest` (`sandbox.Dockerfile`) by
   default — built `FROM` the shared `lastlight-sandbox-base:latest`
   (`sandbox-base.Dockerfile`: `node:24-slim` as the default Node, with `fnm` for
@@ -249,7 +250,7 @@ truth for "what's running."
 
 **`activeDeadlineSeconds`** is a wall-clock cap stamped on every Pod
 (`runCommand`'s `opts.timeoutSeconds`, or `runAgent`'s factory-level timeout,
-default 1800s), so the kubelet itself kills a hung Pod at the budget;
+from `sandbox.agentTimeoutSeconds` — no code default), so the kubelet itself kills a hung Pod at the budget;
 `streamPodLog` resolves once the Pod terminates, so no separate
 application-level timeout watchdog is needed.
 
@@ -618,6 +619,16 @@ result = await agenticRun({
   onWarn: (msg) => console.warn(`[agentic] ${msg}`),
 });
 ```
+
+**Gate timeout.** Core always passes the run's resolved `gate.timeoutSeconds`
+to agentic-pi (`agentic-pi run --gate-timeout <seconds>` on the container
+backends, the equivalent run option in-process). agentic-pi has no default: with
+the flag set it appends short guidance to the `bash` tool (built-in and the
+gondolin `createBashTool`) — installs, builds and full test suites use
+`timeout: <gate>`, run as `<cmd> > /tmp/gate.log 2>&1; echo EXIT=$?` so the exit
+code is the verdict and the log tail only diagnoses, short timeouts are for
+quick commands, and a timed-out gate command is reported as timed out, never
+re-run with a larger timeout. Without the flag no gate guidance is added.
 
 The `onEvent` callback receives agentic-pi's `EmitterRecord` events —
 `session`, `message_end`, `tool_execution_end`, `usage_snapshot`,

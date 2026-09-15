@@ -56,6 +56,9 @@ function makeFakeChild() {
 }
 
 describe("DockerSandbox.runAgent — prompt via stdin, not shell arg", () => {
+  // Both budgets are resolved from config by the orchestrator (issue #385) —
+  // the driver has no default of its own, so every call supplies them.
+  const RUN = { timeoutSeconds: 5, gateTimeoutSeconds: 900 };
   let manager: DockerSandbox;
   let fakeChild: ReturnType<typeof makeFakeChild>;
 
@@ -67,7 +70,6 @@ describe("DockerSandbox.runAgent — prompt via stdin, not shell arg", () => {
     manager = new DockerSandbox({
       imageName: "test-image",
       env: {},
-      timeoutSeconds: 5,
     });
     (manager as unknown as { activeContainers: Map<string, unknown> })
       .activeContainers.set("task-001", {
@@ -78,7 +80,7 @@ describe("DockerSandbox.runAgent — prompt via stdin, not shell arg", () => {
   });
 
   it("spawn is called with stdin: 'pipe'", async () => {
-    const runPromise = manager.runAgent("task-001", "hello world");
+    const runPromise = manager.runAgent("task-001", "hello world", RUN);
     process.nextTick(() => fakeChild.emit("close", 0));
     await runPromise;
 
@@ -88,7 +90,7 @@ describe("DockerSandbox.runAgent — prompt via stdin, not shell arg", () => {
 
   it("prompt is written to child.stdin", async () => {
     const prompt = "Do something dangerous'; rm -rf /; echo '";
-    const runPromise = manager.runAgent("task-001", prompt);
+    const runPromise = manager.runAgent("task-001", prompt, RUN);
     process.nextTick(() => fakeChild.emit("close", 0));
     await runPromise;
 
@@ -98,7 +100,7 @@ describe("DockerSandbox.runAgent — prompt via stdin, not shell arg", () => {
 
   it("prompt is not embedded in the docker exec args", async () => {
     const prompt = "secret'; rm -rf /;'";
-    const runPromise = manager.runAgent("task-001", prompt);
+    const runPromise = manager.runAgent("task-001", prompt, RUN);
     process.nextTick(() => fakeChild.emit("close", 0));
     await runPromise;
 
@@ -108,7 +110,7 @@ describe("DockerSandbox.runAgent — prompt via stdin, not shell arg", () => {
   });
 
   it("docker exec args contain -i flag for stdin", async () => {
-    const runPromise = manager.runAgent("task-001", "test prompt");
+    const runPromise = manager.runAgent("task-001", "test prompt", RUN);
     process.nextTick(() => fakeChild.emit("close", 0));
     await runPromise;
 
@@ -117,7 +119,7 @@ describe("DockerSandbox.runAgent — prompt via stdin, not shell arg", () => {
   });
 
   it("agentic-pi command runs in --sandbox none mode and does not embed the prompt", async () => {
-    const runPromise = manager.runAgent("task-001", "test prompt");
+    const runPromise = manager.runAgent("task-001", "test prompt", RUN);
     process.nextTick(() => fakeChild.emit("close", 0));
     await runPromise;
 
@@ -136,7 +138,7 @@ describe("DockerSandbox.runAgent — prompt via stdin, not shell arg", () => {
       GIT_COMMITTER_NAME: "nearform-lastlight[bot]",
       GIT_COMMITTER_EMAIL: "nearform-lastlight[bot]@users.noreply.github.com",
     };
-    const runPromise = manager.runAgent("task-001", "test prompt", { sandboxEnv });
+    const runPromise = manager.runAgent("task-001", "test prompt", { ...RUN, sandboxEnv });
     process.nextTick(() => fakeChild.emit("close", 0));
     await runPromise;
 
@@ -155,7 +157,7 @@ describe("DockerSandbox.runAgent — prompt via stdin, not shell arg", () => {
   });
 
   it("passes --profile to agentic-pi when a valid profile is given", async () => {
-    const runPromise = manager.runAgent("task-001", "test prompt", { profile: "issues-write" });
+    const runPromise = manager.runAgent("task-001", "test prompt", { ...RUN, profile: "issues-write" });
     process.nextTick(() => fakeChild.emit("close", 0));
     await runPromise;
 
@@ -164,12 +166,39 @@ describe("DockerSandbox.runAgent — prompt via stdin, not shell arg", () => {
     expect(shCmd).toContain("--profile issues-write");
   });
 
+  it("always passes the run's gate budget to agentic-pi as --gate-timeout (#385)", async () => {
+    const runPromise = manager.runAgent("task-001", "test prompt", { ...RUN, gateTimeoutSeconds: 1234 });
+    process.nextTick(() => fakeChild.emit("close", 0));
+    await runPromise;
+
+    const shCmd = (mockSpawn.mock.calls[0][1] as string[]).at(-1)!;
+    expect(shCmd).toContain("--gate-timeout 1234");
+  });
+
+  it("rounds a fractional gate budget UP — never down (#385)", async () => {
+    const runPromise = manager.runAgent("task-001", "test prompt", { ...RUN, gateTimeoutSeconds: 90.5 });
+    process.nextTick(() => fakeChild.emit("close", 0));
+    await runPromise;
+
+    expect((mockSpawn.mock.calls[0][1] as string[]).at(-1)).toContain("--gate-timeout 91");
+  });
+
+  it("refuses to run without a resolved timeout rather than defaulting to a literal (#385)", async () => {
+    await expect(
+      manager.runAgent("task-001", "test prompt", { gateTimeoutSeconds: 900 } as never),
+    ).rejects.toThrow(/timeoutSeconds must be a positive number/);
+    await expect(
+      manager.runAgent("task-001", "test prompt", { timeoutSeconds: 60 } as never),
+    ).rejects.toThrow(/gateTimeoutSeconds must be a positive number/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
   it("rejects when profile is not one of the closed set", async () => {
     // The `as any` simulates a value that reached here already erased to
     // `string` (e.g. an untyped caller) — the runtime guard is the last
     // line of defence once `GitAccessProfile` narrowing is bypassed.
     await expect(
-      manager.runAgent("task-001", "test prompt", { profile: "admin" as any }),
+      manager.runAgent("task-001", "test prompt", { ...RUN, profile: "admin" as any }),
     ).rejects.toThrow(/Refusing to pass profile "admin"/);
     expect(mockSpawn).not.toHaveBeenCalled();
   });

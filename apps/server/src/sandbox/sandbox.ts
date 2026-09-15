@@ -187,6 +187,21 @@ export interface RunAgentOpts {
    * executor sets for every backend.
    */
   providers?: Record<string, unknown>;
+  /**
+   * Wall-clock budget for this agent run, in seconds: the phase's own
+   * `timeout_seconds` when it set one, else `sandbox.agentTimeoutSeconds`.
+   * Resolved by the orchestrator from config — adapters never default it
+   * (issue #385). Enforced by the docker/smol drivers' kill timer and the k8s
+   * pod's `activeDeadlineSeconds`; the in-process adapter has no wall-clock
+   * kill of its own.
+   */
+  timeoutSeconds: number;
+  /**
+   * The run's effective (repo-clamped) `gate.timeoutSeconds`. Passed to
+   * agentic-pi on EVERY run — `--gate-timeout` for the container backends,
+   * `gateTimeoutSeconds` for the in-process adapter.
+   */
+  gateTimeoutSeconds: number;
 }
 
 export interface RunCommandOpts {
@@ -217,7 +232,6 @@ export interface SandboxFactoryOpts {
   /** Docker image override (the browser-QA image for `sandbox_image: qa`). */
   imageName?: string;
   otel?: OtelConfig;
-  timeoutSeconds?: number;
   /**
    * Dependency services this phase runs against, already admitted against the
    * operator's bounds (`docs/plans/sandbox-services`).
@@ -391,6 +405,8 @@ class DockerSandbox implements Sandbox {
       skillDirs: opts.skillDirs,
       webSearch: opts.webSearch,
       webSearchProvider: opts.webSearchProvider,
+      timeoutSeconds: opts.timeoutSeconds,
+      gateTimeoutSeconds: opts.gateTimeoutSeconds,
       onLine: parseLine(onEvent),
     });
     return undefined;
@@ -490,6 +506,8 @@ class SmolSandbox implements Sandbox {
       skillDirs: opts.skillDirs,
       webSearch: opts.webSearch,
       webSearchProvider: opts.webSearchProvider,
+      timeoutSeconds: opts.timeoutSeconds,
+      gateTimeoutSeconds: opts.gateTimeoutSeconds,
       onLine: parseLine(onEvent),
     });
     return undefined;
@@ -631,6 +649,9 @@ class InProcessSandbox implements Sandbox {
       allowedHttpHosts,
       webSearch: opts.webSearch === true,
       webSearchProvider: opts.webSearchProvider,
+      // The run's effective gate budget — agentic-pi adds its gate guidance to
+      // the bash tool only when this is set, so core always sets it.
+      gateTimeoutSeconds: opts.gateTimeoutSeconds,
       onEvent,
       onWarn: (msg) => logger("agentic").warn(msg),
     });

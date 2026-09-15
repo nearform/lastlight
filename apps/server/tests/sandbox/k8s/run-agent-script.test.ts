@@ -10,6 +10,7 @@ const base = {
   webSearch: false,
   webSearchProvider: false,
   artifactUpload: false,
+  gateTimeoutSeconds: 900,
 };
 
 describe("buildRunAgentScript", () => {
@@ -23,6 +24,20 @@ describe("buildRunAgentScript", () => {
   it("always runs agentic-pi with the model bound to $1, sandbox none, no-session", () => {
     const script = buildRunAgentScript(base);
     expect(script).toContain('agentic-pi run --model "$1" --sandbox none --no-session');
+  });
+
+  describe("--gate-timeout (#385)", () => {
+    it("always emits the run's gate budget, rounded up", () => {
+      expect(buildRunAgentScript({ ...base, gateTimeoutSeconds: 900 })).toContain("--gate-timeout 900");
+      expect(buildRunAgentScript({ ...base, gateTimeoutSeconds: 90.5 })).toContain("--gate-timeout 91");
+    });
+
+    it("refuses a missing or non-positive budget rather than defaulting to a literal", () => {
+      expect(() => buildRunAgentScript({ ...base, gateTimeoutSeconds: undefined as unknown as number })).toThrow(
+        /gateTimeoutSeconds/,
+      );
+      expect(() => buildRunAgentScript({ ...base, gateTimeoutSeconds: 0 })).toThrow(/gateTimeoutSeconds/);
+    });
   });
 
   describe("--profile", () => {
@@ -136,6 +151,7 @@ describe("buildRunAgentScript", () => {
         webSearch: true,
         webSearchProvider: true,
         artifactUpload: true,
+        gateTimeoutSeconds: 900,
       });
       expect(script).toMatch(/--model\s+"\$1"/);
       expect(script).not.toMatch(/--model\s+(?!"\$1")\S/);

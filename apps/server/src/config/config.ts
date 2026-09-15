@@ -131,28 +131,34 @@ import {
   defaultDependenciesConfig,
   defaultFixConfig,
   defaultNotificationsConfig,
-  defaultReviewConfig,
+  defaultReviewPolicy,
   isDependencyImpact,
   isDiagnosisClass,
   isReviewTrigger,
   type DependenciesConfig,
   type FixConfig,
+  type GateConfig,
   type NotificationsConfig,
   type ReviewConfig,
+  type ReviewPolicy,
+  type SandboxTimeoutsConfig,
 } from "lastlight-shared/config-types";
 export type {
   DependenciesConfig,
   DependencyImpact,
   FixConfig,
+  GateConfig,
   NotificationsConfig,
   ReviewConfig,
+  ReviewPolicy,
   ReviewTrigger,
+  SandboxTimeoutsConfig,
 } from "lastlight-shared/config-types";
 export {
   defaultDependenciesConfig,
   defaultFixConfig,
   defaultNotificationsConfig,
-  defaultReviewConfig,
+  defaultReviewPolicy,
 } from "lastlight-shared/config-types";
 
 export interface PublicConfigBundle {
@@ -297,6 +303,14 @@ export interface LastLightConfig {
    * — see `packages/shared/src/repo-config-schema.ts`.
    */
   review: ReviewConfig;
+  /**
+   * The build/test gate budget (issue #385) — see {@link GateConfig}. The
+   * OPERATOR's block; a run's effective, repo-clamped value is composed by
+   * `effectiveGate` in `workflows/simple.ts`.
+   */
+  gate: GateConfig;
+  /** The sandbox's default wall-clock budgets (issue #385), from `sandbox:`. */
+  sandboxTimeouts: SandboxTimeoutsConfig;
   /**
    * Retry/escalation budgets for the PR_FIX_SHAPED workflows (issue #251) and
    * the major-bump auto-merge policy (issue #252). Both blocks resolve through
@@ -549,6 +563,112 @@ export function getReviewConfig(): ReviewConfig {
   return currentConfig?.review || defaultReviewConfig();
 }
 
+// ── Packaged defaults, derived from config/default.yaml (issue #385) ─────────
+//
+// Every timeout default lives in `config/default.yaml` and NOWHERE else. The
+// "never throw, always answer" pre-boot paths (unit tests, the evals harness,
+// `operatorFix()`-style fallbacks) used to answer from TS literals that
+// duplicated the file; they now answer from the file itself, normalised by the
+// exact loader boot uses — so the packaged value and the booted value cannot
+// drift, and removing a key from the file fails both paths with the same error.
+
+let packagedFileConfigCache: NormalizedFileConfig | undefined;
+
+/** `config/default.yaml` alone (no overlay, no env), normalised. Memoised. */
+function packagedFileConfig(): NormalizedFileConfig {
+  packagedFileConfigCache ??= normalizeFileConfig(readYamlFile(defaultConfigPath(), true)!);
+  return packagedFileConfigCache;
+}
+
+/** The packaged `review:` block — complete, durations included — from `config/default.yaml`. */
+export function defaultReviewConfig(): ReviewConfig {
+  return structuredClone(packagedFileConfig().review);
+}
+
+/** The packaged `gate:` block, from `config/default.yaml`. */
+export function defaultGateConfig(): GateConfig {
+  return { ...packagedFileConfig().gate };
+}
+
+/** The packaged sandbox timeouts, from `config/default.yaml`. */
+export function defaultSandboxTimeouts(): SandboxTimeoutsConfig {
+  return { ...packagedFileConfig().sandboxTimeouts };
+}
+
+/** The operator's `gate:` block — boot config, else the packaged one. */
+export function getGateConfig(): GateConfig {
+  return currentConfig?.gate ?? defaultGateConfig();
+}
+
+/**
+ * A run's EFFECTIVE gate block: the repo layer's `gate:` leaves (already
+ * sanitised, see `sanitizeGate` in lastlight-shared) over the operator's, with
+ * `timeoutSeconds` clamped — again, as a belt — to the operator's
+ * `maxTimeoutSeconds`. `maxTimeoutSeconds` / `phaseTimeoutSeconds` are
+ * operator-only and always the operator's. No repo layer ⇒ the operator block.
+ */
+export function effectiveGate(repoGate?: Partial<GateConfig>, operator: GateConfig = getGateConfig()): GateConfig {
+  const requested = repoGate?.timeoutSeconds ?? operator.timeoutSeconds;
+  return {
+    timeoutSeconds: Math.min(requested, operator.maxTimeoutSeconds),
+    maxTimeoutSeconds: operator.maxTimeoutSeconds,
+    phaseTimeoutSeconds: operator.phaseTimeoutSeconds,
+  };
+}
+
+/** The operator's sandbox timeouts — boot config, else the packaged ones. */
+export function getSandboxTimeouts(): SandboxTimeoutsConfig {
+  return currentConfig?.sandboxTimeouts ?? defaultSandboxTimeouts();
+}
+
+/**
+ * A complete {@link ReviewConfig} from a duration-free {@link ReviewPolicy}
+ * (what the repo-layer merge yields) plus the operator's durations — all of
+ * which are operator-only, so the operator's block is their only source.
+ */
+export function withReviewDurations(policy: ReviewPolicy, operator: ReviewConfig): ReviewConfig {
+  return {
+    ...policy,
+    triage: { ...policy.triage, timeoutSeconds: operator.triage.timeoutSeconds },
+    analysis: {
+      ...policy.analysis,
+      prepareTimeoutSeconds: operator.analysis.prepareTimeoutSeconds,
+      coverageTimeoutSeconds: operator.analysis.coverageTimeoutSeconds,
+      factsTimeoutSeconds: operator.analysis.factsTimeoutSeconds,
+      seedTimeoutSeconds: operator.analysis.seedTimeoutSeconds,
+      reconcileTimeoutSeconds: operator.analysis.reconcileTimeoutSeconds,
+    },
+  };
+}
+
+/**
+ * The deprecated `fix.gateTimeoutSeconds` alias (issue #385), applied to ONE
+ * layer in place before the merge. An overlay that still sets it and does not
+ * set `gate.timeoutSeconds` has it mapped across (so provenance attributes the
+ * value to the overlay); either way the old key is removed from the layer and
+ * the operator is told once.
+ */
+function applyDeprecatedGateAlias(layer: Record<string, unknown> | null, label: string): void {
+  if (!layer || !isPlainObject(layer.fix) || !("gateTimeoutSeconds" in layer.fix)) return;
+  const fixNode = layer.fix;
+  const legacy = fixNode.gateTimeoutSeconds;
+  delete fixNode.gateTimeoutSeconds;
+  const gateNode = isPlainObject(layer.gate) ? layer.gate : undefined;
+  if (gateNode && gateNode.timeoutSeconds !== undefined) {
+    log.warn("fix.gateTimeoutSeconds is deprecated and ignored — gate.timeoutSeconds is also set", {
+      layer: label,
+      ignored: legacy,
+      gateTimeoutSeconds: gateNode.timeoutSeconds,
+    });
+    return;
+  }
+  layer.gate = { ...(gateNode ?? {}), timeoutSeconds: legacy };
+  log.warn("fix.gateTimeoutSeconds is deprecated — mapped to gate.timeoutSeconds; rename it", {
+    layer: label,
+    gateTimeoutSeconds: legacy,
+  });
+}
+
 /**
  * The configured HOLD label, with the packaged default when config isn't loaded
  * yet (unit tests) — see {@link LastLightConfig.holdLabel} and {@link HOLD_LABEL}.
@@ -673,6 +793,7 @@ export function loadConfig(): LastLightConfig {
     }
     overlayRaw = readYamlFile(join(overlayDir, "config.yaml"), false);
   }
+  applyDeprecatedGateAlias(overlayRaw, "overlay");
 
   // Build the env layer once: a partial config tree in the same shape as the
   // YAML layers. This is the single place that maps env vars onto config paths
@@ -830,6 +951,8 @@ export function loadConfig(): LastLightConfig {
     publicUrl: resolvePublicUrl(),
     reviewPostsCheck: fileCfg.review.postsCheck,
     review: fileCfg.review,
+    gate: fileCfg.gate,
+    sandboxTimeouts: fileCfg.sandboxTimeouts,
     fix: fileCfg.fix,
     dependencies: fileCfg.dependencies,
     concurrency: fileCfg.concurrency,
@@ -847,6 +970,8 @@ function stringEnv(name: string, fallback: string): string {
   const v = process.env[name];
   return v && v.length > 0 ? v : fallback;
 }
+
+type NormalizedFileConfig = ReturnType<typeof normalizeFileConfig>;
 
 function normalizeFileConfig(raw: Record<string, unknown>): {
   managedRepos: string[];
@@ -867,6 +992,8 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   holdLabel: string;
   exploreDefaultRepo?: string;
   review: ReviewConfig;
+  gate: GateConfig;
+  sandboxTimeouts: SandboxTimeoutsConfig;
   fix: FixConfig;
   dependencies: DependenciesConfig;
   otel: OtelConfig;
@@ -901,6 +1028,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const analysisRaw = isPlainObject(reviewRaw.analysis) ? reviewRaw.analysis : {};
   const triageRaw = isPlainObject(reviewRaw.triage) ? reviewRaw.triage : {};
   const fixRaw = isPlainObject(raw.fix) ? raw.fix : {};
+  const gateRaw = isPlainObject(raw.gate) ? raw.gate : {};
   const dependenciesRaw = isPlainObject(raw.dependencies) ? raw.dependencies : {};
   const approvalRaw = isPlainObject(raw.approval) ? raw.approval : {};
   const otelRaw = isPlainObject(raw.otel) ? raw.otel : {};
@@ -921,6 +1049,32 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
 
   const backend = sandboxBackend(sandboxRaw.backend, "sandbox.backend");
   const maxTurns = typeof sandboxRaw.maxTurns === "number" ? sandboxRaw.maxTurns : 200;
+  // ── Timeouts (issue #385): required, no fallback. Strict where the policy
+  // leaves above are lenient, on purpose: a timeout with a silent fallback is
+  // exactly how `1800` ended up buried in three backends with no config key.
+  const sandboxTimeouts: SandboxTimeoutsConfig = {
+    agentTimeoutSeconds: requiredSeconds(sandboxRaw.agentTimeoutSeconds, "sandbox.agentTimeoutSeconds"),
+    commandTimeoutSeconds: requiredSeconds(sandboxRaw.commandTimeoutSeconds, "sandbox.commandTimeoutSeconds"),
+    untilBashTimeoutSeconds: requiredSeconds(sandboxRaw.untilBashTimeoutSeconds, "sandbox.untilBashTimeoutSeconds"),
+  };
+  const gate: GateConfig = {
+    timeoutSeconds: requiredSeconds(gateRaw.timeoutSeconds, "gate.timeoutSeconds"),
+    maxTimeoutSeconds: requiredSeconds(gateRaw.maxTimeoutSeconds, "gate.maxTimeoutSeconds"),
+    phaseTimeoutSeconds: requiredSeconds(gateRaw.phaseTimeoutSeconds, "gate.phaseTimeoutSeconds"),
+  };
+  if (!(gate.timeoutSeconds <= gate.maxTimeoutSeconds)) {
+    throw new Error(
+      `Invalid config: gate.timeoutSeconds (${gate.timeoutSeconds}) must not exceed ` +
+        `gate.maxTimeoutSeconds (${gate.maxTimeoutSeconds})`,
+    );
+  }
+  if (!(gate.maxTimeoutSeconds < gate.phaseTimeoutSeconds)) {
+    throw new Error(
+      `Invalid config: gate.phaseTimeoutSeconds (${gate.phaseTimeoutSeconds}) must exceed ` +
+        `gate.maxTimeoutSeconds (${gate.maxTimeoutSeconds}) — a phase that runs a gate needs room for ` +
+        `the longest gate a repo may ask for plus install and reporting`,
+    );
+  }
   const kubernetes = kubernetesRaw ? normalizeKubernetesFileConfig(kubernetesRaw) : undefined;
   const buildAssets = buildAssetsLocation(buildAssetsRaw.location, "buildAssets.location");
   // yaml `url: null`, `url: ""` and an absent key all land on undefined — the
@@ -955,18 +1109,18 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   // shipped defaults come from `lastlight-shared` so `config/default.yaml`,
   // this normaliser and the repo-layer clamps can't drift apart.
   const fixDefaults = defaultFixConfig();
+  // `fixRaw.gateTimeoutSeconds` is deliberately not read: the deprecated alias
+  // is mapped to `gate.timeoutSeconds` per layer before the merge.
   const fix: FixConfig = {
     // Whole numbers, matching the repo-layer clamp in `repo-config-schema.ts`
     // (`positiveInt`). They used to accept any positive number here while the
     // clamp required an integer, so an operator writing `maxAttempts: 2.5` got
     // the REPO layer silently falling back to the shipped default while the
     // operator layer kept 2.5 — two layers disagreeing about the same leaf
-    // (#256). `gateTimeoutSeconds` is a duration, not a count, so it stays a
-    // plain positive number.
+    // (#256).
     maxAttempts: positiveInt(fixRaw.maxAttempts, "fix.maxAttempts") ?? fixDefaults.maxAttempts,
     localIterations:
       positiveInt(fixRaw.localIterations, "fix.localIterations") ?? fixDefaults.localIterations,
-    gateTimeoutSeconds: positiveNumber(fixRaw.gateTimeoutSeconds) ?? fixDefaults.gateTimeoutSeconds,
     // 0 is meaningful here ("escalate the model from the first retry"), so this
     // one accepts zero where the budgets above require a positive number.
     escalateModelAfterAttempt:
@@ -996,7 +1150,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
         : dependenciesDefaults.auditComment,
   };
 
-  const reviewDefaults = defaultReviewConfig();
+  const reviewDefaults = defaultReviewPolicy();
   const review: ReviewConfig = {
     // Historically `review.postsCheck` defaulted OFF for anything that wasn't
     // literally `true`; keep that exact reading.
@@ -1021,8 +1175,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     // it ships on, and its worst case is one cheap pass plus today's review.
     triage: {
       enabled: triageRaw.enabled !== false,
-      timeoutSeconds:
-        nonNegativeNumber(triageRaw.timeoutSeconds) ?? reviewDefaults.triage.timeoutSeconds,
+      timeoutSeconds: requiredSeconds(triageRaw.timeoutSeconds, "review.triage.timeoutSeconds"),
     },
     // The evidence pipeline. `enabled` reads exactly like `postsCheck` above —
     // anything that is not literally `true` is OFF — because locked decision 8
@@ -1063,10 +1216,20 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
       probeLifecycleScripts: analysisRaw.probeLifecycleScripts === true,
       probeTypecheck: analysisRaw.probeTypecheck === true,
       probeCoverage: analysisRaw.probeCoverage === true,
-      prepareTimeoutSeconds:
-        nonNegativeNumber(analysisRaw.prepareTimeoutSeconds) ?? reviewDefaults.analysis.prepareTimeoutSeconds,
-      coverageTimeoutSeconds:
-        nonNegativeNumber(analysisRaw.coverageTimeoutSeconds) ?? reviewDefaults.analysis.coverageTimeoutSeconds,
+      prepareTimeoutSeconds: requiredSeconds(
+        analysisRaw.prepareTimeoutSeconds,
+        "review.analysis.prepareTimeoutSeconds",
+      ),
+      coverageTimeoutSeconds: requiredSeconds(
+        analysisRaw.coverageTimeoutSeconds,
+        "review.analysis.coverageTimeoutSeconds",
+      ),
+      factsTimeoutSeconds: requiredSeconds(analysisRaw.factsTimeoutSeconds, "review.analysis.factsTimeoutSeconds"),
+      seedTimeoutSeconds: requiredSeconds(analysisRaw.seedTimeoutSeconds, "review.analysis.seedTimeoutSeconds"),
+      reconcileTimeoutSeconds: requiredSeconds(
+        analysisRaw.reconcileTimeoutSeconds,
+        "review.analysis.reconcileTimeoutSeconds",
+      ),
       probeRounds: nonNegativeNumber(analysisRaw.probeRounds) ?? reviewDefaults.analysis.probeRounds,
       // WP6b, the attention boundary. `maxInlineComments` allows 0 — a
       // deployment that wants every finding in the review body is a coherent
@@ -1251,6 +1414,8 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     holdLabel,
     exploreDefaultRepo,
     review,
+    gate,
+    sandboxTimeouts,
     fix,
     dependencies,
     otel: normalizeOtelFileConfig(otelRaw),
@@ -1321,6 +1486,22 @@ function diagnosisClassList(raw: unknown): string[] | undefined {
  */
 function positiveNumber(raw: unknown): number | undefined {
   return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : undefined;
+}
+
+/**
+ * A REQUIRED timeout, in seconds: a finite number > 0, or a thrown error naming
+ * the key (issue #385). `config/default.yaml` is the single source of every
+ * timeout, so "missing" here means the packaged file lost the key or an overlay
+ * nulled it — both of which must stop the boot, not resolve to a number buried
+ * in code.
+ */
+function requiredSeconds(raw: unknown, path: string): number {
+  if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) return raw;
+  const got = raw === undefined || raw === null ? "the key is missing" : `got ${JSON.stringify(raw)}`;
+  throw new Error(
+    `Invalid config: ${path} must be a positive number of seconds (${got}). ` +
+      `Every timeout is set in config/default.yaml and overridable in the overlay — there is no code default.`,
+  );
 }
 
 /** As {@link positiveNumber}, but 0 is a legal value rather than a fallback trigger. */

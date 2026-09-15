@@ -7,10 +7,15 @@ import {
   defaultDependenciesConfig,
   defaultFixConfig,
   defaultReviewConfig,
+  effectiveGate,
   getBotName,
+  getGateConfig,
   getRuntimeConfig,
+  getSandboxTimeouts,
+  withReviewDurations,
   type DependenciesConfig,
   type FixConfig,
+  type GateConfig,
   type ModelConfig,
   type RepoConfigPolicy,
   type ReviewConfig,
@@ -116,6 +121,12 @@ export interface RunRepoConfig {
   fix: FixConfig;
   dependencies: DependenciesConfig;
   review: ReviewConfig;
+  /**
+   * The run's EFFECTIVE gate budget (issue #385): the repo's `gate.timeoutSeconds`
+   * clamped to the operator's `gate.maxTimeoutSeconds`, the operator-only
+   * ceilings as-is. See `effectiveGate`.
+   */
+  gate: GateConfig;
   /**
    * Where this repo's outbound notifications go. Routing, not policy, so it is
    * NOT clamped — read `sources.notifications["slack.channel"]` to tell a repo's
@@ -257,7 +268,10 @@ export async function resolveRepoRunConfig(
       disabled: resolved.merged.disabled,
       fix: resolved.merged.fix,
       dependencies: resolved.merged.dependencies,
-      review: resolved.merged.review,
+      // The merge yields a duration-free review POLICY; every review duration is
+      // operator-only, so the operator's block is their only source.
+      review: withReviewDurations(resolved.merged.review, operatorReview()),
+      gate: effectiveGate(resolved.merged.gate),
       notifications: resolved.merged.notifications,
       services: resolved.merged.services,
       // The operator's bounds travel WITH the declaration, not read live at use time:
@@ -298,6 +312,8 @@ export interface RepoConfigRunRecord {
     fix?: Record<string, unknown>;
     dependencies?: Record<string, unknown>;
     review?: Record<string, unknown>;
+    /** The `gate:` leaves the repo won (only ever `timeoutSeconds`, already clamped). */
+    gate?: Record<string, unknown>;
     /**
      * Notification routing the repo won, keyed by the same DOTTED leaf
      * `RepoConfigSources` uses (`"slack.channel"`) — this is the one block that
@@ -355,6 +371,7 @@ export function repoConfigRunRecord(cfg: RunRepoConfig): RepoConfigRunRecord {
       fix: wonBy(cfg.fix as unknown as Record<string, unknown>, cfg.sources.fix),
       dependencies: wonBy(cfg.dependencies as unknown as Record<string, unknown>, cfg.sources.dependencies),
       review: wonBy(cfg.review as unknown as Record<string, unknown>, cfg.sources.review),
+      gate: wonBy((cfg.gate ?? {}) as unknown as Record<string, unknown>, cfg.sources.gate ?? {}),
       notifications: wonBy({ "slack.channel": cfg.notifications.slack.channel }, cfg.sources.notifications),
       services: Object.keys(cfg.services ?? {}).length > 0 ? cfg.services : undefined,
       serviceBounds: Object.keys(cfg.services ?? {}).length > 0 ? cfg.serviceBounds : undefined,
@@ -395,6 +412,7 @@ export interface RestoreRepoRunConfigOptions {
   fix?: FixConfig;
   dependencies?: DependenciesConfig;
   review?: ReviewConfig;
+  gate?: GateConfig;
   /** Layer lookup seam (tests). Defaults to the cache, then one conditional refetch. */
   resolveLayer?: (repo: string) => Promise<RepoLayer | undefined>;
 }
@@ -420,6 +438,9 @@ function operatorDependencies(): DependenciesConfig {
 }
 function operatorReview(): ReviewConfig {
   return getRuntimeConfig()?.review ?? defaultReviewConfig();
+}
+function operatorGate(): GateConfig {
+  return getGateConfig();
 }
 
 /**
@@ -505,6 +526,12 @@ export async function restoreRepoRunConfig(
     ...(applied.dependencies ?? {}),
   };
   const review: ReviewConfig = { ...(options.review ?? operatorReview()), ...(applied.review ?? {}) };
+  // Re-clamped against the operator's CURRENT ceiling, so a ceiling lowered
+  // while the run was paused still binds it — the same rule `fix` follows.
+  const gate: GateConfig = effectiveGate(
+    applied.gate as Partial<GateConfig> | undefined,
+    options.gate ?? operatorGate(),
+  );
   // Routing, not policy, so there is nothing to re-clamp — the repo's channel
   // (including an explicit null) is simply restored. `in`, not truthiness: a
   // null the repo chose is a different answer from a key it never set.
@@ -563,6 +590,7 @@ export async function restoreRepoRunConfig(
       fix,
       dependencies,
       review,
+      gate,
       notifications,
       // Restored from the record, NOT re-resolved: the run keeps the services and the
       // bounds it was dispatched with, so a config edit made while it was paused cannot
@@ -577,6 +605,7 @@ export async function restoreRepoRunConfig(
         fix: sourcesOf(fix as unknown as Record<string, unknown>, applied.fix),
         dependencies: sourcesOf(dependencies as unknown as Record<string, unknown>, applied.dependencies),
         review: sourcesOf(review as unknown as Record<string, unknown>, applied.review),
+        gate: sourcesOf(gate as unknown as Record<string, unknown>, applied.gate),
         notifications: {
           "slack.channel":
             applied.notifications && "slack.channel" in applied.notifications ? "repo" : "default",
@@ -1032,6 +1061,10 @@ export async function runSimpleWorkflow(
   // see the note on `ctx` below.
   const effectiveFix = repoConfig?.fix ?? operatorFix();
   const effectiveDependencies = repoConfig?.dependencies ?? operatorDependencies();
+  // Issue #385: the run's effective gate budget (repo-clamped) and the sandbox's
+  // default timeouts, seeded on the context below.
+  const runGate = repoConfig?.gate ?? effectiveGate();
+  const sandboxTimeouts = getSandboxTimeouts();
 
   // ── Per-attempt fix policy (04-retry.md §4.4, 09-state-machine.md §S1) ─────
   //
@@ -1356,6 +1389,22 @@ export async function runSimpleWorkflow(
     // `RunRepoConfig.review` / the runtime config.
     fix: effectiveFix as unknown as Record<string, unknown>,
     dependencies: effectiveDependencies as unknown as Record<string, unknown>,
+    // Issue #385 — every timeout a phase reads comes from here, never a YAML or
+    // code literal: `timeout_seconds: { from: gate.timeoutSeconds }`, the prompt's
+    // `{{gate.timeoutSeconds}}`, and the engine's `until_bash` fallback
+    // (`timeouts.untilBashSeconds`). `gate` is the EFFECTIVE (repo-clamped) block.
+    //
+    // Both names were checked against every `output_var` in workflows/*.yaml —
+    // the shadowing trap that keeps `review` off this context (see above) does
+    // not apply: no phase emits `gate` or `timeouts`. `runWorkflow` backfills
+    // both for callers that build their own context (resume of an older run,
+    // the evals harness).
+    gate: runGate as unknown as Record<string, unknown>,
+    timeouts: {
+      agentSeconds: sandboxTimeouts.agentTimeoutSeconds,
+      commandSeconds: sandboxTimeouts.commandTimeoutSeconds,
+      untilBashSeconds: sandboxTimeouts.untilBashTimeoutSeconds,
+    },
     // Slack-initiated runs need the runner to pause/resume on the thread id,
     // not on owner/repo#N. Passing the override through here keeps the
     // runner's triggerId derivation in one place.

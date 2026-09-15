@@ -184,6 +184,15 @@ export interface RunOptions {
    */
   maxSteps?: number;
 
+  /**
+   * Timeout (seconds) for gate commands — installs, builds, full test suites.
+   * When set, the bash tool gets one guideline to pass this timeout and judge
+   * gates by exit code, and a smaller model-supplied timeout on a recognised
+   * gate command is raised to it. Unset (default) = no guidance, no change.
+   * CLI equivalent: `--gate-timeout <seconds>`.
+   */
+  gateTimeoutSeconds?: number;
+
   // ── OpenTelemetry ───────────────────────────────────────────────
   /**
    * Enable OTEL traces + metrics export. Default: `false` (or env
@@ -386,6 +395,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
     maxRetries: options.maxRetries,
     retryBaseDelayMs: options.retryBaseDelayMs,
     maxSteps: options.maxSteps,
+    gateTimeoutSeconds: options.gateTimeoutSeconds,
     otel: options.otel,
     otelIncludeContent: options.otelIncludeContent,
     otelServiceName: options.otelServiceName,

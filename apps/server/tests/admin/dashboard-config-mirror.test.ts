@@ -22,8 +22,9 @@ import {
   defaultFixConfig,
   defaultDependenciesConfig,
   defaultNotificationsConfig,
-  defaultReviewConfig,
 } from "lastlight-shared/config-types";
+// The COMPLETE review block (durations included) is derived from config/default.yaml by core (#385).
+import { defaultReviewConfig } from "#src/config/config.js";
 import type { RepoMergedConfig } from "lastlight-shared/repo-config-schema";
 
 const DASHBOARD = join(import.meta.dirname, "../../dashboard/src");

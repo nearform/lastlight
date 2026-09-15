@@ -123,6 +123,32 @@ otel:
 sandbox:
   backend: gondolin
   maxTurns: 200
+  # Wall-clock budgets (issue #385). This file is the ONLY place a timeout
+  # default lives — code carries no numeric fallback, and a missing or invalid
+  # key fails config load naming the key. Override in your overlay.
+  agentTimeoutSeconds: 1800     # one agent phase run, when the phase sets no timeout_seconds
+  commandTimeoutSeconds: 300    # a type: bash / type: script phase with no timeout_seconds
+  untilBashTimeoutSeconds: 30   # a generic_loop until_bash check with no timeout_seconds
+
+# The build/test GATE budget (issue #385) — one number for "a single full
+# build/test gate command" (install excluded), shared by the fix loops'
+# until_bash gate and the agent's own gate commands (core passes it to
+# agentic-pi as --gate-timeout on every agent run). Seeded on the run's
+# template context as {{gate.timeoutSeconds}}.
+#
+# `timeoutSeconds` is REPO-SETTABLE — only the repo knows how long its suite
+# takes — which departs from the "a repo may only be more conservative" rule,
+# so it is clamped to `maxTimeoutSeconds`: min(repo, operator max).
+# `maxTimeoutSeconds` and `phaseTimeoutSeconds` are OPERATOR-ONLY.
+# Validated at load: timeoutSeconds <= maxTimeoutSeconds < phaseTimeoutSeconds.
+#
+# `fix.gateTimeoutSeconds` is the DEPRECATED spelling of `timeoutSeconds`: an
+# overlay that still sets it (and not gate.timeoutSeconds) is mapped across,
+# with a warning.
+gate:
+  timeoutSeconds: 900           # budget for ONE full build/test gate command (install excluded)
+  maxTimeoutSeconds: 1500       # ceiling a repo's .lastlight/lastlight.yml gate.timeoutSeconds is clamped to
+  phaseTimeoutSeconds: 2400     # budget for a phase that runs a gate (guardrails gate, executor); must exceed maxTimeoutSeconds
 
 # Where the per-phase build handoff docs (architect-plan.md, status.md,
 # executor-summary.md, reviewer-verdict.md, …) live:
@@ -285,7 +311,7 @@ repoConfig:
   # measured against `allowedImages` below. Drop it from this list to refuse the whole
   # feature outright.
   allowKeys: [models, variants, crons, disabled.workflows, disabled.crons, approval,
-              fix, dependencies, review, notifications, services]
+              fix, dependencies, review, notifications, services, gate]
   allowedModels: null            # null = any model whose provider prefix is configured;
                                  # a list restricts repos to exactly those model specs
   allowAssets: true              # allow the repo's prompt/skill/agent-context overrides
@@ -580,6 +606,11 @@ review:
     probeCoverage: false
     prepareTimeoutSeconds: 300
     coverageTimeoutSeconds: 900
+    # Phase budgets for the pipeline's deterministic steps in pr-review.yaml
+    # (`facts`, `seed`, `reconcile`), read as `{ from: … }` — no literal in YAML.
+    factsTimeoutSeconds: 300
+    seedTimeoutSeconds: 120
+    reconcileTimeoutSeconds: 120
     # Rounds `falsify` gets to write and run probes. Two: the loop's exit is a
     # five-line existence gate, not a validator — v2's full quote validator was
     # overkill and cost 2.4x for a worse result.
@@ -648,12 +679,12 @@ review:
 #   maxAttempts / localIterations / maxFlakyDeferrals   min(repo, operator)
 #   maxCostUsd                                          min, `null` = unbounded
 #   retryableClasses                                    a subset of this list
-# `escalateModelAfterAttempt` (spend) and `gateTimeoutSeconds` (shared resource)
-# are OPERATOR-ONLY — a repo setting them is dropped with a warning.
+# `escalateModelAfterAttempt` (spend) is OPERATOR-ONLY — a repo setting it is
+# dropped with a warning. The gate's until_bash budget moved to
+# `gate.timeoutSeconds` (above); `fix.gateTimeoutSeconds` is a deprecated alias.
 fix:
   maxAttempts: 3               # cross-run attempts per (repo, PR) before requires-human
   localIterations: 2           # within-run gate-loop iterations inside ONE attempt
-  gateTimeoutSeconds: 900      # until_bash budget for the repo's build/test gate
   escalateModelAfterAttempt: 1 # attempts above this use models["pr-fix-retry"] when set
   maxCostUsd: 5.0              # cumulative ceiling across attempts for one PR; null = off
   maxFlakyDeferrals: 2         # a `flaky` verdict defers this often, then counts as reproducible

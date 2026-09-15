@@ -663,6 +663,7 @@ GITHUB_TOKEN=ghp_…
 | `--retry-base-delay-ms <n>` | Backoff base in ms: `delay = base·2^(attempt-1)`. Overrides `retry.baseDelayMs` in settings.json. |
 | `--web-search-max-calls <n>` | Cap combined `web_search` + `web_fetch` calls per run. Default: 30. |
 | `--max-steps <n>` | Hard cap on agent steps (one LLM turn + its tool calls). When reached while the agent still wants to continue, the run stops and emits a `max_steps_reached` event before `agent_end`. Default: no cap. |
+| `--gate-timeout <seconds>` | Timeout for gate commands (installs, builds, full test suites). Adds one bash-tool guideline telling the model to pass this `timeout`, redirect output to a log and judge by exit code, and not to retry a timed-out gate; a smaller model timeout on a recognised gate command (`pnpm test`, `vitest`, `turbo run`, …) is raised to it. Programmatic: `gateTimeoutSeconds`. Default: unset (no guidance, no change). Works with `--sandbox gondolin` too. |
 | `--otel` | Enable OpenTelemetry traces + metrics export. Off by default. Requires an OTLP endpoint via `OTEL_EXPORTER_OTLP_ENDPOINT` (or `--otel-endpoint`). See section 10. |
 | `--no-otel` | Force-disable OTEL even if `AGENTIC_PI_OTEL_ENABLED=1`. |
 | `--otel-include-content` | Attach prompt/message/tool content to spans (bounded + truncated). Default: metadata-only. |

@@ -30,7 +30,7 @@ phases:
       - "scratch.fixMarkers.diagnosis.class == 'flaky'"
       - "scratch.fixMarkers.diagnosis.class == 'infra-dependent'"
       - "scratch.fixMarkers.diagnosis.class == 'upstream-broken'"
-    timeout_seconds: { from: fix.gateTimeoutSeconds, default: 900 }
+    timeout_seconds: { from: gate.timeoutSeconds }
     on_output:
       requires_marker: "CI_FIX_COMPLETE:"
     generic_loop:

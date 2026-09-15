@@ -836,14 +836,25 @@ export class FanoutHandler implements PhaseTypeHandler {
   }
 
   private gateTimeoutSeconds(phase: PhaseDefinition, branch: FanoutBranch): number {
-    return (
-      resolveTemplatedNumber(
-        branch.timeout_seconds ?? phase.timeout_seconds,
-        this.run.ctx,
-        `${phase.name}.${branch.name}.timeout_seconds`,
-        this.run.ledger.logger,
-      ) ?? 30
+    const own = resolveTemplatedNumber(
+      branch.timeout_seconds ?? phase.timeout_seconds,
+      this.run.ctx,
+      `${phase.name}.${branch.name}.timeout_seconds`,
+      this.run.ledger.logger,
     );
+    if (own !== undefined) return own;
+    // No budget of its own: the `until_bash` default from config
+    // (`sandbox.untilBashTimeoutSeconds`, seeded as `timeouts.untilBashSeconds`)
+    // — never a code literal (issue #385).
+    const timeouts = this.run.ctx.timeouts as { untilBashSeconds?: unknown } | undefined;
+    const fallback = Number(timeouts?.untilBashSeconds);
+    if (!Number.isFinite(fallback) || fallback <= 0) {
+      throw new Error(
+        `${phase.name}.${branch.name}: no timeout_seconds, and the run context carries no ` +
+          `timeouts.untilBashSeconds (sandbox.untilBashTimeoutSeconds) to fall back to`,
+      );
+    }
+    return fallback;
   }
 }
 

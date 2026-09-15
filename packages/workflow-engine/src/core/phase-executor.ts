@@ -418,6 +418,11 @@ export async function runPhase(
   workflowRunId?: string,
   githubAccess?: GitSandboxAccess,
   variantOverride?: string,
+  /**
+   * The agent run's kill budget (seconds), forwarded to `AgentPort.runAgent` as
+   * `opts.timeoutSeconds`. Absent ⇒ the backend's configured agent limit.
+   */
+  timeoutSeconds?: number,
 ): Promise<RunPhaseResult> {
   const dedupKey = `${workflowName}:${phaseName}`;
   const attrs = {
@@ -439,7 +444,12 @@ export async function runPhase(
     telemetry: { workflowName, phaseName, triggerId, workflowRunId },
   };
   return runLedgeredPhase(attrs, { dedupKey, phaseName, taskId, triggerId, repo: githubAccess?.repo, owner: githubAccess?.owner, workflowRunId }, deps, (onSessionId) =>
-    deps.agent.runAgent(prompt, phaseConfig, { taskId, githubAccess, onSessionId }),
+    deps.agent.runAgent(prompt, phaseConfig, {
+      taskId,
+      githubAccess,
+      onSessionId,
+      ...(timeoutSeconds !== undefined ? { timeoutSeconds } : {}),
+    }),
   );
 }
 
@@ -484,6 +494,8 @@ export async function runCommandPhase(
 
 const MAX_PREV_OUTPUT_BYTES = 10 * 1024; // cap accumulated generic-loop output at 10KB
 const MAX_UNTIL_OUTPUT_BYTES = 8 * 1024; // cap the until_bash gate's recorded stdout at 8KB
+/** Run-context key an `until_bash` check falls back to when its phase sets no `timeout_seconds`. */
+export const UNTIL_BASH_TIMEOUT_KEY = "timeouts.untilBashSeconds";
 
 export class PhaseExecutor {
   constructor(
@@ -588,7 +600,22 @@ export class PhaseExecutor {
       workflowId,
       githubAccess,
       variant,
+      this.agentTimeoutSeconds(phase),
     );
+  }
+
+  /**
+   * The agent run's kill budget for a standard or reviewer-loop phase:
+   * `timeout_seconds`, resolved against the run context.
+   *
+   * NOT for a `generic_loop` phase — there `timeout_seconds` has always been the
+   * `until_bash` gate's budget (pr-fix sets it to `fix.gateTimeoutSeconds`),
+   * and reusing it as the agent's limit would kill a fix iteration at the gate
+   * budget. Those phases keep the backend's agent limit.
+   */
+  private agentTimeoutSeconds(phase: PhaseDefinition): number | undefined {
+    if (phase.generic_loop) return undefined;
+    return this.phaseTimeoutSeconds(phase);
   }
 
   private async runStandard(
@@ -631,37 +658,9 @@ export class PhaseExecutor {
       return { results: [result], status: "failed", outputVars };
     }
 
-    // on_output rules (BLOCKED).
-    if (phase.on_output) {
-      const blocked = await this.evaluateBlocked(phase, pr.result.output ?? "");
-      if (blocked === "fail") {
-        const failResult: PhaseResult = {
-          phase: phaseName,
-          success: false,
-          output: pr.result.output ?? "",
-          error: "BLOCKED",
-        };
-        return { results: [failResult], status: "failed", outputVars };
-      }
-
-      // Postcondition marker: the run must sign off with an agreed completion
-      // marker. Its absence means the agent stopped without reaching an outcome
-      // — a silent no-op that would otherwise report success. Fail it like any
-      // phase failure (posts on_failure, records the error) so it shows red.
-      const marker = phase.on_output.requires_marker;
-      if (marker && !(pr.result.output ?? "").includes(marker)) {
-        const error = `phase produced no outcome — missing completion marker "${marker}"`;
-        await this.reporter.step(phaseName, "failed", phase.messages?.on_failure);
-        await this.reporter.failWorkflow(error);
-        const failResult: PhaseResult = {
-          phase: phaseName,
-          success: false,
-          output: pr.result.output ?? "",
-          error,
-        };
-        return { results: [failResult], status: "failed", outputVars };
-      }
-    }
+    // on_output rules (BLOCKED / requires_marker).
+    const onOutputFail = await this.applyOnOutput(phase, pr.result.output ?? "", outputVars);
+    if (onOutputFail) return onOutputFail;
 
     // Approval gate.
     if (phase.approval_gate && this.resolver.gateEnabled(phase.approval_gate) && this.run.store && this.run.workflowId) {
@@ -735,6 +734,13 @@ export class PhaseExecutor {
       await this.reporter.failWorkflow(pr.result.error);
       return { results: [result], status: "failed", outputVars };
     }
+
+    // Same on_output contract as an agent phase: a deterministic gate (e.g.
+    // build's `guardrails_gate`) exits 0 and prints its READY/BLOCKED verdict,
+    // so BLOCKED (with its `unless_*` bypass) and `requires_marker` apply to
+    // stdout exactly as they do to an agent's final text.
+    const onOutputFail = await this.applyOnOutput(phase, rawOutput, outputVars);
+    if (onOutputFail) return onOutputFail;
 
     if (phase.approval_gate && this.resolver.gateEnabled(phase.approval_gate) && this.run.store && this.run.workflowId) {
       await this.pauseForApproval(
@@ -810,6 +816,25 @@ export class PhaseExecutor {
   }
 
   /**
+   * The `until_bash` check's budget: the phase's own `timeout_seconds`, else the
+   * run context's `timeouts.untilBashSeconds` (seeded from resolved config).
+   * There is no numeric fallback — neither resolving is an error naming both.
+   */
+  private untilBashTimeoutSeconds(phase: PhaseDefinition): number {
+    const own = this.phaseTimeoutSeconds(phase);
+    if (own !== undefined) return own;
+    const fromCtx = resolveTemplatedNumber(
+      { from: UNTIL_BASH_TIMEOUT_KEY },
+      this.run.ctx,
+      `${phase.name}.generic_loop.until_bash timeout (no timeout_seconds on the phase)`,
+      this.ports.logger,
+    );
+    // `{ from }` with no default either resolves or throws; this guards the type.
+    if (fromCtx === undefined) throw new Error(`${phase.name}: until_bash timeout did not resolve`);
+    return fromCtx;
+  }
+
+  /**
    * Evaluate a `generic_loop.until_bash` condition INSIDE the sandbox (against
    * the persisted workspace), replacing the old harness-host `execSync`. Exit 0
    * ⇒ loop complete. The check inherits the phase's egress; no session log is
@@ -844,6 +869,10 @@ export class PhaseExecutor {
     const { config, githubAccess, taskId, triggerId, definition, workflowId, store: db } = this.run;
     const log = this.ports.logger ?? noopLogger;
     const label = PhaseRef.iterCheck(phase.name, iteration).format();
+    // Resolved BEFORE the row is opened and outside the try: an unresolvable
+    // budget is a config wiring bug that must fail the phase loudly, not be
+    // swallowed into a `condition_not_met` that quietly iterates again.
+    const timeoutSeconds = this.untilBashTimeoutSeconds(phase);
     const startedAt = Date.now();
 
     const executionId = db ? randomUUID() : undefined;
@@ -876,7 +905,7 @@ export class PhaseExecutor {
         {
           taskId,
           githubAccess,
-          timeoutSeconds: this.phaseTimeoutSeconds(phase) ?? 30,
+          timeoutSeconds,
           writeSession: false,
         },
       );
@@ -911,6 +940,42 @@ export class PhaseExecutor {
     }
 
     return met;
+  }
+
+  /**
+   * Apply a phase's `on_output` rules to its successful output. Returns the
+   * failed outcome when a rule fails the phase, `undefined` to carry on.
+   * Shared by agent phases ({@link runStandard}) and `bash`/`script` phases
+   * ({@link runCommandBody}).
+   */
+  private async applyOnOutput(
+    phase: PhaseDefinition,
+    output: string,
+    outputVars: Record<string, unknown>,
+  ): Promise<PhaseOutcome | undefined> {
+    if (!phase.on_output) return undefined;
+    const phaseName = phase.name;
+    const blocked = await this.evaluateBlocked(phase, output);
+    if (blocked === "fail") {
+      return {
+        results: [{ phase: phaseName, success: false, output, error: "BLOCKED" }],
+        status: "failed",
+        outputVars,
+      };
+    }
+
+    // Postcondition marker: the run must sign off with an agreed completion
+    // marker. Its absence means the phase stopped without reaching an outcome
+    // — a silent no-op that would otherwise report success. Fail it like any
+    // phase failure (posts on_failure, records the error) so it shows red.
+    const marker = phase.on_output.requires_marker;
+    if (marker && !output.includes(marker)) {
+      const error = `phase produced no outcome — missing completion marker "${marker}"`;
+      await this.reporter.step(phaseName, "failed", phase.messages?.on_failure);
+      await this.reporter.failWorkflow(error);
+      return { results: [{ phase: phaseName, success: false, output, error }], status: "failed", outputVars };
+    }
+    return undefined;
   }
 
   /**

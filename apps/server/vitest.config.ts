@@ -24,8 +24,16 @@ export default defineConfig({
     // identity with `last-light[bot]`. Existing tests that explicitly
     // exercise the global-write path can still `delete process.env.LASTLIGHT_LOCAL_DEV`
     // in beforeEach (see tests/engine/git-auth.test.ts).
+    //
+    // LOG_LEVEL: core's pino logger emits structured JSON at info/warn, which
+    // buried the vitest summary under ~65 kB of log lines (issue #385). Default
+    // it to `fatal` — the quietest level `resolveLevel()` accepts (it has no
+    // `silent`), and only process-startup paths in src/index.ts emit fatal —
+    // unless the developer already set LOG_LEVEL (`LOG_LEVEL=debug … vitest`).
+    // The logger reads it once at import, so it must be set here, not in a test.
     env: {
       LASTLIGHT_LOCAL_DEV: "1",
+      LOG_LEVEL: process.env.LOG_LEVEL || "fatal",
     },
   },
 });

@@ -193,7 +193,13 @@ async function runFanout(
 
   const scope: FanoutRunScope = {
     workflowName: "pr-review",
-    ctx: { owner: "acme", repo: "widgets" } as unknown as TemplateContext,
+    // `timeouts` is what `dispatchWorkflow` seeds from `sandbox.*` (issue #385):
+    // a branch gate with no `timeout_seconds` of its own reads its budget here.
+    ctx: {
+      owner: "acme",
+      repo: "widgets",
+      timeouts: { agentSeconds: 1800, commandSeconds: 300, untilBashSeconds: 30 },
+    } as unknown as TemplateContext,
     config,
     taskId: "task-1",
     triggerId: "acme/widgets#7",

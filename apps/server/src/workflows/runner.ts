@@ -6,7 +6,8 @@ import type {
 import type { StateDb } from "../state/db.js";
 import type { PhaseHistoryEntry } from "../state/db.js";
 import type { ModelConfig, VariantConfig } from "../config/config.js";
-import { resolveModel, resolveVariant, getBotName } from "../config/config.js";
+import { resolveModel, resolveVariant, getBotName, effectiveGate, getSandboxTimeouts } from "../config/config.js";
+import type { RunExecutorConfig } from "../engine/executors/orchestrator.js";
 import { logger } from "../logging/logger.js";
 import type { AgentWorkflowDefinition } from "./schema.js";
 import {
@@ -436,9 +437,25 @@ export async function runWorkflow(
       ? { services: repoConfig.services, serviceBounds: repoConfig.serviceBounds }
       : {};
 
-  const runConfig: ExecutorConfig = assets
-    ? { ...config, ...runServices, agentContext: runAgentContext(assets, repoConfig) }
-    : { ...config, ...runServices };
+  // Issue #385: the run's effective (repo-clamped) gate budget. Backfilled onto
+  // the context for callers that build their own (a resume of an older run, the
+  // evals harness) — `dispatchWorkflow` already seeds both — and carried on the
+  // executor config so EVERY agent run is launched with `--gate-timeout`.
+  const runGate = repoConfig?.gate ?? effectiveGate();
+  if (ctx.gate === undefined) ctx.gate = { ...runGate };
+  if (ctx.timeouts === undefined) {
+    const t = getSandboxTimeouts();
+    ctx.timeouts = {
+      agentSeconds: t.agentTimeoutSeconds,
+      commandSeconds: t.commandTimeoutSeconds,
+      untilBashSeconds: t.untilBashTimeoutSeconds,
+    };
+  }
+  const runGateConfig: RunExecutorConfig = { gateTimeoutSeconds: runGate.timeoutSeconds };
+
+  const runConfig: RunExecutorConfig = assets
+    ? { ...config, ...runServices, ...runGateConfig, agentContext: runAgentContext(assets, repoConfig) }
+    : { ...config, ...runServices, ...runGateConfig };
 
   const modelFor = (taskType: string): string | undefined =>
     effectiveModels ? resolveModel(effectiveModels, taskType) : undefined;

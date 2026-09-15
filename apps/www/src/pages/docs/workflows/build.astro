@@ -72,9 +72,20 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	<h3>1. Guardrails</h3>
 	<p>
 		Pre-flight check that verifies the repo has foundational tooling: a test
-		framework, linter, and type checker. Outputs <code>READY</code> or
-		<code>BLOCKED</code>. If blocked, the workflow stops unless the issue has
-		a <code>lastlight:bootstrap</code> label (used for issues that set up the
+		framework, linter, and type checker. It runs in two parts:
+	</p>
+	<ul>
+		<li><strong><code>guardrails</code></strong> (agent) installs dependencies, runs typecheck and lint, and writes <code>.git/lastlight-gate.sh</code> holding the repo's full test command.</li>
+		<li><strong><code>guardrails_gate</code></strong> (harness-run, no LLM) runs that full suite <strong>once</strong> under <code>timeout gate.timeoutSeconds</code>. Exit 0 → <code>READY</code>; non-zero → <code>BLOCKED</code> with the log tail; a timeout → <code>BLOCKED</code> with "raise <code>gate.timeoutSeconds</code>".</li>
+	</ul>
+	<p>
+		<code>READY</code> requires the <strong>full</strong> suite to pass — the
+		exit code decides, so a subset or "representative" run is never evidence.
+		The report records the command and how long it took, so you can size
+		<code>gate.timeoutSeconds</code> from real numbers (see
+		<a href="/docs/agent-friendly-repos">Making your repo agent-friendly</a>).
+		If blocked, the workflow stops unless the issue has a
+		<code>lastlight:bootstrap</code> label (used for issues that set up the
 		missing tooling).
 	</p>
 
@@ -97,8 +108,12 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	<h3>3. Executor</h3>
 	<p>
 		Implements the architect's plan using TDD: writes failing tests first,
-		then implements until tests pass. Runs the full guardrails suite (test,
-		lint, typecheck) before committing. Pushes to the workflow's branch.
+		then implements until tests pass. Runs the targeted tests for touched
+		areas plus typecheck, lint and build, then the full suite
+		<strong>once</strong> within <code>gate.timeoutSeconds</code>, judged by
+		exit code. A timed-out suite is reported in the executor summary rather
+		than retried — CI runs the full suite on the PR. Pushes to the workflow's
+		branch.
 	</p>
 
 	<h3>4. Reviewer</h3>

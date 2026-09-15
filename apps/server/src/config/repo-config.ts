@@ -133,6 +133,8 @@ export function repoConfigBaseFromRuntime(config: LastLightConfig): RepoConfigBa
       fix: { ...config.fix },
       dependencies: { ...config.dependencies },
       review: { ...config.review },
+      // Issue #385: the operator ceiling `gate.timeoutSeconds` is clamped to.
+      gate: { ...(config.gate ?? {}) },
     },
     sources: {
       models: expandSourceNode(bootSources.models, Object.keys(config.models)),
@@ -144,6 +146,7 @@ export function repoConfigBaseFromRuntime(config: LastLightConfig): RepoConfigBa
       fix: expandSourceNode(bootSources.fix, Object.keys(config.fix ?? {})),
       dependencies: expandSourceNode(bootSources.dependencies, Object.keys(config.dependencies ?? {})),
       review: expandSourceNode(bootSources.review, Object.keys(config.review ?? {})),
+      gate: expandSourceNode(bootSources.gate, Object.keys(config.gate ?? {})),
     },
   };
 }

@@ -24,7 +24,9 @@ import type { TemplateContext } from "#src/workflows/templates.js";
 import type { AgentWorkflowDefinition, PhaseDefinition } from "#src/workflows/schema.js";
 import type { DagNode } from "#src/workflows/dag.js";
 import { setRuntimeConfig, resetRuntimeConfigForTests } from "#src/config/config.js";
-import { defaultReviewConfig, type ReviewConfig } from "lastlight-shared/config-types";
+import type { ReviewConfig } from "lastlight-shared/config-types";
+// The COMPLETE review block (durations included) is derived from config/default.yaml by core (#385).
+import { defaultReviewConfig } from "#src/config/config.js";
 
 /**
  * Integration test for the first-class `post-review` action

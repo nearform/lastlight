@@ -66,7 +66,6 @@ repo-config-schema.ts The PURE half of the per-repository `.lastlight/` config
                       leaf resolves to exactly it). Leaves that even a one-way
                       clamp would get wrong are operator-only and answer
                       `key-not-allowed`: fix.escalateModelAfterAttempt (spend),
-                      fix.gateTimeoutSeconds (shared resource),
                       dependencies.minSettledChecks (a max() clamp would weld
                       the escape hatch shut for a repo with no CI), and
                       review.analysis (the review evidence pipeline — spend,

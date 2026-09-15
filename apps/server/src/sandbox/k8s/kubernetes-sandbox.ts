@@ -321,6 +321,7 @@ export class KubernetesSandbox implements Sandbox, AgentContextSink {
       webSearch: opts.webSearch === true,
       webSearchProvider: opts.webSearch === true && Boolean(opts.webSearchProvider),
       artifactUpload: Boolean(this.artifactToken),
+      gateTimeoutSeconds: opts.gateTimeoutSeconds,
     });
     // `runPod` stashes the resulting `RunHandles` on `this.handles` for
     // `dispose`; `runAgent` has no further use for them (the orchestrator
@@ -343,6 +344,7 @@ export class KubernetesSandbox implements Sandbox, AgentContextSink {
       cwd: opts.agentCwd,
       onLine: parseLine(onEvent),
       promptText: prompt,
+      timeoutSeconds: opts.timeoutSeconds,
     });
     return undefined; // orchestrator reconstructs the result from the streamed events
   }
@@ -404,7 +406,8 @@ export class KubernetesSandbox implements Sandbox, AgentContextSink {
     env: Record<string, string>;
     cwd: string;
     onLine: (line: string) => void;
-    timeoutSeconds?: number;
+    /** Wall-clock cap, resolved from config by the caller — no default (issue #385). */
+    timeoutSeconds: number;
     /** Prompt text for a `runAgent` call — creates a prompt Secret mounted
      *  into the pod. Omitted for `runCommand` (no prompt to deliver). */
     promptText?: string;
@@ -440,8 +443,8 @@ export class KubernetesSandbox implements Sandbox, AgentContextSink {
     this.handles = handles;
 
     // Wall-clock cap: activeDeadlineSeconds kills the pod at the per-call budget
-    // (runCommand threads its RunCommandOpts.timeoutSeconds; runAgent falls
-    // through to the factory timeout). streamPodLog resolves once the pod (and
+    // (runCommand threads its RunCommandOpts.timeoutSeconds; runAgent threads
+    // RunAgentOpts.timeoutSeconds — both resolved from config, issue #385). streamPodLog resolves once the pod (and
     // its log stream) terminates, so no separate timeout is needed here.
     const manifest = buildPodManifest({
       name: podLabel.value,
@@ -451,7 +454,7 @@ export class KubernetesSandbox implements Sandbox, AgentContextSink {
       envFromSecret: secrets.credsSecret,
       promptSecret: secrets.promptSecret,
       cwd,
-      activeDeadlineSeconds: timeoutSeconds ?? this.opts.timeoutSeconds ?? 1800,
+      activeDeadlineSeconds: podDeadlineSeconds(timeoutSeconds),
       runAsUser: this.runAsUser,
       workspace: this.provisioned?.workspace ?? { kind: "emptyDir" },
       initContainers: this.buildInitContainers(),
@@ -574,4 +577,14 @@ export class KubernetesSandbox implements Sandbox, AgentContextSink {
       this.artifactToken = undefined;
     }
   }
+}
+
+/** `activeDeadlineSeconds` must be a positive integer; a budget is never rounded DOWN. */
+function podDeadlineSeconds(timeoutSeconds: number): number {
+  if (typeof timeoutSeconds !== "number" || !Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
+    throw new Error(
+      `Refusing to create a pod: timeoutSeconds must be a positive number of seconds (got ${String(timeoutSeconds)})`,
+    );
+  }
+  return Math.ceil(timeoutSeconds);
 }

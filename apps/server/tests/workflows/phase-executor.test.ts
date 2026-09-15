@@ -376,6 +376,140 @@ describe("PhaseExecutor — on_output BLOCKED", () => {
   });
 });
 
+describe("PhaseExecutor — on_output on a bash phase (#385 guardrails_gate)", () => {
+  const cmdOk = (output: string) => ({ success: true, output, error: undefined, turns: 0, durationMs: 5 });
+  const def: AgentWorkflowDefinition = {
+    kind: "agent",
+    name: "gated",
+    phases: [
+      makePhase({
+        name: "guardrails_gate",
+        type: "bash",
+        command: "sh .git/gate.sh",
+        on_output: {
+          contains_BLOCKED: { action: "fail", message: "Guardrails: BLOCKED", unless_label: "lastlight:bootstrap", bypass_message: "bypassed" },
+          contains_READY: { action: "continue" },
+        },
+        messages: { on_success: "READY — suite passed" },
+      }),
+    ],
+  };
+
+  it("fails the node when the command's stdout says BLOCKED (exit 0)", async () => {
+    mockExecuteCommand.mockResolvedValue(cmdOk("BLOCKED — full test suite failed (exit 1)\n"));
+    const reporter = makeReporter();
+    const db = makeMockDb();
+    const outcome = await makeExecutor(makeRun(def, db), reporter, makeResolver()).execute(node("guardrails_gate"), {});
+
+    expect(outcome.status).toBe("failed");
+    expect(outcome.results[0]).toMatchObject({ phase: "guardrails_gate", success: false, error: "BLOCKED" });
+    expect(db.executions.markLatestAsFailed).toHaveBeenCalledWith("gated:guardrails_gate", "acme/widget#42", "Guardrails: BLOCKED", "wf-1");
+    expect(reporter.failed).toContain("Guardrails: BLOCKED");
+    expect(reporter.steps.some((s) => s.status === "done")).toBe(false);
+  });
+
+  it("bypasses BLOCKED on a bootstrap label and continues", async () => {
+    mockExecuteCommand.mockResolvedValue(cmdOk("BLOCKED — full test suite failed (exit 1)\n"));
+    const reporter = makeReporter();
+    const run = makeRun(def, makeMockDb());
+    run.ctx.issueLabels = ["lastlight:bootstrap"];
+    const outcome = await makeExecutor(run, reporter, makeResolver()).execute(node("guardrails_gate"), {});
+
+    expect(outcome.status).toBe("succeeded");
+    expect(reporter.notes).toContain("bypassed");
+  });
+
+  it("READY stdout succeeds and posts on_success", async () => {
+    mockExecuteCommand.mockResolvedValue(cmdOk("READY — full test suite passed (exit 0) in 12s\n"));
+    const reporter = makeReporter();
+    const outcome = await makeExecutor(makeRun(def, makeMockDb()), reporter, makeResolver()).execute(node("guardrails_gate"), {});
+
+    expect(outcome.status).toBe("succeeded");
+    expect(reporter.steps.find((s) => s.status === "done")?.template).toBe("READY — suite passed");
+  });
+
+  it("enforces requires_marker on command stdout", async () => {
+    mockExecuteCommand.mockResolvedValue(cmdOk("nothing useful\n"));
+    const markerDef: AgentWorkflowDefinition = {
+      kind: "agent",
+      name: "marked",
+      phases: [makePhase({ name: "emit", type: "bash", command: "true", on_output: { requires_marker: "DONE:" } })],
+    };
+    const outcome = await makeExecutor(makeRun(markerDef), makeReporter(), makeResolver()).execute(node("emit"), {});
+    expect(outcome.status).toBe("failed");
+    expect(outcome.results[0].error).toContain('missing completion marker "DONE:"');
+  });
+});
+
+describe("PhaseExecutor — agent phase timeout_seconds reaches the agent port (#385)", () => {
+  it("forwards a resolved { from } timeout as opts.timeoutSeconds on a standard phase", async () => {
+    mockExecuteAgent.mockResolvedValue(makeSuccessResult("done"));
+    const def: AgentWorkflowDefinition = {
+      kind: "agent",
+      name: "timed",
+      phases: [makePhase({ name: "executor", prompt: "prompts/executor.md", timeout_seconds: { from: "gate.phaseTimeoutSeconds" } })],
+    };
+    const run = makeRun(def);
+    run.ctx = { ...run.ctx, gate: { phaseTimeoutSeconds: 2400 } } as TemplateContext;
+    await makeExecutor(run, makeReporter(), makeResolver()).execute(node("executor"), {});
+
+    const opts = mockExecuteAgent.mock.calls[0][2] as { timeoutSeconds?: number };
+    expect(opts.timeoutSeconds).toBe(2400);
+  });
+
+  it("forwards it to both the review and the fix run of a reviewer loop", async () => {
+    mockExecuteAgent
+      .mockResolvedValueOnce(makeSuccessResult("VERDICT: REQUEST_CHANGES"))
+      .mockResolvedValueOnce(makeSuccessResult("fixed"))
+      .mockResolvedValueOnce(makeSuccessResult("VERDICT: APPROVED"));
+    const def: AgentWorkflowDefinition = {
+      kind: "agent",
+      name: "timed-loop",
+      phases: [
+        makePhase({
+          name: "reviewer",
+          prompt: "prompts/reviewer.md",
+          timeout_seconds: 777,
+          loop: { max_cycles: 1, on_request_changes: { fix_prompt: "prompts/fix.md", re_review_prompt: "prompts/re-reviewer.md" } },
+        } as Partial<PhaseDefinition> & { name: string }),
+      ],
+    };
+    await makeExecutor(makeRun(def), makeReporter(), makeResolver()).execute(node("reviewer"), {});
+
+    expect(mockExecuteAgent.mock.calls.length).toBeGreaterThanOrEqual(2);
+    for (const call of mockExecuteAgent.mock.calls) {
+      expect((call[2] as { timeoutSeconds?: number }).timeoutSeconds).toBe(777);
+    }
+  });
+
+  it("omits timeoutSeconds when the phase declares none", async () => {
+    mockExecuteAgent.mockResolvedValue(makeSuccessResult("done"));
+    const def: AgentWorkflowDefinition = { kind: "agent", name: "untimed", phases: [makePhase({ name: "a", prompt: "p.md" })] };
+    await makeExecutor(makeRun(def), makeReporter(), makeResolver()).execute(node("a"), {});
+    expect(mockExecuteAgent.mock.calls[0][2]).not.toHaveProperty("timeoutSeconds");
+  });
+
+  it("does NOT apply a generic_loop phase's timeout_seconds (the until_bash budget) to the agent", async () => {
+    mockExecuteAgent.mockResolvedValue(makeSuccessResult("done"));
+    mockExecuteCommand.mockResolvedValue({ success: true, output: "", error: undefined, turns: 0, durationMs: 1 });
+    const def: AgentWorkflowDefinition = {
+      kind: "agent",
+      name: "loop-timed",
+      phases: [
+        makePhase({
+          name: "fix",
+          prompt: "p.md",
+          timeout_seconds: 900,
+          generic_loop: { max_iterations: 1, until_bash: "true", interactive: false, fresh_context: false },
+        } as Partial<PhaseDefinition> & { name: string }),
+      ],
+    };
+    await makeExecutor(makeRun(def), makeReporter(), makeResolver()).execute(node("fix"), {});
+    expect(mockExecuteAgent.mock.calls[0][2]).not.toHaveProperty("timeoutSeconds");
+    expect((mockExecuteCommand.mock.calls[0][2] as { timeoutSeconds?: number }).timeoutSeconds).toBe(900);
+  });
+});
+
 describe("PhaseExecutor — on_output requires_marker", () => {
   const def: AgentWorkflowDefinition = {
     kind: "agent",

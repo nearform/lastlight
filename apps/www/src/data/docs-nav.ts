@@ -54,6 +54,7 @@ export const docsNav: DocsNavSection[] = [
 		items: [
 			{ slug: 'configuration', label: 'Configuration' },
 			{ slug: 'repo-config', label: 'Per-repo config' },
+			{ slug: 'agent-friendly-repos', label: 'Making your repo agent-friendly' },
 			{ slug: 'observability', label: 'Observability' },
 			{ slug: 'feedback-signals', label: 'Feedback signals' },
 			{ slug: 'cli', label: 'CLI' },

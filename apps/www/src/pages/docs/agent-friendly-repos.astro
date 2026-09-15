@@ -1,0 +1,57 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="agent-friendly-repos"
+	description="Four small habits that make Last Light's builds faster and its verdicts clearer: a test command that fails loudly, quiet test logs, a gate timeout sized to your real suite, and one test command shared with CI."
+>
+	<p>
+		Last Light works on any repo — it does not depend on anything on this page.
+		Its build and fix gates judge your test suite by <strong>exit code</strong>
+		and run it under a budget you control. These habits just make those runs
+		faster and the verdicts easier to read.
+	</p>
+
+	<h2>1. The test command exits non-zero on failure</h2>
+	<p>
+		The <a href="/docs/workflows/build">build workflow's</a> guardrails gate runs
+		your full suite once and reads only its exit code: 0 is <code>READY</code>,
+		anything else is <code>BLOCKED</code>. A script that swallows failures
+		(<code>|| true</code>, a wrapper that always exits 0, a watch mode that never
+		exits) turns a broken suite into a green one — or a hang into a timeout.
+	</p>
+
+	<h2>2. Keep test logging quiet</h2>
+	<p>
+		When a gate fails, the agent diagnoses it from the tail of the log. If every
+		test prints application logs, the summary and the failing assertion get
+		buried. Default your logger to silent (or <code>error</code>) under test, and
+		let a developer opt back in with an environment variable such as
+		<code>LOG_LEVEL=debug</code>.
+	</p>
+
+	<h2>3. Size <code>gate.timeoutSeconds</code> to your real suite</h2>
+	<p>
+		One full build/test gate command gets <code>gate.timeoutSeconds</code>
+		(900 by default). If your suite takes longer, set it in the repo:
+	</p>
+	<pre><code># .lastlight/lastlight.yml
+gate:
+  timeoutSeconds: 1200         # our full suite takes ~14 minutes on a cold sandbox</code></pre>
+	<p>
+		The guardrails report records the command it ran and how long it took, so
+		use that number plus some headroom. A repo value is clamped to the operator's
+		<code>gate.maxTimeoutSeconds</code> (1500 by default) — see
+		<a href="/docs/repo-config#policy">Per-repo config</a>. A suite that doesn't
+		finish in time is reported <code>BLOCKED</code> with "raise
+		<code>gate.timeoutSeconds</code>", never retried with a bigger budget.
+	</p>
+
+	<h2>4. CI runs the same test command</h2>
+	<p>
+		Guardrails proves the suite is green before work starts, and CI checks the
+		pull request after. If both run the same command (say,
+		<code>pnpm test</code>), a green guardrails gate means the same thing as a
+		green CI check — and a red CI run is something the agent can reproduce.
+	</p>
+</DocsLayout>

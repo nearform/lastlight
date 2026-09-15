@@ -18,6 +18,7 @@ import {
   SessionManager,
   SettingsManager,
   createAgentSession,
+  createBashToolDefinition,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionEvent, RetrySettings } from "@earendil-works/pi-coding-agent";
@@ -40,6 +41,7 @@ import {
 import { loadSkillsExtension, buildSkillsStatusEvent } from "./extensions/skills/index.js";
 import { registerProviderOverrides, resolveModel } from "./models.js";
 import { resolveRetrySettings } from "./retry.js";
+import { applyGateTimeout } from "./gate-timeout.js";
 import { buildSandbox, type ImageDescriptor, type SandboxResult } from "./sandbox/index.js";
 import { ensureImage, ImageLoaderError } from "./sandbox/images/loader.js";
 import { createTelemetry, resolveTelemetryConfig } from "./telemetry/index.js";
@@ -302,7 +304,24 @@ export async function runOnce(
     resourceLoader,
     tools: config.tools,
     noTools: noToolsMode,
-    customTools: [...sandbox.customTools, ...github.customTools, ...webSearch.customTools],
+    customTools: [
+      // Gate-timeout wraps the gondolin bash, or — when Pi's host built-ins are
+      // active — supplies a wrapped host bash (built with the same settings Pi
+      // uses) that supersedes the built-in by name. No-op when unset.
+      ...applyGateTimeout(
+        sandbox.customTools,
+        config.gateTimeoutSeconds,
+        noToolsMode
+          ? undefined
+          : () =>
+              createBashToolDefinition(config.cwd, {
+                commandPrefix: settingsManager.getShellCommandPrefix(),
+                shellPath: settingsManager.getShellPath(),
+              }),
+      ),
+      ...github.customTools,
+      ...webSearch.customTools,
+    ],
   });
 
   // Telemetry observes the raw event stream below. Built after the session so

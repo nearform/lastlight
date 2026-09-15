@@ -679,6 +679,14 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
     `approval` (add-only — a repo may raise a gate, never clear one), `fix`,
     `dependencies`, `review` (one-way clamped — next bullet). Inert out
     of the box: nothing changes until a repo actually commits `.lastlight/`.
+  - **`gate` — the one budget a repo may RAISE** (issue #385).
+    `gate.timeoutSeconds` (one full build/test gate command) is repo-settable
+    because only the repo knows how long its suite takes, clamped to the
+    operator's `gate.maxTimeoutSeconds` (`min(repo, max)`, over-ceiling →
+    `policy-downgrade`). `gate.maxTimeoutSeconds` / `gate.phaseTimeoutSeconds`
+    are operator-only (`key-not-allowed`). Every timeout lives in
+    `config/default.yaml` with no code default — a missing key fails config
+    load; `fix.gateTimeoutSeconds` is a deprecated overlay alias.
   - **Policy blocks** (`fix` / `dependencies` / `review`, issues #251/#252) —
     budgets and blast-radius dials, so they generalise `approval`'s add-only
     rule: **a repo may only ever be MORE conservative than the operator.** A
@@ -697,10 +705,9 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
     review modes are equally *safe* but not equally *expensive* — `eager`
     buys a full agent review per push on the operator's budget — and the
     audit comment is the record of a major this deployment auto-merged,
-    whose only silenceable party is the one being audited.) Five leaves are
+    whose only silenceable party is the one being audited.) Four leaves are
     **operator-only** and answer `key-not-allowed` instead:
     `fix.escalateModelAfterAttempt` (spend),
-    `fix.gateTimeoutSeconds` (shared resource),
     `dependencies.minSettledChecks` — where a `max(repo, operator)` clamp would
     weld the escape hatch shut for a repo with no CI at all — and
     `review.analysis` (the review evidence pipeline: spend, with no
@@ -953,6 +960,7 @@ pnpm --filter lastlight-core start            # compiled JS
 
 # Tests
 pnpm --filter lastlight-core test                       # full server suite (docker ITs skip unless opted in)
+LOG_LEVEL=debug pnpm --filter lastlight-core test       # vitest defaults core's logger to fatal (quiet); opt back in
 pnpm --filter @lastlight/dashboard typecheck            # dashboard typecheck
 
 # State schema change — BOTH dialects, always. Edit src/state/schema/sqlite.ts
