@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, lstatSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { RunResultAccumulator, stageSkillBundle, excludeFromGit, resetVerifyScript, VERIFY_SCRIPT_NAME, detectAccountError, reclassifySuccess } from "#src/engine/agent-executor.js";
+import { RunResultAccumulator, stageSkillBundle, excludeFromGit, resetVerifyScript, VERIFY_SCRIPT_NAME, detectAccountError, reclassifySuccess, mapStopReason } from "#src/engine/agent-executor.js";
 
 /**
  * A pi assistant `message_end` event carrying per-message usage. Mirrors the
@@ -247,6 +247,58 @@ describe("RunResultAccumulator tool errors", () => {
     const acc = new RunResultAccumulator();
     acc.feed({ type: "tool_execution_end", tool: "read", isError: false, result: "ok" });
     expect(acc.toolError()).toBeUndefined();
+  });
+
+  it("clears lastToolError after a later successful tool", () => {
+    const acc = new RunResultAccumulator();
+    acc.feed({ type: "tool_execution_end", tool: "bash", isError: true, error: "exit 1" });
+    acc.feed({ type: "tool_execution_end", tool: "read", isError: false, result: "ok" });
+    // A later success means the run did NOT end on a failing tool
+    expect(acc.toolError()).toBeUndefined();
+  });
+
+  it("keeps the error when the LAST tool failed (even after an earlier success)", () => {
+    const acc = new RunResultAccumulator();
+    acc.feed({ type: "tool_execution_end", tool: "read", isError: false, result: "ok" });
+    acc.feed({ type: "tool_execution_end", tool: "bash", isError: true, error: "quota exceeded" });
+    expect(acc.toolError()).toEqual({ tool: "bash", message: "quota exceeded" });
+  });
+});
+
+describe("mapStopReason — lastToolErrored semantics", () => {
+  const baseResult = {
+    exitCode: 0 as const,
+    ok: true,
+    agentEnded: true,
+    toolErrors: false,
+    maxStepsReached: false,
+    finalText: "",
+    messages: [],
+    records: [],
+    warnings: [],
+  };
+
+  it("returns error_tool when lastToolErrored is true and finalText is empty", () => {
+    expect(mapStopReason({ ...baseResult, lastToolErrored: true, toolErrors: true, finalText: "" })).toBe("error_tool");
+  });
+
+  it("returns unknown (not error_tool) when lastToolErrored is false even if toolErrors sticky flag is true", () => {
+    // Recovered tool failure: some earlier tool errored but the last one succeeded,
+    // and the run ended with an empty completion (no agentEnded). Must be soft/retryable.
+    expect(
+      mapStopReason({ ...baseResult, agentEnded: false, lastToolErrored: false, toolErrors: true, finalText: "" }),
+    ).toBe("unknown");
+  });
+
+  it("returns success when finalText is non-empty regardless of toolErrors", () => {
+    expect(mapStopReason({ ...baseResult, lastToolErrored: true, toolErrors: true, finalText: "answer" })).toBe("success");
+  });
+
+  it("returns unknown when lastToolErrored is undefined and finalText is empty", () => {
+    // Producers that predate lastToolErrored (or a run with no tools) should map to unknown
+    expect(
+      mapStopReason({ ...baseResult, agentEnded: false, lastToolErrored: undefined, toolErrors: false, finalText: "" }),
+    ).toBe("unknown");
   });
 });
 
