@@ -74,6 +74,22 @@ export function opengrepArgs(rulesPath: string, targets: string[]): string[] {
 }
 
 /**
+ * The environment opengrep is spawned with: the caller's, with a UTF-8 locale
+ * forced on.
+ *
+ * opengrep is a bundled Python program that decodes its `--config` file with the
+ * process locale. The sandbox image set none, so it decoded `rules/review.yaml`
+ * as ASCII and died on the first non-ASCII byte — an em dash in a COMMENT —
+ * with exit 2 and empty stdout, turning every `patterns` run into a
+ * `degraded[]` entry and zero findings. Set here, at the one spawn site, so a
+ * host run (`--sandbox none`, a dev box with `LANG=C`) is covered too, not only
+ * the image's `ENV`.
+ */
+export function withUtf8Locale(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return { ...env, LANG: "C.UTF-8", LC_ALL: "C.UTF-8" };
+}
+
+/**
  * `sha1(tool + ":" + rule + ":" + file + ":" + 3-line-context)`, lowercase hex
  * — the recipe `skills/security-review/SKILL.md` §4 already defines. Reused
  * rather than reinvented, so a finding keeps one identity across both surfaces.
@@ -238,6 +254,7 @@ export function extractPatterns(options: ExtractPatternsOptions): ExtractPattern
     } else {
       const result = spawnSync(opengrep, opengrepArgs(rules, scannable), {
         cwd: options.repo,
+        env: withUtf8Locale(process.env),
         encoding: "utf8",
         timeout,
         maxBuffer: 64 * 1024 * 1024,

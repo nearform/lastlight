@@ -33,7 +33,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
-import { defaultRulesPath, opengrepArgs } from "../src/patterns.js";
+import { defaultRulesPath, opengrepArgs, withUtf8Locale } from "../src/patterns.js";
 import { resolveToolBin } from "../src/toolchain.js";
 import { runExtractor } from "../src/run.js";
 import { makeFixture } from "./helpers.js";
@@ -472,6 +472,8 @@ describe.skipIf(!OPENGREP)("rules/review.yaml — every rule fires on real code"
     // actually saw carried the config's absolute path.
     const result = spawnSync(OPENGREP as string, opengrepArgs(RULES, ["."]), {
       cwd: dir,
+      // Same environment production spawns with — see `withUtf8Locale`.
+      env: withUtf8Locale(process.env),
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
       timeout: 180_000,

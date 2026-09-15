@@ -30,6 +30,11 @@ import {
   PLATFORM_KEYS,
 } from "../src/toolchain.js";
 
+// A baked-binary directory that cannot exist. The real `/opt/lastlight/bin` DOES
+// exist inside the sandbox image, so asserting "nothing resolves" against it made
+// these tests pass on CI and fail in Last Light's own guardrails gate.
+const NO_BAKED_DIR = "/nonexistent/lastlight-baked-bin";
+
 function fakeBin(name: string, body = "#!/bin/sh\necho 1.2.3\n"): { dir: string; bin: string } {
   const dir = mkdtempSync(join(tmpdir(), "ll-facts-tool-"));
   const bin = join(dir, name);
@@ -80,7 +85,7 @@ describe("binary resolution order (§D1)", () => {
   });
 
   it("returns null when nothing resolves, so `patterns` can degrade", () => {
-    expect(resolveToolBin("opengrep", { PATH: "" })).toBeNull();
+    expect(resolveToolBin("opengrep", { PATH: "" }, undefined, NO_BAKED_DIR)).toBeNull();
   });
 
   it("applies the same order to the facts CLI itself", () => {
@@ -88,7 +93,7 @@ describe("binary resolution order (§D1)", () => {
     try {
       expect(resolveFactsBin({ LASTLIGHT_FACTS_BIN: preferred.bin, PATH: "" })).toBe(preferred.bin);
       expect(resolveFactsBin({ PATH: preferred.dir })).toBe(preferred.bin);
-      expect(resolveFactsBin({ PATH: "" })).toBeNull();
+      expect(resolveFactsBin({ PATH: "" }, NO_BAKED_DIR)).toBeNull();
     } finally {
       rmSync(preferred.dir, { recursive: true, force: true });
     }

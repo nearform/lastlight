@@ -42,6 +42,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # and the hook silently falls back to system Node 24 — so a repo's .nvmrc pin is
 # ignored. Both mutable dirs (`multishells` per-shell symlinks, `node-versions`
 # on-demand installs) must be world-writable; sticky (1777) like /tmp.
+# A UTF-8 locale for every process in the sandbox. Without it, Python-based
+# tools decode files as ASCII: opengrep died loading rules/review.yaml on an em
+# dash in a comment (exit 2, empty stdout), so every pr-review `patterns` run
+# degraded to zero findings, and packages/code-facts' opengrep tests failed in
+# Last Light's own guardrails gate. Inherited by sandbox and sandbox-qa.
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 ENV FNM_DIR=/usr/local/share/fnm
 ENV PATH=$FNM_DIR/aliases/default/bin:$PATH
 RUN curl -fsSL https://fnm.vercel.app/install \

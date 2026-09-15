@@ -157,12 +157,19 @@ export function resolveToolBin(
   tool: string,
   env: NodeJS.ProcessEnv = process.env,
   envVar = envVarFor(tool),
+  /**
+   * Where the image bakes its binaries. A parameter only so a test can make the
+   * last step of the order hermetic: inside the sandbox image
+   * `/opt/lastlight/bin` really exists, so "nothing resolves" is not assertable
+   * against the real path there.
+   */
+  bakedDir: string = BAKED_BIN_DIR,
 ): string | null {
   const override = env[envVar];
   if (override) return isExecutable(override) ? override : null;
   const found = onPath(tool, env);
   if (found) return found;
-  const baked = join(BAKED_BIN_DIR, tool);
+  const baked = join(bakedDir, tool);
   return isExecutable(baked) ? baked : null;
 }
 
@@ -174,8 +181,11 @@ export function resolveToolBin(
  * The env var is `LASTLIGHT_FACTS_BIN`, not the `envVarFor()` derivation — §D1
  * names it, and a spelling nobody uses is the same as no override at all.
  */
-export function resolveFactsBin(env: NodeJS.ProcessEnv = process.env): string | null {
-  return resolveToolBin("lastlight-facts", env, "LASTLIGHT_FACTS_BIN");
+export function resolveFactsBin(
+  env: NodeJS.ProcessEnv = process.env,
+  bakedDir: string = BAKED_BIN_DIR,
+): string | null {
+  return resolveToolBin("lastlight-facts", env, "LASTLIGHT_FACTS_BIN", bakedDir);
 }
 
 /**
