@@ -58,6 +58,7 @@ import {
   type DigestItem,
   type RepoFacts,
   type BotFacts,
+  type DigestMessage,
 } from "../notify/digest-blocks.js";
 import { resolveCronRepos, CRON_GLOBALLY_ENABLED_KEY, CRON_NAME_KEY } from "./repo-crons.js";
 import { callLlm, defaultFastModel, HELPER_MAX_TOKENS } from "../engine/llm.js";
@@ -73,8 +74,12 @@ export interface DigestGitHubClient {
   listRepoDigestDetail: GitHubClient["listRepoDigestDetail"];
 }
 
-/** How a rendered digest reaches Slack. Injected so the tests assert on calls, not on Slack. */
-export type DigestPoster = (channel: string, text: string, blocks: unknown[]) => Promise<void>;
+/**
+ * How a rendered digest reaches Slack. Posts the brief top-level message and
+ * its threaded detail reply (issue #383). Injected so the tests assert on
+ * calls, not on Slack.
+ */
+export type DigestPoster = (channel: string, top: DigestMessage, thread: DigestMessage) => Promise<void>;
 
 export interface RepoDigestDeps {
   db: StateDb;
@@ -208,9 +213,9 @@ async function digestOneRepo(
   const narrative = deps.config.narrative
     ? await summarizeSafely(deps, facts, buildSummaryPrompt(facts, detail))
     : undefined;
-  const { text, blocks } = renderDigest(facts, narrative);
+  const { top, thread } = renderDigest(facts, narrative);
 
-  await deps.post(channel, text, blocks);
+  await deps.post(channel, top, thread);
   log.info("Posted digest", { repo: target, channel, channelSource: source, narrative: !!narrative });
   return true;
 }

@@ -350,6 +350,18 @@ Slack**. It is a `handler:` cron — `runRepoDigest` in `src/cron/repo-digest.ts
   than the digest. The prompt is composed by `buildSummaryPrompt` and budgeted
   in **characters, not items**: a single pull-request body can run to 11 KB, so
   `digest.detailItems` alone bounds nothing.
+- **Each digest posts as a threaded pair** (issue #383). `renderDigest` returns
+  `{ top, thread }`: the top-level message carries the repo header and the
+  narrative summary; the threaded reply carries the content lists (Merged / New
+  issues / Closed issues) and the Repo and Last Light stat sections. The poster
+  in `index.ts` calls `sendMessage(channel, null, top.text, top.blocks, …)`,
+  captures the returned `ts`, then calls
+  `sendMessage(channel, ts, thread.text, thread.blocks, …)` to post the reply
+  in the thread. The feedback anchor (issue #255) is registered on the
+  **top-level** `ts` — that is what a channel reader sees and reacts to. If the
+  first call returns no `ts` (the void path of `sendMessage`), the thread reply
+  is posted unthreaded to the channel instead and a warning is logged; no
+  content is dropped. Both calls pass `unfurl: false`.
 - **`closingIssuesReferences` is a list of candidates, not of facts.** GitHub
   reports every issue *linked* to a merged PR — by keyword or through the
   Development sidebar — whether or not the merge closed it, and whether or not

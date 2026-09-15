@@ -115,15 +115,21 @@ SLACK_DELIVERY_CHANNEL=C01XYZ      # Channel for cron health reports</code></pre
 
 	<p>
 		Once a week (Monday 09:00 by default), Last Light posts a per-repository
-		summary to Slack: what happened in the repo, and what it did about it.
+		summary to Slack as a <strong>threaded pair of messages</strong>. The
+		top-level post carries the repo header and the narrative summary (what
+		happened that week); the detail — content lists and stat sections — is
+		posted as a reply in the thread, keeping the channel tidy when several
+		repos are digested at once.
 	</p>
 
-	<pre><code>acme/widgets — week to 9 Aug
+	<pre><code>Top-level post:
+acme/widgets — week to 9 Aug
 
 Review reliability dominated the week: three fixes closed the last
 stranding modes and the digest stopped burying itself in preview cards.
 Dependency work stayed quiet.
 
+Thread reply:
 Merged (7)
 • #342 Stop Slack unfurling every PR link — @cliftonc   ← links to GitHub
 • #338 Reclaim a pod so a retry can proceed (closes #331)

@@ -75,6 +75,22 @@ export interface BotFacts {
   phases: number;
 }
 
+/** One Slack message — the notification/fallback text and its Block Kit blocks. */
+export interface DigestMessage {
+  text: string;
+  blocks: KnownBlock[];
+}
+
+/**
+ * A digest split for threading: a brief top-level post (repo header + the
+ * narrative "what happened") and a threaded reply carrying the detail (content
+ * lists + the Repo and Last Light stat sections). See issue #383.
+ */
+export interface RenderedDigest {
+  top: DigestMessage;
+  thread: DigestMessage;
+}
+
 export interface DigestFacts {
   /** `owner/repo`. */
   repo: string;
@@ -157,7 +173,7 @@ const WORKFLOW_LABELS: Record<string, string> = {
   "security-review": "security-scanned",
 };
 
-export function renderDigest(facts: DigestFacts, narrative?: string): { text: string; blocks: KnownBlock[] } {
+export function renderDigest(facts: DigestFacts, narrative?: string): RenderedDigest {
   const { repo, repoFacts: r, botFacts: b } = facts;
   const title = `${repo} — ${facts.windowDays === 7 ? "week" : `${facts.windowDays} days`} to ${formatDay(facts.until)}`;
 
@@ -219,25 +235,36 @@ export function renderDigest(facts: DigestFacts, narrative?: string): { text: st
     { heading: "Last Light", lines: botLines },
   ];
 
-  const markdown = [
-    `## ${escapeSlack(title)}`,
-    summary ? `\n${summary}` : "",
-    ...sections.map((s) => `\n**${s.heading}**\n${s.lines.join("\n")}`),
-  ]
+  return { top: buildTopMessage(title, summary), thread: buildThreadMessage(facts, sections) };
+}
+
+/** Build the brief top-level message: repo header + optional narrative. */
+function buildTopMessage(title: string, summary: string): DigestMessage {
+  const topMarkdown = [`## ${escapeSlack(title)}`, summary ? `\n${summary}` : ""]
     .filter(Boolean)
     .join("\n");
-
-  const blocks: KnownBlock[] = [
+  const topBlocks: KnownBlock[] = [
     { type: "header", text: { type: "plain_text", text: truncate(title, 150), emoji: true } },
   ];
-  if (summary) blocks.push({ type: "section", text: { type: "mrkdwn", text: markdownToSlackMrkdwn(summary) } });
-  for (const s of sections) blocks.push(sectionBlock(`*${s.heading}*`, s.lines));
-  blocks.push({
+  if (summary) topBlocks.push({ type: "section", text: { type: "mrkdwn", text: markdownToSlackMrkdwn(summary) } });
+  return { text: markdownToSlackMrkdwn(topMarkdown), blocks: topBlocks };
+}
+
+/** Build the threaded detail message: content lists + Repo/Last Light sections + date footer. */
+function buildThreadMessage(
+  facts: DigestFacts,
+  sections: Array<{ heading: string; lines: string[] }>,
+): DigestMessage {
+  const threadMarkdown = sections
+    .map((s) => `\n**${s.heading}**\n${s.lines.join("\n")}`)
+    .filter(Boolean)
+    .join("\n");
+  const threadBlocks: KnownBlock[] = sections.map((s) => sectionBlock(`*${s.heading}*`, s.lines));
+  threadBlocks.push({
     type: "context",
     elements: [{ type: "mrkdwn", text: `${formatDay(facts.since)} → ${formatDay(facts.until)}` }],
   });
-
-  return { text: markdownToSlackMrkdwn(markdown), blocks };
+  return { text: markdownToSlackMrkdwn(threadMarkdown), blocks: threadBlocks };
 }
 
 /**
