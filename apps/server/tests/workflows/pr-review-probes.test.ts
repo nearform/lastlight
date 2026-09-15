@@ -7,8 +7,9 @@ import { renderContext } from "#src/engine/pr-decisions.js";
 import {
   defaultDependenciesConfig,
   defaultFixConfig,
-  defaultReviewConfig,
 } from "lastlight-shared/config-types";
+// The COMPLETE review block (durations included) is derived from config/default.yaml by core (#385).
+import { defaultReviewConfig } from "#src/config/config.js";
 
 /**
  * WP4 — `docs/plans/deterministic-pr-levers.md` §WP4, the `prepare`
@@ -148,9 +149,31 @@ describe("the four switches reach the phase, and absence means off", () => {
   });
 
   it("reads that sum from the context rather than a packaged constant", () => {
-    // `templated-number`: `{ from: <ctx path>, default: N }`. A plain integer
-    // here would silently ignore every operator timeout.
-    expect(prepare!.timeout_seconds).toEqual({ from: "probePhaseTimeoutSeconds", default: 300 });
+    // `templated-number`: `{ from: <ctx path> }`, with NO packaged fallback
+    // (issue #385) — a plain integer here would silently ignore every operator
+    // timeout, and a `default:` would be a second, hidden copy of one.
+    expect(prepare!.timeout_seconds).toEqual({ from: "probePhaseTimeoutSeconds" });
+  });
+});
+
+describe("every pr-review phase budget comes from config (#385)", () => {
+  const def = getWorkflow("pr-review");
+  const phase = (name: string) => def.phases.find((p) => p.name === name);
+
+  it("names a context key, never a literal or a fallback", () => {
+    expect(phase("triage")?.timeout_seconds).toEqual({ from: "triageTimeoutSeconds" });
+    expect(phase("facts")?.timeout_seconds).toEqual({ from: "factsTimeoutSeconds" });
+    expect(phase("seed")?.timeout_seconds).toEqual({ from: "seedTimeoutSeconds" });
+    expect(phase("reconcile")?.timeout_seconds).toEqual({ from: "reconcileTimeoutSeconds" });
+  });
+
+  it("projects those keys from the resolved review block whenever the pipeline runs", () => {
+    const review = defaultReviewConfig();
+    const ctx = contextFor({ enabled: true });
+    expect(ctx.factsTimeoutSeconds).toBe(String(review.analysis.factsTimeoutSeconds));
+    expect(ctx.seedTimeoutSeconds).toBe(String(review.analysis.seedTimeoutSeconds));
+    expect(ctx.reconcileTimeoutSeconds).toBe(String(review.analysis.reconcileTimeoutSeconds));
+    expect(ctx.triageTimeoutSeconds).toBe(String(review.triage.timeoutSeconds));
   });
 });
 

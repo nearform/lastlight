@@ -7,10 +7,15 @@ Start by reading {{issueDir}}/reviewer-verdict.md — fix ONLY those issues. The
 test/lint/typecheck commands are in {{issueDir}}/guardrails-report.md (and the
 architect plan).
 
-Follow the **building** skill: run the full gate (mirror CI — build + test + lint + typecheck)
-once before committing — all of it must pass before you commit.
+Follow the **building** skill: before committing, run the targeted tests for what
+you changed plus typecheck, lint and build — these must pass. Then run the full test suite ONCE with bash `timeout: {{gate.timeoutSeconds}}`, as
+`<full test command> > /tmp/gate.log 2>&1; echo EXIT=$?` — the exit code is the
+verdict; read the log tail only to diagnose a failure. If it times out, record
+"full suite timed out after {{gate.timeoutSeconds}}s" in the summary and carry on
+to publish (CI runs the full suite on the PR). Never re-run it with a larger
+timeout or a different filter.
 
-AFTER THE GATE PASSES:
+AFTER THE GATE (targeted tests, typecheck, lint, build green; full suite passed or timed out):
 1. APPEND to {{issueDir}}/executor-summary.md under heading "## Fix Cycle {{fixCycle}}" (what was fixed, test/lint/typecheck results)
 2. Update status.md: current_phase = fix_loop_{{fixCycle}}
 3. Publish with `github_publish` — `{ owner: "{{owner}}", repo: "{{repo}}",

@@ -93,6 +93,14 @@ phases:
       contains_READY:
         action: continue
 
+  - name: guardrails_gate          # harness-run full suite: no LLM, verdict = exit code
+    type: bash
+    timeout_seconds: { from: gate.phaseTimeoutSeconds }
+    command: |                     # runs .git/lastlight-gate.sh under timeout {{gate.timeoutSeconds}},
+      ...                          # prints READY / BLOCKED — on_output applies to bash phases too
+    on_output:
+      contains_BLOCKED: { action: fail, unless_label: "lastlight:bootstrap" }
+
   - name: reviewer
     label: Reviewer
     prompt: prompts/reviewer.md
@@ -182,7 +190,11 @@ Phase kinds the runner recognises:
   stdout is exposed downstream exactly like an agent phase
   (`output_var` → `{{phaseOutputs.<name>}}`); upstream string outputs
   are also forwarded as `LL_OUT_<PHASE>` env vars (single-line, ≤4KB).
-  Honours `unrestricted_egress` / `sandbox_image` / `timeout_seconds`. The run
+  Honours `unrestricted_egress` / `sandbox_image` / `timeout_seconds` and
+  `on_output` (`contains_BLOCKED` with its `unless_*` bypass, and
+  `requires_marker`) exactly like an agent phase — build's `guardrails_gate`
+  exits 0 and prints its READY/BLOCKED verdict for this. With no
+  `timeout_seconds` it uses `sandbox.commandTimeoutSeconds` from resolved config. The run
   is mirrored to a session jsonl (command → `bash` tool_use, output →
   tool_result) so it shows in the dashboard + `lastlight session log` like an
   agent turn, with `turns: 0` and no model cost. On gondolin/none the command
@@ -259,13 +271,18 @@ the safety trade-off in [`spec/06-workflow-engine.md`](../../spec/06-workflow-en
 
 **Templated phase budgets.** `timeout_seconds` and
 `generic_loop.max_iterations` take either a plain positive integer or
-`{ from: <dotted context path>, default: N }`. `from` is the same lookup
+`{ from: <dotted context path> }`. `from` is the same lookup
 `{{a.b}}` performs, resolved once before the first iteration
-(`resolveTemplatedNumber`, in the engine's `core/templated-number.ts`);
-`default` is used verbatim, with a warning, when it resolves to nothing usable.
-Both fix workflows read `fix.localIterations` / `fix.gateTimeoutSeconds` this
-way, against the run's effective (already repo-clamped) `fix` block — the two
-keys were otherwise parsed, clamped and read by nothing (issue #256).
+(`resolveTemplatedNumber`, in the engine's `core/templated-number.ts`).
+**There is no numeric fallback (issue #385):** a `from` that resolves to
+nothing usable throws, naming the key — config is the single source of every
+budget. (A legacy `default: N` is still accepted for overlay-forked YAML and
+falls back with a warning; packaged workflows never use it.) Both fix workflows
+read `fix.localIterations` / `gate.timeoutSeconds` this way, against the run's
+effective (already repo-clamped) blocks; build reads `gate.phaseTimeoutSeconds`.
+An agent phase's `timeout_seconds` bounds each agent run (standard and
+reviewer-loop phases); on a `generic_loop` phase it bounds only the
+`until_bash` check, which otherwise reads `timeouts.untilBashSeconds`.
 
 **Soft-failure policy (`generic_loop.on_soft_failure`).** By default any
 non-success iteration hard-fails the whole workflow. That's wrong for a

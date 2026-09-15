@@ -152,9 +152,10 @@ Every file in `workflows/prompts/`.
 
 | File | Purpose | Output marker | Writes |
 |---|---|---|---|
-| `guardrails.md` | Pre-flight — verify test / lint / typecheck setup runs. Skips if `{{issueDir}}/status.md` already says READY. | First line `READY` or `BLOCKED` (matched by `on_output: contains_BLOCKED/READY`) | `{{issueDir}}/guardrails-report.md`, `{{issueDir}}/status.md` |
+| `guardrails.md` | Pre-flight (agent) — install, typecheck, lint, and write `.git/lastlight-gate.sh` holding the repo's **full** test command. Skips if `{{issueDir}}/status.md` already says READY. Does not judge the suite. | First line `READY` or `BLOCKED` (matched by `on_output: contains_BLOCKED/READY`) | `{{issueDir}}/guardrails-report.md`, `{{issueDir}}/status.md`, `.git/lastlight-gate.sh` |
+| *(no prompt)* `guardrails_gate` | Harness-run `type: bash` phase, no LLM: runs `.git/lastlight-gate.sh` once under `timeout {{gate.timeoutSeconds}}`. Exit 0 → READY; non-zero → BLOCKED with the log tail; timeout → BLOCKED "full test suite did not finish within gate.timeoutSeconds — raise it". READY requires the FULL suite to pass; a subset run is never evidence. Phase budget `gate.phaseTimeoutSeconds`. | `READY` / `BLOCKED` | — |
 | `architect.md` | Read codebase + guardrails report → produce implementation plan with `file:line` evidence. Approval gate: `post_architect`. | None — deterministic structure | `{{issueDir}}/architect-plan.md`, `{{issueDir}}/status.md` |
-| `executor.md` | Implement per plan, TDD, run guardrails commands, commit. | None | `{{issueDir}}/executor-summary.md`, `{{issueDir}}/status.md` |
+| `executor.md` | Implement per plan, TDD; targeted tests + typecheck/lint/build, then the full suite **once** at `gate.timeoutSeconds`, judged by exit code (a timeout is reported, not retried). Phase budget `gate.phaseTimeoutSeconds`. Commit. | None | `{{issueDir}}/executor-summary.md`, `{{issueDir}}/status.md` |
 | `reviewer.md` | Independent review against plan + diff. Approval gate: `post_reviewer` (on `REQUEST_CHANGES`). | First line `VERDICT: APPROVED` or `VERDICT: REQUEST_CHANGES` (parsed by `^\s*VERDICT:\s*…`) | `{{issueDir}}/reviewer-verdict.md`, `{{issueDir}}/status.md` |
 | `fix.md` | Fix cycle `{{fixCycle}}` — address reviewer's flagged issues, run guardrails, commit. | None | Appends `## Fix Cycle {{fixCycle}}` to `executor-summary.md` |
 | `re-reviewer.md` | Re-review after fix cycle. | Same `VERDICT:` marker | Appends `## Re-review after Fix Cycle {{fixCycle}}` to `reviewer-verdict.md` |

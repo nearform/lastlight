@@ -87,11 +87,11 @@ phases:
       - "scratch.fixMarkers.diagnosis.class == 'flaky'"
       - "scratch.fixMarkers.diagnosis.class == 'infra-dependent'"
       - "scratch.fixMarkers.diagnosis.class == 'upstream-broken'"
-    # Load-bearing: the gate command otherwise inherits a 30-second default,
-    # which kills any real test suite mid-run and reports a false red. Read
-    # from the run's repo-clamped `fix:` block, with the packaged value as the
-    # fallback for a context that carries none.
-    timeout_seconds: { from: fix.gateTimeoutSeconds, default: 900 }
+    # Load-bearing: the gate command otherwise inherits the short
+    # `sandbox.untilBashTimeoutSeconds` default, which kills any real test suite
+    # mid-run and reports a false red. Read from the run's repo-clamped `gate:`
+    # block; no YAML fallback — a context without it fails loud (issue #385).
+    timeout_seconds: { from: gate.timeoutSeconds }
     on_output:
       requires_marker: "CI_FIX_COMPLETE:"
     generic_loop:

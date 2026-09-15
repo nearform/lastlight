@@ -257,6 +257,30 @@ describe("parseArgs", () => {
     );
   });
 
+  test("--gate-timeout is unset by default", () => {
+    assert.equal(parseArgs(["--model", "openai/gpt-4"]).gateTimeoutSeconds, undefined);
+  });
+
+  test("--gate-timeout accepts positive integers", () => {
+    assert.equal(
+      parseArgs(["--model", "openai/gpt-4", "--gate-timeout", "1800"]).gateTimeoutSeconds,
+      1800,
+    );
+  });
+
+  test("--gate-timeout rejects 0, negatives, non-integers and missing values", () => {
+    for (const v of ["0", "-5", "2.5", "abc"]) {
+      assert.throws(
+        () => parseArgs(["--model", "openai/gpt-4", "--gate-timeout", v]),
+        /--gate-timeout must be a positive integer/,
+      );
+    }
+    assert.throws(
+      () => parseArgs(["--model", "openai/gpt-4", "--gate-timeout"]),
+      /flag --gate-timeout requires a value/,
+    );
+  });
+
   test("--max-steps is unset by default", () => {
     assert.equal(parseArgs(["--model", "openai/gpt-4"]).maxSteps, undefined);
   });

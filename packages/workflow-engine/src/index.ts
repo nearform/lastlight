@@ -35,6 +35,9 @@ export {
   // their own work (see `type: fanout`) and must still land an executions row.
   runLedgeredPhase,
   validateShellCommand,
+  // Run-context key an `until_bash` check falls back to (issue #385) — exported so
+  // app-registered handlers (`type: fanout`) resolve it by name, never a literal.
+  UNTIL_BASH_TIMEOUT_KEY,
 } from "./core/phase-executor.js";
 export type { PhaseRunContext, LedgerDeps, RunPhaseResult } from "./core/phase-executor.js";
 export { runWorkflowCore } from "./core/scheduler.js";

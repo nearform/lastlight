@@ -8,6 +8,7 @@ import {
   phaseConfigFor,
   renderTemplate,
   resolveTemplatedNumber,
+  UNTIL_BASH_TIMEOUT_KEY,
   runLedgeredPhase,
   validateShellCommand,
   OPENINFERENCE_CHAIN,
@@ -836,14 +837,29 @@ export class FanoutHandler implements PhaseTypeHandler {
   }
 
   private gateTimeoutSeconds(phase: PhaseDefinition, branch: FanoutBranch): number {
-    return (
-      resolveTemplatedNumber(
-        branch.timeout_seconds ?? phase.timeout_seconds,
-        this.run.ctx,
-        `${phase.name}.${branch.name}.timeout_seconds`,
-        this.run.ledger.logger,
-      ) ?? 30
+    const own = resolveTemplatedNumber(
+      branch.timeout_seconds ?? phase.timeout_seconds,
+      this.run.ctx,
+      `${phase.name}.${branch.name}.timeout_seconds`,
+      this.run.ledger.logger,
     );
+    if (own !== undefined) return own;
+    // No budget of its own: the `until_bash` default from config
+    // (`sandbox.untilBashTimeoutSeconds`, seeded as `timeouts.untilBashSeconds`)
+    // — never a code literal (issue #385).
+    // Resolved by the engine's own key constant and resolver, so a rename can't
+    // leave this handler reading a stale path: `{ from }` with no default either
+    // yields a positive (rounded-up) number or throws naming the key.
+    const fallback = resolveTemplatedNumber(
+      { from: UNTIL_BASH_TIMEOUT_KEY },
+      this.run.ctx,
+      `${phase.name}.${branch.name}.until_bash timeout (no timeout_seconds on the branch or phase)`,
+      this.run.ledger.logger,
+    );
+    if (fallback === undefined) {
+      throw new Error(`${phase.name}.${branch.name}: until_bash timeout did not resolve`);
+    }
+    return fallback;
   }
 }
 

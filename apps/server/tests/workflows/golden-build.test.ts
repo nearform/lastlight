@@ -33,7 +33,7 @@ describe("golden — build.yaml phase sequence is unchanged under the unified sc
 
     expect(order).toEqual(declared);
     // Pin the actual phase names so an accidental rename/reorder is caught.
-    expect(declared).toEqual(["phase_0", "guardrails", "architect", "executor", "reviewer", "pr"]);
+    expect(declared).toEqual(["phase_0", "guardrails", "guardrails_gate", "architect", "executor", "reviewer", "pr"]);
   });
 
   it("synthesizes a previous-phase chain for build.yaml", () => {

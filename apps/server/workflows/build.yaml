@@ -35,11 +35,18 @@ phases:
     label: Context
     type: context
 
+  # Guardrails is two phases (issue #385). The agent does the judgement work —
+  # install, typecheck, lint, and naming the repo's full test command — and
+  # writes it to `.git/lastlight-gate.sh` (inside .git, so it is never
+  # committed). It does NOT run the suite. `guardrails_gate` then runs that
+  # script ONCE, deterministically, under `gate.timeoutSeconds`: the exit code
+  # is the verdict, so READY can only mean the full suite exited 0.
   - name: guardrails
-    label: Guardrails
+    label: Guardrails · setup
     prompt: prompts/guardrails.md
     model: "{{models.guardrails}}"
     variant: "{{variants.guardrails}}"
+    timeout_seconds: { from: gate.phaseTimeoutSeconds }
     on_output:
       contains_BLOCKED:
         action: fail
@@ -52,15 +59,105 @@ phases:
           Proceeding with the build cycle so the architect can plan, and the
           executor can install, the missing tooling. The guardrails report at
           `{{issueDir}}/guardrails-report.md` lists what's missing.
-      contains_READY:
-        action: continue
     messages:
-      on_success: "READY — foundational tooling verified — [guardrails-report.md]({{artifactUrl guardrails-report.md}})"
+      on_success: "Setup verified (install, typecheck, lint) — running the full test suite next"
       on_blocked: |
         **Guardrails check: BLOCKED** — missing foundational tooling.
 
         See the guardrails report on branch `{{branch}}` at `{{issueDir}}/guardrails-report.md`.
         Once you've added the missing tooling, ask me to build this issue again — the check will re-run against the current repo state.
+
+  # No LLM. Prints exactly one verdict line (READY / BLOCKED) and exits 0 so
+  # the verdict flows through on_output; a non-zero exit here means the gate
+  # machinery itself broke. Paths are relative to the checkout — the same cwd
+  # the guardrails agent ran in — so `{{issueDir}}` (incl. a relocated
+  # `../.lastlight/…`) resolves identically.
+  - name: guardrails_gate
+    label: Guardrails · full test suite
+    type: bash
+    timeout_seconds: { from: gate.phaseTimeoutSeconds }
+    command: |
+      dir='{{issueDir}}'
+      limit='{{gate.timeoutSeconds}}'
+      gate=.git/lastlight-gate.sh
+      log=.git/lastlight-gate.log
+      mkdir -p "$dir"
+      set_status() {
+        { grep -v '^guardrails_status:' "$dir/status.md" 2>/dev/null; echo "guardrails_status: $1"; } > "$dir/status.md.tmp"
+        mv "$dir/status.md.tmp" "$dir/status.md"
+      }
+      report() {
+        {
+          echo ''
+          echo '## Full test suite gate (run by the harness)'
+          echo ''
+          echo "- Verdict: $1 — $2"
+          if [ -f "$gate" ]; then echo "- Command (\`$gate\`):"; echo '```sh'; cat "$gate"; echo '```'; fi
+          if [ -n "${code:-}" ]; then
+            echo "- Exit code: $code · duration: ${dur}s · limit: gate.timeoutSeconds=${limit}s"
+            echo ''; echo 'Last 60 lines of output:'; echo '```'; tail -n 60 "$log"; echo '```'
+          fi
+        } >> "$dir/guardrails-report.md"
+      }
+      block() { set_status BLOCKED; report BLOCKED "$1"; echo "BLOCKED — $1"; exit 0; }
+      if grep -qs '^guardrails_status: READY' "$dir/status.md"; then
+        echo 'READY — guardrails already verified (the full test suite passed on an earlier run)'; exit 0
+      fi
+      # BOOTSTRAP is written by the agent, so it only waives a suite that does not
+      # exist yet: a gate script present means there IS a suite, and it always runs.
+      if [ ! -f "$gate" ] && grep -qs '^guardrails_status: BOOTSTRAP' "$dir/status.md"; then
+        echo 'READY — bootstrap build: no test suite to gate yet (the executor establishes it)'; exit 0
+      fi
+      case "$limit" in ''|*[!0-9]*) block "gate.timeoutSeconds is not set in the run context (got '$limit')";; esac
+      [ -f "$gate" ] || block "guardrails did not produce a gate command ($gate is missing)"
+      start=$(date +%s)
+      if command -v timeout >/dev/null 2>&1; then
+        timeout -k 30 "$limit" bash "$gate" > "$log" 2>&1; code=$?
+      else
+        echo '(no coreutils timeout on this host: bounded by the phase timeout only)' > "$log"
+        bash "$gate" >> "$log" 2>&1; code=$?
+      fi
+      dur=$(( $(date +%s) - start ))
+      if [ "$code" -eq 0 ]; then
+        set_status READY
+        report READY "full test suite passed (exit 0) in ${dur}s"
+        echo "READY — full test suite passed (exit 0) in ${dur}s"
+        exit 0
+      fi
+      if [ "$code" -eq 124 ] || { [ "$code" -eq 137 ] && [ "$dur" -ge "$limit" ]; }; then
+        reason="full test suite did not finish within gate.timeoutSeconds (${limit}s) — raise gate.timeoutSeconds in the overlay or .lastlight/lastlight.yml"
+      else
+        reason="full test suite failed (exit $code)"
+      fi
+      set_status BLOCKED
+      report BLOCKED "$reason"
+      echo "BLOCKED — $reason"
+      echo ''
+      echo 'Last 60 lines of output:'
+      tail -n 60 "$log"
+      exit 0
+    on_output:
+      contains_BLOCKED:
+        action: fail
+        message: "Guardrails check: BLOCKED — full test suite gate"
+        unless_label: "lastlight:bootstrap"
+        unless_title_matches: "^(guardrails:|\\[guardrails\\])"
+        bypass_message: |
+          **Guardrails check: BLOCKED** (full test suite) — but this is a bootstrap task
+          (label `lastlight:bootstrap` or "guardrails:" title prefix detected).
+          Proceeding with the build cycle. The gate result is in
+          `{{issueDir}}/guardrails-report.md`.
+      contains_READY:
+        action: continue
+    messages:
+      on_start: "running the full test suite (limit {{gate.timeoutSeconds}}s)…"
+      on_skipped_done: "already verified"
+      on_success: "READY — full test suite passed — [guardrails-report.md]({{artifactUrl guardrails-report.md}})"
+      on_blocked: |
+        **Guardrails check: BLOCKED** — the full test suite did not pass.
+
+        See `{{issueDir}}/guardrails-report.md` for the command, exit code and output tail.
+        Fix the suite (or raise `gate.timeoutSeconds` if it timed out), then ask me to build this issue again.
 
   - name: architect
     label: Architect
@@ -86,6 +183,7 @@ phases:
     skill: building
     model: "{{models.executor}}"
     variant: "{{variants.executor}}"
+    timeout_seconds: { from: gate.phaseTimeoutSeconds }
     messages:
       on_start: "implementing the architect's plan…"
       on_skipped_done: "already completed"
@@ -97,6 +195,8 @@ phases:
     skills: [code-review, building]
     model: "{{models.reviewer}}"
     variant: "{{variants.reviewer}}"
+    # Bounds each review AND each fix run (the fix re-runs the full suite once).
+    timeout_seconds: { from: gate.phaseTimeoutSeconds }
     output_var: review
     loop:
       max_cycles: 2

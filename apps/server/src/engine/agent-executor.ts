@@ -404,6 +404,11 @@ export async function executeAgent(
      */
     onSessionId?: (sessionId: string) => void;
     githubAccess?: GitSandboxAccess;
+    /**
+     * The agent phase's own `timeout_seconds`, resolved by the engine. Wins over
+     * `sandbox.agentTimeoutSeconds` (issue #385).
+     */
+    timeoutSeconds?: number;
     /** Test seam — substitute a FakeSandbox. Defaults to the real factory. */
     sandboxFactory?: SandboxFactory;
   },
@@ -447,6 +452,7 @@ export async function executeAgent(
     prePopulate,
     access,
     onSessionId: opts?.onSessionId,
+    agentTimeoutSeconds: opts?.timeoutSeconds,
     sandboxFactory: opts?.sandboxFactory,
   };
   return withSpan("lastlight.agent.execute", spanAttrs, (span) => runSandboxedAgent(prompt, ctx, span));

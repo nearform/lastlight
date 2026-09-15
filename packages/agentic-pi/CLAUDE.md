@@ -77,6 +77,10 @@ src/
                           error backoff. runner builds a SettingsManager and
                           applyOverrides({retry}) so Pi rides out per-minute
                           rate-limit windows (e.g. Fireworks TPM). Pure/testable.
+  gate-timeout.ts         --gate-timeout / gateTimeoutSeconds: wraps the bash
+                          ToolDefinition (host built-in replacement or gondolin
+                          override) with one promptGuideline + a timeout floor for
+                          recognised install/build/test commands. Unset = no-op.
   runner.ts               Drives Pi: createAgentSession → subscribe → prompt → agent_end.
                           Sink-agnostic — takes an EmitterSink + onWarn callback as deps.
   extensions/github/

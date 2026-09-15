@@ -164,6 +164,14 @@ export interface RunConfig {
    */
   maxSteps?: number;
   /**
+   * Timeout (seconds) for gate commands — installs, builds, full test suites.
+   * Set via `--gate-timeout`. When set, the bash tool gains one guideline
+   * telling the model to pass this timeout and judge gates by exit code, and a
+   * smaller model-supplied timeout on a recognised gate command is raised to
+   * it (see gate-timeout.ts). Unset (default) = no guidance, no change.
+   */
+  gateTimeoutSeconds?: number;
+  /**
    * OpenTelemetry traces + metrics export. Tri-state:
    *   - `true`  (`--otel`)    → enabled.
    *   - `false` (`--no-otel`) → force-disabled (wins over env).
@@ -260,6 +268,10 @@ Flags:
                               calls). When reached while the agent still wants to
                               continue, the run stops and emits a
                               "max_steps_reached" event. Default: no cap.
+  --gate-timeout <seconds>   Timeout for gate commands (installs, builds, full
+                              test suites). Adds bash guidance to use it and judge
+                              by exit code; raises a smaller model timeout on a
+                              recognised gate command. Default: unset (no guidance).
   --otel                     Enable OpenTelemetry traces + metrics export.
                               Off by default. Requires an OTLP endpoint via
                               OTEL_EXPORTER_OTLP_ENDPOINT (or --otel-endpoint).
@@ -455,6 +467,15 @@ export function parseArgs(argv: string[]): RunConfig {
           throw new Error(`--max-steps must be a positive integer (got '${v}')`);
         }
         config.maxSteps = n;
+        break;
+      }
+      case "--gate-timeout": {
+        const v = next();
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 1) {
+          throw new Error(`--gate-timeout must be a positive integer (got '${v}')`);
+        }
+        config.gateTimeoutSeconds = n;
         break;
       }
       case "--file-search-mode": {

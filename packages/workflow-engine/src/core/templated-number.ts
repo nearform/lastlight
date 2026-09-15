@@ -41,10 +41,17 @@
  * runner. A repo that lowered its own budget is honoured for free; a repo that
  * tried to raise it was clamped before it ever reached here.
  *
- * Anything else — key absent, non-numeric, zero, negative, `NaN` — falls back
- * to `default` and warns. It never throws and never yields a non-positive
- * number, because both consumers are a kill timeout and a loop bound, where
- * `0` means "never run" and a negative means nothing at all.
+ * Anything else — key absent, non-numeric, zero, negative, `NaN` — is handled
+ * by whether the spec declares a `default`:
+ *  - **no `default`** (the shape every packaged workflow now uses, issue #385):
+ *    it THROWS, naming the key. Config is the single source of every budget;
+ *    an unresolved key is a wiring bug to surface, not a gap to paper over
+ *    with a number nobody can see in the resolved config.
+ *  - **a `default`** (tolerated for overlay-forked YAML written before #385):
+ *    falls back to it and warns.
+ * It never yields a non-positive number, because the consumers are kill
+ * timeouts and loop bounds, where `0` means "never run" and a negative means
+ * nothing at all.
  */
 
 import { z } from "zod";
@@ -65,8 +72,11 @@ export const TemplatedNumberSchema = z.union([
     .object({
       /** Dotted path into the run's template context, e.g. `fix.localIterations`. */
       from: z.string().min(1),
-      /** The packaged value — used verbatim when `from` resolves to nothing usable. */
-      default: z.number().int().positive(),
+      /**
+       * Optional fallback used when `from` resolves to nothing usable. Omit it
+       * (the packaged workflows do) and an unresolved key is a loud error.
+       */
+      default: z.number().int().positive().optional(),
     })
     .strict(),
 ]);
@@ -77,8 +87,8 @@ export type TemplatedNumber = z.infer<typeof TemplatedNumberSchema>;
  * Resolve a {@link TemplatedNumber} against a run's context.
  *
  * `undefined` in, `undefined` out — the fields this governs are optional and
- * their callers supply their own absent-value behaviour (`?? 30` for a
- * command phase's timeout).
+ * their callers decide what an ABSENT spec means (never a numeric literal).
+ * A spec that is present but unresolvable, with no `default`, throws.
  *
  * A resolved non-integer is rounded UP rather than rejected: the only duration
  * key that reaches here (`fix.gateTimeoutSeconds`) is documented as accepting
@@ -99,9 +109,15 @@ export function resolveTemplatedNumber(
   const raw = lookupContextKey(ctx, value.from);
   const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : Number.NaN;
   if (!Number.isFinite(n) || n <= 0) {
-    // Not an error: a workflow may legitimately run in a context that carries
-    // no `fix` block (a manual trigger, a resumed pre-upgrade run). The warning
-    // is what stops a MISSPELLED `from:` from looking identical to that.
+    if (value.default === undefined) {
+      throw new Error(
+        `${where}: \`from: ${value.from}\` did not resolve to a positive number ` +
+          `(got ${raw === undefined ? "nothing" : JSON.stringify(raw)}) — the run context must carry ` +
+          `\`${value.from}\` from resolved config; there is no fallback`,
+      );
+    }
+    // A legacy spec with its own fallback. The warning is what stops a
+    // MISSPELLED `from:` from looking identical to a context without the block.
     log.warn("templated number did not resolve to a positive number — using default", {
       where,
       from: value.from,

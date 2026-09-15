@@ -8,8 +8,9 @@ import { renderContext } from "#src/engine/pr-decisions.js";
 import {
   defaultDependenciesConfig,
   defaultFixConfig,
-  defaultReviewConfig,
 } from "lastlight-shared/config-types";
+// The COMPLETE review block (durations included) is derived from config/default.yaml by core (#385).
+import { defaultReviewConfig } from "#src/config/config.js";
 
 /**
  * WP3 acceptance criteria 3 and 4 of

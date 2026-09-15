@@ -2,7 +2,13 @@ import { basename, join } from "path";
 import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { resolveAuthFile } from "../oauth.js";
 import { randomUUID } from "crypto";
-import { getBotName, getRuntimeConfig, type SandboxBackend } from "../../config/config.js";
+import {
+  getBotName,
+  getGateConfig,
+  getRuntimeConfig,
+  getSandboxTimeouts,
+  type SandboxBackend,
+} from "../../config/config.js";
 import {
   agentGitIdentityEnv,
   sandboxFor,
@@ -84,8 +90,31 @@ export interface SandboxRunContext {
   prePopulate?: PrePopulateSpec;
   access?: GitSandboxAccess;
   onSessionId?: (sessionId: string) => void;
+  /**
+   * The agent phase's own `timeout_seconds` (resolved by the engine and passed
+   * on `AgentRunOpts.timeoutSeconds`). Wins over `sandbox.agentTimeoutSeconds`;
+   * absent ⇒ that config value. Never a code literal (issue #385).
+   */
+  agentTimeoutSeconds?: number;
   /** Test seam — substitute a FakeSandbox. Defaults to {@link sandboxFor}. */
   sandboxFactory?: SandboxFactory;
+}
+
+/**
+ * The core-side extension of the engine's `ExecutorConfig`: the run's effective
+ * (repo-clamped) `gate.timeoutSeconds`, set once per run by `runWorkflow` and
+ * carried through the engine's config spreads untouched (issue #385).
+ */
+export type RunExecutorConfig = ExecutorConfig & { gateTimeoutSeconds?: number };
+
+/**
+ * The gate budget to hand agentic-pi for this run: the run's effective value
+ * when `runWorkflow` set one, else the operator's resolved `gate.timeoutSeconds`
+ * (a direct `executeAgent` call outside a workflow run). Always a config value.
+ */
+export function gateTimeoutFor(config: ExecutorConfig): number {
+  const own = (config as RunExecutorConfig).gateTimeoutSeconds;
+  return typeof own === "number" && Number.isFinite(own) && own > 0 ? own : getGateConfig().timeoutSeconds;
 }
 
 /**
@@ -401,6 +430,8 @@ export async function runAgentIn(
           webSearchProvider: config.webSearchProvider,
           githubApiBaseUrl: config.githubApiBaseUrl,
           providers: providerEndpointOverrides(),
+          timeoutSeconds: ctx.agentTimeoutSeconds ?? getSandboxTimeouts().agentTimeoutSeconds,
+          gateTimeoutSeconds: gateTimeoutFor(config),
         },
         onEvent,
       );
@@ -609,7 +640,7 @@ function scriptInvocation(spec: Extract<CommandSpec, { kind: "script" }>): {
 
 /** Options for {@link runSandboxedCommand}. */
 export interface CommandRunOpts {
-  /** Per-step timeout in seconds (default 300). */
+  /** Per-step timeout in seconds. Absent ⇒ `sandbox.commandTimeoutSeconds` from config. */
   timeoutSeconds?: number;
   /** Extra env forwarded into the command (e.g. upstream phase outputs). */
   sandboxEnv?: Record<string, string>;
@@ -673,7 +704,7 @@ export async function runCommandIn(
   const { config } = ctx;
   const model = config.model || DEFAULT_MODEL;
   const sessionsDir = resolveSessionsDir(config);
-  const timeoutSeconds = cmdOpts.timeoutSeconds ?? 300;
+  const timeoutSeconds = cmdOpts.timeoutSeconds ?? getSandboxTimeouts().commandTimeoutSeconds;
   const startTime = Date.now();
   const displayPrompt =
     spec.kind === "bash" ? `$ ${spec.command}` : `${spec.runtime} script: ${spec.name}\n\n${spec.script}`;

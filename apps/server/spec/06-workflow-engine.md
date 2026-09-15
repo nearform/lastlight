@@ -194,7 +194,7 @@ router routed nine, which is why the dashboard showed no Slack trigger for
   command?: string;                     // type: bash — deterministic shell command (templated)
   script?: string;                      // type: script — inline source (templated)
   runtime?: "js" | "ts" | "python";     // type: script — js/ts → node, python → uv run (default "js")
-  timeout_seconds?: number | { from: string; default: number };  // bash/script step timeout + until_bash budget (default 300 / 30)
+  timeout_seconds?: number | { from: string };  // phase budget; unset → sandbox.agentTimeoutSeconds / commandTimeoutSeconds / untilBashTimeoutSeconds
   skill?: string;                       // single skill name; sugar for `skills: [<name>]`
   skills?: string[];                    // per-phase bundle: <workspaceRoot>/.lastlight-skills/<phase>/<name>/
                                         // may coexist with `prompt`; mutually exclusive with `skill`
@@ -1005,10 +1005,11 @@ harness host. `{{}}` markers in the command are rejected before execution to
 prevent template-after-render injection (`validateShellCommand`), so the
 command is necessarily a **literal** string — it cannot be varied per backend.
 
-Its budget is `phase.timeout_seconds ?? 30`. **Thirty seconds is a trap**: it
-kills any real build/test suite mid-run and reports a false red, so a phase
-whose gate is the repo's own CI commands must carry an explicit value. Both fix
-workflows read theirs from `fix.gateTimeoutSeconds` — see "Templated phase
+Its budget is `phase.timeout_seconds`, else `sandbox.untilBashTimeoutSeconds`
+(30 in `config/default.yaml` — there is no code default). **Thirty seconds is a
+trap**: it kills any real build/test suite mid-run and reports a false red, so a
+phase whose gate is the repo's own CI commands must carry an explicit value. Both
+fix workflows read theirs from `gate.timeoutSeconds` — see "Templated phase
 budgets" below.
 
 The two are not exclusive, and the order between them is load-bearing: `until`
@@ -1078,9 +1079,9 @@ live.
 positive integer or a reference into the run's template context:
 
 ```yaml
-timeout_seconds: { from: fix.gateTimeoutSeconds, default: 900 }
+timeout_seconds: { from: gate.timeoutSeconds }
 generic_loop:
-  max_iterations: { from: fix.localIterations, default: 2 }
+  max_iterations: { from: fix.localIterations }
 ```
 
 `from` is the same dotted lookup `{{a.b}}` performs (`lookupContextKey`), so
@@ -1090,15 +1091,21 @@ its own budget in `.lastlight/lastlight.yml` is honoured with no code path of
 its own. Resolution happens once, before the first iteration, in
 `resolveTemplatedNumber` (`core/templated-number.ts`).
 
-`default` is the value the workflow ships with, and it is used verbatim
-whenever `from` resolves to nothing usable — key absent, non-numeric, zero or
-negative — with a warning naming the phase and the path. That is why the shape
-is an object rather than a bare `"{{fix.gateTimeoutSeconds}}"`: an unresolved
-template renders to the empty string, which would leave the engine inventing a
-kill timeout for a phase it knows nothing about. A resolved non-integer is
-rounded UP (`gateTimeoutSeconds` is documented as any positive number, and
-truncating a suite's budget downward is the direction that turns a passing gate
+There is **no `default`** (issue #385): every budget lives in
+`config/default.yaml`, so a `from` that resolves to nothing usable — key absent,
+non-numeric, zero or negative — **fails the workflow load** with an error naming
+the phase and the path, rather than falling back to a literal buried in YAML.
+The shape is still an object rather than a bare `"{{gate.timeoutSeconds}}"`
+because an unresolved template renders to the empty string, which would leave
+the engine inventing a kill timeout. A resolved non-integer is rounded UP
+(truncating a suite's budget downward is the direction that turns a passing gate
 red).
+
+The runner seeds the resolved timeouts on every run's context:
+`gate.timeoutSeconds` / `gate.maxTimeoutSeconds` / `gate.phaseTimeoutSeconds`
+(after the repo clamp) and `timeouts.agentSeconds` / `timeouts.commandSeconds` /
+`timeouts.untilBashSeconds`. A phase with no `timeout_seconds` takes the matching
+`sandbox.*TimeoutSeconds` value.
 
 Before this, both keys were parsed, per-repo clamped, CLI-displayed and read by
 nothing: the operative numbers were literals in the YAML, whose comments asked a

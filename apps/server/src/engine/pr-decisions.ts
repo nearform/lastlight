@@ -1622,7 +1622,11 @@ function triageContext(state: PrState, review?: ReviewConfig): Record<string, un
      */
     reviewIsRereview: prior ? "true" : "false",
     triageEnabled: triage?.enabled ? "true" : "false",
-    triageTimeoutSeconds: String(triage?.timeoutSeconds ?? 300),
+    // The phase's budget, from resolved config and nothing else (issue #385):
+    // absent with no review block, which leaves `pr-review.yaml`'s
+    // `{ from: triageTimeoutSeconds }` to fail loud should the phase ever run
+    // without one — it cannot, since `triageEnabled` is "false" then too.
+    ...(triage ? { triageTimeoutSeconds: String(triage.timeoutSeconds) } : {}),
     // The prior verdict, projected for the first time: neither `lastBotReview`
     // nor `pathsSinceLastBotReview` has ever reached a template context, so no
     // prompt could see what we last said about this PR. Empty strings rather
@@ -1696,6 +1700,15 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      * the projection, not a convenience.
      */
     analysisEnabled: "true",
+    /**
+     * Phase budgets for `pr-review.yaml`'s deterministic `facts` / `seed` /
+     * `reconcile` steps, read as `timeout_seconds: { from: … }` (issue #385).
+     * Beside `analysisEnabled` because those three phases run exactly when it
+     * does; absent otherwise, which is fine — the phases skip.
+     */
+    factsTimeoutSeconds: String(review.analysis.factsTimeoutSeconds),
+    seedTimeoutSeconds: String(review.analysis.seedTimeoutSeconds),
+    reconcileTimeoutSeconds: String(review.analysis.reconcileTimeoutSeconds),
     /**
      * WP11c — the `survey` fan-out's concurrency CEILING, read by
      * `max_concurrent: { from: surveyConcurrency, default: 6 }`.

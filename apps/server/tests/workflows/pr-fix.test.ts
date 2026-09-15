@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { defaultGateConfig, defaultSandboxTimeouts } from "#src/config/config.js";
 import { getWorkflow } from "#src/workflows/loader.js";
 import {
   CI_FIX_MARKER_POSTCONDITION,
@@ -150,14 +151,13 @@ describe.each(["pr-fix", "dependabot-ci-fix"])("%s — the local push gate", (na
       from: "fix.localIterations",
       default: defaults.localIterations,
     });
-    expect(fix.timeout_seconds).toEqual({
-      from: "fix.gateTimeoutSeconds",
-      default: defaults.gateTimeoutSeconds,
-    });
-    // `runUntilBash` falls back to `?? 30`, and 30s kills a real test suite
-    // mid-run and reports a false red — so the fallback must stay generous
-    // even if the reference never resolves.
-    expect(defaults.gateTimeoutSeconds).toBeGreaterThan(30);
+    // Issue #385: the gate budget is `gate.timeoutSeconds` — the run's
+    // repo-clamped gate block — with NO YAML fallback: a context without it
+    // fails the phase loudly rather than running on a literal.
+    expect(fix.timeout_seconds).toEqual({ from: "gate.timeoutSeconds" });
+    // And the packaged gate budget must stay well above the short until_bash
+    // default a gate would otherwise inherit, which kills a real suite mid-run.
+    expect(defaultGateConfig().timeoutSeconds).toBeGreaterThan(defaultSandboxTimeouts().untilBashTimeoutSeconds);
   });
 
   it("keeps the CI_FIX_COMPLETE postcondition on the looped phase", () => {

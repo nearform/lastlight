@@ -492,10 +492,10 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 		</tbody>
 	</table>
 
-	<h2 id="workflow-policy">Workflow policy — <code>fix</code>, <code>dependencies</code>, <code>review</code></h2>
+	<h2 id="workflow-policy">Workflow policy — <code>fix</code>, <code>gate</code>, <code>dependencies</code>, <code>review</code></h2>
 
 	<p>
-		Three blocks have no environment variable at all: they're budgets and
+		These blocks have no environment variable at all: they're budgets and
 		blast-radius dials, and those belong in a file you can review and diff
 		rather than in a shell. They live in <code>config/default.yaml</code> with
 		the values below, and you override them in your
@@ -562,11 +562,21 @@ review:
 fix:                           # every PR-fixing workflow: pr-fix, dependabot-ci-fix
   maxAttempts: 3               # attempts ACROSS runs for one PR, then a human is asked
   localIterations: 2           # gate-loop iterations WITHIN one attempt
-  gateTimeoutSeconds: 900      # budget for the repo's own build/test gate
   escalateModelAfterAttempt: 1 # attempts above this use models["pr-fix-retry"]
   maxCostUsd: 5.0              # cumulative ceiling for ONE PR; null = no ceiling
   maxFlakyDeferrals: 2         # "flaky" verdicts before one is taken at face value
   retryableClasses: [reproducible, env-mismatch]
+
+gate:                          # ONE full build/test gate command (install excluded)
+  timeoutSeconds: 900          # a repo may set this in .lastlight/lastlight.yml…
+  maxTimeoutSeconds: 1500      # …clamped to this operator-only ceiling
+  phaseTimeoutSeconds: 2400    # operator-only budget for a phase that RUNS a gate
+                               # (build guardrails_gate, executor)
+
+sandbox:
+  agentTimeoutSeconds: 1800    # one agent phase run with no timeout_seconds
+  commandTimeoutSeconds: 300   # type: bash / type: script phases
+  untilBashTimeoutSeconds: 30  # a generic_loop.until_bash check
 
 dependencies:
   autoMergeMaxImpact: medium   # none | low | medium | high — ceiling for a MAJOR bump
@@ -576,16 +586,32 @@ dependencies:
 
 	<div class="docs-callout">
 		<div class="docs-callout-body">
-			<strong>How the two loop budgets reach the run.</strong>
-			<code>fix.localIterations</code> and <code>fix.gateTimeoutSeconds</code>
-			are read by the fix phase itself, which declares
-			<code>max_iterations: &#123; from: fix.localIterations, default: 2 &#125;</code>
-			and <code>timeout_seconds: &#123; from: fix.gateTimeoutSeconds, default: 900 &#125;</code>.
+			<strong>How the loop budgets reach the run.</strong>
+			The fix phase declares
+			<code>max_iterations: &#123; from: fix.localIterations &#125;</code>
+			and <code>timeout_seconds: &#123; from: gate.timeoutSeconds &#125;</code>.
 			The <code>from:</code> path resolves against the run's effective — already
-			repo-clamped — <code>fix</code> block, so a repository that lowers its own
-			budget in <code>.lastlight/</code> is honoured; the number in the YAML is
-			only the fallback for a run whose context carries no <code>fix:</code> at
-			all.
+			repo-clamped — config, so a repository's own <code>.lastlight/</code>
+			value is honoured. There is no fallback number in the YAML: every timeout
+			lives in <code>config/default.yaml</code>, and a missing key fails config
+			(or workflow) load with an error naming it.
+		</div>
+	</div>
+
+	<div class="docs-callout">
+		<div class="docs-callout-body">
+			<strong>Timeouts are config-only.</strong> No timeout has a default in code.
+			Load validates <code>gate.timeoutSeconds &lt;= gate.maxTimeoutSeconds &lt; gate.phaseTimeoutSeconds</code>,
+			and the resolved values are on every run's template context as
+			<code>&#123;&#123;gate.timeoutSeconds&#125;&#125;</code> (and the other
+			<code>gate.*</code> leaves) and
+			<code>&#123;&#123;timeouts.agentSeconds&#125;&#125;</code> /
+			<code>commandSeconds</code> / <code>untilBashSeconds</code>. Core passes
+			<code>gate.timeoutSeconds</code> to agentic-pi as <code>--gate-timeout</code>,
+			which tells the agent to run installs, builds and full suites under that
+			budget and judge them by exit code. <code>fix.gateTimeoutSeconds</code> is a
+			deprecated alias for <code>gate.timeoutSeconds</code> (overlay only; it
+			logs a warning).
 		</div>
 	</div>
 

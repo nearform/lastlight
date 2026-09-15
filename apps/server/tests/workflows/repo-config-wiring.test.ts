@@ -45,6 +45,7 @@ import { resetRepoConfigForTests, type RepoConfigBase } from "#src/config/repo-c
 import {
   defaultDependenciesConfig,
   defaultFixConfig,
+  defaultGateConfig,
   defaultNotificationsConfig,
   defaultReviewConfig,
 } from "#src/config/config.js";
@@ -168,6 +169,8 @@ function baseConfig(): RepoConfigBase {
       fix: { ...defaultFixConfig() },
       dependencies: { ...defaultDependenciesConfig() },
       review: { ...defaultReviewConfig() },
+      // The operator ceiling a repo's `gate.timeoutSeconds` is clamped to (#385).
+      gate: { ...defaultGateConfig() },
     },
     sources: {
       models: { default: "default" },
@@ -660,7 +663,7 @@ describe("resolveRepoRunConfig — the dispatch choke point", () => {
     const client = fakeClient(() =>
       treeOf({
         "lastlight.yml":
-          "fix:\n  maxAttempts: 1\n  gateTimeoutSeconds: 60\n" +
+          "fix:\n  maxAttempts: 1\n  escalateModelAfterAttempt: 9\n" +
           "dependencies:\n  autoMergeMaxImpact: high\n  auditComment: false\n",
       }),
     );
@@ -672,8 +675,8 @@ describe("resolveRepoRunConfig — the dispatch choke point", () => {
     expect(result.repoConfig?.sources.fix.maxAttempts).toBe("repo");
     // Loosened: clamped back to the operator's tier.
     expect(result.repoConfig?.dependencies.autoMergeMaxImpact).toBe("medium");
-    // Operator-only: refused even though 60 < 900.
-    expect(result.repoConfig?.fix.gateTimeoutSeconds).toBe(defaultFixConfig().gateTimeoutSeconds);
+    // Operator-only: refused outright (spend control is not the repo's call).
+    expect(result.repoConfig?.fix.escalateModelAfterAttempt).toBe(defaultFixConfig().escalateModelAfterAttempt);
     // Add-only key: a repo may ask for the auto-merge audit record, never
     // silence one the operator requires — it is the audit OF that repo.
     expect(result.repoConfig?.dependencies.auditComment).toBe(true);
@@ -682,6 +685,38 @@ describe("resolveRepoRunConfig — the dispatch choke point", () => {
       "policy-downgrade",
       "policy-downgrade",
     ]);
+  });
+
+  it("honours a repo's gate.timeoutSeconds on the SHIPPED allow-list, clamped to maxTimeoutSeconds (#385)", async () => {
+    const operator = defaultGateConfig();
+    const raised = operator.timeoutSeconds + 300;
+    const ask = (seconds: number) =>
+      fakeClient(() =>
+        treeOf({
+          "lastlight.yml":
+            `gate:\n  timeoutSeconds: ${seconds}\n  maxTimeoutSeconds: 99999\n  phaseTimeoutSeconds: 99999\n`,
+        }),
+      );
+
+    // Within the ceiling: the repo may RAISE its gate above the operator's value
+    // — the one leaf that departs from "only ever more conservative".
+    const within = await resolve("pr-fix", { repo: "acme/widgets" }, ask(raised));
+    expect(within.refusal).toBeUndefined();
+    expect(within.repoConfig?.gate).toEqual({ ...operator, timeoutSeconds: raised });
+    expect(within.repoConfig?.sources.gate.timeoutSeconds).toBe("repo");
+    // The operator-only ceilings are dropped, whatever the repo wrote.
+    expect(within.repoConfig?.warnings.map((w) => [w.code, w.path])).toEqual([
+      ["key-not-allowed", "gate.maxTimeoutSeconds"],
+      ["key-not-allowed", "gate.phaseTimeoutSeconds"],
+    ]);
+    // And it is persisted as a repo-won leaf, so a resume keeps it.
+    expect(repoConfigRunRecord(within.repoConfig!).applied.gate).toEqual({ timeoutSeconds: raised });
+
+    resetRepoConfigForTests();
+    // Above the ceiling: clamped to it, with a policy-downgrade warning.
+    const above = await resolve("pr-fix", { repo: "acme/widgets" }, ask(operator.maxTimeoutSeconds * 10));
+    expect(above.repoConfig?.gate.timeoutSeconds).toBe(operator.maxTimeoutSeconds);
+    expect(above.repoConfig?.warnings.map((w) => w.code)).toContain("policy-downgrade");
   });
 
   it("degrades to the operator config when the fetch fails, rather than failing the run", async () => {

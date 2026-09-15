@@ -97,11 +97,10 @@ export type {
 // `{{dependencies.autoMergeMaxImpact}}`, with their shipped defaults — a
 // harness needs the defaults to stand in for boot config it has no other way
 // to obtain.
-export {
-  defaultFixConfig,
-  defaultDependenciesConfig,
-  defaultReviewConfig,
-} from "lastlight-shared/config-types";
+export { defaultFixConfig, defaultDependenciesConfig } from "lastlight-shared/config-types";
+// The COMPLETE review block, durations included, derived from core's own
+// `config/default.yaml` — the single source of every timeout (issue #385).
+export { defaultReviewConfig } from "./config/config.js";
 export type { FixConfig, DependenciesConfig, ReviewConfig } from "lastlight-shared/config-types";
 
 // ── overlay/evals repo bootstrap (reused by `lastlight-evals init`) ──────────

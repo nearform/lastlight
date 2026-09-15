@@ -62,8 +62,11 @@ export function isDiagnosisClass(value: unknown): value is DiagnosisClass {
  * Repo-settable subset (bounded in `repo-config-schema.ts`): `maxAttempts`,
  * `localIterations`, `maxCostUsd`, `maxFlakyDeferrals` and `retryableClasses`,
  * each clamped so a repo can only ever be MORE conservative than the operator.
- * `escalateModelAfterAttempt` (spend control) and `gateTimeoutSeconds` (resource
- * control) are operator-only.
+ * `escalateModelAfterAttempt` (spend control) is operator-only.
+ *
+ * The gate's `until_bash` budget is NOT here: it is `gate.timeoutSeconds`
+ * ({@link GateConfig}, issue #385). `fix.gateTimeoutSeconds` survives only as a
+ * deprecated OPERATOR-overlay alias that core's loader maps across.
  */
 export interface FixConfig {
   /** Cross-run attempts per (repo, PR) before the PR is escalated to a human. */
@@ -77,11 +80,6 @@ export interface FixConfig {
    * template context, so the repo-clamped value is the operative bound.
    */
   localIterations: number;
-  /**
-   * `until_bash` budget, in seconds, for the repo's build/test gate. Read by
-   * the same phase's `timeout_seconds: { from: fix.gateTimeoutSeconds, … }`.
-   */
-  gateTimeoutSeconds: number;
   /** Attempts ABOVE this number use `models["pr-fix-retry"]` when one is set. */
   escalateModelAfterAttempt: number;
   /** Cumulative cost ceiling across attempts for one PR. `null` = unbounded. */
@@ -107,12 +105,59 @@ export function defaultFixConfig(): FixConfig {
   return {
     maxAttempts: 3,
     localIterations: 2,
-    gateTimeoutSeconds: 900,
     escalateModelAfterAttempt: 1,
     maxCostUsd: 5.0,
     maxFlakyDeferrals: 2,
     retryableClasses: ["reproducible", "env-mismatch"],
   };
+}
+
+// ---------------------------------------------------------------------------
+// gate: + sandbox timeouts — wall-clock budgets (issue #385)
+// ---------------------------------------------------------------------------
+//
+// NO shipped-defaults factory, on purpose: `apps/server/config/default.yaml` is
+// the single source of every timeout value, core's loader fails loud on a
+// missing key, and core's pre-boot path derives its fallback by loading that
+// same file. A TS literal here would be a second, silently-drifting copy.
+
+/**
+ * The build/test GATE budget — one number for "a single full build/test gate
+ * command" (install excluded), shared by the fix loops' `until_bash` gate and
+ * the agent's own gate commands (passed to agentic-pi as `--gate-timeout`).
+ *
+ * Repo-settable subset: `timeoutSeconds` ONLY, and it is the one policy leaf
+ * that may be LOOSENED by a repo — only the repo knows how long its suite takes
+ * — so it is clamped `min(repo, maxTimeoutSeconds)` instead of `min(repo,
+ * operator)`. `maxTimeoutSeconds` and `phaseTimeoutSeconds` are operator-only.
+ *
+ * Invariant (validated at config load): `timeoutSeconds <= maxTimeoutSeconds <
+ * phaseTimeoutSeconds`.
+ */
+export interface GateConfig {
+  /** Budget, in seconds, for ONE full build/test gate command. */
+  timeoutSeconds: number;
+  /** Operator ceiling a repo's `gate.timeoutSeconds` is clamped to. */
+  maxTimeoutSeconds: number;
+  /** Budget for a phase that runs a gate; must exceed {@link maxTimeoutSeconds}. */
+  phaseTimeoutSeconds: number;
+}
+
+/** The `gate:` leaves a repo may never set (dropped with a warning). */
+export const GATE_OPERATOR_ONLY_KEYS: readonly string[] = ["maxTimeoutSeconds", "phaseTimeoutSeconds"];
+
+/**
+ * The sandbox's default wall-clock budgets, each applying only when the phase
+ * sets no `timeout_seconds` of its own. Operator-only (`sandbox:` is not
+ * repo-settable).
+ */
+export interface SandboxTimeoutsConfig {
+  /** One agent phase run. */
+  agentTimeoutSeconds: number;
+  /** A `type: bash` / `type: script` phase. */
+  commandTimeoutSeconds: number;
+  /** A `generic_loop.until_bash` check. */
+  untilBashTimeoutSeconds: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +456,12 @@ export interface ReviewAnalysisConfig {
   prepareTimeoutSeconds: number;
   /** Ceiling on `prepare`'s coverage run, in seconds. Minutes, not seconds. */
   coverageTimeoutSeconds: number;
+  /** Phase budget for `pr-review.yaml`'s deterministic `facts` step, in seconds. */
+  factsTimeoutSeconds: number;
+  /** Phase budget for the `seed` step, in seconds. */
+  seedTimeoutSeconds: number;
+  /** Phase budget for the `reconcile` step, in seconds. */
+  reconcileTimeoutSeconds: number;
   /**
    * How many rounds `falsify` gets to write and run probes.
    *
@@ -626,8 +677,35 @@ export function defaultNotificationsConfig(): NotificationsConfig {
   return { slack: { channel: null } };
 }
 
-/** The shipped `review:` block. Mirrors `review:` in `config/default.yaml`. */
-export function defaultReviewConfig(): ReviewConfig {
+/** The DURATION leaves of `review.analysis` — see {@link ReviewPolicy}. */
+export type ReviewAnalysisDurationKey =
+  | "prepareTimeoutSeconds"
+  | "coverageTimeoutSeconds"
+  | "factsTimeoutSeconds"
+  | "seedTimeoutSeconds"
+  | "reconcileTimeoutSeconds";
+
+/**
+ * A {@link ReviewConfig} WITHOUT its duration leaves (`triage.timeoutSeconds`
+ * and the `review.analysis` phase budgets).
+ *
+ * Every timeout default lives in `config/default.yaml` only (issue #385), so the
+ * TS factory below can no longer produce a complete `ReviewConfig`. The
+ * durations are all operator-only, so the repo-layer merge never needs them
+ * either: it resolves this shape, and core re-attaches the operator's
+ * durations from its resolved (or packaged) config.
+ */
+export type ReviewPolicy = Omit<ReviewConfig, "triage" | "analysis"> & {
+  triage: Omit<ReviewTriageConfig, "timeoutSeconds">;
+  analysis: Omit<ReviewAnalysisConfig, ReviewAnalysisDurationKey>;
+};
+
+/**
+ * The shipped `review:` POLICY — `review:` in `config/default.yaml` minus its
+ * durations (see {@link ReviewPolicy}). Core's `defaultReviewConfig()` is the
+ * complete, default.yaml-derived block.
+ */
+export function defaultReviewPolicy(): ReviewPolicy {
   return {
     postsCheck: false,
     trigger: "after-checks",
@@ -656,7 +734,7 @@ export function defaultReviewConfig(): ReviewConfig {
     skipUnchangedDiff: true,
     // ON by default — one cheap pass that can only remove work from a
     // re-review. See {@link ReviewTriageConfig.enabled}.
-    triage: { enabled: true, timeoutSeconds: 300 },
+    triage: { enabled: true },
     analysis: {
       enabled: false,
       // A safety bound, not a budget — see config/default.yaml for why this is
@@ -681,8 +759,6 @@ export function defaultReviewConfig(): ReviewConfig {
       probeLifecycleScripts: false,
       probeTypecheck: false,
       probeCoverage: false,
-      prepareTimeoutSeconds: 300,
-      coverageTimeoutSeconds: 900,
       probeRounds: 2,
       maxInlineComments: 10,
       thresholds: {

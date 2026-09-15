@@ -472,7 +472,7 @@ describe("resolveRepoConfig — fix policy is clamped one way", () => {
     expect(codes(result.warnings).sort()).toEqual(["invalid-value", "policy-downgrade"]);
   });
 
-  it("refuses the operator-only keys outright", () => {
+  it("refuses the operator-only key outright, and no longer knows fix.gateTimeoutSeconds", () => {
     const result = resolveRepoConfig(
       policyBase(),
       policyBlocks(),
@@ -480,10 +480,11 @@ describe("resolveRepoConfig — fix policy is clamped one way", () => {
     );
 
     expect(result.merged.fix.escalateModelAfterAttempt).toBe(defaultFixConfig().escalateModelAfterAttempt);
-    // 60 is *tighter* than the operator's 900 and still refused: this is not a
-    // clamp, it is "not your key" — the gate budget is a shared resource.
-    expect(result.merged.fix.gateTimeoutSeconds).toBe(defaultFixConfig().gateTimeoutSeconds);
-    expect(codes(result.warnings)).toEqual(["key-not-allowed", "key-not-allowed"]);
+    // Issue #385: the gate budget moved to `gate.timeoutSeconds`. The old fix
+    // spelling is an OPERATOR-overlay alias only, so from a repo it is simply
+    // not a key of the fix policy — and it never reaches the merged block.
+    expect(result.merged.fix).not.toHaveProperty("gateTimeoutSeconds");
+    expect(codes(result.warnings)).toEqual(["key-not-allowed", "invalid-value"]);
   });
 
   it("drops an unknown leaf and a malformed value without failing the layer", () => {
@@ -752,7 +753,9 @@ describe("resolveRepoConfig — review policy", () => {
       layerWith({ review: { triage: { enabled: false } } }),
     );
 
-    expect(result.merged.review.triage).toEqual(defaultReviewConfig().triage);
+    // The merged view is the duration-free review POLICY (#385): the operator's
+    // `triage.timeoutSeconds` is re-attached by core, never carried by the merge.
+    expect(result.merged.review.triage).toEqual({ enabled: defaultReviewConfig().triage.enabled });
     expect(codes(result.warnings)).toEqual(["key-not-allowed"]);
   });
 });

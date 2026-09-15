@@ -101,8 +101,6 @@ export interface SmolSandboxConfig {
    * OTEL…). Forwarded via `--secret-env` so values stay off the argv.
    */
   env: Record<string, string>;
-  /** Timeout in seconds for an agent run (default 1800 = 30 min). */
-  timeoutSeconds?: number;
   /**
    * Egress allowlist (apex hostnames). Each becomes a repeated `--allow-host`.
    * `null` → no allowlist (open egress, still `--net`); used for
@@ -231,7 +229,15 @@ export class SmolSandbox {
   async runAgent(
     taskId: string,
     prompt: string,
-    opts?: {
+    opts: {
+      /**
+       * Wall-clock budget for the run, in seconds — resolved from config by the
+       * orchestrator (the phase's `timeout_seconds`, else
+       * `sandbox.agentTimeoutSeconds`). No default here (issue #385).
+       */
+      timeoutSeconds: number;
+      /** The run's effective `gate.timeoutSeconds`, passed as `--gate-timeout`. */
+      gateTimeoutSeconds: number;
       model?: string;
       thinking?: string;
       profile?: string;
@@ -248,9 +254,14 @@ export class SmolSandbox {
     if (!info) throw new Error(`No smol machine for task ${taskId}`);
 
     const model = opts?.model || "anthropic/claude-sonnet-4-6";
-    const timeout = this.config.timeoutSeconds || 1800;
+    const timeout = requirePositiveSeconds(opts.timeoutSeconds, "timeoutSeconds");
+    const gateTimeout = Math.ceil(requirePositiveSeconds(opts.gateTimeoutSeconds, "gateTimeoutSeconds"));
 
-    const piArgs: string[] = ["agentic-pi", "run", "--model", model, "--sandbox", "none"];
+    const piArgs: string[] = [
+      "agentic-pi", "run", "--model", model, "--sandbox", "none",
+      // Always passed (issue #385) — the run's effective gate budget.
+      "--gate-timeout", String(gateTimeout),
+    ];
     if (opts?.thinking) {
       if (!THINKING.has(opts.thinking)) {
         throw new Error(`Refusing to pass thinking "${opts.thinking}" — must be one of ${[...THINKING].join("|")}`);
@@ -364,18 +375,18 @@ export class SmolSandbox {
   async runCommand(
     taskId: string,
     command: string,
-    opts?: {
+    opts: {
       cwd?: string;
       /** Non-secret env forwarded via `-e KEY=VALUE` (e.g. LL_OUT_*, git identity). */
       sandboxEnv?: Record<string, string>;
-      timeoutSeconds?: number;
+      timeoutSeconds: number;
       onLine?: (line: string) => void;
     },
   ): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }> {
     const info = this.machines.get(taskId);
     if (!info) throw new Error(`No smol machine for task ${taskId}`);
 
-    const timeout = opts?.timeoutSeconds || this.config.timeoutSeconds || 1800;
+    const timeout = requirePositiveSeconds(opts.timeoutSeconds, "timeoutSeconds");
     const workdir = opts?.cwd ?? SMOL_WORKSPACE_DIR;
     if (!workdir.startsWith(SMOL_WORKSPACE_DIR) || !PATH_RE.test(workdir)) {
       throw new Error(`Refusing to run command in cwd "${workdir}" — must live under ${SMOL_WORKSPACE_DIR}`);
@@ -549,4 +560,16 @@ function execCmd(cmd: string, args: string[], opts?: { timeout?: number }): stri
 
 function execSafe(cmd: string, args: string[]): void {
   try { execFileSync(cmd, args, { stdio: "ignore" }); } catch { /* ignore */ }
+}
+
+/**
+ * A caller-resolved timeout, validated rather than defaulted (issue #385):
+ * every budget comes from config, so a missing or non-positive value here is a
+ * wiring bug to surface, not a gap to paper over with a literal.
+ */
+function requirePositiveSeconds(value: number | undefined, name: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`Refusing to run: ${name} must be a positive number of seconds (got ${String(value)})`);
+  }
+  return value;
 }

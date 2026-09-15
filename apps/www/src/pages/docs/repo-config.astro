@@ -197,6 +197,10 @@ Effective config overrides
 				<td>The <a href="/docs/configuration#workflow-policy">workflow policy blocks</a> — retry budgets, major-bump auto-merge, and when a review runs. <strong>One-way</strong>: a repo may only ever be <em>more</em> conservative than the operator. See <a href="#policy">below</a>.</td>
 			</tr>
 			<tr>
+				<td><code>gate.timeoutSeconds</code></td>
+				<td>How long one full build/test gate command may run for this repo — size it to your real suite. Clamped to the operator's ceiling. See <a href="#policy">below</a>.</td>
+			</tr>
+			<tr>
 				<td><code>notifications</code></td>
 				<td>Which Slack channel this repo's <a href="/docs/slack#digest">weekly digest</a> goes to. The one key with <em>no</em> clamp direction — a channel isn't more or less conservative. See <a href="#notifications">below</a>.</td>
 			</tr>
@@ -251,7 +255,7 @@ notifications:
 		<code>slack.repoChannels</code> map instead.
 	</p>
 
-	<h2 id="policy">Policy blocks: a repo may only be more careful</h2>
+	<h2 id="policy">Policy blocks: a repo may only be more careful (one exception)</h2>
 
 	<p>
 		<code>fix</code>, <code>dependencies</code> and <code>review</code> aren't
@@ -260,6 +264,15 @@ notifications:
 		share of your money and your machines. So they follow the rule
 		<code>approval</code> already established, generalised: <strong>a repo may
 		only ever be more conservative than the operator.</strong>
+	</p>
+
+	<p>
+		The one exception is <code>gate.timeoutSeconds</code>: only the repo knows
+		how long its full test suite takes, so a repo may <em>raise</em> it — up to
+		the operator's <code>gate.maxTimeoutSeconds</code> ceiling, never past it.
+		A value above the ceiling is clamped to it with a
+		<code>policy-downgrade</code> warning. See
+		<a href="/docs/agent-friendly-repos">Making your repo agent-friendly</a>.
 	</p>
 
 	<p>
@@ -274,7 +287,9 @@ notifications:
 fix:
   maxAttempts: 1               # ✓ lower than the operator's 3 — accepted
   maxCostUsd: 10.0             # ✗ higher than the operator's 5.0 — dropped, stays 5.0
-  gateTimeoutSeconds: 3600     # ✗ operator-only — dropped
+
+gate:
+  timeoutSeconds: 1200         # ✓ raises the operator's 900 — allowed up to gate.maxTimeoutSeconds (1500)
 
 dependencies:
   autoMergeMaxImpact: none     # ✓ never auto-merge a major in this repo
@@ -301,8 +316,12 @@ review:
 				<td>keep a <strong>subset</strong> of your list. Naming a class you don't retry would add a retryable failure mode, so it's dropped; retrying <em>less</em> is always fine. A name that isn't one of the five diagnosis classes at all is reported as a typo rather than as a policy decision — different problems, different fixes.</td>
 			</tr>
 			<tr>
-				<td><code>fix.escalateModelAfterAttempt</code>, <code>fix.gateTimeoutSeconds</code></td>
-				<td><strong>nothing</strong> — operator-only. One is spend, the other a shared-resource budget; neither is a "how careful is this repo" dial.</td>
+				<td><code>fix.escalateModelAfterAttempt</code></td>
+				<td><strong>nothing</strong> — operator-only. It's spend, not a "how careful is this repo" dial.</td>
+			</tr>
+			<tr>
+				<td><code>gate.timeoutSeconds</code></td>
+				<td>set it either way — the one budget a repo may <em>raise</em>, because only the repo knows how long its full test suite takes. Clamped to the operator's <code>gate.maxTimeoutSeconds</code>. <code>gate.maxTimeoutSeconds</code> and <code>gate.phaseTimeoutSeconds</code> are operator-only, and the deprecated <code>fix.gateTimeoutSeconds</code> alias is not accepted from a repo. See <a href="/docs/agent-friendly-repos">Making your repo agent-friendly</a>.</td>
 			</tr>
 			<tr>
 				<td><code>dependencies.autoMergeMaxImpact</code></td>

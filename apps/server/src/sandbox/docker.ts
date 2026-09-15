@@ -32,8 +32,6 @@ export interface SandboxConfig {
   imageName: string;
   /** Env vars to inject into the sandbox */
   env: Record<string, string>;
-  /** Timeout in seconds (default: 1800 = 30 min) */
-  timeoutSeconds?: number;
   /**
    * Per-sandbox memory cap, in Docker's `--memory` format (e.g. "8g", "512m").
    * Default: 8g. Override via the `SANDBOX_MEMORY_LIMIT` env var.
@@ -312,7 +310,15 @@ export class DockerSandbox {
   async runAgent(
     taskId: string,
     prompt: string,
-    opts?: {
+    opts: {
+      /**
+       * Wall-clock budget for the run, in seconds — resolved from config by the
+       * orchestrator (the phase's `timeout_seconds`, else
+       * `sandbox.agentTimeoutSeconds`). No default here (issue #385).
+       */
+      timeoutSeconds: number;
+      /** The run's effective `gate.timeoutSeconds`, passed as `--gate-timeout`. */
+      gateTimeoutSeconds: number;
       model?: string;
       /**
        * Pi thinking level: `off | minimal | low | medium | high | xhigh`.
@@ -360,7 +366,8 @@ export class DockerSandbox {
     if (!info) throw new Error(`No sandbox for task ${taskId}`);
 
     const model = opts?.model || "anthropic/claude-sonnet-4-6";
-    const timeout = this.config.timeoutSeconds || 1800;
+    const timeout = requirePositiveSeconds(opts.timeoutSeconds, "timeoutSeconds");
+    const gateTimeout = Math.ceil(requirePositiveSeconds(opts.gateTimeoutSeconds, "gateTimeoutSeconds"));
 
     // `cmd` is interpolated into `sh -c <cmd>` below, so any value we
     // append here is shell-parsed. Assert each opt-supplied flag against
@@ -369,7 +376,9 @@ export class DockerSandbox {
     const THINKING = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
     const WEB_SEARCH_PROVIDERS = new Set(["tavily", "brave", "exa"]);
 
-    const extraArgs: string[] = [];
+    // Always passed (issue #385): the numeric value is range-checked above and
+    // stringified here, so nothing shell-significant can reach `sh -c`.
+    const extraArgs: string[] = ["--gate-timeout", String(gateTimeout)];
     if (opts?.thinking) {
       if (!THINKING.has(opts.thinking)) {
         throw new Error(`Refusing to pass thinking "${opts.thinking}" — must be one of ${[...THINKING].join("|")}`);
@@ -532,7 +541,7 @@ export class DockerSandbox {
   async runCommand(
     taskId: string,
     command: string,
-    opts?: {
+    opts: {
       /**
        * Working directory inside the container. Defaults to WORKSPACE_DIR.
        * Asserted against the workspace-root allowlist (same guard as runAgent).
@@ -540,8 +549,8 @@ export class DockerSandbox {
       cwd?: string;
       /** Env forwarded into the command via `docker exec -e`. */
       sandboxEnv?: Record<string, string>;
-      /** Per-command timeout in seconds (default: the sandbox config timeout). */
-      timeoutSeconds?: number;
+      /** Per-command timeout in seconds — resolved from config by the caller; no default. */
+      timeoutSeconds: number;
       /** Called for each newline-terminated stdout line as it arrives. */
       onLine?: (line: string) => void;
     },
@@ -549,7 +558,7 @@ export class DockerSandbox {
     const info = this.activeContainers.get(taskId);
     if (!info) throw new Error(`No sandbox for task ${taskId}`);
 
-    const timeout = opts?.timeoutSeconds || this.config.timeoutSeconds || 1800;
+    const timeout = requirePositiveSeconds(opts.timeoutSeconds, "timeoutSeconds");
 
     const workdir = opts?.cwd ?? WORKSPACE_DIR;
     if (!workdir.startsWith(WORKSPACE_DIR) || !/^[A-Za-z0-9/_.-]+$/.test(workdir)) {
@@ -818,4 +827,16 @@ function resolveHostPath(value: string): string {
     p = (process.env.HOME || "") + p.slice(1);
   }
   return resolve(p);
+}
+
+/**
+ * A caller-resolved timeout, validated rather than defaulted (issue #385):
+ * every budget comes from config, so a missing or non-positive value here is a
+ * wiring bug to surface, not a gap to paper over with a literal.
+ */
+function requirePositiveSeconds(value: number | undefined, name: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`Refusing to run: ${name} must be a positive number of seconds (got ${String(value)})`);
+  }
+  return value;
 }
