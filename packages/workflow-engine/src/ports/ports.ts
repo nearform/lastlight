@@ -54,6 +54,14 @@ export interface PhaseResult {
   success: boolean;
   output: string;
   error?: string;
+  /**
+   * The executor's mapped stop reason, carried through from `ExecutionResult`
+   * (`"success"` / `"error_quota"` / `"error_sandbox"` / …). Present for phases
+   * that ran an agent or command; absent for synthesized results (skips,
+   * dedup, unknown nodes). Lets consumers distinguish a deferral from a
+   * failure — e.g. `logPhaseEnd` logs `error_quota` at `warn`, not `error`.
+   */
+  stopReason?: string;
 }
 
 export interface WorkflowResult {
