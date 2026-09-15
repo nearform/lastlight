@@ -265,6 +265,13 @@ export interface RunResult {
   /** True iff at least one tool returned an error. */
   toolErrors: boolean;
   /**
+   * True iff the run's LAST tool result errored (isError). Unlike the sticky
+   * `toolErrors`, this reflects only the final tool call, so an empty
+   * completion that follows a recovered tool failure is not misread as a tool
+   * error. Undefined when no tool ran.
+   */
+  lastToolErrored?: boolean;
+  /**
    * True iff the run was stopped because it hit the `maxSteps` cap — i.e. the
    * agent completed `maxSteps` turns and still wanted to continue. False when
    * the agent finished on its own (or no cap was set). Mirrors the
@@ -523,6 +530,7 @@ export function buildResult(
       }
 
       case "tool_execution_end":
+        result.lastToolErrored = r.isError === true;
         if (r.isError === true) result.toolErrors = true;
         break;
 

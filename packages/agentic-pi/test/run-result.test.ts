@@ -86,3 +86,34 @@ describe("buildResult — terminal agent_end handling", () => {
     assert.equal(r.finalText, "partial");
   });
 });
+
+describe("buildResult — lastToolErrored tracking", () => {
+  test("lastToolErrored is true when the last tool_execution_end errored", () => {
+    const records: EmitterRecord[] = [
+      { type: "tool_execution_end", tool: "bash", isError: true, error: "exit 1" },
+    ];
+    const r = buildResult(0, records, []);
+    assert.equal(r.lastToolErrored, true);
+    assert.equal(r.toolErrors, true);
+  });
+
+  test("lastToolErrored is false when the last tool_execution_end succeeded (even if an earlier one errored)", () => {
+    const records: EmitterRecord[] = [
+      { type: "tool_execution_end", tool: "bash", isError: true, error: "exit 1" },
+      { type: "tool_execution_end", tool: "read", isError: false, result: "ok" },
+    ];
+    const r = buildResult(0, records, []);
+    assert.equal(r.lastToolErrored, false);
+    // Sticky flag still set — some tool failed
+    assert.equal(r.toolErrors, true);
+  });
+
+  test("lastToolErrored is undefined when no tool ran", () => {
+    const records: EmitterRecord[] = [
+      { type: "agent_end", willRetry: false, messages: [assistantMsg("done")] },
+    ];
+    const r = buildResult(0, records, []);
+    assert.equal(r.lastToolErrored, undefined);
+    assert.equal(r.toolErrors, false);
+  });
+});
