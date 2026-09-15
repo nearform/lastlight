@@ -24,6 +24,28 @@ function normalizeBaseUrl(baseUrl: string | undefined): string | undefined {
 }
 
 /**
+ * Octokit's bundled throttling plugin paces requests with Bottleneck limiters
+ * that are MODULE-GLOBAL — shared by every Octokit in the process — and its
+ * `notifications` group allows one review/comment POST per 3 s. Against GitHub
+ * that is the point (secondary rate limits). Against a loopback mock — the
+ * evals harness, the test suite — there is no rate limit to respect, and the
+ * shared limiter made every review POST after the first wait 3 s: 60 s for
+ * `post-review.test.ts` alone (issue #388). Only a literal loopback host opts
+ * out, so no deployment URL can switch pacing off by accident.
+ */
+function throttleFor(baseUrl: string | undefined): { throttle?: { enabled: false } } {
+  if (!baseUrl) return {};
+  try {
+    const host = new URL(baseUrl).hostname;
+    return host === "127.0.0.1" || host === "localhost" || host === "[::1]"
+      ? { throttle: { enabled: false } }
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Log a diagnostic on a 403/404 from the GitHub REST API and re-throw — no
  * behaviour change. Records the request, the endpoint's REQUIRED permissions
  * (`x-accepted-github-permissions`), and — for App-auth clients — the actual
@@ -85,6 +107,7 @@ export function githubAppClient(config: GitHubAppClientConfig): Octokit {
       installationId: config.installationId,
     },
     ...(baseUrl ? { baseUrl } : {}),
+    ...throttleFor(baseUrl),
   });
   installScopeDiagnostics(octokit, true);
   return octokit;
@@ -100,7 +123,7 @@ export function githubAppClient(config: GitHubAppClientConfig): Octokit {
  */
 export function githubTokenClient(token: string, baseUrl?: string): Octokit {
   const url = normalizeBaseUrl(baseUrl);
-  const octokit = new Octokit({ auth: token, ...(url ? { baseUrl: url } : {}) });
+  const octokit = new Octokit({ auth: token, ...(url ? { baseUrl: url } : {}), ...throttleFor(url) });
   // Raw-bearer client carries no App installation to introspect — log only the
   // request + the endpoint's required permissions.
   installScopeDiagnostics(octokit, false);

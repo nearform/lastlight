@@ -28,36 +28,31 @@ vi.mock("#src/logging/logger.js", () => {
   return { logger: () => noopLogger };
 });
 
-import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { migrate } from "drizzle-orm/pglite/migrator";
-import { fileURLToPath } from "node:url";
 import { SessionManager } from "#src/connectors/messaging/session-manager.js";
 import { asStateClient } from "#src/state/client.js";
 import * as pgSchema from "#src/state/schema/pg.js";
 import { runSessionManagerSuite, type SessionSuiteCtx } from "./session-manager-suite.js";
-
-const MIGRATIONS = fileURLToPath(new URL("../../../drizzle/pg", import.meta.url));
+import { migratedPglite } from "../../helpers/pglite.js";
 
 /**
- * Mirrors the sqlite runner's `makeCtx`, swapping the raw libsql client for
- * PGlite and skipping the legacy compat pre-step (there is no legacy Postgres
- * database to repair — `drizzle/pg/` is fresh-DB only).
+ * Mirrors the sqlite runner's `makeCtx`, swapping the raw libsql client for a
+ * reset, migrated PGlite (`../../helpers/pglite.ts`) and skipping the legacy
+ * compat pre-step (there is no legacy Postgres database to repair —
+ * `drizzle/pg/` is fresh-DB only).
  *
- * Note the INVERTED teardown rule versus the store suite: this factory's
- * `runSessionManagerSuite` calls `ctx.close()` in its own `afterEach`, so
- * `makeCtx` must NOT also self-register — that would be a double close.
+ * `close` is a no-op: `runSessionManagerSuite` calls `ctx.close()` in its own
+ * `afterEach`, but the instance is shared by the whole file and the helper
+ * closes it once, after the last test.
  */
 async function makeCtx(): Promise<SessionSuiteCtx> {
-  const pglite = new PGlite({ parsers: { 20: (v: string) => Number(v) } });
   // `{ schema }` is required: `tablesOf()` reads it back off the client to give
   // `SessionManager` the pg table objects rather than the sqlite ones.
-  const client = asStateClient(drizzle(pglite, { schema: pgSchema }));
-  await migrate(client as never, { migrationsFolder: MIGRATIONS });
+  const client = asStateClient(drizzle(await migratedPglite(), { schema: pgSchema }));
   return {
     manager: new SessionManager(client, "postgres"),
     client,
-    close: async () => pglite.close(),
+    close: async () => {},
   };
 }
 

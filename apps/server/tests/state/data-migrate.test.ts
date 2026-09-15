@@ -17,7 +17,7 @@
  * they are value bugs, not row bugs — so the assertions here read the values
  * back rather than counting.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 vi.mock("#src/logging/logger.js", () => {
   const noopLogger = {
@@ -31,10 +31,7 @@ vi.mock("#src/logging/logger.js", () => {
   return { logger: () => noopLogger };
 });
 
-import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { migrate } from "drizzle-orm/pglite/migrator";
-import { fileURLToPath } from "node:url";
 import { asStateClient, tablesOf } from "#src/state/client.js";
 import { StateDb } from "#src/state/db.js";
 import * as pgSchema from "#src/state/schema/pg.js";
@@ -45,8 +42,7 @@ import {
   type MigrateProgress,
 } from "#src/state/data-migrate.js";
 import { makeTestDb } from "../helpers/state-db.js";
-
-const MIGRATIONS = fileURLToPath(new URL("../../drizzle/pg", import.meta.url));
+import { migratedPglite } from "../helpers/pglite.js";
 
 /**
  * Every test below stands up TWO databases (a temp-file SQLite and a PGlite
@@ -57,16 +53,9 @@ const MIGRATIONS = fileURLToPath(new URL("../../drizzle/pg", import.meta.url));
  */
 const DB_TEST_TIMEOUT_MS = 30_000;
 
-const openPglite: PGlite[] = [];
-afterEach(async () => {
-  for (const p of openPglite.splice(0)) await p.close();
-});
-
+/** The file's migrated PGlite, reset for this test (`../helpers/pglite.ts`). */
 async function makePgTarget(): Promise<StateDb> {
-  const pglite = new PGlite({ parsers: { 20: (v: string) => Number(v) } });
-  openPglite.push(pglite);
-  const client = asStateClient(drizzle(pglite, { schema: pgSchema }));
-  await migrate(client as never, { migrationsFolder: MIGRATIONS });
+  const client = asStateClient(drizzle(await migratedPglite(), { schema: pgSchema }));
   return StateDb.fromClient(client, "postgres");
 }
 

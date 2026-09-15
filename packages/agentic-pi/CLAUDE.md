@@ -217,7 +217,7 @@ npm run check             # tsc --noEmit (type-check only)
 npm run lint              # biome lint — the lint-only gate CI runs
 npm run format            # biome format --write (rewrite to formatter style)
 npm run fix               # biome check --write (safe lint fixes + format)
-npm test                  # full suite — integration tests skip if env unset
+npm test                  # unit only (= test:unit) — what CI and the guardrails gate run
 npm run test:unit         # unit only (~170 ms, no API keys, no QEMU)
 npm run test:integration  # integration only (needs OPENAI_API_KEY; sandbox needs QEMU too)
 ```

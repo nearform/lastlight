@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { opengrepArgs, withUtf8Locale } from "../src/patterns.js";
-import { resolveToolBin } from "../src/toolchain.js";
 
 // Regression for the sandbox image shipping no locale: opengrep decoded its
 // --config as ASCII and died on an em dash in a rules-file COMMENT (exit 2,
@@ -17,7 +16,12 @@ describe("withUtf8Locale", () => {
   });
 });
 
-const OPENGREP = resolveToolBin("opengrep", process.env);
+/**
+ * The machine's real opengrep, if it has one. Not `resolveToolBin(process.env)`:
+ * vitest.config.ts disables scanners for the rest of the suite, and hands the
+ * real binary to the suites that exist to run it under this test-only name.
+ */
+const OPENGREP = process.env.LASTLIGHT_TEST_OPENGREP_BIN || null;
 
 describe.skipIf(!OPENGREP)("opengrep loads a rules file with non-ASCII text", () => {
   let dir: string;

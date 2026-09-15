@@ -32,6 +32,12 @@ import type { InstanceResult, ReviewPipelineStats } from "../src/schema.js";
 import { judgedHalf, mergePreservedJudgement, parseArgs } from "./backfill-pipeline.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
+/**
+ * The package's own tsx, run under this node. Not `npx tsx`: npx resolves the
+ * binary at spawn time and, with no local match, reaches for the registry — slow
+ * on a laptop, and a hang or a failure in a sandbox with no npm egress (#388).
+ */
+const TSX = join(here, "..", "node_modules", "tsx", "dist", "cli.mjs");
 
 /** A mechanism-only readout — exactly the shape `readPipelineArtifacts` returns:
  * every judged field absent, because it has no way to know one. */
@@ -284,8 +290,8 @@ describe("--no-judge --write, end to end through the script", () => {
   const before = readFileSync(scorecardPath, "utf8");
 
   const stdout = execFileSync(
-    "npx",
-    ["tsx", join(here, "backfill-pipeline.ts"), artifactRoot, "--results", resultsRoot, "--no-judge", "--write"],
+    process.execPath,
+    [TSX, join(here, "backfill-pipeline.ts"), artifactRoot, "--results", resultsRoot, "--no-judge", "--write"],
     {
       cwd: join(here, ".."),
       encoding: "utf8",
@@ -329,7 +335,7 @@ describe("--no-judge --write, end to end through the script", () => {
 
   it("is read-only without --write", () => {
     const snapshot = readFileSync(scorecardPath, "utf8");
-    execFileSync("npx", ["tsx", join(here, "backfill-pipeline.ts"), artifactRoot, "--results", resultsRoot, "--no-judge"], {
+    execFileSync(process.execPath, [TSX, join(here, "backfill-pipeline.ts"), artifactRoot, "--results", resultsRoot, "--no-judge"], {
       cwd: join(here, ".."),
       encoding: "utf8",
     });
