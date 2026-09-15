@@ -263,6 +263,9 @@ export class RunResultAccumulator {
   private toolErrors = false;
   private maxStepsReached = false;
   private lastToolError?: { tool?: string; message: string };
+  // True iff the MOST RECENT tool result errored. Distinct from a sticky
+  // "some tool errored": a later successful tool clears it. Drives error_tool.
+  private lastToolErrored = false;
   // True iff the last assistant turn ended with a tool call — i.e. the agent
   // asked for a tool and the loop terminated before it could respond to the
   // result. That's a truncated run (pi hit its internal step cap mid-task),
@@ -339,6 +342,7 @@ export class RunResultAccumulator {
       }
       case "tool_execution_end":
         this.toolResults += 1;
+        this.lastToolErrored = r.isError === true;
         if (r.isError === true) {
           this.toolErrors = true;
           // Keep the actual failure text (not just a boolean) so a run that
@@ -358,6 +362,11 @@ export class RunResultAccumulator {
               ? r.toolName
               : undefined;
           if (message) this.lastToolError = { tool, message };
+        } else {
+          // A later successful tool means the run did NOT end on a failing tool.
+          // Clear the stale error so toolError() names the LAST failing call
+          // (or nothing), not one from earlier in the run.
+          this.lastToolError = undefined;
         }
         break;
       case "agent_end":
@@ -427,6 +436,7 @@ export class RunResultAccumulator {
       ok: exitCode === 0 && !this.fatalError,
       agentEnded: this.agentEnded,
       toolErrors: this.toolErrors,
+      lastToolErrored: this.lastToolErrored,
       maxStepsReached: this.maxStepsReached,
       fatalError: this.fatalError,
       sessionId: this.sessionId,
@@ -589,11 +599,12 @@ export function finalizeFromRunResult(
   // A bare `error_tool` stop reason is useless on its own. Surface the
   // failing tool's actual error text so the executions row and dashboard
   // show *why* the run died (e.g. "Tool `bash` failed: insufficient_quota").
-  const toolErrorText = toolError
-    ? toolError.tool
-      ? `Tool \`${toolError.tool}\` failed: ${toolError.message}`
-      : toolError.message
-    : undefined;
+  const toolErrorText =
+    toolError && stopReason === "error_tool"
+      ? toolError.tool
+        ? `Tool \`${toolError.tool}\` failed: ${toolError.message}`
+        : toolError.message
+      : undefined;
 
   const inputTokens = stats?.tokens.input ?? 0;
   const outputTokens = stats?.tokens.output ?? 0;
@@ -669,7 +680,7 @@ export function finalizeFromRunResult(
 
 export function mapStopReason(result: RunResult): string {
   if (result.fatalError) return "error_fatal";
-  if (result.toolErrors && result.finalText.length === 0) return "error_tool";
+  if (result.lastToolErrored && result.finalText.length === 0) return "error_tool";
   if (!result.ok) return `error_exit_${result.exitCode}`;
   if (result.agentEnded || result.finalText.length > 0) return "success";
   return "unknown";
