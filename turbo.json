@@ -3,6 +3,6 @@
   "tasks": {
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**", "dashboard/dist/**"] },
     "typecheck": { "dependsOn": ["^build"] },
-    "test": { "dependsOn": ["^build"] }
+    "test": { "dependsOn": ["^build"], "env": ["VITEST_MAX_WORKERS"] }
   }
 }

@@ -57,7 +57,11 @@ if (files.length === 0) {
   process.exit(1);
 }
 
-const nodeArgs = ["--test", "--import", "tsx", ...passthrough, ...files];
+// VITEST_MAX_WORKERS is the workspace-wide worker cap (see the vitest configs);
+// honour it here too so the guardrails gate bounds node's test pool the same way.
+const concurrency = process.env.VITEST_MAX_WORKERS ? [`--test-concurrency=${process.env.VITEST_MAX_WORKERS}`] : [];
+
+const nodeArgs = ["--test", "--import", "tsx", ...concurrency, ...passthrough, ...files];
 
 const child = spawn(process.execPath, nodeArgs, { stdio: "inherit" });
 child.on("exit", (code, signal) => {

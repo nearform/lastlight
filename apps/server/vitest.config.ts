@@ -11,6 +11,12 @@ export default defineConfig({
     },
   },
   test: {
+    // VITEST_MAX_WORKERS caps the fork pool. Unset keeps vitest's default (one
+    // worker per core). The guardrails gate sets it: inside the sandbox every
+    // package's suite runs at once under turbo, each seeing every HOST core
+    // (docker gets --memory but no --cpus), and the oversubscription made a 4 s
+    // test time out at 60 s (issue #388).
+    ...(process.env.VITEST_MAX_WORKERS ? { maxWorkers: Number(process.env.VITEST_MAX_WORKERS) } : {}),
     environment: "node",
     // Default suite: tests/ tree (mirrors src/). The eval HARNESS now lives in
     // the separate `lastlight-evals` package; core keeps just the slim seam guard
@@ -31,8 +37,14 @@ export default defineConfig({
     // `silent`), and only process-startup paths in src/index.ts emit fatal —
     // unless the developer already set LOG_LEVEL (`LOG_LEVEL=debug … vitest`).
     // The logger reads it once at import, so it must be set here, not in a test.
+    //
+    // LASTLIGHT_SKIP_DOTENV: loadConfig() reads `./.env` from the cwd — which is
+    // this package, where contributors keep their real dev `.env`. A
+    // `LASTLIGHT_SANDBOX=docker` there beat a test's own overlay and failed it on
+    // that machine only (issue #388).
     env: {
       LASTLIGHT_LOCAL_DEV: "1",
+      LASTLIGHT_SKIP_DOTENV: "1",
       LOG_LEVEL: process.env.LOG_LEVEL || "fatal",
     },
   },

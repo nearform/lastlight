@@ -71,7 +71,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -123,34 +123,14 @@ describe("the memory shape changed — the old reproduction is gone", () => {
       { encoding: "utf8" },
     );
     expect(result.status).toBe(0);
+    // The contrast used to be a second, uncapped spawn of the same command —
+    // ~10 s — there only so this case could not pass on a `dist/cli.js` broken
+    // for some unrelated reason. Reading the envelope back proves the same thing
+    // from this one run: a broken bin writes no document, and `--never-fail`
+    // writes one whose analysis is absent (issue #388).
     expect(existsSync(out)).toBe(true);
-  });
-
-  /**
-   * The contrast, and it is not decoration: without it the case above would
-   * pass on a `dist/cli.js` that was broken for any reason whatsoever.
-   */
-  it.skipIf(!BUILT)("…and so is the ordinary run, which is what makes that meaningful", () => {
-    const out = join(outDir, "ok.json");
-    const result = spawnSync(
-      process.execPath,
-      [
-        CLI,
-        "all",
-        "--repo",
-        fixture.dir,
-        "--base",
-        fixture.base,
-        "--head",
-        fixture.head,
-        "--out",
-        out,
-        "--never-fail",
-      ],
-      { encoding: "utf8" },
-    );
-    expect(result.status).toBe(0);
-    expect(existsSync(out)).toBe(true);
+    const document = JSON.parse(readFileSync(out, "utf8")) as { extractors?: Record<string, unknown> };
+    expect(Object.keys(document.extractors ?? {})).toContain("facts");
   });
 });
 

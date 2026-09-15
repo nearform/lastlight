@@ -286,6 +286,7 @@ describe("the flags reach the extraction", () => {
     );
     scratch.push(opengrep.dir);
     const missing = join(fixture.dir, "no-such-rules.yaml");
+    const saved = process.env.LASTLIGHT_OPENGREP_BIN;
     process.env.LASTLIGHT_OPENGREP_BIN = opengrep.bin;
     try {
       const { out } = run(["patterns", "--rules", missing]);
@@ -299,7 +300,8 @@ describe("the flags reach the extraction", () => {
       expect(document.findings).toEqual([]);
       expect(document.coverage).toBe("degraded");
     } finally {
-      delete process.env.LASTLIGHT_OPENGREP_BIN;
+      // Restore, not delete: vitest.config.ts sets it to disable the scanner.
+      process.env.LASTLIGHT_OPENGREP_BIN = saved;
     }
   });
 
@@ -635,6 +637,8 @@ describe("`seed --contract`", () => {
   });
 });
 
+const SUITE_OPENGREP_BIN = process.env.LASTLIGHT_OPENGREP_BIN;
 afterEach(() => {
-  delete process.env.LASTLIGHT_OPENGREP_BIN;
+  // Back to the suite-wide value (vitest.config.ts), which disables the scanner.
+  process.env.LASTLIGHT_OPENGREP_BIN = SUITE_OPENGREP_BIN;
 });

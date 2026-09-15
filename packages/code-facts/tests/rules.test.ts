@@ -34,13 +34,17 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { defaultRulesPath, opengrepArgs, withUtf8Locale } from "../src/patterns.js";
-import { resolveToolBin } from "../src/toolchain.js";
 import { runExtractor } from "../src/run.js";
 import { makeFixture } from "./helpers.js";
 import type { PatternsDocument } from "../src/schema.js";
 
 const RULES = defaultRulesPath();
-const OPENGREP = resolveToolBin("opengrep", process.env);
+/**
+ * The machine's real opengrep, if it has one. Not `resolveToolBin(process.env)`:
+ * vitest.config.ts disables scanners for the rest of the suite, and hands the
+ * real binary to the suites that exist to run it under this test-only name.
+ */
+const OPENGREP = process.env.LASTLIGHT_TEST_OPENGREP_BIN || null;
 
 /** Every `- id:` in the file, in order. */
 function ruleIds(): string[] {

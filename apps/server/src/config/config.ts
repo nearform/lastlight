@@ -30,8 +30,14 @@ const log = logger("config");
 /**
  * Load .env file into process.env (simple, no dependency).
  * Does not overwrite existing env vars.
+ *
+ * `LASTLIGHT_SKIP_DOTENV=1` turns it off. The test suite sets it (vitest.config.ts):
+ * the file is resolved against the cwd, so a contributor's own `apps/server/.env`
+ * leaked into every `loadConfig()` a test ran — and, since the values land in the
+ * worker's shared `process.env`, into every test after it (issue #388).
  */
 function loadDotEnv(path: string): void {
+  if (process.env.LASTLIGHT_SKIP_DOTENV === "1") return;
   if (!existsSync(path)) return;
   const content = readFileSync(path, "utf-8");
   for (const line of content.split("\n")) {

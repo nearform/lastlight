@@ -12,7 +12,7 @@
  * picked up by the existing `pnpm --filter lastlight-core test` glob, and PGlite
  * needs no postgres service, no docker and no opt-in env var.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 // Same mock the sqlite runner carries. `vi.mock` is hoisted per test FILE and
 // does nothing from an imported suite module, so each runner owns its own copy
@@ -29,51 +29,23 @@ vi.mock("#src/logging/logger.js", () => {
   return { logger: () => noopLogger };
 });
 
-import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { migrate } from "drizzle-orm/pglite/migrator";
-import { fileURLToPath } from "node:url";
 import { asStateClient } from "#src/state/client.js";
 import { StateDb } from "#src/state/db.js";
 import * as pgSchema from "#src/state/schema/pg.js";
 import { runStateDbSuite } from "./store-suite.js";
 import { makeTestDb } from "../helpers/state-db.js";
-
-const MIGRATIONS = fileURLToPath(new URL("../../drizzle/pg", import.meta.url));
-
-/**
- * `runStateDbSuite` calls `makeDb()` per test and never closes what it gets —
- * the sqlite leg's `makeTestDb()` registers its own cleanup, and so must this,
- * or every test leaks a PGlite instance.
- */
-const open: PGlite[] = [];
-afterEach(async () => {
-  for (const p of open.splice(0)) await p.close();
-});
+import { migratedPglite } from "../helpers/pglite.js";
 
 /**
- * A pristine, migrated Postgres `StateDb`.
- *
- * Fresh PGlite per test, matching the sqlite leg's per-test temp file: reusing
- * one instance would carry identity-sequence positions, `__drizzle_migrations`
- * rows and test data across tests, silently weakening the suite. The WASM module
- * is compiled once per worker and cached, so only the first instance pays the
- * real init cost.
+ * A pristine, migrated Postgres `StateDb` — the file's one PGlite, reset before
+ * each test (see `../helpers/pglite.ts`).
  */
 async function makePgStateDb(): Promise<StateDb> {
-  // int8 (OID 20) → number. Postgres returns COUNT(*)/SUM(...) as int8, which
-  // node-postgres hands back as a STRING. PGlite ≥0.5 already parses it to a
-  // number by default (verified on 0.5.x) — this parser is kept as a PIN
-  // against that default changing, and as the executable statement of
-  // `asStateClient()`'s contract: any future real PG client must normalize int8
-  // itself, because the cast cannot.
-  const pglite = new PGlite({ parsers: { 20: (v: string) => Number(v) } });
-  open.push(pglite);
   // The schema must be passed here: `tablesOf()` reads it back off the client,
   // which is what makes the stores address pg columns (real boolean, real
   // jsonb) instead of the sqlite ones they are typed against.
-  const client = asStateClient(drizzle(pglite, { schema: pgSchema }));
-  await migrate(client as never, { migrationsFolder: MIGRATIONS });
+  const client = asStateClient(drizzle(await migratedPglite(), { schema: pgSchema }));
   return StateDb.fromClient(client, "postgres");
 }
 

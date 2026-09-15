@@ -830,7 +830,7 @@ console.log(result.records.length);      // full event log
 ```bash
 npm install
 npm run build
-npm test                 # full suite — skips integration tests if env not set
+npm test                 # unit only (same as test:unit) — integration tests never run by default
 npm run test:unit        # unit only (fast, no API keys, no QEMU)
 npm run test:integration # integration only (needs OPENAI_API_KEY; sandbox also needs QEMU)
 
