@@ -64,6 +64,11 @@ better, reword it so it does not need a number.
 6. **Verify the site builds:** `pnpm --filter lastlight-www exec astro check`
    (or `cd apps/www && npx astro check`). To preview spec changes on the site
    first run `pnpm --filter lastlight-www run sync-spec`.
+   **Known incompatibility:** `astro check` currently refuses to start in this
+   workspace — `@astrojs/language-server` rejects TypeScript 7
+   (`assertCompatibleTypeScript`). That is an upstream tooling limit, not a docs
+   error. Until it supports TS 7, verify with `pnpm --filter lastlight-www build`
+   (part of the CI gate), which does build every page.
 7. **Report** which surfaces you touched. Spec + site are one commit now.
 
 ## Change → docs map

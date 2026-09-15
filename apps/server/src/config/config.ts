@@ -609,10 +609,15 @@ export function getGateConfig(): GateConfig {
  */
 export function effectiveGate(repoGate?: Partial<GateConfig>, operator: GateConfig = getGateConfig()): GateConfig {
   const requested = repoGate?.timeoutSeconds ?? operator.timeoutSeconds;
+  // Rounded UP to whole seconds here, once, because every consumer needs an
+  // integer: the `guardrails_gate` bash template renders `{{gate.timeoutSeconds}}`
+  // straight into `timeout N` behind a digits-only guard, and a fractional value
+  // (`900.5`, which config load accepts) would otherwise read as "not set".
+  // Same round-up rule as `resolveTemplatedNumber` and the `--gate-timeout` flag.
   return {
-    timeoutSeconds: Math.min(requested, operator.maxTimeoutSeconds),
-    maxTimeoutSeconds: operator.maxTimeoutSeconds,
-    phaseTimeoutSeconds: operator.phaseTimeoutSeconds,
+    timeoutSeconds: Math.ceil(Math.min(requested, operator.maxTimeoutSeconds)),
+    maxTimeoutSeconds: Math.ceil(operator.maxTimeoutSeconds),
+    phaseTimeoutSeconds: Math.ceil(operator.phaseTimeoutSeconds),
   };
 }
 
