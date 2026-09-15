@@ -1,0 +1,8 @@
+# Per-repository Last Light config for nearform/lastlight.
+#
+# The guardrails gate runs this repo's FULL test suite once before a build
+# starts work. Run serially (see agent-context/testing.md) it needs more than
+# the 900s default, so give it the most the operator allows
+# (gate.maxTimeoutSeconds, 1500 by default — anything above is clamped).
+gate:
+  timeoutSeconds: 1500

@@ -1184,50 +1184,11 @@ export function makeManyFilesFixture(fileCount = 40): Fixture {
 }
 
 /**
- * The `isIgnoredPath` measurement, made into a repo: one constant, and TWO
- * copies of its value that are NOT source — a minified bundle under `dist-site/`
- * (which the old exact-segment `dist` pattern did not match) and a vendored
- * checkout under `data/sandboxes/`.
- *
- * On this monorepo that shape produced **2,663 bogus hard-coded duplicates for
- * a single constant**. Here it produces two, which is the same bug at a size a
- * test can assert on.
- */
-export function makeBuildArtifactFixture(): Fixture {
-  // One long line, the way a bundler writes it — `looksMinified` is the guard
-  // for a bundle that is NOT under a `dist*` path.
-  const bundled = `${"const a=1;".repeat(400)}const MAX=900;\n`;
-  return makeFixture(
-    "artifact",
-    {
-      message: "base",
-      files: {
-        "tsconfig.json": TSCONFIG,
-        "package.json": JSON.stringify({ name: "fixture-artifact", version: "1.0.0" }, null, 2),
-        "src/config.ts": `export const MAX_TOKEN_AGE = 3600;\n`,
-        "src/client/session.ts": `import { MAX_TOKEN_AGE } from "../config.js";\n\nexport function age(): number {\n  return MAX_TOKEN_AGE;\n}\n`,
-      },
-    },
-    {
-      message: "head",
-      files: {
-        "src/config.ts": `export const MAX_TOKEN_AGE = 900;\n`,
-        // NOT source. Every one of these carries the value 900 and none is a
-        // hard-coded duplicate a reviewer could act on.
-        "dist-site/assets/index-a1b2c3.js": bundled,
-        "vendor/checkout/legacy.js": `export const copy = 900;\n`,
-        "build.out/gen/emitted.js": `export const emitted = 900;\n`,
-      },
-    },
-  );
-}
-
-/**
  * THE `.gitignore` FIXTURE — every shape the directory walk could not see.
  *
- * `makeBuildArtifactFixture` above covers the paths a denylist CAN name
- * (`dist-site/`, `vendor/`, a minified bundle). This one covers the three it
- * cannot, and every one is a real shape from this monorepo:
+ * The paths a denylist CAN name (`dist-site/`, `vendor/`, a minified bundle)
+ * are covered by the `isIgnoredPath` / `looksMinified` unit tests. This fixture
+ * covers the three it cannot, and every one is a real shape from this monorepo:
  *
  *   data/sandboxes/**       gitignored by the ROOT `.gitignore`, under a name no
  *                           conventional denylist has ever heard of. On this

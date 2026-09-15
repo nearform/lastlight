@@ -42,7 +42,13 @@ mcp-config.json
 # Build handoff docs — this repo is maintained by a server-mode Last Light
 # instance, which keeps these on the server (never in the tree). Ignored so a
 # repo-mode run or a stray commit can't reintroduce them.
-.lastlight/
+# Per-run build artifacts live under .lastlight/<key>/ — ignored. The repo's own
+# Last Light config (lastlight.yml, agent-context/) is committed on purpose:
+# Last Light reads it from the git tree. `.lastlight/*` rather than
+# `.lastlight/`, because git cannot re-include a child of an excluded directory.
+.lastlight/*
+!.lastlight/lastlight.yml
+!.lastlight/agent-context/
 
 # Caches
 cache/

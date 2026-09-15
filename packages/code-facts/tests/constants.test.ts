@@ -10,7 +10,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   makeBrokenTsConfigFixture,
-  makeBuildArtifactFixture,
   makeConstantFixture,
   makeIgnoredScopeFixture,
   makeLiteralKindsFixture,
@@ -265,33 +264,6 @@ describe("constants — silent truncation (bug a)", () => {
 });
 
 describe("constants — unfiltered scope (bug b)", () => {
-  /**
-   * `isIgnoredPath`'s `dist` pattern was an EXACT segment match and nothing
-   * excluded a bundle by shape, so `apps/evals/dist-site/assets/index-*.js` and
-   * the vendored checkouts under `apps/server/data/sandboxes/**` were both in
-   * scope. Measured on this monorepo: **2,663 bogus "hard-coded duplicates" for
-   * one constant**. Here the same three shapes are present and must contribute
-   * nothing.
-   */
-  it("reports no hard-coded duplicate from a bundle, a build dir or a vendored checkout", () => {
-    const fixture = makeBuildArtifactFixture();
-    try {
-      const document = runExtractor({
-        extractor: "constants",
-        repo: fixture.dir,
-        base: fixture.base,
-        head: fixture.head,
-      }).document as unknown as ConstantsDocument;
-      const fact = document.constants.find((c) => c.constant === "MAX_TOKEN_AGE");
-      expect(fact, "the constant itself must still be found").toBeDefined();
-      // Every one of these carries the literal 900 and none is a site a reviewer
-      // could act on. Before the fix this list had three entries.
-      expect(fact?.hardCodedDuplicates).toEqual([]);
-    } finally {
-      fixture.cleanup();
-    }
-  });
-
   it("widens the ignore set without swallowing ordinary source directories", () => {
     for (const ignored of [
       "apps/evals/dist-site/assets/index-a1b2.js",
