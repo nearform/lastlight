@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import path from "node:path";
 import { timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
 import { streamSSE } from "hono/streaming";
@@ -41,6 +42,7 @@ import { routeEvent, type Route } from "../engine/router.js";
 import { applyPrDispatchGate, prPolicyConfig } from "../engine/dispatcher.js";
 import { resolvePrState, prTriggerId } from "../engine/pr-state.js";
 import { holdReply, type PrPolicyConfig } from "../engine/pr-decisions.js";
+import { advanceStage } from "../engine/stage-advance.js";
 import { prFixShapedWorkflows } from "../workflows/target-policy.js";
 import type { GitHubClient } from "../engine/github/github.js";
 import { classifyComment, type ClassificationResult } from "../engine/screen/classifier.js";
@@ -70,6 +72,90 @@ import { TeamVisibilityResolver } from "../engine/github/team-visibility.js";
  * shows more.
  */
 const MAX_REPO_SCOPE = 200;
+
+/**
+ * Most repos ONE board may cover — deliberately not {@link MAX_REPO_SCOPE}.
+ *
+ * That cap bounds a WHERE clause; this one bounds live GitHub reads, and the
+ * two are three orders of magnitude apart in what they cost. Twenty repos is
+ * two GraphQL documents per TTL window (see `listOpenBoardItems`); two hundred
+ * would be twenty, on the same budget the harness spends reviewing pull
+ * requests. Over the cap the scope is TRUNCATED and says so — never a 400 — so
+ * the UI can report "showing 20 of 57" instead of silently showing a subset.
+ */
+const MAX_BOARD_REPOS = 20;
+
+/**
+ * The ONLY route keys a board dispatch may resolve a workflow through.
+ *
+ * The board posts an issue number, not a workflow name. That is the whole
+ * point: a free-form workflow name accepted from a browser would turn one card
+ * action into a generic "run anything against any managed repo" surface, which
+ * is a much larger thing than the button says it is — and it already exists,
+ * deliberately, as `POST /api/run` for operators who want it.
+ *
+ * So the workflow is resolved from `routes.github` — the operator's own route
+ * map — and then CHECKED to be one of these three keys' values. An operator who
+ * repoints `issue_build` at a different workflow moves this surface with it,
+ * which is right; an operator who never configured the stage at all gets a
+ * refusal rather than a dispatch, which is also right.
+ */
+const ISSUE_DISPATCH_ROUTE_KEYS = ["issue_opened", "issue_labeled", "issue_build"] as const;
+
+/** The four label slots a stage declares, in pipeline order. */
+type StageSlot = "enter" | "running" | "on_success" | "on_failure";
+const STAGE_SLOTS: readonly StageSlot[] = ["enter", "running", "on_success", "on_failure"];
+
+/**
+ * Which stage — and which of its four slots — a configured label names.
+ *
+ * The flat allow-list the stage route builds answers "may this label be
+ * written", which is the SECURITY question and stays exactly as it was. This
+ * answers the different question a dispatch needs: WHICH stage the human just
+ * asked for, and which column of it they dropped on. Only `enter` and `running`
+ * mean "build this"; the two terminal slots are where a run has already ended.
+ *
+ * Fails CLOSED on a label two stages both claim. That is a real config, and a
+ * SPEND decision taken on an undecidable one is the wrong direction to guess in
+ * — the same reason `build-gate.ts` refuses an unknown stage rather than
+ * picking a default.
+ */
+function stageSlotForLabel(
+  label: string,
+):
+  | { kind: "match"; stage: string; slot: StageSlot }
+  | { kind: "ambiguous"; stages: string[] }
+  | null {
+  if (!label) return null;
+  const hits: Array<{ stage: string; slot: StageSlot }> = [];
+  for (const [name, stage] of Object.entries(getAutonomyConfig().stages)) {
+    for (const slot of STAGE_SLOTS) {
+      if (stage[slot] && stage[slot] === label) {
+        hits.push({ stage: name, slot });
+        break;
+      }
+    }
+  }
+  if (hits.length === 0) return null;
+  const names = [...new Set(hits.map((h) => h.stage))];
+  if (names.length > 1) return { kind: "ambiguous", stages: names };
+  return { kind: "match", stage: hits[0]!.stage, slot: hits[0]!.slot };
+}
+
+/**
+ * Is `workflow` one the operator's own route map already points an issue
+ * trigger at? See {@link ISSUE_DISPATCH_ROUTE_KEYS} for why that check exists.
+ *
+ * Shared by BOTH board surfaces — the dispatch button and the drag — because
+ * two copies of this check are two things free to drift, and the one that
+ * drifts open is a "run anything against any managed repo" hole.
+ */
+function isIssueRoutableWorkflow(workflow: string): boolean {
+  const routable = new Set(
+    ISSUE_DISPATCH_ROUTE_KEYS.map((key) => getRoutes().github?.[key]).filter(Boolean),
+  );
+  return routable.has(workflow);
+}
 import {
   getRuntimeConfig,
   getRoutes,
@@ -81,6 +167,8 @@ import {
   // pre-validation, so a copy that drifted behind config.ts's would leak a
   // pasted credential. It must stay single-source (see config.ts).
   redactPublic,
+  getAutonomyConfig,
+  getHoldLabel,
   type RepoConfigPolicy,
 } from "../config/config.js";
 import {
@@ -91,6 +179,11 @@ import {
   repoConfigBaseFromRuntime,
   resolveRepoConfig,
 } from "../config/repo-config.js";
+import { issueTriggerId } from "../engine/build-decisions.js";
+import { applyBuildDispatchGate } from "../engine/build-gate.js";
+import { buildBoard, type BoardStage, type BoardDegradation } from "./board.js";
+import { getBoardItems, invalidateBoard, BOARD_TTL_MS } from "./board-cache.js";
+import { boardSignature, BOARD_TICK_MS, BOARD_HEARTBEAT_MS } from "./board-stream.js";
 import { reapSandboxWorkspace } from "../sandbox/reap.js";
 import { artifactStore } from "../sandbox/artifact-store.js";
 import { reclaimSandbox } from "../sandbox/k8s/reclaim.js";
@@ -2160,6 +2253,251 @@ export function createAdminRoutes(
   // artifact-key count. Managed repos with no activity are included so the tab
   // shows the full fleet; ordered newest-activity first, then name. Read-only —
   // the server keeps returning global data (see issue #169).
+  /**
+   * The pipeline board — every open issue and pull request in scope, filed
+   * under the stage label it carries.
+   *
+   * Read-only, and thin on purpose: scope resolution here, the GitHub read in
+   * `board-cache.ts`, the projection in `board.ts`. It therefore records no
+   * activity — `recordActivityFor` is for USER-INITIATED mutations, and a
+   * dashboard polling every twenty seconds would drown the audit stream.
+   *
+   * **Three queries, whatever the card count — plus two CONDITIONAL ledger
+   * reads**: one when a card has failed (the reason a FAILED band owes the
+   * reader) and one when a card is live (the phase it is actually running,
+   * which `current_phase` lags by one). Both are O(1) in cards and both are
+   * skipped entirely when no card needs them. The cached items, ONE
+   * `latestForTriggers` over every card's trigger id, and ONE `listPending()`.
+   * A per-card run lookup would be fifty statements to render one screen.
+   */
+  app.get("/board", async (c) => {
+    const autonomy = getAutonomyConfig();
+    const stages: BoardStage[] = Object.entries(autonomy.stages).map(([id, stage]) => ({
+      id,
+      enter: stage.enter,
+      running: stage.running,
+      on_success: stage.on_success,
+      on_failure: stage.on_failure,
+    }));
+
+    const managedSet = new Set(getManagedRepos());
+
+    // ── The board's universe is the AUTONOMY ALLOW-LIST, not the managed list ──
+    //
+    // This board is a view of ONE pipeline, and `autonomy.repos` is what decides
+    // which repos have one. A managed repo that is not on the list has no stage
+    // labels anybody writes, no `build` the gate would admit, and every action
+    // offered on its cards answers `409 not-autonomous` — because the card
+    // actions cross the real dispatch gate, which checks exactly this list. So
+    // showing those repos renders columns and menus for work that structurally
+    // cannot run, and pays a live GitHub read per repo to do it.
+    //
+    // Intersected with the managed set rather than trusted outright: the two are
+    // configured independently, and a repo named in `autonomy.repos` that the
+    // App cannot see is a typo, not a target.
+    const eligible = new Set(autonomy.repos.filter((r) => managedSet.has(r)));
+
+    // Scope, in precedence order. Each step narrows to `eligible`.
+    const requested = (c.req.query("repos") || "")
+      .split(",")
+      .map((r) => r.trim())
+      .filter(Boolean);
+
+    let candidates: string[];
+    let reason: string;
+    if (requested.length > 0) {
+      candidates = requested.filter((r) => eligible.has(r));
+      reason = "the repos you asked for";
+    } else {
+      // The same call `/me/repos` makes. `repos: null` is its fail-open
+      // sentinel — no GitHub identity, the feature off, a team too large — and
+      // it means "no filter", never "no access".
+      const visible = await teamVisibility.visibleRepos(actorFromContext(c));
+      if (visible.repos) {
+        candidates = visible.repos.filter((r) => eligible.has(r));
+        reason = "the autonomous repos your GitHub teams can see";
+      } else {
+        // EVERY eligible repo, ordered by activity — not `distinctRepos()`
+        // filtered down to the eligible ones. Those are different answers: a
+        // repo added to `autonomy.repos` this morning has no runs yet, so the
+        // filtered form would hide it on the one day somebody most wants to
+        // watch it start. Activity ORDERS the list so the truncation below
+        // keeps the repos somebody is working in; the tail is the rest of the
+        // allow-list, which is small by construction.
+        const active = await db.runs.distinctRepos();
+        const ordered: string[] = [];
+        const seen = new Set<string>();
+        for (const { repo } of active) {
+          if (eligible.has(repo) && !seen.has(repo)) {
+            seen.add(repo);
+            ordered.push(repo);
+          }
+        }
+        for (const repo of eligible) if (!seen.has(repo)) ordered.push(repo);
+        candidates = ordered;
+        reason = "the repos on the autonomy allow-list";
+      }
+    }
+
+    // Said plainly, because an empty board with no explanation reads as broken
+    // rather than as un-opted-in — and `autonomy.repos: []` is the shipped
+    // default, so this is what a fresh install sees.
+    if (eligible.size === 0) reason = "no repos are on the autonomy allow-list";
+
+    const truncated = candidates.length > MAX_BOARD_REPOS;
+    const scope = {
+      repos: candidates.slice(0, MAX_BOARD_REPOS),
+      // Everything the board COULD show, so the UI's scope picker offers only
+      // repos that can actually appear. Sorted for a stable dropdown.
+      eligible: [...eligible].sort(),
+      truncated,
+      reason: truncated
+        ? `showing ${MAX_BOARD_REPOS} of ${candidates.length} — ${reason}`
+        : reason,
+    };
+
+    const base = { generatedAt: new Date().toISOString(), ttlSeconds: BOARD_TTL_MS / 1000, scope };
+
+    // Not configured: no columns, and — the point of checking here — no GitHub
+    // reads at all. A deployment that has not opted into the pipeline pays
+    // nothing for the tab existing.
+    if (stages.length === 0) {
+      return c.json({ ...base, configured: false, degraded: [], columns: [] });
+    }
+
+    // No eligible repos: render the (empty) columns and touch GitHub not at all.
+    // Same argument as the `configured: false` early return above — a deployment
+    // that has not opted a repo in pays nothing for the tab existing.
+    if (scope.repos.length === 0) {
+      return c.json(
+        buildBoard(
+          {
+            items: [],
+            runs: new Map(),
+            approvals: [],
+            stages,
+            holdLabel: getHoldLabel(),
+            scope,
+            degraded: [],
+            generatedAt: base.generatedAt,
+            ttlSeconds: base.ttlSeconds,
+          },
+          { unstaged: c.req.query("unstaged") === "1" },
+        ),
+      );
+    }
+
+    if (!config.github) {
+      return c.json({
+        ...base,
+        configured: true,
+        degraded: scope.repos.map((repo) => ({ repo, error: "No GitHub client is configured." })),
+        columns: [],
+      });
+    }
+
+    const { items, degraded } = await getBoardItems(scope.repos, {
+      github: config.github,
+      force: c.req.query("refresh") === "1",
+    });
+
+    const runs = await db.runs.latestForTriggers(
+      items.map((item) => issueTriggerId(item.repo, item.number)),
+    );
+    const pending = await db.approvals.listPending();
+
+    // The fourth statement, and only when something failed. `workflow_runs` has
+    // no error column, so a FAILED card's reason comes from the ledger row of
+    // the phase that stopped it. Batched, so it stays O(1) in cards — the
+    // property the header's claim is really about — and a board with nothing
+    // failing pays nothing for it.
+    const failedRunIds = [...runs.values()]
+      .filter((run) => run.status === "failed")
+      .map((run) => run.id);
+    const failures =
+      failedRunIds.length > 0
+        ? await db.executions.failureReasonsForRuns(failedRunIds)
+        : undefined;
+
+    // And the fifth, on the same terms: what each LIVE run is running right
+    // now. `workflow_runs.current_phase` is written on phase COMPLETION, so it
+    // lags by one — a run on `executor` reads `architect`. The ledger knows,
+    // because an in-flight phase is the row with no `finished_at`.
+    const activeRunIds = [...runs.values()]
+      .filter((run) => run.status === "queued" || run.status === "running" || run.status === "paused")
+      .map((run) => run.id);
+    const inFlight =
+      activeRunIds.length > 0
+        ? await db.executions.inFlightPhasesForRuns(activeRunIds)
+        : undefined;
+
+    return c.json(
+      buildBoard(
+        {
+          items,
+          runs,
+          approvals: pending,
+          ...(failures ? { failures } : {}),
+          ...(inFlight ? { inFlight } : {}),
+          stages,
+          holdLabel: getHoldLabel(),
+          scope,
+          degraded: degraded as BoardDegradation[],
+          generatedAt: base.generatedAt,
+          ttlSeconds: base.ttlSeconds,
+        },
+        { unstaged: c.req.query("unstaged") === "1" },
+      ),
+    );
+  });
+
+  /**
+   * `GET /board/stream` — the board's change stream.
+   *
+   * Push-only-on-change, modelled line for line on the session-list stream
+   * above. What it pushes is a SIGNAL and never the board: see
+   * `admin/board-stream.ts` for why that distinction is load-bearing rather
+   * than an optimisation.
+   *
+   * Auth needs nothing special — `authMiddleware` is mounted at `/*` and
+   * already accepts `?token=`, because `EventSource` cannot set headers.
+   */
+  app.get("/board/stream", (c) => {
+    return streamSSE(c, async (stream) => {
+      let prev: string | null = null; // null = nothing sent yet
+      let lastBeat = Date.now();
+      let stopped = false;
+
+      stream.onAbort(() => {
+        stopped = true;
+      });
+
+      const push = async () => {
+        const revision = await boardSignature(db);
+        const now = Date.now();
+        const changed = revision !== prev;
+        // The heartbeat is not decoration here — see BOARD_HEARTBEAT_MS.
+        if (!changed && now - lastBeat < BOARD_HEARTBEAT_MS) return;
+        prev = revision;
+        lastBeat = now;
+        await stream.writeSSE({
+          event: "board",
+          data: JSON.stringify({ revision, changed, at: new Date(now).toISOString() }),
+        });
+      };
+
+      // The handshake frame: `prev` is null, so this always sends. It is what
+      // tells the client the stream is live, and the client skips it rather
+      // than treating it as news.
+      await push();
+      while (!stopped) {
+        await stream.sleep(BOARD_TICK_MS);
+        if (stopped) break;
+        await push();
+      }
+    });
+  });
+
   app.get("/repos", async (c) => {
     const managed = new Set(getManagedRepos());
     const activity = new Map(
@@ -2831,6 +3169,13 @@ export function createAdminRoutes(
 
   // ── Un-stick a pull request — the third retry surface ─────────────────────
   //
+  // EXTRACTED from the route below so the pipeline board's card actions reach
+  // this exact path rather than growing a second one. The board offers "Retry
+  // run" on a PR card; had that posted somewhere new, `resolvePrState` +
+  // `applyPrDispatchGate` would have acquired a second caller free to resolve a
+  // different snapshot or skip a branch — which is the drift the PR gate's
+  // copies already caused once. One function, one decision point, two callers.
+  //
   // `lastlight pr retry <owner/repo#N> [reason]` and (eventually) the dashboard.
   // The other two surfaces are a `@<bot> retry` comment and taking
   // `requires-human` off by hand; all three write the SAME record
@@ -2866,13 +3211,12 @@ export function createAdminRoutes(
   // fork guard, the run lock, `upstream-broken` or a degraded read — and, on the
   // skips that are none of those, what records the standalone `retry-requested`
   // row so the ask survives to the next event.
-  app.post("/prs/:owner/:repo/:number/retry", async (c) => {
-    const { owner, repo: name } = c.req.param();
+  async function retryPullRequest(
+    c: Context,
+    args: { owner: string; name: string; prNumber: number; reason?: string },
+  ): Promise<Response> {
+    const { owner, name, prNumber, reason } = args;
     const repo = `${owner}/${name}`;
-    const prNumber = Number.parseInt(c.req.param("number"), 10);
-    if (!Number.isInteger(prNumber) || prNumber <= 0) {
-      return c.json({ error: `invalid pull request number: ${c.req.param("number")}` }, 400);
-    }
     // The same allowlist that gates every other repo-touching path. A retry must
     // not be a way to make the harness act on a repo the operator never
     // enrolled — `dispatchWorkflow` refuses it too, but that refusal happens
@@ -2886,12 +3230,6 @@ export function createAdminRoutes(
       return c.json({ error: "pull-request retry is not configured" }, 503);
     }
 
-    // Free text from `lastlight pr retry <ref> "<reason>"`. Untrusted, and
-    // deliberately NOT sanitized here: `resolvePrState` runs it through
-    // `pr-notes.ts`'s sanitizer where the record is built, so no surface can
-    // skip that step.
-    const body = (await c.req.json().catch(() => ({}))) as { reason?: unknown };
-    const reason = typeof body?.reason === "string" && body.reason.trim() ? body.reason.trim() : undefined;
     const by = actorFromContext(c) ?? "admin";
 
     // Which workflow is "go again"? The one that last worked this PR — the same
@@ -2999,6 +3337,710 @@ export function createAdminRoutes(
       recorded: false,
       retry,
       reason: disposition.reason,
+    });
+  }
+
+  app.post("/prs/:owner/:repo/:number/retry", async (c) => {
+    const { owner, repo: name } = c.req.param();
+    const prNumber = Number.parseInt(c.req.param("number"), 10);
+    if (!Number.isInteger(prNumber) || prNumber <= 0) {
+      return c.json({ error: `invalid pull request number: ${c.req.param("number")}` }, 400);
+    }
+    // Free text from `lastlight pr retry <ref> "<reason>"`. Untrusted, and
+    // deliberately NOT sanitized here: `resolvePrState` runs it through
+    // `pr-notes.ts`'s sanitizer where the record is built, so no surface can
+    // skip that step.
+    const body = (await c.req.json().catch(() => ({}))) as { reason?: unknown };
+    const reason = typeof body?.reason === "string" && body.reason.trim() ? body.reason.trim() : undefined;
+    return retryPullRequest(c, { owner, name, prNumber, reason });
+  });
+
+  // ── Start a build from the pipeline board ─────────────────────────────────
+  //
+  // The board's one mutating action on an ISSUE card. Everything else it offers
+  // already had an endpoint — approve/reject resolve through
+  // `POST /approvals/:id/respond`, cancel/retry through the workflow-run
+  // routes, and a PR card's retry through `retryPullRequest` above — so this is
+  // the only new surface Phase 7 adds.
+  //
+  // ## It crosses a gate; it does not dispatch blind
+  //
+  // `dispatchWorkflow` already guards the managed-repo allowlist, the repo's
+  // own `disabled.workflows`, and the PR gate. What nothing guarded was the
+  // ISSUE hold on a dashboard-initiated dispatch: a card whose issue carries
+  // the hold label would have dispatched, because the hold is checked inside
+  // `applyBuildDispatchGate` and nothing on this path had reached it. So this
+  // route crosses that gate itself, for the same reason the PR retry above
+  // crosses `applyPrDispatchGate` itself: the route that answers a human is the
+  // route that has to be able to TELL them why not, and a fire-and-forget
+  // dispatch can only ever answer "accepted".
+  //
+  // `dispatchWorkflow` then crosses the build gate a SECOND time, and that is
+  // deliberate rather than tolerated. The context carries `_stage`, which is
+  // what `engine/stage-observer.ts` reads to move the issue off the `running`
+  // label when the run ends — drop it to dodge the second gate and every
+  // board-started build strands on `agent-building` forever, which is precisely
+  // the bug that module exists to prevent. The second crossing is harmless
+  // because the consequence it applies is idempotent: `addLabels` re-adding a
+  // label the issue already carries is a no-op, and `removeLabel` swallows the
+  // 404 that means "already gone" (`stage-observer.ts` makes the same argument
+  // about its own re-firing). The choke point stays the choke point; this route
+  // just gets to answer first.
+  app.post("/issues/:owner/:repo/:number/dispatch", async (c) => {
+    const { owner, repo: name } = c.req.param();
+    const repo = `${owner}/${name}`;
+    const issueNumber = Number.parseInt(c.req.param("number"), 10);
+    if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
+      return c.json({ error: `invalid issue number: ${c.req.param("number")}` }, 400);
+    }
+    // The same allowlist every other repo-touching path is gated on, checked
+    // before anything is read or recorded against the repo.
+    if (!isManagedRepo(repo)) {
+      return c.json({ error: `${repo} is not a managed repository` }, 403);
+    }
+    const github = config.github ?? null;
+    if (!github || !config.dispatchWorkflow) {
+      return c.json({ error: "issue dispatch is not configured" }, 503);
+    }
+
+    const body = (await c.req.json().catch(() => ({}))) as { stage?: unknown; reason?: unknown };
+    const reason =
+      typeof body?.reason === "string" && body.reason.trim() ? body.reason.trim() : undefined;
+
+    // The stage names the workflow, the labels and the gates. Defaulting to the
+    // first configured stage is what lets the board post a bare issue number;
+    // an unknown name fails CLOSED, exactly as the gate itself does, because
+    // everything downstream is keyed on names only the stage carries.
+    const stages = getAutonomyConfig().stages;
+    const stageName =
+      typeof body?.stage === "string" && body.stage.trim()
+        ? body.stage.trim()
+        : Object.keys(stages)[0];
+    const stage = stageName ? stages[stageName] : undefined;
+    if (!stageName || !stage) {
+      return c.json(
+        { error: `unknown stage: \`${stageName ?? ""}\` is not in \`autonomy.stages\`` },
+        400,
+      );
+    }
+
+    // THE ALLOW-LIST. See `ISSUE_DISPATCH_ROUTE_KEYS` — the workflow has to be
+    // one the operator's own route map already points an issue trigger at.
+    if (!isIssueRoutableWorkflow(stage.workflow)) {
+      return c.json(
+        {
+          error:
+            `workflow \`${stage.workflow}\` is not reachable from an issue route ` +
+            `(${ISSUE_DISPATCH_ROUTE_KEYS.join(", ")}), so the board may not dispatch it`,
+        },
+        400,
+      );
+    }
+
+    // ── THE LIVE RE-READ ────────────────────────────────────────────────────
+    //
+    // Never the cached board snapshot. The board is stale by design — up to
+    // `BOARD_TTL_MS` (two minutes) — which is the right trade for RENDERING a
+    // card and the wrong one entirely for DECIDING on it. Two minutes is ample
+    // for a maintainer to apply the hold label and watch a build start anyway,
+    // and the hold is the one instruction that must never lose a race. So the
+    // labels the gate reads are the labels GitHub reports right now.
+    let live: Awaited<ReturnType<GitHubClient["getIssue"]>>;
+    try {
+      live = await github.getIssue(owner, name, issueNumber);
+    } catch (err: unknown) {
+      log.warn("Board dispatch could not read the issue", { repo, issueNumber, err });
+      return c.json(
+        { error: `could not read ${repo}#${issueNumber} from GitHub`, dispatched: false },
+        502,
+      );
+    }
+    // The pipeline builds ISSUES. A pull request reached through the issues API
+    // would cross a gate keyed on issue facts and dispatch a build against a
+    // branch nobody asked to rebuild.
+    if (live.pull_request) {
+      return c.json({ error: `${repo}#${issueNumber} is a pull request, not an issue` }, 400);
+    }
+    const labels = ((live.labels ?? []) as Array<string | { name?: string }>)
+      .map((l) => (typeof l === "string" ? l : l?.name ?? ""))
+      .filter(Boolean);
+
+    const gate = await applyBuildDispatchGate(
+      {
+        repo,
+        issueNumber,
+        labels,
+        // A person clicked a button in the dashboard. Not `labeled` (no label
+        // was applied) and not `sweep` (nothing discovered this).
+        route: "api",
+        // A browser session is a human by construction. The flag exists to make
+        // `already-built` a HARD skip for machines and a permitted retry for
+        // people, and this surface is unambiguously the latter.
+        senderIsBot: false,
+        stage: stageName,
+      },
+      { db, github },
+    );
+
+    const holdLabel = getHoldLabel();
+    const held = labels.includes(holdLabel) ? holdLabel : null;
+    const targetId = issueTriggerId(repo, issueNumber);
+    const by = actorFromContext(c) ?? "admin";
+
+    if (gate.decision === "skip") {
+      // Recorded as loudly as a success, per the `pr.retry` precedent: a
+      // refusal nobody can find afterwards is indistinguishable from the
+      // feature quietly not working. Every skip on THIS surface is a refusal —
+      // unlike the PR retry, no branch here parks an ask for a later event to
+      // honour — so the outcome is always `denied`.
+      await recordActivityFor(c, db, {
+        action: "issue.dispatch",
+        targetType: "issue",
+        targetId,
+        outcome: "denied",
+        detail: {
+          stage: stageName,
+          workflow: stage.workflow,
+          dispatched: false,
+          reason: String(gate.reason ?? "").slice(0, 200),
+          ...(reason ? { note: reason } : {}),
+        },
+      });
+      return c.json(
+        {
+          repo,
+          issueNumber,
+          stage: stageName,
+          workflow: stage.workflow,
+          dispatched: false,
+          // The hold is the one skip that owes a human a sentence rather than a
+          // reason string, and it is the SAME sentence every other surface
+          // gives them.
+          reason: held ? holdReply(held) : gate.reason,
+          ...(held ? { held } : {}),
+        },
+        409,
+      );
+    }
+
+    // Fire-and-forget, exactly like `cron trigger` and the PR retry above: a
+    // build takes minutes and the dashboard is waiting on this response.
+    log.info("board dispatch", { workflow: stage.workflow, repo, issueNumber, stage: stageName, by });
+    config.dispatchWorkflow(stage.workflow, {
+      repo,
+      issueNumber,
+      title: live.title,
+      body: live.body ?? "",
+      labels,
+      _triggerType: "api" as const,
+      // `_stage` names the stage for `stage-observer.ts`; `_autonomous` is what
+      // `build-gate.ts` counts for `maxConcurrentBuilds` and what `simple.ts`
+      // reads for the stage's `on_merge` policy. Both are stamped here because
+      // both are properties of THIS dispatch.
+      _stage: stageName,
+      _autonomous: true,
+      ...(gate.gates ? { _autonomyGates: gate.gates } : {}),
+      sender: by,
+      triggeredBy: by,
+    }).catch((err: unknown) => {
+      log.error("board dispatch failed", { workflow: stage.workflow, repo, issueNumber, err });
+    });
+
+    // The freshness lever that matters. Without this the card keeps rendering
+    // its pre-dispatch stage for up to the full TTL, so the button appears to
+    // have done nothing and the obvious next move is to press it again.
+    invalidateBoard(repo);
+
+    await recordActivityFor(c, db, {
+      action: "issue.dispatch",
+      targetType: "issue",
+      targetId,
+      detail: {
+        stage: stageName,
+        workflow: stage.workflow,
+        dispatched: true,
+        ...(reason ? { note: reason } : {}),
+      },
+    });
+    return c.json({
+      repo,
+      issueNumber,
+      stage: stageName,
+      workflow: stage.workflow,
+      dispatched: true,
+      reason: gate.reason,
+    });
+  });
+
+  // ── Move an issue between pipeline columns ────────────────────────────────
+  //
+  // `POST /issues/:owner/:repo/:number/stage`, body `{ to, from? }`. The drag
+  // gesture on the board, and the second — last — mutating action it offers on
+  // an issue card.
+  //
+  // ## There is no pipeline table, so a "move" is a label write
+  //
+  // The stage LABEL is the source of truth for where an issue has got to
+  // (`stage-labels.ts`, `stage-advance.ts`). Nothing else records a column: the
+  // board (`board.ts`) is a projection of the open issues GitHub reports and the
+  // stage label each one carries. So moving a card cannot be a row update — it
+  // is `advanceStage`, the same add-then-remove the harness performs host-side
+  // at every dispatch, driven from a browser instead of from a run. We go
+  // through that module rather than calling `addLabels`/`removeLabel` here
+  // because its ORDERING is load-bearing: add first, and a half-failure leaves
+  // the issue carrying both labels (visible, reconcilable); remove first, and a
+  // half-failure drops it out of the pipeline entirely with nothing on it to
+  // see. Its header makes the full argument.
+  //
+  // ## THE SECURITY PROPERTY: `to` is checked against the CONFIGURED labels
+  //
+  // This route lets an authenticated browser session write a label to a managed
+  // repository. Unchecked, that is not "move a card" — it is "apply an
+  // arbitrary label to any issue in any managed repo", which is a different and
+  // much larger capability than the gesture implies (`good first issue`,
+  // `security`, a label some other automation gates on). So `to` must be one of
+  // the labels the OPERATOR configured under `autonomy.stages` — every
+  // `enter` / `running` / `on_success` / `on_failure` across every stage — and
+  // anything else is a 400, before a single GitHub call. `from` is checked the
+  // same way, since it names a label we would REMOVE. The one extra value is
+  // the empty string, meaning "off the board": remove `from`, add nothing.
+  //
+  // ## It writes a label AND, on the two build columns, dispatches
+  //
+  // A drag onto a stage's `enter` or `running` column is the same instruction
+  // as the Dispatch button above, made with a different gesture, so it crosses
+  // the SAME gate with the same standing: `route: "api"`, `senderIsBot: false`,
+  // because a browser session is a human by construction. The two TERMINAL
+  // columns (`on_success` / `on_failure`) and `""` move the card and start
+  // nothing — "done" is not a request to build, and `on_failure` is also the
+  // budget-exhausted comment's de-dup key, which a dispatch here would fight.
+  //
+  // **The bot skip is NOT relaxed, and this is the paragraph to read before
+  // changing any of it.** `resolveBuildTrigger`'s `already-built` branch still
+  // hard-skips a BOT re-label, which is what stops label ping-pong — a stage
+  // observer's own write re-triggering the stage it just left. What changed is
+  // that this route no longer *relies* on that webhook chain to start a build:
+  // it asks the gate directly, as the person who dragged. Previously it did
+  // rely on it, and the cost was invisible from the UI — our own label write
+  // arrives with `senderIsBot: true`, so re-dragging an already-built issue
+  // (every guardrails failure, every `agent-blocked` card) wrote the label and
+  // started NOTHING, silently, with no affordance on the card saying why.
+  //
+  // ## The ORDER differs by column, and the reason is a race
+  //
+  // Only `stage.enter` is matched by the router's `stageForLabel`, so only an
+  // `enter` write echoes back to us as a dispatchable webhook. Writing it and
+  // THEN dispatching opens a real window: between our `addLabels` and
+  // `createRun` the echo arrives, reads `alreadyBuilt: false` and
+  // `runInFlight: false` — so the bot skip never even applies — and dispatches
+  // a second time. `simple.ts` then reuses the run row (it dedups only a
+  // QUEUED one), which is two agents in one workspace on one branch.
+  //
+  // So on the `enter` column we cross the gate FIRST. On a dispatch verdict the
+  // gate's own guard 2 has already advanced the issue to `running`, so no
+  // `enter` label is ever written, no echo is ever emitted, and there is
+  // exactly one gate crossing per gesture — closed structurally, with no lock
+  // and no new state. The card lands in the `running` column rather than the
+  // one it was dropped on; `landedLabel` says so, and that is the truth of it.
+  // On a SKIP verdict the label is written as dragged, so the drag still moves
+  // the card and the reason travels back to render on it.
+  //
+  // The `running` column keeps the simpler write-then-gate order: it has no
+  // echo, so it has no race. Dispatching there is not a convenience — the sweep
+  // excludes the `running` label by design (`issue-discovery.ts`), so a card
+  // dropped there with no run behind it is stranded permanently.
+  app.post("/issues/:owner/:repo/:number/stage", async (c) => {
+    const { owner, repo: name } = c.req.param();
+    const repo = `${owner}/${name}`;
+    const issueNumber = Number.parseInt(c.req.param("number"), 10);
+    if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
+      return c.json({ error: `invalid issue number: ${c.req.param("number")}` }, 400);
+    }
+    // The same allowlist every other repo-touching path is gated on, checked
+    // before anything is read or written against the repo.
+    if (!isManagedRepo(repo)) {
+      return c.json({ error: `${repo} is not a managed repository` }, 403);
+    }
+    const github = config.github ?? null;
+    if (!github) {
+      return c.json({ error: "stage moves are not configured" }, 503);
+    }
+
+    const body = (await c.req.json().catch(() => ({}))) as { to?: unknown; from?: unknown };
+    const to = typeof body?.to === "string" ? body.to.trim() : undefined;
+    const from = typeof body?.from === "string" && body.from.trim() ? body.from.trim() : undefined;
+    if (to === undefined) {
+      return c.json({ error: "`to` is required (a configured stage label, or \"\" to unstage)" }, 400);
+    }
+
+    // THE ALLOW-LIST. Every label any configured stage names, in any position.
+    // Built from `autonomy.stages` rather than from `stage-labels.ts`'s
+    // constants so an operator who renamed a stage's labels moves this surface
+    // with them — and an operator who configured no stages at all gets a
+    // refusal rather than a write, which is the right failure for a feature
+    // that is inert out of the box.
+    const configuredLabels = new Set<string>();
+    for (const stage of Object.values(getAutonomyConfig().stages)) {
+      for (const label of [stage.enter, stage.running, stage.on_success, stage.on_failure]) {
+        if (label) configuredLabels.add(label);
+      }
+    }
+    // `""` is legal for `to` only — it means "off the board". As a `from` it
+    // would be meaningless (there is nothing to take off), and `from` is
+    // already absent in that case.
+    if (to !== "" && !configuredLabels.has(to)) {
+      return c.json(
+        { error: `\`${to}\` is not a configured stage label, so it may not be applied here` },
+        400,
+      );
+    }
+    if (from !== undefined && !configuredLabels.has(from)) {
+      return c.json(
+        { error: `\`${from}\` is not a configured stage label, so it may not be removed here` },
+        400,
+      );
+    }
+
+    // ── THE LIVE RE-READ ────────────────────────────────────────────────────
+    //
+    // Never the cached board snapshot, for the reason the dispatch route above
+    // spells out: the board is stale by up to `BOARD_TTL_MS` (two minutes) by
+    // design, which is the right trade for RENDERING a card and the wrong one
+    // for acting on it. A failed read is a 502 rather than a write made blind —
+    // the decision below turns on labels, and guessing at them is how the hold
+    // loses a race it must never lose.
+    let live: Awaited<ReturnType<GitHubClient["getIssue"]>>;
+    try {
+      live = await github.getIssue(owner, name, issueNumber);
+    } catch (err: unknown) {
+      log.warn("Board stage move could not read the issue", { repo, issueNumber, from, to, err });
+      return c.json(
+        { error: `could not read ${repo}#${issueNumber} from GitHub`, moved: false },
+        502,
+      );
+    }
+    const labels = ((live.labels ?? []) as Array<string | { name?: string }>)
+      .map((l) => (typeof l === "string" ? l : l?.name ?? ""))
+      .filter(Boolean);
+
+    const targetId = issueTriggerId(repo, issueNumber);
+    const by = actorFromContext(c) ?? "admin";
+
+    // THE HOLD OUTRANKS A DRAG, exactly as it outranks every other surface. A
+    // maintainer who applied it has said "stay off this subject", and a drag is
+    // not an exception to that — it is the same request as the dispatch button,
+    // made with a different gesture. Recorded as loudly as a success, per the
+    // `pr.retry` precedent, and answered with the same sentence every other
+    // surface gives: `holdReply` names the label, because the fix is to remove
+    // it and a reason code would not say so.
+    const holdLabel = getHoldLabel();
+    const held = labels.includes(holdLabel) ? holdLabel : null;
+    if (held) {
+      await recordActivityFor(c, db, {
+        action: "issue.stage",
+        targetType: "issue",
+        targetId,
+        outcome: "denied",
+        detail: {
+          ...(from ? { from } : {}),
+          to,
+          advanced: false,
+          removed: false,
+          reason: "on-hold",
+        },
+      });
+      return c.json({ moved: false, reason: holdReply(held), held, dispatched: false }, 409);
+    }
+
+    // ── "Off the board" — the one move `advanceStage` cannot express ─────────
+    //
+    // Its whole contract is built around the ADD (add first, and only then the
+    // remove), so it answers `no-target-label` for an empty `to` rather than
+    // performing a bare removal. That is right for the dispatch path, which
+    // never wants one. Here it is a real gesture: dragging a card out of the
+    // pipeline. So this branch removes directly — the single site in this file
+    // that touches a label without going through that module, and it is safe
+    // to do so precisely because there is no ordering to get wrong.
+    if (to === "") {
+      if (!from) {
+        // Nothing named, nothing to take off. A no-op, not an error: the card
+        // is already where the caller asked for it to be.
+        await recordActivityFor(c, db, {
+          action: "issue.stage",
+          targetType: "issue",
+          targetId,
+          detail: { to, advanced: false, removed: false, reason: "already-unstaged" },
+        });
+        return c.json({ moved: true, advanced: false, removed: false, dispatched: false });
+      }
+      let removed = true;
+      let reason: string | undefined;
+      try {
+        await github.removeLabel(owner, name, issueNumber, from);
+      } catch (err: unknown) {
+        // Unlike a failed remove AFTER a successful add, nothing at all moved
+        // here — but it is still not an error the caller can act on differently,
+        // so it reports the same granular shape rather than a status code. The
+        // card redraws where it was, which is the truth.
+        removed = false;
+        reason = "remove-failed";
+        log.warn("Board stage move could not unstage the issue", {
+          repo,
+          issueNumber,
+          from,
+          err,
+        });
+      }
+      await recordActivityFor(c, db, {
+        action: "issue.stage",
+        targetType: "issue",
+        targetId,
+        outcome: removed ? "ok" : "error",
+        detail: { from, to, advanced: false, removed, ...(reason ? { reason } : {}) },
+      });
+      invalidateBoard(repo);
+      return c.json({ moved: removed, advanced: false, removed, dispatched: false });
+    }
+
+    log.info("board stage move", { repo, issueNumber, from, to, by });
+
+    // ── IS THIS GESTURE A REQUEST TO BUILD? ─────────────────────────────────
+    const slotMatch = stageSlotForLabel(to);
+    const stages = getAutonomyConfig().stages;
+    const matchedStage = slotMatch?.kind === "match" ? stages[slotMatch.stage] : undefined;
+
+    // Every reason this gesture MOVES the card but starts nothing. Each is a
+    // sentence a card can render, not a bare code, and the order is
+    // most-specific-first so the answer names the real obstacle.
+    const dispatchRefusal = ((): string | undefined => {
+      if (slotMatch === null) return `unconfigured-label: \`${to}\` names no autonomy stage`;
+      if (slotMatch.kind === "ambiguous") {
+        return (
+          `ambiguous-stage: \`${to}\` is claimed by ${slotMatch.stages.join(", ")}, ` +
+          `so which build to start is undecidable`
+        );
+      }
+      if (slotMatch.slot !== "enter" && slotMatch.slot !== "running") {
+        return (
+          `terminal-column: \`${to}\` is the \`${slotMatch.slot}\` label of ` +
+          `\`${slotMatch.stage}\`, which ends a build rather than starting one`
+        );
+      }
+      if (!matchedStage) return `unknown-stage: \`${slotMatch.stage}\` is not in \`autonomy.stages\``;
+      if (!config.dispatchWorkflow) return "dispatch-not-configured: this deployment has no runner wired";
+      // The pipeline builds ISSUES. A pull request reached through the issues
+      // API would cross a gate keyed on issue facts and dispatch a build
+      // against a branch nobody asked to rebuild — the same refusal the
+      // dispatch button makes. The MOVE still stands; PR cards live on the
+      // board and dragging one between columns is legitimate.
+      if (live.pull_request) return "not-an-issue: the pipeline builds issues, and this is a pull request";
+      // A drop that changes no label is not an instruction. The client has a
+      // same-column no-op, but it is computed from a board snapshot up to
+      // BOARD_TTL_MS stale, so `from` is often wrong and the same column gets
+      // re-dropped. This one reads the LIVE labels, and it is what keeps a
+      // gesture with no menu and no confirm step from being drop-spam that
+      // bills.
+      if (labels.includes(to)) return `already-in-stage: ${repo}#${issueNumber} already carries \`${to}\``;
+      if (!isIssueRoutableWorkflow(matchedStage.workflow)) {
+        return (
+          `unroutable-workflow: \`${matchedStage.workflow}\` is not reachable from an ` +
+          `issue route (${ISSUE_DISPATCH_ROUTE_KEYS.join(", ")})`
+        );
+      }
+      return undefined;
+    })();
+
+    // The PROJECTED label set — what is true of the issue AFTER this move, not
+    // before it. The gate reads labels for the hold and for the
+    // budget-exhausted comment de-dup, and both are questions about the issue
+    // as it will be.
+    const projected = [...new Set(labels.filter((l) => l !== from).concat(to ? [to] : []))];
+
+    let dispatched = false;
+    let dispatchReason: string | undefined = dispatchRefusal;
+    let dispatchStage: string | undefined;
+
+    const crossGate = async (stageName: string) => {
+      const gate = await applyBuildDispatchGate(
+        { repo, issueNumber, labels: projected, route: "api", senderIsBot: false, stage: stageName },
+        { db, github },
+      );
+      dispatchReason = gate.reason;
+      return gate;
+    };
+
+    // Fire-and-forget, exactly like the dispatch button: a build takes minutes
+    // and the dashboard is waiting on this response.
+    const fireDispatch = (
+      stageName: string,
+      workflow: string,
+      gates?: Record<string, boolean>,
+    ): void => {
+      dispatched = true;
+      dispatchStage = stageName;
+      config.dispatchWorkflow!(workflow, {
+        repo,
+        issueNumber,
+        title: live.title,
+        body: live.body ?? "",
+        labels: projected,
+        _triggerType: "api" as const,
+        // `_stage` names the stage for `stage-observer.ts` — drop it and every
+        // board-started build strands on the running label forever.
+        // `_autonomous` is what `build-gate.ts` counts for
+        // `maxConcurrentBuilds` and what `simple.ts` reads for `on_merge`.
+        _stage: stageName,
+        _autonomous: true,
+        ...(gates ? { _autonomyGates: gates } : {}),
+        sender: by,
+        triggeredBy: by,
+      }).catch((err: unknown) => {
+        log.error("board stage dispatch failed", { repo, issueNumber, stage: stageName, err });
+      });
+    };
+
+    // ── GATE FIRST ON THE ENTRY COLUMN ──────────────────────────────────────
+    //
+    // See the route header. Crossing before the write is what stops our own
+    // `enter` label echoing back as a second dispatch; on a dispatch verdict
+    // guard 2 has already moved the issue to `running`, so we never write
+    // `enter` at all.
+    const gateFirst =
+      dispatchRefusal === undefined && slotMatch?.kind === "match" && slotMatch.slot === "enter";
+
+    if (gateFirst && slotMatch?.kind === "match" && matchedStage) {
+      const gate = await crossGate(slotMatch.stage);
+      if (gate.decision === "dispatch") {
+        // Guard 2 wrote `running` and 404-swallowed the `enter` removal. All
+        // that is left is the label the card was dragged OFF — best-effort, on
+        // the same argument `advanceStage` makes: the run row is the fact and
+        // the labels are its projection, so a GitHub blip must not undo a
+        // dispatch that has already been decided.
+        let removed = false;
+        const stale = from && from !== matchedStage.running ? from : undefined;
+        if (stale) {
+          try {
+            await github.removeLabel(owner, name, issueNumber, stale);
+            removed = true;
+          } catch (err: unknown) {
+            log.warn("board stage move could not remove the previous label", {
+              repo,
+              issueNumber,
+              from: stale,
+              err,
+            });
+          }
+        }
+        fireDispatch(slotMatch.stage, matchedStage.workflow, gate.gates);
+        invalidateBoard(repo);
+        await recordActivityFor(c, db, {
+          action: "issue.stage",
+          targetType: "issue",
+          targetId,
+          detail: {
+            ...(from ? { from } : {}),
+            to,
+            advanced: true,
+            removed,
+            dispatched: true,
+            ...(dispatchReason ? { dispatchReason: String(dispatchReason).slice(0, 200) } : {}),
+          },
+        });
+        return c.json({
+          moved: true,
+          advanced: true,
+          removed,
+          dispatched: true,
+          stage: slotMatch.stage,
+          // Where the card ACTUALLY landed. Guard 2 advanced it to the running
+          // column, so the SPA must place it there rather than springing back.
+          landedLabel: matchedStage.running,
+          ...(dispatchReason ? { dispatchReason } : {}),
+        });
+      }
+      // The gate said no. Fall through: the label is written as dragged, the
+      // card moves, and the reason travels back to render on it.
+    }
+
+    const result = await advanceStage({ owner, repo: name, issueNumber, from, to }, { github });
+
+    // A failed ADD means NOTHING happened — `advanceStage` deliberately does not
+    // attempt the remove in that case, so the issue is still wearing `from` and
+    // still in its previous stage. That is a true statement about it, and the
+    // honest answer to the caller is that the move did not happen.
+    if (!result.added) {
+      await recordActivityFor(c, db, {
+        action: "issue.stage",
+        targetType: "issue",
+        targetId,
+        outcome: "error",
+        detail: {
+          ...(from ? { from } : {}),
+          to,
+          advanced: false,
+          removed: false,
+          reason: String(result.reason ?? "add-failed").slice(0, 200),
+        },
+      });
+      return c.json(
+        {
+          error: `could not apply \`${to}\` to ${repo}#${issueNumber}`,
+          moved: false,
+          reason: result.reason,
+        },
+        502,
+      );
+    }
+
+    // The `running` column dispatches AFTER the write — it has no webhook echo
+    // and therefore no race. `gateFirst` guards against crossing twice when the
+    // entry path already asked and was refused.
+    if (!gateFirst && dispatchRefusal === undefined && slotMatch?.kind === "match" && matchedStage) {
+      const gate = await crossGate(slotMatch.stage);
+      if (gate.decision === "dispatch") {
+        fireDispatch(slotMatch.stage, matchedStage.workflow, gate.gates);
+      }
+    }
+
+    // A failed REMOVE is not an error. The issue now carries BOTH labels, which
+    // is the tolerable half of that module's asymmetry: visible, reconcilable by
+    // hand or by the next advance, and a later stage wins wherever the pair is
+    // read. So the move stands and the granular result travels back — the card
+    // will redraw in its new column with the stale label still attached, which
+    // is exactly what is true of it.
+    await recordActivityFor(c, db, {
+      action: "issue.stage",
+      targetType: "issue",
+      targetId,
+      detail: {
+        ...(from ? { from } : {}),
+        to,
+        advanced: result.advanced,
+        removed: result.removed,
+        dispatched,
+        ...(dispatchReason ? { dispatchReason: String(dispatchReason).slice(0, 200) } : {}),
+        ...(result.reason ? { reason: result.reason } : {}),
+      },
+    });
+
+    // The freshness lever. Without it the card keeps rendering its pre-move
+    // column for up to the full TTL, so the drag springs back and the obvious
+    // next move is to drag it again.
+    invalidateBoard(repo);
+
+    return c.json({
+      moved: true,
+      advanced: result.advanced,
+      removed: result.removed,
+      // Stated rather than omitted, on both answers. `dispatchReason` carries
+      // WHY when nothing started — a terminal column, a budget ceiling, a run
+      // already in flight — and is deliberately a separate field from `reason`,
+      // which belongs to the LABEL outcome (`remove-failed`) and answers a
+      // different question.
+      dispatched,
+      ...(dispatchStage ? { stage: dispatchStage } : {}),
+      ...(dispatchReason ? { dispatchReason } : {}),
+      ...(result.reason ? { reason: result.reason } : {}),
     });
   });
 

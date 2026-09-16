@@ -45,6 +45,50 @@ export const ACTIVITY_ACTIONS = [
   "container.kill",
   "artifact.edit",
   "pr.retry",
+  /**
+   * A gated autonomous build the harness REFUSED on a budget (Phase 2 of the
+   * software factory). The one skip family that is not merely transient: a
+   * repo over its daily quota, or a deployment over its daily spend, has hit a
+   * ceiling somebody configured and may want to raise. Recorded rather than
+   * only logged for the `pr-escalation.ts` reason — a refusal nobody can find
+   * afterwards is indistinguishable from the feature quietly not working.
+   *
+   * `outcome: "denied"`, `targetType: "issue"`, `targetId: owner/repo#N`, and
+   * the case name in `detail.case`. NOT written for `concurrency-exhausted`,
+   * which frees itself within minutes and fires on every sweep tick.
+   */
+  "autonomy.skip",
+  /**
+   * A build DISPATCHED from the pipeline board — the one mutating action the
+   * board offers on an issue card (Phase 7). Distinct from `workflow.trigger`,
+   * which the run itself writes from `dispatchWorkflow`: this row is the ASK,
+   * and the pair is the point. An ask with no trigger beside it is a dispatch
+   * the gate refused, which is precisely the case somebody looking at this
+   * stream is trying to find.
+   *
+   * `targetType: "issue"`, `targetId: owner/repo#N`, and `outcome: "denied"`
+   * on every gate refusal — the `pr.retry` precedent, where a refused ask is
+   * recorded as loudly as an honoured one.
+   */
+  "issue.dispatch",
+  /**
+   * An issue DRAGGED between pipeline-board columns (Phase 7). The stage label
+   * is the source of truth for where an issue has got to — there is no pipeline
+   * table — so this row records a real write to GitHub, not a UI preference.
+   *
+   * Distinct from `issue.dispatch` beside it, and the distinction is the point:
+   * a drag writes a LABEL and dispatches nothing. Whether a build follows is
+   * then up to the ordinary webhook → router → gate chain, which hard-skips a
+   * bot sender on `already-built` — so a re-drag of an already-built issue
+   * moves the card and starts nothing. A `issue.stage` row with no
+   * `workflow.trigger` after it is therefore normal, where the same gap after
+   * an `issue.dispatch` is a refusal worth looking at.
+   *
+   * `targetType: "issue"`, `targetId: owner/repo#N`, `detail` carries
+   * `from` / `to` / `advanced` / `removed`. `outcome: "denied"` when the hold
+   * label refused the move; `"error"` when the label write itself failed.
+   */
+  "issue.stage",
 ] as const;
 
 export type ActivityAction = (typeof ACTIVITY_ACTIONS)[number];

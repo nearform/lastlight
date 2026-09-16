@@ -32,11 +32,36 @@ const CRON_ACTOR_KEY = "_cronActor";
 /** How the "Run now" presser authenticated, so the fire's row agrees with the trigger's. */
 const CRON_ACTOR_TYPE_KEY = "_cronActorType";
 
+/**
+ * What a discoverer hands back — a PR candidate OR an issue candidate.
+ *
+ * Widened from `DependencyPr` (which required `prNumber`) when the autonomy
+ * backstop sweep arrived: that cron discovers ISSUES, and the fan-out below is
+ * the shared path every discovery cron uses. `DependencyPr` stays assignable to
+ * this, so the three PR discoverers are unchanged and untouched.
+ *
+ * Exactly one of `prNumber` / `issueNumber` is set. The mapping below branches
+ * on which, because the two produce genuinely different dispatch contexts: a PR
+ * run is keyed on `prNumber` and may carry a head ref to pre-clone, while an
+ * issue run is keyed on `issueNumber` and must carry what the BUILD dispatch
+ * gate reads.
+ */
+export interface CronCandidate extends Omit<DependencyPr, "prNumber"> {
+  /** Set by the PR discoverers. Mutually exclusive with `issueNumber`. */
+  prNumber?: number;
+  /** Set by the issue discoverers (the autonomy backstop sweep). */
+  issueNumber?: number;
+  /** The issue's current labels — read by the build dispatch gate's hold check. */
+  labels?: string[];
+  /** Which `autonomy.stages` stage an issue candidate entered. */
+  stage?: string;
+}
+
 export type CronDiscoverer = (
   repos: string[],
   gh: GitHubClient,
   opts: { log?: (msg: string) => void },
-) => Promise<DependencyPr[]>;
+) => Promise<CronCandidate[]>;
 
 export interface CronRunnerDeps {
   db: StateDb;
@@ -288,9 +313,28 @@ async function fire(
   // discovery calls, no dispatches, no failure. A cheap no-op tick. The
   // discoverer's `log` callback carries per-repo diagnostics that can fire once
   // per managed repo per tick, so it stays `.debug`.
-  const prs = github && repos.length ? await discoverer(repos, github, { log: (m) => log.debug(m) }) : [];
+  const found = github && repos.length ? await discoverer(repos, github, { log: (m) => log.debug(m) }) : [];
 
-  const contexts = prs.map((pr) => ({
+  const contexts = found.map((c) => (c.issueNumber !== undefined ? issueContext(c) : prContext(c, discoverKey)));
+
+  const { dispatched, failures } = await fanOutContexts(workflowName, contexts, dispatch);
+  return {
+    reposEligible: candidates.length,
+    reposScanned: repos.length,
+    discovered: found.length,
+    dispatched,
+    failures,
+    discoverKey,
+  };
+}
+
+/**
+ * The PR dispatch context — byte-for-byte what it was before issue candidates
+ * existed. Extracted, not rewritten: the three PR discovery crons are live in
+ * production and this is the shared fan-out path they all cross.
+ */
+function prContext(pr: CronCandidate, discoverKey: string | undefined): Record<string, unknown> {
+  return {
     _triggerType: "cron",
     repo: pr.repo,
     prNumber: pr.prNumber,
@@ -307,15 +351,41 @@ async function fire(
     // chain ended without pushing — no new commit exists, so no further
     // `check_suite` will ever fire for it (09 → S2).
     ...(discoverKey === "prs-awaiting-review" ? { _reviewRoute: "sweep" } : {}),
-  }));
+  };
+}
 
-  const { dispatched, failures } = await fanOutContexts(workflowName, contexts, dispatch);
+/**
+ * The ISSUE dispatch context — the autonomy backstop sweep (`cron-autonomy.yaml`).
+ *
+ * Shaped to match what the `issue.labeled` webhook route emits, because both
+ * reach `applyBuildDispatchGate` at the `dispatchWorkflow` choke point and the
+ * gate must not be able to tell a difference that matters. `_stage` is what
+ * puts the dispatch INTO that gate at all (the gate fails closed on a stage it
+ * cannot resolve), and `labels` is what its hold check and its
+ * budget-comment de-duplication read.
+ *
+ * **`_senderIsBot` is explicitly `false`.** A sweep has no sender — nobody
+ * applied a label, the cron simply noticed one that was already there. That
+ * matters because the gate's `already-built` branch is ASYMMETRIC on this flag:
+ * a bot sender is a hard skip (it is the harness's own label write echoing
+ * back), while a human sender is an explicit retry instruction and is allowed
+ * through, subject to every budget. Stamping `true` would be a lie that reads
+ * as a loop guard; omitting it lands on the same place (`=== true` is false),
+ * but saying it out loud is the point — this is the one key on this context
+ * whose wrong value would be silently safe today and silently wrong the moment
+ * anyone inverts that test.
+ *
+ * The `route: "sweep"` the gate logs is derived from `_triggerType: "cron"`,
+ * not passed separately.
+ */
+function issueContext(c: CronCandidate): Record<string, unknown> {
   return {
-    reposEligible: candidates.length,
-    reposScanned: repos.length,
-    discovered: prs.length,
-    dispatched,
-    failures,
-    discoverKey,
+    _triggerType: "cron",
+    repo: c.repo,
+    issueNumber: c.issueNumber,
+    title: c.title,
+    labels: c.labels ?? [],
+    ...(c.stage ? { _stage: c.stage } : {}),
+    _senderIsBot: false,
   };
 }

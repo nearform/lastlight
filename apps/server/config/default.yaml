@@ -670,6 +670,81 @@ review:
     # affected — an absent field is not a zero.
     internalFloor: 0.15
 
+# The software-factory pipeline (label-driven autonomy).
+#
+# An issue labelled `ready-for-agent` on a repo listed below dispatches a gated
+# `build` run: the harness moves the label on, runs the workflow behind its
+# human approval gates, and parks the result on a label a human reads.
+#
+# IT SHIPS INERT. `repos: []` means no issue label routes anywhere — the router
+# reads this block on every `issue.labeled` event, and with no repo listed the
+# label is not a pipeline stage at all, so the event is dropped where it
+# arrives. A deployment that says nothing about `autonomy:` behaves exactly as
+# it did before the block existed.
+#
+# OPERATOR-ONLY, deliberately — the same reasoning `review.analysis` carries
+# above. Autonomy is SPEND on the operator's budget, and there is no "more
+# conservative" direction for a repo to clamp it toward, so there is no
+# repo-settable autonomy key and `repoConfig.allowKeys` must NOT gain one: a
+# repo that could add itself here could spend the operator's money by committing
+# a file. A repo opts OUT with the affordances it already owns — an explicit
+# `disabled.workflows: [build]` in its `.lastlight/lastlight.yml` turns the
+# pipeline off for the whole repo, and the hold label turns it off for one
+# issue.
+autonomy:
+  # Exact `owner/repo` names. NO GLOBS, by design: enabling an org by pattern is
+  # how a repo nobody reviewed acquires an agent — and a budget — the moment
+  # somebody creates it. Matching is exact string equality
+  # (`isAutonomousRepo()`); `owner/*` is a repo name that will never exist.
+  repos: []
+  # The stages a label can start. `build` is the one shipped stage.
+  stages:
+    build:
+      # The label a human — or the triage agent — applies to START the stage. A
+      # stage with no `enter` label can never fire, so config load DROPS one
+      # rather than keeping it: a stage that is present in the `/config` view
+      # and unreachable in fact is a silent trap.
+      enter: ready-for-agent
+      # What the harness advances the label to AT DISPATCH — before the run has
+      # started, not after it finishes. That ordering is the whole point: while
+      # `enter` is still on the issue, every backstop sweep and every re-
+      # delivered webhook sees a pipeline entry it is entitled to pick up, and
+      # dispatches the same build again. Moving the label first makes the issue
+      # its own lock.
+      running: agent-building
+      on_success: ready-for-human  # terminal — a human reviews, and merges, the PR
+      on_failure: agent-blocked    # terminal — the run stopped; a human reads why
+      workflow: build
+      # Human-in-the-loop approval gates, ON by default and merged ADD-ONLY onto
+      # the run's effective approval map: this block can turn a gate ON that the
+      # workflow left off, never off one the operator's `approval:` block asked
+      # for. The names are the gates `workflows/build.yaml` already declares.
+      gates:
+        post_architect: true
+        post_reviewer: true
+      # What becomes of the pull request the build opens:
+      #   none             the PR parks at `on_success` and a human merges it —
+      #                    the default, and the only value that ships on
+      #   auto             the build agent enables GitHub AUTO-MERGE, so CI and
+      #                    branch protection still gate the merge; the agent
+      #                    never presses the button itself
+      #   auto-low-impact  NOT IMPLEMENTED YET, and it is worth saying plainly:
+      #                    there is no impact signal for a FEATURE PR today
+      #                    (`dependencies.autoMergeMaxImpact` scores dependency
+      #                    bumps and nothing else). The value is accepted and
+      #                    recorded, and behaves as `none` until one exists.
+      on_merge: none
+  # Bounds on the pipeline as a whole, enforced at the DISPATCH GATE — before a
+  # run starts, never mid-flight — and EVERY refusal is recorded, so "a quiet
+  # day" and "the budget said no" are distinguishable after the fact. They bound
+  # the one real failure mode: a label applied in bulk by a triage sweep, a
+  # re-import or another bot, turning into N concurrent agent runs.
+  budget:
+    maxConcurrentBuilds: 2      # across every repo, at any instant
+    maxBuildsPerRepoPerDay: 3   # per repo, rolling day
+    dailyUsd: 25                # deployment-wide model spend per day
+    repoDailyUsd: 10            # one repo's share of it
+
 # Retry policy for every PR_FIX_SHAPED workflow — pr-fix and dependabot-ci-fix
 # (issue #251). The loop diagnoses a CI failure before it retries, and these are
 # the budgets that bound it.
@@ -746,6 +821,12 @@ routes:
     issue_opened: issue-triage
     issue_answer: answer
     issue_reopened: issue-triage
+    # A pipeline STAGE label was applied to an issue (the software-factory
+    # flow). The router drops every label that is not a configured
+    # `autonomy.stages.*.enter`, so this is inert until `autonomy.repos` names
+    # a repo — and it is guard 1 of the four that replace the bot-sender filter
+    # we deliberately opened for `issues.labeled`.
+    issue_labeled: build
     pr_opened: pr-review
     pr_synchronize: pr-review
     pr_reopened: pr-review

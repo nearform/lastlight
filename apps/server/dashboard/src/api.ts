@@ -765,6 +765,36 @@ export class UnauthorizedError extends Error {
   }
 }
 
+/**
+ * A non-2xx from a MUTATING endpoint, carrying the server's own sentence.
+ *
+ * `req` below renders every failure as `409 Conflict`, which is the least
+ * useful thing a surface can say: the dispatch gate's 409 body is the same
+ * wording the bot would post on the issue — the hold label, the run already in
+ * flight — and that sentence is the whole explanation the operator needs. So
+ * the mutating thunks go through {@link reqAction}, which reads the JSON
+ * `{ error }` body and keeps the status next to it.
+ *
+ * A refusal is not a bug: `409` means the gate declined and said why, and a
+ * caller should show `message` rather than translate it.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly body: unknown;
+
+  constructor(status: number, message: string, body: unknown = null) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.body = body;
+  }
+
+  /** The server REFUSED (a gate explaining itself) rather than broke. */
+  get refused(): boolean {
+    return this.status === 409;
+  }
+}
+
 export const auth = {
   getToken: () => localStorage.getItem(TOKEN_KEY),
   setToken: (t: string) => localStorage.setItem(TOKEN_KEY, t),
@@ -800,6 +830,44 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return (await res.json()) as T;
+}
+
+/**
+ * `req` for endpoints that DO something — the ones whose failure body is a
+ * sentence rather than a status code.
+ *
+ * Identical to `req` on the happy path; on a non-2xx it reads the JSON
+ * `{ error }` body and throws an {@link ApiError} that keeps both the status
+ * and the server's wording. Swallowing that wording is how a 409 turns from
+ * "the hold label is on this issue — remove it to let Last Light act" into
+ * "409 Conflict", so mutating thunks use this and read-only ones stay on `req`.
+ */
+async function reqAction<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = auth.getToken();
+  const headers: Record<string, string> = { ...(init?.headers as Record<string, string>) };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(`${BASE}${path}`, { ...init, headers });
+  if (res.status === 401) {
+    handleUnauthorized();
+    throw new UnauthorizedError();
+  }
+  const contentType = res.headers.get("content-type") ?? "";
+  const body = contentType.includes("application/json")
+    ? await res.json().catch(() => null)
+    : null;
+  if (!res.ok) {
+    const message =
+      body && typeof body === "object" && typeof (body as { error?: unknown }).error === "string"
+        ? ((body as { error: string }).error)
+        : `${res.status} ${res.statusText}`;
+    throw new ApiError(res.status, message, body);
+  }
+  return body as T;
+}
+
+/** `owner/repo` → a path segment pair, each component encoded. */
+function repoPath(repo: string): string {
+  return repo.split("/").map(encodeURIComponent).join("/");
 }
 
 /** Same as `req` but for endpoints that return text/plain (raw YAML, markdown). */
@@ -846,6 +914,205 @@ export function isImageArtifact(name: string): boolean {
  */
 export function isVideoArtifact(name: string): boolean {
   return /\.(mp4|webm)$/i.test(name);
+}
+
+/**
+ * `GET /admin/api/board` — the pipeline board.
+ *
+ * Hand-mirrored wire interfaces, the same way `Execution` and `MeRepos` above
+ * are: the dashboard has no import edge to core, so a shared type is not
+ * available and these are a deliberate second copy of the documented response
+ * shape. A copy can drift from the endpoint, which is why the render side
+ * (`components/board/BoardCard.tsx`) reads the optional members by name
+ * defensively instead of trusting this declaration.
+ */
+export interface BoardLabel {
+  name: string;
+  color: string;
+  description?: string;
+}
+
+/** The workflow run currently acting on a card, when there is one. */
+export interface BoardCardRun {
+  id: string;
+  workflowName: string;
+  status: string;
+  currentPhase?: string;
+  startedAt: string;
+  /**
+   * Why a FAILED run failed — the phase that stopped it and the server's own
+   * sentence, already clipped for display. Absent on every other status, and
+   * absent on a failure the ledger recorded no reason for.
+   */
+  failure?: { phase: string; reason: string };
+  /**
+   * The phase to SHOW, when it differs from `currentPhase`.
+   *
+   * `currentPhase` is written when a phase COMPLETES, so it lags by one for
+   * everything after the first — a run working on `executor` reads
+   * `architect`. Prefer this when present.
+   */
+  phase?: string | null;
+}
+
+/** A pending approval gate — the card is waiting on a human. */
+export interface BoardCardApproval {
+  id: string;
+  gate: string;
+  summary?: string;
+  artifact?: string;
+  createdAt: string;
+}
+
+/**
+ * One action the server offers on a card.
+ *
+ * `enabled` / `disabledReason` are computed SERVER-side because only that side
+ * knows the hold label, the PR-scoped run lock and the route map. The client
+ * renders them verbatim and never re-derives them.
+ */
+export interface BoardCardAction {
+  id: string;
+  label: string;
+  kind: string;
+  enabled: boolean;
+  disabledReason?: string | null;
+  /**
+   * The stage label this action moves the card TO — set only on move-shaped
+   * actions (`unblock`). Named by the server because stage labels are
+   * operator-configured; the client must never guess which column is the
+   * entrance.
+   */
+  to?: string | null;
+}
+
+export interface BoardCard {
+  /** `owner/repo#123`. */
+  key: string;
+  repo: string;
+  number: number;
+  isPr: boolean;
+  title: string;
+  author: string;
+  createdAt: string;
+  url: string;
+  draft: boolean;
+  labels: BoardLabel[];
+  stageLabel: string;
+  /** The card carries more than one stage label. */
+  ambiguousStage: boolean;
+  /** The hold label is applied — Last Light acts on nothing here. */
+  held: boolean;
+  /**
+   * Why the card is held, in the server's words — the tooltip on a held card
+   * and its menu. Optional because it is newer than the rest of this shape;
+   * the render side falls back rather than assuming it arrived.
+   */
+  heldReason?: string | null;
+  /** Server-truncated excerpt of the item's body. Absent when GitHub had none. */
+  body?: string | null;
+  run?: BoardCardRun | null;
+  approval?: BoardCardApproval | null;
+  actions: BoardCardAction[];
+}
+
+export interface BoardColumn {
+  id: string;
+  title: string;
+  label: string;
+  count: number;
+  awaitingHumanCount: number;
+  cards: BoardCard[];
+}
+
+/**
+ * `POST /issues/:owner/:repo/:number/dispatch` — a 200 body.
+ *
+ * The interesting answer is the OTHER one: a `409` means the dispatch gate
+ * refused (hold label, a run already in flight) and its `{ error }` body is the
+ * same sentence the bot would have posted on the issue. That arrives as an
+ * {@link ApiError} with `refused === true`, and is meant to be shown verbatim.
+ */
+export interface IssueDispatchResponse {
+  dispatched: boolean;
+}
+
+/**
+ * `POST /prs/:owner/:repo/:number/retry` — a 200 body.
+ *
+ * `dispatched: false` with `recorded: true` is a SUCCESS: the gate parked the
+ * ask as a `retry-requested` row that the next event honours. An outright
+ * refusal (hold / run in flight / degraded read) is the 409 instead.
+ */
+export interface PrRetryResponse {
+  repo: string;
+  prNumber: number;
+  workflow: string;
+  dispatched: boolean;
+  /** The ask was parked for the next event rather than dispatched now. */
+  recorded?: boolean;
+  reason?: string;
+  /** The hold label, when a hold is what stopped it. */
+  held?: string;
+}
+
+/**
+ * `POST /issues/:owner/:repo/:number/stage` — a 200 body.
+ *
+ * The board's drag writes a stage label, and on a stage's `enter` or `running`
+ * column it ALSO crosses the build gate as the logged-in human and dispatches.
+ * The two terminal columns and `to: ""` move the card and start nothing.
+ *
+ * So a 200 answers two questions, and they are independent: `moved`/`advanced`/
+ * `removed` are the LABEL outcome, while `dispatched` + `dispatchReason` are
+ * the BUILD outcome. A move that succeeds while the gate refuses is an ordinary
+ * 200 with `dispatched: false` — the budget said no, or a run is already in
+ * flight — and the reason is meant to be rendered on the card.
+ *
+ * `400` is a `to` that is not a configured stage; the interesting failure is
+ * still the `409`, whose `{ error }` body is the hold label refusing in the
+ * bot's own words.
+ */
+export interface IssueStageMoveResponse {
+  moved: boolean;
+  /** The card went forward through the pipeline rather than back. */
+  advanced: boolean;
+  /** The `from` label was removed. */
+  removed: boolean;
+  /** A build was started by this drag. */
+  dispatched: boolean;
+  /** The stage that was dispatched, when one was. */
+  stage?: string;
+  /**
+   * Why the build did or did not start. Present on both answers — a gate
+   * refusal is the whole point of showing it.
+   */
+  dispatchReason?: string;
+  /**
+   * Where the card ACTUALLY landed, when that differs from `to`.
+   *
+   * Dropping on the entry column crosses the gate BEFORE writing a label (it is
+   * how the server avoids racing its own webhook), so a dispatched build has
+   * already advanced the issue to the stage's `running` label. The card belongs
+   * in that column, not the one it was dropped on.
+   */
+  landedLabel?: string;
+  /** The LABEL outcome's own note — e.g. `remove-failed`. Not the gate's. */
+  reason?: string;
+}
+
+export interface BoardResponse {
+  generatedAt: string;
+  ttlSeconds: number;
+  /**
+   * False when the operator configured no `autonomy.stages`. The board then
+   * renders an empty state — never an invented default set of columns.
+   */
+  configured: boolean;
+  scope: { repos: string[]; truncated: boolean; reason: string; eligible?: string[] };
+  degraded: Array<{ repo: string; error: string; staleSince?: string }>;
+  columns: BoardColumn[];
+  unstaged?: { count: number; cards: BoardCard[] };
 }
 
 export const api = {
@@ -983,10 +1250,14 @@ export const api = {
   workflowRunApprovals: (id: string) =>
     req<{ approvals: WorkflowApproval[] }>(`/workflow-runs/${id}/approvals`),
   cancelWorkflowRun: (id: string) =>
-    req<{ cancelled: string }>(`/workflow-runs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
+    reqAction<{ cancelled: string }>(`/workflow-runs/${encodeURIComponent(id)}/cancel`, {
+      method: "POST",
+    }),
   // Retry a FAILED run — resumes from the phase that failed with the same context.
   retryWorkflowRun: (id: string) =>
-    req<{ retrying: string }>(`/workflow-runs/${encodeURIComponent(id)}/retry`, { method: "POST" }),
+    reqAction<{ retrying: string }>(`/workflow-runs/${encodeURIComponent(id)}/retry`, {
+      method: "POST",
+    }),
   workflowDefinition: (name: string) =>
     req<{ workflow: WorkflowDefinition }>(`/workflows/${encodeURIComponent(name)}`),
   workflows: () => req<{ workflows: WorkflowSummary[] }>("/workflows"),
@@ -1083,13 +1354,56 @@ export const api = {
       await res.text();
     }
   },
+  /**
+   * The pipeline board. `repos` scopes it, `unstaged` asks for the cards that
+   * matched no stage, `refresh` bypasses the server's ~120s cache.
+   */
+  board: (opts: { repos?: string[]; unstaged?: boolean; refresh?: boolean } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.repos && opts.repos.length > 0) qs.set("repos", opts.repos.join(","));
+    if (opts.unstaged) qs.set("unstaged", "1");
+    if (opts.refresh) qs.set("refresh", "1");
+    const qss = qs.toString();
+    return req<BoardResponse>(`/board${qss ? `?${qss}` : ""}`);
+  },
   approvals: () => req<{ approvals: WorkflowApproval[] }>("/approvals"),
   approval: (id: string) =>
     req<{ approval: WorkflowApproval; artifactRef: ArtifactRef | null; run: WorkflowRun | null }>(
       `/approvals/${encodeURIComponent(id)}`,
     ),
+  /**
+   * Put an issue into the pipeline by hand. The gate still decides: a refusal
+   * comes back as a 409 whose message is the bot's own wording (see
+   * {@link IssueDispatchResponse}), 403 is an unmanaged repo, 503 is a
+   * deployment with no dispatcher wired.
+   */
+  dispatchIssue: (repo: string, number: number, opts: { stage?: string; reason?: string } = {}) =>
+    reqAction<IssueDispatchResponse>(`/issues/${repoPath(repo)}/${number}/dispatch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stage: opts.stage, reason: opts.reason }),
+    }),
+  /**
+   * Move an issue or PR to another stage by writing its label — the board's
+   * drag-and-drop. `to: ""` means the unstaged column: remove `from`, add
+   * nothing. A `409` is the hold label refusing and is meant to be shown
+   * verbatim (see {@link IssueStageMoveResponse}).
+   */
+  moveIssueStage: (repo: string, number: number, to: string, from?: string) =>
+    reqAction<IssueStageMoveResponse>(`/issues/${repoPath(repo)}/${number}/stage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ to, from }),
+    }),
+  /** Ask the fix workflow that last worked this PR to go again. */
+  retryPr: (repo: string, number: number, reason?: string) =>
+    reqAction<PrRetryResponse>(`/prs/${repoPath(repo)}/${number}/retry`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason }),
+    }),
   respondToApproval: (id: string, decision: "approved" | "rejected", reason?: string) =>
-    req<{ status: string }>(`/approvals/${id}/respond`, {
+    reqAction<{ status: string }>(`/approvals/${id}/respond`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ decision, reason }),

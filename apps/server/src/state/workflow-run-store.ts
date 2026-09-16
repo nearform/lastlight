@@ -461,6 +461,74 @@ export class WorkflowRunStore {
   }
 
   /**
+   * The most recent run per trigger id, in ONE query per 200 ids.
+   *
+   * The board (`src/admin/board.ts`) joins a live list of open issues and pull
+   * requests against our own run ledger, and the naive shape of that join is a
+   * `getByTrigger` per card — fifty cards, fifty statements. This is the same
+   * answer as one `IN (...)` ordered newest-first, reduced in JS by keeping the
+   * first row seen per trigger. `idx_workflow_runs_trigger` is on
+   * (`trigger_id`, `status`), so both the filter and the optional status
+   * narrowing are covered.
+   *
+   * **Chunked at 200 ids per statement**, because both dialects bound the
+   * number of bound parameters in one statement (SQLite's `SQLITE_MAX_VARIABLE_NUMBER`,
+   * Postgres's 65535) and a board scoped to twenty busy repos can name more
+   * cards than either wants in a single `IN`.
+   *
+   * **The projection is `list()`'s light column set** — never `context` or
+   * `scratch`. Those are multi-MB on a build run, and a board that selected
+   * them would pull tens of megabytes to render a status pill. Nothing the
+   * board renders lives in either.
+   */
+  async latestForTriggers(
+    triggerIds: string[],
+    opts: { statuses?: string[] } = {},
+  ): Promise<Map<string, WorkflowRun>> {
+    const { workflowRuns } = this.t;
+    const out = new Map<string, WorkflowRun>();
+    const ids = [...new Set(triggerIds.filter((id) => !!id))];
+    if (ids.length === 0) return out;
+
+    const CHUNK = 200;
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const chunk = ids.slice(i, i + CHUNK);
+      const where: SQL[] = [inArray(workflowRuns.triggerId, chunk)];
+      if (opts.statuses && opts.statuses.length > 0) {
+        where.push(inArray(workflowRuns.status, opts.statuses));
+      }
+      const rows = await this.client
+        .select({
+          id: workflowRuns.id,
+          workflowName: workflowRuns.workflowName,
+          triggerId: workflowRuns.triggerId,
+          owner: workflowRuns.owner,
+          repo: workflowRuns.repo,
+          issueNumber: workflowRuns.issueNumber,
+          currentPhase: workflowRuns.currentPhase,
+          phaseHistory: workflowRuns.phaseHistory,
+          status: workflowRuns.status,
+          restartCount: workflowRuns.restartCount,
+          startedAt: workflowRuns.startedAt,
+          updatedAt: workflowRuns.updatedAt,
+          finishedAt: workflowRuns.finishedAt,
+          triggeredBy: workflowRuns.triggeredBy,
+          triggerActorType: workflowRuns.triggerActorType,
+        })
+        .from(workflowRuns)
+        .where(and(...where))
+        .orderBy(desc(workflowRuns.startedAt));
+
+      // Newest first, so the first row seen for a trigger is its latest run.
+      for (const row of rows) {
+        const run = this.deserialize(row);
+        if (!out.has(run.triggerId)) out.set(run.triggerId, run);
+      }
+    }
+    return out;
+  }
+
+  /**
    * The most recent SUCCEEDED run of `workflowName` for this trigger, or null.
    * Unlike `getByTrigger` (active rows only), this reads terminal history: the
    * dependency-workflow dedup guard reads the winner's stored `context.headSha`
@@ -852,6 +920,51 @@ export class WorkflowRunStore {
       .from(workflowRuns)
       .where(and(eq(qualified, `${owner}/${repo}`), gte(workflowRuns.startedAt, sinceIso)))
       .groupBy(workflowRuns.workflowName, workflowRuns.status);
+  }
+
+  /**
+   * How many runs of `workflowName` started for `repo` since `sinceIso`.
+   *
+   * The autonomy pipeline's per-repo day quota (`maxBuildsPerRepoPerDay`) reads
+   * this with `sinceIso` = the start of the UTC day. Deliberately counts runs in
+   * EVERY status: a build that failed, was cancelled or crashed still spent the
+   * money and still consumed the repo's allowance for the day, so excluding it
+   * would let a repo whose builds keep failing loop all day inside its quota —
+   * exactly the case the quota exists for.
+   *
+   * A `count()` aggregate, not a fetch-and-length: the caller wants a number,
+   * and `list()`'s own shape is a warning about how big these rows get
+   * (`context`/`scratch` run to multi-MB on build runs).
+   *
+   * `repoMatchClause`, not `qualifiedRepoSql`, for the both-shapes reason
+   * documented on that helper — the create path stores `repo` BARE with `owner`
+   * beside it, while older rows carry the qualified `owner/repo` in one column,
+   * and only the OR of the two matches both. It also keeps the predicate as
+   * plain column equality rather than a computed CASE, so it can be satisfied
+   * by an index rather than a scan.
+   *
+   * Covered by `idx_workflow_runs_name_started` (`workflow_name`,
+   * `started_at DESC`) — the two selective predicates, leading column first.
+   * The repo pair is the residual filter over that slice, which is the right
+   * way round: one workflow's runs since midnight is already a handful of rows.
+   */
+  async countRunsForRepoSince(
+    workflowName: string,
+    repo: string,
+    sinceIso: string,
+  ): Promise<number> {
+    const { workflowRuns } = this.t;
+    const [row] = await this.client
+      .select({ c: count() })
+      .from(workflowRuns)
+      .where(
+        and(
+          eq(workflowRuns.workflowName, workflowName),
+          gte(workflowRuns.startedAt, sinceIso),
+          repoMatchClause(this.t, repo),
+        ),
+      );
+    return row?.c ?? 0;
   }
 
   /**

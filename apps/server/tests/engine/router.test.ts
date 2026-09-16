@@ -1655,3 +1655,149 @@ describe('routeEvent — @bot retry', () => {
     if (result.action === 'reply') expect(result.message).toMatch(/lastlight-ignore/);
   });
 });
+
+
+/**
+ * The label-driven autonomy pipeline — `issue.labeled`.
+ *
+ * Structurally a twin of the `pr.labeled` branch above: resolve the label to
+ * something configured, and hard-ignore every label that isn't. It is cheaper
+ * than that twin, because `autonomy` is OPERATOR-ONLY (entering a stage spends
+ * the operator's budget), so there is no repo layer to resolve — just a map
+ * lookup over the configured stages.
+ *
+ * Guard 1 of the four-guard loop-safety argument lives here, and it is the
+ * reason this branch can exist at all: `github-webhook.ts` normalizes
+ * `issues.labeled` even when OUR OWN BOT is the sender — it has to, since
+ * `issue-triage` applies `ready-for-agent` as the bot — so the harness's own
+ * stage writes now reach the router. Dropping every non-`enter` label is what
+ * stops them turning into a loop.
+ */
+describe('routeEvent — issue.labeled (the autonomy pipeline)', () => {
+  const STAGES = {
+    build: {
+      enter: 'ready-for-agent',
+      running: 'agent-building',
+      on_success: 'ready-for-human',
+      on_failure: 'agent-blocked',
+      workflow: 'build',
+      gates: { post_architect: true, post_reviewer: true },
+      on_merge: 'none',
+    },
+  };
+
+  /** Runtime config with the shipped stage set and an explicit allow-list. */
+  function setAutonomy(repos: string[]) {
+    setRuntimeConfig({
+      managedRepos: ['cliftonc/drizzle-cube'],
+      autonomy: {
+        repos,
+        stages: STAGES,
+        budget: {
+          maxConcurrentBuilds: 2,
+          maxBuildsPerRepoPerDay: 3,
+          dailyUsd: 25,
+          repoDailyUsd: 10,
+        },
+      },
+    } as unknown as LastLightConfig);
+  }
+
+  const labeled = (over: Partial<EventEnvelope> = {}) =>
+    makeEnvelope({
+      type: 'issue.labeled',
+      issueNumber: 42,
+      title: 'Add a dark-mode toggle',
+      body: 'It should follow the OS setting.',
+      addedLabel: 'ready-for-agent',
+      labels: ['ready-for-agent'],
+      ...over,
+    });
+
+  it("routes a stage's enter label to that stage's workflow, with the full context", async () => {
+    setAutonomy(['cliftonc/drizzle-cube']);
+    const result = await routeEvent(labeled());
+
+    expect(result.action).toBe('handler');
+    if (result.action !== 'handler') return;
+    // `routes.github.issue_labeled` is unset in the packaged config, so the
+    // STAGE's own workflow is what resolves.
+    expect(result.handler).toBe('build');
+    expect(result.context).toEqual({
+      _routeKey: 'github.issue_labeled',
+      _stage: 'build',
+      _addedLabel: 'ready-for-agent',
+      _senderIsBot: false,
+      repo: 'cliftonc/drizzle-cube',
+      issueNumber: 42,
+      title: 'Add a dark-mode toggle',
+      body: 'It should follow the OS setting.',
+      sender: 'octocat',
+      labels: ['ready-for-agent'],
+    });
+  });
+
+  it("GUARD 1: the harness's OWN stage writes never re-trigger the pipeline", async () => {
+    // `agent-building` / `ready-for-human` / `agent-blocked` are labels WE
+    // write, and bot-sent label events now reach the router by design. None of
+    // them is any stage's `enter`, so each one dies at the router — one map
+    // lookup, no config fetch, no dispatch.
+    setAutonomy(['cliftonc/drizzle-cube']);
+    for (const label of ['agent-building', 'ready-for-human', 'agent-blocked']) {
+      const result = await routeEvent(
+        labeled({ addedLabel: label, labels: [label], senderIsBot: true, sender: 'last-light[bot]' }),
+      );
+      expect(result.action).toBe('ignore');
+      if (result.action === 'ignore') expect(result.reason).toContain(label);
+    }
+  });
+
+  it('ignores a label that enters no stage at all', async () => {
+    setAutonomy(['cliftonc/drizzle-cube']);
+    const result = await routeEvent(labeled({ addedLabel: 'bug', labels: ['bug'] }));
+    expect(result.action).toBe('ignore');
+  });
+
+  it('ignores a repo that is not on the autonomy allow-list', async () => {
+    // The dispatch gate checks this too; here it just means an un-opted-in repo
+    // pays nothing further.
+    setAutonomy(['cliftonc/some-other-repo']);
+    const result = await routeEvent(labeled());
+    expect(result.action).toBe('ignore');
+    if (result.action === 'ignore') expect(result.reason).toContain('cliftonc/drizzle-cube');
+  });
+
+  it('is covered by the hold label like every other route', async () => {
+    // No hold check in the branch itself — `holdRoute()` runs above the switch
+    // and the connector fills `labels` on the `issues` path, so the hold lands
+    // before the stage lookup is ever reached.
+    setAutonomy(['cliftonc/drizzle-cube']);
+    const result = await routeEvent(
+      labeled({ labels: ['lastlight-ignore', 'ready-for-agent'] }),
+    );
+    expect(result.action).toBe('ignore');
+    if (result.action === 'ignore') expect(result.reason).toMatch(/^on-hold: `lastlight-ignore`/);
+  });
+
+  it('propagates _senderIsBot — the gate turns it into skip-vs-retry', async () => {
+    // A bot re-label is the harness's own write echoing back (hard skip); a
+    // human re-label is an explicit retry. The router only records which.
+    setAutonomy(['cliftonc/drizzle-cube']);
+
+    const byBot = await routeEvent(labeled({ senderIsBot: true, sender: 'last-light[bot]' }));
+    expect(byBot.action).toBe('handler');
+    if (byBot.action === 'handler') expect(byBot.context._senderIsBot).toBe(true);
+
+    const byHuman = await routeEvent(labeled({ senderIsBot: false, sender: 'cliftonc' }));
+    expect(byHuman.action).toBe('handler');
+    if (byHuman.action === 'handler') expect(byHuman.context._senderIsBot).toBe(false);
+  });
+
+  it('is INERT out of the box — no autonomy config, no route', async () => {
+    // The packaged block ships `repos: []`, so a deployment that says nothing
+    // about autonomy behaves exactly as it did before the block existed.
+    setRuntimeConfig({ managedRepos: ['cliftonc/drizzle-cube'] } as unknown as LastLightConfig);
+    const result = await routeEvent(labeled());
+    expect(result.action).toBe('ignore');
+  });
+});

@@ -25,18 +25,18 @@ import { StateDb, isTriggerActorType, type TriggerActorType } from "./state/db.j
 import { redactDbUrl } from "lastlight-shared/database-url";
 import { CronScheduler, type WorkflowRunner } from "./cron/scheduler.js";
 import { getJobs } from "./cron/jobs.js";
-import { makeCronRunner } from "./cron/runner.js";
+import { makeCronRunner, type CronDiscoverer } from "./cron/runner.js";
 import { sweepSandboxes } from "./cron/sandbox-sweep.js";
 import { sweepK8sSandboxes } from "./sandbox/k8s/sweep.js";
 import {
   discoverGreenDependencyPrs,
   discoverRedDependencyPrs,
   REQUIRES_HUMAN_LABEL,
-  type DependencyPr,
 } from "./cron/dependabot-discovery.js";
 import { buildCronHandlers } from "./cron/handlers.js";
 import type { KnownBlock } from "@slack/web-api";
 import { discoverPrsAwaitingReview } from "./cron/review-discovery.js";
+import { discoverIssuesReadyForAgent } from "./cron/issue-discovery.js";
 import { mountAdmin } from "./admin/index.js";
 import { cleanupOrphanedSandboxes } from "./sandbox/index.js";
 import { mountSkillBundle } from "./sandbox/k8s/skill-bundle-route.js";
@@ -67,12 +67,16 @@ import {
   type PrState,
 } from "./engine/pr-state.js";
 import { renderContext, type ReviewTriggerOptions } from "./engine/pr-decisions.js";
+import { applyBuildDispatchGate } from "./engine/build-gate.js";
 import {
   REVIEW_WORKFLOW,
   bindQueuedReviewCheck,
   installReviewCheckObserver,
   openAndBindReviewCheck,
 } from "./engine/review-check.js";
+import { installStageObserver } from "./engine/stage-observer.js";
+import { invalidateBoard } from "./admin/board-cache.js";
+import { noteBoardRunChange } from "./admin/board-stream.js";
 import { runDashboardUrl } from "./notify/model.js";
 import { harvestFixMarkers } from "./engine/fix-harvest.js";
 import { harvestReviewTriage } from "./engine/review-triage.js";
@@ -343,6 +347,28 @@ async function main() {
     botMention: `@${config.botName}`,
   });
 
+  // The STAGE LABEL is a projection of run state in exactly the same sense, and
+  // is wired here for exactly the same reason (`src/engine/stage-observer.ts`).
+  // The dispatch gate moves an issue onto `agent-building`; this is the only
+  // thing that ever moves it off, so without it every issue the pipeline picks
+  // up strands there while the run that owns it has long since finished.
+  // The board stream's run-side signal. The GitHub half of a card is cached
+  // and the run half is read live, so a run FINISHING changes what the board
+  // shows without touching the cache — invisible to `boardRevision` alone.
+  // A counter bump satisfies the observer contract (synchronous, never throws,
+  // never re-enters the store) exactly.
+  db.runs.addTerminalObserver(() => noteBoardRunChange());
+
+  installStageObserver(db, {
+    github,
+    // A moved label makes the board's cached copy wrong, and the board is the
+    // surface somebody is watching this happen on. Without this the card shows
+    // its run as FAILED while still sitting in the "building" column until the
+    // TTL lapses — the run read is live, the label read is cached, and the card
+    // disagrees with itself in the meantime.
+    onAdvanced: (repo) => invalidateBoard(repo),
+  });
+
   // Feedback signals recorded while telemetry was off carry no export watermark
   // (issue #255), so enabling OTel later can still put them on the traces they
   // grade instead of starting the backend from zero. Bounded per boot; a no-op
@@ -496,6 +522,68 @@ async function main() {
       const msg = `dispatchWorkflow(${workflowName}): refusing repo-disabled workflow: ${refusal}`;
       log.warn(msg, { workflowName, refusal });
       return { success: false, error: msg };
+    }
+
+    // ── The BUILD dispatch gate (the issue side of the same rule) ──────────
+    //
+    // The ISSUE-side twin of the PR gate below, at the SAME choke point and for
+    // the same reason as the three guards above: webhook, cron, `/api/*` and
+    // resume all funnel through here, so this is the one place that can promise
+    // EVERY dispatch surface crossed the gate. That is the design invariant, not
+    // an implementation detail — the Phase 4 backstop sweep and `/api/run` will
+    // arrive here too and need no gate of their own, which is exactly what stops
+    // three surfaces growing three disagreeing copies of one policy.
+    //
+    // Gated on the context being a STAGE dispatch. `_stage` is what the router
+    // emits beside `_routeKey`; a stage dispatch that somehow carries no stage
+    // name still enters the gate (with an unresolvable name), because the one
+    // thing it must not do is skip the gate and run ungoverned.
+    const stageName = typeof context._stage === "string" ? context._stage : undefined;
+    if (stageName !== undefined || context._routeKey === "github.issue_labeled") {
+      const gate = await applyBuildDispatchGate(
+        {
+          repo: repoStr ?? "",
+          issueNumber: typeof context.issueNumber === "number" ? context.issueNumber : 0,
+          labels: Array.isArray(context.labels) ? (context.labels as string[]) : [],
+          addedLabel: typeof context._addedLabel === "string" ? context._addedLabel : undefined,
+          // The label route is the only surface that exists today. The sweep and
+          // `/api/run` will name themselves here.
+          route: context._triggerType === "api" ? "api" : context._triggerType === "cron" ? "sweep" : "labeled",
+          senderIsBot: context._senderIsBot === true,
+          stage: stageName ?? "",
+        },
+        { db, github },
+      );
+      if (gate.decision === "skip") {
+        // `success: true`, exactly as the PR gate's skip returns: the harness
+        // correctly determined there is nothing to do. Reporting it as an error
+        // would paint a cron tick red and count against a fan-out's `failures`.
+        return { success: true };
+      }
+      // The stage's approval gates, onto the context for the run to union onto
+      // its effective approval map (`workflows/simple.ts`). It rides the context
+      // rather than a parameter because it is a property of THIS dispatch — the
+      // same argument `_explicitRequest` makes below.
+      //
+      // THE AUTONOMY MARK, and it is load-bearing in a way `_stage` is not.
+      // `_stage` says WHICH stage; this says the run reached us through the
+      // autonomous pipeline at all. Both are persisted on the run row, and two
+      // readers key on this one specifically:
+      //
+      //  - `engine/build-gate.ts` counts the autonomous builds in flight for
+      //    `autonomy.budget.maxConcurrentBuilds`, by reading it back off every
+      //    ACTIVE run's stored context. Unstamped, that count is permanently
+      //    zero and the concurrency ceiling never fires — a budget that reads
+      //    as enforced and is not.
+      //  - `workflows/simple.ts` decides whether the stage's `on_merge` policy
+      //    applies, so a human's `@bot build` can never auto-merge.
+      //
+      // Stamped HERE rather than in the gate because the gate returns a
+      // decision and mutates nothing — the same split `_autonomyGates` below
+      // follows, and the reason both ride the context rather than a parameter:
+      // they are properties of THIS dispatch, not of the issue.
+      context._autonomous = true;
+      if (gate.gates) context._autonomyGates = gate.gates;
     }
 
     // ── The PR state machine (09-state-machine.md → S3) ────────────────────
@@ -1300,6 +1388,14 @@ async function main() {
       // The harness client memoizes an Octokit per installation; drop it when
       // the App is uninstalled so a re-install can't be served by a dead one.
       onInstallationRemoved: (installationId) => github?.forgetInstallation(installationId),
+      // A delivery that moved, opened, closed or merged something makes the
+      // board's cached GitHub answer wrong — and the board is the surface
+      // somebody is watching it happen on. This is the hook `invalidateBoard`
+      // was written for and never had: until now the ONLY things that
+      // invalidated were the dashboard's own mutations and a finished run, so a
+      // human labelling an issue on github.com moved nothing for up to the full
+      // TTL. Synchronous by contract, like the hooks around it.
+      onBoardChanged: (repo) => invalidateBoard(repo),
       // Team/org membership changed — forget the affected slice of the
       // dashboard visibility cache (issue #169). Deleting rows is the whole
       // response: the cache is filled on demand per logged-in user, so the next
@@ -1452,14 +1548,11 @@ async function main() {
   // Add a discoverer + a `cron-*.yaml` with the matching `discover:` key to
   // introduce a new sweep. The harness `github` client (App auth) is passed to
   // every discoverer, so a discoverer only needs the subset of it it uses.
-  const PR_DISCOVERERS: Record<
-    string,
-    (
-      repos: string[],
-      gh: GitHubClient,
-      opts: { log?: (msg: string) => void },
-    ) => Promise<DependencyPr[]>
-  > = {
+  // Named CRON_DISCOVERERS, not PR_DISCOVERERS: the autonomy backstop sweep
+  // discovers ISSUES, so the registry is no longer PR-only. `CronDiscoverer` is
+  // the runner's own contract, imported rather than re-spelled here so the two
+  // cannot drift.
+  const CRON_DISCOVERERS: Record<string, CronDiscoverer> = {
     // The green sweep's notion of "green" must match the webhook's: on a repo
     // with no *required* checks, `mergeable_state: "clean"` is true for a PR
     // whose CI is red. `requireSettledChecks` makes it ask the checks too.
@@ -1482,6 +1575,18 @@ async function main() {
     // which the webhook route crosses too.
     "prs-awaiting-review": (repos, gh, opts) =>
       discoverPrsAwaitingReview(repos, gh, { ...opts, botLogin: config.botLogin }),
+    // The autonomy backstop sweep (`workflows/cron-autonomy.yaml`): find the
+    // open issues sitting at a stage's `enter` label and fan out one bounded
+    // single-issue run of the stage's workflow each. It closes the one gap the
+    // label pipeline has — a dropped or undelivered `issues.labeled` webhook
+    // leaves an issue at `ready-for-agent` with nothing ever re-checking.
+    //
+    // A pure CANDIDATE FINDER: open, carries `enter`, does NOT carry `running`.
+    // The allow-list, the hold, already-built, run-in-flight and every budget
+    // are decided once by `resolveBuildTrigger` at the dispatch choke point the
+    // webhook route crosses too — which is also why this sweep cannot become
+    // the re-dispatch spend loop. See `cron/issue-discovery.ts`.
+    "issues-ready-for-agent": (repos, gh, opts) => discoverIssuesReadyForAgent(repos, gh, opts),
   };
 
   // Construct the cron scheduler before mounting admin so the dashboard can
@@ -1492,7 +1597,7 @@ async function main() {
   const cronRunner: WorkflowRunner = makeCronRunner({
     db,
     github,
-    discoverers: PR_DISCOVERERS,
+    discoverers: CRON_DISCOVERERS,
     dispatch: dispatchWorkflow,
   });
   const cron = new CronScheduler(db, cronRunner);

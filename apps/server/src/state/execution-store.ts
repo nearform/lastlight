@@ -855,6 +855,134 @@ export class ExecutionStore {
     return changes(result);
   }
 
+  /**
+   * Why each of `workflowRunIds` failed, in ONE query per 200 ids.
+   *
+   * The board needs a short reason on a FAILED card, and `workflow_runs` has no
+   * error column. Neither of the two obvious alternatives can answer it:
+   *
+   *  - `workflow_runs.context.error` is OVERWRITTEN on the path that matters.
+   *    A guardrails block writes the useful sentence via
+   *    `failWorkflow(rule.message)`, and `simple.ts` then calls `finishRun`
+   *    again with the failing phase's own `error` — the bare literal
+   *    `"BLOCKED"`. (`latestForTriggers` also deliberately does not select
+   *    `context`.)
+   *  - `phase_history` only records a failure on a THROW: `persistPhase`
+   *    hardcodes `success: true`, and a BLOCKED verdict RETURNS a failed
+   *    outcome rather than throwing. It would name the last phase that
+   *    SUCCEEDED, confidently and wrongly.
+   *
+   * This ledger is the one place that keeps both the failing phase and the
+   * sentence, because `markLatestAsFailed` stamps `rule.message` on the exact
+   * row that blocked. Newest failed row per run wins.
+   *
+   * `success` is compared as a BOUND false — see {@link markLatestAsFailed} for
+   * why a literal `= 0` breaks Postgres.
+   */
+  async failureReasonsForRuns(
+    workflowRunIds: string[],
+  ): Promise<Map<string, { phase: string; error: string }>> {
+    const { executions } = this.t;
+    const out = new Map<string, { phase: string; error: string }>();
+    const ids = [...new Set(workflowRunIds.filter((id) => !!id))];
+    if (ids.length === 0) return out;
+
+    const CHUNK = 200;
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const found = await this.client
+        .select({
+          workflowRunId: executions.workflowRunId,
+          skill: executions.skill,
+          error: executions.error,
+        })
+        .from(executions)
+        .where(
+          and(
+            inArray(executions.workflowRunId, ids.slice(i, i + CHUNK)),
+            eq(executions.success, false),
+            isNotNull(executions.error),
+            // ── Artifact rows are not VERDICTS, and must never be shown as
+            // why a run failed. Two writers produce `success: false` rows that
+            // say nothing about the work:
+            //
+            //   `recordSkippedPhase` — "skipped: trigger rule not satisfied",
+            //   a phase that never ran because its `when:` was false. Left in,
+            //   a build killed by something else blames whichever phase was
+            //   skipped last, which is both wrong and very convincing.
+            //
+            //   `markAllStaleForTrigger` — "stale: harness restarted", stamped
+            //   on every in-flight row when the process comes back up. That is
+            //   a fact about the HARNESS, not about this issue.
+            //
+            // The `stop_reason` test is NULL-safe deliberately: a bare
+            // `<> 'skipped'` would drop every genuine failure, because SQL
+            // compares NULL to a literal as NULL rather than as true.
+            sql`(${executions.stopReason} IS NULL OR ${executions.stopReason} <> 'skipped')`,
+            sql`${executions.error} NOT LIKE 'stale:%'`,
+          ),
+        )
+        .orderBy(desc(executions.startedAt));
+
+      // Newest first, so the first row seen for a run is its latest failure.
+      for (const row of found) {
+        const runId = row.workflowRunId;
+        if (!runId || !row.error || out.has(runId)) continue;
+        out.set(runId, { phase: row.skill, error: row.error });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The phase each of `workflowRunIds` is RUNNING right now, in ONE query per
+   * 200 ids.
+   *
+   * The board needs this because `workflow_runs.current_phase` answers a
+   * subtly different question. `persistPhase` — the only writer — is called on
+   * phase COMPLETION (`phase-executor.ts`, after the agent returns and after
+   * the approval gate), and it writes the phase that just finished. `createRun`
+   * seeds the column with `phases[0]`, so the column happens to be right during
+   * the first phase and then lags by exactly one for every phase after it: a
+   * run working on `executor` still reads `architect`.
+   *
+   * Fixing that in the engine would mean writing the column at phase start,
+   * which changes what `handleExistingRun` reads to decide a resume point — a
+   * shared choke point. So the board answers it from the ledger instead, where
+   * an in-flight phase is simply the row that has no `finished_at` yet.
+   *
+   * Newest unfinished row per run wins.
+   */
+  async inFlightPhasesForRuns(workflowRunIds: string[]): Promise<Map<string, string>> {
+    const { executions } = this.t;
+    const out = new Map<string, string>();
+    const ids = [...new Set(workflowRunIds.filter(Boolean))];
+    if (ids.length === 0) return out;
+
+    const CHUNK = 200;
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const found = await this.client
+        .select({
+          workflowRunId: executions.workflowRunId,
+          skill: executions.skill,
+        })
+        .from(executions)
+        .where(
+          and(
+            inArray(executions.workflowRunId, ids.slice(i, i + CHUNK)),
+            isNull(executions.finishedAt),
+          ),
+        )
+        .orderBy(desc(executions.startedAt));
+
+      for (const row of found) {
+        const runId = row.workflowRunId;
+        if (!runId || out.has(runId)) continue;
+        out.set(runId, row.skill);
+      }
+    }
+    return out;
+  }
+
   /** Get recent executions for a skill */
   async recentExecutions(skill: string, limit = 10): Promise<ExecutionRecord[]> {
     const { executions } = this.t;

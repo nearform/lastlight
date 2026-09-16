@@ -169,6 +169,61 @@ export interface RepoActivityItem {
 }
 
 /**
+ * One open issue or pull request as the BOARD reads it (`src/admin/board.ts`).
+ *
+ * Deliberately not {@link RepoActivityItem}: the board is a projection of
+ * LABELS onto columns, so it needs each label's `color` and `description` (a
+ * chip has to render) where the digest needed only names, and it needs nothing
+ * about closure or merges because every item it sees is open.
+ */
+export interface BoardItem {
+  /** Qualified `owner/repo` — the board spans repos, so the bare name is ambiguous. */
+  repo: string;
+  number: number;
+  /** True when this item is a pull request rather than an issue. */
+  isPr: boolean;
+  title: string;
+  url: string;
+  author: string;
+  createdAt: string;
+  updatedAt: string;
+  draft: boolean;
+  labels: Array<{ name: string; color: string; description?: string }>;
+  /**
+   * GitHub's `bodyText` — the markdown already flattened to prose, so an
+   * excerpt reads as a sentence rather than a slice of `<details>` scaffolding.
+   * Same field {@link DigestItemDetail} uses, for the same reason.
+   *
+   * TRUNCATED HERE, not by the reader. A board spans twenty repos at fifty
+   * items each, and a handful of essay-length issue bodies would dominate a
+   * payload whose whole design is a small response served from cache. The card
+   * shows two lines; 280 characters is comfortably more than that.
+   */
+  body: string;
+}
+
+/**
+ * One repo's slice of a {@link GitHubClient.listOpenBoardItems} answer.
+ *
+ * A failed repo is a VALUE here, never a throw: the board renders twenty repos
+ * and one of them 404ing (or the App losing its installation on that owner)
+ * must degrade that column's contents, not the request. The caller reports
+ * `error` as a `degraded` entry and keeps serving the rest.
+ *
+ * `fallback` says the items came from the REST path rather than the GraphQL
+ * search — fewer fields (a label has no colour there) and a bounded window —
+ * so the caller marks the repo degraded even though it has data.
+ * `throttled` says GitHub refused for rate-limit reasons, which is the signal
+ * the board cache backs off on.
+ */
+export interface BoardRepoItems {
+  items: BoardItem[];
+  error?: string;
+  fallback?: boolean;
+  throttled?: boolean;
+}
+
+/**
  * One issue or pull request with its text — the unit
  * {@link GitHubClient.listRepoDigestDetail} lists.
  *
@@ -260,6 +315,55 @@ export interface ChecksQueryOptions {
    * state to a *human* (or to the merge prompt) should show what GitHub shows.
    */
   excludeApp?: string;
+}
+
+/** One `search` node as {@link GitHubClient.listOpenBoardItems} selects it. */
+interface GraphQlBoardNode {
+  __typename?: string;
+  number: number;
+  title?: string;
+  url?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  bodyText?: string | null;
+  isDraft?: boolean;
+  author?: { login?: string } | null;
+  labels?: { nodes?: ({ name: string; color?: string; description?: string | null } | null)[] } | null;
+}
+
+/** How much of an item's body the board carries. Two rendered lines, with room. */
+const BOARD_EXCERPT_CHARS = 280;
+
+/**
+ * One item's body, flattened and clipped to {@link BOARD_EXCERPT_CHARS}.
+ *
+ * Clipped on the SERVER rather than by the card, because the cost being
+ * controlled is the payload: twenty repos x fifty items x an essay-length issue
+ * body is a response whose whole design is "small enough to serve from cache
+ * every twenty seconds". Whitespace is collapsed first so the clip lands on
+ * prose rather than in the middle of a blank line, and a clipped string gets an
+ * ellipsis so the card never has to guess whether it is seeing all of it.
+ */
+export function boardExcerpt(bodyText: string | null | undefined): string {
+  const flat = (bodyText ?? "").replace(/\s+/g, " ").trim();
+  if (flat.length <= BOARD_EXCERPT_CHARS) return flat;
+  return `${flat.slice(0, BOARD_EXCERPT_CHARS).trimEnd()}…`;
+}
+
+/**
+ * Did GitHub refuse this for rate-limit reasons?
+ *
+ * Secondary limits are the hazard the board has to survive, and they do NOT
+ * arrive as a documented point exhaustion: they surface as a 403 or 429 whose
+ * prose names abuse detection or a secondary limit. Both codes and the prose
+ * are checked, because the shape has changed before and a missed throttle costs
+ * the fallback that keeps the board readable.
+ */
+function isThrottleError(err: unknown): boolean {
+  const status = (err as { status?: number })?.status;
+  if (status === 429 || status === 403) return true;
+  const message = err instanceof Error ? err.message : String(err ?? "");
+  return /secondary rate limit|abuse detection|rate limit|too many requests/i.test(message);
 }
 
 /** octokit surfaces HTTP failures as errors carrying the numeric `status`. */
@@ -461,13 +565,17 @@ export class GitHubClient {
   /**
    * Add labels to an issue/PR, leaving existing labels alone.
    *
-   * The only harness-side label WRITE. Every other label mutation in the system
-   * happens INSIDE the sandbox, through agentic-pi's `github_*` tools driven
-   * from a prompt — which is the right place for a label whose value is an
-   * agent's judgement (`dependency-trivial`, the triage vocabulary). This one
-   * is different in kind: the dispatch-time escalation
+   * One of exactly TWO harness-side label WRITEs — {@link removeLabel} is the
+   * other, and it arrived with the software-factory stage pipeline. Every other
+   * label mutation in the system happens INSIDE the sandbox, through
+   * agentic-pi's `github_*` tools driven from a prompt — which is the right
+   * place for a label whose value is an agent's judgement
+   * (`dependency-trivial`, the triage vocabulary). These two are different in
+   * kind, and different for the same reason: both fire at a moment when there
+   * is no sandbox and no agent to ask. The dispatch-time escalation
    * (`../pr-escalation.ts`) fires precisely when we have decided NOT to
-   * provision a sandbox, so there is no agent to ask.
+   * provision a sandbox; the stage advance (`../stage-advance.ts`) fires at the
+   * dispatch choke point itself, BEFORE one has been provisioned.
    *
    * GitHub's own endpoint creates a label that does not exist yet (with an
    * arbitrary colour), so there is no `ensureLabels` companion to write.
@@ -489,6 +597,53 @@ export class GitHubClient {
       issue_number: issueNumber,
       labels,
     });
+  }
+
+  /**
+   * Remove ONE label from an issue/PR, leaving every other label alone.
+   *
+   * The second of the two harness-side label writes (see {@link addLabels}),
+   * and the load-bearing half of the software-factory stage pipeline: the
+   * stage label IS the source of truth for where an issue has got to, and the
+   * ENTRY label (`ready-for-agent`) must come off BEFORE the run it triggered
+   * starts. That ordering is not cosmetic. The backstop cron sweep finds work
+   * by querying `label:ready-for-agent`; if the label is still there while the
+   * run is in flight, the sweep is structurally able to re-pick an issue that
+   * was already dispatched, and re-pick it again on the next tick. This repo
+   * has a recorded production incident of exactly that shape — a cron gated on
+   * a signal the work never wrote, every run reporting `succeeded` while it
+   * burned roughly $1.30/hour. Removing the entry label at dispatch is what
+   * makes the re-pick impossible rather than merely unlikely.
+   *
+   * **A missing label is a 404, and a 404 here is success.** GitHub answers
+   * `404` when the label is not on the issue (and also when the label does not
+   * exist in the repo at all). Either way the desired end state — "this label
+   * is not on this issue" — already holds, so removing an absent label is a
+   * no-op and we swallow that ONE status. Everything else (403 from a
+   * downscoped token, 5xx, a network failure) propagates: a blanket catch here
+   * would turn "we could not take the entry label off" into silence, which is
+   * precisely the re-dispatch loop above.
+   */
+  async removeLabel(
+    owner: string,
+    repo: string,
+    issueNumber: number,
+    label: string,
+  ): Promise<void> {
+    if (!label) return;
+    const kit = await this.kit(owner);
+    try {
+      await kit.rest.issues.removeLabel({
+        owner,
+        repo,
+        issue_number: issueNumber,
+        name: label,
+      });
+    } catch (err) {
+      // The one status that means "already in the desired state".
+      if (httpStatus(err) === 404) return;
+      throw err;
+    }
   }
 
   /**
@@ -939,6 +1094,275 @@ export class GitHubClient {
       headSha: p.head?.sha ?? "",
       createdAt: p.created_at ?? "",
     }));
+  }
+
+  /**
+   * The repo's OPEN ISSUES carrying `label`, as light records (number / title /
+   * labels / created-at).
+   *
+   * The autonomy backstop sweep's one GitHub read (`cron/issue-discovery.ts`):
+   * it asks GitHub to do the filtering — `state: "open"` + `labels:` are both
+   * server-side — so a repo with thousands of issues costs one page, not a walk.
+   * `labels` rides the same response, which is what lets the discoverer exclude
+   * a partially-advanced issue (one carrying the stage's `running` label as well
+   * as its `enter` label) without a second call, and what lets the dispatch gate
+   * read the hold label off the candidate it was handed.
+   *
+   * **A PULL REQUEST IS NEVER RETURNED.** `GET /repos/{o}/{r}/issues` returns
+   * pull requests alongside issues — a PR *is* an issue to this API, and it
+   * carries the same labels — so an unfiltered response would offer PRs to a
+   * pipeline that dispatches `build` runs against an ISSUE number. That would
+   * not fail loudly; it would clone the repo and set an agent to work on a
+   * "feature request" that is somebody's open pull request. `item.pull_request`
+   * is present on exactly those items and absent on real issues, so it is the
+   * discriminator (the same one `listRepoActivitySince` uses to set `isPr`).
+   *
+   * Page-bounded to `maxPages` (3 × 100 = 300 items) for the same reason
+   * `listRepoActivitySince` is: an unbounded paginate here runs per repo on
+   * every tick, which is a rate-limit hazard, and a repo with 300 open issues
+   * sitting at one stage label has a queue problem rather than a paging one.
+   * Oldest first, so the caller's per-repo cap is stable across ticks rather
+   * than starving the same tail.
+   */
+  async listOpenIssuesByLabel(
+    owner: string,
+    repo: string,
+    label: string,
+    opts: { maxPages?: number } = {},
+  ): Promise<Array<{ number: number; title: string; labels: string[]; createdAt: string }>> {
+    const kit = await this.kit(owner);
+    const maxPages = opts.maxPages ?? 3;
+    const items: Array<{ number: number; title: string; labels: string[]; createdAt: string }> = [];
+
+    for (let page = 1; page <= maxPages; page++) {
+      const { data } = await kit.rest.issues.listForRepo({
+        owner,
+        repo,
+        state: "open",
+        labels: label,
+        sort: "created",
+        direction: "asc",
+        per_page: 100,
+        page,
+      });
+      for (const item of data) {
+        // See the header: this endpoint returns PRs as issues, and a pull
+        // request reaching the build pipeline would be badly wrong.
+        if (item.pull_request) continue;
+        items.push({
+          number: item.number,
+          title: item.title ?? "",
+          labels: (item.labels ?? [])
+            .map((l) => (typeof l === "string" ? l : l.name ?? ""))
+            .filter(Boolean),
+          createdAt: item.created_at,
+        });
+      }
+      if (data.length < 100) break;
+    }
+    return items;
+  }
+
+  /**
+   * Every OPEN issue and pull request across `repos`, for the board.
+   *
+   * ## The rate-limit budget is what decides this method's shape
+   *
+   * The obvious implementation — `issues.listForRepo` per repo, per poll — does
+   * not survive contact with the numbers. A dashboard polling at 15 s over 20
+   * repos is ~4,800 requests an hour, and each open tab multiplies it; the
+   * installation's 5,000/hr budget is the SAME budget the harness spends
+   * reviewing pull requests and fixing CI, so a board left open would starve the
+   * work it exists to display. That version must not ship.
+   *
+   * So: ONE GraphQL document per batch of up to ten repos, each an aliased
+   * `search(type: ISSUE, query: "repo:o/r is:open")` block. That is the idiom
+   * {@link listRepoDigestDetail} already uses for its three aliased searches —
+   * aliases ride one request and one rate-limit point between them. Twenty
+   * repos therefore cost TWO requests per refresh, and with the board cache's
+   * 120 s TTL in front (`src/admin/board-cache.ts`) the steady state is ~60
+   * requests an hour **regardless of how many dashboards are open**.
+   *
+   * ## Batched by OWNER, because the token is
+   *
+   * {@link kit} resolves a per-OWNER installation and each installation mints
+   * its own token, so a single document can only span repos of one account.
+   * The caller groups by owner; this method takes the owner explicitly and
+   * treats `repos` as bare names under it.
+   *
+   * ## `search` is subject to SECONDARY limits, which the point budget does not
+   * describe
+   *
+   * GitHub throttles search independently of the documented points, with no
+   * warning in the response headers. A throttle therefore falls back to
+   * {@link listRepoActivitySince} (`maxPages: 1`) per repo and marks the result
+   * `fallback` + `throttled`: the board degrades to a bounded, slightly
+   * lossy view of the repo rather than showing an empty column, and the cache
+   * reads `throttled` as its cue to back off that owner.
+   *
+   * Keyed by the QUALIFIED `owner/repo` so the caller can index one map across
+   * every owner it asked about.
+   */
+  async listOpenBoardItems(
+    owner: string,
+    repos: string[],
+    opts: { first?: number; batchSize?: number } = {},
+  ): Promise<Map<string, BoardRepoItems>> {
+    const out = new Map<string, BoardRepoItems>();
+    const names = [...new Set(repos.filter((r) => !!r))];
+    if (names.length === 0) return out;
+
+    // Search caps a page at 100. 50 is the board's per-repo ceiling: a repo with
+    // more than fifty open items has a queue problem, not a paging one, and the
+    // column would be unreadable either way.
+    const first = Math.min(Math.max(opts.first ?? 50, 1), 100);
+    // Ten aliases per document — enough to make twenty repos two requests,
+    // small enough that one hostile repo's page size can't blow the response.
+    const batchSize = Math.min(Math.max(opts.batchSize ?? 10, 1), 10);
+
+    for (let i = 0; i < names.length; i += batchSize) {
+      const batch = names.slice(i, i + batchSize);
+      try {
+        const results = await this.searchOpenBoardItems(owner, batch, first);
+        for (const [repo, items] of results) out.set(repo, { items });
+      } catch (err: unknown) {
+        const throttled = isThrottleError(err);
+        const message = err instanceof Error ? err.message : String(err);
+        log.warn("board search failed", { owner, repos: batch, throttled, err });
+        // Per-repo REST fallback. Only worth the requests on a throttle: any
+        // other failure (a dead installation, a 5xx) would fail the same way
+        // again, and spending ten more requests to prove it is the opposite of
+        // what a rate-limit hazard wants.
+        for (const repo of batch) {
+          const key = `${owner}/${repo}`;
+          if (!throttled) {
+            out.set(key, { items: [], error: message });
+            continue;
+          }
+          try {
+            out.set(key, {
+              items: await this.restBoardFallback(owner, repo),
+              error: `GitHub search was throttled; showing a bounded REST view (${message})`,
+              fallback: true,
+              throttled: true,
+            });
+          } catch (fallbackErr: unknown) {
+            out.set(key, {
+              items: [],
+              error: fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr),
+              throttled: true,
+            });
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  /** The aliased-search half of {@link listOpenBoardItems}. One request. */
+  private async searchOpenBoardItems(
+    owner: string,
+    repos: string[],
+    first: number,
+  ): Promise<Map<string, BoardItem[]>> {
+    const kit = await this.kit(owner);
+
+    // The document is built from the batch because the alias count varies.
+    // `__typename` is what splits an Issue from a PullRequest — `search` returns
+    // both for `type: ISSUE` and the board colours them differently.
+    const params = repos.map((_, idx) => `$q${idx}: String!`).join(", ");
+    const blocks = repos
+      .map(
+        (_, idx) => `r${idx}: search(query: $q${idx}, type: ISSUE, first: $first) {
+           nodes {
+             __typename
+             ... on Issue {
+               number title url createdAt updatedAt bodyText
+               author { login }
+               labels(first: 10) { nodes { name color description } }
+             }
+             ... on PullRequest {
+               number title url createdAt updatedAt isDraft bodyText
+               author { login }
+               labels(first: 10) { nodes { name color description } }
+             }
+           }
+         }`,
+      )
+      .join("\n         ");
+
+    const variables: Record<string, unknown> = { first };
+    repos.forEach((repo, idx) => {
+      variables[`q${idx}`] = `repo:${owner}/${repo} is:open`;
+    });
+
+    const res = await kit.graphql<Record<string, { nodes: (GraphQlBoardNode | null)[] } | null>>(
+      `query(${params}, $first: Int!) {
+         ${blocks}
+       }`,
+      variables,
+    );
+
+    const out = new Map<string, BoardItem[]>();
+    repos.forEach((repo, idx) => {
+      const nodes = res[`r${idx}`]?.nodes ?? [];
+      out.set(
+        `${owner}/${repo}`,
+        nodes
+          .filter((n): n is GraphQlBoardNode => !!n && typeof n.number === "number")
+          .map((n) => ({
+            repo: `${owner}/${repo}`,
+            number: n.number,
+            isPr: n.__typename === "PullRequest",
+            title: n.title ?? "",
+            url: n.url ?? "",
+            author: n.author?.login ?? "",
+            createdAt: n.createdAt ?? "",
+            updatedAt: n.updatedAt ?? n.createdAt ?? "",
+            body: boardExcerpt(n.bodyText),
+            draft: !!n.isDraft,
+            labels: (n.labels?.nodes ?? [])
+              .filter((l): l is NonNullable<typeof l> => !!l?.name)
+              .map((l) => ({
+                name: l.name,
+                color: l.color ?? "",
+                description: l.description ?? undefined,
+              })),
+          })),
+      );
+    });
+    return out;
+  }
+
+  /**
+   * The REST fallback for ONE repo when search is throttled.
+   *
+   * Bounded to a single page and to items still open. It is lossy on purpose:
+   * `listRepoActivitySince` filters on `updated_at`, so an open issue nobody has
+   * touched in the window is missing, and its labels carry no colour. A board
+   * that says so (`degraded`) beats a board that shows an empty column.
+   */
+  private async restBoardFallback(owner: string, repo: string): Promise<BoardItem[]> {
+    const since = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+    const items = await this.listRepoActivitySince(owner, repo, since, { maxPages: 1 });
+    return items
+      .filter((item) => !item.closedAt)
+      .map((item) => ({
+        repo: `${owner}/${repo}`,
+        number: item.number,
+        isPr: item.isPr,
+        title: item.title,
+        url: item.htmlUrl,
+        author: item.authorLogin,
+        createdAt: item.createdAt,
+        updatedAt: item.createdAt,
+        draft: item.draft,
+        labels: item.labels.map((name) => ({ name, color: "" })),
+        // The REST list carries a `body`, but this path exists because GitHub
+        // just throttled us — it is the degraded answer, and the card renders
+        // without an excerpt rather than paying more requests for one.
+        body: "",
+      }));
   }
 
   /**

@@ -30,7 +30,24 @@ Use the MCP tool github_create_pull_request with the following:
 
 Note: There are unresolved reviewer issues after {{review.cycles}} fix cycles. See reviewer-verdict.md on the branch.{{/if}}
 
-Do NOT post a comment with the PR link — the harness adds it to the status
+{{#if autonomyMerge.auto}}AUTO-MERGE: this build ran as an autonomous pipeline stage
+configured with `on_merge: auto`, so after the PR exists call
+`github_enable_auto_merge` for it (owner `{{owner}}`, repo `{{repo}}`, the PR you
+just created).
+
+Enabling auto-merge is NOT merging. It hands the decision to GitHub, which lands
+the PR only once CI and branch protection are satisfied — so the repo's own
+rules still gate it, and a red build simply never merges. Do NOT call
+`github_merge_pull_request` under this policy, and do NOT merge by any other
+means: merging directly is the one action this policy does not authorise,
+because it bypasses the checks that make the automatic landing safe.
+
+If auto-merge cannot be enabled — the repository has the feature disabled, or
+branch protection refuses it — then STOP. Say so plainly in the PR body (one
+line, naming the error GitHub returned) and leave the PR open for a human to
+land. Do not retry it as a direct merge.
+
+{{/if}}Do NOT post a comment with the PR link — the harness adds it to the status
 checklist on the issue automatically. Just create the PR.
 
 Update status.md: current_phase = complete, add pr_number.

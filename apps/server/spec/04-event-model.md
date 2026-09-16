@@ -69,6 +69,10 @@ export type EventType =
   | "issue.opened"
   | "issue.reopened"
   | "issue.closed"
+  | "issue.labeled"      // a label was added to an ISSUE; carries `addedLabel`.
+                         // The software-factory pipeline's entry event — the
+                         // router keeps it only when the label is a configured
+                         // `autonomy.stages.*.enter`
   | "pr.opened"
   | "pr.synchronize"      // new commits pushed to a PR
   | "pr.reopened"
@@ -107,12 +111,24 @@ The order of events through the system:
 2. Connector runs auth (HMAC, allowlist, etc.).
 3. Connector decides whether the payload should produce an envelope at
    all. Many GitHub actions (`edited`, `unlabeled`, `assigned`, …) drop
-   here. `labeled` no longer does — `review.requestLabel` is the real
-   `on-request` review mechanism, since a GitHub App bot user cannot be
-   picked in the reviewer dropdown — but a label on an *issue* still falls
-   out with a null type, and the router hard-ignores every PR label that is
-   not the configured one, so the widening costs a `normalize()` call
-   rather than a dispatch. See [Integrations](/spec/03-integrations).
+   here. `labeled` no longer does, on either subject: on a PR because
+   `review.requestLabel` is the real `on-request` review mechanism (a GitHub
+   App bot user cannot be picked in the reviewer dropdown), and on an issue
+   because a stage label is how the software-factory pipeline starts. The
+   router hard-ignores every label that is not the configured one — the
+   repo's or operator's `review.requestLabel` for a PR, a configured
+   `autonomy.stages.*.enter` for an issue — so both widenings cost a
+   `normalize()` call rather than a dispatch. See
+   [Integrations](/spec/03-integrations).
+
+   **`unlabeled` stays ignored, and that is a decision rather than an
+   omission.** Removing a label is never an instruction to do work: the
+   pipeline's own advance takes the entry label *off* at dispatch, so an
+   `unlabeled` route would make every advance produce an event about
+   itself, and the triage/hold vocabulary is read as a live precondition on
+   the next event rather than as a transition. The one removal that *does*
+   mean something — taking `requires-human` off an escalated PR — is read
+   at dispatch, off the PR's current labels, not from an event.
 4. Connector constructs the envelope and emits `event`.
 5. `ConnectorRegistry` forwards it to the central handler in the
    harness.
@@ -131,13 +147,13 @@ the workflow context where dispatched code may pull fields from it.
 | `prNumber` | PR events + PR comments only | never |
 | `headSha` | `pr.checks_passed` / `pr.checks_failed` / `pr.checks_settled` (the settled suite's head SHA) | never |
 | `isDependencyPr` | `pr.checks_passed` (always `true`) / `pr.checks_failed` (`true` for a bump, `false` for a PR the bot pushed to) / `pr.checks_settled` | never |
-| `addedLabel` | `pr.labeled` only — the label just added, matched against `review.requestLabel` | never |
+| `addedLabel` | `pr.labeled` and `issue.labeled` — the label just added. On a PR it is matched against `review.requestLabel`; on an issue against the configured `autonomy.stages.*.enter` labels | never |
 | `requestedReviewer` | `pr.review_requested` only — a login, or `team/<slug>` for a team request; set to our own `botLogin` when the request arrived as a Re-run on the `last-light/review` check | never |
 | `title` | issues + PRs (+ comments via parent) | never |
 | `issueAuthor` | issues + PRs + comments (parent author) | never |
 | `labels` | issues + PRs (snapshot at event time) | never |
 | `authorAssociation` | always (see below) | never |
-| `senderIsBot` | always `false` (bot self-events are filtered at the connector) | always `false` |
+| `senderIsBot` | `false` for every event except `issue.labeled`, where it is the real answer and is **read** (see the invariant below) | always `false` |
 | `raw.sessionId` / `channelId` / `threadId` | n/a | always (Slack — session routing) |
 
 For Slack, channel id, thread id, and platform user id live in
@@ -219,10 +235,16 @@ never inspects `raw` — all routing decisions use top-level fields.
 - **`labels` is a snapshot, not a delta.** If a label is added after the
   event, the original envelope still reflects the old set. This is
   intentional — events are immutable.
-- **`senderIsBot: true` does not exist in practice.** Both connectors
-  filter bot events upstream (or set the field `false` because there is
-  no bot path that produces an envelope). Code that branches on
-  `senderIsBot === true` is dead.
+- **`senderIsBot: true` reaches the router on exactly one event type.**
+  The connector's bot-sender filter drops bot-sent deliveries, with a
+  deliberate narrow hole for `issues.labeled` — our own `issue-triage`
+  applies `ready-for-agent` *as the bot*, and that chain has to fire. So on
+  `issue.labeled` the field carries the real answer and is **load-bearing**:
+  the build dispatch gate reads it for the already-built asymmetry (a bot
+  re-applying the entry label is a hard skip; a human re-applying it is an
+  explicit retry). On every other type it is still `false`, and code
+  branching on `senderIsBot === true` elsewhere is still dead. See
+  [Router](/spec/05-router) and [Integrations](/spec/03-integrations).
 - **`type === "message"` is the only chat-platform type.** No Slack-
   specific subtypes (`message.app_mention`, `message.dm`). Disambiguation
   inside chat happens via fields in `raw` and by the router examining
@@ -238,7 +260,16 @@ never inspects `raw` — all routing decisions use top-level fields.
   through would mean widening the closed `EventType` union, teaching the
   batcher to skip it, and teaching the classifier to ignore it, for no
   dispatch. It goes through a direct connector callback instead
-  (`onReactionAction`), the same shape as the approval-button hook.
+  (`onReactionAction`), the same shape as the approval-button hook. The board's
+  cache invalidation (`onBoardChanged`) is the second instance of that pattern
+  and the clearer one: it fires on `issues` / `pull_request` deliveries the
+  envelope pipeline never sees — `closed`, `unlabeled` and `deleted` all sit in
+  `IGNORED_ACTIONS` — and it asks for no dispatch at all, only a cache delete.
+  Routing it as an event would have meant emitting `issue.closed` / `pr.merged`,
+  which are **declared in the union but which nothing emits**, purely so a
+  consumer could forget a cached answer. Unlike the other two callbacks it does
+  not consume the delivery: the event still normalizes and dispatches
+  underneath it.
 - **Fields look optional but aren't, for some events.** A workflow that
   expects `repo` should refuse to run if `envelope.repo` is missing.
   The schema is permissive; the consumers' contracts are not.

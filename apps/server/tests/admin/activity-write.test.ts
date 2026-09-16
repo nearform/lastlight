@@ -232,6 +232,8 @@ describe("activity log — the write side", () => {
       "DELETE /crons/:name/override",
       "POST /crons/:name/trigger",
       "POST /prs/:owner/:repo/:number/retry",
+      "POST /issues/:owner/:repo/:number/dispatch",
+      "POST /issues/:owner/:repo/:number/stage",
     ]);
 
     /** Deliberately unlogged, with the reason. */

@@ -28,6 +28,11 @@ const ReposPage = lazy(() =>
 const RouterPlayground = lazy(() =>
   import("./components/RouterPlayground").then((m) => ({ default: m.RouterPlayground })),
 );
+// Lazy for consistency with the other heavy tabs — the board pulls its own
+// column/card tree and is not on the initial path for most sessions.
+const BoardPage = lazy(() =>
+  import("./components/BoardPage").then((m) => ({ default: m.BoardPage })),
+);
 import { FeedbackPage } from "./components/FeedbackPage";
 import { ActivityPage } from "./components/ActivityPage";
 // Lucide, not Heroicons: the header and toolbars were already Lucide, and the
@@ -41,6 +46,7 @@ import {
   Clock,
   Settings,
   LayoutGrid,
+  Columns3,
   Folder,
   Terminal,
   Share2,
@@ -58,11 +64,11 @@ import {
 } from "./hooks/useUrlState";
 
 type AuthState = "checking" | "required" | "ok";
-type Tab = "home" | "sessions" | "chat-sessions" | "workflows" | "runs" | "repos" | "crons" | "feedback" | "logs" | "config" | "router-playground" | "activity";
+type Tab = "home" | "board" | "sessions" | "chat-sessions" | "workflows" | "runs" | "repos" | "crons" | "feedback" | "logs" | "config" | "router-playground" | "activity";
 
 const PAGE_SIZE = 50;
 
-const TABS = ["home", "workflows", "runs", "sessions", "chat-sessions", "repos", "crons", "feedback", "activity", "logs", "config", "router-playground"] as const;
+const TABS = ["home", "board", "workflows", "runs", "sessions", "chat-sessions", "repos", "crons", "feedback", "activity", "logs", "config", "router-playground"] as const;
 
 const SESSION_SOURCE_PATHS: Record<"sessions" | "chat-sessions", string> = {
   sessions: "/admin/api/sessions",
@@ -303,6 +309,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           {(
             [
               { id: "home", label: "Home", Icon: Home },
+              { id: "board", label: "Board", Icon: Columns3 },
               { id: "workflows", label: "Workflows", Icon: LayoutGrid },
               { id: "runs", label: "Workflow Runs", Icon: PlayCircle },
               { id: "sessions", label: "Sandbox Sessions", Icon: Box },
@@ -359,6 +366,10 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             setTab("runs");
           }}
         />
+      ) : tab === "board" ? (
+        <Suspense fallback={<div className="p-6 text-sm text-muted">Loading…</div>}>
+          <BoardPage />
+        </Suspense>
       ) : tab === "sessions" || tab === "chat-sessions" ? (
         <div className="flex flex-col flex-1 overflow-hidden">
           <SessionFilters

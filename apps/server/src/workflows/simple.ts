@@ -8,11 +8,13 @@ import {
   defaultFixConfig,
   defaultReviewConfig,
   effectiveGate,
+  getAutonomyConfig,
   getBotName,
   getGateConfig,
   getRuntimeConfig,
   getSandboxTimeouts,
   withReviewDurations,
+  type AutonomyStageConfig,
   type DependenciesConfig,
   type FixConfig,
   type GateConfig,
@@ -853,6 +855,94 @@ export function artifactIssueDir(
  * Read a numeric leaf off the untyped dispatch `extra`. Anything else — absent,
  * a string, a stale shape — reads as "no snapshot", which is the inert case.
  */
+/**
+ * The `true` leaves of an autonomy stage's gate map, off the untyped dispatch
+ * `extra`. Anything else — absent, a non-object, a non-boolean leaf, or an
+ * explicit `false` — yields nothing for that key.
+ *
+ * `false` is dropped rather than carried because the union this feeds is
+ * ADD-ONLY: a `false` spread over an operator's `true` would clear a gate the
+ * operator asked for, and dropping it lets the base map answer instead. See the
+ * union in `runWorkflow`.
+ */
+function enabledGatesFrom(raw: unknown): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (value === true) out[name] = true;
+  }
+  return out;
+}
+
+/** The merge policy a stage can ask for; anything else reads as `none`. */
+type AutonomyMerge = AutonomyStageConfig["on_merge"];
+
+/** The shape `{{autonomyMerge.*}}` renders from. See {@link resolveAutonomyMerge}. */
+export interface AutonomyMergeContext {
+  /** What the operator wrote for this stage — recorded even when it is not acted on. */
+  configured: AutonomyMerge;
+  /** What this run may actually act on: `auto`, or `none` for everything else. */
+  effective: AutonomyMerge;
+  /** `effective === "auto"`, as a boolean the prompt's `{{#if}}` arm can test. */
+  auto: boolean;
+}
+
+/** The inert answer: park the PR, say nothing about merging. */
+const NO_AUTONOMY_MERGE: AutonomyMergeContext = {
+  configured: "none",
+  effective: "none",
+  auto: false,
+};
+
+function isAutonomyMerge(raw: unknown): raw is AutonomyMerge {
+  return raw === "none" || raw === "auto" || raw === "auto-low-impact";
+}
+
+/**
+ * The stage's merge policy (`autonomy.stages.<stage>.on_merge`), projected onto
+ * the run's template context so `prompts/pr.md` can render the one instruction
+ * that acts on it.
+ *
+ * THREE facts travel, not one, because the template engine's `{{#if}}` is a
+ * truthiness test with no equality operator (`core/templates.ts`): a bare
+ * string could not express "only when this is exactly `auto`". So `auto` is the
+ * boolean the prompt's arm tests, `effective` is what the run may act on, and
+ * `configured` is what the operator actually wrote.
+ *
+ * AUTONOMOUS RUNS ONLY — and this is the invariant the whole projection exists
+ * to hold. A human's `@bot build` carries no stage, so it projects `none`
+ * however `on_merge` is configured: the operator opted a PIPELINE into
+ * auto-merge, not every build anyone can ask for on that repo. Read the dispatch
+ * markers defensively (they arrive through the untyped `extra`, exactly as
+ * `_autonomyGates` does) and treat anything unrecognised as not-autonomous —
+ * every unknown here has to fail toward "a human merges it".
+ *
+ * `auto-low-impact` is ACCEPTED, RECORDED, and behaves exactly as `none`. There
+ * is no impact signal for a feature PR today — `dependencies.autoMergeMaxImpact`
+ * scores dependency bumps and nothing else — and the honest response to a
+ * missing signal is the conservative branch, not a fabricated score. It is kept
+ * on `configured` rather than collapsed away so the run row still records the
+ * policy the operator asked for, and so the day a real signal exists there is
+ * one obvious place to start honouring it.
+ */
+export function resolveAutonomyMerge(
+  extra: Record<string, unknown> | undefined,
+  stages: Record<string, AutonomyStageConfig>,
+): AutonomyMergeContext {
+  const stage = extra?._stage;
+  const stageName = typeof stage === "string" && stage.trim() !== "" ? stage : undefined;
+  // Either marker answers: `_stage` is what the router stamps today, and
+  // `_autonomous` is the flag the dispatch gate sets beside it. Neither present
+  // ⇒ a human asked for this build.
+  const autonomous = extra?._autonomous === true || stageName !== undefined;
+  if (!autonomous) return NO_AUTONOMY_MERGE;
+
+  const raw = stageName === undefined ? undefined : stages[stageName]?.on_merge;
+  const configured: AutonomyMerge = isAutonomyMerge(raw) ? raw : "none";
+  const effective: AutonomyMerge = configured === "auto" ? "auto" : "none";
+  return { configured, effective, auto: effective === "auto" };
+}
+
 function numberFromExtra(
   extra: Record<string, unknown> | undefined,
   key: string,
@@ -1052,7 +1142,43 @@ export async function runSimpleWorkflow(
   // caller's own maps by identity, so behaviour is unchanged.
   const repoConfig = request.repoConfig;
   const effectiveVariants = repoConfig?.variants ?? variants;
-  const effectiveApproval = repoConfig?.approval ?? approvalConfig;
+  // The autonomy stage's approval gates, stashed on the dispatch context by the
+  // build gate (`engine/build-gate.ts`) and read back through the untyped
+  // `extra` — hence defensively, and hence `true` leaves ONLY.
+  //
+  // Why that filter is the whole safety argument: the union is
+  // **positive-enable only**. `gateEnabled` (runner.ts) tests `=== true`, so a
+  // `true` leaf can RAISE a gate the operator left off — but a `false` leaf
+  // spread over an operator's `true` would CLEAR it, which is precisely the
+  // thing the add-only rule forbids. Dropping the `false` IS the clamp: the base
+  // map underneath carries the operator's value, so the leaf resolves straight
+  // back to it — the same shape the repo layer's policy blocks already use.
+  //
+  // The effect is that an autonomous build pauses at `post_architect` while an
+  // `@bot build` on the same repo does not: same workflow, same repo, different
+  // dispatch, and only the autonomous one carries the stage's gates.
+  const autonomyGates = enabledGatesFrom(request.extra?._autonomyGates);
+  // The same stage, its OTHER projection: what becomes of the PR this build
+  // opens. Read from the operator's config (the gate hands back gates, not a
+  // merge policy) and keyed on the same dispatch markers, so an `@bot build`
+  // and an autonomous build of the same issue differ here too.
+  const autonomyMerge = resolveAutonomyMerge(request.extra, getAutonomyConfig().stages);
+  if (autonomyMerge.configured !== autonomyMerge.effective) {
+    // The one case where the two disagree. Logged rather than silently
+    // downgraded: an operator who asked for `auto-low-impact` and got a parked
+    // PR is owed the reason, and it is not a misconfiguration to warn about.
+    simpleLog.info("Autonomy merge policy not actionable — parking the PR for a human", {
+      workflowName,
+      configured: autonomyMerge.configured,
+      effective: autonomyMerge.effective,
+      reason: "no impact signal exists for a feature PR yet",
+    });
+  }
+  const baseApproval = repoConfig?.approval ?? approvalConfig;
+  // No gates ⇒ the caller's own map by identity, exactly as the maps above —
+  // so a run that crossed no stage behaves as it did before the gate existed.
+  const effectiveApproval =
+    Object.keys(autonomyGates).length > 0 ? { ...baseApproval, ...autonomyGates } : baseApproval;
   // The policy blocks have no caller-supplied counterpart (they aren't runner
   // parameters — `runWorkflow.length` is frozen at 9), so the un-overridden case
   // reads the operator's boot config directly. `review` gets no substitution
@@ -1389,6 +1515,12 @@ export async function runSimpleWorkflow(
     // `RunRepoConfig.review` / the runtime config.
     fix: effectiveFix as unknown as Record<string, unknown>,
     dependencies: effectiveDependencies as unknown as Record<string, unknown>,
+    // The autonomy stage's merge policy for THIS dispatch — `{{#if
+    // autonomyMerge.auto}}` in `prompts/pr.md` is the only reader. `none` for
+    // every human-triggered build, whatever the stage says; see
+    // `resolveAutonomyMerge`. No phase emits an `autonomyMerge` `output_var`,
+    // so this shadows nothing (the trap that keeps `review` off this context).
+    autonomyMerge: autonomyMerge as unknown as Record<string, unknown>,
     // Issue #385 — every timeout a phase reads comes from here, never a YAML or
     // code literal: `timeout_seconds: { from: gate.timeoutSeconds }`, the prompt's
     // `{{gate.timeoutSeconds}}`, and the engine's `until_bash` fallback

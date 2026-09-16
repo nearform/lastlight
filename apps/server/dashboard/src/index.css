@@ -491,6 +491,24 @@ body {
   background-color: #ffffff;
 }
 
+/* Board column trough — the surface CARDS sit on, and deliberately not a
+   Tailwind token, because the two themes run their ramps in opposite
+   directions (see the note by the base-100/200/300 definitions above). A card
+   is `.ll-surface`: `base-200` (#161b22) in dark, hardcoded #ffffff in light.
+   So there is no single `bg-*` that sits BEHIND a card in both — `bg-base-200`
+   is the card's own colour in dark, and `bg-base-100` is the card's own colour
+   in light. The column had `bg-base-200/40`, which in dark is a 40% wash of the
+   card's exact colour: card and trough within a couple of points of each other,
+   separated only by a hairline, which is why the cards did not read as cards.
+   One step BELOW the card in each theme, which is the only thing that
+   generalises. */
+.ll-board-column {
+  background-color: var(--color-base-100);
+}
+[data-theme="neaform"] .ll-board-column {
+  background-color: #eceff3;
+}
+
 /* Scrollbars */
 ::-webkit-scrollbar {
   width: 10px;
