@@ -70,6 +70,8 @@ interface LastLightConfig {
   publicUrl?: string;
   reviewPostsCheck: boolean;              // `review.postsCheck`, flattened — predates the block below
   review: ReviewConfig;                   // when pr-review runs, + the draft/label rules
+  autonomy: AutonomyConfig;               // the label-driven software-factory pipeline; OPERATOR-ONLY,
+                                          // and inert until `autonomy.repos` names a repo
   fix: FixConfig;                         // retry budgets for the PR_FIX_SHAPED workflows
   dependencies: DependenciesConfig;       // major-bump auto-merge policy
   concurrency: {                          // global sandbox-run concurrency cap
@@ -176,6 +178,31 @@ interface ReviewAnalysisConfig {          // docs/plans/deterministic-pr-levers.
   thresholds: Record<string, number>;     // confidence bar PER obligation family
   internalFloor: number;                  // below this a finding is recorded, not posted
   maxBodyComments: number | null;         // cap on the review BODY — the one budget that DOES filter; null = unlimited (legacy)
+}
+
+interface AutonomyConfig {                // the software-factory pipeline; operator-only
+  repos: string[];                        // EXACT "owner/repo" names, no globs; [] = inert
+  stages: Record<string, AutonomyStageConfig>;   // the shipped set has one stage: `build`
+  budget: AutonomyBudgetConfig;           // ENFORCED at the dispatch gate, before a run starts
+}
+
+interface AutonomyStageConfig {
+  enter: string;                          // the label that STARTS the stage ("ready-for-agent").
+                                          // A stage with no `enter` is dropped at load — it could never fire
+  running: string;                        // what the label becomes AT DISPATCH ("agent-building")
+  on_success: string;                     // terminal label ("ready-for-human"), written by the terminal-run observer
+  on_failure: string;                     // terminal label ("agent-blocked"), on a failed OR cancelled run
+                                          // — and on a budget-exhausted refusal, as the comment's dedup key
+  workflow: string;                       // the workflow this stage dispatches ("build")
+  gates: Record<string, boolean>;         // HITL approval gates, unioned ADD-ONLY onto the run's map
+  on_merge: "none" | "auto" | "auto-low-impact";  // "auto-low-impact" is NOT IMPLEMENTED — behaves as "none"
+}
+
+interface AutonomyBudgetConfig {          // three branches of the build dispatch gate; a configured 0 refuses everything
+  maxConcurrentBuilds: number;            // across every repo, at any instant (2)
+  maxBuildsPerRepoPerDay: number;         // per repo, rolling day (3)
+  dailyUsd: number;                       // deployment-wide model spend per day (25)
+  repoDailyUsd: number;                   // one repo's share of it (10)
 }
 
 interface FixConfig {                     // budgets for every PR_FIX_SHAPED workflow
@@ -382,6 +409,24 @@ An add-only key given `false` is dropped as `policy-downgrade` when the operator
 actually had the stricter value, and as `invalid-value` when it didn't — the key
 is add-only either way, but only the first case is a repo *losing* an argument
 with its operator.
+
+**`autonomy` is not in this table, and that is the point.** It is operator-only in the strongest sense — there is no repo-settable autonomy leaf, no clamp direction, and `repoConfig.allowKeys` must **not** gain one. Entering a stage is a spend decision on the operator's budget against the operator's agent, exactly the reasoning `review.analysis` gets above, and a repo that could add itself to `autonomy.repos` could spend the operator's money by committing a file. The affordances a repo already owns are how it opts *out*: an explicit `disabled.workflows: [build]` in its `.lastlight/lastlight.yml` turns the pipeline off for the whole repo, and the hold label turns it off for one issue. That is also why the `issue.labeled` router branch consults no repo layer at all, unlike its `pr.labeled` sibling — see [Router](/spec/05-router).
+
+**The four stage labels are also the board's columns.** The dashboard's Board tab derives one column per stage label, in the `enter` / `running` / `on_success` / `on_failure` order declared above, with each heading derived from the label itself — so renaming a label renames the column instead of leaving a stale heading, and nothing in the UI branches on a stage id. A deployment with no `stages` configured gets `configured: false`, no columns and **no GitHub reads at all**: the tab costs nothing until somebody opts in. The board both shows where an issue has got to and MOVES it: dragging a card writes the stage label, and a drop on the `enter` or `running` column also crosses the build dispatch gate as the logged-in human, so the two columns that mean "work on this" start a build while the two terminal ones do not. See [Integrations](/spec/03-integrations#the-pipeline-board).
+
+`autonomy.budget` is **enforced**, at the dispatch gate, before any run starts — never mid-flight. Each of the four numbers is one branch of that gate: `maxConcurrentBuilds` counts autonomous runs of the stage's workflow in flight across every repo at this instant, `maxBuildsPerRepoPerDay` counts runs *started* for this repo today in **every** status (a failed build still spent the repo's allowance), and `dailyUsd` / `repoDailyUsd` are read from the execution ledger's spend for today. All three day-scoped readings are measured from one resolved midnight-UTC boundary — the same bucket `dayBucket()` uses — so the numbers agree with the dashboard's stats page. Comparisons are `>=`, so a configured `0` means "refuse everything" and is the lever for stopping the pipeline dead without un-configuring it; normalisation keeps a `0` as a real setting and only falls back to the packaged default for a negative or non-numeric value. Every refusal is recorded rather than silent, proportionately to how terminal it is — see [Router](/spec/05-router#the-build-dispatch-gate).
+
+**`on_merge` decides what becomes of the pull request the stage opens**, and only one of its three values does anything today:
+
+| Value | Behaviour |
+|---|---|
+| `none` (the shipped default) | The PR parks at `on_success` and a human merges it. Nothing is said to the agent about merging |
+| `auto` | The build agent enables GitHub **auto-merge** on the PR it just opened, using the `github_enable_auto_merge` tool already in the `repo-write` profile. This is not merging: GitHub lands the PR only once CI and branch protection are satisfied, so the repository's own rules still gate the irreversible action, and a red build simply never merges. The prompt forbids `github_merge_pull_request` and any other direct merge under this policy, and tells the agent to stop and say so in the PR body if auto-merge cannot be enabled at all |
+| `auto-low-impact` | **Not implemented.** It is accepted, recorded, and behaves exactly as `none`. There is no impact signal for a *feature* PR today — `dependencies.autoMergeMaxImpact` scores dependency bumps and nothing else — and the honest response to a missing signal is the conservative branch rather than a fabricated score. The value is kept on the run's `configured` field so the row still records what the operator asked for, and the downgrade is logged once per run where `configured` and `effective` disagree |
+
+The policy is projected into the run's template context as an **object**, not a string: `{ configured, effective, auto }`. That is forced by the template engine — `{{#if}}` is a truthiness test with no equality operator, so a bare string would make `{{#if autonomyMerge}}` true for `"none"` as well, and the prompt's arm tests the explicit `auto` boolean instead. And the whole projection is **autonomous-dispatch only**: a human's `@last-light build` carries no stage, so it projects `none` however `on_merge` is configured. The operator opted a *pipeline* into auto-merge, not every build anyone can ask for on that repository — and every unrecognised dispatch marker fails toward "a human merges it".
+
+The block **ships inert**, and it is worth being precise about which key makes it so, because the obvious answer is wrong. The packaged `stages` block *does* define `enter: ready-for-agent`, so `stageForLabel()` matches out of the box on a default install; what stops anything happening is `autonomy.repos: []` failing the allow-list check, in the router and again at the dispatch gate. Nothing else is holding it back. Normalisation is lenient in the inert direction throughout — the router calls `getAutonomyConfig()` on every `issue.labeled` event, so it must answer before boot and must never throw, and every fallback (a non-array `repos`, a garbage stage map, a non-numeric budget) degrades to a value that enables less rather than more. An `on_merge` value that is not one of the three legal strings is coerced to `none`, since `none` is the only value that costs nothing.
 
 The four operator-only leaves are reported as `key-not-allowed`, the same code
 an operator narrowing `allowKeys` produces, because from the repo's side it is

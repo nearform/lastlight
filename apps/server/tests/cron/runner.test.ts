@@ -431,3 +431,131 @@ describe("the removed Discovered PRs line", () => {
     expect("discoverKey" in row).toBe(false);
   });
 });
+
+describe("makeCronRunner — the discoverer contract, widened for issue candidates", () => {
+  /**
+   * The autonomy backstop sweep discovers ISSUES, not PRs, and it shares this
+   * fan-out path with the three live PR discovery crons. So these tests come in
+   * pairs: what the issue path must produce, and — the riskier half — that the
+   * PR path still produces exactly what it did before.
+   */
+  const fire = async (discoverer: CronDiscoverer, cron: string, workflow: string) => {
+    const dispatch = vi.fn(async () => ({ success: true }));
+    const runner = makeCronRunner({
+      db,
+      github: fakeGh,
+      discoverers: { d: discoverer },
+      dispatch,
+      resolveRepos: allParticipate,
+    });
+    await runner(workflow, { discover: "d", repos: ["o/a"], _cronName: cron });
+    return dispatch;
+  };
+
+  it("dispatches an issue candidate with issueNumber and no prNumber", async () => {
+    const dispatch = await fire(
+      async () => [
+        {
+          repo: "o/a",
+          issueNumber: 42,
+          title: "Add X",
+          labels: ["ready-for-agent"],
+          stage: "build",
+        },
+      ],
+      "pick-up-ready-issues",
+      "build",
+    );
+
+    const [workflow, context] = dispatch.mock.calls[0] as unknown as [string, Record<string, unknown>];
+    expect(workflow).toBe("build");
+    expect(context.issueNumber).toBe(42);
+    expect("prNumber" in context).toBe(false);
+    // What the BUILD dispatch gate reads: the stage names the workflow, the
+    // labels and the gates (it fails closed without one), and `labels` is what
+    // its hold check reads.
+    expect(context._stage).toBe("build");
+    expect(context.labels).toEqual(["ready-for-agent"]);
+    expect(context._triggerType).toBe("cron");
+  });
+
+  it("stamps _senderIsBot false on a sweep — there is no sender", async () => {
+    // The gate's `already-built` branch is asymmetric on this flag: a BOT
+    // sender is a hard skip (the harness's own label write echoing back), a
+    // HUMAN sender is an explicit retry. A sweep is neither — nobody applied a
+    // label; the cron noticed one that was already there — so it must not be
+    // read as a bot re-labelling.
+    const dispatch = await fire(
+      async () => [{ repo: "o/a", issueNumber: 7, title: "x", labels: [], stage: "build" }],
+      "c-sweep-sender",
+      "build",
+    );
+    const [, context] = dispatch.mock.calls[0] as unknown as [string, Record<string, unknown>];
+    expect(context._senderIsBot).toBe(false);
+  });
+
+  it("leaves the PR path byte-for-byte unchanged — the red sweep", async () => {
+    const dispatch = await fire(
+      async () => [{ repo: "o/a", prNumber: 5, title: "bump x", branch: "dependabot/x", reason: "behind" as const }],
+      "c-red",
+      "dependabot-ci-fix",
+    );
+    const [, context] = dispatch.mock.calls[0] as unknown as [string, Record<string, unknown>];
+    expect(context).toEqual({
+      _triggerType: "cron",
+      repo: "o/a",
+      prNumber: 5,
+      title: "bump x",
+      branch: "dependabot/x",
+      reason: "behind",
+    });
+  });
+
+  it("leaves the PR path byte-for-byte unchanged — the green sweep carries no branch or reason", async () => {
+    const dispatch = await fire(
+      async () => [{ repo: "o/a", prNumber: 6, title: "bump y" }],
+      "c-green",
+      "dependabot-pr-merge",
+    );
+    const [, context] = dispatch.mock.calls[0] as unknown as [string, Record<string, unknown>];
+    expect(context).toEqual({ _triggerType: "cron", repo: "o/a", prNumber: 6, title: "bump y" });
+  });
+
+  it("still announces the review sweep on _reviewRoute", async () => {
+    // `resolveReviewTrigger` treats the sweep differently from a PR-attention
+    // event, so this key is load-bearing and keyed on the discoverer's NAME.
+    const dispatch = vi.fn(async () => ({ success: true }));
+    const runner = makeCronRunner({
+      db,
+      github: fakeGh,
+      discoverers: {
+        "prs-awaiting-review": async () => [{ repo: "o/a", prNumber: 9, title: "z", branch: "feat/z" }],
+      },
+      dispatch,
+      resolveRepos: allParticipate,
+    });
+    await runner("pr-review", {
+      discover: "prs-awaiting-review",
+      repos: ["o/a"],
+      _cronName: "check-prs-awaiting-review",
+    });
+
+    const [, context] = dispatch.mock.calls[0] as unknown as [string, Record<string, unknown>];
+    expect(context._reviewRoute).toBe("sweep");
+  });
+
+  it("counts issue candidates in the ledger like any other discovery", async () => {
+    await fire(
+      async () => [
+        { repo: "o/a", issueNumber: 1, title: "a", labels: [], stage: "build" },
+        { repo: "o/a", issueNumber: 2, title: "b", labels: [], stage: "build" },
+      ],
+      "c-issue-counts",
+      "build",
+    );
+    const row = (await db.cronRuns.latestByCron()).get("c-issue-counts")!;
+    expect(row.discovered).toBe(2);
+    expect(row.dispatched).toBe(2);
+    expect(row.status).toBe("ok");
+  });
+});

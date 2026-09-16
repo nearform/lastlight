@@ -28,6 +28,178 @@ export function runExecutionsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
       db = await makeDb();
     });
 
+    describe("failureReasonsForRuns — why a FAILED board card failed", () => {
+      // The board joins this by RUN id to put a reason under a FAILED band.
+      // `workflow_runs` has no error column, and the two other candidates both
+      // lie on the guardrails path: `context.error` is overwritten with the
+      // bare literal "BLOCKED", and `phase_history` only records a failure on a
+      // THROW. This ledger is the only source that keeps the sentence.
+      //
+      // Runs on BOTH dialects on purpose: `success` is a boolean-mode column,
+      // and the bound-false compare is the same class of trap this file's
+      // `consecutiveFailures` block was written for.
+      async function phase(
+        id: string,
+        workflowRunId: string,
+        skill: string,
+        opts: { success: boolean; error?: string; startedAt: string },
+      ) {
+        await db.executions.recordStart({
+          id,
+          triggerType: "webhook",
+          triggerId: "owner/repo#1",
+          skill,
+          startedAt: opts.startedAt,
+          workflowRunId,
+        });
+        await db.executions.recordFinish(id, {
+          success: opts.success,
+          ...(opts.error ? { error: opts.error } : {}),
+        });
+      }
+
+      it("returns the NEWEST failed row per run, with the phase that failed", async () => {
+        await phase("e-1", "run-a", "build:architect", {
+          success: false,
+          error: "first failure",
+          startedAt: "2026-09-01T10:00:00.000Z",
+        });
+        await phase("e-2", "run-a", "build:guardrails_gate", {
+          success: false,
+          error: "Guardrails check: BLOCKED",
+          startedAt: "2026-09-01T11:00:00.000Z",
+        });
+
+        const out = await db.executions.failureReasonsForRuns(["run-a"]);
+        expect(out.get("run-a")).toEqual({
+          phase: "build:guardrails_gate",
+          error: "Guardrails check: BLOCKED",
+        });
+      });
+
+      it("ignores succeeded rows — a run that recovered owes no explanation", async () => {
+        await phase("e-3", "run-b", "build:architect", {
+          success: true,
+          startedAt: "2026-09-01T10:00:00.000Z",
+        });
+
+        expect(await db.executions.failureReasonsForRuns(["run-b"])).toEqual(new Map());
+      });
+
+      it("ignores a failure that recorded no reason rather than inventing one", async () => {
+        await phase("e-4", "run-c", "build:architect", {
+          success: false,
+          startedAt: "2026-09-01T10:00:00.000Z",
+        });
+
+        expect(await db.executions.failureReasonsForRuns(["run-c"])).toEqual(new Map());
+      });
+
+      it("keys by run id, so two runs never bleed into one another", async () => {
+        await phase("e-5", "run-d", "build:architect", {
+          success: false,
+          error: "d failed",
+          startedAt: "2026-09-01T10:00:00.000Z",
+        });
+        await phase("e-6", "run-e", "build:review", {
+          success: false,
+          error: "e failed",
+          startedAt: "2026-09-01T10:00:00.000Z",
+        });
+
+        const out = await db.executions.failureReasonsForRuns(["run-d", "run-e"]);
+        expect(out.get("run-d")?.error).toBe("d failed");
+        expect(out.get("run-e")?.error).toBe("e failed");
+      });
+
+      it("ignores a SKIPPED phase — it never ran, so it is not why anything failed", async () => {
+        // `recordSkippedPhase` writes a success:false row carrying
+        // "skipped: trigger rule not satisfied". Left in, a run killed by
+        // something else blames whichever phase was skipped last — wrong, and
+        // convincing enough that nobody questions it.
+        await db.executions.recordSkippedPhase("build:pr", "owner/repo#1", "run-skip", "repo");
+
+        expect(await db.executions.failureReasonsForRuns(["run-skip"])).toEqual(new Map());
+      });
+
+      it("ignores rows a harness restart marked stale", async () => {
+        // `markAllStaleForTrigger` stamps every in-flight row on restart. That
+        // is a fact about the HARNESS, not a verdict on this issue.
+        await db.executions.recordStart({
+          id: "e-stale",
+          triggerType: "webhook",
+          triggerId: "owner/repo#1",
+          skill: "build:executor",
+          startedAt: "2026-09-01T10:00:00.000Z",
+          workflowRunId: "run-stale",
+        });
+        await db.executions.markAllStaleForTrigger("owner/repo#1", "stale: harness restarted");
+
+        expect(await db.executions.failureReasonsForRuns(["run-stale"])).toEqual(new Map());
+      });
+
+      it("still reports a REAL failure sitting beside an artifact row", async () => {
+        await phase("e-real", "run-mix", "build:guardrails_gate", {
+          success: false,
+          error: "Guardrails check: BLOCKED",
+          startedAt: "2026-09-01T10:00:00.000Z",
+        });
+        // Newer, and an artifact — it must not win the "newest failure" race.
+        await db.executions.recordSkippedPhase("build:pr", "owner/repo#1", "run-mix", "repo");
+
+        expect(await db.executions.failureReasonsForRuns(["run-mix"])).toEqual(
+          new Map([["run-mix", { phase: "build:guardrails_gate", error: "Guardrails check: BLOCKED" }]]),
+        );
+      });
+
+      it("short-circuits an empty ask, and is silent about unknown runs", async () => {
+        expect(await db.executions.failureReasonsForRuns([])).toEqual(new Map());
+        expect(await db.executions.failureReasonsForRuns(["nope", ""])).toEqual(new Map());
+      });
+    });
+
+    describe("inFlightPhasesForRuns — what a live run is running NOW", () => {
+      // `workflow_runs.current_phase` is written on phase COMPLETION, so it
+      // names the last phase that FINISHED. The board asks the ledger instead,
+      // where an in-flight phase is simply the row with no `finished_at`.
+      async function started(id: string, workflowRunId: string, skill: string, startedAt: string) {
+        await db.executions.recordStart({
+          id,
+          triggerType: "webhook",
+          triggerId: "owner/repo#1",
+          skill,
+          startedAt,
+          workflowRunId,
+        });
+      }
+
+      it("returns the newest UNFINISHED row per run", async () => {
+        await started("f-1", "run-a", "build:architect", "2026-09-01T10:00:00.000Z");
+        await db.executions.recordFinish("f-1", { success: true });
+        await started("f-2", "run-a", "build:executor", "2026-09-01T11:00:00.000Z");
+
+        const out = await db.executions.inFlightPhasesForRuns(["run-a"]);
+        expect(out.get("run-a")).toBe("build:executor");
+      });
+
+      it("says nothing about a run whose phases have all finished", async () => {
+        await started("f-3", "run-b", "build:architect", "2026-09-01T10:00:00.000Z");
+        await db.executions.recordFinish("f-3", { success: true });
+
+        expect(await db.executions.inFlightPhasesForRuns(["run-b"])).toEqual(new Map());
+      });
+
+      it("keeps two live runs apart, and short-circuits an empty ask", async () => {
+        await started("f-4", "run-c", "build:executor", "2026-09-01T10:00:00.000Z");
+        await started("f-5", "run-d", "build:reviewer", "2026-09-01T10:00:00.000Z");
+
+        const out = await db.executions.inFlightPhasesForRuns(["run-c", "run-d"]);
+        expect(out.get("run-c")).toBe("build:executor");
+        expect(out.get("run-d")).toBe("build:reviewer");
+        expect(await db.executions.inFlightPhasesForRuns([])).toEqual(new Map());
+      });
+    });
+
     describe("recordSkippedPhase — skips land in the executions ledger", () => {
       it("writes a finished, non-successful skip row that shouldRunPhase re-evaluates", async () => {
         const skill = "build:merge";

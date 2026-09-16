@@ -38,7 +38,7 @@ export interface EventEnvelope {
    * to the dependency workflow (09-state-machine.md → D5).
    */
   isDependencyPr?: boolean;
-  /** The label just added, on a `pr.labeled` event. */
+  /** The label just added, on a `pr.labeled` or `issue.labeled` event. */
   addedLabel?: string;
   /**
    * Who the review was requested FROM, on a `pr.review_requested` event — a
@@ -79,6 +79,13 @@ export type EventType =
   | "issue.opened"
   | "issue.reopened"
   | "issue.closed"
+  /**
+   * A label was added to an ISSUE. Carries {@link EventEnvelope.addedLabel} so
+   * the pipeline stages work; the router drops every label that is not a
+   * configured pipeline stage, which is what keeps this from becoming a
+   * firehose.
+   */
+  | "issue.labeled"
   | "pr.opened"
   | "pr.synchronize" // new commits pushed to a PR's branch
   | "pr.reopened"

@@ -47,13 +47,21 @@ import { join, resolve, relative } from "node:path";
 // and predates this gate by four months (21c6cb0, 2026-04-06). Fix it in a
 // change that is about SSE, not as a drive-by. Remove the entry when you do.
 //
-// NOTE: these are keyed by LINE NUMBER, so any edit that adds or removes lines
-// above them in `routes.ts` silently un-allowlists them and the gate fails
-// pointing at code the change never touched. Shifted by +2 in #206 (two added
-// imports). If that happens again, consider keying on the expression text.
+// KEYED ON THE EXPRESSION TEXT, not the line number. The line-number form
+// shifted twice (+2 in #206, +17 in the board slice) and each time it silently
+// un-allowlisted these two and failed the gate pointing at code the change
+// never touched — a gate that cries wolf at whoever edited the file last. The
+// note that survived those two shifts said to key on the text instead; the
+// board-actions slice moved them a third time, so here it is.
+//
+// `exprKey` is the SAME normalisation the diagnostic below prints, shared
+// rather than duplicated: if the key and the error message could disagree, the
+// error message would be telling you to add an entry that does not match.
+const exprKey = (node) => `${node.getText().split("\n")[0].slice(0, 90)}`;
+
 const ALLOWED = new Set([
-  "src/admin/routes.ts:454",
-  "src/admin/routes.ts:460",
+  `src/admin/routes.ts  stream.writeSSE({ event: "message", data: JSON.stringify({ id: msgIndex, ...m }) });`,
+  `src/admin/routes.ts  stream.writeSSE({ event: "ready", data: JSON.stringify({ last_id: lastId, source: "jsonl" `,
 ]);
 
 const projectDirs = process.argv.slice(2);
@@ -116,9 +124,11 @@ for (const dir of projectDirs) {
           isVoidExpression(e) || isAwaitExpression(e) || isBinaryExpression(e) || isHandled(e);
         if (!skip && isThenable(checker, checker.getTypeAtLocation(e))) {
           const { line } = sf.getLineAndCharacterOfPosition(node.getStart());
-          const where = `${relative(root, fileName)}:${line + 1}`;
-          if (!ALLOWED.has(where)) {
-            console.error(`${dir}/${where}  ${node.getText().split("\n")[0].slice(0, 90)}`);
+          const file = relative(root, fileName);
+          const where = `${file}:${line + 1}`;
+          const text = exprKey(node);
+          if (!ALLOWED.has(`${file}  ${text}`)) {
+            console.error(`${dir}/${where}  ${text}`);
             total++;
           }
         }

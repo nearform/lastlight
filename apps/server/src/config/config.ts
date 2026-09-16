@@ -310,6 +310,13 @@ export interface LastLightConfig {
    */
   review: ReviewConfig;
   /**
+   * The label-driven autonomy pipeline — the OPERATOR's `autonomy:` block.
+   * Operator-only on purpose (it is spend, exactly like `review.analysis`), so
+   * unlike `review` there is no repo layer folded in anywhere: what is here is
+   * what the dispatch gate enforces.
+   */
+  autonomy: AutonomyConfig;
+  /**
    * The build/test gate budget (issue #385) — see {@link GateConfig}. The
    * OPERATOR's block; a run's effective, repo-clamped value is composed by
    * `effectiveGate` in `workflows/simple.ts`.
@@ -515,6 +522,62 @@ export interface TeamVisibilityConfig {
   maxRequestsPerResolve: number;
 }
 
+/**
+ * One stage of the autonomy pipeline: the labels that start it, mark it
+ * running, and record how it ended, plus the workflow and the gates it runs
+ * behind. The shipped set has exactly one stage (`build`).
+ */
+export interface AutonomyStageConfig {
+  /** The label a human (or the triage agent) applies to START the stage. */
+  enter: string;
+  /**
+   * What the label becomes AT DISPATCH, before the run starts — which is what
+   * stops a backstop sweep, or a re-delivered webhook, picking the same issue
+   * up a second time.
+   */
+  running: string;
+  on_success: string;
+  on_failure: string;
+  /** The workflow this stage dispatches (`build`). */
+  workflow: string;
+  /**
+   * HITL approval gates, merged ADD-ONLY onto the run's effective approval
+   * map: this may turn a gate ON, never off one the operator's `approval:`
+   * block asked for. The names are the ones `workflows/build.yaml` declares.
+   */
+  gates: Record<string, boolean>;
+  /**
+   * What happens to the PR the stage opens. `none` parks it for a human;
+   * `auto` enables GitHub auto-merge (CI and branch protection still gate it);
+   * `auto-low-impact` is NOT IMPLEMENTED — there is no impact signal for a
+   * feature PR today, so it is recorded and behaves as `none`.
+   */
+  on_merge: "none" | "auto" | "auto-low-impact";
+}
+
+/**
+ * The pipeline's spend/concurrency bounds, enforced at the DISPATCH GATE —
+ * before a run starts, never mid-flight — with every refusal recorded.
+ */
+export interface AutonomyBudgetConfig {
+  maxConcurrentBuilds: number;
+  maxBuildsPerRepoPerDay: number;
+  dailyUsd: number;
+  repoDailyUsd: number;
+}
+
+/**
+ * The `autonomy:` block. Ships INERT: `repos: []` means no issue label routes
+ * anywhere, so a deployment that says nothing behaves exactly as it did before
+ * the block existed.
+ */
+export interface AutonomyConfig {
+  /** Exact `owner/repo` names — no globs; see {@link isAutonomousRepo}. */
+  repos: string[];
+  stages: Record<string, AutonomyStageConfig>;
+  budget: AutonomyBudgetConfig;
+}
+
 let currentConfig: LastLightConfig | undefined;
 let currentPublicConfig: PublicConfigBundle | undefined;
 
@@ -569,6 +632,34 @@ export function getReviewConfig(): ReviewConfig {
   return currentConfig?.review || defaultReviewConfig();
 }
 
+/**
+ * The OPERATOR's `autonomy:` block, with the packaged defaults when config
+ * isn't loaded yet.
+ *
+ * The router calls this on EVERY `issue.labeled` event, for the same reason it
+ * calls {@link getReviewConfig} on a `pr.labeled`: deciding whether the label
+ * is a pipeline stage at all is a hard ROUTER-level ignore, not a mode
+ * decision. A label nobody configured is not an event about us, and resolving
+ * an issue's state to discover that would make routine labelling cost GitHub
+ * calls per label per issue. So this must never throw and must answer before
+ * boot — the shipped answer (`repos: []`) ignores everything, which is the
+ * direction a failure here has to fail.
+ */
+export function getAutonomyConfig(): AutonomyConfig {
+  return currentConfig?.autonomy || defaultAutonomyConfig();
+}
+
+/**
+ * Is `repo` ("owner/name") one the operator listed under `autonomy.repos`?
+ *
+ * EXACT MATCH by design — no globs, no org prefixes. Enabling an org by pattern
+ * is how a repo nobody reviewed acquires an agent, and a budget, the moment
+ * somebody creates it; listing a repo has to be a decision per repository.
+ */
+export function isAutonomousRepo(repo: string): boolean {
+  return getAutonomyConfig().repos.includes(repo);
+}
+
 // ── Packaged defaults, derived from config/default.yaml (issue #385) ─────────
 //
 // Every timeout default lives in `config/default.yaml` and NOWHERE else. The
@@ -589,6 +680,114 @@ function packagedFileConfig(): NormalizedFileConfig {
 /** The packaged `review:` block — complete, durations included — from `config/default.yaml`. */
 export function defaultReviewConfig(): ReviewConfig {
   return structuredClone(packagedFileConfig().review);
+}
+
+/**
+ * The packaged `autonomy:` block, from `config/default.yaml`. `structuredClone`
+ * because the block is nested (stages, gates) and the cache is shared — a
+ * caller that mutated a gate map would be editing every later reader's copy.
+ */
+export function defaultAutonomyConfig(): AutonomyConfig {
+  return structuredClone(packagedFileConfig().autonomy);
+}
+
+let resolvingPackagedAutonomy = false;
+
+/**
+ * The packaged `autonomy:` values, used as the fallback when an overlay wrote
+ * garbage where a stage map or a budget number should be.
+ *
+ * Re-entrancy guard: this is reached WHILE `config/default.yaml` is itself
+ * being normalised the first time, when there is no packaged block to fall back
+ * to yet. On that path it answers with the inert, fail-closed shape — no repos,
+ * no stages, zero budget — rather than recursing forever. The shipped file is
+ * well-formed, so every value in it normalises without a fallback and the guard
+ * branch is never the answer anyone sees.
+ */
+function packagedAutonomy(): AutonomyConfig {
+  if (resolvingPackagedAutonomy) {
+    return {
+      repos: [],
+      stages: {},
+      budget: { maxConcurrentBuilds: 0, maxBuildsPerRepoPerDay: 0, dailyUsd: 0, repoDailyUsd: 0 },
+    };
+  }
+  resolvingPackagedAutonomy = true;
+  try {
+    return packagedFileConfig().autonomy;
+  } finally {
+    resolvingPackagedAutonomy = false;
+  }
+}
+
+/** The three legal `on_merge` values; anything else is coerced to `none`. */
+function isAutonomyMerge(raw: unknown): raw is AutonomyStageConfig["on_merge"] {
+  return raw === "none" || raw === "auto" || raw === "auto-low-impact";
+}
+
+/** A trimmed string, or `""` when the value is not a usable string at all. */
+function autonomyLabel(raw: unknown): string {
+  return typeof raw === "string" ? raw.trim() : "";
+}
+
+/**
+ * The boolean leaves of a flat map, dropping everything else. A gate is an
+ * approval decision, so a `"yes"` that is not literally `true`/`false` is not a
+ * decision — it is dropped, and the run keeps whatever the workflow declared.
+ */
+function booleanMap(raw: unknown): Record<string, boolean> {
+  if (!isPlainObject(raw)) return {};
+  const out: Record<string, boolean> = {};
+  for (const [k, v] of Object.entries(raw)) if (typeof v === "boolean") out[k] = v;
+  return out;
+}
+
+/**
+ * The stage map. Lenient like every normaliser here — a non-object falls back
+ * to the packaged stages rather than throwing, because the router reads this on
+ * every `issue.labeled` event.
+ *
+ * A stage whose `enter` label is missing or empty is DROPPED: it can never
+ * fire, and keeping it would leave a stage visible in the `/config` view that
+ * is unreachable in fact, which is a silent trap.
+ */
+function normalizeAutonomyStages(raw: unknown): Record<string, AutonomyStageConfig> {
+  if (!isPlainObject(raw)) return packagedAutonomy().stages;
+  const out: Record<string, AutonomyStageConfig> = {};
+  for (const [name, value] of Object.entries(raw)) {
+    if (!isPlainObject(value)) continue;
+    const enter = autonomyLabel(value.enter);
+    if (!enter) continue;
+    out[name] = {
+      enter,
+      running: autonomyLabel(value.running),
+      on_success: autonomyLabel(value.on_success),
+      on_failure: autonomyLabel(value.on_failure),
+      workflow: autonomyLabel(value.workflow),
+      gates: booleanMap(value.gates),
+      // Coerced, not rejected: `none` is the only value that costs nothing, so
+      // a typo parks the PR for a human instead of silently enabling a merge.
+      on_merge: isAutonomyMerge(value.on_merge) ? value.on_merge : "none",
+    };
+  }
+  return out;
+}
+
+/**
+ * The budget bounds. Every leaf is `nonNegativeNumber` + the packaged value:
+ * `0` is a real setting ("refuse everything"), while a negative or non-numeric
+ * value is not a budget at all and falls back rather than being clamped into
+ * one somebody could mistake for their own.
+ */
+function normalizeAutonomyBudget(raw: unknown): AutonomyBudgetConfig {
+  const b = isPlainObject(raw) ? raw : {};
+  const packaged = () => packagedAutonomy().budget;
+  return {
+    maxConcurrentBuilds: nonNegativeNumber(b.maxConcurrentBuilds) ?? packaged().maxConcurrentBuilds,
+    maxBuildsPerRepoPerDay: nonNegativeNumber(b.maxBuildsPerRepoPerDay) ?? packaged().maxBuildsPerRepoPerDay,
+    dailyUsd: nonNegativeNumber(b.dailyUsd) ?? packaged().dailyUsd,
+    repoDailyUsd: nonNegativeNumber(b.repoDailyUsd) ?? packaged().repoDailyUsd,
+  };
 }
 
 /** The packaged `gate:` block, from `config/default.yaml`. */
@@ -962,6 +1161,7 @@ export function loadConfig(): LastLightConfig {
     publicUrl: resolvePublicUrl(),
     reviewPostsCheck: fileCfg.review.postsCheck,
     review: fileCfg.review,
+    autonomy: fileCfg.autonomy,
     gate: fileCfg.gate,
     sandboxTimeouts: fileCfg.sandboxTimeouts,
     fix: fileCfg.fix,
@@ -1003,6 +1203,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   holdLabel: string;
   exploreDefaultRepo?: string;
   review: ReviewConfig;
+  autonomy: AutonomyConfig;
   gate: GateConfig;
   sandboxTimeouts: SandboxTimeoutsConfig;
   fix: FixConfig;
@@ -1038,6 +1239,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const reviewRaw = isPlainObject(raw.review) ? raw.review : {};
   const analysisRaw = isPlainObject(reviewRaw.analysis) ? reviewRaw.analysis : {};
   const triageRaw = isPlainObject(reviewRaw.triage) ? reviewRaw.triage : {};
+  const autonomyRaw = isPlainObject(raw.autonomy) ? raw.autonomy : {};
   const fixRaw = isPlainObject(raw.fix) ? raw.fix : {};
   const gateRaw = isPlainObject(raw.gate) ? raw.gate : {};
   const dependenciesRaw = isPlainObject(raw.dependencies) ? raw.dependencies : {};
@@ -1269,6 +1471,22 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     },
   };
 
+  // The autonomy pipeline (issue: the software factory). Lenient like every
+  // block above and then some: `getAutonomyConfig()` is on the router's
+  // `issue.labeled` path, so this shape must always exist and must never throw,
+  // whatever an overlay wrote. Every fallback direction is the inert one.
+  const autonomy: AutonomyConfig = {
+    // Exact `owner/repo` strings. A non-string entry is DROPPED rather than
+    // stringified — what it would become can never match a repo, and it would
+    // sit in the `/config` view looking like an enabled repository. A non-array
+    // value degrades to the packaged `[]`, which enables nothing.
+    repos: Array.isArray(autonomyRaw.repos)
+      ? autonomyRaw.repos.filter((r): r is string => typeof r === "string" && !!r.trim()).map((r) => r.trim())
+      : [],
+    stages: normalizeAutonomyStages(autonomyRaw.stages),
+    budget: normalizeAutonomyBudget(autonomyRaw.budget),
+  };
+
   const maxWorkflows =
     typeof concurrencyRaw.maxWorkflows === "number" && concurrencyRaw.maxWorkflows > 0
       ? concurrencyRaw.maxWorkflows
@@ -1425,6 +1643,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     holdLabel,
     exploreDefaultRepo,
     review,
+    autonomy,
     gate,
     sandboxTimeouts,
     fix,
@@ -1617,6 +1836,11 @@ export function defaultRouteConfig(): RouteConfig {
       issue_opened: "issue-triage",
       issue_answer: "answer",
       issue_reopened: "issue-triage",
+      // A pipeline STAGE label was applied to an issue (software factory). The
+      // router drops every label that is not a configured
+      // `autonomy.stages.*.enter`, so this is inert until `autonomy.repos`
+      // names a repo.
+      issue_labeled: "build",
       pr_opened: "pr-review",
       pr_synchronize: "pr-review",
       pr_reopened: "pr-review",

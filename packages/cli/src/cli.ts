@@ -326,6 +326,9 @@ ${chalk.bold("Activity")} (the audit stream — who did what, when)
 
   Verbs: login, workflow.trigger|retry|cancel|toggle, approval.approve|reject,
          cron.fire|trigger|toggle, config.edit, container.kill, artifact.edit, pr.retry
+         issue.dispatch   ${chalk.dim("(a build started from the pipeline board)")}
+         issue.stage   ${chalk.dim("(a card dragged between pipeline-board columns \u2014 a label write, not a dispatch)")}
+         autonomy.skip   ${chalk.dim("(not a person's action \u2014 a build the harness refused on a budget)")}
   ${chalk.dim("A row with no actor is a password session — authenticated, but carrying no login.")}`,
 
   logs: `

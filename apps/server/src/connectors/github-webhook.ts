@@ -91,6 +91,46 @@ export interface GitHubWebhookConfig {
    * on the webhook hot path. Absent when the feature is off / no DB (tests).
    */
   onTeamChanged?: (scope: { org: string; teamSlug?: string; login?: string }) => void;
+  /**
+   * A delivery changed what the BOARD would render, with its `owner/repo`.
+   *
+   * **Invalidation, not re-derivation**, for the same reason {@link
+   * onTeamChanged} gives: the handler is a cache delete, so a delivery for a
+   * repo nobody is looking at costs a Map miss.
+   *
+   * Two things make it unlike every other hook here. It is called ABOVE the
+   * `IGNORED_ACTIONS` filter, because the single most important board signal is
+   * one that filter drops — `closed`, which is how a merged PR or a closed
+   * issue LEAVES the board's universe (the GitHub read lists OPEN items only).
+   * And it does NOT consume the delivery: there is no `return` after it, so the
+   * event still normalizes and dispatches exactly as before. It is a
+   * side-effect, not a handler.
+   */
+  onBoardChanged?: (repo: string) => void;
+}
+
+/**
+ * Deliveries after which a cached board answer is wrong.
+ *
+ * Kept to the label and lifecycle actions: the board renders OPEN issues and
+ * pull requests filed under stage labels, so these are exactly the deliveries
+ * that move a card, add one, or take one away.
+ *
+ * Deliberately NOT conditioned on the label's NAME. This connector has no
+ * config access by design (the same argument the managed-repo filter makes),
+ * so it cannot know which labels are configured stages — and a cache delete is
+ * cheap enough that it does not need to. `unlabeled` and `deleted` come along
+ * for free here; both are in `IGNORED_ACTIONS`, both change the board, and
+ * nothing below this line would ever hear about either.
+ */
+const BOARD_RELEVANT: Record<string, Set<string>> = {
+  issues: new Set(["opened", "reopened", "closed", "labeled", "unlabeled", "transferred", "deleted"]),
+  pull_request: new Set(["opened", "reopened", "closed", "ready_for_review", "labeled", "unlabeled"]),
+};
+
+function isBoardRelevant(eventType: string | undefined, action: string | undefined): boolean {
+  if (!eventType || !action) return false;
+  return BOARD_RELEVANT[eventType]?.has(action) === true;
 }
 
 /** The check-run name whose "Re-run" button is a review request. */
@@ -108,11 +148,21 @@ const REVIEW_CHECK_NAME = "last-light/review";
  *
  * `labeled` left this set in Phase 7: `review.requestLabel` is the real
  * `on-request` mechanism (GitHub App bot users are not selectable in the
- * reviewer picker, so `review_requested` cannot be). Everything that is not a
- * `pull_request` label still falls out of `normalize()` with a null type and is
- * answered `{ filtered: true, reason: "unmapped event" }`, and the router drops
- * every PR label that is not the configured one — so the widening costs a
- * normalize call, not a dispatch.
+ * reviewer picker, so `review_requested` cannot be), and the router drops every
+ * PR label that is not the configured one — so the widening costs a normalize
+ * call, not a dispatch.
+ *
+ * An ISSUE label no longer falls out either. The software-factory pipeline
+ * makes a stage label the source of truth for where an issue is, so
+ * `issues.labeled` normalizes to `issue.labeled` and the router drops every
+ * label that is not a configured `autonomy.stages` entry — the same shape as
+ * the PR case above, and the same cost model: a normalize call, not a dispatch.
+ *
+ * `unlabeled` STAYS in this set, deliberately. Removing a stage label is
+ * ambiguous ("not ready" vs "I'll take it myself" vs a mis-click) and is the
+ * gesture a human makes to STOP things; taking it out of this set would turn
+ * every stage retraction into a dispatch. The hold label is the stop
+ * mechanism, and it already outranks every route.
  */
 const IGNORED_ACTIONS = new Set([
   "deleted",
@@ -204,6 +254,24 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
         return c.json({ accepted: true, kind: "team-visibility-sync" }, 200);
       }
 
+      // The repo this delivery is about. Read HERE rather than at the
+      // managed-repo filter below, because the board hook above that filter
+      // needs it — `closed` never reaches the filter at all.
+      const repoFullName = payload.repository?.full_name;
+
+      // The BOARD's cached GitHub answer, dropped on the deliveries that change
+      // it. NOTE AND CONTINUE: no `return` — the delivery goes on to normalize
+      // and dispatch exactly as before. See `onBoardChanged` for why it sits
+      // above the filter rather than below it.
+      if (repoFullName && isManagedRepo(repoFullName) && isBoardRelevant(eventType, action)) {
+        try {
+          this.config.onBoardChanged?.(repoFullName);
+        } catch (err: unknown) {
+          // A cache that refuses to clear must not cost us the delivery.
+          log.debug("Board invalidation hook failed", { repoFullName, err });
+        }
+      }
+
       // Filter out ignored actions
       if (action && IGNORED_ACTIONS.has(action)) {
         return c.json({ filtered: true, reason: `action=${action}` }, 200);
@@ -250,7 +318,41 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
       // replies to (it drives the pr.checks_failed → fix path), so there's no
       // self-reply loop risk. See normalize()'s check_suite case.
       const isCheckAttention = eventType === "check_suite" && action === "completed";
-      if (isBotSender && !isPrAttention && !isCheckAttention) {
+      // A stage label applied to an ISSUE. `issue-triage` applies
+      // `ready-for-agent` AS OUR OWN BOT, so without this exemption the
+      // triage → build chain never fires from a webhook at all — the pipeline
+      // stops being autonomous, which is the one thing it exists to be.
+      //
+      // Deliberately NOT conditioned on the label's NAME. The connector has no
+      // config access — it cannot know which labels are configured pipeline
+      // stages — and the router already owns exactly that lookup for
+      // `pr.labeled`, so a second copy here would be free to disagree with the
+      // first. IGNORED_ACTIONS says it of the same widening on the PR side, and
+      // it holds identically here: the widening costs a normalize call, not a
+      // dispatch.
+      //
+      // The price is real and worth naming: our own stage-advance writes
+      // (`agent-building`, `ready-for-human`, `agent-blocked`) each now produce
+      // an ADMITTED delivery, which the router then drops on a map lookup.
+      //
+      // This removes the bot-sender loop guard for this one action, so what
+      // replaces it has to be said out loud. Four independent guards stand
+      // behind it, and a loop needs ALL of them to fail:
+      //   1. the router routes only the configured stage `enter:` labels —
+      //      every other label dies at the map lookup;
+      //   2. the dispatch-time stage advance REMOVES the entry label before the
+      //      run starts, so the label that admitted the delivery is gone by the
+      //      time the run could re-apply it;
+      //   3. `hasRunForTrigger(triggerId, "build")` is a DB FACT that survives
+      //      a failed label write — it is the guard that still holds when (2)
+      //      does not, and it must never be weakened;
+      //   4. budget ceilings bound the blast radius if (1)–(3) somehow all fail.
+      //
+      // And the hole is NARROW. Bot-sent `issues.opened` and `comment.created`
+      // still drop on the filter below, so the bot still cannot reply to
+      // itself — the failure mode the strict filter was written for.
+      const isStageAttention = eventType === "issues" && action === "labeled";
+      if (isBotSender && !isPrAttention && !isCheckAttention && !isStageAttention) {
         return c.json({ filtered: true, reason: "bot sender" }, 200);
       }
 
@@ -276,7 +378,6 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
       // Filter out repos not in the managed allowlist. The GitHub App may be
       // installed on additional repos but we only operate on those we explicitly
       // manage. See src/managed-repos.ts.
-      const repoFullName = payload.repository?.full_name;
       if (!isManagedRepo(repoFullName)) {
         log.info("Filtered webhook for unmanaged repo", { repoFullName });
         return c.json({ filtered: true, reason: `repo not managed: ${repoFullName}` }, 200);
@@ -544,7 +645,10 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
     // and got it wrong — see the `pr.checks_failed` case in `engine/router.ts`
     // (09-state-machine.md → D5).
     let isDependencyPr: boolean | undefined;
-    /** `pr.labeled` only — the label just added, for `review.requestLabel`. */
+    /**
+     * `pr.labeled` / `issue.labeled` only — the label just added, for
+     * `review.requestLabel` and for the issue pipeline's stage entries.
+     */
     let addedLabel: string | undefined;
     /** `pr.review_requested` only — who the review was asked of. */
     let requestedReviewer: string | undefined;
@@ -558,6 +662,16 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
         issueAuthor = payload.issue?.user?.login;
         if (action === "opened") type = "issue.opened";
         else if (action === "reopened") type = "issue.reopened";
+        // A label was added to an issue. Mirrors the `pull_request` case below:
+        // the router drops every label that is not a configured pipeline stage,
+        // so this only ever reaches a dispatch when a stage really advanced.
+        else if (action === "labeled") {
+          const name = payload.label?.name;
+          if (typeof name === "string" && name) {
+            type = "issue.labeled";
+            addedLabel = name;
+          }
+        }
         break;
 
       case "pull_request":

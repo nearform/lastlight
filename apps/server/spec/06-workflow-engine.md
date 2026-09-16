@@ -738,6 +738,8 @@ which calls back into `runSimpleWorkflow()`.
 If the gate name is *not* in `APPROVAL_GATES`, the phase proceeds
 without pausing. Gates are positive enable only.
 
+**One dispatch path raises gates the operator left off.** A run dispatched through an autonomy stage carries that stage's `gates` map on its context, and `runWorkflow` unions it onto the effective approval map — but **`true` leaves only** (`enabledGatesFrom`, `src/workflows/simple.ts`). The filter is the whole safety argument, and a naive spread is not add-only: `gateEnabled` tests `=== true`, so a `true` leaf can raise a gate the operator left off, while a `false` leaf spread over an operator's `true` would *clear* one. Dropping the `false` **is** the clamp — the base map underneath still carries the operator's value, so the leaf resolves straight back to it, the same shape the repo layer's policy blocks use. Note what this means for reading `gateEnabled`'s `=== true`: it guards a *missing* gate, not an overwritten one, so the clamp has to happen before the union rather than being caught by it. With no stage gates the caller's own map is passed by identity, so a run that crossed no stage behaves exactly as it did before the mechanism existed. The visible effect is that an autonomous build pauses at `post_architect` while an `@bot build` on the same repo does not: same workflow, same repo, different dispatch. See [Router](/spec/05-router) and [Configuration](/spec/02-configuration).
+
 **Approving an artifact**: a gate can name the handoff doc it's asking a
 human to approve via `approval_artifact: architect-plan.md` (also valid
 inside `loop:`). The filename is stored on the `workflow_approvals` row
@@ -876,6 +878,26 @@ and starts there — completed phases are skipped via
 For reply gates the runner sets `currentPhase` to the phase *before*
 the loop owner so `nextPhaseAfter()` lands back on the looping phase
 for the next iteration.
+
+## Terminal transitions — the run store's observers
+
+A run's terminal transition (`succeeded` / `failed` / `cancelled`) is a **persisted** fact, and anything that projects it outward hangs off that fact rather than off the in-memory promise that produced it. `WorkflowRunStore` exposes `addTerminalObserver`, notified wherever a run is finished — `simple.ts`, `resume.ts`, the queued-run TTL expiry and the admin cancel — so a projection installed once covers all of them and a ninth terminal path cannot be added without one. The contract is strict and stated on the store: an observer is **synchronous, never throws, and never re-enters the store**; any real work is fired and forgotten with a `.catch` attached, which is both where the rejection goes and what satisfies the floating-promise lint gate.
+
+Two observers are installed at boot. The first completes the `last-light/review` check (see [Router](/spec/05-router#the-last-lightreview-check-is-a-projection-of-run-state)); the second is **the terminal half of the software-factory stage pipeline** (`src/engine/stage-observer.ts`).
+
+The stage observer is the second and final call site of `advanceStage`. The first is the dispatch gate, which moves the issue onto the stage's `running` label before the run exists; until this one landed, nothing moved it off again, and `agent-building` was a dead end — every issue the pipeline ever picked up sat there while the run that owned it had long since finished. On a terminal transition it maps:
+
+| Run status | Label it advances to |
+|---|---|
+| `succeeded` | the stage's `on_success` (packaged: `ready-for-human`) |
+| `failed` | the stage's `on_failure` (packaged: `agent-blocked`) |
+| `cancelled` | the stage's `on_failure` — from the issue's point of view a cancel and a failure are the same fact: the build did not get there and a person needs to look. Leaving a cancelled run on `agent-building` would strand it exactly as before |
+
+**`paused` is structurally unreachable here**, and that is load-bearing rather than incidental. `TerminalRunObserver` is typed to receive only the three statuses above, so a run sitting on an approval gate moves no label at all. That is the correct behaviour: an HITL pause means the work is still in flight while a human decides, so advancing the label there would report a build as finished mid-run — and then move it a second time when the resumed run actually finished. The type is what prevents it; every status is named explicitly rather than swept up by an `else`, so a fourth terminal status becomes a compile error instead of a silent mis-labelling.
+
+**It is idempotent with no bookkeeping.** The observer can fire more than once for one run — a restart-resumed run that finishes twice, a retry, a cancel racing a finish — and needs no dedup state, because `advanceStage` is naturally idempotent at both ends: re-adding a label the issue already carries is a no-op for `addLabels`, and `removeLabel` swallows the 404 that means "already gone". A second firing re-asserts the same two facts. Recording an "already advanced" flag would buy nothing and add a write that could itself fail or go stale; the durable fact is the run row, and the label is its projection.
+
+Three things make it a no-op rather than an error: a run whose stored `context` names no `_stage` (an `@last-light build` comment carries none, and a human-asked build must never acquire stage labels it did not enter the pipeline through, so the check is a by-name read of the JSON rather than a mirrored type); a `_stage` naming a stage an operator has since renamed or removed (debug, not warn — there is no label vocabulary left to move within); and chat-only mode, where there is no GitHub to project onto. A degraded advance — the new label on but the old one still there, or neither — is logged as a warning, because the issue's stage now misreports to the human reading the tracker, but it never fails the run: that fact is already in the database.
 
 ## Concurrency cap and admission
 
@@ -1127,6 +1149,17 @@ advance.
 - **The runner is workflow-agnostic.** It learns about a workflow by
   loading YAML; it has no per-workflow branches. Any change to "what
   happens" is a YAML change, not a code change.
+- **The engine never chains one workflow into another.** A workflow run
+  ends; it does not start a successor. The software-factory pipeline's
+  stage chaining (`ready-for-agent` → `agent-building` → `ready-for-human` /
+  `agent-blocked`) is **router-mediated**, not an engine feature: the
+  harness writes a label, GitHub delivers an `issues.labeled` webhook, and
+  the router decides — independently, from scratch — whether that label
+  enters a stage. There is no `on_complete` key, no successor field, and
+  nothing in the YAML schema that names another workflow. A re-implementation
+  that reads the pipeline as evidence the engine chains runs will build a
+  scheduler the harness does not have, and will lose the property that makes
+  the chain safe: every hop crosses the router and the dispatch gate again.
 - **Completed phases never re-run.** `shouldRunPhase()` is checked at
   the top of every phase entry; resume relies on it.
 - **Idempotency is per-(workflow_run_id, phase_name).** Not per-phase
@@ -1205,6 +1238,7 @@ the database stays app-side, behind a port.
 | Until-condition evaluator | `packages/workflow-engine/src/core/loop-eval.ts` |
 | Template engine | `packages/workflow-engine/src/core/templates.ts` |
 | Resume + orphan recovery | `src/workflows/resume.ts` |
+| Terminal-transition stage observer (the pipeline's `on_success` / `on_failure` labels) | `src/engine/stage-observer.ts`, `src/engine/stage-advance.ts`, installed in `src/index.ts` |
 | Concurrency cap + admission | `src/workflows/admission.ts` (cap enforced in `simple.ts`) |
 | Per-repo layer: dispatch-time resolve, persist, restore | `src/workflows/simple.ts` (`resolveRepoRunConfig`, `repoConfigRunRecord`, `restoreRepoRunConfig`) |
 | Per-run asset resolver | `createAssetResolver` / `makeLayer` / `getAssetLayers` in `packages/shared/src/workflow-loader.ts`, wired in `runner.ts` |

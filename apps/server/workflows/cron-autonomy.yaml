@@ -1,0 +1,24 @@
+kind: cron
+name: pick-up-ready-issues
+schedule: "*/20 * * * *"
+workflow: build
+context:
+  # The cron runner finds the open issues sitting at an `autonomy.stages` entry
+  # label IN CODE and fans out one bounded single-issue `build` run each —
+  # issueNumber + labels + the stage name set, the same shape the
+  # `issue.labeled` webhook produces, reaching the same dispatch gate.
+  discover: issues-ready-for-agent
+
+# Deliberately NO `condition:` — this sweep runs even with webhooks enabled. It
+# is the backstop for a MISSED webhook: a dropped or undelivered
+# `issues.labeled` delivery leaves an issue sitting at `ready-for-agent`
+# forever, and nothing else ever re-checks. A sweep that only ran when webhooks
+# were OFF would, by construction, never cover the case it exists for.
+#
+# Why this cannot re-dispatch work already in flight: the stage label is
+# advanced host-side AT DISPATCH, before the run starts, so a dispatched issue
+# structurally leaves the candidate set; `hasRunForTrigger` is checked at the
+# gate regardless, so even a failed label write cannot re-spend; and the
+# `autonomy.budget` ceilings bound the blast radius if both of those fail. See
+# `src/cron/issue-discovery.ts` for the argument in full — it is the reason
+# this file is safe to schedule at all.

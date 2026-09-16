@@ -1135,30 +1135,240 @@ describe("GitHubWebhookConnector — review-request signals", () => {
     expect(emitted?.type).toBe("pr.synchronize");
   });
 
-  it("an ISSUE label is still nothing — the widening costs a normalize, not a dispatch", async () => {
+  it("an ISSUE label now normalizes too — the widening costs a normalize, not a dispatch", async () => {
+    // This used to assert `{ filtered: true }`: an issue label produced no type
+    // at all. The issue pipeline made the stage label the trigger, so the
+    // delivery is now admitted and the ROUTER drops every label that is not a
+    // configured stage — one map lookup, no dispatch.
+    const { json, emitted } = await postIssues(connector(), {
+      action: "labeled",
+      label: { name: "bug" },
+    });
+    expect(json.accepted).toBe(true);
+    expect(emitted?.type).toBe("issue.labeled");
+    expect(emitted.addedLabel).toBe("bug");
+  });
+});
+
+/**
+ * POST a signed `issues` webhook and return the response plus any emitted
+ * envelope. Defaults to a human sender; pass `sender` to make it the bot.
+ */
+async function postIssues(
+  conn: GitHubWebhookConnector,
+  payloadOver: Record<string, unknown> & { repoFullName?: string },
+): Promise<{ status: number; json: any; emitted: any | null }> {
+  let emitted: any = null;
+  conn.on("event", (e) => { emitted = e; });
+  const { repoFullName, ...over } = payloadOver;
+  const payload = {
+    repository: { full_name: repoFullName ?? REPO },
+    sender: { login: "maintainer", type: "User" },
+    issue: { number: 9, title: "t", body: "", labels: [], user: { login: "alice" } },
+    ...over,
+  };
+  const body = JSON.stringify(payload);
+  const res = await conn.honoApp.request("/webhooks/github", {
+    method: "POST",
+    headers: {
+      "x-hub-signature-256": sign(body),
+      "x-github-event": "issues",
+      "x-github-delivery": "d",
+      "content-type": "application/json",
+    },
+    body,
+  });
+  const json = await res.json();
+  await new Promise((r) => setImmediate(r));
+  return { status: res.status, json, emitted };
+}
+
+/**
+ * The bot-sender exemption for `issues.labeled` — the single most
+ * safety-critical widening in the issue pipeline. `issue-triage` applies the
+ * stage label AS THE BOT, so without the exemption the triage → build chain
+ * never fires; with it, the loop guard that used to live here is replaced by
+ * the router's stage lookup, the dispatch-time label removal, the
+ * `hasRunForTrigger` DB fact and the budget ceilings. These tests pin the size
+ * of the hole: exactly one action, for exactly one event.
+ */
+describe("GitHubWebhookConnector — issue stage labels", () => {
+  beforeEach(() => {
+    setRuntimeConfig({ managedRepos: [REPO] } as unknown as LastLightConfig);
+  });
+  afterEach(() => resetRuntimeConfigForTests());
+
+  const botSender = { login: BOT_LOGIN, type: "Bot" };
+
+  it("admits a BOT-sent issues.labeled — our own stage write is the trigger", async () => {
+    const { status, json, emitted } = await postIssues(connector(), {
+      action: "labeled",
+      sender: botSender,
+      label: { name: "ready-for-agent" },
+    });
+    expect(status).toBe(202);
+    expect(json.accepted).toBe(true);
+    expect(emitted?.type).toBe("issue.labeled");
+    expect(emitted.addedLabel).toBe("ready-for-agent");
+    expect(emitted.issueNumber).toBe(9);
+  });
+
+  it("normalizes a HUMAN-sent issues.labeled the same way", async () => {
+    const { emitted } = await postIssues(connector(), {
+      action: "labeled",
+      label: { name: "ready-for-agent" },
+    });
+    expect(emitted?.type).toBe("issue.labeled");
+    expect(emitted.addedLabel).toBe("ready-for-agent");
+  });
+
+  it("still filters a BOT-sent issues.opened — the hole is one action wide", async () => {
+    const { json, emitted } = await postIssues(connector(), {
+      action: "opened",
+      sender: botSender,
+    });
+    expect(json.filtered).toBe(true);
+    expect(json.reason).toBe("bot sender");
+    expect(emitted).toBeNull();
+  });
+
+  it("still filters a BOT-sent comment — the bot cannot reply to itself", async () => {
     const conn = connector();
     let emitted: any = null;
     conn.on("event", (e) => { emitted = e; });
     const payload = {
-      action: "labeled",
+      action: "created",
       repository: { full_name: REPO },
-      sender: { login: "maintainer", type: "User" },
+      sender: botSender,
       issue: { number: 9, title: "t", body: "", labels: [], user: { login: "alice" } },
-      label: { name: "bug" },
+      comment: { body: "on it" },
     };
     const body = JSON.stringify(payload);
     const res = await conn.honoApp.request("/webhooks/github", {
       method: "POST",
       headers: {
         "x-hub-signature-256": sign(body),
-        "x-github-event": "issues",
+        "x-github-event": "issue_comment",
         "x-github-delivery": "d",
         "content-type": "application/json",
       },
       body,
     });
-    expect((await res.json()).filtered).toBe(true);
+    const json = await res.json();
     await new Promise((r) => setImmediate(r));
+    expect(json.filtered).toBe(true);
+    expect(json.reason).toBe("bot sender");
     expect(emitted).toBeNull();
+  });
+
+  it("still filters issues.unlabeled — removing a stage label is how a human stops things", async () => {
+    const { json, emitted } = await postIssues(connector(), {
+      action: "unlabeled",
+      label: { name: "ready-for-agent" },
+    });
+    expect(json.filtered).toBe(true);
+    expect(json.reason).toBe("action=unlabeled");
+    expect(emitted).toBeNull();
+  });
+
+  it("still filters issue.labeled on an UNMANAGED repo", async () => {
+    const { json, emitted } = await postIssues(connector(), {
+      action: "labeled",
+      repoFullName: "someone-else/other",
+      label: { name: "ready-for-agent" },
+    });
+    expect(json.filtered).toBe(true);
+    expect(json.reason).toContain("repo not managed");
+    expect(emitted).toBeNull();
+  });
+});
+
+/**
+ * The BOARD invalidation hook.
+ *
+ * Two properties, and the second is the one a later change is most likely to
+ * break. The hook sits ABOVE `IGNORED_ACTIONS`, because the signal the board
+ * needs most — `closed`, which is how a merged PR or a closed issue leaves its
+ * universe — is dropped by that filter. And it must NOT consume the delivery:
+ * every event still normalizes and dispatches exactly as it did before.
+ */
+describe("GitHubWebhookConnector — board invalidation", () => {
+  beforeEach(() => {
+    setRuntimeConfig({ managedRepos: [REPO] } as unknown as LastLightConfig);
+  });
+  afterEach(() => resetRuntimeConfigForTests());
+
+  function boardConnector(onBoardChanged: (repo: string) => void): GitHubWebhookConnector {
+    return new GitHubWebhookConnector({
+      port: 0,
+      webhookSecret: SECRET,
+      botLogin: BOT_LOGIN,
+      onBoardChanged,
+    });
+  }
+
+  it("fires on a CLOSED issue — the signal IGNORED_ACTIONS drops", async () => {
+    // Nothing below the filter will ever hear about this, and a closed issue
+    // has to disappear from the board.
+    const onBoardChanged = vi.fn();
+    const { json } = await postIssues(boardConnector(onBoardChanged), { action: "closed" });
+
+    expect(onBoardChanged).toHaveBeenCalledWith(REPO);
+    // And it is STILL filtered — the hook noted it and changed nothing else.
+    expect(json.filtered).toBe(true);
+  });
+
+  it("fires on an UNLABELED issue — also below the filter", async () => {
+    const onBoardChanged = vi.fn();
+    const { json } = await postIssues(boardConnector(onBoardChanged), {
+      action: "unlabeled",
+      label: { name: "ready-for-agent" },
+    });
+
+    expect(onBoardChanged).toHaveBeenCalledWith(REPO);
+    expect(json.filtered).toBe(true);
+  });
+
+  it("fires on a LABELED issue and still emits the envelope", async () => {
+    // The note-and-continue property: no `return` after the hook.
+    const onBoardChanged = vi.fn();
+    const { status, emitted } = await postIssues(boardConnector(onBoardChanged), {
+      action: "labeled",
+      label: { name: "ready-for-agent" },
+    });
+
+    expect(onBoardChanged).toHaveBeenCalledWith(REPO);
+    expect(status).toBe(202);
+    expect(emitted?.type).toBe("issue.labeled");
+  });
+
+  it("stays quiet for an action the board does not render", async () => {
+    const onBoardChanged = vi.fn();
+    await postIssues(boardConnector(onBoardChanged), { action: "assigned" });
+    expect(onBoardChanged).not.toHaveBeenCalled();
+  });
+
+  it("stays quiet for an unmanaged repo", async () => {
+    // The hook runs above the managed-repo filter, so it does that check itself.
+    const onBoardChanged = vi.fn();
+    await postIssues(boardConnector(onBoardChanged), {
+      action: "closed",
+      repoFullName: "someone/else",
+    });
+    expect(onBoardChanged).not.toHaveBeenCalled();
+  });
+
+  it("does not cost the delivery when the hook throws", async () => {
+    // A cache that refuses to clear must never drop a webhook.
+    const onBoardChanged = vi.fn(() => {
+      throw new Error("cache exploded");
+    });
+    const { status, emitted } = await postIssues(boardConnector(onBoardChanged), {
+      action: "labeled",
+      label: { name: "ready-for-agent" },
+    });
+
+    expect(status).toBe(202);
+    expect(emitted?.type).toBe("issue.labeled");
   });
 });

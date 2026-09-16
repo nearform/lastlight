@@ -43,6 +43,90 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
       return id;
     }
 
+    describe("latestForTriggers", () => {
+      it("returns the NEWEST run per trigger, in one pass", async () => {
+        const older = await makeRun({
+          triggerId: "acme/widget#1",
+          workflowName: "build",
+          startedAt: "2026-01-01T00:00:00.000Z",
+          status: "failed",
+        });
+        const newer = await makeRun({
+          triggerId: "acme/widget#1",
+          workflowName: "build",
+          startedAt: "2026-02-01T00:00:00.000Z",
+          status: "running",
+        });
+        await makeRun({ triggerId: "acme/widget#2", startedAt: "2026-01-15T00:00:00.000Z" });
+
+        const found = await db.runs.latestForTriggers(["acme/widget#1", "acme/widget#2"]);
+
+        expect(found.size).toBe(2);
+        expect(found.get("acme/widget#1")!.id).toBe(newer);
+        expect(found.get("acme/widget#1")!.id).not.toBe(older);
+      });
+
+      it("omits a trigger with no runs rather than mapping it to null", async () => {
+        await makeRun({ triggerId: "acme/widget#1" });
+
+        const found = await db.runs.latestForTriggers(["acme/widget#1", "acme/widget#404"]);
+
+        expect([...found.keys()]).toEqual(["acme/widget#1"]);
+      });
+
+      it("returns an empty map for an empty id list, with no query", async () => {
+        expect((await db.runs.latestForTriggers([])).size).toBe(0);
+      });
+
+      it("narrows to the requested statuses", async () => {
+        await makeRun({
+          triggerId: "acme/widget#1",
+          status: "succeeded",
+          startedAt: "2026-02-01T00:00:00.000Z",
+        });
+        const live = await makeRun({
+          triggerId: "acme/widget#1",
+          status: "running",
+          startedAt: "2026-01-01T00:00:00.000Z",
+        });
+
+        const found = await db.runs.latestForTriggers(["acme/widget#1"], {
+          statuses: ["queued", "running", "paused"],
+        });
+
+        expect(found.get("acme/widget#1")!.id).toBe(live);
+      });
+
+      it("omits the heavy JSON columns the board never reads", async () => {
+        await makeRun({
+          triggerId: "acme/widget#1",
+          context: { blob: "x".repeat(1000) },
+        });
+
+        const run = (await db.runs.latestForTriggers(["acme/widget#1"])).get("acme/widget#1")!;
+
+        // `context` / `scratch` are multi-MB on a build run; the board renders
+        // neither, and selecting them turns a 50-card page into a huge payload.
+        expect(run.context).toBeUndefined();
+        expect(run.scratch).toBeUndefined();
+        expect(run.workflowName).toBe("explore");
+      });
+
+      it("chunks past the per-statement parameter limit — 250 ids still resolve", async () => {
+        const ids = Array.from({ length: 250 }, (_, i) => `acme/widget#${i}`);
+        // Two real rows, at opposite ends of the id list, so a chunking bug that
+        // dropped either the first or the last chunk fails here.
+        await makeRun({ triggerId: ids[0]!, startedAt: "2026-01-01T00:00:00.000Z" });
+        await makeRun({ triggerId: ids[249]!, startedAt: "2026-01-02T00:00:00.000Z" });
+
+        const found = await db.runs.latestForTriggers(ids);
+
+        expect(found.size).toBe(2);
+        expect(found.has(ids[0]!)).toBe(true);
+        expect(found.has(ids[249]!)).toBe(true);
+      });
+    });
+
     describe("workflow_runs CRUD", () => {
       it("creates a workflow run and retrieves it by ID", async () => {
         const id = randomUUID();
@@ -768,6 +852,53 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
         } as any);
         expect(await db.runs.requeueRunning(id)).toBe(0);
         expect((await db.runs.getRun(id))!.status).toBe("queued");
+      });
+    });
+
+    describe("countRunsForRepoSince — the autonomy pipeline's per-repo day quota", () => {
+      const TODAY = new Date().toISOString();
+      const YESTERDAY = new Date(Date.now() - 36 * 3_600_000).toISOString();
+
+      it("counts this workflow's runs for this repo since the boundary", async () => {
+        await makeRun({ workflowName: "build", owner: "acme", repo: "api", startedAt: TODAY });
+        await makeRun({ workflowName: "build", owner: "acme", repo: "api", startedAt: TODAY });
+
+        const since = new Date(Date.now() - 12 * 3_600_000).toISOString();
+        expect(await db.runs.countRunsForRepoSince("build", "acme/api", since)).toBe(2);
+      });
+
+      it("counts EVERY status — a failed build still spent the repo's allowance", async () => {
+        // The case the quota exists for: a repo whose builds keep crashing is
+        // exactly where an unbounded retry loop is most expensive.
+        for (const status of ["succeeded", "failed", "cancelled", "running"] as const) {
+          await makeRun({ workflowName: "build", owner: "acme", repo: "api", status, startedAt: TODAY });
+        }
+        const since = new Date(Date.now() - 12 * 3_600_000).toISOString();
+        expect(await db.runs.countRunsForRepoSince("build", "acme/api", since)).toBe(4);
+      });
+
+      it("excludes other repos, other workflows and anything before the boundary", async () => {
+        await makeRun({ workflowName: "build", owner: "acme", repo: "api", startedAt: TODAY });
+        await makeRun({ workflowName: "build", owner: "acme", repo: "www", startedAt: TODAY });
+        await makeRun({ workflowName: "pr-review", owner: "acme", repo: "api", startedAt: TODAY });
+        await makeRun({ workflowName: "build", owner: "acme", repo: "api", startedAt: YESTERDAY });
+
+        const since = new Date(Date.now() - 12 * 3_600_000).toISOString();
+        expect(await db.runs.countRunsForRepoSince("build", "acme/api", since)).toBe(1);
+      });
+
+      it("matches BARE rows AND qualified ones — a plain equality would miss half", async () => {
+        // The real create path stores `repo` bare with `owner` beside it; older
+        // rows carry the qualified name in one column. Both are the same repo.
+        await makeRun({ workflowName: "build", owner: "acme", repo: "api", startedAt: TODAY });
+        await makeRun({ workflowName: "build", repo: "acme/api", startedAt: TODAY });
+
+        const since = new Date(Date.now() - 12 * 3_600_000).toISOString();
+        expect(await db.runs.countRunsForRepoSince("build", "acme/api", since)).toBe(2);
+      });
+
+      it("is 0 for a repo with no runs at all", async () => {
+        expect(await db.runs.countRunsForRepoSince("build", "acme/none", YESTERDAY)).toBe(0);
       });
     });
 

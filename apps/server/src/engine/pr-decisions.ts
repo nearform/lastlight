@@ -98,6 +98,25 @@ export interface Decision<T> {
    */
   runInFlight?: { workflow: string; runId: string };
   /**
+   * Set ONLY on the `budget-exhausted` skip of {@link resolveBuildTrigger} —
+   * the autonomy pipeline's daily spend ceiling, harness-wide or per-repo.
+   *
+   * The caller keys on this typed field rather than string-matching the reason
+   * prose, for the reason {@link Decision.runInFlight} and
+   * {@link Decision.forkPr} both give: the prose is a RENDERING, free to be
+   * reworded, and a consequence that only fires while the wording holds is a
+   * consequence that stops firing the day somebody improves the sentence. It
+   * carries the numbers as well as the flag because the comment the gate posts
+   * has to name the ceiling that was hit and what has been spent against it,
+   * and re-reading the config at comment time would answer a different
+   * question — what the limit is now, not what refused this build.
+   *
+   * Absent on every other decision, including the pipeline's two other budget
+   * skips (`concurrency-exhausted`, `repo-quota-exhausted`), which are
+   * transient and earn no comment.
+   */
+  budgetExhausted?: { scope: "harness" | "repo"; limitUsd: number; spentUsd: number };
+  /**
    * Set ONLY when the decision came from {@link resolveReviewTrigger}, carrying
    * its UNDEGRADED three-valued verdict.
    *

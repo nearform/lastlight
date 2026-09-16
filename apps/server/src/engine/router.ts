@@ -8,7 +8,10 @@ import {
   getBotName,
   getHoldLabel,
   getReviewConfig,
+  getAutonomyConfig,
+  isAutonomousRepo,
   type ReviewConfig,
+  type AutonomyStageConfig,
 } from "../config/config.js";
 import type { StateDb } from "../state/db.js";
 import type { GitHubClient } from "./github/github.js";
@@ -119,6 +122,42 @@ async function reviewRequestLabels(
     });
   }
   return labels;
+}
+
+/**
+ * The autonomy stage a just-added label ENTERS, or undefined for every other
+ * label — which is nearly every label, and is the point.
+ *
+ * Modelled on `reviewRequestLabels` above and held to the same discipline: it
+ * never throws and never blocks the route. A router that 500s because one
+ * config read had a bad minute drops the event entirely, so a failure here
+ * answers "no stage" — the direction that ignores, never the one that spends.
+ *
+ * The one real difference, and it is deliberate: this does NOT consult the repo
+ * layer. `autonomy` is OPERATOR-ONLY by design — entering a stage is a SPEND
+ * decision on the operator's budget, against the operator's agent — so there is
+ * no repo-settable stage label to merge in. (`review.requestLabel` is the
+ * opposite case, and legitimately so: a repo naming an ADDITIONAL label is only
+ * ever asking for a review of its own pull request.) That makes this a pure map
+ * lookup over `getAutonomyConfig().stages` with no config fetch at all —
+ * strictly cheaper than the `pr.labeled` branch it otherwise mirrors, which
+ * pays one cached repo-layer resolution per event.
+ */
+function stageForLabel(
+  addedLabel: string | undefined,
+): { name: string; stage: AutonomyStageConfig } | undefined {
+  if (!addedLabel) return undefined;
+  try {
+    for (const [name, stage] of Object.entries(getAutonomyConfig().stages)) {
+      if (stage.enter === addedLabel) return { name, stage };
+    }
+  } catch (err: unknown) {
+    log.warn("Could not resolve the autonomy stages; treating the label as no stage", {
+      addedLabel,
+      err,
+    });
+  }
+  return undefined;
 }
 
 /** Friendly reply when a Slack/CLI command targets an unmanaged repo. */
@@ -327,6 +366,78 @@ export async function routeEvent(
           reopened: true,
         },
       };
+
+    case "issue.labeled": {
+      // The label-driven pipeline: a stage's `enter` label landed on an issue,
+      // so that stage's workflow runs.
+      //
+      // There is deliberately NO hold check in this branch. `holdRoute()` runs
+      // above the switch and reads `envelope.labels`, and the connector's
+      // `issues` branch of `normalize()` fills that from `payload.issue.labels`
+      // BEFORE it decides the action — so a held issue is already ignored by the
+      // time this case is reached, `issue.labeled` included. Verified against
+      // the connector rather than assumed, because the whole hold is worth
+      // nothing if one route quietly opts out of it.
+      //
+      // GUARD 1 of the feature's four-guard loop-safety argument: a label that
+      // enters no configured stage is dropped right here. That is precisely what
+      // stops the harness's OWN stage writes — `agent-building`,
+      // `ready-for-human`, `agent-blocked` — from re-triggering the pipeline,
+      // now that bot-sent label events reach the router at all. They reach it on
+      // purpose: `github-webhook.ts` normalizes `issues.labeled` even when the
+      // sender is our own bot, because `issue-triage` applies `ready-for-agent`
+      // AS THE BOT and that chain has to fire. The hole is paid for here — a
+      // ROUTER-level hard ignore costing one map lookup, in exactly the shape
+      // `pr.labeled`'s takes.
+      const entered = stageForLabel(envelope.addedLabel);
+      if (!entered) {
+        return {
+          action: "ignore",
+          reason: `label ${envelope.addedLabel ?? "(none)"} enters no autonomy stage`,
+        };
+      }
+      // The autonomy allow-list. The dispatch gate checks this too — it must,
+      // since nothing forces a dispatch through the router — so this is not the
+      // enforcement point, it is the CHEAP one: a repo that never opted in pays
+      // the lookup above and nothing further.
+      if (!envelope.repo || !isAutonomousRepo(envelope.repo)) {
+        return {
+          action: "ignore",
+          reason: `${envelope.repo ?? "this repo"} is not on the autonomy allow-list`,
+        };
+      }
+      log.info("Autonomy stage entered", {
+        repo: envelope.repo,
+        issueNumber: envelope.issueNumber,
+        stage: entered.name,
+        addedLabel: envelope.addedLabel,
+        senderIsBot: envelope.senderIsBot,
+      });
+      return {
+        action: "handler",
+        // `routes.github.issue_labeled` is the operator's override; absent, the
+        // STAGE names its own workflow, which is the value that actually varies
+        // per stage. `build` is the last resort.
+        handler: gh.issue_labeled || entered.stage.workflow || "build",
+        context: {
+          _routeKey: "github.issue_labeled",
+          _stage: entered.name,
+          _addedLabel: envelope.addedLabel,
+          // Load-bearing downstream, not diagnostics: the dispatch gate reads
+          // this for the already-built asymmetry — a BOT re-label is a hard skip
+          // (it is the harness's own write echoing back), while a HUMAN
+          // re-label is an explicit retry. The router records WHO relabelled and
+          // decides nothing about it; `routeEvent` stays pure.
+          _senderIsBot: envelope.senderIsBot,
+          repo: envelope.repo,
+          issueNumber: envelope.issueNumber,
+          title: envelope.title,
+          body: envelope.body,
+          sender: envelope.sender,
+          labels: envelope.labels,
+        },
+      };
+    }
 
     case "pr.opened":
     case "pr.synchronize":
