@@ -169,7 +169,22 @@ export interface RepoActivityItem {
 }
 
 /**
- * One open issue or pull request as the BOARD reads it (`src/admin/board.ts`).
+ * A pull request that will close a board issue — GitHub's closing reference,
+ * which our PR template writes as `Closes #N` and a human can add by hand.
+ */
+export interface BoardLinkedPr {
+  number: number;
+  url: string;
+  title: string;
+  /** `OPEN` | `CLOSED` | `MERGED`. */
+  state: string;
+  draft: boolean;
+}
+
+/**
+ * One open ISSUE as the BOARD reads it (`src/admin/board.ts`). The pipeline
+ * builds issues, so pull requests are never board items — a PR appears only as
+ * a {@link BoardLinkedPr} on the issue it closes.
  *
  * Deliberately not {@link RepoActivityItem}: the board is a projection of
  * LABELS onto columns, so it needs each label's `color` and `description` (a
@@ -180,15 +195,17 @@ export interface BoardItem {
   /** Qualified `owner/repo` — the board spans repos, so the bare name is ambiguous. */
   repo: string;
   number: number;
-  /** True when this item is a pull request rather than an issue. */
-  isPr: boolean;
   title: string;
   url: string;
   author: string;
   createdAt: string;
   updatedAt: string;
-  draft: boolean;
   labels: Array<{ name: string; color: string; description?: string }>;
+  /**
+   * Pull requests that close this issue, open or merged or closed. Empty on the
+   * throttled REST fallback, which does not read closing references.
+   */
+  linkedPrs: BoardLinkedPr[];
   /**
    * GitHub's `bodyText` — the markdown already flattened to prose, so an
    * excerpt reads as a sentence rather than a slice of `<details>` scaffolding.
@@ -326,9 +343,11 @@ interface GraphQlBoardNode {
   createdAt?: string;
   updatedAt?: string;
   bodyText?: string | null;
-  isDraft?: boolean;
   author?: { login?: string } | null;
   labels?: { nodes?: ({ name: string; color?: string; description?: string | null } | null)[] } | null;
+  closedByPullRequestsReferences?: {
+    nodes?: ({ number: number; url?: string; title?: string; state?: string; isDraft?: boolean } | null)[];
+  } | null;
 }
 
 /** How much of an item's body the board carries. Two rendered lines, with room. */
@@ -1164,7 +1183,9 @@ export class GitHubClient {
   }
 
   /**
-   * Every OPEN issue and pull request across `repos`, for the board.
+   * Every OPEN issue across `repos`, for the board, each with the pull requests
+   * that close it. Pull requests are excluded at the query (`is:issue`): the
+   * pipeline builds issues, and a PR shows only as a link on its issue.
    *
    * ## The rate-limit budget is what decides this method's shape
    *
@@ -1176,7 +1197,7 @@ export class GitHubClient {
    * work it exists to display. That version must not ship.
    *
    * So: ONE GraphQL document per batch of up to ten repos, each an aliased
-   * `search(type: ISSUE, query: "repo:o/r is:open")` block. That is the idiom
+   * `search(type: ISSUE, query: "repo:o/r is:open is:issue")` block. That is the idiom
    * {@link listRepoDigestDetail} already uses for its three aliased searches —
    * aliases ride one request and one rate-limit point between them. Twenty
    * repos therefore cost TWO requests per refresh, and with the board cache's
@@ -1280,11 +1301,9 @@ export class GitHubClient {
                number title url createdAt updatedAt bodyText
                author { login }
                labels(first: 10) { nodes { name color description } }
-             }
-             ... on PullRequest {
-               number title url createdAt updatedAt isDraft bodyText
-               author { login }
-               labels(first: 10) { nodes { name color description } }
+               closedByPullRequestsReferences(first: 5, includeClosedPrs: true) {
+                 nodes { number url title state isDraft }
+               }
              }
            }
          }`,
@@ -1293,7 +1312,7 @@ export class GitHubClient {
 
     const variables: Record<string, unknown> = { first };
     repos.forEach((repo, idx) => {
-      variables[`q${idx}`] = `repo:${owner}/${repo} is:open`;
+      variables[`q${idx}`] = `repo:${owner}/${repo} is:open is:issue`;
     });
 
     const res = await kit.graphql<Record<string, { nodes: (GraphQlBoardNode | null)[] } | null>>(
@@ -1309,18 +1328,30 @@ export class GitHubClient {
       out.set(
         `${owner}/${repo}`,
         nodes
-          .filter((n): n is GraphQlBoardNode => !!n && typeof n.number === "number")
+          // `is:issue` already excludes pull requests; the typename check keeps
+          // one out even if the query is ever widened.
+          .filter(
+            (n): n is GraphQlBoardNode =>
+              !!n && typeof n.number === "number" && n.__typename !== "PullRequest",
+          )
           .map((n) => ({
             repo: `${owner}/${repo}`,
             number: n.number,
-            isPr: n.__typename === "PullRequest",
             title: n.title ?? "",
             url: n.url ?? "",
             author: n.author?.login ?? "",
             createdAt: n.createdAt ?? "",
             updatedAt: n.updatedAt ?? n.createdAt ?? "",
             body: boardExcerpt(n.bodyText),
-            draft: !!n.isDraft,
+            linkedPrs: (n.closedByPullRequestsReferences?.nodes ?? [])
+              .filter((pr): pr is NonNullable<typeof pr> => !!pr && typeof pr.number === "number")
+              .map((pr) => ({
+                number: pr.number,
+                url: pr.url ?? "",
+                title: pr.title ?? "",
+                state: pr.state ?? "OPEN",
+                draft: !!pr.isDraft,
+              })),
             labels: (n.labels?.nodes ?? [])
               .filter((l): l is NonNullable<typeof l> => !!l?.name)
               .map((l) => ({
@@ -1346,17 +1377,17 @@ export class GitHubClient {
     const since = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
     const items = await this.listRepoActivitySince(owner, repo, since, { maxPages: 1 });
     return items
-      .filter((item) => !item.closedAt)
+      .filter((item) => !item.closedAt && !item.isPr)
       .map((item) => ({
         repo: `${owner}/${repo}`,
         number: item.number,
-        isPr: item.isPr,
         title: item.title,
         url: item.htmlUrl,
         author: item.authorLogin,
         createdAt: item.createdAt,
         updatedAt: item.createdAt,
-        draft: item.draft,
+        // Closing references need GraphQL — the degraded view goes without.
+        linkedPrs: [],
         labels: item.labels.map((name) => ({ name, color: "" })),
         // The REST list carries a `body`, but this path exists because GitHub
         // just throttled us — it is the degraded answer, and the card renders

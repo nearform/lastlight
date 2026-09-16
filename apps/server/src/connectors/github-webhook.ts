@@ -112,9 +112,10 @@ export interface GitHubWebhookConfig {
 /**
  * Deliveries after which a cached board answer is wrong.
  *
- * Kept to the label and lifecycle actions: the board renders OPEN issues and
- * pull requests filed under stage labels, so these are exactly the deliveries
- * that move a card, add one, or take one away.
+ * Kept to the label and lifecycle actions: the board renders OPEN issues filed
+ * under stage labels, each linking the pull requests that close it, so these
+ * are exactly the deliveries that move a card, add one, take one away, or
+ * change a card's PR link (a PR opening, closing or leaving draft).
  *
  * Deliberately NOT conditioned on the label's NAME. This connector has no
  * config access by design (the same argument the managed-repo filter makes),

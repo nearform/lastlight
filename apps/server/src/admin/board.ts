@@ -62,18 +62,35 @@ export interface BoardLabel {
   description?: string;
 }
 
-/** The live item the board is projecting — one open issue or pull request. */
+/**
+ * A pull request that closes a board issue. Structurally satisfied by the
+ * GitHub client's `BoardLinkedPr`.
+ */
+export interface BoardLinkedPr {
+  number: number;
+  url: string;
+  title: string;
+  /** `OPEN` | `CLOSED` | `MERGED`. */
+  state: string;
+  draft: boolean;
+}
+
+/**
+ * The live item the board is projecting — one open ISSUE. Pull requests are
+ * never cards: the pipeline builds issues, and a PR appears only as a link on
+ * the issue it closes ({@link BoardLinkedPr}).
+ */
 export interface BoardBuilderItem {
   /** Qualified `owner/repo`. */
   repo: string;
   number: number;
-  isPr: boolean;
   title: string;
   url: string;
   author: string;
   createdAt: string;
-  draft: boolean;
   labels: BoardLabel[];
+  /** Pull requests that close this issue. Absent or empty when there are none. */
+  linkedPrs?: BoardLinkedPr[];
   /** Flattened, server-truncated body text. Empty when GitHub gave us none. */
   body?: string;
 }
@@ -154,13 +171,17 @@ export interface BoardCard {
   key: string;
   repo: string;
   number: number;
-  isPr: boolean;
   title: string;
   author: string;
   createdAt: string;
   url: string;
-  draft: boolean;
   labels: BoardLabel[];
+  /**
+   * Pull requests that close this issue — the build's PR once it exists, or one
+   * a human opened. Absent when there are none (or on the throttled fallback,
+   * which cannot read closing references).
+   */
+  linkedPrs?: BoardLinkedPr[];
   /**
    * A short excerpt of the item's body, already flattened and clipped by the
    * GitHub client. Absent or empty means GitHub gave us none — an item with no
@@ -336,7 +357,6 @@ function heldReasonFor(holdLabel: string): string {
 function actionsFor(args: {
   held: boolean;
   holdLabel: string;
-  isPr: boolean;
   run: BoardBuilderRun | null;
   approval: BoardBuilderApproval | null;
   staged: boolean;
@@ -347,7 +367,7 @@ function actionsFor(args: {
   /** Its stage's `on_failure` label — where a stopped run parks. */
   failureLabel: string | null;
 }): BoardAction[] {
-  const { held, holdLabel, isPr, run, approval, staged, stageLabel, entryLabel, failureLabel } = args;
+  const { held, holdLabel, run, approval, staged, stageLabel, entryLabel, failureLabel } = args;
   const actions: BoardAction[] = [
     { id: "open", label: "Open on GitHub", kind: "link", enabled: true, disabledReason: null },
   ];
@@ -388,7 +408,6 @@ function actionsFor(args: {
   // refusals. The stale FAILED band clears by itself, because the new run
   // becomes the latest for this trigger.
   const parked =
-    !isPr &&
     staged &&
     !!entryLabel &&
     stageLabel !== entryLabel &&
@@ -405,9 +424,6 @@ function actionsFor(args: {
     });
   }
 
-  // Dispatch is issue-only: the pipeline builds ISSUES. A PR's equivalent is
-  // the existing PR retry surface, which the board does not duplicate.
-  //
   // A PREVIOUS run does NOT disable it, and that is load-bearing. The gate
   // treats a human ask as an explicit retry — `resolveBuildTrigger`'s
   // `already-built` branch hard-skips only a BOT re-label, and this surface
@@ -420,7 +436,7 @@ function actionsFor(args: {
   // `dispatch` (a run exists), leaving only `retry`, which resumes the same
   // failed run in its stale workspace. If the blocker was fixed upstream, that
   // is precisely the one thing that cannot help.
-  if (!isPr) {
+  {
     const disabledReason = held
       ? holdReason
       : live
@@ -445,8 +461,7 @@ function actionsFor(args: {
  * Project the live items onto the configured columns.
  *
  * Three inputs, no I/O, no exceptions. An item that matches no column is
- * unstaged — which is the NORMAL state of an open pull request, not an error:
- * the pipeline labels issues, and nothing labels PRs.
+ * unstaged — an ordinary open issue the pipeline has not been asked about.
  */
 /**
  * Two rendered lines' worth of reason. The same argument `boardExcerpt` makes
@@ -580,14 +595,13 @@ export function buildBoard(input: BuildBoardInput, opts: BuildBoardOptions = {})
       key,
       repo: item.repo,
       number: item.number,
-      isPr: item.isPr,
       title: item.title,
       author: item.author,
       createdAt: item.createdAt,
       url: item.url,
-      draft: item.draft,
       labels: item.labels,
       ...(item.body ? { body: item.body } : {}),
+      ...(item.linkedPrs && item.linkedPrs.length > 0 ? { linkedPrs: item.linkedPrs } : {}),
       stageLabel: staged ? columns[index]!.label : "",
       ambiguousStage: matches > 1,
       held,
@@ -597,7 +611,6 @@ export function buildBoard(input: BuildBoardInput, opts: BuildBoardOptions = {})
       actions: actionsFor({
         held,
         holdLabel: input.holdLabel,
-        isPr: item.isPr,
         run,
         approval,
         staged,

@@ -60,13 +60,12 @@ function boardItem(repo: string, number: number, labels: string[]): BoardItem {
   return {
     repo,
     number,
-    isPr: false,
     title: `Item ${number}`,
     url: `https://github.com/${repo}/issues/${number}`,
     author: "maintainer",
     createdAt: "2026-09-01T00:00:00.000Z",
     updatedAt: "2026-09-01T00:00:00.000Z",
-    draft: false,
+    linkedPrs: [],
     labels: labels.map((name) => ({ name, color: "ededed" })),
   };
 }

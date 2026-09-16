@@ -1,13 +1,14 @@
 import { useState } from "react";
 import clsx from "clsx";
 import { GitPullRequest, CircleDot, Split, X, Loader2, TriangleAlert } from "lucide-react";
-import type { BoardCard as BoardCardData } from "../../api";
+import type { BoardCard as BoardCardData, BoardLinkedPr } from "../../api";
 import { LabelChip } from "./LabelChip";
 import { CardActionMenu, type CardFeedback } from "./CardActionMenu";
 import { draggedCardOf, encodeDragPayload, isDraggable, DRAG_MIME, type DraggedCard } from "./stageDrop";
 
 /**
- * One issue/PR on the pipeline board.
+ * One issue on the pipeline board. Pull requests are never cards — the PRs that
+ * close an issue render as links on it.
  *
  * ## Everything optional is read by name, defensively
  *
@@ -82,6 +83,7 @@ export function BoardCard({
   const labels = (Array.isArray(card.labels) ? card.labels : [])
     .slice()
     .sort((x, y) => (x?.name ?? "").localeCompare(y?.name ?? ""));
+  const linkedPrs = linkedPrsOf(card);
   const held = card.held === true;
   const gated = approval !== null;
   const canDrag = isDraggable(card) && !moving;
@@ -143,12 +145,8 @@ export function BoardCard({
     >
       {/* ── Identity line: #123 · author · opened 14h ─────────────────── */}
       <div className="flex items-start gap-1.5">
-        <span className="mt-px shrink-0 text-faint" title={card.isPr ? "Pull request" : "Issue"}>
-          {card.isPr ? (
-            <GitPullRequest className="h-3 w-3" />
-          ) : (
-            <CircleDot className="h-3 w-3" />
-          )}
+        <span className="mt-px shrink-0 text-faint" title="Issue">
+          <CircleDot className="h-3 w-3" />
         </span>
         <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-1.5 text-[10px] text-muted">
           {card.repo && (
@@ -177,7 +175,6 @@ export function BoardCard({
           {approvalAge === null && timeAgo(card.createdAt) && (
             <span>· opened {timeAgo(card.createdAt)}</span>
           )}
-          {card.draft && <span className="text-faint">· draft</span>}
         </div>
         <CardActionMenu
           card={card}
@@ -287,6 +284,30 @@ export function BoardCard({
         </div>
       )}
 
+      {/* ── Linked pull requests ──────────────────────────────────────── */}
+      {linkedPrs.length > 0 && (
+        <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-[10px]">
+          {linkedPrs.map((pr) => (
+            <a
+              key={pr.number}
+              href={pr.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={`${pr.title || `PR #${pr.number}`} — ${prStateLabel(pr)}`}
+              onClick={(e) => e.stopPropagation()}
+              className={clsx(
+                "inline-flex items-center gap-1 font-medium transition-colors hover:underline",
+                prStateTone(pr),
+              )}
+            >
+              <GitPullRequest className="h-2.5 w-2.5 shrink-0" />
+              <span className="font-mono">#{pr.number}</span>
+              <span className="font-normal opacity-80">{prStateLabel(pr)}</span>
+            </a>
+          ))}
+        </div>
+      )}
+
       {/* ── Labels ────────────────────────────────────────────────────── */}
       {labels.length > 0 && (
         <div className="flex flex-wrap gap-1">
@@ -348,6 +369,26 @@ function asDict(v: unknown): Dict | null {
 
 function str(v: unknown): string | null {
   return typeof v === "string" && v ? v : null;
+}
+
+/** The card's linked PRs, dropping any entry without a number or link. */
+export function linkedPrsOf(card: BoardCardData): BoardLinkedPr[] {
+  return (Array.isArray(card.linkedPrs) ? card.linkedPrs : []).filter(
+    (pr): pr is BoardLinkedPr => !!pr && typeof pr.number === "number" && !!str(pr.url),
+  );
+}
+
+/** `MERGED` → "merged", an open draft → "draft". */
+export function prStateLabel(pr: BoardLinkedPr): string {
+  if (pr.state === "MERGED") return "merged";
+  if (pr.state === "CLOSED") return "closed";
+  return pr.draft ? "draft" : "open";
+}
+
+function prStateTone(pr: BoardLinkedPr): string {
+  if (pr.state === "MERGED") return "text-primary";
+  if (pr.state === "CLOSED") return "text-faint line-through";
+  return pr.draft ? "text-muted" : "text-success";
 }
 
 /** Relative age of an ISO timestamp — "3h", "2d" (mirrors ReposPage). */

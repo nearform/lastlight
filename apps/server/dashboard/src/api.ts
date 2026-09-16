@@ -986,18 +986,30 @@ export interface BoardCardAction {
   to?: string | null;
 }
 
+export interface BoardLinkedPr {
+  number: number;
+  url: string;
+  title: string;
+  /** `OPEN` | `CLOSED` | `MERGED`. */
+  state: string;
+  draft: boolean;
+}
+
 export interface BoardCard {
   /** `owner/repo#123`. */
   key: string;
   repo: string;
   number: number;
-  isPr: boolean;
   title: string;
   author: string;
   createdAt: string;
   url: string;
-  draft: boolean;
   labels: BoardLabel[];
+  /**
+   * Pull requests that close this issue (the build's PR once opened). The board
+   * shows issues only; a PR is never a card, just a link here.
+   */
+  linkedPrs?: BoardLinkedPr[] | null;
   stageLabel: string;
   /** The card carries more than one stage label. */
   ambiguousStage: boolean;

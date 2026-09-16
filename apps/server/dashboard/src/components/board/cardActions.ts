@@ -34,7 +34,6 @@ export type CardIntent =
   | { kind: "reject"; approvalId: string }
   | { kind: "cancelRun"; runId: string }
   | { kind: "retryRun"; runId: string }
-  | { kind: "retryPr"; repo: string; number: number }
   | { kind: "dispatchIssue"; repo: string; number: number }
   /**
    * Move a parked card back to its stage's entry column, which the server then
@@ -49,7 +48,6 @@ export type CardIntent =
 export interface CardSubject {
   repo: string;
   number: number;
-  isPr: boolean;
   url: string;
   runId: string | null;
   approvalId: string | null;
@@ -64,7 +62,6 @@ export function subjectOf(card: BoardCard): CardSubject {
   return {
     repo: typeof card.repo === "string" ? card.repo : "",
     number: typeof card.number === "number" ? card.number : 0,
-    isPr: card.isPr === true,
     url: typeof card.url === "string" ? card.url : "",
     runId: typeof run?.id === "string" && run.id ? run.id : null,
     approvalId: typeof approval?.id === "string" && approval.id ? approval.id : null,
@@ -107,19 +104,14 @@ export function intentForAction(action: BoardCardAction, subject: CardSubject): 
   }
 
   if (id === "retry" || kind === "run") {
-    // A run id is what the run-scoped retry needs. A PR card without one is
-    // the PR-retry surface instead: same intent ("go again"), different
-    // endpoint, because a PR's retry re-crosses the dispatch gate rather than
-    // resuming a failed phase.
+    // A run id is what the run-scoped retry needs. The board holds issues
+    // only, so there is no PR-retry fallback here.
     if (subject.runId) return { kind: "retryRun", runId: subject.runId };
-    if (subject.isPr) return { kind: "retryPr", repo: subject.repo, number: subject.number };
     return { kind: "unsupported", reason: "No run on this card to retry." };
   }
 
   if (id === "dispatch" || kind === "dispatch") {
-    return subject.isPr
-      ? { kind: "retryPr", repo: subject.repo, number: subject.number }
-      : { kind: "dispatchIssue", repo: subject.repo, number: subject.number };
+    return { kind: "dispatchIssue", repo: subject.repo, number: subject.number };
   }
 
   return { kind: "unsupported", reason: `This dashboard does not know the action "${id || kind}".` };
@@ -172,14 +164,6 @@ export async function performIntent(
     case "retryRun":
       await api.retryWorkflowRun(intent.runId);
       return {};
-    case "retryPr": {
-      const res = await api.retryPr(intent.repo, intent.number, reason);
-      if (res?.dispatched === false) {
-        const why = typeof res.reason === "string" && res.reason ? ` — ${res.reason}` : "";
-        return { note: `Parked: the next event on this PR will honour the retry${why}.` };
-      }
-      return {};
-    }
     case "dispatchIssue":
       await api.dispatchIssue(intent.repo, intent.number, reason ? { reason } : {});
       return {};

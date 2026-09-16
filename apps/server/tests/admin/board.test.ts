@@ -31,12 +31,10 @@ function item(number: number, labels: string[], over: Partial<BoardBuilderItem> 
   return {
     repo: REPO,
     number,
-    isPr: false,
     title: `Item ${number}`,
     url: `https://github.com/${REPO}/issues/${number}`,
     author: "maintainer",
     createdAt: "2026-09-01T00:00:00.000Z",
-    draft: false,
     labels: labels.map((name) => ({ name, color: "ededed" })),
     ...over,
   };
@@ -154,14 +152,14 @@ describe("buildBoard card placement", () => {
     expect(board.unstaged).toBeUndefined();
   });
 
-  it("buckets them into `unstaged` when asked — an unlabelled PR is normal, not an error", () => {
-    const board = build([item(2, ["bug"]), item(3, [], { isPr: true, draft: true })], {
+  it("buckets them into `unstaged` when asked — an unlabelled issue is normal, not an error", () => {
+    const board = build([item(2, ["bug"]), item(3, [])], {
       unstaged: true,
     });
 
     expect(board.unstaged!.count).toBe(2);
     expect(board.unstaged!.cards.map((card) => card.number)).toEqual([2, 3]);
-    expect(board.unstaged!.cards[1]).toMatchObject({ isPr: true, draft: true, stageLabel: "" });
+    expect(board.unstaged!.cards[1]).toMatchObject({ stageLabel: "" });
   });
 
   it("marks a held card and disables every action but the link", () => {
@@ -261,11 +259,13 @@ describe("buildBoard runs, approvals and actions", () => {
     });
   });
 
-  it("never offers dispatch on a pull request — the pipeline builds issues", () => {
-    const board = build([item(6, ["ready-for-human"], { isPr: true })]);
+  it("links the pull requests that close an issue — and omits the field when there are none", () => {
+    const pr = { number: 31, url: `https://github.com/${REPO}/pull/31`, title: "Build #6", state: "OPEN", draft: false };
+    const board = build([item(6, ["ready-for-human"], { linkedPrs: [pr] }), item(7, ["ready-for-human"], { linkedPrs: [] })]);
 
-    const card = board.columns.find((col) => col.label === "ready-for-human")!.cards[0]!;
-    expect(card.actions.map((a) => a.id)).not.toContain("dispatch");
+    const [withPr, without] = board.columns.find((col) => col.label === "ready-for-human")!.cards;
+    expect(withPr!.linkedPrs).toEqual([pr]);
+    expect(without).not.toHaveProperty("linkedPrs");
   });
 });
 
@@ -428,13 +428,6 @@ describe("buildBoard — the unblock action", () => {
     });
     expect(unblockOn(board)?.enabled).toBe(false);
     expect(unblockOn(board)?.disabledReason).toContain(HOLD);
-  });
-
-  it("is never offered on a pull request — the pipeline builds issues", () => {
-    const board = build([item(4, ["agent-blocked"], { isPr: true })], {
-      runs: new Map([[`${REPO}#4`, FAILED]]),
-    });
-    expect(unblockOn(board)).toBeUndefined();
   });
 });
 

@@ -216,7 +216,12 @@ export function boardRevision(): number {
  */
 function fingerprint(items: readonly BoardItem[]): string {
   return items
-    .map((item) => `${item.number}:${item.labels.map((l) => l.name).sort().join(",")}`)
+    .map(
+      (item) =>
+        `${item.number}:${item.labels.map((l) => l.name).sort().join(",")}` +
+        // A PR opening, merging or closing changes the card's link.
+        `:${item.linkedPrs.map((pr) => `${pr.number}${pr.state}${pr.draft ? "d" : ""}`).sort().join(",")}`,
+    )
     .sort()
     .join("|");
 }

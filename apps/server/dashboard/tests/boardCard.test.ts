@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
 import type { BoardCard as BoardCardData } from "../src/api";
-import { isGated, timeAgo } from "../src/components/board/BoardCard";
+import { isGated, linkedPrsOf, prStateLabel, timeAgo } from "../src/components/board/BoardCard";
 
 const NOW = new Date("2026-09-16T12:00:00.000Z");
 const ago = (secs: number) => new Date(NOW.getTime() - secs * 1000).toISOString();
@@ -18,12 +18,10 @@ function card(over: Partial<BoardCardData> = {}): BoardCardData {
     key: "acme/widget#7",
     repo: "acme/widget",
     number: 7,
-    isPr: false,
     title: "t",
     author: "maintainer",
     createdAt: "2026-09-01T00:00:00.000Z",
     url: "https://github.com/acme/widget/issues/7",
-    draft: false,
     labels: [],
     stageLabel: "Build",
     ambiguousStage: false,
@@ -109,5 +107,37 @@ describe("timeAgo", () => {
     expect(timeAgo("2026-13-45T99:99:99Z")).toBeNull();
     expect(timeAgo(1_757_000_000_000)).toBeNull();
     expect(timeAgo({ createdAt: "2026-09-01" })).toBeNull();
+  });
+});
+
+describe("linkedPrsOf / prStateLabel", () => {
+  const pr = (over: Record<string, unknown> = {}) => ({
+    number: 31,
+    url: "https://github.com/acme/widget/pull/31",
+    title: "Build #7",
+    state: "OPEN",
+    draft: false,
+    ...over,
+  });
+
+  it("reads the linked PRs, dropping entries with no number or link", () => {
+    const got = linkedPrsOf(
+      card({
+        linkedPrs: [pr(), pr({ number: "32" }), pr({ url: "" }), null] as unknown as BoardCardData["linkedPrs"],
+      }),
+    );
+    expect(got.map((p) => p.number)).toEqual([31]);
+  });
+
+  it("is empty for an older server that sends no field, or junk", () => {
+    expect(linkedPrsOf(card())).toEqual([]);
+    expect(linkedPrsOf(card({ linkedPrs: "nope" as unknown as null }))).toEqual([]);
+  });
+
+  it("names the state a person cares about", () => {
+    expect(prStateLabel(pr())).toBe("open");
+    expect(prStateLabel(pr({ draft: true }))).toBe("draft");
+    expect(prStateLabel(pr({ state: "MERGED" }))).toBe("merged");
+    expect(prStateLabel(pr({ state: "CLOSED", draft: true }))).toBe("closed");
   });
 });

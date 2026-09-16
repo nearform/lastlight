@@ -19,7 +19,6 @@ const { apiMock } = vi.hoisted(() => ({
     respondToApproval: vi.fn(async () => ({ status: "ok" })),
     cancelWorkflowRun: vi.fn(async () => ({ cancelled: "run-1" })),
     retryWorkflowRun: vi.fn(async () => ({ retrying: "run-1" })),
-    retryPr: vi.fn(async () => ({ dispatched: true })),
     dispatchIssue: vi.fn(async () => ({ dispatched: true })),
     moveIssueStage: vi.fn(async () => ({
       moved: true,
@@ -66,12 +65,10 @@ function card(over: Partial<BoardCard> = {}): BoardCard {
     key: "acme/widget#7",
     repo: "acme/widget",
     number: 7,
-    isPr: false,
     title: "Something is broken",
     author: "maintainer",
     createdAt: "2026-09-01T00:00:00.000Z",
     url: "https://github.com/acme/widget/issues/7",
-    draft: false,
     labels: [],
     stageLabel: "Build",
     ambiguousStage: false,
@@ -95,7 +92,6 @@ function action(over: Partial<BoardCardAction> = {}): BoardCardAction {
 }
 
 const issueCard = card();
-const prCard = card({ isPr: true, number: 12, url: "https://github.com/acme/widget/pull/12" });
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -108,7 +104,6 @@ describe("subjectOf", () => {
     expect(subjectOf(card({ run: RUN, approval: APPROVAL }))).toEqual({
       repo: "acme/widget",
       number: 7,
-      isPr: false,
       url: "https://github.com/acme/widget/issues/7",
       runId: "run-1",
       approvalId: "ap-1",
@@ -124,14 +119,12 @@ describe("subjectOf", () => {
       approval: "definitely-not-an-object",
       repo: 42,
       number: "7",
-      isPr: "yes",
       url: undefined,
       stageLabel: 99,
     } as unknown as BoardCard;
     expect(subjectOf(broken)).toEqual({
       repo: "",
       number: 0,
-      isPr: false,
       url: "",
       runId: null,
       approvalId: null,
@@ -276,7 +269,7 @@ describe("intentForAction — an unknown action degrades explicitly", () => {
     ];
     // A card carrying EVERYTHING, so a wrong fall-through would have the ids it
     // needs to actually fire.
-    const loaded = subjectOf(card({ isPr: true, run: RUN, approval: APPROVAL }));
+    const loaded = subjectOf(card({ run: RUN, approval: APPROVAL }));
     for (const stranger of strangers) {
       const intent = intentForAction(stranger, loaded);
       expect(intent.kind).toBe("unsupported");
@@ -285,33 +278,9 @@ describe("intentForAction — an unknown action degrades explicitly", () => {
   });
 });
 
-// ── The two documented PR-retry fallbacks ───────────────────────────────────
+// ── Retry without a run ─────────────────────────────────────────────────────
 
-describe("intentForAction — PR retry fallbacks", () => {
-  it("retry on a PR card with NO run id becomes a PR retry", () => {
-    expect(intentForAction(action({ id: "retry", kind: "run" }), subjectOf(prCard))).toEqual({
-      kind: "retryPr",
-      repo: "acme/widget",
-      number: 12,
-    });
-  });
-
-  it("a kind-`run` action on a PR card with no run id takes the same road", () => {
-    expect(intentForAction(action({ id: "go-again", kind: "run" }), subjectOf(prCard))).toEqual({
-      kind: "retryPr",
-      repo: "acme/widget",
-      number: 12,
-    });
-  });
-
-  it("dispatch on a PR card is a PR retry, not an issue dispatch", () => {
-    expect(intentForAction(action({ id: "dispatch", kind: "dispatch" }), subjectOf(prCard))).toEqual({
-      kind: "retryPr",
-      repo: "acme/widget",
-      number: 12,
-    });
-  });
-
+describe("intentForAction — retry", () => {
   it("retry on an ISSUE card with no run has nowhere to go", () => {
     expect(intentForAction(action({ id: "retry", kind: "run" }), subjectOf(issueCard))).toEqual({
       kind: "unsupported",
@@ -319,10 +288,12 @@ describe("intentForAction — PR retry fallbacks", () => {
     });
   });
 
-  it("a PR card with a run still retries the RUN, not the PR", () => {
-    expect(
-      intentForAction(action({ id: "retry", kind: "run" }), subjectOf(card({ isPr: true, run: RUN }))),
-    ).toEqual({ kind: "retryRun", runId: "run-1" });
+  it("dispatch on a card is always an issue dispatch — the board holds issues only", () => {
+    expect(intentForAction(action({ id: "dispatch", kind: "dispatch" }), subjectOf(issueCard))).toEqual({
+      kind: "dispatchIssue",
+      repo: "acme/widget",
+      number: 7,
+    });
   });
 });
 
@@ -335,7 +306,6 @@ describe("needsReason / needsConfirm / isNavigation", () => {
     reject: { kind: "reject", approvalId: "ap-1" },
     cancelRun: { kind: "cancelRun", runId: "run-1" },
     retryRun: { kind: "retryRun", runId: "run-1" },
-    retryPr: { kind: "retryPr", repo: "acme/widget", number: 12 },
     dispatchIssue: { kind: "dispatchIssue", repo: "acme/widget", number: 7 },
     unsupported: { kind: "unsupported", reason: "nope" },
   } as const;
@@ -388,28 +358,6 @@ describe("performIntent", () => {
     expect(apiMock.cancelWorkflowRun).toHaveBeenCalledWith("run-1");
     await performIntent({ kind: "retryRun", runId: "run-2" });
     expect(apiMock.retryWorkflowRun).toHaveBeenCalledWith("run-2");
-  });
-
-  it("retries a PR by repo + number", async () => {
-    await expect(
-      performIntent({ kind: "retryPr", repo: "acme/widget", number: 12 }, { reason: "flaky" }),
-    ).resolves.toEqual({});
-    expect(apiMock.retryPr).toHaveBeenCalledWith("acme/widget", 12, "flaky");
-  });
-
-  it("reports a PARKED PR retry as a note — a 200 where nothing starts yet", async () => {
-    apiMock.retryPr.mockResolvedValueOnce({ dispatched: false, reason: "a run is in flight" } as never);
-    await expect(
-      performIntent({ kind: "retryPr", repo: "acme/widget", number: 12 }),
-    ).resolves.toEqual({
-      note: "Parked: the next event on this PR will honour the retry — a run is in flight.",
-    });
-  });
-
-  it("parks without a reason when the server gave none", async () => {
-    apiMock.retryPr.mockResolvedValueOnce({ dispatched: false } as never);
-    const { note } = await performIntent({ kind: "retryPr", repo: "acme/widget", number: 12 });
-    expect(note).toBe("Parked: the next event on this PR will honour the retry.");
   });
 
   it("dispatches an issue, passing a reason only when there is one", async () => {
