@@ -23,7 +23,7 @@ import { logPhaseEnd, logPhaseStart } from "#src/logging/phase-log.js";
  * byte-identical duplicates, which is how one gets fixed and the other doesn't.
  */
 
-function fakeLogger(): LoggerPort & { info: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn> } {
+function fakeLogger(): LoggerPort & { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn> } {
   const log = {
     debug: vi.fn(),
     info: vi.fn(),
@@ -35,6 +35,7 @@ function fakeLogger(): LoggerPort & { info: ReturnType<typeof vi.fn>; error: Ret
   log.child.mockReturnValue(log);
   return log as unknown as LoggerPort & {
     info: ReturnType<typeof vi.fn>;
+    warn: ReturnType<typeof vi.fn>;
     error: ReturnType<typeof vi.fn>;
   };
 }
@@ -84,6 +85,46 @@ describe("logPhaseEnd", () => {
       success: false,
       error: 'secrets "ll-run-abc-creds" already exists',
     });
+    expect(log.info).not.toHaveBeenCalled();
+  });
+
+  it("logs an error_quota deferral at WARN, not error, carrying the cause", () => {
+    const log = fakeLogger();
+    const deferred: PhaseResult = {
+      phase: "report",
+      success: false,
+      output: "",
+      error: "pod create rejected by ResourceQuota",
+      stopReason: "error_quota",
+    };
+    logPhaseEnd(log, "repo-health", "report", deferred);
+    expect(log.warn).toHaveBeenCalledWith("Phase end", {
+      workflowName: "repo-health",
+      phase: "report",
+      success: false,
+      error: "pod create rejected by ResourceQuota",
+    });
+    expect(log.error).not.toHaveBeenCalled();
+    expect(log.info).not.toHaveBeenCalled();
+  });
+
+  it("still logs a non-quota failure carrying a stopReason at ERROR", () => {
+    const log = fakeLogger();
+    const failed: PhaseResult = {
+      phase: "report",
+      success: false,
+      output: "",
+      error: "sandbox provisioning failed",
+      stopReason: "error_sandbox",
+    };
+    logPhaseEnd(log, "repo-health", "report", failed);
+    expect(log.error).toHaveBeenCalledWith("Phase end", {
+      workflowName: "repo-health",
+      phase: "report",
+      success: false,
+      error: "sandbox provisioning failed",
+    });
+    expect(log.warn).not.toHaveBeenCalled();
     expect(log.info).not.toHaveBeenCalled();
   });
 

@@ -216,8 +216,8 @@ export function isSoftOutcome(
   return r.stopReason === "unknown" || r.stopReason === "error_truncated";
 }
 
-function pickResult(r: ExecutionResult): Pick<ExecutionResult, "success" | "output" | "error"> {
-  return { success: r.success, output: r.output, error: r.error };
+function pickResult(r: ExecutionResult): Pick<ExecutionResult, "success" | "output" | "error" | "stopReason"> {
+  return { success: r.success, output: r.output, error: r.error, stopReason: r.stopReason };
 }
 
 function issueNumberFromTrigger(triggerId: string): number | undefined {
