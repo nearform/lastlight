@@ -222,6 +222,35 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
         expect(run!.finishedAt).toBeTruthy();
       });
 
+      it("refuses to flip a PAUSED run to succeeded, but still fails or cancels it", async () => {
+        // A paused run is waiting on a human. `succeeded` aimed at it is a caller
+        // that mistook a gate stop for a finish — honouring it strands the
+        // approval and fires the terminal observers.
+        const id = randomUUID();
+        await db.runs.createRun({
+          id,
+          workflowName: "build",
+          triggerId: "owner/repo#6",
+          currentPhase: "waiting_approval",
+          status: "paused",
+          startedAt: new Date().toISOString(),
+        });
+        const observed: string[] = [];
+        db.runs.addTerminalObserver((_run, status) => observed.push(status));
+
+        await db.runs.finishRun(id, "succeeded", { terminalMarker: { phase: "complete" } });
+        let run = await db.runs.getRun(id);
+        expect(run!.status).toBe("paused");
+        expect(run!.finishedAt).toBeFalsy();
+        expect(run!.phaseHistory.map((p) => p.phase)).not.toContain("complete");
+        expect(observed).toEqual([]);
+
+        await db.runs.finishRun(id, "cancelled");
+        run = await db.runs.getRun(id);
+        expect(run!.status).toBe("cancelled");
+        expect(observed).toEqual(["cancelled"]);
+      });
+
       it("finishes a workflow run with failed status", async () => {
         const id = randomUUID();
         const now = new Date().toISOString();

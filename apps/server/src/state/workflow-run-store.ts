@@ -974,14 +974,26 @@ export class WorkflowRunStore {
    * read-modify-write, plus the status flip — so it runs in ONE transaction
    * and the dashboard never sees the terminal phase without the finished
    * status, or vice versa.
+   *
+   * A `paused` run is NEVER flipped to `succeeded`. Paused means a human still
+   * owes this run an answer; the approval path flips it back to `running`
+   * before any phase continues, so a `succeeded` aimed at a paused row can only
+   * be a caller that mistook a gate stop (`success: true, paused: true`) for a
+   * finish. Honouring it would strand the pending approval and fire the
+   * terminal observers, which advance the issue's stage label past the gate.
+   * Failing or cancelling a paused run stays legal — that is how a rejection
+   * and a dashboard cancel end one.
    */
   async finishRun(
     id: string,
     status: "succeeded" | "failed" | "cancelled",
     opts: { error?: string; terminalMarker?: PhaseMarker } = {},
   ): Promise<void> {
-    const apply = async (dbc: StateDbc): Promise<void> => {
-      if (opts.terminalMarker) {
+    const apply = async (dbc: StateDbc): Promise<boolean> => {
+      // Flip FIRST so a refused flip leaves no terminal marker behind; the
+      // order is invisible outside the transaction.
+      const flipped = await this.flipFinished(id, status, opts.error, dbc);
+      if (flipped && opts.terminalMarker) {
         await this.appendPhase(
           id,
           opts.terminalMarker.phase,
@@ -994,24 +1006,41 @@ export class WorkflowRunStore {
           dbc,
         );
       }
-      await this.flipFinished(id, status, opts.error, dbc);
+      return flipped;
     };
-    if (opts.terminalMarker || opts.error !== undefined) {
-      await this.serialize(() => this.client.transaction(async (tx) => apply(tx)));
-    } else {
-      await apply(this.client);
+    const flipped =
+      opts.terminalMarker || opts.error !== undefined
+        ? await this.serialize(() => this.client.transaction(async (tx) => apply(tx)))
+        : await apply(this.client);
+    if (!flipped) {
+      log.warn("Refused to mark a paused run succeeded — it is waiting on a human", { runId: id });
+      return;
     }
     // AFTER the transaction commits — the observer reads the row back.
     await this.notifyTerminal(id, status);
   }
 
+  /**
+   * Returns `false` — writing nothing — when `status` is `succeeded` and the row
+   * is `paused` (see {@link finishRun}). A status read rather than a conditional
+   * UPDATE's row count, so the guard never depends on a driver reporting
+   * affected rows.
+   */
   private async flipFinished(
     id: string,
     status: "succeeded" | "failed" | "cancelled",
     error?: string,
     dbc: StateDbc = this.client,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const { workflowRuns } = this.t;
+    if (status === "succeeded") {
+      const [row] = await dbc
+        .select({ status: workflowRuns.status })
+        .from(workflowRuns)
+        .where(eq(workflowRuns.id, id))
+        .limit(1);
+      if (row?.status === "paused") return false;
+    }
     const now = new Date().toISOString();
     const patch: Partial<StateTables["workflowRuns"]["$inferInsert"]> = {
       status,
@@ -1023,6 +1052,7 @@ export class WorkflowRunStore {
     // untouched otherwise.
     if (error !== undefined) patch.context = { ...(await this.readContext(id, dbc)), error };
     await dbc.update(workflowRuns).set(patch).where(eq(workflowRuns.id, id));
+    return true;
   }
 
   /** Cancel a workflow run */
@@ -1044,6 +1074,30 @@ export class WorkflowRunStore {
       .update(workflowRuns)
       .set({ status: "paused", updatedAt: now })
       .where(eq(workflowRuns.id, id));
+  }
+
+  /**
+   * Put a run wrongly finished at an approval gate back to `paused`: one that
+   * reads `succeeded` while its `currentPhase` is still the `waiting_approval`
+   * marker. A resume path before the fix in `resumeSimpleRun` stamped gate
+   * stops that way, which left the approval unanswerable — the approve path
+   * only resumes a `paused` run. CAS-guarded on exactly that shape, so a run
+   * that genuinely completed is never touched; returns rows changed.
+   */
+  async restorePaused(id: string): Promise<number> {
+    const { workflowRuns } = this.t;
+    const now = new Date().toISOString();
+    const result = await this.client
+      .update(workflowRuns)
+      .set({ status: "paused", finishedAt: null, updatedAt: now })
+      .where(
+        and(
+          eq(workflowRuns.id, id),
+          eq(workflowRuns.status, "succeeded"),
+          eq(workflowRuns.currentPhase, "waiting_approval"),
+        ),
+      );
+    return changes(result);
   }
 
   /** Resume a paused workflow run (set back to running) */

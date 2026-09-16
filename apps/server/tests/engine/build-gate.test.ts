@@ -327,7 +327,11 @@ describe("applyBuildDispatchGate — budget skip consequences", () => {
   }
 
   /** A live build run for another issue — the concurrency input. */
-  async function seedActiveBuild(n: number, autonomous: boolean): Promise<void> {
+  async function seedActiveBuild(
+    n: number,
+    autonomous: boolean,
+    status: "running" | "queued" | "paused" = "running",
+  ): Promise<void> {
     await db.runs.createRun({
       id: `live-${n}`,
       workflowName: "build",
@@ -335,8 +339,8 @@ describe("applyBuildDispatchGate — budget skip consequences", () => {
       owner: "cliftonc",
       repo: "lastlight",
       issueNumber: 800 + n,
-      currentPhase: "architect",
-      status: "running",
+      currentPhase: status === "paused" ? "waiting_approval" : "architect",
+      status,
       context: autonomous ? { _autonomous: true } : {},
       startedAt: new Date().toISOString(),
     });
@@ -489,6 +493,99 @@ describe("applyBuildDispatchGate — budget skip consequences", () => {
     const result = await applyBuildDispatchGate(args(), { db, github: fakeGithub() });
 
     expect(result.decision).toBe("dispatch");
+  });
+
+  it("a build PAUSED on a human does not consume the concurrency ceiling", async () => {
+    // A run waiting at an approval gate holds no agent and no sandbox slot.
+    // Counting it let two architect plans awaiting review stop the whole
+    // pipeline (nearform, 2026-09-16).
+    useBudget({ maxConcurrentBuilds: 1 });
+    await seedActiveBuild(1, true, "paused");
+    await seedActiveBuild(2, true, "paused");
+
+    const result = await applyBuildDispatchGate(args(), { db, github: fakeGithub() });
+
+    expect(result.decision).toBe("dispatch");
+  });
+
+  it("a QUEUED autonomous build still consumes the ceiling — it is about to run", async () => {
+    useBudget({ maxConcurrentBuilds: 1 });
+    await seedActiveBuild(1, true, "queued");
+
+    const result = await applyBuildDispatchGate(args(), { db, github: fakeGithub() });
+
+    expect(result.reason).toMatch(/^concurrency-exhausted:/);
+  });
+
+  it("gates a burst atomically — one sweep tick cannot dispatch past the ceiling", async () => {
+    // The fan-out gates every discovered issue in parallel, and none of their
+    // run rows exist yet when the others read the count. Seven issues against a
+    // ceiling of one all read zero and all dispatched.
+    useBudget({ maxConcurrentBuilds: 1 });
+    const github = fakeGithub();
+
+    const results = await Promise.all(
+      [1, 2, 3, 4, 5, 6, 7].map((n) =>
+        applyBuildDispatchGate(args({ issueNumber: 100 + n }), { db, github }),
+      ),
+    );
+
+    expect(results.filter((r) => r.decision === "dispatch")).toHaveLength(1);
+    expect(results.filter((r) => /^concurrency-exhausted:/.test(r.reason))).toHaveLength(6);
+  });
+
+  it("does not count an issue's own reservation against it — the board gates twice", async () => {
+    // The board route crosses the gate, then `dispatchWorkflow` crosses it again
+    // for the same issue before the run row exists.
+    useBudget({ maxConcurrentBuilds: 1 });
+    const github = fakeGithub();
+
+    expect((await applyBuildDispatchGate(args({ route: "api" }), { db, github })).decision).toBe("dispatch");
+    expect((await applyBuildDispatchGate(args({ route: "api" }), { db, github })).decision).toBe("dispatch");
+  });
+
+  it("releases a reservation once its run exists — the row is the count from then on", async () => {
+    useBudget({ maxConcurrentBuilds: 1 });
+    const github = fakeGithub();
+    expect((await applyBuildDispatchGate(args({ issueNumber: 1 }), { db, github })).decision).toBe("dispatch");
+
+    // The dispatched run starts, then stops at its approval gate.
+    await db.runs.createRun({
+      id: "burst-1",
+      workflowName: "build",
+      triggerId: issueTriggerId(REPO, 1),
+      owner: "cliftonc",
+      repo: "lastlight",
+      issueNumber: 1,
+      currentPhase: "waiting_approval",
+      status: "paused",
+      context: { _autonomous: true },
+      startedAt: new Date().toISOString(),
+    });
+
+    expect((await applyBuildDispatchGate(args({ issueNumber: 2 }), { db, github })).decision).toBe("dispatch");
+  });
+
+  it("counts a dispatch ONCE when its run row appears — the reservation gives way to the row", async () => {
+    useBudget({ maxConcurrentBuilds: 2 });
+    const github = fakeGithub();
+    expect((await applyBuildDispatchGate(args({ issueNumber: 1 }), { db, github })).decision).toBe("dispatch");
+    await db.runs.createRun({
+      id: "realised-1",
+      workflowName: "build",
+      triggerId: issueTriggerId(REPO, 1),
+      owner: "cliftonc",
+      repo: "lastlight",
+      issueNumber: 1,
+      currentPhase: "architect",
+      status: "running",
+      context: { _autonomous: true },
+      startedAt: new Date(Date.now() + 1).toISOString(),
+    });
+
+    // One running row against a ceiling of two. Had the reservation for issue 1
+    // survived beside its row, the count would read two and refuse this.
+    expect((await applyBuildDispatchGate(args({ issueNumber: 2 }), { db, github })).decision).toBe("dispatch");
   });
 
   it("no budget skip EVER advances the issue to the running label", async () => {

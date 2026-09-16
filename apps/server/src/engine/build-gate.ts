@@ -101,58 +101,80 @@ export async function applyBuildDispatchGate(
   const triggerId = issueTriggerId(args.repo, args.issueNumber);
   const budget = getAutonomyConfig().budget;
   const [owner, name] = args.repo.split("/");
-  // Every day-scoped budget input is measured from the same instant, resolved
-  // ONCE here. Two reads that each called "start of today" separately could
-  // straddle midnight and answer about different days.
-  const sinceIso = startOfUtcDayIso();
-  const [alreadyBuilt, inFlight, activeRuns, buildsForRepoToday, dailyStats, repoSpend] = await Promise.all([
-    // GUARD 3 — the real lock. A fact in our own database, in ANY status, that
-    // no GitHub outage can move.
-    deps.db.runs.hasRunForTrigger(triggerId, stage.workflow),
-    // `activeForTrigger`, not `getByTrigger`: both mean "queued | running |
-    // paused for this trigger", but `getByTrigger` answers for ANY workflow, so
-    // a live issue-triage run on the same issue would read as a build in
-    // flight. The constraint being protected is two agents in one build
-    // workspace, which is scoped to the stage's own workflow — and it is what
-    // the decision's `run-in-flight:` reason claims in prose.
-    deps.db.runs.activeForTrigger([stage.workflow], triggerId),
-    // The concurrency input. `listActive()` + a filter, NOT `countRunning()`:
-    // that one counts every running workflow in the harness — a PR review, a
-    // triage, a cron fan-out — so the autonomy pipeline's own ceiling would be
-    // consumed by work it has nothing to do with, and a busy deployment would
-    // refuse every autonomous build while running none.
-    deps.db.runs.listActive(),
-    // Guard 4's counter. Runs STARTED for this repo today, in any status.
-    deps.db.runs.countRunsForRepoSince(stage.workflow, args.repo, sinceIso),
-    // `dailyStats(1)` is the inclusive window [today, today] — one bucket, and
-    // it is synthesised as a zero row when nothing has run, so the array is
-    // never empty. Read defensively anyway: a spend input that read `undefined`
-    // as "over budget" would refuse every build on a quiet morning.
-    deps.db.executions.dailyStats(1),
-    deps.db.executions.repoCostSince(owner ?? "", name ?? "", sinceIso),
-  ]);
+  // Read → decide → reserve under ONE in-process lock. The fan-out gates every
+  // discovered issue in parallel, and a run row is only written later, inside
+  // the dispatch — so without the lock and the reservation every gate in a
+  // tick reads the same count, and seven issues against a ceiling of one all
+  // dispatched (nearform, 2026-09-16).
+  const decision = await withGateLock(async () => {
+    // Every day-scoped budget input is measured from the same instant, resolved
+    // ONCE here. Two reads that each called "start of today" separately could
+    // straddle midnight and answer about different days.
+    const sinceIso = startOfUtcDayIso();
+    const [alreadyBuilt, inFlight, activeRuns, buildsForRepoToday, dailyStats, repoSpend] = await Promise.all([
+      // GUARD 3 — the real lock. A fact in our own database, in ANY status, that
+      // no GitHub outage can move.
+      deps.db.runs.hasRunForTrigger(triggerId, stage.workflow),
+      // `activeForTrigger`, not `getByTrigger`: both mean "queued | running |
+      // paused for this trigger", but `getByTrigger` answers for ANY workflow, so
+      // a live issue-triage run on the same issue would read as a build in
+      // flight. The constraint being protected is two agents in one build
+      // workspace, which is scoped to the stage's own workflow — and it is what
+      // the decision's `run-in-flight:` reason claims in prose.
+      deps.db.runs.activeForTrigger([stage.workflow], triggerId),
+      // The concurrency input. `listActive()` + a filter, NOT `countRunning()`:
+      // that one counts every running workflow in the harness — a PR review, a
+      // triage, a cron fan-out — so the autonomy pipeline's own ceiling would be
+      // consumed by work it has nothing to do with, and a busy deployment would
+      // refuse every autonomous build while running none.
+      deps.db.runs.listActive(),
+      // Guard 4's counter. Runs STARTED for this repo today, in any status.
+      deps.db.runs.countRunsForRepoSince(stage.workflow, args.repo, sinceIso),
+      // `dailyStats(1)` is the inclusive window [today, today] — one bucket, and
+      // it is synthesised as a zero row when nothing has run, so the array is
+      // never empty. Read defensively anyway: a spend input that read `undefined`
+      // as "over budget" would refuse every build on a quiet morning.
+      deps.db.executions.dailyStats(1),
+      deps.db.executions.repoCostSince(owner ?? "", name ?? "", sinceIso),
+    ]);
 
-  const concurrentAutonomousBuilds = activeRuns.filter(
-    (run) => run.workflowName === stage.workflow && isAutonomousRun(run),
-  ).length;
-  const spendTodayUsd = dailyStats[dailyStats.length - 1]?.costUsd ?? 0;
+    // `queued` and `running` only. A `paused` run is waiting on a human at an
+    // approval gate: it holds no agent and no sandbox slot, so counting it let a
+    // handful of plans awaiting review stop the whole pipeline. (It still blocks
+    // a rebuild of ITS issue — that is `inFlight` above, which keeps `paused`.)
+    const liveRows = activeRuns.filter(
+      (run) =>
+        run.workflowName === stage.workflow &&
+        isAutonomousRun(run) &&
+        (run.status === "queued" || run.status === "running"),
+    ).length;
+    // Dispatches this gate approved whose run row does not exist yet — see
+    // `pendingReservations`. Without them every gate in one sweep tick reads the
+    // same pre-burst count.
+    const pending = await pendingReservations(deps.db, stage.workflow, triggerId);
+    const concurrentAutonomousBuilds = liveRows + pending.length;
+    const spendTodayUsd = dailyStats[dailyStats.length - 1]?.costUsd ?? 0;
 
-  const decision = resolveBuildTrigger({
-    repo: args.repo,
-    issueNumber: args.issueNumber,
-    labels: args.labels,
-    addedLabel: args.addedLabel,
-    route: args.route,
-    senderIsBot: args.senderIsBot,
-    autonomyEnabled: isAutonomousRepo(args.repo),
-    alreadyBuilt,
-    runInFlight: !!inFlight,
-    holdLabel: getHoldLabel(),
-    concurrentAutonomousBuilds,
-    buildsForRepoToday,
-    spendTodayUsd,
-    repoSpendTodayUsd: repoSpend.costUsd,
-  }, budget);
+    const decision = resolveBuildTrigger({
+      repo: args.repo,
+      issueNumber: args.issueNumber,
+      labels: args.labels,
+      addedLabel: args.addedLabel,
+      route: args.route,
+      senderIsBot: args.senderIsBot,
+      autonomyEnabled: isAutonomousRepo(args.repo),
+      alreadyBuilt,
+      runInFlight: !!inFlight,
+      holdLabel: getHoldLabel(),
+      concurrentAutonomousBuilds,
+      // A reserved dispatch for this repo has not STARTED a run yet, but it will.
+      buildsForRepoToday: buildsForRepoToday + pending.filter((r) => r.repo === args.repo).length,
+      spendTodayUsd,
+      repoSpendTodayUsd: repoSpend.costUsd,
+    }, budget);
+    if (decision.decision === "dispatch") reserve(deps.db, stage.workflow, triggerId, args.repo);
+    return decision;
+  });
 
   // ── 3. THE LOG ───────────────────────────────────────────────────────────
   //
@@ -219,6 +241,80 @@ export async function applyBuildDispatchGate(
   // they belong to the RUN, which does not exist yet. The union happens where
   // the run's effective approval map is composed (`workflows/simple.ts`).
   return { decision: "dispatch", reason: decision.reason, gates: stage.gates };
+}
+
+/**
+ * Dispatch reservations — the gate's own not-yet-visible dispatches.
+ *
+ * A `dispatch` verdict is only a promise: the run row that the concurrency and
+ * day-quota counts read is written later, inside `runSimpleWorkflow`. Between
+ * the two, a reservation stands in for it. One is dropped as soon as a run for
+ * its trigger has started at or after it (from then on the row is the count),
+ * or after {@link RESERVATION_TTL_MS} — a dispatch refused downstream or crashed
+ * before creating its row must not hold a slot forever.
+ *
+ * Keyed by the `StateDb` so each store (and each test's fresh one) has its own.
+ * In-process only: one harness owns the dispatch choke point, and a restart
+ * starts with no promises outstanding.
+ */
+interface Reservation {
+  workflow: string;
+  triggerId: string;
+  repo: string;
+  at: number;
+}
+
+const RESERVATION_TTL_MS = 5 * 60_000;
+const reservationsByDb = new WeakMap<StateDb, Map<string, Reservation>>();
+
+function reservationsFor(db: StateDb): Map<string, Reservation> {
+  let held = reservationsByDb.get(db);
+  if (!held) {
+    held = new Map();
+    reservationsByDb.set(db, held);
+  }
+  return held;
+}
+
+function reserve(db: StateDb, workflow: string, triggerId: string, repo: string): void {
+  reservationsFor(db).set(`${workflow}\u0000${triggerId}`, { workflow, triggerId, repo, at: Date.now() });
+}
+
+/**
+ * The live reservations for `workflow`, pruning realised and expired ones.
+ * `ownTriggerId` is excluded: the board gates an issue, then `dispatchWorkflow`
+ * gates it again, and a dispatch must not be refused by its own reservation.
+ */
+async function pendingReservations(
+  db: StateDb,
+  workflow: string,
+  ownTriggerId: string,
+): Promise<Reservation[]> {
+  const held = reservationsFor(db);
+  const now = Date.now();
+  const out: Reservation[] = [];
+  for (const [key, r] of held) {
+    if (r.workflow !== workflow) continue;
+    if (now - r.at > RESERVATION_TTL_MS) {
+      held.delete(key);
+      continue;
+    }
+    const latest = await db.runs.latestForTrigger([workflow], r.triggerId);
+    if (latest && Date.parse(latest.startedAt) >= r.at) {
+      held.delete(key);
+      continue;
+    }
+    if (r.triggerId !== ownTriggerId) out.push(r);
+  }
+  return out;
+}
+
+/** Serialises the gate's read → decide → reserve step within this process. */
+let gateTail: Promise<unknown> = Promise.resolve();
+function withGateLock<T>(fn: () => Promise<T>): Promise<T> {
+  const next = gateTail.then(fn, fn);
+  gateTail = next.catch(() => undefined);
+  return next;
 }
 
 /**

@@ -224,4 +224,32 @@ describe("resumeSimpleRun — the run's own config, not today's", () => {
     expect(mockExecuteAgent.mock.calls[0]![1].model).toBe("anthropic/operator-default");
     expect(mockExecuteAgent.mock.calls[0]![1].agentContext).toBeUndefined();
   });
+
+  it("leaves a resumed run that stops at an approval gate PAUSED, not succeeded", async () => {
+    // Every admission promotion of a `queued` run goes through resumeSimpleRun.
+    // The scheduler reports a gate stop as `success: true, paused: true`, and a
+    // resume that read `success` alone stamped the run `succeeded` while its
+    // approval was still pending — the terminal observer then moved the issue
+    // to `ready-for-human` with nothing built.
+    writeFileSync(
+      join(builtIn, "workflows", "pr-review.yaml"),
+      REVIEW_YAML + "    approval_gate: post_review\n",
+    );
+    clearWorkflowCache();
+    await orphan({});
+    const terminal = vi.fn();
+    db.runs.addTerminalObserver(terminal);
+
+    await resumeSimpleRun((await db.runs.getRun("run-1"))!, {
+      ...resumeOpts(),
+      approvalConfig: { post_review: true },
+    });
+
+    const run = await db.runs.getRun("run-1");
+    expect(run?.status).toBe("paused");
+    expect(run?.currentPhase).toBe("waiting_approval");
+    expect(run?.finishedAt).toBeFalsy();
+    expect(await db.approvals.getPendingForWorkflow("run-1")).toMatchObject({ gate: "post_review" });
+    expect(terminal).not.toHaveBeenCalled();
+  });
 });

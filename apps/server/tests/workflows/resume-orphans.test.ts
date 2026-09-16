@@ -70,4 +70,30 @@ describe("resumeOrphanedWorkflows — queued orphans", () => {
 
     expect((await db.runs.getRun("p1"))!.status).toBe("paused");
   });
+
+  it("restores a run wrongly finished at an approval gate back to paused", async () => {
+    const approval = { gate: "post_architect", summary: "plan ready", createdAt: new Date().toISOString() };
+    for (const [id, pending] of [["stranded", true], ["answered", false]] as const) {
+      await db.runs.createRun({
+        id,
+        workflowName: "build",
+        triggerId: `acme/widgets#${id}`,
+        currentPhase: "waiting_approval",
+        status: "running",
+        startedAt: new Date().toISOString(),
+      });
+      const approvalId = `${id}-approval`;
+      await db.approvals.create({ ...approval, id: approvalId, workflowRunId: id });
+      if (!pending) await db.approvals.respond(approvalId, "approved", "someone");
+      await db.runs.finishRun(id, "succeeded");
+    }
+
+    await resumeOrphanedWorkflows(makeResumeOpts(db));
+
+    const stranded = (await db.runs.getRun("stranded"))!;
+    expect(stranded.status).toBe("paused");
+    expect(stranded.finishedAt).toBeFalsy();
+    // An answered approval means the run really moved on — never rewound.
+    expect((await db.runs.getRun("answered"))!.status).toBe("succeeded");
+  });
 });

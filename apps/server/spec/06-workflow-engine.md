@@ -860,7 +860,10 @@ Two distinct entry points.
 **`resumeOrphanedWorkflows()`** (`resume.ts:276–315`) — called at
 [Harness](/spec/01-harness) boot. Scans `workflow_runs` for rows with
 status `running` (`paused` is left alone — those are awaiting humans).
-For each:
+First it repairs gate-stranded runs: a run reading `succeeded` while its
+`currentPhase` is still `waiting_approval` and its approval is still
+pending is put back to `paused` (`restorePaused`), so answering the
+approval resumes it. For each `running` run:
 
 1. Increment `restart_count`. If `> 3` (`MAX_RESTART_RESUMES`), mark
    the run `failed` and skip. This is the crash-loop circuit breaker.
@@ -930,7 +933,11 @@ came back".
 **Admission.** `createAdmissionController` (`src/workflows/admission.ts`)
 promotes queued runs to running as slots free, reusing `resumeSimpleRun`
 (a queued run's stored `context` is shaped exactly like a resume's, and no
-phase has run yet, so the ledger runs them all). Promotion is FIFO by
+phase has run yet, so the ledger runs them all). A promoted run that stops
+at an approval gate stays `paused` — the runner reports a gate stop as
+`success: true, paused: true`, so `resumeSimpleRun` checks `paused` before
+`success`, and `finishRun` itself refuses to flip a `paused` row to
+`succeeded`. Promotion is FIFO by
 `started_at` and guarded by a compare-and-set (`admitRun`:
 `WHERE status = 'queued'`), so its two triggers race safely:
 

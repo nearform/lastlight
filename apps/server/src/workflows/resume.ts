@@ -444,14 +444,21 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
       effective.repoConfig,
     );
 
-    if (result.success) {
+    // `paused` FIRST: a run that stopped at an approval gate reports
+    // `success: true, paused: true` (the scheduler's contract), so testing
+    // `success` alone would stamp a run still waiting on a human as
+    // `succeeded` — and the terminal observer would then advance its stage
+    // label past the gate. Same order as the fresh-dispatch twin in simple.ts.
+    if (result.paused) {
+      log.info("Paused", { workflowName: run.workflowName, runId: run.id });
+    } else if (result.success) {
       await opts.db.runs.finishRun(run.id, "succeeded");
     } else if (result.backpressure) {
       // Same backpressure requeue as the fresh-dispatch path: a promoted run
       // that re-hits the quota goes back to `queued` for the next admission tick.
       await opts.db.runs.requeueRunning(run.id);
       log.info("Requeued — cluster at capacity", { workflowName: run.workflowName, runId: run.id });
-    } else if (!result.paused) {
+    } else {
       await opts.db.runs.finishRun(run.id, "failed", {
         error: result.phases.find((p) => !p.success)?.error || "workflow failed during resume",
       });
@@ -477,6 +484,38 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
  * approval and the dashboard / GitHub comment flow will resume them.
  */
 /**
+ * Boot-time repair: a run that reads `succeeded` while it still sits on the
+ * `waiting_approval` marker with a PENDING approval was stopped at a gate, not
+ * finished — `resumeSimpleRun` used to stamp gate stops as successes. Put it
+ * back to `paused` so answering the approval resumes it. Idempotent: a repaired
+ * row no longer matches, and a run whose approval was answered is left alone.
+ *
+ * The stage label the wrong finish advanced is NOT moved back — a human may
+ * already have acted on the board; the card still shows "Waiting on you".
+ */
+async function restoreGateStrandedRuns(db: StateDb): Promise<void> {
+  try {
+    let restored = 0;
+    for (const approval of await db.approvals.listPending()) {
+      const run = await db.runs.getRun(approval.workflowRunId);
+      if (run?.status !== "succeeded" || run.currentPhase !== "waiting_approval") continue;
+      const changed = await db.runs.restorePaused(run.id);
+      if (changed > 0) {
+        restored += changed;
+        log.warn("Restored a gate-stranded run to paused", {
+          workflowName: run.workflowName,
+          runId: run.id,
+          gate: approval.gate,
+        });
+      }
+    }
+    if (restored > 0) log.info("Restored gate-stranded run(s)", { restored });
+  } catch (err: unknown) {
+    log.error("Gate-stranded run repair failed", { err });
+  }
+}
+
+/**
  * Maximum number of times a single workflow run can be resumed after a
  * harness restart. Past this we mark the run failed and stop re-dispatching
  * it, on the theory that a run that crashes the host three times in a row
@@ -485,6 +524,8 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
 const MAX_RESTART_RESUMES = 3;
 
 export async function resumeOrphanedWorkflows(opts: ResumeOptions): Promise<void> {
+  await restoreGateStrandedRuns(opts.db);
+
   const active = await opts.db.runs.listActive();
 
   // Queued orphans: a run that was still `queued` (waiting on the concurrency
