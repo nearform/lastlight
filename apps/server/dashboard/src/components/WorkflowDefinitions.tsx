@@ -9,6 +9,7 @@ import {
   type WorkflowFullPhase,
   type TriggerInfo,
   type TriggerKind,
+  formatTemplatedNumber,
 } from "../api";
 import { CodeBlock } from "./timeline/CodeBlock";
 import {
@@ -521,7 +522,7 @@ function PhaseDetailBox({ phase, onClose }: PhaseDetailBoxProps) {
           </Field>
         )}
         {phase.timeout_seconds !== undefined && (
-          <Field label="timeout_seconds">{phase.timeout_seconds}</Field>
+          <Field label="timeout_seconds">{formatTemplatedNumber(phase.timeout_seconds)}</Field>
         )}
         {phase.model && <Field label="model">{phase.model}</Field>}
         {phase.approval_gate && <Field label="approval_gate">{phase.approval_gate}</Field>}
@@ -579,7 +580,7 @@ function PhaseDetailBox({ phase, onClose }: PhaseDetailBoxProps) {
         {phase.generic_loop && (
           <Field label="generic_loop">
             <SubGrid>
-              <Field label="max_iterations">{phase.generic_loop.max_iterations}</Field>
+              <Field label="max_iterations">{formatTemplatedNumber(phase.generic_loop.max_iterations)}</Field>
               {phase.generic_loop.until && <Field label="until">{phase.generic_loop.until}</Field>}
               {phase.generic_loop.until_bash && (
                 <Field label="until_bash">{phase.generic_loop.until_bash}</Field>

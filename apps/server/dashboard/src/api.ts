@@ -402,7 +402,7 @@ export interface WorkflowFullPhase {
   /** type: script — runtime selector (js/ts → node, python → uv run). */
   runtime?: "js" | "ts" | "python";
   /** type: bash/script — per-step timeout in seconds. */
-  timeout_seconds?: number;
+  timeout_seconds?: TemplatedNumber;
   /** Singular sugar. Mutually exclusive with `skills`; use {@link phaseSkillNames}. */
   skill?: string;
   /** Plural skill list (e.g. pr-review's `skills: [pr-review, building, code-review]`). */
@@ -418,7 +418,7 @@ export interface WorkflowFullPhase {
     messages?: Record<string, string>;
   };
   generic_loop?: {
-    max_iterations: number;
+    max_iterations: TemplatedNumber;
     until?: string;
     until_bash?: string;
     interactive?: boolean;
@@ -435,6 +435,18 @@ export interface WorkflowFullPhase {
   depends_on?: string[];
   trigger_rule?: "all_success" | "one_success" | "none_failed_min_one_success" | "all_done";
   output_var?: string;
+}
+
+/**
+ * A numeric YAML field that may be a literal or a config reference resolved at
+ * run time, e.g. `timeout_seconds: { from: gate.phaseTimeoutSeconds }`.
+ */
+export type TemplatedNumber = number | { from: string; default?: number };
+
+/** Render a {@link TemplatedNumber} as text — never hand the raw object to React. */
+export function formatTemplatedNumber(value: TemplatedNumber): string {
+  if (typeof value === "number") return String(value);
+  return value.default !== undefined ? `{ from: ${value.from}, default: ${value.default} }` : `{ from: ${value.from} }`;
 }
 
 export interface WorkflowFullDefinition {

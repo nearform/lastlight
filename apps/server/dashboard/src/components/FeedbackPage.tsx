@@ -79,6 +79,20 @@ const GLYPH: Record<string, string> = {
 
 const glyph = (emoji: string) => GLYPH[emoji] ?? `:${emoji}:`;
 
+/**
+ * Which feedback sources are switched on, read from the merged config
+ * (default ← overlay ← env). Mirrors the defaults in `config.ts`: the master
+ * switch is on unless explicitly `false`, the GitHub poller off unless `true`.
+ */
+export function feedbackSources(merged: Record<string, unknown> | undefined): {
+  enabled: boolean;
+  github: boolean;
+} {
+  const raw = merged?.feedback;
+  const fb = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  return { enabled: fb.enabled !== false, github: fb.github === true };
+}
+
 function scoreTone(score: number): string {
   if (score > 0) return "text-success";
   if (score < 0) return "text-error";
@@ -91,6 +105,7 @@ export function FeedbackPage() {
   const [daily, setDaily] = useState<FeedbackDailyRow[] | null>(null);
   const [summary, setSummary] = useState<FeedbackSummaryRow[] | null>(null);
   const [signals, setSignals] = useState<FeedbackSignal[] | null>(null);
+  const [sources, setSources] = useState<{ enabled: boolean; github: boolean } | null>(null);
   const { isDark } = useTheme();
   const CHART = isDark ? CHART_DARK : CHART_LIGHT;
 
@@ -109,6 +124,16 @@ export function FeedbackPage() {
       // should not blank the page.
     }
   }, [range, workflow]);
+
+  // Config only changes on restart — fetch it once, not on the 30s poll.
+  useEffect(() => {
+    api
+      .config()
+      .then((c) => setSources(feedbackSources(c.merged)))
+      .catch(() => {
+        // Unknown is not "disabled" — show no banner rather than a wrong one.
+      });
+  }, []);
 
   useEffect(() => {
     load();
@@ -186,6 +211,23 @@ export function FeedbackPage() {
           </div>
         </div>
       </div>
+
+      {sources && (!sources.enabled || !sources.github) && (
+        <div role="status" className="alert alert-warning text-xs py-2">
+          {!sources.enabled ? (
+            <span>
+              Feedback collection is disabled (<code>feedback.enabled: false</code>) — no new
+              Slack or GitHub signals are being recorded.
+            </span>
+          ) : (
+            <span>
+              GitHub feedback is disabled (<code>feedback.github: false</code>) — only Slack
+              reactions are being recorded. Set <code>feedback.github: true</code> (or{" "}
+              <code>LASTLIGHT_FEEDBACK_GITHUB=true</code>) to poll GitHub reactions.
+            </span>
+          )}
+        </div>
+      )}
 
       {!hasData && (
         <div className="card bg-base-200 border border-hairline rounded-panel shadow-panel">
