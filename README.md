@@ -28,12 +28,14 @@ packages/
   cli/               lastlight              — the lean, published global CLI (+ the Claude Code plugin)
   shared/            lastlight-shared      — shared utilities (e.g. the provider registry)
   workflow-engine/   lastlight-workflow-engine — the reusable workflow runner
+  code-facts/        lastlight-code-facts  — deterministic PR analysis (`lastlight facts`)
   agentic-pi/        agentic-pi            — the coding-agent harness core runs in the sandbox
 ```
 
-Six packages publish to npm: `lastlight`, `lastlight-core`,
-`lastlight-workflow-engine`, `lastlight-shared`, `lastlight-evals`, and
-`agentic-pi`. The root package (`lastlight-monorepo`) is private. Common scripts run from the root
+Seven packages publish to npm: `lastlight`, `lastlight-core`,
+`lastlight-workflow-engine`, `lastlight-shared`, `lastlight-code-facts`,
+`lastlight-evals`, and `agentic-pi`. The root package (`lastlight-monorepo`) is
+private (as are `lastlight-www` and both dashboards). Common scripts run from the root
 via Turborepo: `pnpm build` / `pnpm test` / `pnpm typecheck` (each `turbo run …`),
 and `pnpm dev` (= `pnpm --filter lastlight-core dev`). See the root `CLAUDE.md`
 for the canonical workspace map and orientation.
@@ -68,7 +70,8 @@ webhooks. Everything deployment-specific lives in `instance/`, which is mounted
 read-only and never baked into the image; edit it and `docker compose restart agent`
 to apply (no rebuild). See [Deployment overlay](#deployment-overlay) for the model.
 
-> **Requires:** Node.js 20+, Docker, and a GitHub App already created
+> **Requires:** Node.js 22.12+ (the repo pins 22 in `.nvmrc`), Docker, and a
+> GitHub App already created
 > (see [Create a GitHub App](#1-create-a-github-app) below).
 
 For a Docker-free production install (systemd unit, gondolin sandbox), see [Native deploy](#native-systemd-deploy) below.
@@ -79,7 +82,7 @@ For a Docker-free production install (systemd unit, gondolin sandbox), see [Nati
 
 ### Prerequisites
 
-- Node.js 20+
+- Node.js 22.12+ (`engines.node`; the repo pins 22 in `.nvmrc`)
 - Docker Desktop (or compatible) — only needed for `LASTLIGHT_SANDBOX=docker`; gondolin runs without it on macOS/Linux
 - A GitHub App (see [Create a GitHub App](#1-create-a-github-app) below)
 - An API key for whichever provider your chosen `LASTLIGHT_MODEL` uses.
@@ -96,13 +99,14 @@ cd lastlight
 pnpm install          # this is a pnpm workspace — installs every package
 ```
 
-Copy and edit the environment file:
+Copy and edit the environment file. It lives in the **server package**, not the
+repo root — `scripts/dev-local.sh` sources `apps/server/.env`:
 
 ```bash
-cp .env.example .env
+cp apps/server/.env.example apps/server/.env
 ```
 
-Fill in the required values in `.env`:
+Fill in the required values in `apps/server/.env`:
 
 ```bash
 # GitHub App (required)
@@ -147,6 +151,7 @@ The dev script is explicitly safe with your personal config:
 If you want the Docker sandbox mode locally, build the image once first:
 
 ```bash
+cd apps/server   # the compose file lives in the server package
 docker compose --profile build-only build sandbox-base   # shared base first
 docker compose --profile build-only build sandbox
 ```
@@ -191,6 +196,27 @@ lastlight build https://github.com/owner/repo/issues/42
 > From a source checkout, swap `lastlight` for `pnpm --filter lastlight exec tsx src/cli.ts`.
 
 The default for a single-issue/PR shorthand is the **cheap** action (triage or review). Build cycles require the explicit `build` subcommand to opt in.
+
+Beyond triggering work, the CLI is also how you operate and debug an instance
+over its admin API — no SSH:
+
+```bash
+lastlight login                   # authenticate against a server; lastlight status / whoami
+lastlight workflow                # list / inspect / trigger workflow runs
+lastlight session                 # tail an agent session transcript
+lastlight logs                    # search the structured server logs
+lastlight approvals               # list and resolve pending approval gates
+lastlight cron                    # list crons, trigger one by hand
+lastlight stats / activity        # spend, token counts, the activity feed
+lastlight repo config validate    # check a repo's .lastlight/ config offline
+lastlight facts all --repo . --base main   # deterministic diff analysis (lastlight-code-facts)
+lastlight fork / pr / chat        # fork an overlay asset, PR helpers, chat
+lastlight server …                # host-local lifecycle: setup/build/start/update/db
+```
+
+The full command catalogue lives in
+[`packages/cli/CLAUDE.md`](packages/cli/CLAUDE.md); `lastlight --help` lists the
+same set.
 
 ### Authentication
 
@@ -242,18 +268,40 @@ you only have a Codex subscription.
 
 The docker-compose stack is useful when you want a single `docker compose up -d` deploy. For gondolin (and a smaller deployment surface area), prefer the [native systemd deploy](#native-systemd-deploy) instead.
 
-### Build and Run
+> **Every `docker compose` command in this section runs from `apps/server/`** —
+> that's where `docker-compose.yml` lives. A production install laid out by
+> `lastlight server setup` puts `instance/` next to it.
 
-Build both the harness image **and** the sandbox image. The sandbox image is what the harness spawns per phase when `LASTLIGHT_SANDBOX=docker`. The sandbox service is under the `build-only` profile so it is never started — it is only built.
+### Pull (or build) the images
+
+The stack needs the harness image **and** the sandbox images — the latter is what
+the harness spawns per phase when `LASTLIGHT_SANDBOX=docker`.
+
+**Prebuilt — the default.** Every GitHub Release publishes
+`ghcr.io/nearform/lastlight-{agent,sandbox-base,sandbox,sandbox-qa}` as *public*
+packages, so `docker pull` needs no registry login. `lastlight server update`
+pulls the tag your overlay's `deploy.version` pins (else `:latest`), re-tags them
+to the local names the compose stack expects, restarts, and prunes superseded
+versions:
 
 ```bash
+lastlight server update             # pull prebuilt images, restart
+lastlight server update --local     # build from source instead
+lastlight server update --no-build  # just up + restart, don't touch images
+```
+
+**From source.** The sandbox services sit under the `build-only` profile, so they
+are never started — only built:
+
+```bash
+cd apps/server
 docker compose build agent
 docker compose --profile build-only build sandbox-base   # shared base first
 docker compose --profile build-only build sandbox
 docker compose up -d agent
 ```
 
-Set `LASTLIGHT_SANDBOX=docker` in your `.env`. (Inside the harness container, gondolin's QEMU path isn't available unless you do the nested-virt setup yourself — the docker-sandbox path is the practical default for Docker deployments.)
+Set `LASTLIGHT_SANDBOX=docker` in your `instance/secrets/.env`. (Inside the harness container, gondolin's QEMU path isn't available unless you do the nested-virt setup yourself — the docker-sandbox path is the practical default for Docker deployments.)
 
 ### Deployment overlay
 
@@ -321,11 +369,16 @@ Or use [ngrok](https://ngrok.com) / [Cloudflare Tunnel](https://developers.cloud
 
 ### State & Monitoring
 
-All persistent state lives in a single Docker volume (`agent-data`), mounted at `/app/data`:
+The state layer is written once and runs on **two dialects**: SQLite (via
+libsql) by default, and Postgres (node-postgres or Neon) when `DATABASE_URL`
+says so. Both are supported production stores — see
+[`apps/server/src/state/CLAUDE.md`](apps/server/src/state/CLAUDE.md). With the
+default SQLite store, all persistent state lives in a single Docker volume
+(`agent-data`), mounted at `/app/data`:
 
 ```
 data/
-  lastlight.db              # SQLite: executions, workflow_runs, approvals, messaging sessions
+  lastlight.db              # SQLite (libsql): executions, workflow_runs, approvals, sessions …
   agent-sessions/           # Dashboard JSONL envelope store (written by event-shim.ts)
     projects/-app/*.jsonl                    # Chat sessions (one per Slack thread)
     projects/-home-agent-workspace/*.jsonl   # Sandbox-mode workflow sessions
@@ -336,6 +389,12 @@ data/
 ```
 
 Mount this volume or bind-mount the directory for monitoring tools to access session logs and the execution database.
+
+On Postgres only `lastlight.db` moves out — the sessions, sandboxes and logs
+directories are still on disk. `lastlight server db check` reports which store
+is live, and `lastlight server db migrate` runs the one-way SQLite → Postgres
+copy from inside the agent container (the `lastlight-state` bin ships in the
+image, since the CLI may never gain an edge to core).
 
 ### Trigger Work via CLI
 
@@ -447,7 +506,8 @@ Legacy `OPENCODE_*` names are still read as fallbacks for the corresponding `LAS
 | `LASTLIGHT_SESSIONS_DIR` | No | Where the dashboard reads sessions (default: `$STATE_DIR/agent-sessions`). |
 | `PORT` / `WEBHOOK_PORT` | No | Webhook listener port (default: `8644`) |
 | `STATE_DIR` | No | Persistent state directory (default: `./data`) |
-| `DB_PATH` | No | SQLite path (default: `$STATE_DIR/lastlight.db`) |
+| `DB_PATH` | No | SQLite path (default: `$STATE_DIR/lastlight.db`). Ignored when `DATABASE_URL` is set. |
+| `DATABASE_URL` | No | Postgres connection string. Set it and the whole state layer runs on Postgres (node-postgres, or Neon for a `neon.tech` host) instead of SQLite. Secret — belongs in `instance/secrets/.env`, never in `config.yaml`. See [`src/state/CLAUDE.md`](apps/server/src/state/CLAUDE.md). |
 | `MAX_TURNS` | No | Reserved (kept for API stability) |
 | `BOT_LOGIN` | No | Bot login name for self-event filtering (default: `last-light[bot]`) |
 | `LASTLIGHT_LOCAL_DEV` | No | Set to `1` on dev machines to skip `git config --global` writes from `git-auth.ts`. The installation token still reaches sandboxes via `GIT_TOKEN`. |
@@ -521,10 +581,13 @@ workflow into my overlay"*, or *"scaffold a Last Light evals workspace"*.
 
 | Skill | Use it when you want to… |
 |-------|--------------------------|
+| `lastlight-guide` | Orientation & router — you're not sure which of the others you need. |
 | `lastlight-server` | Install & configure a Last Light server (agent + docker stack). |
 | `lastlight-client` | Point the `lastlight` CLI at a server and log in. |
 | `lastlight-overlay` | Create a deployment overlay and fork workflows/prompts/skills/persona. |
+| `lastlight-debug` | Debug a failed or stuck run on a deployed instance over the admin API (no SSH). |
 | `lastlight-evals` | Scaffold & run a Last Light Evals workspace (datasets, models, comparisons). |
+| `lastlight-evals-loop` | Drive an eval toward a score target with an anti-gaming improvement loop. |
 
 Install them with the CLI (version-matched to the installed `lastlight`, works
 offline — uses the `claude` plugin marketplace when present, else copies the
@@ -576,7 +639,7 @@ distinct from Last Light's internal sandbox skills in `apps/server/skills/`.
 │        ↓                                │
 │  Sandboxes (git clone per task)         │
 │  Cron Scheduler (health reports)        │
-│  State DB (SQLite execution log)        │
+│  State DB (SQLite or Postgres)          │
 └─────────────────────────────────────────┘
 ```
 
@@ -587,24 +650,34 @@ distinct from Last Light's internal sandbox skills in `apps/server/skills/`.
    - `issue.opened` → `issue-triage`
    - `pr.opened` → `pr-review`
    - `comment.created` with `@last-light` from a maintainer → routed by intent classifier (build / explore / question / triage / review / security / verify / qa-test / demo)
-3. **Workflow runner** loads the matching YAML, dispatches each phase to `executeAgent` (`src/engine/agent-executor.ts`, which invokes agentic-pi) or, for chat, `ChatRunner` (`src/engine/chat-runner.ts`, in-process pi-ai)
-4. **Build workflow** runs a multi-phase cycle:
-   - Phase 1: **Architect** — read-only analysis, writes plan to `.lastlight/issue-N/architect-plan.md`
-   - Phase 2: **Executor** — TDD implementation following the plan
-   - Phase 3: **Reviewer** — independent verification (no shared context with executor)
-   - Phase 4: **Fix loop** (up to 2 cycles if reviewer requests changes)
-   - Phase 5: **Create PR**
+3. **Workflow runner** loads the matching YAML, dispatches each phase to `executeAgent` (`src/engine/agent-executor.ts`, which invokes agentic-pi) or, for chat, `ChatRunner` (`src/engine/chat/chat-runner.ts`, in-process pi-ai)
+4. **Build workflow** (`workflows/build.yaml`) runs a multi-phase cycle:
+   - **Context** (`phase_0`) — gathers the issue/repo context the later phases read
+   - **Guardrails · setup** — the agent works out install/typecheck/lint and names the repo's full test command, writing it to `.git/lastlight-gate.sh` (inside `.git`, so it is never committed). It does *not* run the suite.
+   - **Guardrails · gate** — a deterministic `bash` phase that runs that script **once**; the exit code is the verdict, so READY can only mean the full suite exited 0
+   - **Architect** — read-only analysis, writes plan to `.lastlight/issue-N/architect-plan.md`
+   - **Executor** — TDD implementation following the plan
+   - **Reviewer** — independent verification (no shared context with executor), with a **fix loop** of up to 2 cycles if it requests changes
+   - **Create PR**
 
 ### Cron
 
-When webhooks are enabled, only the weekly reports (health + security) run on cron (issue/PR events arrive in real-time via webhooks). Without webhooks, triage and PR review also run on cron.
+Most cron jobs run **regardless of webhooks**. Only issue triage is
+webhook-gated. The review and autonomy sweeps deliberately carry no `condition:`
+— they are the backstop for work that stranded or for an event that never
+arrived, which is precisely the failure webhooks cannot self-heal. Don't disable
+them because webhooks are on.
 
-| Job | Schedule | Condition |
-|-----|----------|-----------|
-| Triage new issues | Every 15 min | Only without webhooks |
-| Check PRs for review | Every 30 min | Only without webhooks |
-| Weekly health report | Mondays 9am | Always |
-| Weekly security scan | Mondays 10am | Always |
+| Job | Workflow | Schedule | Condition |
+|-----|----------|----------|-----------|
+| Triage new issues | `cron-triage.yaml` | Every 15 min | Only without webhooks |
+| Check PRs awaiting review | `cron-review.yaml` | Every 30 min | Always — the stranded-review backstop |
+| Pick up ready issues (autonomy) | `cron-autonomy.yaml` | Every 20 min | Always |
+| Merge green dependency PRs | `cron-dependabot-merge.yaml` | Daily 14:00 | Always |
+| Fix red dependency PRs | `cron-dependabot-ci-fix.yaml` | Daily 15:00 | Always |
+| Weekly health report | `cron-health.yaml` | Mondays 9am | Always |
+| Weekly repo digest → Slack | `cron-digest.yaml` | Mondays 9am | Always, but inert until a channel resolves for the repo |
+| Weekly security scan | `cron-security.yaml` | Mondays 10am | Always |
 
 ---
 
@@ -635,6 +708,7 @@ lastlight/                      # private root package (lastlight-monorepo)
       CLAUDE.md                 #   server-package development guide
     www/                        # lastlight-www — Astro site → lastlight.dev
     evals/                      # lastlight-evals — eval harness → evals.lastlight.dev
+      dashboard/                #   @lastlight/evals-dashboard (private)
   packages/
     cli/                        # lastlight — the lean published global CLI
       src/                      #   cli.ts (entry), cli-server.ts, oauth-cli.ts, …
@@ -642,6 +716,9 @@ lastlight/                      # private root package (lastlight-monorepo)
                                 #   this package at build (so the npm tarball ships them)
     shared/                     # lastlight-shared — e.g. src/providers.ts (registry)
     workflow-engine/            # lastlight-workflow-engine — reusable phase runner
+    code-facts/                 # lastlight-code-facts — deterministic PR analysis (ts-morph
+                                #   + ast-grep); consumed by the CLI, so `lastlight facts`
+                                #   works on the host with --sandbox none
     agentic-pi/                 # agentic-pi — the coding-agent harness run in the sandbox (published)
 ```
 
@@ -671,6 +748,7 @@ pnpm --filter lastlight-core dev:server
 ### `pnpm --filter lastlight-core dev` says the sandbox image is missing (docker-sandbox mode)
 
 ```bash
+cd apps/server   # the compose file lives in the server package
 docker compose --profile build-only build sandbox-base   # shared base first
 docker compose --profile build-only build sandbox
 ```
@@ -680,6 +758,7 @@ docker compose --profile build-only build sandbox
 The sandbox image needs `agentic-pi` baked in. Rebuild it:
 
 ```bash
+cd apps/server   # the compose file lives in the server package
 docker compose --profile build-only build sandbox-base   # shared base first
 docker compose --profile build-only build sandbox
 ```
