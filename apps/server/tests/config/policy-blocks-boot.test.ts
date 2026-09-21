@@ -228,6 +228,58 @@ describe("loadConfig — review.analysis.maxBodyComments", () => {
 });
 
 /**
+ * `review.analysis.probes` — the TRI-STATE gate, and the one compatibility
+ * property that matters.
+ *
+ * It was a boolean, and it gated `prepare` and `falsify` identically — so the
+ * only way to reach the oracle was to buy an install of the pull request
+ * author's dependencies. A bare `true` must therefore land on `"static"`: an
+ * existing deployment (or eval overlay) that opted into WP4 keeps the oracle
+ * and silently LOSES the install on upgrade, which is the safe direction, and
+ * nothing gains one.
+ */
+describe("loadConfig — review.analysis.probes", () => {
+  beforeEach(() => {
+    for (const k of ["GITHUB_APP_ID", "SLACK_BOT_TOKEN", "LASTLIGHT_MODEL", "LASTLIGHT_MODELS"]) {
+      vi.stubEnv(k, "");
+    }
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetRuntimeConfigForTests();
+  });
+
+  const probesFor = (yaml: string) => {
+    resetRuntimeConfigForTests();
+    vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlayWith(yaml));
+    return loadConfig().review.analysis.probes;
+  };
+
+  it("ships off — the whole pipeline is inert out of the box", () => {
+    expect(probesFor("review:\n  analysis:\n    enabled: true\n")).toBe("off");
+  });
+
+  it("reads a bare `true` as `static`, so no upgrade silently buys an install", () => {
+    expect(probesFor("review:\n  analysis:\n    probes: true\n")).toBe("static");
+  });
+
+  it("takes the two explicit spellings", () => {
+    expect(probesFor("review:\n  analysis:\n    probes: static\n")).toBe("static");
+    expect(probesFor("review:\n  analysis:\n    probes: full\n")).toBe("full");
+  });
+
+  it("reads everything else as off, including the truthy-looking strings", () => {
+    // The `=== true` parsing this replaced existed so a truthy string in an
+    // overlay could never install a PR author's dependencies. Same spirit: a
+    // value that merely LOOKS enabled spends nothing.
+    for (const bad of ['"true"', '"yes"', "1", '"FULL"', '"on"', "false", '"off"']) {
+      expect(probesFor(`review:\n  analysis:\n    probes: ${bad}\n`), bad).toBe("off");
+    }
+  });
+});
+
+/**
  * Issue #385 — every timeout comes from config, with no numeric default in
  * code. `config/default.yaml` is the single source; a missing or invalid key
  * FAILS the boot naming the key, instead of resolving to a number buried in a

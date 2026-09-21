@@ -51,6 +51,7 @@ import {
   isDependencyImpact,
   isDiagnosisClass,
   isReviewTrigger,
+  coerceProbeMode,
   reviewTriggerRank,
   type DependenciesConfig,
   type DisabledConfig,
@@ -1701,7 +1702,11 @@ function shapeReviewAnalysis(raw: unknown, d: ReviewPolicy["analysis"]): ReviewP
     mint: typeof node.mint === "string" ? node.mint : d.mint,
     surveyPasses: num(node.surveyPasses, d.surveyPasses),
     surveyConcurrency: num(node.surveyConcurrency, d.surveyConcurrency),
-    probes: node.probes === true,
+    // Tri-state (`off` | `static` | `full`), with a bare `true` reading as
+    // `static` so an upgrade never silently buys an install. Operator-only
+    // like the rest of `review.analysis`, so this only projects the
+    // operator's own answer into the merged view.
+    probes: coerceProbeMode(node.probes),
     probeLifecycleScripts: node.probeLifecycleScripts === true,
     probeTypecheck: node.probeTypecheck === true,
     probeCoverage: node.probeCoverage === true,

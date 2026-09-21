@@ -102,15 +102,73 @@ Then ask the question that keeps a difference from becoming a false finding:
 behavioural difference is evidence, not a defect. If the answer is "the PR
 intended this", the verdict is still `refuted` — with the transcript.
 
+## The probe ladder — cheapest first, and the cheap ones are not the weak ones
+
+Work **down** this list and stop at the first tier that settles the claim. Every
+tier here runs with **no dependencies installed**, which is the normal state of
+this workspace: nothing below needs a `node_modules`, a package manager or a
+test suite, and you must never invoke one.
+
+**1. Differential git probe.** The same input against `origin/{{baseBranch}}`
+and `HEAD`. Costs two `git show` / `git diff` invocations and no runtime at all,
+and it is the strongest cheap evidence there is, because the *difference* is a
+fact where a one-sided reading is a judgement. Use it for anything shaped like
+*"the PR changed the behaviour of X"*.
+
+**2. Isolated pure-function execution.** Copy the changed function — or the few
+lines of it the claim is about — into
+`.lastlight/pr-review/probes/<hypothesis-id>.mjs`, stub whatever it calls, and
+run it under plain `node`. Sub-second, dependency-free, and it decides exactly
+the class of claim that reading keeps getting wrong: normalisation, comparison,
+ordering, boundary and case-sensitivity defects. *"Is the email lowercased on
+one path and not the other?"* is four lines and one `node` run; no amount of
+staring at two call sites settles it. Copy, never import, and never edit a
+tracked file to make the copy run.
+
+**3. Vendored-binary probe.** Only where a runner is **already on disk** —
+something under an existing `node_modules/.bin`, a checked-in script, a compiler
+the image itself ships. If it is not already there, it does not exist for you:
+do not install it.
+
+**4. Deterministic re-query.** Re-run `lastlight-facts` scoped to the claim
+(`lastlight-facts` if it is on `PATH`, else `/opt/lastlight/bin/lastlight-facts`) —
+`facts` for a symbol's reference count and which of them are inside the diff,
+`contracts` for a signature delta on a changed export, `constants` for a literal
+duplicated outside the diff. This is execution too, and it is the tier people
+forget: it settles *"nothing else calls this"* and *"the signature did not
+change"* against a fresh analysis, which is an artefact **no earlier pass
+produced**. That independence is the whole mechanism — what makes an oracle
+worth anything is being grounded in something the generator did not write, not
+running a program as such.
+
+Anything that needs a tier **above** these — a real install, a service, a
+network call, a full test suite — is `unprobed` with that named as the reason,
+and it **survives** to adjudication. Do not install anything to reach it.
+
+This ordering is not just frugality. The large false-positive-elimination
+results in the literature come from pipelines that never compile the project at
+all: Tencent's industrial study reports 94–98% of false positives eliminated
+with a scanner that explicitly "does not require code compilation"
+(arXiv:2601.18844), and LLM4PFA removes 72–96% while losing 3 of 45 true
+positives (arXiv:2506.10322) — contrasting itself with IRIS precisely because
+IRIS needs a buildable repo. A cheap probe against an independent artefact is
+not a degraded version of running the suite. It is the thing that works.
+
 ## Before you start: what you can actually run
 
 Read `.lastlight/pr-review/probes/env.json`. It is a fact, not a guess:
 
 - `"installed": false` means **there are no dependencies on disk**. Nothing that
   imports a third-party package can run. That is a real constraint, not an
-  excuse — a probe against the repo's own source may still work — but a
-  hypothesis you cannot execute against is `unprobed`, with `"reason":
-  "no dependencies installed"`, and it survives.
+  excuse — tiers 1, 2 and 4 above all still work, and a probe against the repo's
+  own source is the normal case rather than the fallback — but a hypothesis you
+  cannot execute against is `unprobed`, with `"reason": "no dependencies
+  installed"`, and it survives.
+- `"install": "skipped"` means the deployment deliberately runs this pass
+  **without installing** the PR author's dependencies. It is not a failure and
+  there is nothing to retry: do not run `npm`/`pnpm`/`yarn`/`bun install`, and
+  do not run the repo's test suite. Both are forbidden here whatever `env.json`
+  says.
 - `"typecheck": "errors"` with diagnostics tells you the tree already does not
   compile; do not report those errors as your finding.
 

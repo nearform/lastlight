@@ -100,6 +100,13 @@ phases:
       }
 
       ARGS="--repo . --out $OUT"
+      # The INSTALL decision, and the only one whose default direction is
+      # inverted: anything that is not the literal "true" adds `--no-install`,
+      # so `probes: static` — and an absent value — prepares the tree without
+      # ever running a package manager. `env.json` then says
+      # `install: "skipped"` with `installed` still read off the filesystem,
+      # which is the one field `falsify` branches on.
+      [ "{{probeInstall}}" != "true" ] && ARGS="$ARGS --no-install"
       # Each switch arrives as the literal "true"/"false"; absent means off.
       [ "{{probeLifecycleScripts}}" = "true" ] && ARGS="$ARGS --lifecycle-scripts"
       [ "{{probeTypecheck}}" = "true" ] && ARGS="$ARGS --typecheck"
@@ -285,6 +292,12 @@ phases:
       - "scratch.reviewTriage.depth == 'light'"
     depends_on: [survey]
     trigger_rule: all_done
+    # A WHOLE-PHASE ceiling, across every round. `probeRounds` bounds how many
+    # times the loop may go round and not what it may spend, and this is the
+    # one phase in the pipeline that executes code — so it is the one that
+    # needs a wall-clock bound rather than a count. Like every other budget
+    # here it names a context key, never a literal (#385).
+    timeout_seconds: { from: falsifyTimeoutSeconds }
     generic_loop:
       on_soft_failure: { retries: 1, then: complete }
       max_iterations: { from: probeRounds, default: 2 }

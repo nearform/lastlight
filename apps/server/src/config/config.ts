@@ -134,6 +134,7 @@ export type { DisabledConfig, RouteConfig } from "lastlight-shared/config-types"
 // surface for the runtime config shape.
 import {
   DIAGNOSIS_CLASSES,
+  coerceProbeMode,
   defaultDependenciesConfig,
   defaultFixConfig,
   defaultNotificationsConfig,
@@ -155,6 +156,7 @@ export type {
   FixConfig,
   GateConfig,
   NotificationsConfig,
+  ProbeMode,
   ReviewConfig,
   ReviewPolicy,
   ReviewTrigger,
@@ -847,6 +849,7 @@ export function withReviewDurations(policy: ReviewPolicy, operator: ReviewConfig
       factsTimeoutSeconds: operator.analysis.factsTimeoutSeconds,
       seedTimeoutSeconds: operator.analysis.seedTimeoutSeconds,
       reconcileTimeoutSeconds: operator.analysis.reconcileTimeoutSeconds,
+      falsifyTimeoutSeconds: operator.analysis.falsifyTimeoutSeconds,
     },
   };
 }
@@ -1421,12 +1424,16 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
       // effective value and the run logs when the host overrides it.
       surveyConcurrency:
         nonNegativeNumber(analysisRaw.surveyConcurrency) ?? reviewDefaults.analysis.surveyConcurrency,
-      // WP4. Every one of these four reads `=== true` for the same reason
-      // `enabled` does: each buys the operator's compute, and two of them —
-      // `probes` (which installs a PR author's dependencies) and
-      // `probeLifecycleScripts` (which runs that author's postinstall) — are
-      // decisions a truthy-ish string in an overlay must never make by accident.
-      probes: analysisRaw.probes === true,
+      // WP4. `probes` is TRI-STATE (`off` | `static` | `full`) and the other
+      // three still read `=== true`, for the same reason `enabled` does: each
+      // buys the operator's compute, and two of them — `full` (which installs a
+      // PR author's dependencies) and `probeLifecycleScripts` (which runs that
+      // author's postinstall) — are decisions a truthy-ish string in an overlay
+      // must never make by accident. `coerceProbeMode` keeps exactly that
+      // spirit: only the literal `"full"` installs, a bare `true` lands on
+      // `"static"` (so no existing deployment gains an install by upgrading),
+      // and every other value — including `"true"` and `"yes"` — is `"off"`.
+      probes: coerceProbeMode(analysisRaw.probes),
       probeLifecycleScripts: analysisRaw.probeLifecycleScripts === true,
       probeTypecheck: analysisRaw.probeTypecheck === true,
       probeCoverage: analysisRaw.probeCoverage === true,
@@ -1443,6 +1450,10 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
       reconcileTimeoutSeconds: requiredSeconds(
         analysisRaw.reconcileTimeoutSeconds,
         "review.analysis.reconcileTimeoutSeconds",
+      ),
+      falsifyTimeoutSeconds: requiredSeconds(
+        analysisRaw.falsifyTimeoutSeconds,
+        "review.analysis.falsifyTimeoutSeconds",
       ),
       probeRounds: nonNegativeNumber(analysisRaw.probeRounds) ?? reviewDefaults.analysis.probeRounds,
       // WP6b, the attention boundary. `maxInlineComments` allows 0 — a

@@ -235,6 +235,36 @@ export function isReviewTrigger(value: unknown): value is ReviewTrigger {
 }
 
 /**
+ * `review.analysis.probes` — what WP4's two phases are allowed to cost.
+ *
+ * See {@link ReviewConfig.analysis.probes} for what each value buys. The three
+ * spellings exist because `prepare` and `falsify` were gated on ONE boolean,
+ * which made "run the oracle" and "install a pull request author's
+ * dependencies into the workspace" the same decision when they are not.
+ */
+export type ProbeMode = "off" | "static" | "full";
+
+/**
+ * Read an operator's `probes` value. **Total**, and every failure direction is
+ * the cheap one.
+ *
+ * The one compatibility property that matters: a bare `true` — every deployment
+ * and every eval overlay that opted into WP4 before this key was tri-stated —
+ * lands on `"static"`, so nothing silently gains an install by upgrading. Only
+ * the literal string `"full"` buys a package manager.
+ *
+ * Everything else, including the truthy strings (`"true"`, `"yes"`, `"1"`),
+ * lands on `"off"`. That preserves the spirit of the `=== true` parsing this
+ * replaces: a value that merely LOOKS enabled must never spend the operator's
+ * compute, and a typo must be inert rather than expensive.
+ */
+export function coerceProbeMode(raw: unknown): ProbeMode {
+  if (raw === "full") return "full";
+  if (raw === "static" || raw === true) return "static";
+  return "off";
+}
+
+/**
  * How much automation a trigger mode buys, ascending — the scale the repo-layer
  * clamp takes the minimum on.
  *
@@ -398,23 +428,36 @@ export interface ReviewAnalysisConfig {
    */
   surveyConcurrency: number;
   /**
-   * WP4 — the `prepare` + `falsify` pair: install dependencies so a probe can be
-   * **run**, then write probes and run them.
+   * WP4 — the `prepare` + `falsify` pair: prepare the probe environment, then
+   * write probes and run them. **Tri-state**, and the middle value is the point.
    *
-   * A second switch under an already-gated block, deliberately. `prepare` is the
-   * phase that decides whether the review workspace has a `node_modules`, and
-   * that one fact changes three things at once: it is what makes a
-   * package-extending `tsconfig` resolve (so `contract` can seed at all on a
-   * normal monorepo), it is the only route to a coverage artifact (so `tests`
-   * can), and it re-arms the memory profile of a *different* phase. Bundling it
-   * into `enabled` would have made "run the surveys" and "install the PR
-   * author's dependencies" the same decision.
+   * One key used to gate both phases, so the only way to reach the oracle was
+   * to buy an install of the PR author's dependencies. That was an accident of
+   * gating, not a design constraint: `review-falsify.md` already reads
+   * `probes/env.json` as a fact and branches on `installed: false` — anything
+   * it cannot run becomes `unprobed` with a stated reason and **survives** to
+   * adjudication. The pass was written for the zero-install world before
+   * anything could put it there.
    *
-   * `false` reproduces WP3 exactly. Default posture is **off in production, on
-   * in the eval overlay** — the ablation rung is what decides whether it ships
-   * on, and that is a number, not a judgement call.
+   * - **`"off"`** — neither phase runs. Reproduces WP3 exactly, and it is the
+   *   shipped default (LD8: the whole pipeline is off out of the box).
+   * - **`"static"`** — both phases run and **nothing is ever installed**.
+   *   `prepare` runs with `--no-install`, so it writes a real `env.json`
+   *   (`install: "skipped"`, `installed` read off the filesystem as always) and
+   *   `falsify` gets the fact its prompt is written against. Seconds of CPU and
+   *   no package manager, no test suite, no `postinstall` from a pull request
+   *   head.
+   * - **`"full"`** — today's behaviour: `prepare` installs. That buys the
+   *   DISCOVERY side rather than the probe side — a `tsconfig` that `extends` a
+   *   bare package specifier resolves, so `contract` can seed on a normal
+   *   monorepo (measured over the 50-PR corpus: tier-1 cases 21 → 5, contract
+   *   deltas 73 → 19 without it) — and it is separately decidable from wanting
+   *   an oracle at all.
+   *
+   * **A bare `true` coerces to `"static"`**, never `"full"`: no deployment may
+   * silently gain an install by upgrading. See {@link coerceProbeMode}.
    */
-  probes: boolean;
+  probes: ProbeMode;
   /**
    * Let `prepare`'s install run the tree's own lifecycle scripts.
    *
@@ -462,6 +505,15 @@ export interface ReviewAnalysisConfig {
   seedTimeoutSeconds: number;
   /** Phase budget for the `reconcile` step, in seconds. */
   reconcileTimeoutSeconds: number;
+  /**
+   * Phase budget for `falsify`, the oracle, in seconds.
+   *
+   * It had none at all until probes could run without an install, and
+   * `probeRounds` was never a budget: two rounds of an agent that may write
+   * and run code is a count, not a ceiling, and CPU is the constraint this
+   * pipeline is bounded by. A whole-phase ceiling covering every round.
+   */
+  falsifyTimeoutSeconds: number;
   /**
    * How many rounds `falsify` gets to write and run probes.
    *
@@ -670,7 +722,8 @@ export type ReviewAnalysisDurationKey =
   | "coverageTimeoutSeconds"
   | "factsTimeoutSeconds"
   | "seedTimeoutSeconds"
-  | "reconcileTimeoutSeconds";
+  | "reconcileTimeoutSeconds"
+  | "falsifyTimeoutSeconds";
 
 /**
  * A {@link ReviewConfig} WITHOUT its duration leaves (`triage.timeoutSeconds`
@@ -742,7 +795,7 @@ export function defaultReviewPolicy(): ReviewPolicy {
       mint: "all-in-diff,registrations",
       surveyPasses: 6,
       surveyConcurrency: 6,
-      probes: false,
+      probes: "off",
       probeLifecycleScripts: false,
       probeTypecheck: false,
       probeCoverage: false,

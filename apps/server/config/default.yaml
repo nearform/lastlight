@@ -567,27 +567,51 @@ review:
 
     # ── WP4: `prepare` (the affordance) + `falsify` (the oracle) ──────────────
     #
-    # A SECOND switch under an already-gated block, and deliberately so. What
-    # `probes: true` buys is a review workspace with a `node_modules` in it, and
-    # that one fact changes three things at once:
+    # A SECOND switch under an already-gated block, and TRI-STATE — the middle
+    # value is the point of it.
     #
-    #   - `contract` can seed at all on a normal monorepo. A tsconfig that
-    #     `extends` a bare package specifier (`@calcom/tsconfig/react-library`)
-    #     does not resolve on a bare checkout, tsgo excludes the project, and the
-    #     case drops to tier 2 with `contracts` emitting nothing. Measured over
-    #     the 50-PR corpus: tier-1 cases 21 -> 5, contract deltas 73 -> 19.
-    #   - `tests` can seed at all. The `coverage` extractor READS a report and
-    #     never runs a suite; it found ZERO artifacts across all 50 corpus cases
-    #     and all 8 gate cases. Until `probeCoverage` produces one, that family
-    #     is NOT MEASURED — a different row from "did not convert".
-    #   - the `facts` phase inherits an installed tree, on every re-review too
-    #     (the cross-run refresh is `git clean -fdx -e node_modules`). Peak RSS
-    #     there is UNMEASURED on the current engine.
+    #   "off"    — neither `prepare` nor `falsify` runs. Reproduces WP3 exactly,
+    #              and it is the shipped posture: the whole pipeline is off out
+    #              of the box (LD8).
+    #   "static" — both phases run and NOTHING IS EVER INSTALLED. `prepare` runs
+    #              with `--no-install`, so it writes a real `env.json`
+    #              (`install: "skipped"`, `installed` still read off the
+    #              filesystem) and `falsify` gets the fact its prompt is written
+    #              against: it already branches on `installed: false`, records
+    #              what it cannot run as `unprobed` with a reason, and those
+    #              hypotheses SURVIVE to adjudication. The oracle was written
+    #              for the zero-install world; one shared gate was all that kept
+    #              it out of one. Seconds of CPU, no package manager, no test
+    #              suite, no `postinstall` from a pull request head.
+    #   "full"   — `prepare` installs. What that buys is the DISCOVERY side, not
+    #              the probe side: a tsconfig that `extends` a bare package
+    #              specifier (`@calcom/tsconfig/react-library`) does not resolve
+    #              on a bare checkout, tsgo excludes the project, and the case
+    #              drops to tier 2 with `contracts` emitting nothing — measured
+    #              over the 50-PR corpus, tier-1 cases 21 -> 5 and contract
+    #              deltas 73 -> 19. It is also the only route to a coverage
+    #              artifact, so until `probeCoverage` produces one the `tests`
+    #              family is NOT MEASURED, a different row from "did not
+    #              convert".
     #
-    # Default posture: OFF in production, ON in the eval overlay — whether it
-    # ships on is an ablation number, not a judgement call.
-    probes: false
-    # Let the install run the tree's own postinstall. OFF, as a SECURITY default:
+    #              Two costs that are NOT metered anywhere, and this is the only
+    #              place they are written down. There is no disk guard — not in
+    #              `prepare`, not in `prepareTree`, not in the workflow — and
+    #              the warm-workspace refresh is deliberately
+    #              `git clean -fdx -e node_modules`, so `node_modules` PERSISTS
+    #              across reviews by design. `full` is therefore a permanent
+    #              per-target disk cost with nothing watching the volume. And
+    #              the `facts` phase inherits the installed tree on every
+    #              re-review; peak RSS there is UNMEASURED on the current
+    #              engine.
+    #
+    # A bare `true` reads as "static", never "full": no deployment may silently
+    # gain an install by upgrading. Anything else — including the truthy strings
+    # — reads as "off", the same direction every switch in this block fails.
+    probes: "off"
+    # Let the install run the tree's own postinstall. Applies to `full` alone —
+    # there is no install to attach a script to under `static`, and the phase
+    # never claims otherwise in `env.json`. OFF, as a SECURITY default:
     # `prepare` installs at a PULL REQUEST HEAD, so a lifecycle script there is
     # code the PR author wrote running on this machine — and `pr-review`'s
     # workspace has never installed anything, which makes this the first thing in
@@ -615,6 +639,14 @@ review:
     # five-line existence gate, not a validator — v2's full quote validator was
     # overkill and cost 2.4x for a worse result.
     probeRounds: 2
+    # The WHOLE-PHASE ceiling on `falsify`, across every round. It had none at
+    # all until the oracle could run without an install, and `probeRounds` was
+    # never a budget: a round count bounds how many times the loop may go round,
+    # not what it may spend, and CPU is this pipeline's binding constraint. Ten
+    # minutes covers two rounds of a pass whose probes are sub-second by
+    # construction (a differential `git` run, a copied pure function under plain
+    # `node`) and whose real cost is model latency.
+    falsifyTimeoutSeconds: 600
     # The attention boundary (WP6b). Preserving internal recall and spending a
     # human's attention are two different budgets; conflating them is how a
     # recall-first reviewer becomes unreadable.
