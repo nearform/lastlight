@@ -79,7 +79,23 @@ six shared cases (20 gold)        0.55/0.55  0.30/0.30     0.25/0.25
    - **The genuinely shallow option, untried:** let the oracle install *only what a probe needs* — `npm i --no-save eslint` when it wants to run eslint — rather than the whole tree. Smallest possible install per probe, no tree-wide cost, and it fits the existing ladder as a new tier between 2 and 3. Needs a CLI affordance and a disk/time budget; **there is no disk guard anywhere today** and warm `node_modules` persists.
 4. **A differential arm.** Tier 1 is unused by both models. The prompt already prefers it and `origin/<base>` is already fetched. Possibly just a prompt/ladder emphasis change, so cheap to try.
 
-## Build queue — and why it comes before the paid repeats
+## Build queue — #399 is BUILT (2026-09-21), unmeasured
+
+Both halves landed behind one config key, `review.analysis.adjudicate: legacy | dossier`, default `legacy` so no deployment moves before the arm runs.
+
+- **Input** — a deterministic `dossier` phase (`lastlight-facts dossier`, `packages/code-facts/src/adjudicate-render.ts`) joins every hypothesis, probe verdict + transcript, the conservation ledger and the review pass's findings, with **every quote already resolved against the tree**. Delivered as prompt bytes via `{{phaseOutputs.dossier}}`, never as a path.
+- **Output** — the adjudicator writes `claim` / `category` / `fix`; a pure `computeTier()` (`review-poster.ts`) derives the tier. No `tier`, no `confidence`. A derived withholding records `reason: "computed"` in `disposition.json`.
+- **Instrument** — `apps/evals/scripts/phase-turns.ts`, `$0`. The issue said bash calls and turns were "already recorded per phase"; they are not, so the baseline was read by hand once and now is not. **Pre-#399: 137 bash calls / 141 turns across 8 adjudications, mean 17.1 bash, stress case 30.**
+- **Arm** — `overlays/wp3-minimal-d2ab-probes-sonnet-dossier`, one key off `2026-09-21_130604-a312c19`.
+
+Two things the wiring got wrong first, both now pinned by tests, and both silent failures rather than loud ones:
+
+- **`all_success` does not tolerate a skipped dependency.** `skip_if` sets `skipped`; `evaluateTriggerRule` wants `succeeded`. `adjudicate` depending on a skipped `dossier` under the default rule would have skipped the **adjudicator** on every deployment left on `legacy` — the whole pipeline going quiet with nothing failing. It is `none_failed_min_one_success`, which still refuses a failed review.
+- **A command phase's stdout is a plain string.** `{{phaseOutputs.dossier.output}}` — the spelling the engine schema's own doc comment suggests — walks off the end of a string and renders empty, delivering the "everything you need is attached below" preamble with nothing attached.
+
+Still to do on it: idea 2 (a System-1 classifier over the dossier, on the category axis only) and idea 3's turn cap, both of which wanted the dossier to exist first.
+
+## Why it came before the paid repeats
 
 **[#399](https://github.com/nearform/lastlight/issues/399) — `adjudicate` assembles its own context with 30 bash calls.** Measured on `1587-r2`: 35 assistant turns, **30 of them `bash`**, one `write`, ~10 min and $1.27–1.34 uncontended — **about a third of case cost**. The calls are clerical: `cat` every `hypotheses/*.jsonl`, `cat` every probe transcript, `findings --ledger` twice, then dozens of `sed -n '<N>p'` re-reading source lines to verify quotes it was handed. All of it is already parsed by `readHypothesisSet`, `checkProbes` and `buildFindingsLedger`.
 
@@ -91,7 +107,7 @@ Three reasons this is the next *build*, not a nice-to-have:
 
 Success criteria are already recorded per phase and need no new plumbing: **bash calls and assistant turns per adjudication** (35/30 is the stress case), then cost and duration **at `--concurrency 1`**. The guardrail — "internal recall first, then posted" — survives, but only with the CONFIRM pass on: raw `internalMatched` is ~⅓ noise and cannot gate anything. Read `internalMatched` only where `internalMatchedPreConfirm` is present beside it.
 
-Revised order: judge audit (~$0.20) → **#399 + the typed-attribute output change** ($0 to build) → repeats on the new shape → the install-oracle arm.
+Revised order: ~~judge audit~~ (done, $0.15) → ~~#399 + the typed-attribute output change~~ (built, $0) → **the #399 arm at `--concurrency 1`** → repeats on whichever shape wins → the install-oracle arm.
 
 ## Traps this pass re-learned
 
