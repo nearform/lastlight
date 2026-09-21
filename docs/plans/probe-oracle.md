@@ -1,0 +1,65 @@
+# The probe oracle — state, and what to run next
+
+Written 2026-09-21 to be picked up cold. Sibling docs: [`deterministic-pr-levers.md`](deterministic-pr-levers.md) (the pipeline's design record) and `~/work/nearform-evals/research-notes.md` (the rung-by-rung journal, incl. rungs 0–4 from this pass).
+
+Branch `evals/persist-pipeline-artifacts`, ~28 commits, **nothing pushed**. Gate green (26/26).
+
+## What shipped
+
+| | |
+|---|---|
+| `7f7562e2` | Deleted `internalFloor` + the six per-family thresholds. They gated on `confidence`, measured **AUROC 0.228** (inverted) over 516 findings, and `say-gap` showed **zero** gold ever lost to any boundary filter. Non-breaking: `loadConfig` has no unknown-key rejection, so stale overlay pins are simply unread (a `log.warn` now names them). |
+| `0c82debf` | `review.analysis.probes` is tri-state `off \| static \| full`. **`static` runs the oracle with `--no-install`**; a bare `true` coerces to `static`, so no deployment gains an install by upgrading. Default stays `off`. |
+| `1248acdc` | **The execution gate.** A `reproduced`/`refuted` verdict must name a command that the transcript's first line records. `unprobed` stays free (an unsatisfiable gate breeds dishonesty). Plus `models.review-falsify` with an explicit `{{#if}}` fall-through. |
+| `4a66b087` | Warn (and name the findings) when a finding's `existingCode` matches nothing in the file it cites. |
+| `5140c2ec`, `d63d9db2` | Dashboard: session lanes named from the phase stamp; the per-family funnel drills into obligations → hypotheses → dispositions. |
+| new scripts | `say-gap`, `anchor-forensics`, `deletion-risk`, `facts-obligations` — all $0, all read-only. `audit-internal-pairs` now speaks all three artifact layouts and has `--dry-run`. |
+
+## What the two 8-case arms established
+
+`2026-09-21_130604` (probes `static`, Sonnet oracle) vs `2026-09-21_151448` (probes off). Same binaries, one key apart. **7 shared cases / 20 gold** — arm 2's `1667` died on a connection error and is excluded; scoring it as zero is how the first (wrong) read of this pair was produced.
+
+```
+micro-recall  0.400 → 0.450   +3/−2 paired, McNemar p=0.500 one-sided — INDISTINGUISHABLE
+SNR           0.471 → 0.818   posted 25→20, matched 8→9
+precision     0.303 → 0.629 (per-case mean)
+canary 1641   4 false positives → 0
+cost          $23.83 → $31.77 (+33%)
+```
+
+**Precision improved and recall did not pay for it** — the first time in this campaign, after five reproductions of the opposite. That is the shape the no-compile oracle literature predicts (Tencent 94–98% FP elimination, arXiv:2601.18844; LLM4PFA 72–96% losing 3 of 45 TPs, arXiv:2506.10322).
+
+Mechanism findings, which are the trustworthy half:
+
+- **The oracle's model is the binding constraint.** On five hypotheses probed by both, Haiku returned `reproduced` via `git show | grep` on all five and was wrong — it confirmed the constants were duplicated without testing whether their values diverged. Sonnet executed `node` probes, found them identical, and refuted all five. Tier 4 vs tier 2 of the ladder.
+- **First legitimate deletions in the project's history.** 13 across 8 cases, **13/13 transcript-backed**, the conservation floor correctly leaving them standing. Paired worst case: **1 gold** loss attributable to a deletion, and that is co-location, not causation.
+- **Neither model used tier 1** — `differential: false` on every verdict in both arms. Nobody ran the same input against base and head, the form a PR uniquely affords.
+
+## The blocker on every per-gold number
+
+**The internal MATCH judge transposes golds.** On `1587-r2` it gave gold #0 (case-normalisation) to a "…verified" null-handling report, and gave gold #4 (population mismatch) to the finding that actually describes gold #0. It matches on subject matter, not on the claim. This contaminates `internalMatched`, `varianceRollup`'s unions, `pairedBand` and `deletion-risk --vs` — and it manufactured a phantom recall loss in the first `deletion-risk` output. Posted recall uses a *different* judge and is less exposed.
+
+**Run `audit-internal-pairs.ts` (~$0.01/case, `--dry-run` first) before quoting another per-gold number.**
+
+## Next evals, cheapest first
+
+1. **The judge audit** (~$0.20). Above. Gates everything else.
+2. **Repeats on the pair** (~$110 for 2×2). Today's arms are n=1; historical bands ran 0.04–0.14 and one arm swung 0.320→0.080 across identical runs. Nothing here can order arms until this exists.
+3. **An INSTALL oracle arm — `probes: full`, done cheaply.** The open question: Sonnet reached tier 2 with no dependencies; what does it reach with them? Only an install makes `tsc`, `eslint`, the framework's own runner and a single test file available, and those are the probes that settle the claims a grep cannot.
+   - **Confound to design around:** `prepare` runs *before* `facts`, so an install also moves DISCOVERY — measured, tier-1 cases 21→5 and contract deltas 73→19 without it (`packages/code-facts/src/prepare.ts:29-35`). A `full` arm therefore changes two things at once. Either accept it and say so, or add a mode that installs for probes only (after `facts`), which is a workflow reordering, not a new capability.
+   - **Making it fast, which is the whole objection.** `--ignore-scripts` is already the default and is most of the CPU and all of the arbitrary-code risk. Beyond that: a **warm shared package store** (pnpm's content-addressable store hardlinks, so 8 cases pay the download once — the `lastlight_pkg-cache` docker volume already exists for this), `--prefer-offline`, and the fact that warm workspaces already keep `node_modules` across reviews (`git clean -fdx -e node_modules`), so only the first review of a repo pays.
+   - **The genuinely shallow option, untried:** let the oracle install *only what a probe needs* — `npm i --no-save eslint` when it wants to run eslint — rather than the whole tree. Smallest possible install per probe, no tree-wide cost, and it fits the existing ladder as a new tier between 2 and 3. Needs a CLI affordance and a disk/time budget; **there is no disk guard anywhere today** and warm `node_modules` persists.
+4. **A differential arm.** Tier 1 is unused by both models. The prompt already prefers it and `origin/<base>` is already fetched. Possibly just a prompt/ladder emphasis change, so cheap to try.
+
+## Traps this pass re-learned
+
+- **A finished run holds its dashboard server open forever** — that is why `--repeats` implies `--no-open`. Chaining a second arm on "no run process alive" deadlocks.
+- **`--concurrency N` contaminates latency only** (cost, verdicts and recall are fine). The same case/phase ran 613s at concurrency 1 and 2731s at 3.
+- **An errored case is not a zero.** `diff-runs` excludes it; hand-rolled `jq` will not.
+- **Artifact layouts differ** — archive `<run>/<instance>/pr-review` vs eval-run `sessions/<case>__<arm>/trial-N/pr-review`. Resolve via `pipelineArtifactRel`, never by reconstruction; a wrong layout reads as "no artifacts".
+
+## Open issues
+
+- **#399** — `adjudicate` spends 30 bash calls assembling context the harness already holds (~10 min, $1.27–1.34/case, a third of case cost). Includes the render-a-dossier proposal and the System-1/Jev exploration.
+- Dropped obligations' **text is not recorded** — `obligations.json`'s `dropped[]` is `{reason, count}` only, so "which questions were never asked" is unanswerable from disk. Not yet filed.
+- A **release is required** before any of this reaches a deployment (`config/default.yaml`, workflows and prompts all changed).
