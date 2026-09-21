@@ -35,15 +35,26 @@ Mechanism findings, which are the trustworthy half:
 - **First legitimate deletions in the project's history.** 13 across 8 cases, **13/13 transcript-backed**, the conservation floor correctly leaving them standing. Paired worst case: **1 gold** loss attributable to a deletion, and that is co-location, not causation.
 - **Neither model used tier 1** — `differential: false` on every verdict in both arms. Nobody ran the same input against base and head, the form a PR uniquely affords.
 
-## The blocker on every per-gold number
+## The blocker on every per-gold number — audited 2026-09-21, and worse than it looked
 
-**The internal MATCH judge transposes golds.** On `1587-r2` it gave gold #0 (case-normalisation) to a "…verified" null-handling report, and gave gold #4 (population mismatch) to the finding that actually describes gold #0. It matches on subject matter, not on the claim. This contaminates `internalMatched`, `varianceRollup`'s unions, `pairedBand` and `deletion-risk --vs` — and it manufactured a phantom recall loss in the first `deletion-risk` output. Posted recall uses a *different* judge and is less exposed.
+`audit-internal-pairs.ts` over both arms, all seven gold-bearing cases, 14 MATCH calls, **$0.15**, every credited pair then hand-adjudicated against the full gold and finding text. The audit reproduces the production judge exactly — both arms ran `judgeWithDiff: false` and `anthropic/claude-sonnet-4-6`, which is what the script invokes. Journal: `~/work/nearform-evals/research-notes.md` §"Rung 5".
 
-**Run `audit-internal-pairs.ts` (~$0.01/case, `--dry-run` first) before quoting another per-gold number.**
+**11 of 30 credited pairs are wrong, 3 more arguable.** Corrected internal recall over all 25 gold: `static` 0.56 → **0.28**, off 0.64 → **0.36**. Over the six shared cases the reported numbers tie at 11/20 and the adjudicated numbers tie at 6/20 — the correction halves both arms and reorders nothing, so the probes arm's case still rests on precision and nothing internal argues against it.
+
+Two distinct defects, roughly even:
+
+- **Wrong-subject (6/11)** — the transposition. `1667` gold #3 was credited the finding that is gold #4's claim; gold #4 then reads MISS. Marginals unchanged, both rows wrong.
+- **Polarity (5/11)** — a *verification report* credited to the gold it refutes. `1587-r3` gold #0 ("nothing flips the app into a logged-in state") got *"Login state … is correctly driven by the JWT cookie"*. `INTERNAL_MATCH_SYSTEM` (`apps/evals/src/grade.ts:435`) already forbids precisely this, in its own constant, added for precisely this reason on 2026-08-24. **That clause is measured-insufficient** — this is its first audit and it fails a third of the time on the population it was written for.
+
+**The sharpest cut is by tier of the credited finding:** posted (`inline`/`body`) credits are 15/20 sound; **`internal` (withheld) credits are 1 of 10.** That withheld half is the whole reason internal recall exists as a separate instrument, and the "found it but didn't say it" headroom it reports is, on this pair, **one finding** (`1667` gold #4).
+
+Consequences: `deletion-risk --vs` stays unreadable and its "2 gold lost to a deletion" headline is now positively withdrawn — both credits it rested on are wrong. `varianceRollup`'s unions and `pairedBand` index the same per-gold vector and inherit the same ⅓ error. Posted recall uses a *different* judge, with an EXTRACT stage that filters praise before MATCH sees it, and audits sound here; no published posted number moves.
+
+**The cheap fix is spent.** What remains is structural — the judge never sees a finding's `tier` or disposition, only `title — body` flattened by `internalJudgeInputs` (`review-pipeline-stats.ts:591`) — or procedural, a confirm call per credited pair. Both move a measured instrument, so both need a decision before a keystroke.
 
 ## Next evals, cheapest first
 
-1. **The judge audit** (~$0.20). Above. Gates everything else.
+1. ~~**The judge audit** (~$0.20)~~ — **done, $0.15**; see the section above. It gates per-gold numbers, and it now also gates #399's guardrail.
 2. **Repeats on the pair** (~$110 for 2×2). Today's arms are n=1; historical bands ran 0.04–0.14 and one arm swung 0.320→0.080 across identical runs. Nothing here can order arms until this exists.
 3. **An INSTALL oracle arm — `probes: full`, done cheaply.** The open question: Sonnet reached tier 2 with no dependencies; what does it reach with them? Only an install makes `tsc`, `eslint`, the framework's own runner and a single test file available, and those are the probes that settle the claims a grep cannot.
    - **Confound to design around:** `prepare` runs *before* `facts`, so an install also moves DISCOVERY — measured, tier-1 cases 21→5 and contract deltas 73→19 without it (`packages/code-facts/src/prepare.ts:29-35`). A `full` arm therefore changes two things at once. Either accept it and say so, or add a mode that installs for probes only (after `facts`), which is a workflow reordering, not a new capability.
@@ -61,7 +72,7 @@ Three reasons this is the next *build*, not a nice-to-have:
 2. **It should land with the say-side typed-attribute work, not after it.** #399 fixes adjudicate's *input* (a rendered dossier instead of thirty shell calls); the typed-attribute change — adjudicator emits `claim`/`category`/`fix` and a pure `computeTier()` decides, dropping `confidence` — fixes its *output*. Both change the same phase's measured surface, so shipping them together costs **one** comparability break with the archive instead of two. That was the reason the output half was gated on a fresh collection arm; the same arm can validate both.
 3. **Idea 1 is a prerequisite for Idea 2.** The System-1 / Jev exploration in #399 only makes sense once the dossier exists — a per-row classifier fed by thirty shell calls inherits the problem. And the evidence is specific: blind *correctness* adjudication is measured-dead (keep-all F1 **0.825** vs Jev 0.789, Haiku 0.803, GLM 0.745), but the same probabilities separate Code Defect from Maintainability at **AUC 0.897**. So the shape to test is typed attributes on the category axis, never "is this finding correct" — and `jev-with-evidence` was explicitly left un-ruled-out.
 
-Success criteria are already recorded per phase and need no new plumbing: **bash calls and assistant turns per adjudication** (35/30 is the stress case), then cost and duration **at `--concurrency 1`**. Guardrail: internal recall first, then posted — a faster adjudicator that tiers worse is a regression however good the latency looks.
+Success criteria are already recorded per phase and need no new plumbing: **bash calls and assistant turns per adjudication** (35/30 is the stress case), then cost and duration **at `--concurrency 1`**. The guardrail needs re-specifying, though: it was "internal recall first, then posted", and the audit above leaves internal recall ⅓ noise with its withheld half 1-for-10 — it cannot gate this rewrite until the judge is fixed or the guardrail moves to posted recall alone.
 
 Revised order: judge audit (~$0.20) → **#399 + the typed-attribute output change** ($0 to build) → repeats on the new shape → the install-oracle arm.
 

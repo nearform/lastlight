@@ -575,9 +575,14 @@ export function readPipelineArtifacts(
  * `disposition.json`. Keying on the line silently failed to join 10 of 32
  * findings on the measured case — and a failed join looks exactly like a
  * finding that was never tiered.
+ *
+ * The separator is written `\u0000` rather than as a literal NUL byte: an
+ * embedded NUL makes the whole file read as BINARY to `grep`/`rg`, which then
+ * skip it silently — a repo-wide search for anything in this module matched
+ * nothing at all until 2026-09-21.
  */
 function findingKey(f: { title?: string; path?: string }): string {
-  return `${f.path ?? ""} ${f.title ?? ""}`;
+  return `${f.path ?? ""}\u0000${f.title ?? ""}`;
 }
 
 /**
