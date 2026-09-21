@@ -723,6 +723,20 @@ export interface InstanceResult {
    *
    * On a `--runs N` aggregate this is **trial 1's** workspace, like every other
    * field `aggregateTrials` carries through; the runner prints all N paths.
+   *
+   * **It is not a retention policy.** The temp dir it names is reclaimed by the
+   * OS within days; see {@link pipelineArtifactRel}, which is.
    */
   workspaceDir?: string;
+  /**
+   * The pipeline's artifacts (`facts.json`, `obligations/`,
+   * `hypotheses/*.jsonl`, `probes/`, `findings.json`, `disposition.json`),
+   * copied into the run directory at `<sessionTrialRel>/pr-review` — relative,
+   * so a run dir stays portable.
+   *
+   * Written on every run that produced artifacts, with no flag, because
+   * `--keep-workspace` kept them somewhere the operating system deletes. Absent
+   * means the arm ran no pipeline, not that the copy was skipped.
+   */
+  pipelineArtifactRel?: string;
 }

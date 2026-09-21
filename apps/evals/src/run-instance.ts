@@ -50,7 +50,7 @@ import {
 } from "./metrics.js";
 import { modelCost } from "./env.js";
 import { gradeBehavioral, gradeExecution, gradeTriage, gradeReview, gradeInternalRecall, gradeMarkers } from "./grade.js";
-import { readPipelineStats, internalJudgeInputs, withInternalRecall } from "./review-pipeline-stats.js";
+import { readPipelineStats, persistPipelineArtifacts, internalJudgeInputs, withInternalRecall } from "./review-pipeline-stats.js";
 import { prContextPatch, type ReviewOverride } from "./pr-context.js";
 import { resolveFactsBin } from "./paths.js";
 
@@ -697,6 +697,19 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
       // came to be absent from every arm ever measured. `undefined` for a
       // baseline arm, which runs no pipeline and writes no artifacts.
       const readout = readPipelineStats(repoDir);
+      // …and copied somewhere that outlives the workspace, before anything can
+      // fail below. `sessionTrialDir` is in the run dir; `stateDir` is in
+      // `os.tmpdir()`, which the OS empties. See `persistPipelineArtifacts`.
+      if (opts.sessionTrialDir) {
+        try {
+          if (persistPipelineArtifacts(repoDir, opts.sessionTrialDir) && opts.sessionTrialRel)
+            result.pipelineArtifactRel = `${opts.sessionTrialRel}/pr-review`;
+        } catch (err) {
+          // Never fail a measured run over its own bookkeeping — but say so,
+          // because a silent miss here is the bug this function exists to fix.
+          console.warn(`could not persist pipeline artifacts: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
       const rg = await gradeReview({
         gold: inst.review_gold,
         reviews,

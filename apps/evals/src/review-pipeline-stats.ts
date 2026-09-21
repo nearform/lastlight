@@ -24,7 +24,7 @@
  * degrades to posted-only rather than reporting a row of zeros.
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { flattenToolchain } from "./paths.js";
@@ -32,6 +32,36 @@ import type { ReviewFamilyStats, ReviewPipelineStats } from "./schema.js";
 
 /** Where the pipeline writes, relative to the seeded repo checkout. */
 const ARTIFACT_DIR = join(".lastlight", "pr-review");
+
+/**
+ * Copy the pipeline's artifacts out of the throwaway workspace into a directory
+ * that outlives it. Returns the destination, or `undefined` when the arm wrote
+ * no artifacts (a baseline run) — absent is not empty.
+ *
+ * `--keep-workspace` was never a retention policy. It keeps the trial's
+ * `stateDir`, which lives under `os.tmpdir()` — on macOS a per-user folder
+ * beneath `/var/folders/` whose periodic purge deletes every FILE after a few
+ * days while leaving the directory tree standing. The loss is silent twice
+ * over: nothing errors, and `existsSync(workspaceDir)` still returns true. On
+ * 2026-09-21, 216 of 237 recorded `workspaceDir` paths still resolved and **not
+ * one** still held a single file under `.lastlight/` — 94 runs, 319 case-runs,
+ * the evidence behind every one of them gone, while `run.ts` went on printing
+ * "nothing else will remove them".
+ *
+ * So this is deliberately NOT behind `--keep-workspace`, for exactly the reason
+ * {@link readPipelineStats} is not behind it either: a record that exists only
+ * when someone remembers a debugging flag is a record that will not exist when
+ * it is needed. The cost is a few kilobytes of JSON per case. The artifacts ARE
+ * the telemetry; the checkout is the expensive part and is not copied.
+ */
+export function persistPipelineArtifacts(repoDir: string, destDir: string): string | undefined {
+  const src = join(repoDir, ARTIFACT_DIR);
+  if (!existsSync(src)) return undefined;
+  const dest = join(destDir, "pr-review");
+  mkdirSync(destDir, { recursive: true });
+  cpSync(src, dest, { recursive: true });
+  return dest;
+}
 
 /**
  * The four discharge codes, plus the bucket for a row that carries none.
@@ -84,6 +114,17 @@ export interface PipelineFinding {
   family?: string;
   /** `inline` / `body` / `internal`, from `disposition.json`. */
   tier?: string;
+  /**
+   * `Critical` / `Important` / `Minor` as the adjudicator wrote it — NOT
+   * normalised, because `review-poster.ts` has a separate job flagging a
+   * vocabulary it does not share (`Blocker`, `p1`) rather than defaulting it.
+   *
+   * Carried because it is the other half of the boundary's ranking function
+   * (`rankOf = confidence x SEVERITY_WEIGHT`), and a reader that drops it makes
+   * that ranking un-measurable — a back-fill would silently score confidence
+   * alone and report it as the rank.
+   */
+  severity?: string;
   confidence?: number;
   /** Ids of the survey hypotheses this finding was built from. May be empty —
    * see {@link ReviewPipelineStats.unprovenanced}. */
@@ -234,6 +275,7 @@ interface FindingsDoc {
     path?: string;
     line?: number;
     family?: string;
+    severity?: string;
     confidence?: number;
     hypotheses?: string[];
   }[];
@@ -447,6 +489,7 @@ export function readPipelineArtifacts(
       line: f.line,
       family: f.family,
       tier,
+      severity: f.severity,
       confidence: f.confidence,
       hypotheses: ids,
       // Every supporting hypothesis must RESOLVE and be clean. An id that names

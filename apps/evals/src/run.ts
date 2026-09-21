@@ -1455,11 +1455,15 @@ async function runEval(): Promise<number> {
 
   // `--keep-workspace` is only useful if you can find what it kept. The paths
   // are on every result too (`workspaceDir`); this is the line that stops a
-  // kept batch from being N anonymous temp dirs, and the reminder that nothing
-  // else will ever delete them.
+  // kept batch from being N anonymous temp dirs.
+  //
+  // It used to end "nothing else will remove them", which was wrong and cost a
+  // corpus: these live under `os.tmpdir()`, and macOS empties it. The pipeline
+  // artifacts are copied into the run dir separately and unconditionally (see
+  // `persistPipelineArtifacts`); what is temporary here is the checkout.
   if (keptWorkspaces.length) {
     p.log.warn(
-      `Kept ${keptWorkspaces.length} workspace${keptWorkspaces.length === 1 ? "" : "s"} (--keep-workspace) — nothing else will remove them:\n` +
+      `Kept ${keptWorkspaces.length} workspace${keptWorkspaces.length === 1 ? "" : "s"} (--keep-workspace) — temp dirs, reclaimed by the OS within days, so copy anything you need out:\n` +
         keptWorkspaces
           .map(
             (w) =>
@@ -1618,10 +1622,12 @@ Run options:
                        in-process (fast, CI). gondolin isolates the agent's tools
                        in a QEMU micro-VM so it can't read host gold data (needs
                        QEMU natively — brew install qemu). Or EVAL_SANDBOX.
-  --keep-workspace     Don't delete each trial's workspace. Keeps the evidence
-                       pipeline's artifacts (.lastlight/pr-review/facts.json,
-                       obligations/, hypotheses/, probes/) readable after the run;
-                       the path lands on each result as workspaceDir. Costs disk.
+  --keep-workspace     Don't delete each trial's workspace — the whole checkout,
+                       in a temp dir the OS reclaims within days. You do NOT need
+                       this for the pipeline's artifacts: .lastlight/pr-review/ is
+                       always copied into the run dir (sessions/<case>/trial-N/
+                       pr-review, on each result as pipelineArtifactRel). Use it
+                       when you need the code too. Costs disk.
   --concurrency <n>    Run n cases of the SAME arm at once (default 1 = serial).
                        Arms always stay serial (one overlay at a time, ADR 0001);
                        --runs trials within a case stay serial too. Bounded by the
