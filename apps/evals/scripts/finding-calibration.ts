@@ -86,6 +86,16 @@ interface ArchivedCase {
   findings: PipelineFinding[];
   /** `<family>-<NNN>` → the raw hypothesis row, for the discharge/quote axes. */
   hypotheses: Map<string, Record<string, unknown>>;
+  /**
+   * sha1 of this case's obligation id list.
+   *
+   * The deterministic stage IS deterministic — verified 2026-09-21, every
+   * repeat of every case in the archive produced a byte-identical obligation
+   * set. That makes the digest a self-validating definition of "these runs are
+   * repeats of each other": no naming convention to trust, no config to
+   * compare. Two runs are siblings iff they were handed the same questions.
+   */
+  obligationDigest: string;
 }
 
 function readHypotheses(dir: string): Map<string, Record<string, unknown>> {
@@ -119,6 +129,19 @@ function readHypotheses(dir: string): Map<string, Record<string, unknown>> {
   return out;
 }
 
+/** Identity of the question set this case was handed. See {@link ArchivedCase.obligationDigest}. */
+function obligationDigest(dir: string): string {
+  try {
+    const doc = JSON.parse(readFileSync(join(dir, "obligations.json"), "utf8")) as {
+      obligations?: { id?: string; obligation?: string }[];
+    };
+    const ids = (doc.obligations ?? []).map((o, i) => o.id ?? o.obligation ?? `#${i}`);
+    return createHash("sha1").update(JSON.stringify(ids)).digest("hex").slice(0, 8);
+  } catch {
+    return "none";
+  }
+}
+
 function loadArchive(root: string): ArchivedCase[] {
   if (!existsSync(root)) die(`no archive at ${root}`);
   const cases: ArchivedCase[] = [];
@@ -134,7 +157,14 @@ function loadArchive(root: string): ArchivedCase[] {
       const dir = join(runDir, instanceId, "pr-review");
       const readout = readPipelineArtifacts(dir);
       if (!readout || !readout.findings.length) continue;
-      cases.push({ run, instanceId, dir, findings: readout.findings, hypotheses: readHypotheses(dir) });
+      cases.push({
+        run,
+        instanceId,
+        dir,
+        findings: readout.findings,
+        hypotheses: readHypotheses(dir),
+        obligationDigest: obligationDigest(dir),
+      });
     }
   }
   return cases;
@@ -340,6 +370,147 @@ function mark(n: number): string {
   return n < SMALL ? "†" : " ";
 }
 
+
+// ── Recurrence (rung 1) ─────────────────────────────────────────────────────
+
+/**
+ * Candidate equivalence keys — "did two independent runs raise the same thing?"
+ *
+ * The obvious key was the obligation id, because the deterministic stage is
+ * genuinely deterministic (verified: every repeat of every case in the archive
+ * produced a byte-identical obligation set). It does not work, and the reason
+ * is worth recording: `hypotheses[].obligation` is written by the MODEL, not
+ * resolved by the harness. One case's repeats reference 44 distinct obligation
+ * ids against a question set of 33, and two repeats of `1667` reference
+ * disjoint sets — an id that names nothing is not a join key.
+ *
+ * So the key has to come from the anchors, which are quoted out of real files.
+ * Every candidate is scored below rather than chosen: which granularity counts
+ * as "the same finding" is a researcher's free parameter, and a single key in a
+ * report is a number somebody picked.
+ */
+const KEYS: Record<string, (f: PipelineFinding) => string> = {
+  "path": (f) => norm(f.path),
+  "path:line": (f) => `${norm(f.path)}:${f.line ?? "?"}`,
+  "family + path": (f) => `${norm(f.family)}|${norm(f.path)}`,
+  "family + path:line": (f) => `${norm(f.family)}|${norm(f.path)}:${f.line ?? "?"}`,
+};
+
+function norm(s: unknown): string {
+  return String(s ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+interface Unit {
+  caseId: string;
+  key: string;
+  /** How many sibling repeats raised something under this key, out of `n`. */
+  votes: number;
+  n: number;
+  y: number;
+}
+
+/** Sibling groups: same case, same question set. See {@link ArchivedCase.obligationDigest}. */
+function siblingGroups(cases: ArchivedCase[]): ArchivedCase[][] {
+  const groups = new Map<string, ArchivedCase[]>();
+  for (const c of cases) {
+    const k = `${c.instanceId}|${c.obligationDigest}`;
+    (groups.get(k) ?? groups.set(k, []).get(k)!).push(c);
+  }
+  return [...groups.values()].filter((v) => v.length >= 2);
+}
+
+function unitsFor(groups: ArchivedCase[][], cache: LabelCache, gold: Map<string, GoldComment[]>, key: (f: PipelineFinding) => string): Unit[] {
+  const units: Unit[] = [];
+  for (const sibs of groups) {
+    const caseId = sibs[0].instanceId;
+    const g = gold.get(caseId);
+    if (!g) continue;
+    const votes = new Map<string, number>();
+    const hit = new Set<string>();
+    const seen = new Set<string>();
+    for (const c of sibs) {
+      const label = cache[caseDigest(c, g)];
+      const matched = new Set((label?.goldToFinding ?? []).filter((i): i is number => i !== null));
+      const here = new Set<string>();
+      c.findings.forEach((f, i) => {
+        const k = key(f);
+        seen.add(k);
+        here.add(k);
+        // A gold match in ANY repeat makes the key a positive. The question is
+        // whether recurrence predicts a real defect, and a defect does not stop
+        // being real in the repeat that happened to miss it.
+        if (matched.has(i)) hit.add(k);
+      });
+      for (const k of here) votes.set(k, (votes.get(k) ?? 0) + 1);
+    }
+    for (const k of seen) units.push({ caseId, key: k, votes: votes.get(k) ?? 0, n: sibs.length, y: hit.has(k) ? 1 : 0 });
+  }
+  return units;
+}
+
+function unitAuroc(units: Unit[]): number | null {
+  const frac = (u: Unit) => u.votes / u.n;
+  const p = units.filter((u) => u.y === 1).map(frac);
+  const n = units.filter((u) => u.y === 0).map(frac);
+  if (!p.length || !n.length) return null;
+  let w = 0;
+  for (const a of p) for (const b of n) w += a > b ? 1 : a === b ? 0.5 : 0;
+  return w / (p.length * n.length);
+}
+
+function recurrenceReport(cases: ArchivedCase[], cache: LabelCache, gold: Map<string, GoldComment[]>): void {
+  const groups = siblingGroups(cases);
+  console.log(`\n── RUNG 1: recurrence across sibling repeats ──`);
+  if (!groups.length) {
+    console.log(`   no case in this archive has two runs of the same question set — nothing to vote on.\n`);
+    return;
+  }
+  console.log(`   groups        ${groups.length} · repeats each: ${groups.map((g) => g.length).join(", ")}`);
+  console.log(`   NOTE the group of ${Math.max(...groups.map((g) => g.length))} spans two contract variants of one case —`);
+  console.log(`   same questions, different rendering. Diverse sampling, not identical repeats.`);
+
+  console.log(`\n   ${"equivalence key".padEnd(22)} ${"units".padStart(5)}  ${"pos".padStart(4)}  ${"recur".padStart(6)}  ${"AUROC".padStart(6)}`);
+  let best: { name: string; units: Unit[]; auc: number } | null = null;
+  for (const [name, key] of Object.entries(KEYS)) {
+    const units = unitsFor(groups, cache, gold, key);
+    const auc = unitAuroc(units);
+    const pos = units.filter((u) => u.y === 1).length;
+    const recur = units.filter((u) => u.votes > 1).length;
+    console.log(
+      `   ${name.padEnd(22)} ${String(units.length).padStart(5)}${mark(units.length)} ${String(pos).padStart(4)}  ${pct(recur, units.length).padStart(6)}  ${auc === null ? "   —  " : auc.toFixed(3).padStart(6)}`,
+    );
+    if (auc !== null && (!best || auc > best.auc)) best = { name, units, auc };
+  }
+  if (!best) {
+    console.log(`\n   no key produced both positives and negatives — nothing to measure.\n`);
+    return;
+  }
+
+  const { name, units } = best;
+  console.log(`\n   ── vote table for the best key (${name}) ──`);
+  console.log(`   ${"votes".padStart(8)}  ${"units".padStart(5)}  ${"matched".padStart(7)}  ${"hit rate".padStart(8)}`);
+  const buckets = new Map<string, Unit[]>();
+  for (const u of units) {
+    const k = `${u.votes}/${u.n}`;
+    (buckets.get(k) ?? buckets.set(k, []).get(k)!).push(u);
+  }
+  for (const [k, v] of [...buckets].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const m = v.filter((u) => u.y === 1).length;
+    console.log(`   ${k.padStart(8)}  ${String(v.length).padStart(5)}${mark(v.length)} ${String(m).padStart(7)}  ${pct(m, v.length).padStart(8)}`);
+  }
+
+  // The number that decides whether voting is a good idea here. Cursor drops
+  // anything a single pass found; this is what that rule would cost US.
+  const once = units.filter((u) => u.votes === 1 && u.n > 1);
+  const more = units.filter((u) => u.votes > 1);
+  console.log(`\n   raised in exactly one repeat   ${String(once.length).padStart(4)} units, ${once.filter((u) => u.y === 1).length} matched gold`);
+  console.log(`   raised in more than one        ${String(more.length).padStart(4)} units, ${more.filter((u) => u.y === 1).length} matched gold`);
+  const lost = once.filter((u) => u.y === 1).length;
+  const kept = more.filter((u) => u.y === 1).length;
+  console.log(`\n   Cursor's rule — drop anything only one pass found — would cost ${lost} of ${lost + kept}`);
+  console.log(`   real defects here (${pct(lost, lost + kept).trim()} of recall) to remove ${pct(once.length, units.length).trim()} of the volume.\n`);
+}
+
 async function main(): Promise<number> {
   loadDotEnv();
   const archive = resolve(flag("archive") ?? join(homedir(), "lastlight-run-artifacts"));
@@ -460,6 +631,20 @@ async function main(): Promise<number> {
     const ci = bootstrapAuroc(defectsOnly, a);
     console.log(`   ${a.padEnd(28)} ${v.toFixed(3).padStart(6)}   ${ci ? `[${ci[0].toFixed(3)}, ${ci[1].toFixed(3)}]` : "—"}`);
   }
+
+  // ── RUNG 1: recurrence across sibling repeats ──
+  //
+  // The obligations are identical across repeats, so there is nothing to
+  // cluster and no equivalence function to get wrong — the expensive part of
+  // semantic entropy (Farquhar, Nature 2024) is free here by construction. The
+  // unit is (case, obligation) and the question is: in how many independent
+  // runs handed THIS question did the pipeline come back with a defect claim
+  // rather than a clean bill of health?
+  //
+  // That is Cursor's majority-vote-of-8 and SWR-Bench v2's Self-Agg, on a fixed
+  // question set. It is union-preserving by construction: recurrence is counted,
+  // never merged, so no claim can be deleted by a vote.
+  recurrenceReport(cases, cache, gold);
 
   // ── Breakdowns: the tables that caught the last mistake ──
   const group = (key: (r: Scored) => string, title: string) => {
