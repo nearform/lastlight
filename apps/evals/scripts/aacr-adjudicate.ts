@@ -15,12 +15,20 @@
  *       [--seed N] [--model <id>] [--concurrency N] [--dry-run] [--yes]
  *       [--dataset <path>] [--out [<resultsRoot>]] [--print-prompt] [--help]
  *
- *   --arm          keep-all (default) | drop-all | llm      (see ARMS below)
+ *   --arm          keep-all (default) | drop-all | llm | jev  (see ARMS below)
  *   --limit N      sample size, deterministic + stratified  (default 50)
  *   --all          score all 2,145 rows. Required to go past --limit
  *   --seed N       sampling seed                            (default 1)
  *   --model <id>   judge model for the `llm` arm; else EVAL_JUDGE_MODEL, else
- *                  defaultJudgeModel()
+ *                  defaultJudgeModel(). For the `jev` arm it is the TypeSafe
+ *                  model id; else TYPESAFE_MODEL, else `jev-latest`
+ *   --jev-axis     which jev probability drives the decision and the sweep:
+ *                  `useful` (default, matches AACR's label: correct AND worth
+ *                  acting on, maintainability included) or `correct` (narrower —
+ *                  names a real DEFECT, which drops most maintainability rows)
+ *   --jev-threshold  the `jev` arm keeps iff P(axis) >= this  (default 0.5).
+ *                  The sweep re-thresholds independently, so this only moves the
+ *                  arm's own headline row
  *   --concurrency  parallel model calls                     (default 4)
  *   --dry-run      zero model calls; a stub decision drives the whole pipeline
  *   --yes          the spend acknowledgement. Without it, a model arm prints its
@@ -130,6 +138,24 @@
  * printed beside the headline. Silently defaulting an error to `keep` would
  * flatter retention, and to `drop` would flatter interception. Both are lies of
  * the kind 08-evals §5 already forbids for the pr-review judge.
+ *
+ * ── Why there is a `jev` arm ─────────────────────────────────────────────────
+ *
+ * Every adjudicator we have measured reports a **decorative** confidence: median
+ * 0.95–1.00 across findings, no threshold binds, so the whole inline/body/internal
+ * boundary in `post-review` is gated on a number that does not vary
+ * ([the found→said gap](docs/plans/deterministic-pr-levers.md)). The `sweep()`
+ * below exists to test exactly that, and so far it has had nothing worth sweeping.
+ *
+ * TypeSafe's System One model (`jev`) is trained to return a **calibrated**
+ * probability rather than generated text, so it is the first arm whose confidence
+ * axis is a hypothesis rather than an artefact. That is the entire reason this arm
+ * exists — not "another model", but *a different kind of number*. Read the sweep
+ * before the headline row: if `t` does not move retention and interception apart,
+ * the thesis is dead and no pipeline work is justified.
+ *
+ * The arm cannot be an adjudicator on its own — jev does not generate text, so it
+ * can score a comment but never write, merge, or rephrase one.
  */
 
 import { createHash } from "node:crypto";
@@ -139,6 +165,8 @@ import { dirname, join, resolve } from "node:path";
 import { defaultJudgeModel, judge, parseJudgeJson } from "../src/judge.js";
 import { gitShortSha, makeRunId, resultsRoot } from "../src/paths.js";
 import { mapPool } from "../src/pool.js";
+import { loadDotEnv } from "../src/env.js";
+import { noul, TypeSafeClient, type NoulResponse } from "@typesafe-ai/sdk";
 
 const DATASET_URL = "https://huggingface.co/datasets/Alibaba-Aone/aacr-bench/resolve/main/dataset.json";
 
@@ -157,6 +185,22 @@ function has(name: string): boolean {
 function die(msg: string): never {
   console.error(`aacr-adjudicate: ${msg}`);
   process.exit(1);
+}
+
+/** `--jev-threshold`, the `jev` arm's own keep bar. The sweep re-thresholds the
+ * same confidences independently, so this only moves the arm's headline row. */
+function jevAxis(): "correct" | "useful" {
+  const raw = flag("jev-axis") ?? "useful";
+  if (raw !== "correct" && raw !== "useful") die(`--jev-axis must be "correct" or "useful"`);
+  return raw;
+}
+
+function jevThreshold(): number {
+  const raw = flag("jev-threshold");
+  if (raw === undefined) return 0.5;
+  const t = Number(raw);
+  if (!Number.isFinite(t) || t < 0 || t > 1) die(`--jev-threshold must be between 0 and 1`);
+  return t;
 }
 
 // ── The dataset ─────────────────────────────────────────────────────────────
@@ -476,7 +520,171 @@ function stubDecision(row: Row): Decision {
   return { keep: confidence >= 0.35, confidence, reason: "stub (--dry-run)" };
 }
 
+// ── The jev arm ─────────────────────────────────────────────────────────────
+//
+// TypeSafe System One. Four independent yes/no questions over ONE structured
+// state, sent in a single request — they evaluate in parallel, so the three
+// diagnostics are close to free on latency and add only their own tokens.
+//
+// `correct` is the decision axis and the only one the sweep sees. The other
+// three are recorded in `reason` so a failure can be read without a second run;
+// policy stays in code, which is the whole System One idea.
+
+/** The decision axis and three diagnostics. Phrasing follows the jev-1.13
+ * jagged-edges list: no double negatives, no multi-hop conditions, nothing that
+ * requires counting, and each criterion stands on its own. */
+const JEV_QUESTIONS = {
+  correct: noul(
+    "The review comment identifies a real defect in the code it points at.",
+    {
+      true: {
+        what: "The comment names a genuine problem — a bug, a missed case, a security or correctness issue, a real maintainability hazard.",
+        examples: [
+          "points out an unhandled null or error path",
+          "identifies an off-by-one or a wrong boundary",
+          "names a resource that is opened and never released",
+        ],
+      },
+      false: {
+        what: "The comment is wrong, invented, empty, or describes no defect at all.",
+        examples: [
+          "asserts behaviour the code does not have",
+          "restates what the line plainly does",
+          "a bare style preference with no defect behind it",
+        ],
+      },
+    },
+  ),
+  useful: noul(
+    "A maintainer of this project would agree this comment is correct and worth acting on.",
+    {
+      true: {
+        what: "The comment is accurate about the code and points at something genuinely worth changing. This includes maintainability and readability observations, not only outright bugs.",
+        examples: [
+          "identifies a bug, a missed case, or a security issue",
+          "names a genuine readability or maintainability problem a reviewer would raise",
+          "flags a real performance cost",
+        ],
+      },
+      false: {
+        what: "The comment is inaccurate about the code, invented, or says nothing a maintainer would act on.",
+        examples: [
+          "asserts behaviour the code does not have",
+          "restates what the line plainly does",
+          "an arbitrary preference no maintainer would enforce",
+        ],
+      },
+    },
+  ),
+  specific: noul(
+    "The comment names a concrete, checkable problem rather than a general observation.",
+  ),
+  vacuous: noul(
+    "The comment only restates what the code plainly does, or is a style preference with no defect behind it.",
+  ),
+  unverifiable: noul(
+    "Judging this comment would require code or context that the comment itself does not show.",
+  ),
+} as const;
+
+/**
+ * The state. Same field SELECTION as {@link buildUserPrompt} — and for the same
+ * reasons: `label`, `is_ai_comment` and `source_model` are leakage, `category`
+ * and `context` are annotator-assigned and are scoring axes here, so feeding
+ * them in would make the breakdown circular.
+ *
+ * Passed as named JSON fields rather than a serialized prompt string: the state
+ * is already structured, and jev's accuracy falls as unrelated text grows around
+ * the decision ("context bloat", jev-1.13 jagged edges).
+ */
+function buildJevState(row: Row): Record<string, unknown> {
+  return {
+    repository_language: row.project_main_language,
+    pull_request: { category: row.pr_category, changed_lines: row.pr_change_line_count },
+    anchor: {
+      file: row.path,
+      side: row.side,
+      from_line: row.from_line,
+      to_line: row.to_line,
+    },
+    review_comment: row.note.length > 4000 ? `${row.note.slice(0, 4000)}\n[…truncated]` : row.note,
+  };
+}
+
+type JevAxis = "correct" | "useful";
+
+function jevArm(opts: ArmOpts & { threshold: number; axis: JevAxis }): Arm {
+  let dumped = false;
+  // Constructed lazily so --dry-run needs no key at all.
+  let client: TypeSafeClient | null = null;
+  const getClient = (): TypeSafeClient => {
+    if (client) return client;
+    // Our key is TYPESAFE_KEY; the SDK's own fallback is TYPESAFE_API_KEY. Pass
+    // it explicitly rather than renaming a var that apps/server/.env already owns.
+    const apiKey = process.env.TYPESAFE_KEY?.trim() || process.env.TYPESAFE_API_KEY?.trim();
+    if (!apiKey) die("the jev arm needs TYPESAFE_KEY (or TYPESAFE_API_KEY) in the environment or a cwd .env");
+    client = new TypeSafeClient({
+      apiKey,
+      defaultModel: opts.model,
+      // One attempt is ~100ms; 30s is a hung connection, not a slow answer.
+      timeout: 30_000,
+      // 429 and 5xx (529 included) are already retried by default.
+      retry: { maxRetries: 4 },
+    });
+    return client;
+  };
+
+  return {
+    name: "jev",
+    usesModel: !opts.dryRun,
+    describe: () =>
+      opts.dryRun
+        ? `stubbed (--dry-run): state and questions are built for ${opts.model} but nothing is sent`
+        : `one TypeSafe systemOne call per row to ${opts.model} — 5 parallel nouls, keeps iff P(${opts.axis}) >= ${opts.threshold}`,
+    estimateTokens: (rows) => ({
+      // The questions are resent with every request, so they are per-row input.
+      input: rows.reduce(
+        (n, r) => n + approxTokens(JSON.stringify(buildJevState(r))) + approxTokens(JSON.stringify(JEV_QUESTIONS)),
+        0,
+      ),
+      // jev returns probabilities, not text. Output is negligible AND free.
+      output: 0,
+    }),
+    decide: async (row) => {
+      const state = buildJevState(row);
+      if (opts.printPrompt && !dumped) {
+        dumped = true;
+        console.log(`\n── REQUEST (row 0 of the sample) ─────────────────────────────────────────\n`);
+        console.log(`[state]\n${JSON.stringify(state, null, 2)}\n\n[questions]\n${JSON.stringify(JEV_QUESTIONS, null, 2)}\n`);
+      }
+      if (opts.dryRun) return stubDecision(row);
+      let answers: { [K in keyof typeof JEV_QUESTIONS]: NoulResponse };
+      try {
+        ({ answers } = await getClient().systemOne({ state, questions: JEV_QUESTIONS }));
+      } catch (err) {
+        return { keep: false, error: (err as Error).message.slice(0, 200) };
+      }
+      const p = answers[opts.axis]?.noul;
+      // A missing or out-of-range probability is UNGRADED, not a default keep.
+      if (typeof p !== "number" || !Number.isFinite(p) || p < 0 || p > 1) {
+        return { keep: false, error: `bad P(${opts.axis}): ${JSON.stringify(answers[opts.axis])}` };
+      }
+      const pct = (x: number | undefined) => (typeof x === "number" ? x.toFixed(2) : "n/a");
+      // The non-decision axes ride along in `reason` — they cost one request
+      // between them, and a failure can then be read without a second run.
+      return {
+        keep: p >= opts.threshold,
+        confidence: p,
+        reason:
+          `correct ${pct(answers.correct?.noul)} · useful ${pct(answers.useful?.noul)} · ` +
+          `specific ${pct(answers.specific?.noul)} · vacuous ${pct(answers.vacuous?.noul)} · unverifiable ${pct(answers.unverifiable?.noul)}`,
+      };
+    },
+  };
+}
+
 const ARMS: Record<string, (opts: ArmOpts) => Arm> = {
+  jev: (opts) => jevArm({ ...opts, threshold: jevThreshold(), axis: jevAxis() }),
   "keep-all": keepAllArm,
   "drop-all": dropAllArm,
   llm: llmArm,
@@ -769,6 +977,9 @@ const PRICES: { match: RegExp; input: number; output: number }[] = [
   { match: /gpt-5(\.\d+)?-mini|gpt-5-\d-mini/i, input: 0.25, output: 2 },
   { match: /gpt-5/i, input: 1.25, output: 10 },
   { match: /deepseek/i, input: 0.28, output: 0.42 },
+  // TypeSafe jev: $42 per BILLION input tokens, output free. Three orders of
+  // magnitude under the chat models above, which is the point of the arm.
+  { match: /^jev/i, input: 0.042, output: 0 },
 ];
 
 function priceOf(model: string): { input: number; output: number } | null {
@@ -811,6 +1022,11 @@ function spendGate(arm: Arm, rows: Row[], model: string): void {
 }
 
 async function main(): Promise<number> {
+  // The llm arm's provider key and the jev arm's TYPESAFE_KEY both live in a
+  // cwd `.env` for local dev. Direct `tsx scripts/…` invocation skips run.ts,
+  // which is where this normally happens.
+  loadDotEnv();
+
   if (has("help") || has("h")) {
     console.log(readFileSync(import.meta.filename, "utf8").split("*/")[0]);
     return 0;
@@ -830,14 +1046,22 @@ async function main(): Promise<number> {
   // A model arm needs a model id even in --dry-run, so the prompt header and the
   // provenance stamp say which model the prompts were built for. Resolving it
   // must not explode when no key is set and no call will be made.
-  const armNeedsModel = armName === "llm";
-  let model = flag("model") ?? process.env.EVAL_JUDGE_MODEL?.trim() ?? "";
-  if (armNeedsModel && !model) {
-    try {
-      model = defaultJudgeModel();
-    } catch (err) {
-      if (!dryRun) die((err as Error).message);
-      model = "(unresolved — no provider key; --dry-run makes no calls)";
+  const armNeedsModel = armName === "llm" || armName === "jev";
+  let model = "";
+  if (armName === "jev") {
+    // jev is not a chat model and must never resolve through defaultJudgeModel():
+    // EVAL_JUDGE_MODEL names the grader, which is deliberately independent of
+    // whatever is under test.
+    model = flag("model") ?? process.env.TYPESAFE_MODEL?.trim() ?? "jev-latest";
+  } else {
+    model = flag("model") ?? process.env.EVAL_JUDGE_MODEL?.trim() ?? "";
+    if (armNeedsModel && !model) {
+      try {
+        model = defaultJudgeModel();
+      } catch (err) {
+        if (!dryRun) die((err as Error).message);
+        model = "(unresolved — no provider key; --dry-run makes no calls)";
+      }
     }
   }
 
@@ -894,7 +1118,7 @@ async function main(): Promise<number> {
       arm: arm.name,
       armDescription: arm.describe(),
       model: armNeedsModel ? model : null,
-      reasoningEffort: armNeedsModel ? (process.env.EVAL_JUDGE_REASONING_EFFORT?.trim() || null) : null,
+      reasoningEffort: armName === "llm" ? (process.env.EVAL_JUDGE_REASONING_EFFORT?.trim() || null) : null,
       dryRun,
       dataset: { url: DATASET_URL, path: dsPath, sha256, rows: allRows.length },
       sampling: {
