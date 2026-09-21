@@ -50,7 +50,24 @@ Two distinct defects, roughly even:
 
 Consequences: `deletion-risk --vs` stays unreadable and its "2 gold lost to a deletion" headline is now positively withdrawn — both credits it rested on are wrong. `varianceRollup`'s unions and `pairedBand` index the same per-gold vector and inherit the same ⅓ error. Posted recall uses a *different* judge, with an EXTRACT stage that filters praise before MATCH sees it, and audits sound here; no published posted number moves.
 
-**The cheap fix is spent.** What remains is structural — the judge never sees a finding's `tier` or disposition, only `title — body` flattened by `internalJudgeInputs` (`review-pipeline-stats.ts:591`) — or procedural, a confirm call per credited pair. Both move a measured instrument, so both need a decision before a keystroke.
+### Fixed the same day — a CONFIRM pass, validated 30/30
+
+MATCH ranks candidates and must choose *something* for every gold it can reach; CONFIRM is asked one closed question about one pair and may answer no to all of them. That difference, not another clause, is the fix. `gradeInternalRecall` now runs MATCH, then a second call over only the pairs MATCH credited (`INTERNAL_CONFIRM_SYSTEM`, `apps/evals/src/grade.ts`) — ~$0.02 a case instead of ~$0.01, and `--no-confirm` on the audit script reproduces the old grader exactly.
+
+Additive on purpose, not an edit to `INTERNAL_MATCH_SYSTEM`: that prompt is pinned by every back-filled run, and `internalGold` stores MATCH's reply verbatim, so the archive can be re-judged without re-running MATCH. A run now records `internalMatchedPreConfirm` (its presence is the marker that `internalMatched` is confirm-filtered; absent on everything before 2026-09-21), `internalConfirmRejected` (the dropped pairs — a correction nobody can review is its own bad instrument) and `internalConfirmUngraded` (CONFIRM failed ⇒ the count is raw MATCH and says so).
+
+**Validated by re-running the audit with it on and scoring its 30 decisions against the hand adjudication: 30/30 agree.** It also corrected one of mine — `1680-r2` gold #1 is an `AGENTS.md` paragraph about the shared `NodeCache` key space, and the finding credited to it is "the PR description says 120s, the code says 600s"; I had passed that, CONFIRM rejected it on both arms.
+
+```
+internal recall, all 25 gold      reported   adjudicated   CONFIRM
+probes static                     0.56       0.28          0.24 (6/25)
+probes off                        0.64       0.36          0.28 (7/25)
+six shared cases (20 gold)        0.55/0.55  0.30/0.30     0.25/0.25
+```
+
+**The one judgement call — a dismissal counts as a find.** The first prompt rejected `1667` gold #1, where the pipeline generated the gold's exact mechanism (*"a caller who sends `{"dryRun": 0}` gets a 400 before they see a 401"*) and then dismissed it on impact. Rejecting that folds a **triage** failure back into the **discovery ceiling**, which is the collapse internal recall exists to undo. So: a finding that states the same thing is wrong and argues it is low-impact, out of scope, pre-existing or already mitigated **is** a match; one that asserts the code is correct, or never states the defect, is not. It is also the sharpest surviving instance of found-but-withheld, and the sharpest argument for #399's typed-attribute work — the adjudicator had the defect and argued itself out of it in prose.
+
+**Caveat CONFIRM does not fix: MATCH is not stable run to run.** Between two audit passes over identical artifacts at temperature 0, the credited pairs differed on four of fourteen targets. CONFIRM rejected the wrong pair in every version, so corrected numbers are stable where raw ones are not — but a per-gold vector from one MATCH call is a draw, not a measurement.
 
 ## Next evals, cheapest first
 
@@ -72,7 +89,7 @@ Three reasons this is the next *build*, not a nice-to-have:
 2. **It should land with the say-side typed-attribute work, not after it.** #399 fixes adjudicate's *input* (a rendered dossier instead of thirty shell calls); the typed-attribute change — adjudicator emits `claim`/`category`/`fix` and a pure `computeTier()` decides, dropping `confidence` — fixes its *output*. Both change the same phase's measured surface, so shipping them together costs **one** comparability break with the archive instead of two. That was the reason the output half was gated on a fresh collection arm; the same arm can validate both.
 3. **Idea 1 is a prerequisite for Idea 2.** The System-1 / Jev exploration in #399 only makes sense once the dossier exists — a per-row classifier fed by thirty shell calls inherits the problem. And the evidence is specific: blind *correctness* adjudication is measured-dead (keep-all F1 **0.825** vs Jev 0.789, Haiku 0.803, GLM 0.745), but the same probabilities separate Code Defect from Maintainability at **AUC 0.897**. So the shape to test is typed attributes on the category axis, never "is this finding correct" — and `jev-with-evidence` was explicitly left un-ruled-out.
 
-Success criteria are already recorded per phase and need no new plumbing: **bash calls and assistant turns per adjudication** (35/30 is the stress case), then cost and duration **at `--concurrency 1`**. The guardrail needs re-specifying, though: it was "internal recall first, then posted", and the audit above leaves internal recall ⅓ noise with its withheld half 1-for-10 — it cannot gate this rewrite until the judge is fixed or the guardrail moves to posted recall alone.
+Success criteria are already recorded per phase and need no new plumbing: **bash calls and assistant turns per adjudication** (35/30 is the stress case), then cost and duration **at `--concurrency 1`**. The guardrail — "internal recall first, then posted" — survives, but only with the CONFIRM pass on: raw `internalMatched` is ~⅓ noise and cannot gate anything. Read `internalMatched` only where `internalMatchedPreConfirm` is present beside it.
 
 Revised order: judge audit (~$0.20) → **#399 + the typed-attribute output change** ($0 to build) → repeats on the new shape → the install-oracle arm.
 

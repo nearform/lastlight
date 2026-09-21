@@ -614,7 +614,14 @@ export function internalJudgeInputs(
 export function withInternalRecall(
   readout: PipelineReadout,
   internal:
-    | { goldToFinding: (number | null)[]; matched: number; error?: string }
+    | {
+        goldToFinding: (number | null)[];
+        matched: number;
+        matchedPreConfirm?: number;
+        confirmRejected?: { gold: number; finding: number }[];
+        confirmUngraded?: string;
+        error?: string;
+      }
     | undefined,
 ): ReviewPipelineStats {
   const stats = readout.stats;
@@ -646,6 +653,12 @@ export function withInternalRecall(
   return {
     ...stats,
     internalMatched: internal.matched,
+    // The CONFIRM pass's working, when one ran. `internalMatched` alone cannot
+    // say whether it is a confirmed count or a raw MATCH count, and those
+    // differ by ~a third — so the distinguishing fields travel with it.
+    ...(internal.matchedPreConfirm !== undefined ? { internalMatchedPreConfirm: internal.matchedPreConfirm } : {}),
+    ...(internal.confirmRejected?.length ? { internalConfirmRejected: internal.confirmRejected } : {}),
+    ...(internal.confirmUngraded ? { internalConfirmUngraded: internal.confirmUngraded } : {}),
     // The judge's reply, verbatim. The count above is this vector's non-null
     // count; without the vector itself, per-gold internal union/intersection
     // across repeats cannot be computed and can never be back-filled — the

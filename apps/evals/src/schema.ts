@@ -522,6 +522,23 @@ export interface ReviewPipelineStats {
    */
   internalGold?: (number | null)[];
   /**
+   * `internalMatched` BEFORE the CONFIRM pass dropped anything, and by its
+   * presence the marker that `internalMatched` IS confirm-filtered.
+   *
+   * Absent on every run recorded before 2026-09-21, whose `internalMatched` is
+   * a raw MATCH count the audit puts ~⅓ high (`docs/plans/probe-oracle.md`).
+   * Keeping both is what lets a corrected arm be compared against the archive
+   * without re-running anything: the old number is still derivable.
+   */
+  internalMatchedPreConfirm?: number;
+  /** Pairs MATCH credited and CONFIRM rejected, `{gold, finding}` in the same
+   * index spaces as `internalGold`. Recorded so a correction can be eyeballed,
+   * and so it is reversible. */
+  internalConfirmRejected?: { gold: number; finding: number }[];
+  /** CONFIRM did not run or did not parse, and why. Present ⇒ `internalMatched`
+   * is MATCH's raw count and carries MATCH's known error rate. */
+  internalConfirmUngraded?: string;
+  /**
    * The internal-recall judge did not run or did not parse, and why.
    *
    * Present ⇒ `internalMatched` is deliberately ABSENT rather than 0. An

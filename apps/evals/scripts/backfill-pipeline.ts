@@ -110,9 +110,14 @@ import { mapPool } from "../src/pool.js";
  * The arithmetic is untouched, so anything above this is a real change. */
 const EPS = 1e-9;
 
-/** One MATCH judge call per case. No EXTRACT step — `findings.json` is already a
- * structured list, which is the whole reason `gradeInternalRecall` exists. */
-const JUDGE_CALLS_PER_CASE = 1;
+/** Two judge calls per case: MATCH, then the CONFIRM pass over what MATCH
+ * credited (2026-09-21 — see `gradeInternalRecall`). Still no EXTRACT step,
+ * since `findings.json` is already a structured list, which is the whole reason
+ * `gradeInternalRecall` exists.
+ *
+ * This number is the consent gate's denominator: it drives the printed estimate
+ * and the `--max-spend` refusal, so leaving it at 1 would have halved both. */
+const JUDGE_CALLS_PER_CASE = 2;
 
 /** Concurrent judge calls. Temperature-0 calls are independent; kept low so a
  * back-fill never trips a rate limit the original run did not. */

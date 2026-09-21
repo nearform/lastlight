@@ -6,7 +6,8 @@
  * (WP8)"): the counts alone cannot distinguish "withheld defect claim"
  * (H-A1) from "posted but uncredited by the review judge" (H-A4).
  *
- * Usage: npx tsx scripts/audit-internal-pairs.ts <instances.json> <instance_id> <dir> [...]
+ * Usage: npx tsx scripts/audit-internal-pairs.ts [--dry-run] [--no-confirm] \\
+ *          <instances.json> <instance_id> <dir> [...]
  *
  * A `<dir>` may be any of three things, and the script works out which:
  *
@@ -40,9 +41,14 @@ const argv = process.argv.slice(2);
  * this one silently bought one MATCH call per dir on plain invocation. It is
  * also the only way to check the layout resolution without paying for it. */
 const dryRun = argv.includes("--dry-run");
-const [instancesPath, instanceId, ...dirs] = argv.filter((a) => a !== "--dry-run");
+/** Reproduce the pre-2026-09-21 grader (MATCH only). The audit that motivated
+ * the CONFIRM pass was run this way, so this is how its numbers are re-derived
+ * — and how CONFIRM's effect on an archived run is measured as a difference
+ * rather than asserted. */
+const noConfirm = argv.includes("--no-confirm");
+const [instancesPath, instanceId, ...dirs] = argv.filter((a) => a !== "--dry-run" && a !== "--no-confirm");
 if (!instancesPath || !instanceId || !dirs.length) {
-  console.error("usage: audit-internal-pairs.ts <instances.json> <instance_id> <artifactDir> [...]");
+  console.error("usage: audit-internal-pairs.ts [--dry-run] [--no-confirm] <instances.json> <instance_id> <artifactDir> [...]");
   process.exit(2);
 }
 const instances = JSON.parse(readFileSync(instancesPath, "utf8")) as { instance_id: string; review_gold?: GoldComment[] }[];
@@ -93,10 +99,12 @@ const targets = dirs.flatMap((d) => {
   return found;
 });
 
-/** ~$0.01 per MATCH call, one per resolved target. */
-const ESTIMATE_USD_PER_DIR = 0.01;
+/** ~$0.01 per judge call: MATCH, plus CONFIRM unless it is switched off. */
+const ESTIMATE_USD_PER_CALL = 0.01;
+const callsPerDir = noConfirm ? 1 : 2;
 console.log(
-  `\n${targets.length} target(s) for ${instanceId} · 1 MATCH call each · ~$${(targets.length * ESTIMATE_USD_PER_DIR).toFixed(2)}`,
+  `\n${targets.length} target(s) for ${instanceId} · ${noConfirm ? "MATCH only" : "MATCH + CONFIRM"} ` +
+    `· ~$${(targets.length * callsPerDir * ESTIMATE_USD_PER_CALL).toFixed(2)}`,
 );
 for (const t of targets) console.log(`  ${t.label}\n    ${t.path}`);
 if (dryRun) {
@@ -110,11 +118,26 @@ for (const { label: dir, path } of targets) {
     console.log(`${dir}: unreadable at ${path}`);
     continue;
   }
-  const grade = await gradeInternalRecall({ gold, findings: internalJudgeInputs(readout.findings) });
-  console.log(`\n== ${dir} (matched ${grade?.matched ?? "?"})`);
+  const grade = await gradeInternalRecall({
+    gold,
+    findings: internalJudgeInputs(readout.findings),
+    ...(noConfirm ? { confirm: false } : {}),
+  });
+  const pre = grade?.matchedPreConfirm;
+  console.log(
+    `\n== ${dir} (matched ${grade?.matched ?? "?"}${pre !== undefined ? ` — CONFIRM dropped ${pre - (grade?.matched ?? 0)} of ${pre}` : ""})`,
+  );
   if (grade?.error) {
     console.log(`  JUDGE ERROR — every row below is the all-null placeholder: ${grade.error}`);
     continue;
+  }
+  if (grade?.confirmUngraded) console.log(`  CONFIRM DID NOT RUN — the count is raw MATCH: ${grade.confirmUngraded}`);
+  // Print what CONFIRM threw out, not just what survived. A rejection is the
+  // half of this audit that is new, and an unreviewable correction is its own
+  // kind of unreliable instrument.
+  for (const r of grade?.confirmRejected ?? []) {
+    const f = readout.findings[r.finding];
+    console.log(`  gold[${r.gold}] REJECTED by CONFIRM <- [${f?.tier ?? "?"}] "${f?.title.slice(0, 90)}"`);
   }
   grade?.goldToFinding.forEach((f, g) => {
     const goldDesc = (gold[g].description ?? "").replace(/\s+/g, " ").slice(0, 90);
