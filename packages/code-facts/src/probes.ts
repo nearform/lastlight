@@ -212,8 +212,65 @@ function firstTranscriptLine(path: string): string | null {
   return null;
 }
 
+/** One hypothesis's answer, canonical id resolved and transcript located. */
+export interface ProbeAnswer {
+  /** The verdict as written; `"(missing)"` when the line carried none. */
+  verdict: string;
+  /** The command the verdict claims it ran, or `null`. */
+  command: string | null;
+  /** The transcript path as written, or `null`. */
+  transcript: string | null;
+  /** Where that transcript actually is on disk, or `null` if nowhere. */
+  transcriptPath: string | null;
+}
+
+/**
+ * Every hypothesis that has an answer, canonical id resolved, newest line
+ * winning — the one reader of `probes/verdicts.jsonl`.
+ *
+ * Split out of {@link checkProbes} so the adjudication dossier
+ * (`adjudicate-render.ts`) can inline a verdict and its transcript without a
+ * second parser. Two readers of one append-only artifact is two places for
+ * "which line wins" and "which id does this answer" to disagree, and both
+ * questions have already cost this pipeline a measurement.
+ *
+ * Note what is deliberately NOT returned: the verdict's `reason` field. A
+ * dossier carries evidence and records, never an earlier pass's prose — agents
+ * shown the reasoning that produced a false report fail to reject it 96% of the
+ * time, which is the whole point of `adjudicate` running `fresh_context: true`.
+ */
+export function readProbeAnswers(
+  options: CheckProbesOptions,
+  set: ReturnType<typeof readHypothesisSet>,
+): { answers: Map<string, ProbeAnswer>; malformed: number } {
+  const { rows, malformed } = readJsonl<VerdictLine>(join(options.dir, "probes", "verdicts.jsonl"));
+  const latest = new Map<string, VerdictLine>();
+  for (const row of rows) {
+    if (typeof row.hypothesis !== "string") continue;
+    // Resolved to the CANONICAL id, so a verdict written against a model-minted
+    // `H-001` still answers `contract-001`. An ambiguous citation resolves to
+    // nothing and the hypothesis stays unanswered — which is the honest reading:
+    // a verdict naming an id two families minted does not say which it probed.
+    const resolution = resolveHypothesis(set, row.hypothesis);
+    if (resolution.kind !== "resolved") continue;
+    // LAST write wins: the file is append-only, so a second round revising a
+    // verdict appends rather than edits, and the newest line is the answer.
+    latest.set(resolution.id, row);
+  }
+  const answers = new Map<string, ProbeAnswer>();
+  for (const [id, row] of latest) {
+    const transcript = typeof row.transcript === "string" ? row.transcript : null;
+    answers.set(id, {
+      verdict: typeof row.verdict === "string" ? row.verdict : "(missing)",
+      command: typeof row.command === "string" && row.command.trim() ? row.command.trim() : null,
+      transcript,
+      transcriptPath: transcript === null ? null : resolveTranscript(options, transcript),
+    });
+  }
+  return { answers, malformed };
+}
+
 export function checkProbes(options: CheckProbesOptions): CheckProbesResult {
-  const probesDir = join(options.dir, "probes");
   const notes: string[] = [];
   let malformed = 0;
 
@@ -230,30 +287,12 @@ export function checkProbes(options: CheckProbesOptions): CheckProbesResult {
     if (requiresProbe(record.row as HypothesisLine)) required.add(record.id);
   }
 
-  const { rows: verdicts, malformed: badVerdicts } = readJsonl<VerdictLine>(
-    join(probesDir, "verdicts.jsonl"),
-  );
+  const { answers, malformed: badVerdicts } = readProbeAnswers(options, set);
   malformed += badVerdicts;
 
   const byVerdict: Record<string, number> = {};
-  const answered = new Map<string, VerdictLine>();
-  for (const row of verdicts) {
-    if (typeof row.hypothesis !== "string") continue;
-    // Resolved to the CANONICAL id, so a verdict written against a model-minted
-    // `H-001` still answers `contract-001`. An ambiguous citation resolves to
-    // nothing and the hypothesis stays unanswered — which is the honest reading:
-    // a verdict naming an id two families minted does not say which it probed.
-    const resolution = resolveHypothesis(set, row.hypothesis);
-    if (resolution.kind !== "resolved") continue;
-    // LAST write wins: the file is append-only, so a second round revising a
-    // verdict appends rather than edits, and the newest line is the answer.
-    answered.set(resolution.id, row);
-  }
-  for (const row of answered.values()) {
-    const verdict = typeof row.verdict === "string" ? row.verdict : "(missing)";
-    byVerdict[verdict] = (byVerdict[verdict] ?? 0) + 1;
-  }
-
+  const answered = answers;
+  for (const row of answered.values()) byVerdict[row.verdict] = (byVerdict[row.verdict] ?? 0) + 1;
   const gaps: ProbeGapKind[] = [];
   let claimedExecution = 0;
   let executed = 0;
@@ -263,7 +302,7 @@ export function checkProbes(options: CheckProbesOptions): CheckProbesResult {
       gaps.push({ kind: "no-verdict", hypothesis: id, detail: "no line in probes/verdicts.jsonl" });
       continue;
     }
-    const verdict = typeof row.verdict === "string" ? row.verdict : "";
+    const verdict = row.verdict === "(missing)" ? "" : row.verdict;
     // `unprobed` (and anything else) stops here, and deliberately: the honest
     // answer has to stay costless or the gate teaches dishonesty.
     if (verdict !== "reproduced" && verdict !== "refuted") continue;
@@ -271,8 +310,8 @@ export function checkProbes(options: CheckProbesOptions): CheckProbesResult {
     // THE rule, mechanised. A refutation with nothing to show for it is an
     // argument wearing a verdict's clothes, and it is the one move that costs
     // recall outright.
-    const transcript = typeof row.transcript === "string" ? row.transcript : null;
-    const resolved = transcript === null ? null : resolveTranscript(options, transcript);
+    const transcript = row.transcript;
+    const resolved = row.transcriptPath;
     if (resolved === null) {
       gaps.push({
         kind: "no-transcript",
@@ -284,7 +323,7 @@ export function checkProbes(options: CheckProbesOptions): CheckProbesResult {
     // …and the second half of the same rule: the transcript has to be the
     // record of an EXECUTION. `"command": "code inspection"` over a page of
     // prose was 9 of 9 verdicts on the first real run.
-    const command = typeof row.command === "string" ? row.command.trim() : "";
+    const command = row.command ?? "";
     if (!command) {
       gaps.push({
         kind: "unexecuted",

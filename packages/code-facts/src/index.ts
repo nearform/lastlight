@@ -246,8 +246,11 @@ export type {
   HypothesisRow,
   HypothesisSet,
 } from "./hypotheses.js";
-export { checkProbes, readJsonl, renderProbeCheck, requiresProbe } from "./probes.js";
-export type { CheckProbesOptions, CheckProbesResult, ProbeGapKind } from "./probes.js";
+export { checkProbes, readJsonl, readProbeAnswers, renderProbeCheck, requiresProbe } from "./probes.js";
+export type { CheckProbesOptions, CheckProbesResult, ProbeAnswer, ProbeGapKind } from "./probes.js";
+
+export { locateExcerpt, pathOfRow, renderAdjudicationDossier } from "./adjudicate-render.js";
+export type { DossierEntry, DossierOptions, DossierQuote, ExcerptLocation } from "./adjudicate-render.js";
 
 export {
   buildFindingsLedger,

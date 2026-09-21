@@ -45,6 +45,7 @@ import {
   type MintOptions,
   type SeedFamily,
 } from "./seed.js";
+import { renderAdjudicationDossier } from "./adjudicate-render.js";
 import { renderFamilyBlock } from "./seed-render.js";
 import { loadManifest, resolveFactsBin, toolchainStamp } from "./toolchain.js";
 import { compilerInfo } from "./project.js";
@@ -78,6 +79,9 @@ Commands:
   findings    the \`adjudicate\` loop's exit gate — the CONSERVATION check: every
               hypothesis has exactly one disposition, and every deletion names a
               transcript that exists
+  dossier     the \`adjudicate\` phase's INPUT — every hypothesis, probe verdict,
+              transcript and conservation row joined into one document, with
+              every quote already checked against the tree
   toolchain   print the pinned manifest and what actually resolved
 
 \`discharge\` options (WP3 — it replaces \`test -s\`, which one line of any content
@@ -122,6 +126,18 @@ transcript's FIRST LINE and nothing else):
                       .jsonl files. Reports; never grades — ALWAYS exits 0.
   Exit 0 = the loop may stop. Non-zero = a hypothesis is unaccounted for, a
   deletion has nothing to show for it, or there is no readable findings.json.
+
+\`dossier\` options (it reads the pipeline's own artifacts; no --base/--head):
+  --dir <dir>         the .lastlight/pr-review directory
+                      (default: .lastlight/pr-review)
+  --repo <dir>        what a quote path and a transcript path are relative to
+                      (default: cwd)
+  --out <file>        write the dossier here                   (default: stdout)
+  --transcript-chars <n>  cap on an inlined probe transcript   (default: 4000).
+                      Truncation is always announced with the path.
+  Always exits 0. Its consumer is the harness, which attaches the result to the
+  phase — a missing artifact is a thinner dossier that SAYS so, never a failure
+  that strands the phase with nothing.
 
 \`prepare\` options (it acts on a tree; no --base/--head, and it runs no analysis):
   --repo <dir>        the checkout to prepare               (default: cwd)
@@ -449,6 +465,23 @@ export function runCli(
     });
     io.out(renderFindingsCheck(result));
     return result.satisfied ? EXIT_OK : EXIT_DEGRADED;
+  }
+
+  if (command === "dossier") {
+    // Always exits 0, and for the same reason `findings --ledger` does: this is
+    // not a gate. It renders what exists. A run whose surveys wrote nothing
+    // gets a dossier that says so in a labelled block — which is strictly more
+    // than the phase had before — and a non-zero exit here would strand
+    // `adjudicate` with no input at all rather than with a thin one.
+    const text = renderAdjudicationDossier({
+      dir: stringFlag(flags.dir) ?? ".lastlight/pr-review",
+      repo: stringFlag(flags.repo),
+      transcriptChars: numberFlag(flags["transcript-chars"]),
+    });
+    const out = stringFlag(flags.out);
+    if (out) writeDocument(out, text, { raw: true });
+    else io.out(text);
+    return EXIT_OK;
   }
 
   if (command === "seed") {
