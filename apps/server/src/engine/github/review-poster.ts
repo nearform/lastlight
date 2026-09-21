@@ -584,6 +584,11 @@ export interface DemotedFinding {
  *   confidence at all.
  * - `clean-discharge` — every supporting hypothesis is a clean QUOTE, so the
  *   finding is an ANTI-finding. See {@link tierFindings}.
+ * - `prose-disposition` — no `tier`, AND the finding's own prose carries this
+ *   pipeline's disposition label. The adjudicator decided, and wrote the
+ *   decision where the boundary cannot read it. A CONTRACT VIOLATION rather
+ *   than a judgement about the finding — see {@link tierFindings} for why it is
+ *   a conjunction and what each half costs alone.
  * - `below-floor` — under {@link AttentionBoundary.internalFloor}.
  * - `body-budget` — demoted to the body and then past
  *   {@link AttentionBoundary.maxBodyComments}. The only reason applied to a
@@ -593,7 +598,11 @@ export interface DemotedFinding {
  *   the reader's attention.
  */
 export type InternalReason =
-  "adjudicated" | "clean-discharge" | "below-floor" | "body-budget";
+  | "adjudicated"
+  | "clean-discharge"
+  | "prose-disposition"
+  | "below-floor"
+  | "body-budget";
 
 /** One recorded-not-posted finding, carrying the reason it was withheld. */
 export interface InternalFinding {
@@ -708,6 +717,29 @@ function rankOf(f: ReviewFinding): number {
 }
 
 /**
+ * The disposition labels a model writes when it is answering the schema in
+ * prose instead of in the `tier` field.
+ *
+ * **Line-anchored, and that is not incidental.** These have to match a LABEL
+ * the model prefixed to its own output, never a claim about the code. The
+ * unanchored version of this idea is the rule part two removed: it fired on
+ * verification *wording* and buried two confirmed defects that happened to be
+ * written in that grammar. A finding may say "the dismissal path is wrong" or
+ * "internal state leaks here" all it likes — neither starts a line with the
+ * label, so neither trips this.
+ */
+const DISPOSITION_LABEL: RegExp[] = [
+  /^\s*internal\s*:/im,
+  /^\s*(?:dismissed|not a (?:defect|finding))\s*[:.]/im,
+];
+
+/** Did the model write its disposition into the prose? See {@link DISPOSITION_LABEL}. */
+function proseDisposition(f: ReviewFinding): boolean {
+  const prose = `${f.title ?? ""}\n${f.body ?? ""}`;
+  return DISPOSITION_LABEL.some((re) => re.test(prose));
+}
+
+/**
  * A severity string no {@link SEVERITY_WEIGHT} entry matches — see `rankOf`.
  *
  * A PREDICATE, not a warning, because this module does no I/O: every function
@@ -757,6 +789,13 @@ const INTERNAL_JARGON: RegExp[] = [
   /\bconservation (?:holds|floor)\b/i,
   /\battention boundary\b/i,
   /\binternal tier\b/i,
+  // The disposition label itself, anchored to the start of a line so it is the
+  // LABEL rather than the ordinary adjective ("an internal API", "internal
+  // state"). Measured on `prreview__skillspro-1680-r1`: two inline comments
+  // were posted whose bodies opened `internal: …`, and nothing in this list
+  // caught it, because every other entry names a mechanism and this one names
+  // a verdict.
+  /^\s*internal:/im,
   /\bdischarges?d?\b/i,
   /\.lastlight\//i,
 ];
@@ -901,6 +940,38 @@ export function tierFindings(
     }
     if (allHypothesesClean(f, clean)) {
       internal.push({ finding: f, reason: "clean-discharge" });
+      continue;
+    }
+    // The adjudicator recorded its DISPOSITION in the prose instead of in the
+    // `tier` field — and so posted the thing it had decided not to say.
+    //
+    // Measured on `prreview__skillspro-1680-r1` (2026-09-21): it reviewed two
+    // claims, concluded both were non-defects, and said so in the only place
+    // the boundary cannot read — titles ending "— dismissed", bodies opening
+    // "internal: … Reviewed and dismissed; no defect." — while leaving `tier`
+    // unset. Both took an inline slot on the pull request. The one finding
+    // that matched real gold went to the body.
+    //
+    // **Deliberately a CONJUNCTION, and that is the whole design.** Neither
+    // half is safe alone:
+    //
+    //  - Untiered alone is not a defect. This module's contract is that an
+    //    absent tier means "no opinion", and the shipped reviewer never writes
+    //    one; keying on it buries ordinary findings (it failed 27 tests that
+    //    encode exactly that, which is how this shape was found).
+    //  - Prose alone is the mistake part two already paid for — a rule keyed
+    //    on verification WORDING buried two confirmed defects written in that
+    //    grammar. `disposition()` is deliberately not that: it matches a
+    //    line-anchored LABEL the model prefixed to its own output, not a claim
+    //    about the code, so a defect described in any English cannot trip it.
+    //
+    // Together they are unambiguous: a required field is missing AND its value
+    // is sitting in the prose. Recorded, never dropped — it lands in
+    // `disposition.json` with this reason, so the omission is findable rather
+    // than silently posted, and the fix upstream is a prompt that fills in the
+    // field.
+    if (!f.tier && proseDisposition(f)) {
+      internal.push({ finding: f, reason: "prose-disposition" });
       continue;
     }
     if (f.confidence !== undefined && f.confidence < boundary.internalFloor) {

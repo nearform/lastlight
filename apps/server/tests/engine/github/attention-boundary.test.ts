@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildBodyOnlyReview,
   buildReview,
+  internalJargon,
   renderDemotedGrouped,
   tierFindings,
   unknownSeverity,
@@ -824,3 +825,73 @@ describe("renderDemotedGrouped — three causes must not share one heading", () 
     expect(renderDemotedGrouped([])).toBe("");
   });
 });
+
+describe("tierFindings — a disposition written in the prose", () => {
+  /**
+   * The measured failure, verbatim in shape. `prreview__skillspro-1680-r1`
+   * (2026-09-21): the adjudicator reviewed two claims, concluded both were
+   * non-defects, wrote that conclusion into the title and body, and left
+   * `tier` unset. Both were posted as INLINE comments on the pull request —
+   * taking both inline slots — while the one finding that matched real gold
+   * went to the body.
+   */
+  const dismissed = (line: number) =>
+    f({
+      line,
+      title: "finally-purge correctness — dismissed",
+      body:
+        "internal: The `finally` block runs even when `populateProfiles` throws. " +
+        "`imgCache.del` is synchronous and cannot itself throw. Reviewed and dismissed; no defect.",
+    });
+
+  it("records an untiered finding whose prose carries the disposition label", () => {
+    const t = tierFindings([dismissed(1)], COMMENTABLE, BOUNDARY);
+    expect(t.inline).toHaveLength(0);
+    expect(t.body).toHaveLength(0);
+    expect(t.internal.map((x) => x.reason)).toEqual(["prose-disposition"]);
+  });
+
+  it("does not touch an untiered finding whose prose is ordinary review English", () => {
+    // The other half of the conjunction. An absent tier means "no opinion",
+    // the shipped reviewer never writes one, and burying on that alone failed
+    // 27 tests that encode exactly this contract.
+    const t = tierFindings([f({ line: 2, title: "Null deref", body: "`x` may be undefined here." })], COMMENTABLE, BOUNDARY);
+    expect(t.inline).toHaveLength(1);
+    expect(t.internal).toHaveLength(0);
+  });
+
+  it("obeys an explicit tier even when the prose carries the label", () => {
+    // A document that filled the field in is not in violation, whatever its
+    // prose says — so a `body` disposition stays `body` rather than being
+    // re-judged by a regex.
+    const t = tierFindings([{ ...dismissed(3), tier: "body" }], COMMENTABLE, BOUNDARY);
+    expect(t.body.map((x) => x.reason)).toEqual(["adjudicated"]);
+    expect(t.internal).toHaveLength(0);
+  });
+
+  it("is not tripped by a defect that merely discusses dismissal or internal state", () => {
+    // The part-two regression, pinned. A rule keyed on verification WORDING
+    // buried two confirmed defects written in that grammar. These labels are
+    // line-anchored so a real finding cannot phrase its way into silence.
+    const t = tierFindings(
+      [
+        f({ line: 4, title: "Error dismissed silently", body: "The catch block swallows it; internal state is left half-written." }),
+        f({ line: 5, title: "Leak", body: "This is not a defect in the happy path, but it is one on retry." }),
+      ],
+      COMMENTABLE,
+      BOUNDARY,
+    );
+    expect(t.inline).toHaveLength(2);
+    expect(t.internal).toHaveLength(0);
+  });
+
+  it("internalJargon catches the label it used to miss", () => {
+    // Every other entry in that list names a MECHANISM; this one names a
+    // verdict, which is why a body opening `internal:` walked through the leak
+    // detector and onto a pull request.
+    expect(internalJargon({ findings: [dismissed(6)] })).toContain("internal:");
+    // …and still does not fire on the ordinary adjective.
+    expect(internalJargon({ findings: [f({ line: 7, body: "an internal API boundary" })] })).toEqual([]);
+  });
+});
+
