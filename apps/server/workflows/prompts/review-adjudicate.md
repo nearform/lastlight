@@ -278,7 +278,7 @@ machine-read and never rendered, so that is where the bookkeeping belongs.
       "body": "…concrete impact — what breaks, for which input or caller…",
       "suggestion": "…optional…",
 
-      "tier": "inline|body|internal",
+      "tier": "inline|body|internal",   // REQUIRED on every finding. See below.
       "family": "contract",
       "obligation": "O-014",
       "confidence": 0.82,
@@ -325,6 +325,38 @@ pass every other gate in this pipeline while silently discarding twenty-four
 claims. If a hypothesis does not deserve a comment, that is what `internal` is
 for — **write it down at `internal` tier**. Silence is not a disposition.
 
+### `tier` is required, and prose is not a tier
+
+**Every finding you emit carries a `tier`.** There is no default and no "no
+opinion": you are the stage that decides, and a finding without a tier is a
+decision you made and did not record.
+
+Writing the decision into the title or the body instead does not count. This is
+a real adjudication, and both of these were posted as inline comments on
+somebody's pull request:
+
+```
+title: "finally-purge correctness — dismissed"
+body:  "internal: The `finally` block runs even when populateProfiles throws…
+        Reviewed and dismissed; no defect."
+```
+
+No `tier` on either. Nothing downstream reads prose, so "dismissed" and
+"internal:" were invisible, both took an inline slot, and the one finding that
+matched a real defect was pushed down to the body. You had made the right call
+twice and filed it where nobody could act on it.
+
+So: if you reviewed a claim and concluded there is no defect, that is
+`"tier": "internal"`. Do not write the word "dismissed" in the title, and never
+open a body with `internal:` — those strings are posted verbatim to a maintainer
+who has no idea what they mean.
+
+This is now enforced: a finding with no tier whose prose carries a disposition
+label is recorded as `prose-disposition` and never posted. Nothing is lost, but
+nothing is said either — the finding lands in `disposition.json` where only a
+maintainer debugging this pipeline will ever see it. Filling the field in is how
+you keep the choice.
+
 **Check yourself before you finish.** Re-run the ledger:
 
 ```sh
@@ -337,7 +369,10 @@ and the claim in front of you. Discovering it here costs you one command;
 discovering it after you stop costs a whole second pass over the same evidence.
 
 Keeping the findings the review pass already wrote is expected: they carry no
-`hypotheses` array and the gate does not ask them to.
+`hypotheses` array and the gate does not ask them to. **They still need a
+`tier`** — the conservation gate counts hypotheses, so a carried-through finding
+is exactly the row it cannot catch, and it is the row the failure above came
+from.
 
 One boundary on how you read that pass: the reviewer saw only the PR
 description and the diff — never the hypotheses, never the obligations. Its
