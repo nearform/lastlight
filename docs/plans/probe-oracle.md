@@ -51,6 +51,20 @@ Mechanism findings, which are the trustworthy half:
    - **The genuinely shallow option, untried:** let the oracle install *only what a probe needs* — `npm i --no-save eslint` when it wants to run eslint — rather than the whole tree. Smallest possible install per probe, no tree-wide cost, and it fits the existing ladder as a new tier between 2 and 3. Needs a CLI affordance and a disk/time budget; **there is no disk guard anywhere today** and warm `node_modules` persists.
 4. **A differential arm.** Tier 1 is unused by both models. The prompt already prefers it and `origin/<base>` is already fetched. Possibly just a prompt/ladder emphasis change, so cheap to try.
 
+## Build queue — and why it comes before the paid repeats
+
+**[#399](https://github.com/nearform/lastlight/issues/399) — `adjudicate` assembles its own context with 30 bash calls.** Measured on `1587-r2`: 35 assistant turns, **30 of them `bash`**, one `write`, ~10 min and $1.27–1.34 uncontended — **about a third of case cost**. The calls are clerical: `cat` every `hypotheses/*.jsonl`, `cat` every probe transcript, `findings --ledger` twice, then dozens of `sed -n '<N>p'` re-reading source lines to verify quotes it was handed. All of it is already parsed by `readHypothesisSet`, `checkProbes` and `buildFindingsLedger`.
+
+Three reasons this is the next *build*, not a nice-to-have:
+
+1. **It is a third of the eval bill.** Item 2 below (repeats, ~$110) is mostly adjudicate. Paying for repeats of a phase you are about to rewrite is buying a baseline you will discard.
+2. **It should land with the say-side typed-attribute work, not after it.** #399 fixes adjudicate's *input* (a rendered dossier instead of thirty shell calls); the typed-attribute change — adjudicator emits `claim`/`category`/`fix` and a pure `computeTier()` decides, dropping `confidence` — fixes its *output*. Both change the same phase's measured surface, so shipping them together costs **one** comparability break with the archive instead of two. That was the reason the output half was gated on a fresh collection arm; the same arm can validate both.
+3. **Idea 1 is a prerequisite for Idea 2.** The System-1 / Jev exploration in #399 only makes sense once the dossier exists — a per-row classifier fed by thirty shell calls inherits the problem. And the evidence is specific: blind *correctness* adjudication is measured-dead (keep-all F1 **0.825** vs Jev 0.789, Haiku 0.803, GLM 0.745), but the same probabilities separate Code Defect from Maintainability at **AUC 0.897**. So the shape to test is typed attributes on the category axis, never "is this finding correct" — and `jev-with-evidence` was explicitly left un-ruled-out.
+
+Success criteria are already recorded per phase and need no new plumbing: **bash calls and assistant turns per adjudication** (35/30 is the stress case), then cost and duration **at `--concurrency 1`**. Guardrail: internal recall first, then posted — a faster adjudicator that tiers worse is a regression however good the latency looks.
+
+Revised order: judge audit (~$0.20) → **#399 + the typed-attribute output change** ($0 to build) → repeats on the new shape → the install-oracle arm.
+
 ## Traps this pass re-learned
 
 - **A finished run holds its dashboard server open forever** — that is why `--repeats` implies `--no-open`. Chaining a second arm on "no run process alive" deadlocks.
@@ -60,6 +74,6 @@ Mechanism findings, which are the trustworthy half:
 
 ## Open issues
 
-- **#399** — `adjudicate` spends 30 bash calls assembling context the harness already holds (~10 min, $1.27–1.34/case, a third of case cost). Includes the render-a-dossier proposal and the System-1/Jev exploration.
+- **[#399](https://github.com/nearform/lastlight/issues/399)** — planned; see *Build queue* above.
 - Dropped obligations' **text is not recorded** — `obligations.json`'s `dropped[]` is `{reason, count}` only, so "which questions were never asked" is unanswerable from disk. Not yet filed.
 - A **release is required** before any of this reaches a deployment (`config/default.yaml`, workflows and prompts all changed).
