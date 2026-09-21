@@ -105,46 +105,40 @@ async function rebuildMessagingIfLegacyUnique(client: Client): Promise<void> {
   if (!tableSql.includes("UNIQUE(platform")) return;
 
   log.info("legacy compat: rebuilding messaging_sessions without the table-level UNIQUE");
-  const fkRow = await client.execute("PRAGMA foreign_keys");
-  const fkWasOn = Number(fkRow.rows[0]?.foreign_keys ?? 0) === 1;
-  await client.execute("PRAGMA foreign_keys = OFF");
-  try {
-    // One execute() per statement — executeMultiple() force-rolls-back any open
-    // transaction in its `finally`, so BEGIN → executeMultiple → COMMIT
-    // silently undoes the rebuild and then throws "no transaction is active".
-    // Boot would fail on exactly the legacy databases this exists for.
-    await client.execute("BEGIN");
-    try {
-      await client.execute(`CREATE TABLE messaging_sessions__new (
+
+  // Pre-check: if existing data is already inconsistent, fail loud before modifying schema.
+  // A direct INSERT INTO ... SELECT copy cannot introduce violations the source didn't have,
+  // so this is equivalent to the in-transaction check the original code ran.
+  const preCheck = await client.execute("PRAGMA foreign_key_check(messaging_sessions)");
+  if (preCheck.rows.length > 0) {
+    throw new Error(
+      `FK check failed before messaging rebuild: ${JSON.stringify(preCheck.rows)}`,
+    );
+  }
+
+  // client.migrate() executes all statements on a single pooled connection with
+  // PRAGMA foreign_keys=OFF before a DEFERRED transaction and foreign_keys=ON
+  // after commit. This is the correct replacement for the manual BEGIN/COMMIT
+  // sequence, which broke in @libsql/client 0.18.0: execute() now
+  // acquires-then-releases a connection per call, and release() rolls back any
+  // open transaction, so BEGIN → execute(DDL…) → COMMIT always failed with
+  // "cannot commit - no transaction is active".
+  await client.migrate([
+    `CREATE TABLE messaging_sessions__new (
         id TEXT PRIMARY KEY, platform TEXT NOT NULL, channel_id TEXT NOT NULL,
         thread_id TEXT, user_id TEXT NOT NULL, agent_session_id TEXT,
         created_at TEXT NOT NULL, last_activity_at TEXT NOT NULL,
         message_count INTEGER DEFAULT 0, active INTEGER DEFAULT 1
-      )`);
-      await client.execute(`INSERT INTO messaging_sessions__new
+      )`,
+    `INSERT INTO messaging_sessions__new
         SELECT id, platform, channel_id, thread_id, user_id, agent_session_id,
                created_at, last_activity_at, message_count, active
-        FROM messaging_sessions`);
-      await client.execute("DROP TABLE messaging_sessions");
-      await client.execute("ALTER TABLE messaging_sessions__new RENAME TO messaging_sessions");
-      await client.execute(`CREATE INDEX IF NOT EXISTS idx_msg_sessions_lookup
-        ON messaging_sessions(platform, channel_id, thread_id, user_id)`);
-      // Belt-and-braces: if the copy missed rows the messages reference, fail
-      // the migration loudly rather than commit a half-broken schema.
-      const violations = await client.execute("PRAGMA foreign_key_check");
-      if (violations.rows.length > 0) {
-        throw new Error(
-          `FK check failed after messaging rebuild: ${JSON.stringify(violations.rows)}`,
-        );
-      }
-      await client.execute("COMMIT");
-    } catch (err) {
-      await client.execute("ROLLBACK").catch(() => {});
-      throw err;
-    }
-  } finally {
-    if (fkWasOn) await client.execute("PRAGMA foreign_keys = ON");
-  }
+        FROM messaging_sessions`,
+    "DROP TABLE messaging_sessions",
+    "ALTER TABLE messaging_sessions__new RENAME TO messaging_sessions",
+    `CREATE INDEX IF NOT EXISTS idx_msg_sessions_lookup
+        ON messaging_sessions(platform, channel_id, thread_id, user_id)`,
+  ]);
   // The partial unique index is deliberately NOT recreated here — the baseline
   // migrator runs immediately after, same boot, before any writes.
 }

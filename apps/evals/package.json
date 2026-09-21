@@ -42,11 +42,11 @@
   "author": "Clifton Cunningham",
   "license": "MIT",
   "dependencies": {
-    "@clack/prompts": "^1.7.0",
+    "@clack/prompts": "^1.8.1",
     "lastlight-core": "workspace:*",
     "lastlight-workflow-engine": "workspace:*",
     "chalk": "^6.0.0",
-    "yaml": "^2.5.0"
+    "yaml": "^2.9.1"
   },
   "peerDependencies": {
     "agentic-pi": "^0.6.1"
