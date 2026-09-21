@@ -134,6 +134,7 @@ export type { DisabledConfig, RouteConfig } from "lastlight-shared/config-types"
 // surface for the runtime config shape.
 import {
   DIAGNOSIS_CLASSES,
+  coerceAdjudicateMode,
   coerceProbeMode,
   defaultDependenciesConfig,
   defaultFixConfig,
@@ -1434,6 +1435,12 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
       // `"static"` (so no existing deployment gains an install by upgrading),
       // and every other value — including `"true"` and `"yes"` — is `"off"`.
       probes: coerceProbeMode(analysisRaw.probes),
+      // #399. Selects what `adjudicate` is handed and what shape it writes
+      // back, in ONE key because both halves move the same phase's measured
+      // surface. Only the literal `"dossier"` moves a deployment; everything
+      // else is the shipped phase, which is the direction the whole block
+      // fails.
+      adjudicate: coerceAdjudicateMode(analysisRaw.adjudicate),
       probeLifecycleScripts: analysisRaw.probeLifecycleScripts === true,
       probeTypecheck: analysisRaw.probeTypecheck === true,
       probeCoverage: analysisRaw.probeCoverage === true,

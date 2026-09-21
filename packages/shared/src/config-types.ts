@@ -265,6 +265,32 @@ export function coerceProbeMode(raw: unknown): ProbeMode {
 }
 
 /**
+ * What `adjudicate` reads and what it writes. See
+ * {@link ReviewAnalysisConfig.adjudicate}.
+ *
+ * Two literals rather than a boolean because this selects a PHASE SHAPE, and
+ * the next one — a per-row System-1 classifier over the same dossier
+ * ([#399](https://github.com/nearform/lastlight/issues/399) idea 2) — is a
+ * third value, not a second flag. `obligationContract` has the same shape for
+ * the same reason.
+ */
+export type AdjudicateMode = "legacy" | "dossier";
+
+/**
+ * Read an operator's `adjudicate` value. **Total**, and it fails toward the
+ * shipped phase.
+ *
+ * Only the literal `"dossier"` moves a deployment. A bare `true` does NOT —
+ * unlike {@link coerceProbeMode}, where `true` meant something specific
+ * historically, nothing has ever written `adjudicate: true`, so there is no
+ * compatibility to preserve and no reason to let a truthy-ish value select an
+ * unmeasured phase shape.
+ */
+export function coerceAdjudicateMode(raw: unknown): AdjudicateMode {
+  return raw === "dossier" ? "dossier" : "legacy";
+}
+
+/**
  * How much automation a trigger mode buys, ascending — the scale the repo-layer
  * clamp takes the minimum on.
  *
@@ -378,6 +404,36 @@ export interface ReviewAnalysisConfig {
    * of every run.
    */
   obligationContract: "full" | "minimal";
+  /**
+   * What `adjudicate` is handed, and what shape it writes back.
+   *
+   * - `legacy` — the shipped phase. The prompt names the files and the model
+   *   shells out to assemble them, then writes a `tier` and a `confidence` per
+   *   finding.
+   * - `dossier` — a deterministic `dossier` phase renders every record the
+   *   phase needs (`lastlight-facts dossier`) and the harness attaches it, and
+   *   the model writes typed ATTRIBUTES (`claim` / `category` / `fix`) from
+   *   which a pure `computeTier()` derives the tier. `confidence` is not asked
+   *   for.
+   *
+   * **One key for both halves on purpose.** They change the same phase's
+   * measured surface — its input and its output — so shipping them together
+   * costs ONE comparability break with the archive instead of two, and one arm
+   * validates both. Splitting them would buy a second baseline nobody wants.
+   *
+   * What it is fixing, measured on the 8-case probes arm: `adjudicate` spends
+   * **137 bash calls across 8 adjudications** (35 turns / 30 bash on the
+   * stress case) re-deriving records the harness already holds — about a third
+   * of case cost — and then makes its actual judgement at the end of a long,
+   * noisy transcript, which is the condition under which every measured
+   * failure of this phase has happened. See
+   * [#399](https://github.com/nearform/lastlight/issues/399).
+   *
+   * Defaults to `legacy`, and an unrecognised value lands there too: the same
+   * direction every switch in this block fails. No deployment changes
+   * behaviour until an operator asks and an arm has measured it.
+   */
+  adjudicate: AdjudicateMode;
   /**
    * Which D2 minting arms `lastlight-facts seed` runs, as a comma-list over
    * `all-in-diff` (contract obligations for symbols whose every reference is
@@ -791,6 +847,8 @@ export function defaultReviewPolicy(): ReviewPolicy {
       // remains the opt-in telemetry arm (discharge codes + the
       // clean-discharge demotion at the posting boundary).
       obligationContract: "minimal",
+      // Unmeasured until #399's arm runs. See the field's doc.
+      adjudicate: "legacy",
       // Both D2 rules — the measured shipped shape. See the field's doc.
       mint: "all-in-diff,registrations",
       surveyPasses: 6,

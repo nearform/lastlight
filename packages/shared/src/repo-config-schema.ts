@@ -51,6 +51,7 @@ import {
   isDependencyImpact,
   isDiagnosisClass,
   isReviewTrigger,
+  coerceAdjudicateMode,
   coerceProbeMode,
   reviewTriggerRank,
   type DependenciesConfig,
@@ -1697,6 +1698,9 @@ function shapeReviewAnalysis(raw: unknown, d: ReviewPolicy["analysis"]): ReviewP
     // Operator-only like the rest of `review.analysis`, so this only ever
     // projects the operator's answer into the merged view. `minimal` or nothing.
     obligationContract: node.obligationContract === "minimal" ? "minimal" : d.obligationContract,
+    // Operator-only as well, and the most important one to keep that way: it
+    // selects a phase SHAPE whose measured surface differs from the archive's.
+    adjudicate: coerceAdjudicateMode(node.adjudicate),
     // Operator-only projection too. A plain string — the CLI (`--mint`) is the
     // loud validator, exactly as for obligationContract above.
     mint: typeof node.mint === "string" ? node.mint : d.mint,

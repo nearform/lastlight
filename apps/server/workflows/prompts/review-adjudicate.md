@@ -44,7 +44,7 @@ deciding a claim feels weak.
 still visible; it is simply not an inline comment. That is the tool to reach for
 whenever you are tempted to drop something.
 
-## Start here: get your checklist
+{{#if !dossierEnabled}}## Start here: get your checklist
 
 **First command, before you read anything:**
 
@@ -84,6 +84,49 @@ a small one.
 If `verdicts.jsonl` is absent, no probe ran. That is **not** evidence about any
 hypothesis: it means the oracle never got to look, so nothing may be dropped on
 this run at all.
+{{/if}}{{#if dossierEnabled}}## Your evidence, already assembled
+
+Everything this pass needs is in the dossier at the end of this prompt. It was
+built from `.lastlight/pr-review/` by `lastlight-facts dossier`: every
+hypothesis with its canonical id, claim and both mechanism ends; every probe's
+verdict, command and transcript; the conservation ledger with the exact ids
+still owing a disposition; and the findings the review pass wrote.
+
+**Do not go and fetch what is already here.** No `cat` of the `.jsonl` files, no
+`cat` of a probe transcript, no `findings --ledger`. A previous shape of this
+phase spent **thirty shell calls and about a third of the case's cost**
+re-deriving that document one file at a time, and then made its actual judgement
+at the end of a long, noisy transcript. Your budget is for the judgement.
+
+**Quotes are already checked against the tree.** `quote VERIFIED — path:line`
+means the excerpt is in the file it names, at that line. `quote NOT FOUND` means
+it is not, and re-reading the file will not change that — a finding built on a
+quote that does not resolve cannot be anchored inline, so either re-quote from
+the code or say what you are anchoring to instead. **Do not `sed`/`grep` a file
+to check a quote this document has verified.**
+
+Two things are deliberately missing from the dossier and their absence is not an
+oversight. The falsify pass's **reasoning** about its own verdicts is not there
+— you get the verdict, the command and the transcript, and you judge the
+transcript. And **`confidence`** is not there, on a hypothesis or a finding: it
+measured AUROC 0.228 across 516 findings, inverted, because the claims this
+pipeline is surest of are the ones where nothing is wrong. Do not reintroduce
+it, and do not ask for it.
+
+If the dossier says `DOSSIER NOT AVAILABLE`, it could not be built. Then — and
+only then — read `.lastlight/pr-review/` yourself: `hypotheses/*.jsonl`,
+`probes/verdicts.jsonl`, `probes/*.txt`, `findings.json`, and
+`lastlight-facts findings --dir .lastlight/pr-review --ledger`.
+
+If no probe verdict appears anywhere, no probe ran. That is **not** evidence
+about any hypothesis: it means the oracle never got to look, so nothing may be
+dropped on this run at all.
+
+**If the ledger shows ids already marked `[x]`, you are on a retry.** A previous
+attempt wrote `findings.json` and the gate rejected it for the ids still marked
+`[ ]`. **Do not start over.** Keep every finding that is already there and add a
+disposition for each outstanding id.
+{{/if}}
 
 ## What to do, in order of importance
 
@@ -216,7 +259,44 @@ this run at all.
    `event`, so those are yours — establish the prior state with the `github_*`
    review and comment reads before you decide it.
 
-## Confidence prices the defect, not your certainty
+{{#if dossierEnabled}}## Say what is wrong, what kind of wrong, and what to change
+
+You do **not** write a `tier` and you do **not** write a `confidence`. You write
+three typed attributes per finding and the harness derives the tier from them.
+
+| field | what it is |
+|---|---|
+| `claim` | one sentence naming what is **wrong** — never what the code does. If you cannot write one, the finding is a verification report; say so in `category` and leave this empty. |
+| `category` | `defect` · `correctness-risk` · `maintainability` · `nit` · `verification` |
+| `fix` | one sentence naming what to **change**. Empty when there is nothing to do. |
+
+The categories, and the line between them is the one that matters:
+
+- **`defect`** — it is wrong now. Some input, caller or configuration that
+  reaches this code produces the wrong result, and you can name it.
+- **`correctness-risk`** — the mechanism is incomplete in a way that produces a
+  wrong result under a condition you can name but have not shown holds.
+- **`maintainability`** — correct today, and a foreseeable edit breaks it:
+  duplicated constants, a contract enforced in one place of two.
+- **`nit`** — style, naming, wording. True and small.
+- **`verification`** — *you looked and there is no defect.* Every "correctly
+  enforced", "already handled", "the values agree", "intentional and
+  documented" belongs here, however certain you are. **A confident report of
+  nothing is not a finding.**
+
+Why these three and not a verdict: asking a model whether a review comment is
+*correct* has been measured three times against 2,145 labelled comments and lost
+every time to keeping everything (keep-all F1 **0.825**; the best adjudicator
+0.803). The same judgement, asked as *defect or maintainability*, separates them
+at **AUC 0.897**. So this asks you the question you can answer, and the routing
+is arithmetic.
+
+Write the honest category. `verification` is not a failure — it is the
+disposition that lets a real defect keep the slot it would otherwise have taken,
+and a run whose every row is `defect` is not a calibrated run, it is an
+uncalibrated one.
+
+{{/if}}{{#if !dossierEnabled}}## Confidence prices the defect, not your certainty
 
 `confidence` is the probability that a maintainer who investigates will conclude
 something is **genuinely wrong** — never how sure you are of an observation. A
@@ -233,6 +313,7 @@ A document whose every row sits at 0.75+ is not calibrated — and measured runs
 did exactly that (median 0.95–1.00, minimum 0.75, with 1.00 spent on statements
 like *"exported signature unchanged"*). If your confidences do not spread, they
 are not confidences.
+{{/if}}
 
 ## Anchoring: quote the code, do not count the lines
 
@@ -263,7 +344,41 @@ this paragraph exists to prevent. Everything else in the schema below —
 `family`, `obligation`, `confidence`, `hypotheses`, `mechanism`, `evidence` — is
 machine-read and never rendered, so that is where the bookkeeping belongs.
 
-```jsonc
+{{#if dossierEnabled}}```jsonc
+{
+  "summary": "…",
+  "event": "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
+  "verdict": { "spec": "pass|fail|unknown", "standards": "pass|fail|unknown" },
+  "findings": [
+    {
+      "path": "src/server/auth.ts",
+      "existingCode": "the verbatim excerpt, copied not paraphrased",
+      "severity": "Critical|Important",
+      "title": "…",
+      "body": "…concrete impact — what breaks, for which input or caller…",
+      "suggestion": "…optional…",
+
+      // REQUIRED on every finding. No `tier` and no `confidence` — see above.
+      "claim": "the nonce age is never compared against SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS",
+      "category": "defect",
+      "fix": "compare issuedAt against the constant in readPendingNonces",
+
+      "family": "contract",
+      "obligation": "O-014",
+      "hypotheses": ["contract-003", "enforcement-017"],
+      "mechanism": "value set on one side of a boundary, never checked on the other",
+      "evidence": [
+        { "type": "reference", "detail": "MAX_TOKEN_AGE: 1 reference, client-side only" },
+        { "type": "transcript", "ref": "probes/contract-003.txt", "result": "reproduced" }
+      ]
+    }
+  ],
+  "dropped": [
+    { "hypothesis": "security-021", "refutedBy": "probes/security-021.txt" }
+  ]
+}
+```
+{{/if}}{{#if !dossierEnabled}}```jsonc
 {
   "summary": "…",
   "event": "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
@@ -294,6 +409,7 @@ machine-read and never rendered, so that is where the bookkeeping belongs.
   ]
 }
 ```
+{{/if}}
 
 A `dropped` entry with a `reason` and no `refutedBy` transcript is not a softer
 kind of drop — it is a deletion the reconcile floor will un-delete back to
@@ -324,7 +440,34 @@ pass every other gate in this pipeline while silently discarding twenty-four
 claims. If a hypothesis does not deserve a comment, that is what `internal` is
 for — **write it down at `internal` tier**. Silence is not a disposition.
 
-### `tier` is required, and prose is not a tier
+{{#if dossierEnabled}}### The attributes are required, and prose is not a disposition
+
+**Every finding you emit carries `claim`, `category` and `fix`.** There is no
+default and no "no opinion": you are the stage that decides, and a finding
+without them is a decision you made and did not record.
+
+Writing the decision into the title or the body instead does not count. This is
+a real adjudication, and both of these were posted as inline comments on
+somebody's pull request:
+
+```
+title: "finally-purge correctness — dismissed"
+body:  "internal: The `finally` block runs even when populateProfiles throws…
+        Reviewed and dismissed; no defect."
+```
+
+Nothing downstream reads prose, so "dismissed" and "internal:" were invisible,
+both took an inline slot, and the one finding that matched a real defect was
+pushed down to the body. You had made the right call twice and filed it where
+nobody could act on it. Both of those are `"category": "verification"` with an
+empty `claim`, and then they are withheld automatically.
+
+So: if you reviewed a claim and concluded there is no defect, that is
+`verification`. Do not write the word "dismissed" in the title, and never open a
+body with `internal:` — those strings are posted verbatim to a maintainer who
+has no idea what they mean.
+
+{{/if}}{{#if !dossierEnabled}}### `tier` is required, and prose is not a tier
 
 **Every finding you emit carries a `tier`.** There is no default and no "no
 opinion": you are the stage that decides, and a finding without a tier is a
@@ -355,8 +498,14 @@ label is recorded as `prose-disposition` and never posted. Nothing is lost, but
 nothing is said either — the finding lands in `disposition.json` where only a
 maintainer debugging this pipeline will ever see it. Filling the field in is how
 you keep the choice.
+{{/if}}
 
-**Check yourself before you finish.** Re-run the ledger:
+**Check yourself before you finish.** {{#if dossierEnabled}}Against the
+dossier's conservation section, not by re-running anything: every id it listed
+as outstanding must now appear in a finding's `hypotheses` array or in
+`dropped`. Adding a disposition while the file is open costs you nothing;
+discovering it after you stop costs a whole second pass over the same
+evidence.{{/if}}{{#if !dossierEnabled}}Re-run the ledger:
 
 ```sh
 "$FACTS" findings --dir .lastlight/pr-review --ledger
@@ -365,12 +514,14 @@ you keep the choice.
 Every line must read `[x]` and it must end with *"Conservation holds"*. If
 anything is still outstanding, add its disposition now — you have the file open
 and the claim in front of you. Discovering it here costs you one command;
-discovering it after you stop costs a whole second pass over the same evidence.
+discovering it after you stop costs a whole second pass over the same
+evidence.{{/if}}
 
 Keeping the findings the review pass already wrote is expected: they carry no
-`hypotheses` array and the gate does not ask them to. **They still need a
-`tier`** — the conservation gate counts hypotheses, so a carried-through finding
-is exactly the row it cannot catch, and it is the row the failure above came
+`hypotheses` array and the gate does not ask them to. **They still need
+{{#if dossierEnabled}}the three attributes{{/if}}{{#if !dossierEnabled}}a `tier`{{/if}}**
+— the conservation gate counts hypotheses, so a carried-through finding is
+exactly the row it cannot catch, and it is the row the failure above came
 from.
 
 One boundary on how you read that pass: the reviewer saw only the PR
@@ -381,3 +532,14 @@ does not display, structurally invisible to a diff-level pass — a measured
 adjudication demoted a real spec violation with *"since the prior reviewer
 didn't block it, the issue might be acceptable"*, which is exactly the
 inference this paragraph exists to forbid.
+
+{{#if dossierEnabled}}---
+
+## Attached: the dossier
+
+Everything below was assembled by `lastlight-facts dossier` from the pipeline's
+own artifacts and is reproduced **verbatim**. It has already been read for you —
+do not open the files it came from, and do not construct a path to them.
+
+{{phaseOutputs.dossier}}
+{{/if}}

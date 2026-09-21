@@ -82,6 +82,20 @@ export interface ReviewFinding {
    * them means.
    */
   tier?: "inline" | "body" | "internal";
+  /**
+   * #399's typed attributes, written INSTEAD of `tier` under
+   * `review.analysis.adjudicate: "dossier"`. {@link computeTier} turns them
+   * into a tier; absent, everything below behaves exactly as it did.
+   *
+   * `claim` is what is WRONG (not what the code does), `fix` is what to
+   * change, and `category` is the axis that measured **AUC 0.897** where
+   * blind correctness adjudication measured worse than keeping everything.
+   * There is no `confidence` here on purpose: it measured AUROC 0.228 and is
+   * already gone from {@link rankOf}.
+   */
+  claim?: string | null;
+  category?: "defect" | "correctness-risk" | "maintainability" | "nit" | "verification" | null;
+  fix?: string | null;
 }
 
 /** A finding that has an anchor. Narrowed by {@link splitFindings}. */
@@ -631,7 +645,16 @@ export type InternalReason =
   | "adjudicated"
   | "clean-discharge"
   | "prose-disposition"
-  | "body-budget";
+  | "body-budget"
+  /**
+   * #399: the tier was DERIVED from the finding's typed attributes rather than
+   * stated by the model — a `verification` category, or a finding that could
+   * state no `claim` and no `fix`. Its own token because the question "how
+   * often does the computed tier withhold something" is the whole point of the
+   * typed-attribute arm, and folded into `adjudicated` it would be
+   * unanswerable from `disposition.json`.
+   */
+  | "computed";
 
 /** One recorded-not-posted finding, carrying the reason it was withheld. */
 export interface InternalFinding {
@@ -951,6 +974,58 @@ function allHypothesesClean(
  * empty ⇒ the rule cannot fire, which is the inertness guarantee for every
  * deployment and every arm that runs no evidence pipeline.
  */
+/**
+ * The tier a finding's typed attributes imply, or `undefined` when it has none.
+ *
+ * #399's output half. The adjudicator under `review.analysis.adjudicate:
+ * "dossier"` is not asked for a `tier` at all — it writes `claim` (what is
+ * wrong), `category` (what kind of wrong) and `fix` (what to change), and this
+ * decides. Three reasons that is the better question to ask a model:
+ *
+ *  - **"Is this finding correct?" is measured-dead.** Over 2,145 labelled AACR
+ *    comments, keep-all scores F1 0.825 and every blind adjudicator tried came
+ *    in under it (Haiku 0.803, Jev 0.789, GLM 0.745). The same probabilities
+ *    separate Code Defect from Maintainability at **AUC 0.897**. Category is
+ *    where the signal is.
+ *  - **The failures this phase actually had were unstated decisions, not wrong
+ *    ones.** Two findings on `1680-r1` were correctly judged non-defects and
+ *    filed in prose — "— dismissed", "internal: … no defect" — with `tier`
+ *    unset, so both took an inline slot. A model that must answer "defect or
+ *    verification?" cannot make that mistake; a model asked for a tier can
+ *    simply not write one.
+ *  - **It is checkable.** A `claim` is a sentence about what is wrong, and a
+ *    `verification` category with a claim, or a `defect` with none, is a
+ *    contradiction a human or a script can see. A tier is a verdict with
+ *    nothing behind it.
+ *
+ * The mapping is deliberately GENEROUS at the top: the measured constraint is
+ * the found→said gap (the pipeline withholds ~31% of what it finds), so
+ * `defect` and `correctness-risk` both ask for inline and the cascade below —
+ * anchorability, then the inline cap, then the body cap — does the narrowing
+ * with evidence this function does not have. SNR is the guardrail on that
+ * choice.
+ *
+ * Returns `undefined` for a finding with no attributes, which is every finding
+ * written under `adjudicate: "legacy"` and every one the shipped reviewer
+ * writes. That is what keeps this inert until an operator asks for it.
+ */
+export function computeTier(f: ReviewFinding): "inline" | "body" | "internal" | undefined {
+  const category = f.category;
+  if (!category) return undefined;
+  // A verification report is always internal. Long-standing rule; the typed
+  // category is the first time it has been machine-checkable rather than a
+  // sentence in a prompt.
+  if (category === "verification") return "internal";
+  const claim = typeof f.claim === "string" ? f.claim.trim() : "";
+  const fix = typeof f.fix === "string" ? f.fix.trim() : "";
+  // Nothing wrong, or nothing to do about it. Recorded, never posted — which
+  // is what `internal` has always meant, now reached without asking the model
+  // to name the tier.
+  if (!claim || !fix) return "internal";
+  if (category === "defect" || category === "correctness-risk") return "inline";
+  return "body";
+}
+
 export function tierFindings(
   findings: ReviewFinding[],
   commentable: Map<string, Set<string>> | null,
@@ -961,15 +1036,29 @@ export function tierFindings(
   const body: DemotedFinding[] = [];
   const candidates: AnchoredFinding[] = [];
 
-  for (const f of findings) {
-    if (!f) continue;
+  for (const raw of findings) {
+    if (!raw) continue;
+    // #399. A finding carrying typed attributes and no `tier` gets one
+    // derived here, ONCE, before any rule below reads `f.tier` — so the whole
+    // cascade (clean-discharge, prose-disposition, anchorability, the two
+    // budgets) is shared by both shapes instead of forked. A finding that
+    // states a tier keeps it: an operator mid-migration, or the conservation
+    // floor's repaired rows, must not have their explicit `internal`
+    // recomputed out from under them.
+    //
+    // `derived` is tracked so the withholding can be attributed. "How often
+    // does the computed tier bury something, and what?" is the question the
+    // typed-attribute arm exists to answer, and `disposition.json` is where it
+    // gets answered.
+    const derived = raw.tier ? undefined : computeTier(raw);
+    const f = derived ? { ...raw, tier: derived } : raw;
     // An explicit `internal` is obeyed unconditionally and FIRST. The
     // conservation floor writes unaccounted-for hypotheses at this tier with no
     // `confidence` at all, and a confidence-only rule would have posted every
     // one of them — turning "we recorded what we could not adjudicate" into
     // "we published what we could not adjudicate".
     if (f.tier === "internal") {
-      internal.push({ finding: f, reason: "adjudicated" });
+      internal.push({ finding: f, reason: derived ? "computed" : "adjudicated" });
       continue;
     }
     if (allHypothesesClean(f, clean)) {

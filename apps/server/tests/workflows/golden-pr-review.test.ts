@@ -67,6 +67,9 @@ const DECLARED = [
   "survey",
   "falsify",
   "review",
+  // #399. Deterministic, and it must sit between `review` and `adjudicate`:
+  // it renders what the review pass wrote along with everything else.
+  "dossier",
   "adjudicate",
   "reconcile",
   "post-review",
@@ -208,12 +211,17 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
       survey: ["seed"],
       falsify: ["survey"],
       review: ["falsify"],
-      adjudicate: ["review"],
+      dossier: ["review"],
+      adjudicate: ["review", "dossier"],
       reconcile: ["adjudicate"],
       "post-review": ["review"],
     };
     const declaredEdges = def.phases.filter((p) => p.depends_on?.length);
+    // Every phase but the root declares an edge. `adjudicate` declares TWO, so
+    // the edge COUNT is no longer the phase count — a fan-in is what a second
+    // producer before one consumer looks like.
     expect(declaredEdges).toHaveLength(DECLARED.length - 1);
+    expect(declaredEdges.flatMap((p) => p.depends_on ?? [])).toHaveLength(DECLARED.length);
 
     const dag = buildDag(def.phases, { chainIfNoDeps: true });
     // Exactly one root, and it is the first declared phase.
@@ -230,16 +238,20 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
     // `prepare` joined the list when `triage` became its dependency: triage
     // SKIPS on a first review and wherever the deployment turned it off, and a
     // skipped node is not `succeeded`.
-    const allDone = ["prepare", "facts", "seed", "survey", "falsify", "review", "reconcile"];
+    const allDone = ["prepare", "facts", "seed", "survey", "falsify", "review", "dossier", "reconcile"];
     for (const name of allDone) {
       expect(byName.get(name)?.trigger_rule, `${name}.trigger_rule`).toBe("all_done");
     }
     // post-review is deliberately the other way: a FAILED review must not post.
     expect(byName.get("post-review")?.trigger_rule).toBeUndefined();
     expect(byName.get("post-review")?.depends_on).toEqual(["review"]);
-    // `adjudicate` too, and for the mirror-image reason: there is nothing worth
-    // adjudicating about a review that failed.
-    expect(byName.get("adjudicate")?.trigger_rule).toBeUndefined();
+    // `adjudicate` is the one node that is neither, and #399 is why. It must
+    // still refuse a FAILED review, and it must tolerate a SKIPPED `dossier` —
+    // which `all_success` would not, since `skip_if` sets `skipped` and that
+    // is not `succeeded`. With `all_success` here, every deployment left on
+    // `review.analysis.adjudicate: legacy` would skip the dossier and silently
+    // skip the adjudicator with it, no phase failing anywhere.
+    expect(byName.get("adjudicate")?.trigger_rule).toBe("none_failed_min_one_success");
     // …but `reconcile` is `all_done`, because a cut-short adjudicator is
     // exactly when the conservation floor has work to do.
     expect(byName.get("reconcile")?.trigger_rule).toBe("all_done");
@@ -316,18 +328,37 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
     // The shipping shape of WP4: the pipeline on, probes off. `prepare` skips
     // and everything downstream still runs, because `facts` takes `all_done`.
     const { ran, skipped } = simulate(def.phases, { analysisEnabled: "true" });
-    expect(ran).toEqual(DECLARED.filter((n) => !WP4_PHASES.includes(n) && n !== "triage"));
-    expect(skipped.map((s) => s.name)).toEqual(["triage", ...WP4_PHASES]);
+    // `dossier` joins the skip list for the same reason: a THIRD independent
+    // switch (#399), off until an operator asks.
+    const off = [...WP4_PHASES, "dossier"];
+    expect(ran).toEqual(DECLARED.filter((n) => !off.includes(n) && n !== "triage"));
+    expect(skipped.map((s) => s.name)).toEqual(["triage", ...WP4_PHASES, "dossier"]);
   });
 
-  it("runs all ten in declaration order once every flag is on", () => {
+  it("runs every declared phase in order once every flag is on", () => {
+    const { ran, skipped } = simulate(def.phases, {
+      analysisEnabled: "true",
+      probesEnabled: "true",
+      dossierEnabled: "true",
+      ...TRIAGE_ON,
+    });
+    expect(ran).toEqual(DECLARED);
+    expect(skipped).toEqual([]);
+  });
+
+  it("skips the dossier without taking the adjudicator with it (#399)", () => {
+    // THE regression this phase could cause. `dossier` is a third independent
+    // switch, so the whole pipeline runs with it off — which is every
+    // deployment until an operator opts in — and `adjudicate` must still run.
+    // `all_success` on that node would skip it here and nothing would fail.
     const { ran, skipped } = simulate(def.phases, {
       analysisEnabled: "true",
       probesEnabled: "true",
       ...TRIAGE_ON,
     });
-    expect(ran).toEqual(DECLARED);
-    expect(skipped).toEqual([]);
+    expect(skipped.map((s) => s.name)).toEqual(["dossier"]);
+    expect(ran).toEqual(DECLARED.filter((n) => n !== "dossier"));
+    expect(ran).toContain("adjudicate");
   });
 
   it("never runs WP4 on probes alone — an install with nothing to feed is pure cost", () => {
@@ -351,9 +382,10 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
       const { ran } = simulate(def.phases, {
         analysisEnabled: value,
         probesEnabled: value,
+        dossierEnabled: value,
         ...TRIAGE_ON,
       });
-      expect(ran, `both=${JSON.stringify(value)}`).toEqual(DECLARED);
+      expect(ran, `all=${JSON.stringify(value)}`).toEqual(DECLARED);
     }
   });
 
@@ -361,7 +393,7 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
     for (const value of ["false", "", "0", "no", "TRUE-ish"]) {
       const { ran } = simulate(def.phases, { analysisEnabled: "true", probesEnabled: value });
       expect(ran, `probesEnabled=${JSON.stringify(value)}`).toEqual(
-        DECLARED.filter((n) => !WP4_PHASES.includes(n) && n !== "triage"),
+        DECLARED.filter((n) => ![...WP4_PHASES, "dossier"].includes(n) && n !== "triage"),
       );
     }
   });
@@ -557,6 +589,7 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
       prNumber: 7,
       analysisEnabled: "true",
       probesEnabled: "true",
+      dossierEnabled: "true",
       ...TRIAGE_ON,
     });
 
@@ -571,6 +604,7 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
       "facts",
       "seed",
       "review",
+      "dossier",
       "reconcile",
       "post-review",
     ]);

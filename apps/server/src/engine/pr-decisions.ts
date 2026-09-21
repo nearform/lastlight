@@ -1848,6 +1848,22 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      */
     ...(review.analysis.probes !== "off" ? { probesEnabled: "true" } : {}),
     /**
+     * #399's gate, and a third separate one — `skip_if: "dossierEnabled != true"`
+     * on the `dossier` phase, and the `{{#if dossierEnabled}}` pair that selects
+     * which half of `review-adjudicate.md` renders.
+     *
+     * Present only when the operator asked, so the absence rule holds here too:
+     * a deployment with the pipeline on and this off gets today's adjudicator
+     * byte-for-byte, and a typo anywhere still fails toward it. Its own key
+     * rather than a richer object because `evalSkipIf` compares scalars — the
+     * same reason `probesEnabled` is one.
+     *
+     * It gates BOTH halves of the change (the rendered input and the typed
+     * output) because they move one phase's measured surface together; see
+     * `ReviewAnalysisConfig.adjudicate`.
+     */
+    ...(review.analysis.adjudicate === "dossier" ? { dossierEnabled: "true" } : {}),
+    /**
      * The three sub-switches, projected only when probes are on at all.
      *
      * They are strings for the same reason `analysisEnabled` is: the render

@@ -534,6 +534,28 @@ review:
     # telemetry (and the clean-discharge demotion it enables at the posting
     # boundary), at the cost of the verification-report volume above.
     obligationContract: minimal
+    # What `adjudicate` is handed, and what shape it writes back (#399).
+    #
+    #   legacy   — the shipped phase. The prompt names the files and the model
+    #              shells out to assemble them, then writes a `tier` and a
+    #              `confidence` per finding.
+    #   dossier  — a deterministic `dossier` phase renders every record the
+    #              phase needs and the harness attaches it, and the model writes
+    #              typed attributes (`claim` / `category` / `fix`) from which a
+    #              pure function derives the tier. `confidence` is not asked for.
+    #
+    # ONE key for both halves deliberately: they move the same phase's measured
+    # surface — its input and its output — so shipping them together costs one
+    # comparability break with the archive instead of two, and one arm validates
+    # both.
+    #
+    # What it targets, measured on the 8-case probes arm: adjudicate spends 137
+    # bash calls across 8 adjudications (35 turns, 30 of them bash on the stress
+    # case) re-deriving records the harness already holds — about a third of
+    # case cost — and makes its actual judgement at the end of that transcript.
+    #
+    # `legacy` until the arm has run. An unrecognised value lands there too.
+    adjudicate: legacy
 
     # Which D2 minting rules `lastlight-facts seed` runs beyond the original
     # four. A comma-list; the valid tokens are `all-in-diff` (contract
