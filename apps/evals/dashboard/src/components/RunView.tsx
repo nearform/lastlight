@@ -174,7 +174,9 @@ export function RunView({ run, onShowRepeats }: { run: IndexRun; onShowRepeats?:
           )}
           <CompareTable models={models} tier={tier} labels={labels} axisLabel={isConfig ? "Config" : "Model"} />
 
-          {isPrReviewTier(tier) && <MicroPanel models={models} labels={labels} />}
+          {isPrReviewTier(tier) && (
+            <MicroPanel models={models} labels={labels} results={tierResults} scorecardUrl={run.scorecard} />
+          )}
 
           {isConfig && <PhaseModelPanel results={tierResults} labels={labels} />}
 

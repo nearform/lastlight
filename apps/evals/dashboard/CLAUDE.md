@@ -71,6 +71,43 @@ Two rules it exists to enforce:
 index and the baked static manifest (`../scripts/build-site.ts`) are the same
 shape and the same component renders both.
 
+## The funnel drill-down reads the pipeline's own artifacts
+
+`src/lib/pipelineArtifacts.ts` + `src/components/FamilyDrilldown.tsx` turn each
+row of the per-family funnel into the evidence behind it — the obligations, the
+hypotheses, and what became of each. It is the **first UI to read
+`results[].pipelineArtifactRel`**, which only exists because
+`persistPipelineArtifacts()` now copies `.lastlight/pr-review/` into the run
+directory unconditionally; before that the evidence lived in a `$TMPDIR`
+workspace the OS reaped (216 of 237 recorded paths resolved, not one still held
+a file). `src/serve.ts` already serves the run dir at `/data/*`, so there is no
+new endpoint — the four documents are fetched lazily on open, via TanStack
+Query, keyed on the artifact dir.
+
+Three rules are mirrored from the harness's reader
+(`../../src/review-pipeline-stats.ts`, which cannot be imported here — it opens
+with `node:fs`) and pinned in `src/lib/pipelineArtifacts.test.ts`, because
+getting any of them wrong renders a confident wrong answer rather than failing:
+
+- **Hypothesis identity is POSITIONAL** — `<family>-NNN` from the FILENAME plus
+  append order. The model-declared `id` is an alias at best; a torn line
+  consumes no ordinal, a scalar line does.
+- **The findings ↔ disposition join is `path + title`, never `line`** (the
+  boundary re-anchors lines; keying on the line lost 10 of 32 findings).
+- **Absent ≠ zero**, in four places the UI renders distinctly: a run with no
+  artifacts ("artifacts not retained"), a missing `hypotheses/<family>.jsonl`
+  (the survey never ran) vs an empty one, a missing `findings.json` (nothing is
+  known about what became of the rows — *not* a conservation failure), and
+  `notMeasured` vs 0. `spec` declares `measured: false` meaning "cannot COUNT"
+  while its survey runs, so it is **not** marked notMeasured; `tests` declares
+  it and writes only the tombstone, so it is.
+
+One thing the artifacts cannot answer: `obligations.json`'s `dropped[]` is
+`{reason, count}` with no ids, no text and no family field, so a dropped
+obligation's *question* is nowhere on disk. The per-family dropped count is
+`minted − obligations` (`families[]`), and the panel says so rather than
+implying the questions are recoverable.
+
 ## Testing
 
 `vitest.config.ts`, `environment: "node"` — everything worth testing here is pure
