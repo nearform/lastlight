@@ -504,10 +504,12 @@ describe("tierFindings — the body budget (maxBodyComments)", () => {
     expect(t.inline.length + t.body.length + t.internal.length).toBe(3);
   });
 
-  it("a cap of 2 keeps the top 2 by severity × confidence, in document order", () => {
-    // Ranks: critHigh 0.9×3=2.7 · imp (no confidence → 1.0)×2=2.0 ·
-    // critLow 0.5×3=1.5 · minor 1.0×1=1.0. Keep critHigh + imp; the kept
-    // entries keep their document order rather than being re-sorted.
+  it("a cap of 2 keeps the top 2 by severity, in document order", () => {
+    // Ranks are severity alone: critHigh 3 · critLow 3 · imp 2 · minor 1.
+    // Confidence is NOT a factor — it used to be, and `critLow` (0.5) lost to
+    // `imp` because of it. See `rankOf`: confidence scored AUROC 0.228 against
+    // gold, so multiplying it in was sorting the wrong way. The two Criticals
+    // now tie and document order breaks it.
     const t = tierFindings(
       [
         f({ line: 999, severity: "Minor", title: "minor" }),
@@ -528,32 +530,67 @@ describe("tierFindings — the body budget (maxBodyComments)", () => {
       COMMENTABLE,
       { ...BOUNDARY, maxBodyComments: 2 },
     );
-    expect(t.body.map((d) => d.finding.title)).toEqual(["critHigh", "imp"]);
+    expect(t.body.map((d) => d.finding.title)).toEqual(["critHigh", "critLow"]);
     expect(t.internal.map((x) => [x.finding.title, x.reason])).toEqual([
       ["minor", "body-budget"],
-      ["critLow", "body-budget"],
+      ["imp", "body-budget"],
     ]);
   });
 
-  it("ranks an absent confidence as 1.0 — severity order, exactly as the inline overflow does", () => {
-    // Same rule as `rankOf` for the inline budget: absence is not low
-    // confidence. An unscored Important (2.0) outranks a scored one (1.8).
+  it("ignores confidence entirely — the budget cannot be spent on how sure the model says it is", () => {
+    // The regression this pins is the measured one. Over 516 labelled pipeline
+    // findings, confidence ranked BACKWARDS (AUROC 0.228): withheld findings
+    // carried a higher median confidence (0.99) than posted ones, because the
+    // claims a model is most certain of are the ones where nothing is wrong.
+    // A budget that sorts on it spends itself on verification reports.
+    //
+    // Same severity, opposite ends of the confidence range, and a cap of 1.
+    // The certain one must NOT win: the two tie, and document order decides.
     const t = tierFindings(
       [
-        f({ line: 999, severity: "Important", title: "unscored" }),
         f({
           line: 999,
           severity: "Important",
-          confidence: 0.9,
-          title: "scored",
+          confidence: 0.2,
+          title: "hedged defect",
+        }),
+        f({
+          line: 999,
+          severity: "Important",
+          confidence: 1,
+          title: "certain non-finding",
         }),
       ],
       COMMENTABLE,
       { ...BOUNDARY, maxBodyComments: 1 },
     );
-    expect(t.body.map((d) => d.finding.title)).toEqual(["unscored"]);
+    expect(t.body.map((d) => d.finding.title)).toEqual(["hedged defect"]);
     expect(t.internal.map((x) => [x.finding.title, x.reason])).toEqual([
-      ["scored", "body-budget"],
+      ["certain non-finding", "body-budget"],
+    ]);
+  });
+
+  it("an absent confidence is not a penalty either — severity alone orders", () => {
+    // Absence used to need its own rule (`?? 1`) so that the shipped reviewer,
+    // which writes no confidence at all, was not sorted below every
+    // hypothesis-derived finding. With confidence out of `rankOf` the rule is
+    // gone and absence is simply not a fact about rank.
+    const t = tierFindings(
+      [
+        f({ line: 999, severity: "Minor", title: "unscored minor" }),
+        f({
+          line: 999,
+          severity: "Critical",
+          confidence: 0.3,
+          title: "scored critical",
+        }),
+      ],
+      COMMENTABLE,
+      { ...BOUNDARY, maxBodyComments: 1 },
+    );
+    expect(t.body.map((d) => d.finding.title)).toEqual(["scored critical"]);
+    expect(t.internal.map((x) => [x.finding.title, x.reason])).toEqual([
+      ["unscored minor", "body-budget"],
     ]);
   });
 

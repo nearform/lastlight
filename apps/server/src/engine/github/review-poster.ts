@@ -622,9 +622,8 @@ export interface AttentionBoundary {
    * Unlike `maxInlineComments` this budget DOES filter: the excess is tiered
    * `internal` with reason `body-budget` — recorded in the disposition, never
    * posted. `null` or absent = unlimited, the legacy funnel; `0` = nothing
-   * tiers to body at all. Ranked by {@link rankOf} — the same severity ×
-   * confidence rank the inline budget spends, so an absent confidence ranks
-   * as 1.0 (severity order), never as low confidence. Shipped default is `5`
+   * tiers to body at all. Ranked by {@link rankOf} — the same severity rank the
+   * inline budget spends. Shipped default is `5`
    * (see `ReviewAnalysisConfig.maxBodyComments` in lastlight-shared for the
    * measurements, and for why the measured-best `0` is not the shipped one);
    * optional here so every existing constructor keeps today's behaviour.
@@ -653,24 +652,59 @@ const SEVERITY_WEIGHT: Record<string, number> = {
 };
 
 /**
- * Rank for the inline budget: confidence × severity.
+ * Rank for the inline budget: severity, and deliberately NOT confidence.
  *
- * **An absent `confidence` ranks as 1.0, not as 0.** Nothing the shipped
- * reviewer writes carries the field, so treating absence as low confidence
- * would push every one of today's findings below every hypothesis-derived one —
- * a silent re-ranking of the reviewer that ships, caused by a field it does not
- * know about. With 1.0 the ranking degenerates to severity order, which is what
- * a document with no confidences should get.
+ * **`confidence` used to be a factor here and it was ranking backwards.**
+ * Measured 2026-09-21 over 516 pipeline findings from 20 preserved case-runs,
+ * labelled against gold by the same MATCH judge a live run uses
+ * (`apps/evals/scripts/finding-calibration.ts`; write-up in
+ * `nearform-evals/research-notes.md`):
+ *
+ * | axis                                   | AUROC | 95% CI         |
+ * | -------------------------------------- | ----- | -------------- |
+ * | the adjudicator's own tier             | 0.767 | [0.665, 0.846] |
+ * | severity alone                         | 0.521 | [0.414, 0.630] |
+ * | *a coin*                               | 0.500 |                |
+ * | **confidence × severity — this rank**  | 0.370 | [0.240, 0.521] |
+ * | **confidence alone**                   | 0.228 | [0.171, 0.299] |
+ *
+ * 0.228 is not a weak signal, it is a strong one pointing the wrong way, and
+ * multiplying it into the rank dragged the rank below a coin. The cause is
+ * structural rather than a bad prompt: the model rates how certain it is of an
+ * OBSERVATION, and the observations it is most certain of are the ones where
+ * nothing is wrong — 36% of findings are written in verification grammar and
+ * their median confidence is 0.99 against 0.92 for everything else. Withheld
+ * findings scored a HIGHER median confidence (0.99) than posted ones (0.85 body,
+ * 0.90 inline). So the ranking's top was a coin flip between a real defect and
+ * "Enforcement check passed: LOGIN_HINT_STORAGE_KEY" — 21 rows tied at the
+ * maximum rank of 3.00, 11 of them verification reports.
+ *
+ * `review-adjudicate.md` already tells the model to price the defect and not its
+ * own certainty, and warns that confidences which do not spread have disabled
+ * the thresholds. The instruction does not take, and this is what it cost.
+ *
+ * **Severity stays** — at 0.521 with a CI straddling 0.500 it is indistinguishable
+ * from neutral, so it is not carrying the rank but it is not poisoning it either,
+ * and it is the ordering a reader expects. Its own breakdown is worse than that
+ * summary suggests (Critical converted at 1.1% against Important at 9.7%, n=87
+ * and 290), which is a live question for the prompts rather than for this sort.
  *
  * **An UNRECOGNISED severity is warned about, not just defaulted.** Absence is a
- * known state and ranks Important on purpose (above). A string nobody defined —
+ * known state and ranks Important on purpose. A string nobody defined —
  * `Blocker`, `High`, `p1` — is a different thing: it means some prompt is
  * emitting a vocabulary this code does not share, and the `?? 2` below turns
  * that into an ordinary-looking Important. See {@link unknownSeverity}.
+ *
+ * NOTE `internalFloor` and the per-family `thresholds` still read `confidence`
+ * below. They are latent rather than harmful today — the observed minimum on a
+ * posted finding is 0.75, against a floor of 0.15 and family bars of 0.30–0.60,
+ * so neither has ever fired — but they gate on the same inverted axis and should
+ * go the same way. That removal touches the documented config surface
+ * (`lastlight-shared` types, `default.yaml`, both spec copies) and is its own
+ * change.
  */
 function rankOf(f: ReviewFinding): number {
-  const sev = SEVERITY_WEIGHT[(f.severity || "important").toLowerCase()] ?? 2;
-  return (f.confidence ?? 1) * sev;
+  return SEVERITY_WEIGHT[(f.severity || "important").toLowerCase()] ?? 2;
 }
 
 /**
@@ -901,12 +935,14 @@ export function tierFindings(
   // The body budget — LAST, over the FINAL body list, so the inline overflow
   // has already landed there and competes for body slots like everything else
   // (under a cap of 0 the inline excess therefore goes `internal`, not to a
-  // body the cap just closed). Ranked by the same severity × confidence rank
-  // the inline budget spends — {@link rankOf}, absent confidence = 1.0 — and
+  // body the cap just closed). Ranked by the same severity rank the inline
+  // budget spends — {@link rankOf} — and
   // the sort is over a COPY: the survivors keep their document order, so the
   // grouped rendering and the disposition rows read as before. Ties across
   // the cut fall to document order (stable sort), the same tie-break the
-  // inline budget uses. `null`/absent = unlimited, the legacy funnel.
+  // inline budget uses — and after {@link rankOf} dropped its confidence
+  // factor there are only three distinct ranks, so document order now decides
+  // far more of this cut than it used to. `null`/absent = unlimited.
   const cap = boundary.maxBodyComments;
   if (cap === null || cap === undefined || body.length <= Math.max(0, cap)) {
     return { inline, body, internal };

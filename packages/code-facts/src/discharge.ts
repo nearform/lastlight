@@ -344,8 +344,17 @@ export function checkDischarge(options: CheckDischargeOptions): CheckDischargeRe
   const { doc, error: documentError } = loadObligations(options.dir);
 
   // Identity and enumeration come from the ONE reader `findings` and `probes`
-  // use, so no two gates can disagree about which rows exist.
-  const set = readHypothesisSet(options.dir);
+  // use, so no two gates can disagree about which rows exist. The seeded
+  // obligation ids go in with it so each row's `obligation` back-pointer is
+  // RESOLVED rather than taken on trust — it is model-written, and measured
+  // across 20 preserved runs it cites ids that do not exist (44 distinct
+  // against a question set of 33 on one case). Absent document ⇒ nothing to
+  // check against, and `obligationsChecked` says so rather than reporting
+  // clean.
+  const set = readHypothesisSet(
+    options.dir,
+    doc ? (doc.obligations ?? []).map((o) => o?.id).filter((id): id is string => asString(id) !== null) : undefined,
+  );
   const records = set.records.filter((r) => r.family === family);
   // `readHypothesisSet` lists the directory, so a family it names has a FILE and
   // a family it does not name has none. That is the whole `null` vs `[]`
@@ -416,6 +425,21 @@ export function checkDischarge(options: CheckDischargeOptions): CheckDischargeRe
   const byCode: Record<string, number> = {};
   for (const entry of entries) {
     if (entry.code) byCode[entry.code] = (byCode[entry.code] ?? 0) + 1;
+  }
+
+  // A row whose `obligation` names nothing the seeder wrote. Distinct from
+  // `unknownCitations` below, which is about the `discharge` MAP — that field
+  // is absent under the `minimal` contract, so it cannot catch this.
+  const strayObligations = [...set.unknownObligations.entries()]
+    .filter(([, ids]) => ids.some((id) => records.some((r) => r.id === id)))
+    .sort(([a], [b]) => a.localeCompare(b));
+  if (strayObligations.length) {
+    notes.push(
+      `${strayObligations.length} row(s) in ${family}.jsonl cite an obligation the seeder never wrote: ` +
+        `${strayObligations.map(([id, by]) => `"${id}" (${by.join(", ")})`).join("; ")}. ` +
+        `The back-pointer is model-written and is not a join key until it resolves — anything reading it ` +
+        `(per-family attribution, recurrence across runs) is reading a string, not a reference`,
+    );
   }
 
   const foreign = [...cited.keys()].filter((id) => !mineIds.has(id) && everyId.has(id)).sort();
