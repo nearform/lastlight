@@ -3,15 +3,34 @@
  *
  * WP4 (`docs/plans/deterministic-pr-levers.md` §WP4). It answers one
  * question: **has every hypothesis that needed a probe been given a verdict, and
- * does every verdict that claims execution have a transcript to show for it?**
+ * does every verdict that claims execution have a transcript — opening with the
+ * command that produced it — to show for it?**
  *
  * ── Why it is five lines of logic and not a validator ────────────────────────
  *
  * Because the sizing was measured. Candidate v3's gate was an existence check
  * and earned the investigation's only gold match; v2's full quote validator was
- * overkill and cost 2.4× for a worse result. This does not read a transcript, it
- * does not judge a verdict, and it does not check that the command was sensible.
- * It checks that the work was *done and recorded*.
+ * overkill and cost 2.4× for a worse result. It still does not judge a verdict
+ * and it does not check that the command was sensible. It checks that the work
+ * was *done and recorded* — and, since 2026-09-21, that the record is the record
+ * of an EXECUTION rather than of a reading.
+ *
+ * ── Why it now reads the transcript's FIRST LINE ────────────────────────────
+ *
+ * On the oracle's first-ever real run (eval `2026-09-21_113136-7d490df`,
+ * `prreview__skillspro-1587-r2`) it returned **nine verdicts, nine of them
+ * `reproduced`, every one with `"command": "code inspection"` and a transcript
+ * of prose** — *"Reading source at … lines 78-80 … VERDICT: The claim is
+ * ACCURATE"*. Not one recorded an executed command. `review-falsify.md` had
+ * asked for *"the command line itself as the first line"* since the day it was
+ * written; nothing checked it, so the strongest evidence in the pipeline was
+ * being minted by reading code. That is the fourth
+ * instruction-without-a-mechanism failure in this pipeline after
+ * `hypotheses[].id`, `hypotheses[].obligation` and the adjudicator's `tier`.
+ *
+ * It matters beyond this phase: `refuted` plus a transcript is the ONLY thing
+ * that authorises the adjudicator to DELETE a finding, so a prose transcript is
+ * a licence to delete a real defect on the basis of reasoning.
  *
  * ── Why it must be SATISFIABLE, and by the model alone ──────────────────────
  *
@@ -30,12 +49,18 @@
  *
  * ── The one thing it DOES enforce ───────────────────────────────────────────
  *
- * A `reproduced` or `refuted` verdict must name a transcript that exists. That
- * is the rule with money on it, mechanised: *"you may add evidence and lower
+ * A `reproduced` or `refuted` verdict must name a transcript that exists **and
+ * a `command`, echoed on that transcript's first non-blank line**. That is the
+ * rule with money on it, mechanised: *"you may add evidence and lower
  * confidence; you may not drop a hypothesis without a counter-transcript."*
  * A refutation by argument is exactly the intervention that raised precision
  * 54.5 → 67.1 and cut recall 45.5 → 39.8 in the measurement this whole pipeline
  * is a reaction to.
+ *
+ * **`unprobed` stays completely free**, and that is not an oversight — see the
+ * satisfiability section above. The bar rises only on the two verdicts that
+ * CLAIM evidence; the verdict that admits there is none must stay costless, or
+ * the gate starts manufacturing the dishonesty it exists to catch.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -53,12 +78,15 @@ interface VerdictLine {
   hypothesis?: unknown;
   verdict?: unknown;
   transcript?: unknown;
+  command?: unknown;
 }
 
 export interface ProbeGapKind {
   /** `no-verdict` — asked for, never answered. `no-transcript` — answered with
-   * a claim of execution and nothing to show. */
-  kind: "no-verdict" | "no-transcript";
+   * a claim of execution and nothing to show. `unexecuted` — answered with a
+   * transcript that records no command having been run: no `command` field, or
+   * one the transcript's first line does not echo. */
+  kind: "no-verdict" | "no-transcript" | "unexecuted";
   hypothesis: string;
   detail: string;
 }
@@ -69,6 +97,18 @@ export interface CheckProbesResult {
   /** Of those, the ones with a verdict of any kind. */
   answered: string[];
   byVerdict: Record<string, number>;
+  /**
+   * Of the required hypotheses, how many were answered with a verdict that
+   * CLAIMS execution (`reproduced` / `refuted`).
+   */
+  claimedExecution: number;
+  /**
+   * Of those, how many named a `command` echoed on their transcript's first
+   * non-blank line — i.e. how many actually ran something. The honesty of this
+   * phase as a NUMBER: the run that motivated the check reads `0/9`, and it took
+   * reading nine files by hand to find that out.
+   */
+  executed: number;
   gaps: ProbeGapKind[];
   /** Lines that were not JSON at all, counted rather than silently skipped. */
   malformed: number;
@@ -126,6 +166,52 @@ export interface CheckProbesOptions {
   repo?: string;
 }
 
+/**
+ * Where a named transcript actually landed, or `null` if nowhere. Both roots
+ * are tried for the reason {@link CheckProbesOptions.repo} gives.
+ */
+function resolveTranscript(options: CheckProbesOptions, transcript: string): string | null {
+  for (const root of [options.repo ?? process.cwd(), options.dir]) {
+    const candidate = resolve(root, transcript);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Normalise a command line for comparison: shell prompts, backticks, quoting
+ * noise and run-length whitespace are presentation, not evidence. Forgiving on
+ * purpose — the gate is here to separate *ran something* from *read something*,
+ * not to police transcript formatting, and every false failure costs a probe
+ * round for nothing.
+ */
+function normaliseCommand(text: string): string {
+  return text
+    .replace(/[`'"]/g, "")
+    .replace(/^\s*[$>#]\s+/, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * The transcript's first non-blank line, or `null` if it could not be read.
+ * Bounded read: the command is the FIRST line by contract, and a transcript can
+ * be a whole test-suite log.
+ */
+function firstTranscriptLine(path: string): string | null {
+  let head: string;
+  try {
+    head = readFileSync(path, "utf8").slice(0, 8192);
+  } catch {
+    return null;
+  }
+  for (const line of head.split("\n")) {
+    if (line.trim()) return line;
+  }
+  return null;
+}
+
 export function checkProbes(options: CheckProbesOptions): CheckProbesResult {
   const probesDir = join(options.dir, "probes");
   const notes: string[] = [];
@@ -169,6 +255,8 @@ export function checkProbes(options: CheckProbesOptions): CheckProbesResult {
   }
 
   const gaps: ProbeGapKind[] = [];
+  let claimedExecution = 0;
+  let executed = 0;
   for (const id of required) {
     const row = answered.get(id);
     if (!row) {
@@ -176,22 +264,48 @@ export function checkProbes(options: CheckProbesOptions): CheckProbesResult {
       continue;
     }
     const verdict = typeof row.verdict === "string" ? row.verdict : "";
+    // `unprobed` (and anything else) stops here, and deliberately: the honest
+    // answer has to stay costless or the gate teaches dishonesty.
     if (verdict !== "reproduced" && verdict !== "refuted") continue;
+    claimedExecution += 1;
     // THE rule, mechanised. A refutation with nothing to show for it is an
     // argument wearing a verdict's clothes, and it is the one move that costs
     // recall outright.
     const transcript = typeof row.transcript === "string" ? row.transcript : null;
-    const found =
-      transcript !== null &&
-      (existsSync(resolve(options.repo ?? process.cwd(), transcript)) ||
-        existsSync(resolve(options.dir, transcript)));
-    if (!found) {
+    const resolved = transcript === null ? null : resolveTranscript(options, transcript);
+    if (resolved === null) {
       gaps.push({
         kind: "no-transcript",
         hypothesis: id,
         detail: `verdict "${verdict}" names ${transcript ?? "no transcript"}, which does not exist — only a transcript may refute`,
       });
+      continue;
     }
+    // …and the second half of the same rule: the transcript has to be the
+    // record of an EXECUTION. `"command": "code inspection"` over a page of
+    // prose was 9 of 9 verdicts on the first real run.
+    const command = typeof row.command === "string" ? row.command.trim() : "";
+    if (!command) {
+      gaps.push({
+        kind: "unexecuted",
+        hypothesis: id,
+        detail: `verdict "${verdict}" names no command — reading the code is not a probe; if you executed nothing the verdict is "unprobed"`,
+      });
+      continue;
+    }
+    const firstLine = firstTranscriptLine(resolved);
+    if (firstLine === null || !normaliseCommand(firstLine).includes(normaliseCommand(command))) {
+      gaps.push({
+        kind: "unexecuted",
+        hypothesis: id,
+        detail:
+          `verdict "${verdict}" claims \`${command}\` but ${transcript} does not open with it ` +
+          `(first line: ${firstLine === null ? "the file could not be read" : JSON.stringify(firstLine.trim().slice(0, 80))}) — ` +
+          `the transcript's first line must be the command you ran; if you executed nothing the verdict is "unprobed"`,
+      });
+      continue;
+    }
+    executed += 1;
   }
 
   if (families.length === 0) {
@@ -204,11 +318,24 @@ export function checkProbes(options: CheckProbesOptions): CheckProbesResult {
     );
   }
   if (malformed > 0) notes.push(`${malformed} unparseable JSONL line(s) were ignored`);
+  // LD6: the interesting number is the one that can be ZERO while everything
+  // else looks clean. Nine `reproduced` verdicts and no command between them is
+  // exactly what a silent pass looked like, so it is said out loud every time.
+  if (claimedExecution > 0) {
+    notes.push(
+      `${executed}/${claimedExecution} reproduced/refuted verdict(s) ran a command their transcript records` +
+        (executed === 0
+          ? " — NOT ONE of them executed anything; reading the code is not a probe"
+          : ""),
+    );
+  }
 
   return {
     required: [...required].sort(),
     answered: [...required].filter((id) => answered.has(id)).sort(),
     byVerdict,
+    claimedExecution,
+    executed,
     gaps,
     malformed,
     satisfied: gaps.length === 0,
@@ -227,6 +354,14 @@ export function renderProbeCheck(result: CheckProbesResult): string {
             .join(" ")})`
         : ""),
   ];
+  // Printed unconditionally when anything claimed execution, including when it
+  // is the whole of the answer: `executed=0` beside `reproduced=9` is the
+  // single line that would have caught this by eye.
+  if (result.claimedExecution > 0) {
+    lines.push(
+      `  executed: ${result.executed}/${result.claimedExecution} reproduced/refuted verdict(s) with a command their transcript records`,
+    );
+  }
   for (const note of result.notes) lines.push(`  note: ${note}`);
   for (const gap of result.gaps.slice(0, 20)) lines.push(`  ✗ ${gap.hypothesis}: ${gap.detail}`);
   if (result.gaps.length > 20) lines.push(`  … and ${result.gaps.length - 20} more`);

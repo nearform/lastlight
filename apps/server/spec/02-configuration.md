@@ -756,14 +756,20 @@ those examples are Anthropic models, and pinning one packaged would send that
 phase at a provider a deployment overriding only `models.default` has no key for.
 Unset it falls through to `default` — a cheap model there is the whole point of
 splitting the phase out, so it is worth pinning per deployment.
-`pr-review.yaml` adds three more: `review-survey` (the survey fan-out's branches,
-plus `falsify`), `review-adjudicate` — the adjudicate phase's own key, so an
-overlay can move the ranking pass without moving `models.review` — and
-`review-triage`, the depth pass (issue #378). The latter is
-the one key with its own fall-through: the phase's `model:` template is an
-`{{#if}}` pair that renders `models.review` when the key is unset, because a
-bare `{{models.review-adjudicate}}` would render *empty* and resolve to the
-default model, not to `models.review`.
+`pr-review.yaml` adds four more: `review-survey` (the survey fan-out's
+branches), `review-falsify` — the oracle's own key — `review-adjudicate` — the
+adjudicate phase's own key, so an overlay can move the ranking pass without
+moving `models.review` — and `review-triage`, the depth pass (issue #378).
+`review-falsify` and `review-adjudicate` are the two keys with a
+**fall-through**: each phase's `model:` template is an `{{#if}}` /
+`{{#if !x}}` pair rendering `models.review-survey` and `models.review`
+respectively when the key is unset, because a bare `{{models.review-falsify}}`
+would render *empty* and resolve to the default model rather than to the
+intended one. `review-falsify` exists because `falsify` was hard-wired to
+`models.review-survey`: moving the oracle meant moving all five survey branches
+with it, so *"is a cheap model good enough at writing and running a probe?"*
+was not a one-variable experiment. Unset, it is the survey model exactly as
+before.
 
 **`review-survey` is the one key `config/default.yaml` ships SET**, to
 `anthropic/claude-haiku-4-5-20251001` — the opposite of the `diagnose` rule

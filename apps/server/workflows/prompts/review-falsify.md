@@ -67,6 +67,32 @@ Concretely, and there are only three verdicts:
 expensive mistake available in this phase, because nothing downstream can
 recover it.
 
+### Reading the code is NOT a probe, and this is now machine-checked
+
+The first time this phase ever ran for real it returned nine verdicts, nine of
+them `reproduced`, every single one with `"command": "code inspection"` and a
+transcript that was prose — *"Reading source at … lines 78-80 … VERDICT: the
+claim is ACCURATE"*. Not one of them ran anything. Reading is what every earlier
+pass already did; if that were enough, this phase would not exist.
+
+So, concretely:
+
+- **`"code inspection"` is not a command.** Neither is *"reviewed the diff"*,
+  *"traced the callers"* or *"analysed the source"*. A command is something a
+  shell ran: `git show …`, `node .lastlight/pr-review/probes/contract-001.mjs`,
+  `lastlight-facts facts --repo . …`.
+- **If you executed nothing, the verdict is `unprobed`**, with a `reason` saying
+  which constraint stopped you. That is a completely acceptable outcome and it
+  costs the finding **nothing**: an `unprobed` hypothesis survives to
+  adjudication at lowered confidence, exactly as if you had never been asked.
+  There is no pressure here to manufacture a verdict — the only wrong answer is
+  a claim of execution that did not happen.
+- **The gate reads your transcript's first line.** `lastlight-facts probes`
+  now fails the phase on any `reproduced` or `refuted` whose verdict names no
+  `command`, or whose transcript does not open with that command. A file full of
+  careful reasoning will not close this loop; one line of `$ node probe.mjs`
+  followed by its output will.
+
 ## What to probe
 
 Read every `.lastlight/pr-review/hypotheses/*.jsonl` line. Probe:
@@ -198,8 +224,10 @@ Two things per probed hypothesis.
 .lastlight/pr-review/probes/<hypothesis-id>.txt
 ```
 
-Include the command line itself as the first line. For a differential probe,
-include both runs in the one file, labelled `BASE:` and `HEAD:`. Do not
+**Include the command line itself as the first line, and make it the same
+string you put in `command`** — that pair is checked by machine, not trusted.
+For a differential probe, include both runs in the one file, labelled `BASE:`
+and `HEAD:` (a label in front of the command on that first line is fine). Do not
 summarise, do not trim to the interesting part: the transcript is the evidence,
 and a later phase reads it rather than your description of it.
 
@@ -222,4 +250,6 @@ collides with another's. A verdict naming a colliding id answers neither.
 Every hypothesis you were asked to probe needs a line here, including the ones
 you could not run — that is what makes *"probed and found nothing"* and *"never
 looked"* different rows instead of the same silence. A `reproduced` or `refuted`
-line **must** carry a `transcript` path that exists.
+line **must** carry a `transcript` path that exists **and a `command` that its
+first line echoes**; an `unprobed` line needs neither and always closes the
+gate.

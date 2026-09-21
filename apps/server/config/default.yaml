@@ -39,6 +39,7 @@ models:
   #   diagnose: anthropic/claude-haiku-4-5-20251001     # the CI-failure classifier
   #   pr-fix-retry: anthropic/claude-opus-4-8           # used above fix.escalateModelAfterAttempt
   #   review-adjudicate: anthropic/claude-sonnet-4-6      # the adjudication pass
+  #   review-falsify: anthropic/claude-haiku-4-5-20251001 # the probe oracle
   # A per-task entry wins over `default`. `classifier`/`screener` are the cheap
   # one-shot helpers (src/engine/llm.ts); when unset they fall back to the first
   # configured provider's fast model, NOT `default`.
@@ -53,8 +54,8 @@ models:
   #
   # `review-survey` is SET above, and it is the one entry in this block that is
   # not an example. It is the key the five survey branches of `pr-review.yaml`
-  # declare (`model: "{{models.review-survey}}"`, one per obligation family)
-  # and, since it has no key of its own, the `falsify` phase too — six phases.
+  # declare (`model: "{{models.review-survey}}"`, one per obligation family),
+  # and the `falsify` phase's fall-through.
   #
   # Pinning it to Haiku 4.5 is NOT a cost downgrade, and that is the unusual
   # part: on review RECALL, Haiku 4.5 BEATS Sonnet 4.6 on two independent evals
@@ -78,6 +79,15 @@ models:
   # SO: a non-Anthropic deployment must override this key in its overlay
   # `config.yaml` (a cheap, fast model of its own provider), exactly as it
   # already overrides `models.default`.
+  #
+  # `review-falsify` is the ORACLE's own key — the one phase that runs code.
+  # Unset, it falls through to `review-survey` (its template is the same
+  # `{{#if}}` pair `adjudicate` uses, so an unset key lands on the survey model
+  # and not on `default`), which is exactly the behaviour before the key
+  # existed. It exists so the oracle's model can be moved on its own: it was
+  # hard-wired to `review-survey`, so asking "is a cheap model good enough at
+  # WRITING AND RUNNING a probe?" meant moving all five survey branches too —
+  # two variables, and therefore not a runnable experiment.
   #
   # `review-adjudicate` is the adjudicate phase's own key in `pr-review.yaml` —
   # the RANKING pass over what the surveys found, a different task from survey

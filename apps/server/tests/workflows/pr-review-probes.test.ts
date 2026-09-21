@@ -471,13 +471,52 @@ describe("control", () => {
 const falsify = byName.get("falsify");
 if (!falsify) throw new Error("pr-review.yaml has no `falsify` phase");
 
+const FALSIFY_MODEL =
+  "{{#if models.review-falsify}}{{models.review-falsify}}{{/if}}" +
+  "{{#if !models.review-falsify}}{{models.review-survey}}{{/if}}";
+
 describe("falsify — the loop, its gate, and the rule with money on it", () => {
-  it("runs on the cheap survey model, not the review model", () => {
+  it("has its OWN model key, falling through to the cheap survey model", () => {
     // The oracle's value is EXECUTION, not reasoning power. Paying review-model
     // rates to run `eslint` against a four-line probe file buys nothing, and the
     // measured ordering (Haiku beats Sonnet on review recall on two independent
-    // evals) says the cheap model is not the compromise it looks like.
-    expect(falsify!.model).toBe("{{models.review-survey}}");
+    // evals) says the cheap model is not the compromise it looks like — so
+    // `models.review-survey` stays the DEFAULT here.
+    //
+    // But it was HARD-WIRED to that key, which made "is a cheap model good
+    // enough at writing and RUNNING a probe?" unrunnable: moving the oracle
+    // moved all five survey branches with it, two variables in one arm.
+    expect(falsify!.model).toBe(FALSIFY_MODEL);
+  });
+
+  it("uses the explicit `{{#if}}` PAIR, exactly as `adjudicate` does", () => {
+    // Load-bearing and already measured once: a bare unset
+    // `{{models.review-falsify}}` renders EMPTY, and an empty model resolves to
+    // the DEFAULT model rather than to the intended fall-through. The
+    // adjudicate case cost a scorecard that recorded literal `{{#if …}}`
+    // residue as `PhaseMetric.model`.
+    const adjudicateModel = byName.get("adjudicate")?.model ?? "";
+    expect(adjudicateModel).toContain("{{#if models.review-adjudicate}}");
+    expect(adjudicateModel).toContain("{{#if !models.review-adjudicate}}");
+    expect(falsify!.model).toContain("{{#if models.review-falsify}}");
+    expect(falsify!.model).toContain("{{#if !models.review-falsify}}");
+    expect(falsify!.model).not.toBe("{{models.review-falsify}}");
+  });
+
+  it("renders to the pinned model when set, and to review-survey when not", () => {
+    // Through CORE'S OWN engine — the function `resolveModelVariant` feeds
+    // these templates through — and the residue assertion is the whole point:
+    // an empty or `{{#if}}`-carrying render is not a model id.
+    const render = (models: Record<string, string>) =>
+      renderTemplate(falsify!.model!, { models } as unknown as TemplateContext).trim();
+
+    const base = { default: "openai/gpt-5.4-mini", "review-survey": "anthropic/claude-haiku-4-5" };
+    expect(render(base)).toBe("anthropic/claude-haiku-4-5");
+    expect(render({ ...base, "review-falsify": "openai/gpt-5.5" })).toBe("openai/gpt-5.5");
+    for (const models of [base, { ...base, "review-falsify": "openai/gpt-5.5" }]) {
+      expect(render(models)).not.toMatch(/\{\{|\}\}/);
+      expect(render(models)).not.toBe("");
+    }
   });
 
   it("reads its round budget from the operator's config", () => {
@@ -604,6 +643,22 @@ describe("the falsify prompt carries the constraints, not just the task", () => 
     expect(prompt).toMatch(/"install": "skipped"/);
   });
 
+  it("says reading the code is not a probe, and that the rule is machine-checked", () => {
+    // The mechanism half landed in `packages/code-facts/src/probes.ts`; this is
+    // the half that tells the model. First real run of this phase: 9 verdicts,
+    // 9 `reproduced`, every one `"command": "code inspection"` over a prose
+    // transcript, zero executed commands. An instruction is not a mechanism —
+    // and now that there IS a mechanism, the prompt has to name it, or the
+    // phase fails a gate for a rule it was never told about.
+    expect(prompt).toMatch(/Reading the code is NOT a probe/i);
+    expect(prompt).toMatch(/`?"code inspection"`? is not a command/i);
+    expect(prompt).toMatch(/If you executed nothing, the verdict is `unprobed`/i);
+    // …and that it costs the finding nothing, which is what keeps the gate
+    // satisfiable honestly rather than pushing the pass into a fabrication.
+    expect(prompt).toMatch(/survives to\s+adjudication at lowered confidence/i);
+    expect(prompt).toMatch(/first line/i);
+  });
+
   it("forbids the four things that would corrupt a later phase", () => {
     expect(prompt).toMatch(/Do NOT post a review/);
     expect(prompt).toMatch(/Do NOT write `?\.lastlight\/pr-review\/findings\.json/);
@@ -617,7 +672,9 @@ describe("the falsify prompt carries the constraints, not just the task", () => 
     // The gate keys on `hypothesis` and `verdict`, and demands `transcript` for
     // the two verdicts that claim execution. A prompt that named different
     // fields would produce an unsatisfiable loop.
-    for (const field of ['"hypothesis"', '"verdict"', '"transcript"']) {
+    // `command` joins them: the gate now checks it against the transcript's
+    // first line, so a prompt that stopped naming it would be unsatisfiable.
+    for (const field of ['"hypothesis"', '"verdict"', '"transcript"', '"command"']) {
       expect(prompt, field).toContain(field);
     }
   });

@@ -285,7 +285,14 @@ phases:
   - name: falsify
     label: Falsify · run the probe
     prompt: prompts/review-falsify.md
-    model: "{{models.review-survey}}"
+    # Its OWN key, falling through to `models.review-survey`. Hard-wiring the
+    # survey key meant the oracle's model could not be moved without moving all
+    # five survey branches with it — two variables, so "is a cheap model good
+    # enough at WRITING AND RUNNING a probe?" was not a runnable experiment.
+    # The `{{#if}}` pair is load-bearing, exactly as on `adjudicate` below: a
+    # bare unset `{{models.review-falsify}}` renders EMPTY, and an empty model
+    # falls back to the DEFAULT model rather than to `models.review-survey`.
+    model: "{{#if models.review-falsify}}{{models.review-falsify}}{{/if}}{{#if !models.review-falsify}}{{models.review-survey}}{{/if}}"
     skip_if:
       - "analysisEnabled != true"
       - "probesEnabled != true"

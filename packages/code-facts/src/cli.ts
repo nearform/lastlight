@@ -74,6 +74,7 @@ Commands:
               QUOTE / ABSENT / PARTIAL / PROBE discharge in its .jsonl
   probes      the \`falsify\` loop's exit gate — every hypothesis that needed a
               probe has a verdict, and every claim of execution has a transcript
+              that OPENS with the command it ran
   findings    the \`adjudicate\` loop's exit gate — the CONSERVATION check: every
               hypothesis has exactly one disposition, and every deletion names a
               transcript that exists
@@ -93,10 +94,15 @@ passes; it reads no quote and judges no claim):
   hypotheses/<family>.jsonl at all, no readable obligations.json, or a --family
   the document does not name. ANY non-zero means "iterate again".
 
-\`probes\` options (an existence gate, not a validator — it reads no transcript):
+\`probes\` options (a near-existence gate, not a validator — it reads a
+transcript's FIRST LINE and nothing else):
   --dir <dir>         the .lastlight/pr-review directory
                       (default: .lastlight/pr-review)
   --repo <dir>        what a transcript path is relative to (default: cwd)
+  A \`reproduced\`/\`refuted\` verdict must name a \`command\` and a transcript that
+  exists and opens with that command — \`"command": "code inspection"\` over a
+  page of prose is \`unexecuted\`, not evidence. \`unprobed\` needs neither and
+  always closes the gate.
   Exit 0 = the loop may stop. Non-zero = something still owes a verdict, which
   a pass can always discharge honestly by recording \`unprobed\`.
 
