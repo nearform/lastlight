@@ -488,27 +488,15 @@ export interface ReviewAnalysisConfig {
    */
   maxInlineComments: number;
   /**
-   * Per-obligation-family confidence bar for an INLINE comment. Below the bar a
-   * finding goes to the body; it is never deleted.
-   *
-   * **Per-family, not global, and that is a measured choice.** AutoCommenter
-   * (Google Critique) found a global threshold catastrophic — at `t = 0.98`,
-   * ~80% of below-threshold predictions were still correct — while per-URL
-   * thresholds raised recall without hurting precision.
-   *
-   * **These numbers are initial guesses to be tuned on the train split, not
-   * measurements.** Record each retune in the eval journal.
+   * **REMOVED (2026-09-21): `internalFloor` and the per-family `thresholds`.**
+   * Both were confidence gates, and `finding.confidence` was measured at AUROC
+   * 0.228 [0.171, 0.299] over 516 findings from 20 preserved case-runs — a
+   * strong signal pointing the WRONG way. They also cost nothing to remove:
+   * across the preserved archive not one gold finding was lost to
+   * `below-floor` or `below-threshold`. An overlay still carrying either key
+   * is accepted and ignored (`config.ts` warns). See `rankOf` in
+   * `apps/server/src/engine/github/review-poster.ts`.
    */
-  thresholds: Record<string, number>;
-  /**
-   * Below this confidence a finding is recorded but not posted at all.
-   *
-   * The one tier that costs recall, so it is deliberately low and deliberately
-   * auditable. A finding carrying NO confidence is never affected — see
-   * `tierFindings`; treating an absent field as zero would silently delete every
-   * finding from any prompt that has not been taught to self-score.
-   */
-  internalFloor: number;
   /**
    * Cap on findings rendered into the review BODY (the "Additional findings"
    * section) — the body-side sibling of `maxInlineComments`, and the one
@@ -521,9 +509,8 @@ export interface ReviewAnalysisConfig {
    *   inline lands in the body.
    * - `0` — no overflow at all: nothing tiers to body; anything that would
    *   have gone there is recorded `internal` instead.
-   * - `N > 0` — at most N body findings, ranked by severity × confidence
-   *   exactly as the inline overflow ranks (an absent confidence ranks as
-   *   1.0, so an unscored document degenerates to severity order).
+   * - `N > 0` — at most N body findings, ranked by severity exactly as the
+   *   inline overflow ranks.
    *
    * **`5` is the shipped default, and the number it replaced is the reason.**
    * `0` was measured rather than assumed: under the production
@@ -761,15 +748,6 @@ export function defaultReviewPolicy(): ReviewPolicy {
       probeCoverage: false,
       probeRounds: 2,
       maxInlineComments: 10,
-      thresholds: {
-        contract: 0.35,
-        enforcement: 0.35,
-        security: 0.3,
-        state: 0.5,
-        tests: 0.6,
-        spec: 0.45,
-      },
-      internalFloor: 0.15,
       // A bounded body overflow. Cap 0 measured better under the production
       // Sonnet adjudicator (precision 0.263→0.492 / F1 0.362→0.479) but that
       // win is adjudicator-shape-conditional — under Haiku-everywhere the body

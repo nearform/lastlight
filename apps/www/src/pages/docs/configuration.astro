@@ -547,17 +547,12 @@ review:
     probeRounds: 2
     maxInlineComments: 10      # the attention boundary — findings past this go
                                # to the review body, never dropped
-    maxBodyComments: 5         # body-tier budget. N = top N by severity ×
-                               # confidence (default 5); 0 = no overflow at all;
+    maxBodyComments: 5         # body-tier budget. N = top N by severity
+                               # (default 5); 0 = no overflow at all;
                                # null = unlimited
-    thresholds:                # per-family confidence bar for an INLINE comment;
-      contract: 0.35           # below it, the body
-      enforcement: 0.35
-      security: 0.30
-      state: 0.50
-      tests: 0.60
-      spec: 0.45
-    internalFloor: 0.15        # below this, recorded in findings.json, not posted
+                               # (`thresholds` and `internalFloor` were removed
+                               #  in 2026-09 — the boundary no longer gates on a
+                               #  finding's confidence; both keys are ignored)
 
 fix:                           # every PR-fixing workflow: pr-fix, dependabot-ci-fix
   maxAttempts: 3               # attempts ACROSS runs for one PR, then a human is asked

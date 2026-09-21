@@ -632,7 +632,7 @@ review:
     maxInlineComments: 10
     # The BODY budget — how many findings the review body's "Additional
     # findings" list may carry. N (the default is 5) keeps the top N ranked by
-    # severity × confidence and records the rest in disposition.json at
+    # severity and records the rest in disposition.json at
     # `internal` with reason `body-budget` — capped attention, never a lost
     # record. 0 = NO overflow at all (nothing tiers to body); null = unlimited
     # (the pre-2026-08-24 funnel).
@@ -650,25 +650,15 @@ review:
     # should still pin this key (`null` for the open funnel) explicitly rather
     # than inherit it.
     maxBodyComments: 5
-    # Per-family confidence bar for an INLINE comment; below it, the body.
-    # Per-family and not global because AutoCommenter (Google Critique) measured
-    # a global threshold as catastrophic — at t=0.98, ~80% of below-threshold
-    # predictions were still CORRECT — while per-URL thresholds raised recall
-    # without hurting precision.
-    #
-    # THESE ARE INITIAL GUESSES TO BE TUNED ON THE TRAIN SPLIT, NOT
-    # MEASUREMENTS. Record each retune in the eval journal.
-    thresholds:
-      contract: 0.35      # converts; cheap to check; bias to surface
-      enforcement: 0.35
-      security: 0.30
-      state: 0.50
-      tests: 0.60         # mechanical provenance, but noisier as prose
-      spec: 0.45
-    # Below this, recorded in findings.json but not posted at all. The one tier
-    # that costs recall, so it is low. A finding carrying NO confidence is never
-    # affected — an absent field is not a zero.
-    internalFloor: 0.15
+    # REMOVED 2026-09-21: `thresholds` (the per-family confidence bars) and
+    # `internalFloor`. Both gated on a finding's self-reported `confidence`,
+    # which measured AUROC 0.228 [0.171, 0.299] over 516 findings from 20
+    # preserved case-runs — a strong signal pointing the WRONG way, because the
+    # model is surest about the observations where nothing is wrong (withheld
+    # findings carried a HIGHER median confidence, 0.99, than posted ones).
+    # They also cost nothing: across the preserved archive not one gold finding
+    # was ever lost to `below-floor` or `below-threshold`. An overlay that
+    # still pins either key is accepted and ignored, with a warning in the log.
 
 # The software-factory pipeline (label-driven autonomy).
 #

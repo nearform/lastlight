@@ -1803,15 +1803,14 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      * `maxBodyComments` serialises `null` as the literal string `"null"` —
      * null is the documented "unlimited" value and must survive a string
      * projection; the consumer parses it back and degrades garbage to `0`,
-     * the same direction `config.ts` coerces. `boundaryThresholds` is the one
-     * JSON-valued key (a per-family map has no scalar form); nothing renders
-     * it into a prompt — `post-review` is its only reader.
+     * the same direction `config.ts` coerces. Nothing renders either key into
+     * a prompt — `post-review` is their only reader. `internalFloor` and
+     * `boundaryThresholds` were projected here too until the confidence gates
+     * they fed were removed (see `rankOf` in `review-poster.ts`).
      */
     maxInlineComments: String(review.analysis.maxInlineComments),
-    internalFloor: String(review.analysis.internalFloor),
     maxBodyComments:
       review.analysis.maxBodyComments === null ? "null" : String(review.analysis.maxBodyComments),
-    boundaryThresholds: JSON.stringify(review.analysis.thresholds ?? {}),
     /**
      * WP4's gate, and a SEPARATE one — `skip_if: "probesEnabled != true"`.
      *

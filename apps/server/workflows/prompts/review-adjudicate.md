@@ -229,11 +229,10 @@ by being certainly true. Calibrate:
 - **0.30–0.55** — plausible, but inferred rather than shown.
 - **below 0.30** — speculative; `unprobed` claims with thin evidence live here.
 
-The downstream posting thresholds READ this number (family bars 0.30–0.60,
-floor 0.15). A document whose every row sits at 0.75+ has silently disabled
-them — and measured runs did exactly that (median 0.95–1.00, minimum 0.75,
-with 1.00 spent on statements like *"exported signature unchanged"*). If
-your confidences do not spread, they are not confidences.
+A document whose every row sits at 0.75+ is not calibrated — and measured runs
+did exactly that (median 0.95–1.00, minimum 0.75, with 1.00 spent on statements
+like *"exported signature unchanged"*). If your confidences do not spread, they
+are not confidences.
 
 ## Anchoring: quote the code, do not count the lines
 

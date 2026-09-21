@@ -47,7 +47,13 @@ export interface ReviewFinding {
    * the full price of a wrong answer. See {@link resolveAnchor}.
    */
   existingCode?: string;
-  /** The obligation family this came from — the key for the per-family threshold (WP6b). */
+  /**
+   * The obligation family this came from (WP6b).
+   *
+   * It keyed the per-family confidence threshold until that bar was removed —
+   * see {@link rankOf}. It survives because the grouping and the disposition
+   * record still name it.
+   */
   family?: string;
   /** 0..1. Absent is NOT zero — see {@link tierFindings}. */
   confidence?: number;
@@ -141,7 +147,7 @@ export interface BuiltReview {
   comments: InlineComment[];
   inlineCount: number;
   demotedCount: number;
-  /** Below the floor: recorded, never posted. Always 0 without an {@link AttentionBoundary}. */
+  /** Recorded, never posted. Always 0 without an {@link AttentionBoundary}. */
   internalCount: number;
   /**
    * The tiering this review was built from, present only when an
@@ -560,11 +566,13 @@ export function splitFindings(
 /**
  * Why a finding is in the review body rather than inline. Three causes, and
  * they must stay distinguishable: "Additional findings" meaning off-diff AND
- * below-threshold AND overflowed-the-cap, under one heading, is a worse review
- * to read than the one it replaced (§D11).
+ * adjudicated-to-body AND overflowed-the-cap, under one heading, is a worse
+ * review to read than the one it replaced (§D11).
+ *
+ * `below-threshold` was a fourth, retired with the per-family confidence bars
+ * it named — see {@link rankOf} for the measurement.
  */
-export type DemotionReason =
-  "off-diff" | "below-threshold" | "overflow" | "adjudicated";
+export type DemotionReason = "off-diff" | "overflow" | "adjudicated";
 
 /** One demoted finding, carrying the reason it did not earn an inline comment. */
 export interface DemotedFinding {
@@ -579,6 +587,9 @@ export interface DemotedFinding {
  * not say, and why?"* — which is the only thing separating an attention
  * boundary from v2's suppressor.
  *
+ * `below-floor` was a fifth, retired with the confidence floor it named — see
+ * {@link rankOf}.
+ *
  * - `adjudicated` — the document said `tier: "internal"` itself. That includes
  *   every hypothesis the conservation floor repaired, which carries no
  *   confidence at all.
@@ -589,7 +600,6 @@ export interface DemotedFinding {
  *   decision where the boundary cannot read it. A CONTRACT VIOLATION rather
  *   than a judgement about the finding — see {@link tierFindings} for why it is
  *   a conjunction and what each half costs alone.
- * - `below-floor` — under {@link AttentionBoundary.internalFloor}.
  * - `body-budget` — demoted to the body and then past
  *   {@link AttentionBoundary.maxBodyComments}. The only reason applied to a
  *   finding the boundary had already ROUTED somewhere visible, which is why it
@@ -601,7 +611,6 @@ export type InternalReason =
   | "adjudicated"
   | "clean-discharge"
   | "prose-disposition"
-  | "below-floor"
   | "body-budget";
 
 /** One recorded-not-posted finding, carrying the reason it was withheld. */
@@ -611,17 +620,19 @@ export interface InternalFinding {
 }
 
 /**
- * The attention budget. Absent ⇒ today's behaviour exactly: no cap, no
- * thresholds, no `internal` tier — every finding is inline or body, decided by
- * anchorability alone.
+ * The attention budget — two budgets and nothing else. Absent ⇒ today's
+ * behaviour exactly: no cap, no `internal` tier — every finding is inline or
+ * body, decided by anchorability alone.
+ *
+ * **There is no confidence gate here any more.** `internalFloor` and the
+ * per-family `thresholds` used to live in this shape and both read
+ * `finding.confidence`, an axis measured at AUROC 0.228 — see {@link rankOf}.
+ * What remains are budgets, which spend the reader's attention rather than
+ * judge a finding's truth.
  */
 export interface AttentionBoundary {
-  /** Rank by confidence × severity; everything past this goes to the body, never away. */
+  /** Rank by severity; everything past this goes to the body, never away. */
   maxInlineComments: number;
-  /** Per-obligation-family confidence bar for an INLINE comment. Below it: the body. */
-  thresholds: Record<string, number>;
-  /** Below this, recorded but not posted. See {@link TieredFindings.internal}. */
-  internalFloor: number;
   /**
    * Cap on the FINAL body list — applied last, after every other rule has
    * routed findings there (including the inline overflow), because it governs
@@ -645,7 +656,7 @@ export interface TieredFindings {
   inline: AnchoredFinding[];
   body: DemotedFinding[];
   /**
-   * Below the floor: kept in `findings.json` with its reason, never posted.
+   * Kept in `findings.json` with its reason, never posted.
    *
    * **This is an attention boundary, not v2's suppressor**, and the difference
    * is that it is auditable — WP7's `review_findings` table is where it becomes
@@ -704,13 +715,19 @@ const SEVERITY_WEIGHT: Record<string, number> = {
  * emitting a vocabulary this code does not share, and the `?? 2` below turns
  * that into an ordinary-looking Important. See {@link unknownSeverity}.
  *
- * NOTE `internalFloor` and the per-family `thresholds` still read `confidence`
- * below. They are latent rather than harmful today — the observed minimum on a
- * posted finding is 0.75, against a floor of 0.15 and family bars of 0.30–0.60,
- * so neither has ever fired — but they gate on the same inverted axis and should
- * go the same way. That removal touches the documented config surface
- * (`lastlight-shared` types, `default.yaml`, both spec copies) and is its own
- * change.
+ * **`internalFloor` and the per-family `thresholds` are gone too**, removed
+ * here for the same reason and confirmed inert before they went. They read the
+ * same inverted axis, and they never cost a single gold finding: across the
+ * preserved archive (`apps/evals/scripts/say-gap.ts`, 2026-09-21), of every
+ * gold finding not posted inline, 12 were demoted because the adjudicator
+ * itself wrote `body`, 6 were off-diff and 1 was withheld `adjudicated` —
+ * ZERO to `below-floor`, `below-threshold`, `body-budget`, `overflow` or
+ * `clean-discharge`. The 259 archived rows labelled "below the internal floor"
+ * are a MISLABEL from the original `recordDisposition` (5abb03de), which
+ * hard-coded that string: 255 of them carry confidence at or above the 0.15
+ * floor and 116 sit at exactly 1.00. Since 47ee595c wired the real reasons,
+ * 97 of 97 internal findings are `adjudicated` and not one is `below-floor`.
+ * The floor never fired on an honestly-labelled row.
  */
 function rankOf(f: ReviewFinding): number {
   return SEVERITY_WEIGHT[(f.severity || "important").toLowerCase()] ?? 2;
@@ -863,18 +880,17 @@ function allHypothesesClean(
 /**
  * Split findings across the three destinations.
  *
- * Order matters and each step is a different question: does this SAY anything
- * (the clean-discharge rule) · is it worth a human's attention at all (the
- * floor) · can it even be anchored (GitHub's constraint) · is it confident
- * enough for an inline comment (the family threshold) · is there room (the
- * budget) · and, last, may the body still grow (the body budget,
- * {@link AttentionBoundary.maxBodyComments} — the one step that moves a
- * finding OUT of the posted review, to `internal` with reason `body-budget`).
+ * Order matters and each step is a different question: did the adjudicator
+ * already decide (the explicit tier) · does this SAY anything (the
+ * clean-discharge rule) · can it even be anchored (GitHub's constraint) · is
+ * there room (the inline budget) · and, last, may the body still grow (the
+ * body budget, {@link AttentionBoundary.maxBodyComments} — the one step that
+ * moves a finding OUT of the posted review, to `internal` with reason
+ * `body-budget`).
  *
- * **A missing `confidence` never demotes and never suppresses.** Both bars are
- * `confidence !== undefined && confidence < bar`, so a finding that declines to
- * self-score is treated as passing — the alternative silently deletes every
- * finding from any prompt that has not been taught the field.
+ * **No step reads `confidence`.** Two did — an `internalFloor` and a
+ * per-family bar — and both were removed once the axis was measured at AUROC
+ * 0.228 and shown to have cost no gold finding; see {@link rankOf}.
  *
  * ## The clean-discharge rule, and why it is not a confidence rule
  *
@@ -901,16 +917,14 @@ function allHypothesesClean(
  * count there is **0 of 16** and this rule is a verified no-op, which is what
  * keeps the control arm single-variable. On the first repeat **all 17 were posted**
  * — "Type contract: consolidateData correctly accepts…", "GOOGLE_CLIENT_ID
- * constant imported and passed correctly". The confidence bars cannot catch
- * them: confidence on those rows is uniformly ≥ 0.7 (median 0.95–1.00, minimum
- * 0.75 across the whole document), so `internalFloor` and every family
- * threshold pass them. That is the point — **an anti-finding is not an
- * unconfident finding, it is a confident report of nothing**, and only its
- * provenance says so.
- *
- * It is checked BEFORE the floor because it is the more specific answer to
- * "why was this withheld?", not because the two disagree about the tier — they
- * cannot; both are `internal`.
+ * constant imported and passed correctly". The confidence bars that used to
+ * sit below this rule could never have caught them: confidence on those rows
+ * is uniformly ≥ 0.7 (median 0.95–1.00, minimum 0.75 across the whole
+ * document), so the 0.15 floor and every 0.30–0.60 family bar passed them.
+ * That is the point — **an anti-finding is not an unconfident finding, it is a
+ * confident report of nothing**, and only its provenance says so. It is also
+ * half of why those bars are gone (see {@link rankOf}): the one thing they
+ * were imagined to catch, they could not.
  *
  * `clean` is supplied by the caller (`post-review` reads the sibling
  * `hypotheses/*.jsonl`), never read here: this module does no I/O. Absent or
@@ -974,10 +988,6 @@ export function tierFindings(
       internal.push({ finding: f, reason: "prose-disposition" });
       continue;
     }
-    if (f.confidence !== undefined && f.confidence < boundary.internalFloor) {
-      internal.push({ finding: f, reason: "below-floor" });
-      continue;
-    }
     if (!f.path || !f.line || !isAnchored(f, commentable)) {
       body.push({ finding: f, reason: "off-diff" });
       continue;
@@ -985,11 +995,6 @@ export function tierFindings(
     // An explicit `body` is a demotion, and a demotion is always safe to obey.
     if (f.tier === "body") {
       body.push({ finding: f, reason: "adjudicated" });
-      continue;
-    }
-    const bar = f.family ? boundary.thresholds[f.family] : undefined;
-    if (bar !== undefined && f.confidence !== undefined && f.confidence < bar) {
-      body.push({ finding: f, reason: "below-threshold" });
       continue;
     }
     candidates.push(f as AnchoredFinding);
@@ -1091,17 +1096,11 @@ export function renderDemoted(list: ReviewFinding[]): string {
  */
 const DEMOTION_LEAD: Record<DemotionReason, string> = {
   "off-diff": "_Outside this PR's diff — GitHub cannot anchor a comment here._",
-  "below-threshold": "_Below the confidence bar for an inline comment._",
   overflow: "_Beyond this review's inline comment limit, ranked by severity._",
   adjudicated: "_Raised for context rather than as an inline comment._",
 };
 
-const DEMOTION_ORDER: DemotionReason[] = [
-  "off-diff",
-  "below-threshold",
-  "adjudicated",
-  "overflow",
-];
+const DEMOTION_ORDER: DemotionReason[] = ["off-diff", "adjudicated", "overflow"];
 
 /**
  * The "Additional findings" section, grouped by why each finding is here.

@@ -1707,25 +1707,12 @@ function shapeReviewAnalysis(raw: unknown, d: ReviewPolicy["analysis"]): ReviewP
     probeCoverage: node.probeCoverage === true,
     probeRounds: num(node.probeRounds, d.probeRounds),
     maxInlineComments: num(node.maxInlineComments, d.maxInlineComments),
-    // Total, leaf-by-leaf like everything else here, but the KEY SET is the
-    // caller's: an unknown family name would configure a threshold nothing
-    // reads, which is worse than rejecting it, and a missing one correctly
-    // means "no bar for this family" rather than zero.
-    thresholds: shapeThresholds(node.thresholds, d.thresholds),
-    internalFloor: num(node.internalFloor, d.internalFloor),
     // Nullable like `fix.maxCostUsd`: an explicit `null` is the documented
     // "unlimited body overflow" value, distinct from an absent key (the
     // shipped `0`). Operator-only like the rest of `review.analysis`, so this
     // only ever projects the operator's answer into the merged view.
     maxBodyComments: node.maxBodyComments === null ? null : num(node.maxBodyComments, d.maxBodyComments ?? 0),
   };
-}
-
-function shapeThresholds(raw: unknown, d: Record<string, number>): Record<string, number> {
-  const node = isPlainObject(raw) ? raw : {};
-  const out: Record<string, number> = {};
-  for (const [family, fallback] of Object.entries(d)) out[family] = num(node[family], fallback);
-  return out;
 }
 
 function num(raw: unknown, fallback: number): number {
