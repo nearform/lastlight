@@ -226,6 +226,37 @@ describe("anchorFindings — writing the anchor back, and the counts", () => {
     );
     expect(out.stats).toMatchObject({ unresolved: 1, noExcerpt: 1 });
   });
+
+  it("NAMES the findings whose excerpt matched nothing, not just how many", () => {
+    // Measured 2026-09-21 across all 54 off-diff demotions in the preserved
+    // archive: 26 carried an excerpt matching nothing, and 22 of those came
+    // from ONE case-run whose `existingCode` held prose rather than code
+    // ("Lines 165-169 declare appsScriptGlobals (DriveApp, FormApp, …)").
+    // A count alone cannot tell an operator which finding to go and look at,
+    // and finding it took a bespoke script reading the rows by hand.
+    const out = anchorFindings(
+      [
+        finding({ title: "prose where a quote goes", existingCode: "Lines 165-169 declare appsScriptGlobals" }),
+        // Placed, so it must NOT appear in the list.
+        finding({ line: 999, existingCode: "export const MIN_TOKEN_AGE = 1;" }),
+        // No excerpt at all is a different fact and is not named here.
+        finding({ line: 71 }),
+      ],
+      FILES,
+    );
+    expect(out.stats).toMatchObject({ unresolved: 1, noExcerpt: 1, relocated: 1 });
+    expect(out.unresolvedExcerpts).toEqual([
+      { path: "src/auth.ts", title: "prose where a quote goes" },
+    ]);
+  });
+
+  it("returns an empty list when every excerpt placed — the warning must not fire on a clean run", () => {
+    const out = anchorFindings(
+      [finding({ line: 999, existingCode: "export const MIN_TOKEN_AGE = 1;" })],
+      FILES,
+    );
+    expect(out.unresolvedExcerpts).toEqual([]);
+  });
 });
 
 describe("AC1a — a wrong line with a right excerpt anchors inline anyway", () => {

@@ -493,6 +493,29 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
           ...anchored.stats,
         });
       }
+      // Warn, never fail, and deliberately NOT inside the `if` above: that
+      // one fires only when something RESOLVED, so the case where every
+      // excerpt failed — the case worth knowing about — logged nothing at all.
+      // Measured 2026-09-21 over all 54 off-diff demotions in the preserved
+      // archive: 26 carried an excerpt matching nothing, and 22 of those came
+      // from ONE case-run whose `existingCode` held prose rather than code.
+      // The cascade is behaving correctly there; the adjudicator is not
+      // honouring its own output contract, and nothing a run wrote said so.
+      if (anchored.stats.unresolved > 0) {
+        log.warn(
+          "findings quote code that is not in the file they name — anchoring to the body",
+          {
+            repo: `${owner}/${repo}`,
+            prNumber,
+            count: anchored.stats.unresolved,
+            // Capped: one measured case produced 22 of these and a log line
+            // is not a report. The count above is the honest total.
+            findings: anchored.unresolvedExcerpts
+              .slice(0, 10)
+              .map((f) => `${f.path}: ${f.title}`),
+          },
+        );
+      }
       doc = { ...doc, findings: anchored.findings };
     }
 

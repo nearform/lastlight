@@ -490,7 +490,25 @@ export function anchorFindings(
   findings: ReviewFinding[],
   files: DiffFile[],
   readHeadFile?: (path: string) => string | null,
-): { findings: ReviewFinding[]; stats: AnchorStats } {
+): {
+  findings: ReviewFinding[];
+  stats: AnchorStats;
+  /**
+   * The findings behind `stats.unresolved`, named so the warning can be acted
+   * on. An excerpt that matches nothing in the file it names, nothing in that
+   * file at head, and nothing unique anywhere in the diff is almost always the
+   * adjudicator having written a SUMMARY where a quote goes — measured
+   * 2026-09-21 over all 54 off-diff demotions in the preserved archive
+   * (`apps/evals/scripts/anchor-forensics.ts`): 26 of them had an excerpt that
+   * matched nowhere, and 22 of those 26 came from a single case-run whose
+   * `existingCode` fields held prose (`"Lines 165-169 declare appsScriptGlobals
+   * (DriveApp, FormApp, Logger, etc.)"`). Nothing in a run recorded that, so it
+   * took a bespoke script and a human reading 54 rows to find.
+   *
+   * Capped by the caller, not here — this is the whole list.
+   */
+  unresolvedExcerpts: { path: string; title: string }[];
+} {
   const stats: AnchorStats = {
     hunk: 0,
     file: 0,
@@ -498,6 +516,7 @@ export function anchorFindings(
     unresolved: 0,
     noExcerpt: 0,
   };
+  const unresolvedExcerpts: { path: string; title: string }[] = [];
   const out = findings.map((f) => {
     if (!f || !f.path) return f;
     if (!needleOf(f.existingCode).length) {
@@ -507,6 +526,7 @@ export function anchorFindings(
     const res = resolveAnchor(f, files, readHeadFile);
     if (!res) {
       stats.unresolved++;
+      unresolvedExcerpts.push({ path: f.path, title: f.title ?? "" });
       return f;
     }
     if (res.via === "hunk") stats.hunk++;
@@ -523,7 +543,7 @@ export function anchorFindings(
       ...(res.start_line ? { start_line: res.start_line } : {}),
     };
   });
-  return { findings: out, stats };
+  return { findings: out, stats, unresolvedExcerpts };
 }
 
 /** True when a finding anchors onto a line that appears in the diff. */
