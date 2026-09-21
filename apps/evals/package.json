@@ -43,7 +43,6 @@
   "license": "MIT",
   "dependencies": {
     "@clack/prompts": "^1.7.0",
-    "@typesafe-ai/sdk": "^0.6.0",
     "chalk": "^6.0.0",
     "lastlight-core": "workspace:*",
     "lastlight-workflow-engine": "workspace:*",
@@ -53,6 +52,7 @@
     "agentic-pi": "^0.6.1"
   },
   "devDependencies": {
+    "@typesafe-ai/sdk": "^0.6.0",
     "@types/node": "^26.2.0",
     "agentic-pi": "workspace:*",
     "tsx": "^4.23.12",
