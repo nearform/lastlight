@@ -115,6 +115,24 @@ export interface PipelineFinding {
   /** `inline` / `body` / `internal`, from `disposition.json`. */
   tier?: string;
   /**
+   * WHY the boundary put it there — the machine token from `disposition.json`
+   * (`adjudicated`, `clean-discharge`, `prose-disposition`, `below-floor`,
+   * `off-diff`, `below-threshold`, `overflow`, `body-budget`), `null` on an
+   * inline row that was never demoted.
+   *
+   * Carried for the same reason `severity` is: without it nothing can say
+   * whether a gold finding was buried by the adjudicator's own `tier` or by a
+   * cap the boundary applied afterwards, and those are different bugs with
+   * different fixes. `say-gap.ts` is the reader.
+   *
+   * **Pre-`47ee595c` artifacts are void on this field.** The original WP6b
+   * `recordDisposition` hard-coded `"below the internal floor"` for every
+   * internal row — 255 of the archive's 259 such rows carry a confidence at or
+   * above the 0.15 floor, 116 of them at exactly 1.00. Anything reading this
+   * across the 2026-08-22/23 keepers is pooling two incompatible vocabularies.
+   */
+  reason?: string | null;
+  /**
    * `Critical` / `Important` / `Minor` as the adjudicator wrote it — NOT
    * normalised, because `review-poster.ts` has a separate job flagging a
    * vocabulary it does not share (`Blocker`, `p1`) rather than defaulting it.
@@ -456,11 +474,15 @@ export function readPipelineArtifacts(
   // which is how an inert attention boundary stays invisible.
   const tiers: Partial<Record<"inline" | "body" | "internal", number>> = {};
   const tierOf = new Map<string, string>();
+  const reasonOf = new Map<string, string | null>();
   for (const d of dispositionDoc?.findings ?? []) {
     if (d.tier === "inline" || d.tier === "body" || d.tier === "internal")
       tiers[d.tier] = (tiers[d.tier] ?? 0) + 1;
     const f = d.finding as { title?: string; path?: string } | undefined;
-    if (f?.title && d.tier) tierOf.set(findingKey(f), d.tier);
+    if (f?.title && d.tier) {
+      tierOf.set(findingKey(f), d.tier);
+      reasonOf.set(findingKey(f), d.reason ?? null);
+    }
   }
 
   const findings: PipelineFinding[] = [];
@@ -489,6 +511,9 @@ export function readPipelineArtifacts(
       line: f.line,
       family: f.family,
       tier,
+      // Only where the join landed: an absent reason and a finding the
+      // boundary never saw must not read the same.
+      ...(tier !== undefined ? { reason: reasonOf.get(findingKey(f)) ?? null } : {}),
       severity: f.severity,
       confidence: f.confidence,
       hypotheses: ids,

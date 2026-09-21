@@ -98,10 +98,10 @@ function measuredShape() {
     },
     disposition: {
       findings: [
-        { tier: "inline", finding: { title: "Defect", path: "a.ts", line: 1 } },
-        { tier: "body", finding: { title: "Properly enforced", path: "b.ts", line: 2 } },
+        { tier: "inline", reason: null, finding: { title: "Defect", path: "a.ts", line: 1 } },
+        { tier: "body", reason: "off-diff", finding: { title: "Properly enforced", path: "b.ts", line: 2 } },
         { tier: "body", finding: { title: "Verified", path: "c.ts", line: 3 } },
-        { tier: "internal", finding: { title: "No provenance", path: "d.ts", line: 4 } },
+        { tier: "internal", reason: "adjudicated", finding: { title: "No provenance", path: "d.ts", line: 4 } },
       ],
     },
   });
@@ -481,6 +481,36 @@ describe("persistPipelineArtifacts", () => {
     const to = join(dest(), "sessions", "case__model", "trial-1");
     expect(persistPipelineArtifacts(measuredShape(), to)).toBe(join(to, "pr-review"));
     expect(existsSync(join(to, "pr-review", "obligations.json"))).toBe(true);
+  });
+});
+
+describe("the disposition reason", () => {
+  it("is carried through, because tier alone cannot say WHO withheld a finding", () => {
+    const r = readPipelineStats(measuredShape())!;
+    // The whole point: `internal | adjudicated` is the adjudicator's own
+    // verdict, `body | off-diff` is the boundary re-anchoring. Different bugs,
+    // different fixes, and `say-gap.ts` cannot tell them apart without this.
+    expect(r.findings[3].reason).toBe("adjudicated");
+    expect(r.findings[1].reason).toBe("off-diff");
+  });
+
+  it("is null on a row the boundary recorded without one, and ABSENT on a row it never saw", () => {
+    const r = readPipelineStats(measuredShape())!;
+    // An inline row carries no demotion reason — but the boundary did place it,
+    // so `null` is the honest answer.
+    expect(r.findings[0].reason).toBeNull();
+    // A tiered row whose disposition entry omitted `reason` is also null.
+    expect(r.findings[2].reason).toBeNull();
+    // And a finding the join could not place has no `tier`, so no `reason`
+    // key at all — a broken join must not read as "the boundary said nothing".
+    const orphan = readPipelineStats(
+      workspace({
+        findings: { findings: [{ title: "Unplaced", path: "z.ts", hypotheses: [] }] },
+        disposition: { findings: [] },
+      }),
+    )!;
+    expect(orphan.findings[0].tier).toBeUndefined();
+    expect("reason" in orphan.findings[0]).toBe(false);
   });
 });
 
