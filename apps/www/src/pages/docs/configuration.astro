@@ -531,6 +531,14 @@ review:
                                # you raise one of those ceilings
     obligationContract: minimal  # minimal | full — how much each survey records
                                # per obligation. minimal is the measured default
+    adjudicate: legacy         # legacy | dossier. dossier renders every record
+                               # the adjudication needs (hypotheses, probe
+                               # transcripts, the conservation ledger, quotes
+                               # already checked against the tree) instead of
+                               # having the model shell out ~30 times to
+                               # assemble them — and asks it for claim /
+                               # category / fix instead of a tier and a
+                               # confidence
     mint: all-in-diff,registrations  # extra seeding rules beyond the original
                                # four; "" = the pre-D2 baseline set
     surveyPasses: 6            # RECORDED, not consumed — the fan-out branch list
@@ -725,6 +733,23 @@ dependencies:
 		lets the review carry a verdict <em>per axis</em>: a change that is clean by
 		every standards check but doesn't do what the issue asked can no longer be
 		approved on the strength of the half that passed.
+	</p>
+
+	<p>
+		<code>adjudicate</code> selects what the adjudication phase reads and
+		what shape it writes back, in one key because both halves change the
+		same phase. Under <code>legacy</code> the prompt names the files and
+		the model shells out to assemble them; measured on an eight-case arm
+		that was <strong>137 shell calls across 8 adjudications</strong>, about
+		a third of the run's cost, spent re-deriving records the harness had
+		already parsed. Under <code>dossier</code> a deterministic phase
+		renders them once — every hypothesis, every probe transcript, the
+		conservation ledger, and every quote already checked against the actual
+		file it names — and the model spends its budget deciding rather than
+		fetching. It also stops asking for a tier and a confidence and asks
+		instead for what is <em>wrong</em>, what <em>kind</em> of wrong, and
+		what to <em>change</em>; the tier is then arithmetic. Off until you ask
+		for it.
 	</p>
 
 	<p>
