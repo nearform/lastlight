@@ -141,6 +141,78 @@ Two caveats, both load-bearing:
 
 Not wired into the pipeline. Next, cheapest first: repeat the probe over the same artifacts to see if jev's own call is stable (untested — everything this doc has learned about run-to-run variance so far is about the *big* multi-phase pipeline, not a single System-1 call); then score a sample against gold rather than against Sonnet; only then consider using it as a pre-tier gate ahead of `adjudicate` (skip the big-model turn entirely on a high-confidence `verification` row) or as a second opinion recorded beside Sonnet's own call.
 
+## The gold ceiling — how much of the 25 is reachable at all (2026-09-22, $0)
+
+Nobody had established what fraction of the 25 gold a diff-reading pipeline could find *in principle*, so every ratio in this document has been quoting a denominator nobody checked. Hand-classified all 25 against the preserved diffs of run `2026-09-22_023026` (the `dossier` arm, the last complete 8-case run), then tested the classification against what that run actually matched.
+
+**First, a mechanical fact that kills the obvious hypothesis.** 24 of the 25 gold sit *literally inside a changed hunk* — same file, line within an `@@` range — and the 25th (`1680-r1` #4, "no test covers the new `finally` purge") carries no file at all because it is an absence. So nothing is missed for want of *locating* it. Reachability here is never about where the defect is; it is about whether the defect can be **judged** from what the pipeline can see.
+
+Four buckets, by what a reader needs beyond the diff:
+
+| bucket | what it needs | n | ever found? |
+|---|---|---|---|
+| **A. in-tree** | the diff + the head checkout, nothing else | **19** | all 9 matches are here |
+| **B. dependencies on disk** | `node_modules` source, or a real runner to execute | 3 | never |
+| **C. public external knowledge** | third-party API / release semantics absent from the repo | 1 | never |
+| **D. non-repo facts** | live production state, or org process | 2 | never |
+
+**B** is `1587-r3` #1 (the proof is react-cookie 8.0.1 / universal-cookie internals), `1641-r2` #1 (ESLint 10 freezes the rule context — the Proxy-invariant `TypeError`), and `1667` #3 (the Slack SDK's `WebClient.js:478-483` turning a 429 into a `p-retry` `AbortError`). Every one of these is decidable by *execution* and undecidable by reading, and every one is out of reach today because `probes/env.json` reports `install: skipped` / `installed: false` on all eight cases. **This is the bucket the probe ladder was built for and cannot currently enter.** It is also the bucket that produced the 7.5-hour hang: the agent reached for `npx eslint --inspect-config` on `1641-r2` precisely because eslint was not on disk.
+
+**C** is `1680-r1` #3 (`includeItemsFromAllDrives` / `supportsAllDrives` on shared drives) — Google Drive API semantics, in public documentation but not in this repo. **D** is `1587-r3` #4 (whether any live account is not exactly `@nearform.com` — the finding's own ask is "confirm against the live roster") and `1680-r2` #3, which says outright *"my remaining concern is not the code"* and asks for a committed runbook.
+
+**The classification separates cleanly against the evidence, which is the only reason to trust it.** All 9 matched gold are in bucket A; nothing in B, C or D has ever been matched by any arm. One gold moved *because* of that test: `1587-r2` #5 (Directory API and the NetSuite tab are two different populations) was classified as needing domain knowledge, then found — so it is in-tree after all, and its twin `1587-r3` #2 moved with it.
+
+**So the denominator is 19, not 25.** On this run that reads **9/19 = 47%** of the reachable ceiling rather than 9/25 = 36%, and the honest target is the **10 in-tree gold still missed**, not 16. The headline "19 of 25 never discovered" was carrying two different errors in the same direction: it counted 6 gold nothing could have found, and it measured a different arm.
+
+**One judgement call, recorded because it is arguable.** `1680-r2` #2 — the `AGENTS.md` paragraph asserting "all photo access goes through authenticated routes" while `/api/images/:set/:id` and `/api/images/thumb/:driveid` share one `NodeCache` key space — was the example originally offered for "a project-convention defect no diff-reading pipeline finds". It is classified **A**: the `AGENTS.md` line is in the diff, the code contradicting it is in the tree, and auditing a prose claim against unchanged code needs no outside information. It is brutally hard, not unreachable, and putting it in D would deflate the denominator on a technicality. It has never been found.
+
+**What this does not measure.** These 9 are *posted and matched*. The separate claim that survey never *discovers* most gold is about hypotheses, not postings, and needs gold-to-hypothesis correspondence — that is the Phase 3 characterisation, not this.
+
+
+## Survey, characterised — it is not a coverage problem (2026-09-22, $0)
+
+The premise going in was that `survey` is 41% of spend, carries the run-to-run variance, and is the phase responsible for the gold nothing ever finds — so the question was whether the five branches are the right five and whether pooling more samples raises the ceiling. Measured over preserved artifacts, **that premise is wrong in a specific and useful way.**
+
+### Variance: the count is stable, the content is not, and neither changes the outcome
+
+Three runs of `1667` at an identical config (`080542`, `084524`, `091734`) — same overlay, same commit, same case:
+
+| run | rows | needsProbe | cost | posted | matched |
+|---|---|---|---|---|---|
+| `080542` | 21 | 1 | $2.88 | 1 | 1/5 |
+| `084524` | 25 | 3 | $2.98 | 3 | 1/5 |
+| `091734` | 21 | 2 | $3.67 | 1 | 1/5 |
+
+Hypothesis *counts* barely move. Hypothesis *subjects* move a lot, and unevenly: Jaccard is **0.91** between `080542` and `091734` but **0.33–0.38** against `084524`, and only **9 of 27** distinct subjects appear in all three. So the variance is bimodal — two near-identical draws and one divergent one — not smooth noise. Cost spreads 28% for the same work.
+
+**And all three matched the same 1/5.** The content churn buys nothing: the four missed gold are missed identically every time. For this case survey is a **ceiling** problem, not a variance problem, and the churn is in rows that were never going to become findings.
+
+### The actual failure: right site, wrong direction
+
+This is the finding that redirects the work. On `1667`, survey reaches the exact code of **four of the five gold** — and writes a verification at each one:
+
+- gold #5 (the page-cap guard cannot distinguish truncation) → `contract-002`, *"fetchUserIdsByEmail returns incomplete roster when MAX_USER_PAGES is hit, without signaling incompleteness to caller"* — essentially the gold, `Important`, `needsProbe: true`. **This one worked end to end**: falsify `reproduced` it with an isolated probe at `mockPages=26`, adjudicate tiered it `inline`, and it is the single posted match. Meanwhile `enforcement-003` and `contract-004`, in the same run, call `MAX_USER_PAGES` *"properly enforced"*.
+- gold #2 (auth runs after `preValidation`, so an unauthenticated caller reaches body validation) → `security-001` describes that exact ordering — `strictDryRun` first, `bearerTokenAuth` second — and calls it correct. `Minor`, no probe.
+- gold #3 (429 handling removed) → `contract-001`, *"createSlackClient sets explicit retry and 429 handling"*. Actively false, discharged as fine.
+- gold #1 / #4 → `spec-001` and `contract-012` assert `strictDryRun` validates correctly; `state-003` describes the dry-run early return and calls it correct.
+
+`1587-r3` (0/4) repeats it. `enforcement-008` says `SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS` *"is read by consumer code that enforces the age check"* — the gold on the sibling round is that **nothing** enforces it. `spec-009` describes `LoginPage` showing the Sign In button as correct fallback behaviour, which is the literal symptom of gold #1. `spec-006` narrates the `@nearform.com` gate neutrally.
+
+### The shape of the output explains why
+
+Across all 8 cases of the `dossier` arm: **275 hypotheses, 200 `Minor` (73%), 29 `Important`, 8 `Critical`, 38 with no severity at all, and only 43 (15.6%) asking for a probe.** Survey is mostly writing *discharge records*, not claims.
+
+And posted recall tracks `Important`/`Critical` density, not row count. `1587-r3` has the **most** rows of any case (56) and found **nothing**; `1587-r1` has 50 rows but 9 `Important` and went 3/3. More hypotheses is not more findings.
+
+### What this means for the lever
+
+The queued question — are the branches the right five, is coverage or hypothesis precision binding, does pooling raise the ceiling — is answerable now, and the answer is **none of those**. Coverage is not the binding constraint: survey already stands at the defect. Pooling more samples buys more rows at the same direction, which is what the variance measurement shows costs money and changes nothing.
+
+The binding constraint is that **a branch that reaches a defect and writes "verified correct" is unrecoverable downstream.** Nothing after survey re-opens a discharged row: falsify probes only `needsProbe` + `Critical`, so a `Minor` discharge is never executed against, and adjudicate is right to withhold a claim that says the code is fine. The one gold that survived is precisely the one where survey wrote a *claim* rather than a *verification* — and then the cheap machinery worked perfectly.
+
+So the lever to test is the **discharge threshold**, not the branch count: what survey must do before it is allowed to write "verified", and whether `needsProbe` should be driven by the *site* (is this in a changed hunk with a non-trivial control-flow or normalisation change?) rather than by the branch's own confidence in its own verdict. That also connects to the ceiling section above: bucket **B** — the three gold that only *execution* can settle — is exactly the population a probe-first discharge rule would route into falsify, and the population `install: skipped` currently locks out.
+
+
 ## Why it came before the paid repeats
 
 **[#399](https://github.com/nearform/lastlight/issues/399) — `adjudicate` assembles its own context with 30 bash calls.** Measured on `1587-r2`: 35 assistant turns, **30 of them `bash`**, one `write`, ~10 min and $1.27–1.34 uncontended — **about a third of case cost**. The calls are clerical: `cat` every `hypotheses/*.jsonl`, `cat` every probe transcript, `findings --ledger` twice, then dozens of `sed -n '<N>p'` re-reading source lines to verify quotes it was handed. All of it is already parsed by `readHypothesisSet`, `checkProbes` and `buildFindingsLedger`.
