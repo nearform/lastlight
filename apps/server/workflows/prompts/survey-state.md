@@ -7,46 +7,39 @@ Reviewing **{{owner}}/{{repo}}#{{prNumber}}**, head `{{headSha}}` against `{{bas
 
 ## What this pass is, and what it is not
 
-A deterministic layer has already analysed this diff and written **obligations** —
-questions that each name BOTH ENDS of a possible defect mechanism: where
-something is introduced, and where it would have to be enforced. Your job is to
-DISCHARGE them, and to record what you found as hypotheses.
+A deterministic layer analysed this diff and wrote **obligations** — questions that each name BOTH ENDS of a possible defect mechanism: where something is introduced, and where it would have to be enforced. Discharge them, and record what you found as hypotheses.
 
-You are **not** the last word. A later phase runs probes against what you record,
-and a stronger model adjudicates. Both of them can only REMOVE. Nothing
-downstream can recover a mechanism you declined to write down.
+You are **not** the last word. A later phase probes what you record; a stronger model adjudicates. Both can only REMOVE.
 
-So the instruction here is the opposite of the usual one: **over-produce**. A
-plausible mechanism you cannot yet refute is a hypothesis, not noise. Do not
-apply a confidence gate — you are not being scored on precision, and the
-guardrail is elsewhere.
+> **Nothing downstream can recover a mechanism you declined to write down.**
+
+So: **over-produce.** A plausible mechanism you cannot yet refute is a hypothesis, not noise. Apply no confidence gate — you are not scored on precision, and the guardrail is elsewhere.
 
 ## Hard limits on this pass
 
-- **Do NOT post a review.** Do not call `github_create_pull_request_review` or any
-  other posting tool.
-- **Do NOT write `.lastlight/pr-review/findings.json`.** A later phase owns it.
-- **Do NOT read or write any other family's file.** Another pass owns each of the
-  others, and passes never reconcile — appending to disjoint files is what makes
-  a consensus collapse impossible by construction rather than by instruction.
-- **Do NOT re-derive this PR's range with `git diff` or `git show`.** The
-  deterministic layer resolved the merge-base range once and staged it:
-  `.lastlight/pr-review/diff/index.md` lists every changed file with its status,
-  its changed line ranges and the per-file patch that holds its diff, all under
-  `.lastlight/pr-review/diff/`. Read those. The paths are relative to your
-  working directory — open them exactly as written and never join them onto an
-  absolute path. Re-deriving the range is how a two-dot diff creeps back in and
-  claims commits the author never wrote; if the index says NOT AVAILABLE, derive
-  it yourself as `git diff origin/{{baseBranch}}...HEAD`, three dots.
+| do NOT | why |
+|---|---|
+| **Do NOT post a review** — no `github_create_pull_request_review`, no posting tool | you are not the last word |
+| **Do NOT write `.lastlight/pr-review/findings.json`** | a later phase owns it |
+| **Do NOT read or write any other family's file** | another pass owns each; appending to disjoint files makes a consensus collapse impossible **by construction**, not by instruction |
+| **Do NOT re-derive this PR's range with `git diff` or `git show`.** | it is already staged — see below |
+
+**The range is already resolved.** `.lastlight/pr-review/diff/index.md` lists every changed file with its status, its changed line ranges, and the per-file patch under `.lastlight/pr-review/diff/`. Read those. Paths are relative to your working directory — open them exactly as written, never joined onto an absolute path.
+
+If the index says NOT AVAILABLE, derive it yourself as `git diff origin/{{baseBranch}}...HEAD` — **three dots**.
+
+<!-- Re-deriving is how a two-dot diff creeps back in and claims commits the
+author never wrote. -->
 
 ## What you have: the whole checkout
 
-You are sitting in the complete repository at head, not in a patch file. The
-staged diff is your STARTING POINT, not your scope. Open the changed files
-whole, read the code on either side of every hunk, grep for the callers and
-references the patch never shows you, follow a changed symbol out into the files
-this PR did not touch. That is the work, not a licence: **the defects worth
-finding live in the code the diff touches but does not display.**
+You are in the complete repository at head, not a patch file. The staged diff is your STARTING POINT, not your scope:
+
+- open the changed files whole, and read either side of every hunk
+- grep for the callers and references the patch never shows you
+- follow a changed symbol out into files this PR did not touch
+
+That is the work, not a licence. **The defects worth finding live in the code the diff touches but does not display.**
 
 ## Your family: `state`
 
@@ -69,23 +62,27 @@ contract and you must follow it exactly.
 path you construct for it is a guess about a harness layout that varies by
 backend, and earlier passes have lost their seed to exactly that guess.
 
-Read the attachment before anything else. It can say three things and they are
-three different facts:
+Read the attachment before anything else. It says one of three things, and they are three different facts:
 
-- **Obligations.** Discharge every one, exactly as its contract says.
-- **NOT MEASURED.** Record that and stop — do not substitute a judgement for a measurement.
-- **NOT AVAILABLE**, or a path for you to open yourself. The harness could not attach the file; do exactly what the attachment then tells you to. Where it says the block was never delivered, that is **not** a clean result and it is not a finding about the code either — record it FIRST, then work the diff for this family's question directly and say plainly in your output that you did so unseeded.
+| it says | you do |
+|---|---|
+| **obligations** | discharge every one, exactly as its contract says |
+| **NOT MEASURED** | record that and stop — do not substitute a judgement for a measurement |
+| **NOT AVAILABLE** (or a path to open yourself) | do exactly what it tells you to |
+
+A block that was never delivered is **not** a clean result, and not a finding about the code either. Record it FIRST, then work the diff for this family's question directly and say plainly in your output that you did so unseeded.
 
 Rank your attention by how much of the impact cone lies OUTSIDE the diff. A symbol with forty callers of which two were touched is a different risk from one with two callers of which two were touched, and the diff alone cannot tell them apart.
 
 ## The questions an innocent quote cannot answer
 
 Phrase every discharge so that a QUOTED LINE is the only honest answer and an
-innocent quote is not available. "The line exists" is not a discharge: measured
-on this pipeline's own runs, every never-matched real defect within reach of an
-obligation was read, quoted, and signed off as fine. Ask what the quoted line
-cannot tell apart, what runs before it, and what happens after it trips. The
-recurring shapes for THIS family:
+innocent quote is not available. **"The line exists" is not a discharge.** Ask what the quoted line cannot tell apart, what runs before it, and what happens after it trips.
+
+<!-- Every never-matched real defect within reach of an obligation was read,
+quoted, and signed off as fine. -->
+
+The recurring shapes for THIS family:
 
 1. **Hook / phase ordering.** "This route registers `<hook>` at `<line>`. Name
    the framework's phase order, then quote the earliest line that rejects an
@@ -124,21 +121,13 @@ recurring shapes for THIS family:
 
 ## State the residual risk, not the reassurance
 
-A discharge that concludes "correctly handled", "properly ordered" or
-"enforced" is a CLAIM, not a measurement — and its direction is the one thing
-no downstream stage can flip. Before you write "correct", name the bar you
-graded against: who or what can reach this code WITHOUT the check, and what
-happens then. Two invariants can both be true of the same quoted line — "the
-check runs before the handler" and "the check runs before any request-derived
-value is read" are different bars — and this family's question is always the
-strongest bar it cares about, never the weakest true statement. If you cannot
-name the bar, record the mechanism with `needsProbe: true` and no verdict: the
-probe and the adjudicator can remove a risk you wrote down, but they will never
-see the one you graded away as fine.
+"Correctly handled", "properly ordered", "enforced" — each is a CLAIM, not a measurement, and its direction is the one thing no downstream stage can flip.
 
-**In a changed hunk: record the risk, not the reassurance.** Put the falsifiable
-risk in `claim`, set `needsProbe: true`, and leave the reasoning that reassured
-you in the discharge field.
+**Name the bar before you write "correct":** who or what reaches this code WITHOUT the check, and what happens then. Two invariants can both be true of one quoted line — *"the check runs before the handler"* and *"the check runs before any request-derived value is read"* are different bars. Your family's question is always the **strongest** bar it cares about, never the weakest true statement.
+
+Cannot name the bar? Record the mechanism with `needsProbe: true` and no verdict.
+
+**In a changed hunk: record the risk, not the reassurance.** The falsifiable risk goes in `claim`, `needsProbe: true`; the reasoning that reassured you goes in the discharge field.
 
 | don't write | write |
 |---|---|
