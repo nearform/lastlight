@@ -152,8 +152,8 @@ risk in `claim` and set `needsProbe: true`.
 
 | don't write | write |
 |---|---|
-| `MAX_USER_PAGES is properly enforced` | `if the page cap fires, the roster returns truncated with no signal to the caller` |
-| `createSlackClient sets explicit retry and 429 handling` | `a 429 from chat.postMessage is not retried` |
+| `the page cap is properly enforced` | `when the cap fires, the caller gets a truncated result and no signal that it was truncated` |
+| `the client is configured with retry and rate-limit handling` | `a rate-limited call is dropped rather than retried` |
 
 `needsProbe` is the only field that routes a record to the one stage that can
 execute against it. Set it whenever your record asserts a behavioural property

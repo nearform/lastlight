@@ -112,18 +112,14 @@ you in the discharge field.
 
 | don't write | write |
 |---|---|
-| `MAX_USER_PAGES is properly enforced` | `if the page cap fires, the roster returns truncated with no signal to the caller` |
-| `createSlackClient sets explicit retry and 429 handling` | `a 429 from chat.postMessage is not retried` |
-| `strictDryRun validates dryRun is boolean` | `a non-object JSON body reaches \`'dryRun' in body\` and throws` |
+| `the page cap is properly enforced` | `when the cap fires, the caller gets a truncated result and no signal that it was truncated` |
+| `the client is configured with retry and rate-limit handling` | `a rate-limited call is dropped rather than retried` |
+| `the body is validated before use` | `a non-object body reaches the property check and throws` |
 
 Same reading, same evidence. Only the right column can be probed — and the probe
 is the only thing that moves a verdict in the direction you graded against. If
 you were right, it gets refuted and withheld, and the bar was tested rather than
 asserted.
-
-Measured on `1667`: survey stood at four of the five gold defects and wrote the
-left column at each. The one gold that got posted is the one it wrote as the
-right column.
 
 ## Output
 

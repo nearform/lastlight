@@ -110,16 +110,14 @@ you in the discharge field.
 
 | don't write | write |
 |---|---|
-| `Backend enforces the nearform.com domain by checking the hd claim` | `an account whose primary address is an alias domain loses all access` |
-| `LoginPage shows the Sign In button when loginState is loginRequired` | `after a successful sign-in loginState never leaves loginRequired` |
+| `the page cap is properly enforced` | `when the cap fires, the caller gets a truncated result and no signal that it was truncated` |
+| `the client is configured with retry and rate-limit handling` | `a rate-limited call is dropped rather than retried` |
+| `the body is validated before use` | `a non-object body reaches the property check and throws` |
 
 Same reading, same evidence. Only the right column can be probed — and the probe
 is the only thing that moves a verdict in the direction you graded against. If
 you were right, it gets refuted and withheld, and the bar was tested rather than
 asserted.
-
-Measured on `1587-r3`: both left-column lines above are real survey output, from
-the run that found none of its four gold.
 
 ## Output
 
