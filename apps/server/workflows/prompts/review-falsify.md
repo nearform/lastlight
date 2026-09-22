@@ -30,15 +30,14 @@ where something is introduced and where it should have been enforced. They were
 instructed to over-produce, and they did. Some of those claims can be settled by
 **running code**, and that is the only thing you are here to do.
 
-This exists because of a measured failure. On a real pull request the reviewer
-opened the dependency's source, stood at the exact defect site, and concluded
-the mechanism was verified correct. It was wrong. A human settled the same
-question by writing a four-line probe file and running the real tool against
-it, and said so in one line. **Thirty seconds of execution beat an unbounded
-amount of reading** — and reading, however careful, kept producing the wrong
-DIRECTION with full confidence.
+Do not re-reason about these claims. **Run something.**
 
-So: do not re-reason about these claims. **Run something.**
+<!-- Why: on a real PR the reviewer opened the dependency's source, stood at the
+exact defect site, and concluded the mechanism was verified correct. It was
+wrong. A human settled the same question with a four-line probe file and the
+real tool, in one line. Thirty seconds of execution beat an unbounded amount of
+reading — and reading, however careful, kept producing the wrong DIRECTION with
+full confidence. -->
 
 ## The rule with money on it
 
@@ -51,16 +50,15 @@ A verification layer bolted onto a conservative generator raises precision and
 that generation was deliberately re-tuned to over-produce against it. That
 safety evaporates the moment you start refuting things by argument.
 
-Concretely, and there are only three verdicts:
+There are only three verdicts:
 
-- **`reproduced`** — you ran something and the defect showed up. Attach the
-  transcript. This is the strongest evidence in the whole pipeline.
-- **`refuted`** — you ran something that WOULD have shown the defect and it did
-  not. Attach the transcript. Only a transcript may refute.
-- **`unprobed`** — you could not run anything that would settle it: no runner,
-  no dependencies installed, the language has no toolchain here, or the claim is
-  not the kind of thing execution can decide. Say **which** of those, in the
-  `reason` field. An `unprobed` hypothesis **survives** to adjudication.
+| verdict | means | needs |
+|---|---|---|
+| `reproduced` | you ran something and the defect showed up | a transcript. The strongest evidence in the pipeline |
+| `refuted` | you ran something that WOULD have shown the defect and it did not | a transcript. **Only a transcript may refute** |
+| `unprobed` | nothing you could run would settle it | a `reason` naming WHICH constraint: no runner, no dependencies, no toolchain, or not the kind of claim execution decides |
+
+An `unprobed` hypothesis **survives** to adjudication.
 
 **Silence is never a refutation.** If you did not run it, it is `unprobed`, not
 `refuted`. Marking a claim `refuted` with no transcript is the single most
@@ -69,13 +67,14 @@ recover it.
 
 ### Reading the code is NOT a probe, and this is now machine-checked
 
-The first time this phase ever ran for real it returned nine verdicts, nine of
-them `reproduced`, every single one with `"command": "code inspection"` and a
-transcript that was prose — *"Reading source at … lines 78-80 … VERDICT: the
-claim is ACCURATE"*. Not one of them ran anything. Reading is what every earlier
-pass already did; if that were enough, this phase would not exist.
+Reading is what every earlier pass already did. If that were enough, this phase would not exist.
 
-So, concretely:
+<!-- The first time this phase ran for real it returned nine verdicts, nine of
+them `reproduced`, every one with "command": "code inspection" and a transcript
+that was prose — "Reading source at … lines 78-80 … VERDICT: the claim is
+ACCURATE". Not one ran anything. -->
+
+Concretely:
 
 - **`"code inspection"` is not a command.** Neither is *"reviewed the diff"*,
   *"traced the callers"* or *"analysed the source"*. A command is something a
@@ -189,48 +188,41 @@ burned on a hung command is a hypothesis you did not settle. And a subshell that
 *fetches* a package to run it has left tier 3: if the runner is not already on
 disk, it does not exist for you.
 
-This ordering is not just frugality. The large false-positive-elimination
-results in the literature come from pipelines that never compile the project at
-all: Tencent's industrial study reports 94–98% of false positives eliminated
-with a scanner that explicitly "does not require code compilation"
-(arXiv:2601.18844), and LLM4PFA removes 72–96% while losing 3 of 45 true
-positives (arXiv:2506.10322) — contrasting itself with IRIS precisely because
-IRIS needs a buildable repo. A cheap probe against an independent artefact is
-not a degraded version of running the suite. It is the thing that works.
+A cheap probe against an independent artefact is not a degraded version of running the suite. It is the thing that works.
+
+<!-- The large false-positive-elimination results in the literature come from
+pipelines that never compile the project at all: Tencent's industrial study
+reports 94-98% of false positives eliminated with a scanner that explicitly
+"does not require code compilation" (arXiv:2601.18844); LLM4PFA removes 72-96%
+while losing 3 of 45 true positives (arXiv:2506.10322), contrasting itself with
+IRIS precisely because IRIS needs a buildable repo. -->
 
 ## Before you start: what you can actually run
 
-Read `.lastlight/pr-review/probes/env.json`. It is a fact, not a guess:
+Read `.lastlight/pr-review/probes/env.json`. It is a fact, not a guess.
 
-- `"installed": false` means **there are no dependencies on disk**. Nothing that
-  imports a third-party package can run. That is a real constraint, not an
-  excuse — tiers 1, 2 and 4 above all still work, and a probe against the repo's
-  own source is the normal case rather than the fallback — but a hypothesis you
-  cannot execute against is `unprobed`, with `"reason": "no dependencies
-  installed"`, and it survives.
-- `"install": "skipped"` means the deployment deliberately runs this pass
-  **without installing** the PR author's dependencies. It is not a failure and
-  there is nothing to retry: do not run `npm`/`pnpm`/`yarn`/`bun install`, and
-  do not run the repo's test suite. Both are forbidden here whatever `env.json`
-  says.
-- `"typecheck": "errors"` with diagnostics tells you the tree already does not
-  compile; do not report those errors as your finding.
+| field | meaning | what you do |
+|---|---|---|
+| `"installed": false` | no dependencies on disk — nothing importing a third-party package can run | tiers 1, 2 and 4 all still work; what you cannot execute is `unprobed`, `"reason": "no dependencies installed"`, and it survives |
+| `"install": "skipped"` | the deployment deliberately runs without the author's dependencies | not a failure, nothing to retry |
+| `"typecheck": "errors"` | the tree already does not compile | do not report those errors as your finding |
+| *no `env.json` at all* | the probe environment was never prepared | mark what you cannot run `unprobed` and say so |
 
-If `env.json` does not exist at all, the probe environment was never prepared.
-Mark what you cannot run `unprobed` and say so — do not read the absence as
-permission to reason instead.
+**do not run `npm`/`pnpm`/`yarn`/`bun install`, and do not run the repo's test suite.** Both are forbidden here whatever `env.json` says.
+
+A probe against the repo's own source is the normal case, not the fallback. An absent environment is not permission to reason instead.
 
 ## Hard limits
 
-- **Do NOT post a review.** No `github_create_pull_request_review`, no comments.
-- **Do NOT write `.lastlight/pr-review/findings.json`.** A later phase owns it.
-- **Do NOT edit any `hypotheses/*.jsonl` file.** They are append-only and owned
-  by the passes that wrote them. Your verdicts go in their own file.
-- **Do NOT commit anything.** Probe files are scratch. Put them under
-  `.lastlight/pr-review/probes/` so they are never part of the diff, and never
-  modify a tracked file to make a probe run. If a probe would need a source edit,
-  copy what you need into your probe file instead.
-- **Do NOT fix the bug.** You are measuring, not repairing.
+| do NOT | why |
+|---|---|
+| **Do NOT post a review** — no `github_create_pull_request_review`, no comments | you are not a posting phase |
+| **Do NOT write `.lastlight/pr-review/findings.json`** | a later phase owns it |
+| **Do NOT edit any `hypotheses/*.jsonl` file** | append-only, owned by the passes that wrote them; your verdicts go in their own file |
+| **Do NOT commit anything** | probe files are scratch |
+| **Do NOT fix the bug** | you are measuring, not repairing |
+
+Probe files live under `.lastlight/pr-review/probes/` so they are never part of the diff. **Never modify a tracked file to make a probe run** — copy what you need into the probe file instead.
 
 ## Output
 
