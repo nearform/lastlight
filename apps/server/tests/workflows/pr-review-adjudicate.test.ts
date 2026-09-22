@@ -357,3 +357,51 @@ describe("the adjudicate prompt carries the constraints that have money on them"
     expect(rendered).not.toContain("}}");
   });
 });
+
+// ── Eval-dataset leakage ────────────────────────────────────────────────────
+// Twice now a prompt has grown an example lifted verbatim from the `pr-review`
+// eval dataset: adjudicate's output schema carried a gold defect's own constant,
+// reader function and field, and its prose-disposition example carried a second
+// case's gold verbatim. A prompt that names the answer scores on the dataset for
+// a reason that has nothing to do with the pipeline being better, and nothing in
+// the score says so.
+//
+// The dataset lives in a separate private repo, so this cannot diff against it.
+// It pins the identifiers we have actually caught, plus the repo name — a
+// regression guard, not a proof. The RULE is: examples in a prompt are
+// placeholders (`<path/to/file.ext>`, `<symbol>`, `<topic>`) or invented, never
+// copied from a case you are measuring against.
+describe("no eval-dataset leakage in the pr-review prompts", () => {
+  const LEAKED = [
+    "skillspro",
+    "SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS",
+    "readPendingNonces",
+    "populateProfiles",
+    "finally-purge",
+    "MAX_USER_PAGES",
+    "createSlackClient",
+    "strictDryRun",
+    "spreadsheetLoader",
+    "sheetsDataStore",
+    "activeUserEmails",
+  ];
+
+  const PROMPTS = [
+    "prompts/review-adjudicate.md",
+    "prompts/review-falsify.md",
+    "prompts/review-triage.md",
+    "prompts/review.md",
+    ...["contract", "enforcement", "security", "spec", "state", "tests"].map(
+      (f) => `prompts/survey-${f}.md`,
+    ),
+  ];
+
+  for (const prompt of PROMPTS) {
+    it(`${prompt} names no identifier from a graded case`, () => {
+      const text = loadPromptTemplate(prompt).toLowerCase();
+      for (const id of LEAKED) {
+        expect(text, `${prompt} leaks "${id}"`).not.toContain(id.toLowerCase());
+      }
+    });
+  }
+});
