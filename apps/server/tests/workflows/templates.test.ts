@@ -357,3 +357,35 @@ describe("renderTemplate — order of processing", () => {
     expect(renderTemplate(tmpl, ctx)).toBe("Fix: some failures");
   });
 });
+
+describe("maintainer notes (<!-- … -->)", () => {
+  it("strips a note entirely, and its trailing newline", () => {
+    const out = renderTemplate("Rule.\n<!-- why: measured 2026-09-22 -->\nNext.", BASE_CTX);
+    expect(out).toBe("Rule.\nNext.");
+  });
+
+  it("strips a multi-line note", () => {
+    const out = renderTemplate("A\n<!--\n  line one\n  line two\n-->\nB", BASE_CTX);
+    expect(out).toBe("A\nB");
+  });
+
+  it("strips several notes independently, not everything between the first and last", () => {
+    const out = renderTemplate("<!-- a -->keep one<!-- b -->keep two<!-- c -->", BASE_CTX);
+    expect(out).toBe("keep onekeep two");
+  });
+
+  // The whole point of stripping FIRST: a note may quote the prompt syntax it
+  // is explaining without that syntax rendering, or erroring, on the way out.
+  it("does not render placeholders inside a note", () => {
+    const out = renderTemplate("<!-- {{owner}} and {{#if repo}}x{{/if}} -->body {{owner}}", BASE_CTX);
+    expect(out).toBe("body acme");
+    expect(out).not.toContain("widget");
+  });
+
+  // A stray `-->` with no opener is ordinary text. An INLINE note leaves the
+  // spaces that surrounded it — notes belong on their own line.
+  it("leaves a lone arrow sequence alone", () => {
+    const out = renderTemplate("a --> b <!-- c --> d", BASE_CTX);
+    expect(out).toBe("a --> b  d");
+  });
+});
