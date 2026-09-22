@@ -79,7 +79,7 @@ six shared cases (20 gold)        0.55/0.55  0.30/0.30     0.25/0.25
    - **The genuinely shallow option, untried:** let the oracle install *only what a probe needs* — `npm i --no-save eslint` when it wants to run eslint — rather than the whole tree. Smallest possible install per probe, no tree-wide cost, and it fits the existing ladder as a new tier between 2 and 3. Needs a CLI affordance and a disk/time budget; **there is no disk guard anywhere today** and warm `node_modules` persists.
 4. **A differential arm.** Tier 1 is unused by both models. The prompt already prefers it and `origin/<base>` is already fetched. Possibly just a prompt/ladder emphasis change, so cheap to try.
 
-## Build queue — #399 is BUILT (2026-09-21), unmeasured
+## Build queue — #399 is BUILT (2026-09-21) and MEASURED (2026-09-22)
 
 Both halves landed behind one config key, `review.analysis.adjudicate: legacy | dossier`, default `legacy` so no deployment moves before the arm runs.
 
@@ -95,6 +95,52 @@ Two things the wiring got wrong first, both now pinned by tests, and both silent
 
 Still to do on it: idea 2 (a System-1 classifier over the dossier, on the category axis only) and idea 3's turn cap, both of which wanted the dossier to exist first.
 
+### The arm, run clean at `--concurrency 1`: `2026-09-22_023026-2057708` vs `2026-09-21_130604-a312c19`
+
+Two false starts before the real run. (1) The first attempt used the **globally-installed** `lastlight-evals` (npm `0.10.0`/core `0.26.0`, a month stale) — it has no idea `review.analysis.adjudicate` exists, so it silently fell back to the vanilla two-phase `review`/`post-review` workflow (`phases: [review, post-review]` only, no facts/hypotheses/probes at all) and "finished" in under an hour with avgRecall 0.21 and a broken dashboard (that build's stale bundled `dashboard/dist`). **Moved to `.stale-cli-runs/`, not a real data point.** Always invoke the monorepo's own `apps/evals/src/run.ts` via `npx tsx` when measuring anything built on this branch — the installed CLI tracks published releases, not working-tree code. (2) The retry crashed at 6/8 (dead process, no error) — restarted clean.
+
+**Mechanism (#399's actual target) confirmed on the full 8/8, concurrency-insensitive:** `adjudicate` phase mean per case — bash calls **17.1 → 4.0**, turns **17.6 → 8.3**, cost **$0.93 → $0.77**. `phase-turns.ts` output archived; the dossier does what it was built to do.
+
+**Internal recall (the CONFIRM-corrected instrument) is a tie.** The comparator predates the CONFIRM pass, so its scorecard shows raw MATCH (14/25 = 0.56) — but this doc's own audit of that *exact* run already hand-corrected it to 6/25 = 0.24 (see the CONFIRM table above). The new dossier run natively records CONFIRM and lands at the same 6/25 = 0.24. Same six confirmed finds, both arms — the rewrite cost no discovery.
+
+**Posted recall/precision both dropped:** micro-recall 0.48→0.36, precision 0.52→0.35, SNR 1.09→0.53 (full 25 gold, posted judge — the *other* judge-sound instrument, per the audit above). Same six confirmed internal finds, fewer reaching a posted comment the judge credits. **Not attributable to the dossier change on n=1** — survey/seed are stochastic per run and the repeat-variance section below already measured swings of this size on an unchanged config. Needs the repeats (next item) to separate signal from noise.
+
+**Cost/duration are confounded the other way.** The comparator ran at concurrency 3, this arm at concurrency 1 — and the "Traps" section already established that concurrency 3 alone inflates per-case duration via contention (613s → 2731s on an identical case/phase). This arm reading faster per-case than the comparator is consistent with that contention effect, not evidence of a dossier speedup. No clean duration read exists yet between the two shapes.
+
+### The falsify-loop bug, found and fixed the same day
+
+A second, unrelated bug surfaced while watching this arm run: the `falsify` loop nearly always burned its full `max_iterations: 2`. `packages/code-facts/src/probes.ts`'s gate required a `reproduced`/`refuted` verdict's transcript to open with a line that *contains* the verdict's whole `command` string. `review-falsify.md` told the model to record a **differential** probe (base vs. head — tier 1, previously unused, now apparently common) as one `command` string labelled `BASE: … HEAD: …`, but the model runs the two invocations as two separate bash calls, so the transcript's actual first line only ever had the `BASE` half — the gate then read the verdict as unexecuted and failed the phase's `until_bash` check, forcing a second full iteration on nearly every case with a differential probe in it. Confirmed on `1587-r1`/`spec-004` in the arm's preserved workspace.
+
+**Fixed.** `checkProbes` now splits a `"BASE: … HEAD: …"` command into its two halves and checks each against wherever it actually landed — `BASE` still has to open the transcript, `HEAD` only has to appear in it — rather than demanding both, concatenated, on line one. Falls through to the old exact-match behaviour for a non-differential command or a differential probe that genuinely ran as one invocation. `review-falsify.md` updated to describe the real two-line shape instead of implying both belong on one line. Six new cases in `probes.test.ts` (30/30 passing); `code-facts`'s full suite (712 tests) and `tsc --noEmit` both clean.
+
+**Validated against the arm's own preserved workspaces**, re-running the rebuilt gate over every one of the 8 cases' final `verdicts.jsonl`/transcripts: every differential probe that previously needed the second iteration now satisfies the gate on the first (`1641-r2` 2/2 iterations → would be 1; `1641`, `1587-r2`, `1587-r3`, `1667` all clean). One hypothesis (`1587-r1`/`spec-004`) still correctly fails — a *different* defect, the model's `command` field paraphrased the grep pattern it actually ran rather than copying it verbatim, which the gate is supposed to catch. Not touched; loosening further would re-admit the "code inspection" problem the gate exists to prevent.
+
+### The dossier itself is the cost, not the static prompt — and a fifth of it is provably discardable
+
+Asked separately: the 545-line `review-adjudicate.md` template is not where the money is. Across the same 8 preserved dossiers: **390,453 bytes total**, of which quote/anchor blocks already known `NOT FOUND` in the tree — `locateExcerpt` has already determined the excerpt matches nothing, so it cannot anchor an inline comment either way — are **78,889 bytes, 20.2% of every byte in every dossier**, at a mean size 3x a verified block's (426 vs 146 bytes) because a stale guessed excerpt tends to be a bigger guess than a confirmed one-liner. `renderEntry` (`adjudicate-render.ts`) fences the full wrong text anyway. Not yet changed — the fix (render a short preview instead of the full wrong excerpt when `excerpt.kind !== "resolved"`) is straightforward and low-risk, but landing it means re-measuring the arm again, and item 2 below is the more interesting thing to spend that re-measurement on.
+
+### Idea 2, screened: a System-1 call per hypothesis, fed the dossier's evidence
+
+#399 explicitly left `jev-with-evidence` un-ruled-out: blind *correctness* adjudication over 2,145 labelled AACR comments is measured-dead (keep-all F1 0.825 beats Haiku 0.803 / GLM 0.745 / **Jev 0.789**, AUC 0.534), but the same Jev probabilities asked the *category* axis instead hit **AUC 0.897** — on bare comments, with none of this pipeline's own evidence attached. Idea 1 (the dossier) had to land first so a per-row classifier wasn't fed by thirty shell calls; it now has.
+
+**Built and run for real, not simulated.** `lastlight-facts dossier` gained a `--json` mode (`buildEntries`, already what the Markdown renderer used internally, now exported) so a consumer reads the same structured per-hypothesis rows Sonnet's dossier does without a second `.jsonl` parser. `apps/evals/scripts/jev-hypothesis-probe.ts` sends **one TypeSafe `systemOne` call per hypothesis** — not per finding: 260 hypotheses vs. a few dozen posted findings across this arm, and per-hypothesis is the volume a System-1 primitive is for — with a `choice` question over the same five categories `review-adjudicate.md` uses (`defect` / `correctness-risk` / `maintainability` / `nit` / `verification`), fed the dossier's evidence (claim, both mechanism ends, probe verdict/command/transcript) minus the falsify pass's own reasoning and `confidence` — same two exclusions the dossier itself makes — plus one more: a mismatched anchor/quote is reported as a status line, never the full wrong excerpt (the previous section's finding, applied here first because jev's own accuracy is measured to fall as unrelated text grows around the decision).
+
+**Result, across the 8-case arm (260 hypotheses, 250 with a Sonnet category to compare against): 209/250 = 83.6% agreement with Sonnet's own category call, on the identical evidence. Cost: $0.0053.**
+
+```
+jev's distribution:  verification 201 · correctness-risk 27 · maintainability 22 · defect 5 · nit 5
+confusion (rows Sonnet, cols jev), the two rarest/hardest classes:
+  correctness-risk →  defect 3 · correctness-risk 4 · maintainability 1 · verification 2   (4/10 = 40%)
+  defect           →  defect 1 · correctness-risk 1 · verification 1                        (1/3 = 33%)
+```
+
+Two caveats, both load-bearing:
+
+- **This is agreement with Sonnet, not accuracy against gold.** High agreement says jev could plausibly pre-tier what Sonnet currently reads one row at a time; it says nothing about whether Sonnet's own call was right — the audit earlier in this doc already found Sonnet's own dispositions wrong often enough to matter. Comparing against gold is the follow-on, not done here.
+- **The aggregate hides the failure shape.** Agreement is strongest on the class that dominates the distribution (`verification`, 187/217 = 86%) and weakest on the two rarest, highest-stakes classes (`correctness-risk` 40%, `defect` 33% recall against Sonnet) — exactly where a wrong pre-tier costs the most. One disagreement (`1680-r2`/`spec-001`, the "PR says 120s, code uses 600s" claim already flagged elsewhere in this doc as a CONFIRM-rejected credit) has Sonnet saying `correctness-risk` and jev saying `defect`, and neither is obviously the right label for what is really a stale-PR-description nit — a reminder that 83.6% agreement between two models is not 83.6% correctness.
+
+Not wired into the pipeline. Next, cheapest first: repeat the probe over the same artifacts to see if jev's own call is stable (untested — everything this doc has learned about run-to-run variance so far is about the *big* multi-phase pipeline, not a single System-1 call); then score a sample against gold rather than against Sonnet; only then consider using it as a pre-tier gate ahead of `adjudicate` (skip the big-model turn entirely on a high-confidence `verification` row) or as a second opinion recorded beside Sonnet's own call.
+
 ## Why it came before the paid repeats
 
 **[#399](https://github.com/nearform/lastlight/issues/399) — `adjudicate` assembles its own context with 30 bash calls.** Measured on `1587-r2`: 35 assistant turns, **30 of them `bash`**, one `write`, ~10 min and $1.27–1.34 uncontended — **about a third of case cost**. The calls are clerical: `cat` every `hypotheses/*.jsonl`, `cat` every probe transcript, `findings --ledger` twice, then dozens of `sed -n '<N>p'` re-reading source lines to verify quotes it was handed. All of it is already parsed by `readHypothesisSet`, `checkProbes` and `buildFindingsLedger`.
@@ -107,7 +153,7 @@ Three reasons this is the next *build*, not a nice-to-have:
 
 Success criteria are already recorded per phase and need no new plumbing: **bash calls and assistant turns per adjudication** (35/30 is the stress case), then cost and duration **at `--concurrency 1`**. The guardrail — "internal recall first, then posted" — survives, but only with the CONFIRM pass on: raw `internalMatched` is ~⅓ noise and cannot gate anything. Read `internalMatched` only where `internalMatchedPreConfirm` is present beside it.
 
-Revised order: ~~judge audit~~ (done, $0.15) → ~~#399 + the typed-attribute output change~~ (built, $0) → **the #399 arm at `--concurrency 1`** → repeats on whichever shape wins → the install-oracle arm.
+Revised order: ~~judge audit~~ (done, $0.15) → ~~#399 + the typed-attribute output change~~ (built, $0) → ~~the #399 arm at `--concurrency 1`~~ (run, mechanism confirmed / quality inconclusive on n=1) → ~~the falsify differential-probe gate fix~~ (done, $0) → **repeats on whichever shape wins** → the install-oracle arm.
 
 ## Traps this pass re-learned
 
@@ -115,6 +161,7 @@ Revised order: ~~judge audit~~ (done, $0.15) → ~~#399 + the typed-attribute ou
 - **`--concurrency N` contaminates latency only** (cost, verdicts and recall are fine). The same case/phase ran 613s at concurrency 1 and 2731s at 3.
 - **An errored case is not a zero.** `diff-runs` excludes it; hand-rolled `jq` will not.
 - **Artifact layouts differ** — archive `<run>/<instance>/pr-review` vs eval-run `sessions/<case>__<arm>/trial-N/pr-review`. Resolve via `pipelineArtifactRel`, never by reconstruction; a wrong layout reads as "no artifacts".
+- **A globally-installed `lastlight-evals` silently measures the wrong code.** It's npm-versioned and separate from a working-tree checkout; running it against a branch with unreleased config keys (`review.analysis.adjudicate: dossier`) doesn't error — it just ignores the key and falls back to whatever the installed version supports. Its `meta` lacks the `RunProvenance` block a current build stamps (`overlay`, `harness.version`, `core.root`, `toolchain`, `argv`) — check for those fields before trusting a run measured anything new. Always run the monorepo's own `apps/evals/src/run.ts` via `npx tsx` when the thing under test lives on an unreleased branch.
 
 ## Open issues
 

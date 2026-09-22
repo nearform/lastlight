@@ -268,25 +268,36 @@ export function coerceProbeMode(raw: unknown): ProbeMode {
  * What `adjudicate` reads and what it writes. See
  * {@link ReviewAnalysisConfig.adjudicate}.
  *
- * Two literals rather than a boolean because this selects a PHASE SHAPE, and
- * the next one — a per-row System-1 classifier over the same dossier
- * ([#399](https://github.com/nearform/lastlight/issues/399) idea 2) — is a
- * third value, not a second flag. `obligationContract` has the same shape for
- * the same reason.
+ * Three literals rather than a boolean because this selects a PHASE SHAPE.
+ * `"jev"` is the third value this type's doc comment predicted — a per-row
+ * System-1 classifier over the same dossier
+ * ([#399](https://github.com/nearform/lastlight/issues/399) idea 2) — built
+ * and measured 2026-09-22: 260 hypotheses across an 8-case arm, 83.6%
+ * agreement with a Sonnet adjudicate call on the identical dossier evidence,
+ * for $0.0053. It **implies** `"dossier"` (the rendering and the typed
+ * `claim`/`category`/`fix` output are unchanged) and additionally runs
+ * `jev-classify`, whose per-hypothesis category is rendered into the dossier
+ * as an ADVISORY line — Sonnet still writes every disposition itself. Not a
+ * replacement of the adjudicator: the measured agreement is weakest exactly
+ * on the rarest, highest-stakes categories (`defect` 33%, `correctness-risk`
+ * 40% recall against Sonnet's own call), so nothing here skips or overrides
+ * Sonnet's judgement yet. `obligationContract` has the same three-value shape
+ * for the same reason (a phase shape, not a flag).
  */
-export type AdjudicateMode = "legacy" | "dossier";
+export type AdjudicateMode = "legacy" | "dossier" | "jev";
 
 /**
  * Read an operator's `adjudicate` value. **Total**, and it fails toward the
  * shipped phase.
  *
- * Only the literal `"dossier"` moves a deployment. A bare `true` does NOT —
- * unlike {@link coerceProbeMode}, where `true` meant something specific
- * historically, nothing has ever written `adjudicate: true`, so there is no
- * compatibility to preserve and no reason to let a truthy-ish value select an
- * unmeasured phase shape.
+ * Only the literals `"dossier"` and `"jev"` move a deployment. A bare `true`
+ * does NOT — unlike {@link coerceProbeMode}, where `true` meant something
+ * specific historically, nothing has ever written `adjudicate: true`, so
+ * there is no compatibility to preserve and no reason to let a truthy-ish
+ * value select an unmeasured phase shape.
  */
 export function coerceAdjudicateMode(raw: unknown): AdjudicateMode {
+  if (raw === "jev") return "jev";
   return raw === "dossier" ? "dossier" : "legacy";
 }
 
@@ -635,6 +646,19 @@ export interface ReviewAnalysisConfig {
    * explicitly instead of inheriting whatever it currently is.
    */
   maxBodyComments: number | null;
+  /**
+   * The TypeSafe model id `jev-classify` calls, under `adjudicate: "jev"`.
+   * `null` ⇒ the CLI's own default (`TYPESAFE_MODEL` env, else `jev-latest`) —
+   * kept out of the `models:` map because TypeSafe is a separate provider
+   * from the `provider/model` chat models that map resolves, and conflating
+   * them would let an unrelated key silently redirect a model call nothing
+   * else reads.
+   */
+  jevModel: string | null;
+  /** Phase budget for `jev-classify`, in seconds. Cheap and fast per call (a
+   * TypeSafe `systemOne` round trip is ~100ms), but the phase makes one call
+   * per hypothesis and a case can carry dozens. */
+  jevTimeoutSeconds: number;
 }
 
 /**
@@ -779,7 +803,8 @@ export type ReviewAnalysisDurationKey =
   | "factsTimeoutSeconds"
   | "seedTimeoutSeconds"
   | "reconcileTimeoutSeconds"
-  | "falsifyTimeoutSeconds";
+  | "falsifyTimeoutSeconds"
+  | "jevTimeoutSeconds";
 
 /**
  * A {@link ReviewConfig} WITHOUT its duration leaves (`triage.timeoutSeconds`
@@ -847,7 +872,11 @@ export function defaultReviewPolicy(): ReviewPolicy {
       // remains the opt-in telemetry arm (discharge codes + the
       // clean-discharge demotion at the posting boundary).
       obligationContract: "minimal",
-      // Unmeasured until #399's arm runs. See the field's doc.
+      // `dossier` measured 2026-09-22 (mechanism confirmed; posted-recall
+      // guardrail inconclusive on n=1 — repeats pending). `jev` built and
+      // screened the same day (83.6% agreement with Sonnet, $0.0053) but not
+      // yet compared against gold. Neither has an arm behind it yet. See the
+      // field's doc.
       adjudicate: "legacy",
       // Both D2 rules — the measured shipped shape. See the field's doc.
       mint: "all-in-diff,registrations",
@@ -867,6 +896,9 @@ export function defaultReviewPolicy(): ReviewPolicy {
       // compromise; `null` restores the legacy unlimited funnel. See the
       // field's doc.
       maxBodyComments: 5,
+      // `null` ⇒ jev-classify's own default (TYPESAFE_MODEL env, else
+      // jev-latest). Inert unless `adjudicate: "jev"`.
+      jevModel: null,
     },
   };
 }

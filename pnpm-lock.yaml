@@ -483,6 +483,9 @@ importers:
       '@ast-grep/napi':
         specifier: ^0.45.2
         version: 0.45.2
+      '@typesafe-ai/sdk':
+        specifier: ^0.6.0
+        version: 0.6.0
       typescript:
         specifier: 7.0.2
         version: 7.0.2

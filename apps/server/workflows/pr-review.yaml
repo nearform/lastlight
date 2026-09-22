@@ -334,6 +334,41 @@ phases:
     model: "{{models.review}}"
     variant: "{{variants.review}}"
 
+  # #399 idea 2. One TypeSafe `systemOne` call PER HYPOTHESIS (not per
+  # finding — hypotheses vastly outnumber findings, and per-hypothesis is the
+  # volume a System-1 primitive is for), asking only the category axis
+  # measured at AUC 0.897 (never correctness, measured dead at AUC 0.534).
+  # Writes `.lastlight/pr-review/jev.json`, which `dossier` below renders as
+  # an ADVISORY line per hypothesis — `adjudicate` still writes every
+  # disposition itself. Measured 2026-09-22: 260 hypotheses / 8 cases, 83.6%
+  # agreement with Sonnet's own adjudicate call on identical evidence,
+  # $0.0053 — weakest on the rarest, highest-stakes categories, which is why
+  # this annotates rather than decides.
+  #
+  # `dossier` depends on this PHASE (not just on the file it writes) so the
+  # DAG itself enforces the ordering the render call needs — `jev.json` must
+  # exist before `dossier --json`'s underlying render reads it.
+  #
+  # `|| true`: no `TYPESAFE_KEY`, a network error, a malformed answer — all of
+  # it degrades to "no annotation" inside the CLI command itself (see
+  # `jev-classify.ts`), and this phase must never fail the run on a third
+  # party's API health that `legacy`/`dossier` deployments never needed at all.
+  - name: jev-classify
+    label: System-1 per-hypothesis pre-read
+    type: bash
+    skip_if:
+      - "analysisEnabled != true"
+      - "jevClassifyEnabled != true"
+      - "scratch.reviewTriage.depth == 'light'"
+    depends_on: [review]
+    trigger_rule: all_done
+    timeout_seconds: { from: jevTimeoutSeconds }
+    command: |
+      set -u
+      FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+      "$FACTS" jev-classify --dir .lastlight/pr-review --repo . \
+        {{#if jevModel}}--model "{{jevModel}}"{{/if}} || true
+
   # #399. Every record `adjudicate` needs, joined and quote-checked ONCE, by
   # code, instead of thirty shell calls inside the phase.
   #
@@ -363,7 +398,13 @@ phases:
       - "analysisEnabled != true"
       - "dossierEnabled != true"
       - "scratch.reviewTriage.depth == 'light'"
-    depends_on: [review]
+    # `jev-classify` too, not just `review` — `all_done` already tolerates a
+    # skipped dependency (it is what `review` itself already relies on here;
+    # the stricter `none_failed_min_one_success` below is for `adjudicate`,
+    # which must not run if `review` genuinely FAILED). Declaring the
+    # dependency is what makes the DAG run `jev-classify` to completion (or
+    # skip) before this phase reads the file it writes.
+    depends_on: [review, jev-classify]
     trigger_rule: all_done
     output_var: dossier
     timeout_seconds: { from: reconcileTimeoutSeconds }

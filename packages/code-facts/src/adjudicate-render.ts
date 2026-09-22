@@ -67,6 +67,7 @@ import { join, resolve } from "node:path";
 
 import { buildFindingsLedger, type FindingsLedger } from "./findings.js";
 import { readHypothesisSet, type HypothesisRecord } from "./hypotheses.js";
+import { readJevClassifyDocument, type JevResult } from "./jev-classify-io.js";
 import { readProbeAnswers, type ProbeAnswer } from "./probes.js";
 
 export interface DossierOptions {
@@ -204,8 +205,24 @@ function fence(body: string, lang = ""): string[] {
   return [`${ticks}${lang}`, body, ticks];
 }
 
-/** Read the excerpt's file once per (path, excerpt) pair. */
-function buildEntries(options: DossierOptions): { entries: DossierEntry[]; families: string[]; malformed: number } {
+/** One dossier's worth of per-hypothesis rows, before rendering to Markdown. */
+export interface DossierEntries {
+  entries: DossierEntry[];
+  families: string[];
+  malformed: number;
+}
+
+/**
+ * Read the excerpt's file once per (path, excerpt) pair.
+ *
+ * Exported so a consumer that wants the STRUCTURED rows — not the rendered
+ * Markdown `renderAdjudicationDossier` produces — can read the exact same
+ * evidence the real dossier does, rather than re-parsing `.jsonl` a second
+ * time. The System-1-per-hypothesis probe (#399 idea 2) is the first such
+ * consumer: it needs `DossierEntry.excerpt`/`quotes`/`probe`, keyed by
+ * `record.id`, not a document meant for an LLM to read top to bottom.
+ */
+export function buildEntries(options: DossierOptions): DossierEntries {
   const repoRoot = options.repo ?? process.cwd();
   const cap = options.transcriptChars ?? DEFAULT_TRANSCRIPT_CHARS;
   const set = readHypothesisSet(options.dir);
@@ -268,7 +285,99 @@ function renderExcerptStatus(loc: ExcerptLocation, path: string | null): string 
   }
 }
 
-function renderEntry(entry: DossierEntry): string[] {
+/**
+ * The fenced body for an anchor or quote. A `resolved` excerpt IS the
+ * evidence and is shown in full. Anything else is already known unusable —
+ * `locateExcerpt` said so on the status line above this — so the full wrong
+ * text buys nothing beyond a preview: it cannot anchor an inline comment
+ * either way, and re-reading it will not change that.
+ *
+ * Measured 2026-09-22 across the 8-case dossier arm: a `NOT FOUND` block
+ * averaged **3x** a `VERIFIED` one's size (426 vs 146 bytes) and was **20.2%
+ * of every byte in every dossier** — the single biggest lever found, bigger
+ * than the static prompt template. A one-line preview keeps the "roughly what
+ * this claim is about" context a fresh reader still benefits from without
+ * paying for a guess that is already known wrong.
+ */
+function renderExcerptBody(loc: ExcerptLocation, text: string): string[] {
+  if (loc.kind === "resolved") return fence(text);
+  const lines = text.split("\n");
+  const preview = (lines[0] ?? "").slice(0, 120);
+  const truncated = (lines[0] ?? "").length > preview.length;
+  const short =
+    `${preview}${truncated ? "…" : ""}` +
+    `\n[…${lines.length} line(s), ${text.length} char(s) total, not shown — this excerpt does not resolve against the tree]`;
+  // The note has its own overhead. For a short single-line guess — the common
+  // case, measured — trimming it would COST bytes, not save them; only take
+  // the short form when it is actually shorter.
+  return fence(short.length < text.length ? short : text);
+}
+
+/** The closest competing category to jev's own pick, for the one-number
+ * calibration line — see the call site's comment for why not the whole
+ * vector. */
+function jevRunnerUp(probabilities: Record<string, number> | null, top: string | null): { category: string; probability: number } | null {
+  if (!probabilities || !top) return null;
+  let best: { category: string; probability: number } | null = null;
+  for (const [category, probability] of Object.entries(probabilities)) {
+    if (category === top) continue;
+    if (!best || probability > best.probability) best = { category, probability };
+  }
+  return best;
+}
+
+/**
+ * Is this hypothesis confidently boring — safe to compact its CORROBORATING
+ * quotes down to a count, rather than fencing every one in full?
+ *
+ * Three independent signals must all point the same way before anything is
+ * compacted: jev calls it `verification` (no defect) at high confidence, the
+ * deterministic probe cross-check found no contradiction, and the falsify
+ * pass's own EXECUTED probe (when one ran) didn't reproduce it either. The
+ * ANCHOR quote is never touched by this — only the corroborating `quotes[]`
+ * list, which is what carries the per-hypothesis cost that scales with
+ * consumer-site count (up to 8–9 quotes seen on one hypothesis in the
+ * measured arm). Nothing is deleted: the quotes still exist in
+ * `hypotheses/*.jsonl` on disk, and the count + verified-count told here is
+ * enough to ask for one by path:line if the reader disagrees with the read.
+ */
+function isConfidentlyBoring(jev: JevResult | null | undefined, probe: ProbeAnswer | null): boolean {
+  if (!jev || jev.error || jev.category !== "verification") return false;
+  if ((jev.confidence ?? 0) < 0.75) return false;
+  if (jev.probeContradiction) return false;
+  if (probe?.verdict === "reproduced") return false;
+  return true;
+}
+
+/**
+ * Where should the adjudicator's judgement land on this hypothesis FIRST —
+ * a reading-order hint, not a disposition. #399's own idea 2 was "annotate,
+ * never decide"; this is that same rule applied to STRUCTURE rather than to
+ * content. The dossier used to hand over N hypotheses in file order with no
+ * signal about which ones are worth the model's attention — exactly the
+ * "adjudicate is the last and most expensive read" problem #399 opened with,
+ * one level up from bash calls.
+ *
+ * - `flagged` — jev disagrees with an EXECUTED probe (the deterministic
+ *   cross-check), or the probe itself reproduced something, or jev's own call
+ *   is `defect`/`correctness-risk`. The candidates for inline/body.
+ * - `boring` — {@link isConfidentlyBoring}: three independent signals agree
+ *   there is nothing here. Corroborating quotes are compacted for these.
+ * - `uncertain` — jev ran but neither of the above: a low-confidence or
+ *   `maintainability`/`nit` call with nothing contradicting it either.
+ * - `unclassified` — no jev annotation for this id (`legacy`/`dossier` mode,
+ *   or a placeholder row jev never saw). Reads exactly as it always has.
+ */
+function triagePriority(entry: DossierEntry, jev: JevResult | null | undefined): "flagged" | "boring" | "uncertain" | "unclassified" {
+  if (!jev || jev.error) return "unclassified";
+  if (jev.probeContradiction) return "flagged";
+  if (entry.probe?.verdict === "reproduced") return "flagged";
+  if (jev.category === "defect" || jev.category === "correctness-risk") return "flagged";
+  if (isConfidentlyBoring(jev, entry.probe)) return "boring";
+  return "uncertain";
+}
+
+function renderEntry(entry: DossierEntry, jev?: JevResult | null): string[] {
   const { record, probe } = entry;
   const row = record.row;
   const out: string[] = [];
@@ -277,6 +386,33 @@ function renderEntry(entry: DossierEntry): string[] {
   out.push(`### ${record.id} · ${obligation} · ${severity}`);
   out.push("");
   out.push(`**Claim.** ${asString(row.claim) ?? "(none written — the row carried no claim)"}`);
+
+  // #399 idea 2 — advisory, not a decision. Measured 2026-09-22: 83.6%
+  // agreement with Sonnet's own category call on this same evidence, weakest
+  // on `defect`/`correctness-risk` (the ones that matter most). You may agree
+  // or disagree; neither is confirmed or refuted by this line alone.
+  //
+  // ONE extra number, not the whole probability vector. A first version
+  // fenced the full 5-entry distribution as JSON and measured a real cost —
+  // +19% on the dossier of the first live run this shipped in (31,000 →
+  // 36,897 bytes on one case) — for calibration signal a single runner-up
+  // margin already carries: a 0.35-vs-0.30 call and a 0.91-vs-0.02 call still
+  // must not render identically, but five raw numbers per hypothesis is more
+  // than that question needs.
+  if (jev) {
+    out.push("");
+    if (jev.error) {
+      out.push(`**System-1 pre-read (advisory).** unavailable for this hypothesis: ${jev.error}`);
+    } else {
+      const runnerUp = jevRunnerUp(jev.probabilities, jev.category);
+      const margin = runnerUp ? ` (next: ${runnerUp.category} ${runnerUp.probability.toFixed(2)})` : "";
+      out.push(`**System-1 pre-read (advisory).** ${jev.category} (p=${jev.confidence?.toFixed(2) ?? "?"})${margin}`);
+      // A DETERMINISTIC cross-check against the falsify pass's own EXECUTED
+      // probe — computed once at classify time (`jev-classify.ts`), not a
+      // second model call. See `JevResult.probeContradiction`'s doc.
+      if (jev.probeContradiction) out.push("", `**⚠ CONTRADICTS THE PROBE.** ${jev.probeContradiction}`);
+    }
+  }
 
   const ends = row.bothEnds as { introducedAt?: unknown; enforcedAt?: unknown } | undefined;
   const introduced = asString(ends?.introducedAt);
@@ -294,20 +430,37 @@ function renderEntry(entry: DossierEntry): string[] {
   const excerpt = asString(row.existingCode);
   out.push("");
   out.push(`**Anchor.** ${renderExcerptStatus(entry.excerpt, path)}`);
-  if (excerpt) out.push("", ...fence(excerpt));
+  if (excerpt) out.push("", ...renderExcerptBody(entry.excerpt, excerpt));
 
-  for (const q of entry.quotes) {
-    out.push("");
-    // The claimed line vs the found line is the `sed -n '<N>p'` the adjudicator
-    // was running by hand, resolved once. A quote that is real but N lines off
-    // is a usable anchor; the disagreement is worth stating rather than
-    // silently correcting, because the survey's line number is also evidence.
-    const drift =
-      q.located.kind === "resolved" && q.claimedLine !== null && q.claimedLine !== q.located.line
-        ? ` (the survey said :${q.claimedLine})`
-        : "";
-    out.push(`**Quote.** ${renderExcerptStatus(q.located, q.path)}${drift}`);
-    out.push(...fence(q.text));
+  if (entry.quotes.length && isConfidentlyBoring(jev, probe)) {
+    // Compacted, not omitted: the quotes still exist in `hypotheses/*.jsonl`
+    // on disk, this hypothesis's disposition is still required, and nothing
+    // here overrides that. Only the corroborating-quote LISTING — the part
+    // that scales with consumer-site count, up to 8-9 seen on one hypothesis
+    // in the measured arm — is collapsed to a count, because three
+    // independent signals (jev, the probe cross-check, and the executed
+    // probe itself) already agree there is nothing here worth the tokens.
+    const verified = entry.quotes.filter((q) => q.located.kind === "resolved").length;
+    out.push(
+      "",
+      `**Quotes.** ${entry.quotes.length} corroborating quote(s), ${verified} verified — not shown. ` +
+        `System-1 read this as \`verification\` (p=${jev!.confidence?.toFixed(2)}) with no contradicting probe. ` +
+        `Ask for a specific \`path:line\` if you want to check one.`,
+    );
+  } else {
+    for (const q of entry.quotes) {
+      out.push("");
+      // The claimed line vs the found line is the `sed -n '<N>p'` the adjudicator
+      // was running by hand, resolved once. A quote that is real but N lines off
+      // is a usable anchor; the disagreement is worth stating rather than
+      // silently correcting, because the survey's line number is also evidence.
+      const drift =
+        q.located.kind === "resolved" && q.claimedLine !== null && q.claimedLine !== q.located.line
+          ? ` (the survey said :${q.claimedLine})`
+          : "";
+      out.push(`**Quote.** ${renderExcerptStatus(q.located, q.path)}${drift}`);
+      out.push(...renderExcerptBody(q.located, q.text));
+    }
   }
 
   out.push("");
@@ -402,6 +555,11 @@ export function renderAdjudicationDossier(options: DossierOptions): string {
   const repoRoot = options.repo ?? process.cwd();
   const { entries, families, malformed } = buildEntries(options);
   const ledger = buildFindingsLedger({ dir: options.dir, repo: options.repo });
+  // #399 idea 2. Absent (no file) under `legacy`/`dossier` — nothing below
+  // changes for either. Present under `jev`: one advisory line per
+  // hypothesis, keyed by id, never a decision.
+  const jevDoc = readJevClassifyDocument(options.dir);
+  const jevById = new Map((jevDoc?.results ?? []).map((r) => [r.id, r]));
 
   const lines: string[] = [
     "# Adjudication dossier",
@@ -423,9 +581,48 @@ export function renderAdjudicationDossier(options: DossierOptions): string {
     "",
   ];
 
+  if (jevDoc) {
+    lines.push(
+      jevDoc.error
+        ? `A System-1 pre-read was requested but is unavailable for this run: ${jevDoc.error}. No hypothesis below carries one.`
+        : "Some hypotheses below carry a **System-1 pre-read** — one line, `category (p=confidence)`, from an independent " +
+            "cheap classifier over the same evidence. It is ADVISORY: measured 83.6% agreement with an adjudicator's own " +
+            "category call on identical evidence, weakest on `defect`/`correctness-risk` — the categories that matter most. " +
+            "You may agree or disagree; neither is confirmed or refuted by that line alone. Decide from the evidence, as always.",
+      "",
+    );
+  }
+
   if (malformed) lines.push(`${malformed} line(s) in the pipeline's JSONL could not be parsed and are NOT represented below.`, "");
 
   lines.push(...renderLedgerSection(ledger), "");
+
+  // A READING ORDER, not a disposition — every id still needs its own entry
+  // below and this map may be wrong about any one of them. Without it the
+  // dossier hands over N hypotheses in file order with no signal about which
+  // ones are worth spending judgement on, which is the same "most expensive
+  // read, least structured" shape #399 opened with, one level up.
+  if (jevDoc && !jevDoc.error && entries.length) {
+    const buckets: Record<"flagged" | "uncertain" | "boring", string[]> = { flagged: [], uncertain: [], boring: [] };
+    for (const e of entries) {
+      const bucket = triagePriority(e, jevById.get(e.record.id));
+      if (bucket !== "unclassified") buckets[bucket].push(e.record.id);
+    }
+    if (buckets.flagged.length || buckets.uncertain.length || buckets.boring.length) {
+      lines.push(
+        "## Triage map — a reading order, not a disposition",
+        "",
+        `**${buckets.flagged.length} FLAGGED** — jev contradicts an executed probe, the probe itself reproduced something, or jev's own call is \`defect\`/\`correctness-risk\`. Read these first: ${buckets.flagged.join(", ") || "none"}`,
+        "",
+        `**${buckets.uncertain.length} UNCERTAIN** — jev ran but neither flagged nor confidently clean: ${buckets.uncertain.join(", ") || "none"}`,
+        "",
+        `**${buckets.boring.length} CONFIDENTLY BORING** — jev: \`verification\`, high confidence, nothing contradicts it. Their corroborating quotes are compacted below (counts only): ${buckets.boring.join(", ") || "none"}`,
+        "",
+        "This is a suggestion for where to spend attention, not an answer — every id above still gets its own full entry below, and you may disagree with any bucket.",
+        "",
+      );
+    }
+  }
 
   if (!entries.length) {
     lines.push(
@@ -448,7 +645,7 @@ export function renderAdjudicationDossier(options: DossierOptions): string {
       const inFamily = entries.filter((e) => e.record.family === family);
       if (!inFamily.length) continue;
       lines.push(`## ${family} — ${inFamily.length}`, "");
-      for (const entry of inFamily) lines.push(...renderEntry(entry), "");
+      for (const entry of inFamily) lines.push(...renderEntry(entry, jevById.get(entry.record.id)), "");
     }
   }
 

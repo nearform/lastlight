@@ -89,6 +89,193 @@ describe("pathOfRow", () => {
   });
 });
 
+describe("the #399 idea 2 System-1 annotation — advisory, never absent from a decision", () => {
+  it("carries nothing when no jev.json exists — legacy/dossier modes are unaffected", () => {
+    const f = fixture();
+    writeHypotheses(f, "contract", [{ id: "contract-001", claim: "c" }]);
+    expect(render(f)).not.toContain("System-1 pre-read");
+  });
+
+  it("renders the runner-up margin, not the full probability vector — one number, not five", () => {
+    // A first version fenced the full 5-entry distribution as JSON and
+    // measured +19% on a real dossier for it. A 0.35-vs-0.30 call and a
+    // 0.91-vs-0.02 call still must not render identically, but the one
+    // number that says so is the runner-up margin, not every raw probability.
+    const f = fixture();
+    writeHypotheses(f, "contract", [{ id: "contract-001", claim: "c" }]);
+    writeFileSync(
+      join(f.dir, "jev.json"),
+      JSON.stringify({
+        model: "jev-latest",
+        generatedAt: "2026-09-22T00:00:00Z",
+        error: null,
+        results: [
+          {
+            id: "contract-001",
+            category: "verification",
+            confidence: 0.91,
+            probabilities: { verification: 0.91, defect: 0.03, "correctness-risk": 0.03, maintainability: 0.02, nit: 0.01 },
+            error: null,
+            probeContradiction: null,
+          },
+        ],
+      }),
+    );
+    const out = render(f);
+    expect(out).toContain("System-1 pre-read**");
+    expect(out).toContain("verification (p=0.91) (next: defect 0.03)");
+    expect(out).not.toContain('"probabilities"');
+    expect(out).toContain("83.6% agreement");
+    expect(out).toContain("ADVISORY");
+    expect(out).not.toContain("CONTRADICTS");
+  });
+
+  it("flags a deterministic contradiction against the probe — no second model call", () => {
+    const f = fixture();
+    writeHypotheses(f, "contract", [{ id: "contract-001", claim: "c" }]);
+    writeFileSync(
+      join(f.dir, "jev.json"),
+      JSON.stringify({
+        model: "jev-latest",
+        generatedAt: "2026-09-22T00:00:00Z",
+        error: null,
+        results: [
+          {
+            id: "contract-001",
+            category: "verification",
+            confidence: 0.8,
+            probabilities: { verification: 0.8 },
+            error: null,
+            probeContradiction: "jev called this `verification` (no defect); the probe REPRODUCED the claim — trust the probe.",
+          },
+        ],
+      }),
+    );
+    const out = render(f);
+    expect(out).toContain("⚠ CONTRADICTS THE PROBE");
+    expect(out).toContain("the probe REPRODUCED the claim");
+  });
+
+  it("compacts a confidently-boring hypothesis's corroborating quotes to a count, never the anchor", () => {
+    const f = fixture();
+    writeHypotheses(f, "contract", [
+      {
+        id: "contract-001",
+        claim: "c",
+        existingCode: "if (!token) return null;",
+        quotes: [
+          { path: "src/auth.ts", text: "if (!token) return null;" },
+          { path: "src/auth.ts", text: "not in the file at all" },
+        ],
+      },
+    ]);
+    writeFileSync(
+      join(f.dir, "jev.json"),
+      JSON.stringify({
+        model: "jev-latest",
+        generatedAt: "2026-09-22T00:00:00Z",
+        error: null,
+        results: [{ id: "contract-001", category: "verification", confidence: 0.9, probabilities: { verification: 0.9 }, error: null, probeContradiction: null }],
+      }),
+    );
+    const out = render(f);
+    // The anchor is untouched — still fenced in full.
+    expect(out).toContain("if (!token) return null;");
+    // The corroborating quotes are not: a count instead of two more fences.
+    expect(out).toContain("**Quotes.** 2 corroborating quote(s), 1 verified — not shown");
+    expect(out).not.toContain("not in the file at all");
+  });
+
+  it("does NOT compact quotes when the probe reproduced the claim, even if jev says verification", () => {
+    const f = fixture();
+    writeHypotheses(f, "contract", [{ id: "contract-001", claim: "c", needsProbe: true, quotes: [{ path: "src/auth.ts", text: "if (!token) return null;" }] }]);
+    writeFileSync(join(f.dir, "probes", "contract-001.txt"), "node -e 'x'\nout\n");
+    writeFileSync(
+      join(f.dir, "probes", "verdicts.jsonl"),
+      JSON.stringify({ hypothesis: "contract-001", verdict: "reproduced", transcript: "probes/contract-001.txt", command: "node -e 'x'" }) + "\n",
+    );
+    writeFileSync(
+      join(f.dir, "jev.json"),
+      JSON.stringify({
+        model: "jev-latest",
+        generatedAt: "2026-09-22T00:00:00Z",
+        error: null,
+        results: [{ id: "contract-001", category: "verification", confidence: 0.9, probabilities: { verification: 0.9 }, error: null, probeContradiction: null }],
+      }),
+    );
+    const out = render(f);
+    expect(out).not.toContain("corroborating quote(s)");
+    expect(out).toContain("quote VERIFIED — src/auth.ts");
+  });
+
+  it("builds a triage map bucketing every jev-annotated id — flagged / uncertain / boring", () => {
+    const f = fixture();
+    writeHypotheses(f, "contract", [
+      { id: "contract-001", claim: "flagged: contradicts probe" },
+      { id: "contract-002", claim: "flagged: defect call" },
+      { id: "contract-003", claim: "uncertain: low confidence" },
+      { id: "contract-004", claim: "boring: confident verification" },
+    ]);
+    writeFileSync(
+      join(f.dir, "jev.json"),
+      JSON.stringify({
+        model: "jev-latest",
+        generatedAt: "2026-09-22T00:00:00Z",
+        error: null,
+        results: [
+          { id: "contract-001", category: "verification", confidence: 0.9, probabilities: {}, error: null, probeContradiction: "contradicts" },
+          { id: "contract-002", category: "defect", confidence: 0.7, probabilities: {}, error: null, probeContradiction: null },
+          { id: "contract-003", category: "verification", confidence: 0.4, probabilities: {}, error: null, probeContradiction: null },
+          { id: "contract-004", category: "verification", confidence: 0.9, probabilities: {}, error: null, probeContradiction: null },
+        ],
+      }),
+    );
+    const out = render(f);
+    expect(out).toContain("## Triage map — a reading order, not a disposition");
+    expect(out).toContain("**2 FLAGGED**");
+    expect(out).toContain("contract-001");
+    expect(out).toContain("contract-002");
+    expect(out).toContain("**1 UNCERTAIN** — jev ran but neither flagged nor confidently clean: contract-003");
+    expect(out).toContain("**1 CONFIDENTLY BORING**");
+    expect(out).toContain("contract-004");
+    expect(out).toContain("not an answer");
+  });
+
+  it("omits the triage map entirely when jev never ran — legacy/dossier are unaffected", () => {
+    const f = fixture();
+    writeHypotheses(f, "contract", [{ id: "contract-001", claim: "c" }]);
+    expect(render(f)).not.toContain("Triage map");
+  });
+
+  it("says the whole-run error instead of annotating anything, when jev-classify could not run at all", () => {
+    const f = fixture();
+    writeHypotheses(f, "contract", [{ id: "contract-001", claim: "c" }]);
+    writeFileSync(
+      join(f.dir, "jev.json"),
+      JSON.stringify({ model: "jev-latest", generatedAt: "2026-09-22T00:00:00Z", error: "no TYPESAFE_KEY (or TYPESAFE_API_KEY) in the environment", results: [] }),
+    );
+    const out = render(f);
+    expect(out).toContain("unavailable for this run: no TYPESAFE_KEY");
+    expect(out).not.toContain("System-1 pre-read**");
+  });
+
+  it("says the per-hypothesis error rather than fabricating a category, when that one call failed", () => {
+    const f = fixture();
+    writeHypotheses(f, "contract", [{ id: "contract-001", claim: "c" }]);
+    writeFileSync(
+      join(f.dir, "jev.json"),
+      JSON.stringify({
+        model: "jev-latest",
+        generatedAt: "2026-09-22T00:00:00Z",
+        error: null,
+        results: [{ id: "contract-001", category: null, confidence: null, probabilities: null, error: "timeout" }],
+      }),
+    );
+    const out = render(f);
+    expect(out).toContain("System-1 pre-read (advisory).** unavailable for this hypothesis: timeout");
+  });
+});
+
 describe("renderAdjudicationDossier", () => {
   it("verifies a quote against the tree and names the line", () => {
     const f = fixture();
@@ -118,6 +305,40 @@ describe("renderAdjudicationDossier", () => {
     const out = render(f);
     expect(out).toContain("quote NOT FOUND in src/auth.ts");
     expect(out).toContain("1 carry an excerpt that matches nothing in the file it names");
+  });
+
+  it("previews a mismatched excerpt instead of fencing it in full", () => {
+    // Measured 2026-09-22: a NOT-FOUND block averaged 3x a VERIFIED one's size
+    // and was a fifth of every dossier's bytes, for text that cannot anchor an
+    // inline comment either way. A short one still gets shown whole — there is
+    // nothing to save — but a multi-line guess is previewed, not fenced whole.
+    const f = fixture();
+    const longWrongGuess = Array.from({ length: 20 }, (_, i) => `line ${i} of a guess that is not in the file`).join("\n");
+    writeHypotheses(f, "contract", [
+      { claim: "a big wrong excerpt", quotes: [{ path: "src/auth.ts", text: longWrongGuess }], existingCode: longWrongGuess },
+    ]);
+    const out = render(f);
+    expect(out).toContain("quote NOT FOUND in src/auth.ts");
+    expect(out).toContain("line 0 of a guess that is not in the file");
+    expect(out).not.toContain("line 19 of a guess that is not in the file");
+    expect(out).toContain("20 line(s)");
+    expect(out).toContain("not shown — this excerpt does not resolve");
+  });
+
+  it("does not shrink a SHORT mismatched excerpt — there is nothing to save", () => {
+    const f = fixture();
+    writeHypotheses(f, "contract", [{ claim: "c", quotes: [{ path: "src/auth.ts", text: "short and wrong" }], existingCode: "short and wrong" }]);
+    const out = render(f);
+    expect(out).toContain("short and wrong");
+    expect(out).not.toContain("not shown");
+  });
+
+  it("still fences a VERIFIED excerpt in full, unaffected by the preview rule", () => {
+    const f = fixture();
+    writeHypotheses(f, "contract", [{ claim: "c", quotes: [{ path: "src/auth.ts", text: "if (!token) return null;" }] }]);
+    const out = render(f);
+    expect(out).toContain("if (!token) return null;");
+    expect(out).not.toContain("not shown");
   });
 
   it("inlines a probe's verdict, command and transcript — and not its reason", () => {

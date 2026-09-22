@@ -226,10 +226,13 @@ Two things per probed hypothesis.
 
 **Include the command line itself as the first line, and make it the same
 string you put in `command`** — that pair is checked by machine, not trusted.
-For a differential probe, include both runs in the one file, labelled `BASE:`
-and `HEAD:` (a label in front of the command on that first line is fine). Do not
-summarise, do not trim to the interesting part: the transcript is the evidence,
-and a later phase reads it rather than your description of it.
+For a **differential** probe, base and head are two separate commands, so put
+each on its own line, labelled `BASE:` and `HEAD:`, in the order you ran them —
+`BASE:` opens the file. Write `command` as `"BASE: <cmd1> HEAD: <cmd2>"`; the
+gate splits it and checks each half against the line it actually landed on, not
+both against line one. Do not summarise, do not trim to the interesting part:
+the transcript is the evidence, and a later phase reads it rather than your
+description of it.
 
 **2. One JSON object per line**, appended to
 `.lastlight/pr-review/probes/verdicts.jsonl`:

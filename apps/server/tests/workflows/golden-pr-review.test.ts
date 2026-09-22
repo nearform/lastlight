@@ -67,6 +67,9 @@ const DECLARED = [
   "survey",
   "falsify",
   "review",
+  // #399 idea 2. One TypeSafe call per hypothesis, annotating what `dossier`
+  // renders next — a fourth independent switch, off until an operator asks.
+  "jev-classify",
   // #399. Deterministic, and it must sit between `review` and `adjudicate`:
   // it renders what the review pass wrote along with everything else.
   "dossier",
@@ -120,6 +123,13 @@ const WP3_PHASES = ["facts", "seed", "survey"];
  * outcome the gate exists to prevent.
  */
 const WP6_PHASES = ["adjudicate", "reconcile"];
+
+/** #399 idea 2's one phase — gated separately on `jevClassifyEnabled`, same
+ * reasoning as WP4's own separate gate: "run the surveys" and "run a
+ * System-1 call per hypothesis" are not the same decision, and a deployment
+ * on `adjudicate: "dossier"` must get the dossier with no annotation phase
+ * added underneath it. */
+const JEV_PHASES = ["jev-classify"];
 
 /** The two phases that existed before WP3 and must still EXECUTE when it is off. */
 const LEGACY_PHASES = ["review", "post-review"];
@@ -211,17 +221,22 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
       survey: ["seed"],
       falsify: ["survey"],
       review: ["falsify"],
-      dossier: ["review"],
+      "jev-classify": ["review"],
+      // TWO deps, same reasoning as `adjudicate` below: `dossier --json`'s
+      // render has to run AFTER `jev-classify` writes `jev.json`, and the DAG
+      // — not phase declaration order — is what enforces that (#399 idea 2).
+      dossier: ["review", "jev-classify"],
       adjudicate: ["review", "dossier"],
       reconcile: ["adjudicate"],
       "post-review": ["review"],
     };
     const declaredEdges = def.phases.filter((p) => p.depends_on?.length);
-    // Every phase but the root declares an edge. `adjudicate` declares TWO, so
-    // the edge COUNT is no longer the phase count — a fan-in is what a second
-    // producer before one consumer looks like.
+    // Every phase but the root declares an edge.
     expect(declaredEdges).toHaveLength(DECLARED.length - 1);
-    expect(declaredEdges.flatMap((p) => p.depends_on ?? [])).toHaveLength(DECLARED.length);
+    // `dossier` AND `adjudicate` each declare TWO edges now — two fan-ins, not
+    // one — so the edge count is the phase count plus one extra per fan-in
+    // beyond the first.
+    expect(declaredEdges.flatMap((p) => p.depends_on ?? [])).toHaveLength(DECLARED.length + 1);
 
     const dag = buildDag(def.phases, { chainIfNoDeps: true });
     // Exactly one root, and it is the first declared phase.
@@ -238,7 +253,7 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
     // `prepare` joined the list when `triage` became its dependency: triage
     // SKIPS on a first review and wherever the deployment turned it off, and a
     // skipped node is not `succeeded`.
-    const allDone = ["prepare", "facts", "seed", "survey", "falsify", "review", "dossier", "reconcile"];
+    const allDone = ["prepare", "facts", "seed", "survey", "falsify", "review", "jev-classify", "dossier", "reconcile"];
     for (const name of allDone) {
       expect(byName.get(name)?.trigger_rule, `${name}.trigger_rule`).toBe("all_done");
     }
@@ -296,6 +311,15 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
         TIER_GUARD,
       ]);
     }
+    // `jev-classify` carries its OWN third switch, same shape as `probesEnabled`
+    // above: a deployment on `dossier` alone must not gain the annotation phase.
+    for (const name of JEV_PHASES) {
+      expect(phaseSkipIfExpressions(byName.get(name)!), `${name}.skip_if`).toEqual([
+        "analysisEnabled != true",
+        "jevClassifyEnabled != true",
+        TIER_GUARD,
+      ]);
+    }
     for (const name of LEGACY_PHASES) {
       expect(phaseSkipIfExpressions(byName.get(name)!), `${name}.skip_if`).toEqual([]);
     }
@@ -328,11 +352,11 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
     // The shipping shape of WP4: the pipeline on, probes off. `prepare` skips
     // and everything downstream still runs, because `facts` takes `all_done`.
     const { ran, skipped } = simulate(def.phases, { analysisEnabled: "true" });
-    // `dossier` joins the skip list for the same reason: a THIRD independent
-    // switch (#399), off until an operator asks.
-    const off = [...WP4_PHASES, "dossier"];
+    // `dossier` and `jev-classify` join the skip list for the same reason:
+    // two more independent switches (#399), off until an operator asks.
+    const off = [...WP4_PHASES, ...JEV_PHASES, "dossier"];
     expect(ran).toEqual(DECLARED.filter((n) => !off.includes(n) && n !== "triage"));
-    expect(skipped.map((s) => s.name)).toEqual(["triage", ...WP4_PHASES, "dossier"]);
+    expect(skipped.map((s) => s.name)).toEqual(["triage", ...WP4_PHASES, ...JEV_PHASES, "dossier"]);
   });
 
   it("runs every declared phase in order once every flag is on", () => {
@@ -340,6 +364,7 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
       analysisEnabled: "true",
       probesEnabled: "true",
       dossierEnabled: "true",
+      jevClassifyEnabled: "true",
       ...TRIAGE_ON,
     });
     expect(ran).toEqual(DECLARED);
@@ -351,13 +376,15 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
     // switch, so the whole pipeline runs with it off — which is every
     // deployment until an operator opts in — and `adjudicate` must still run.
     // `all_success` on that node would skip it here and nothing would fail.
+    // `jev-classify` skips alongside it too (its own switch is off here as
+    // well), and that must not take `dossier` down a SECOND way either.
     const { ran, skipped } = simulate(def.phases, {
       analysisEnabled: "true",
       probesEnabled: "true",
       ...TRIAGE_ON,
     });
-    expect(skipped.map((s) => s.name)).toEqual(["dossier"]);
-    expect(ran).toEqual(DECLARED.filter((n) => n !== "dossier"));
+    expect(skipped.map((s) => s.name)).toEqual(["jev-classify", "dossier"]);
+    expect(ran).toEqual(DECLARED.filter((n) => n !== "dossier" && n !== "jev-classify"));
     expect(ran).toContain("adjudicate");
   });
 
@@ -375,14 +402,15 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
       const { ran } = simulate(def.phases, { analysisEnabled: value });
       expect(ran, `analysisEnabled=${JSON.stringify(value)}`).toEqual(LEGACY_PHASES);
     }
-    // …and the two spellings that legitimately mean yes do enable it. Both keys
-    // together, because `prepare` requires both and the sweep below pins that
-    // `probesEnabled` reads through the same coercion.
+    // …and the two spellings that legitimately mean yes do enable it. All four
+    // keys together, because `prepare` requires two of them and the sweep
+    // below pins that `probesEnabled` reads through the same coercion.
     for (const value of ["true", "TRUE", "1", true]) {
       const { ran } = simulate(def.phases, {
         analysisEnabled: value,
         probesEnabled: value,
         dossierEnabled: value,
+        jevClassifyEnabled: value,
         ...TRIAGE_ON,
       });
       expect(ran, `all=${JSON.stringify(value)}`).toEqual(DECLARED);
@@ -393,7 +421,7 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
     for (const value of ["false", "", "0", "no", "TRUE-ish"]) {
       const { ran } = simulate(def.phases, { analysisEnabled: "true", probesEnabled: value });
       expect(ran, `probesEnabled=${JSON.stringify(value)}`).toEqual(
-        DECLARED.filter((n) => ![...WP4_PHASES, "dossier"].includes(n) && n !== "triage"),
+        DECLARED.filter((n) => ![...WP4_PHASES, ...JEV_PHASES, "dossier"].includes(n) && n !== "triage"),
       );
     }
   });
@@ -604,6 +632,10 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
       "facts",
       "seed",
       "review",
+      // Skipped, not run — `jevClassifyEnabled` is not set in this context —
+      // but a skip is still a phase result under its own name, same as
+      // `dossier` running is, since neither has sub-units to report under.
+      "jev-classify",
       "dossier",
       "reconcile",
       "post-review",

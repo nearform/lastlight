@@ -1721,6 +1721,8 @@ function shapeReviewAnalysis(raw: unknown, d: ReviewPolicy["analysis"]): ReviewP
     // shipped `0`). Operator-only like the rest of `review.analysis`, so this
     // only ever projects the operator's answer into the merged view.
     maxBodyComments: node.maxBodyComments === null ? null : num(node.maxBodyComments, d.maxBodyComments ?? 0),
+    // Operator-only projection, same reasoning as `mint`/`obligationContract`.
+    jevModel: typeof node.jevModel === "string" ? node.jevModel : d.jevModel,
   };
 }
 

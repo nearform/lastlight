@@ -851,6 +851,7 @@ export function withReviewDurations(policy: ReviewPolicy, operator: ReviewConfig
       seedTimeoutSeconds: operator.analysis.seedTimeoutSeconds,
       reconcileTimeoutSeconds: operator.analysis.reconcileTimeoutSeconds,
       falsifyTimeoutSeconds: operator.analysis.falsifyTimeoutSeconds,
+      jevTimeoutSeconds: operator.analysis.jevTimeoutSeconds,
     },
   };
 }
@@ -1478,6 +1479,11 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
         analysisRaw.maxBodyComments === null
           ? null
           : nonNegativeNumber(analysisRaw.maxBodyComments) ?? reviewDefaults.analysis.maxBodyComments,
+      // #399 idea 2. `null` ⇒ `jev-classify`'s own default. A non-string is
+      // the same direction every switch in this block fails: the default,
+      // never a fabricated model id.
+      jevModel: typeof analysisRaw.jevModel === "string" ? analysisRaw.jevModel.trim() : reviewDefaults.analysis.jevModel,
+      jevTimeoutSeconds: requiredSeconds(analysisRaw.jevTimeoutSeconds, "review.analysis.jevTimeoutSeconds"),
     },
   };
 

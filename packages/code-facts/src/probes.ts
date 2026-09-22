@@ -61,6 +61,20 @@
  * satisfiability section above. The bar rises only on the two verdicts that
  * CLAIM evidence; the verdict that admits there is none must stay costless, or
  * the gate starts manufacturing the dishonesty it exists to catch.
+ *
+ * ── Why a differential probe's SECOND command is not held to "line one" ─────
+ *
+ * `review-falsify.md` asks a differential probe (base vs. head — tier 1 of the
+ * ladder) to document both runs in one `command` string, `"BASE: <cmd1> HEAD:
+ * <cmd2>"`. But base and head are two separate tool invocations, so their
+ * echoes land on two different transcript lines, and the first-line check
+ * above can never see the second half — it hadn't run yet when line one was
+ * written. Measured 2026-09-22 (`prreview__skillspro-1587-r1`/`spec-004`): a
+ * verdict was genuinely differential, both commands genuinely ran, and the
+ * gate failed it anyway, forcing a needless second `falsify` iteration on
+ * (as of that run) most cases with a differential probe in them. `command` is
+ * still split and BOTH halves are still required to appear in the transcript
+ * — this loosens *where* the second half may appear, not *whether* it must.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -195,21 +209,45 @@ function normaliseCommand(text: string): string {
 }
 
 /**
- * The transcript's first non-blank line, or `null` if it could not be read.
- * Bounded read: the command is the FIRST line by contract, and a transcript can
- * be a whole test-suite log.
+ * A transcript's leading bytes, or `null` if it could not be read. Bounded:
+ * a transcript can be a whole test-suite log, and the evidence this gate
+ * checks always lives at the top of it.
  */
-function firstTranscriptLine(path: string): string | null {
-  let head: string;
+function transcriptHead(path: string): string | null {
   try {
-    head = readFileSync(path, "utf8").slice(0, 8192);
+    return readFileSync(path, "utf8").slice(0, 8192);
   } catch {
     return null;
   }
+}
+
+/** The first non-blank line of an already-read transcript head, or `null`. */
+function firstNonBlankLine(head: string): string | null {
   for (const line of head.split("\n")) {
     if (line.trim()) return line;
   }
   return null;
+}
+
+/**
+ * Split a differential probe's `command` into its BASE and HEAD halves.
+ *
+ * `review-falsify.md` asks a differential probe to run "the same input
+ * against base and head" and document both in one `command` string
+ * (`"BASE: <cmd1> HEAD: <cmd2>"`). But base and head are two separate tool
+ * invocations, not one, so they land on two different transcript lines — the
+ * model was never going to make the second command appear on line 1, because
+ * it hadn't run yet when line 1 was written. Splitting the two halves apart
+ * lets each be checked against wherever it actually landed, instead of
+ * demanding the whole compound string verbatim on the first line.
+ *
+ * Falls through to the whole string when the `BASE:`/`HEAD:` pair isn't
+ * there, so a differential probe that genuinely is ONE command (e.g. a single
+ * `git diff base...head`) is checked exactly as before.
+ */
+function differentialParts(command: string): string[] {
+  const m = command.match(/^\s*base:\s*(.+?)\s*;?\s*head:\s*(.+)$/is);
+  return m ? [m[1].trim(), m[2].trim()] : [command];
 }
 
 /** One hypothesis's answer, canonical id resolved and transcript located. */
@@ -332,15 +370,22 @@ export function checkProbes(options: CheckProbesOptions): CheckProbesResult {
       });
       continue;
     }
-    const firstLine = firstTranscriptLine(resolved);
-    if (firstLine === null || !normaliseCommand(firstLine).includes(normaliseCommand(command))) {
+    const head = transcriptHead(resolved);
+    const firstLine = head === null ? null : firstNonBlankLine(head);
+    // A differential `command` ("BASE: cmd1 HEAD: cmd2") is two invocations,
+    // not one — only the first can be held to "on line one"; the second is
+    // checked against the transcript as a whole, wherever its own echo landed.
+    const [firstPart, ...restParts] = differentialParts(command);
+    const firstOk = firstLine !== null && normaliseCommand(firstLine).includes(normaliseCommand(firstPart));
+    const restOk = head !== null && restParts.every((part) => normaliseCommand(head).includes(normaliseCommand(part)));
+    if (!firstOk || !restOk) {
       gaps.push({
         kind: "unexecuted",
         hypothesis: id,
         detail:
-          `verdict "${verdict}" claims \`${command}\` but ${transcript} does not open with it ` +
+          `verdict "${verdict}" claims \`${command}\` but ${transcript} does not record it ` +
           `(first line: ${firstLine === null ? "the file could not be read" : JSON.stringify(firstLine.trim().slice(0, 80))}) — ` +
-          `the transcript's first line must be the command you ran; if you executed nothing the verdict is "unprobed"`,
+          `the transcript must show every command you claim, in the order you ran it; if you executed nothing the verdict is "unprobed"`,
       });
       continue;
     }

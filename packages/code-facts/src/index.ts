@@ -249,8 +249,11 @@ export type {
 export { checkProbes, readJsonl, readProbeAnswers, renderProbeCheck, requiresProbe } from "./probes.js";
 export type { CheckProbesOptions, CheckProbesResult, ProbeAnswer, ProbeGapKind } from "./probes.js";
 
-export { locateExcerpt, pathOfRow, renderAdjudicationDossier } from "./adjudicate-render.js";
-export type { DossierEntry, DossierOptions, DossierQuote, ExcerptLocation } from "./adjudicate-render.js";
+export { buildEntries, locateExcerpt, pathOfRow, renderAdjudicationDossier } from "./adjudicate-render.js";
+export type { DossierEntries, DossierEntry, DossierOptions, DossierQuote, ExcerptLocation } from "./adjudicate-render.js";
+
+export { classifyHypotheses, jevClassifyPath, readJevClassifyDocument, writeJevClassifyDocument } from "./jev-classify.js";
+export type { JevClassifyDocument, JevClassifyOptions, JevResult } from "./jev-classify.js";
 
 export {
   buildFindingsLedger,

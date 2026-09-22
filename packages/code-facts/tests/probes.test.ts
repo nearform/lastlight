@@ -255,7 +255,7 @@ describe("reading the code is not a probe — the `unexecuted` gate", () => {
     ]);
     expect(result.satisfied).toBe(false);
     expect(result.gaps[0].kind).toBe("unexecuted");
-    expect(result.gaps[0].detail).toMatch(/must be the command you ran/);
+    expect(result.gaps[0].detail).toMatch(/must show every command you claim/);
     expect(result.gaps[0].detail).toMatch(/"unprobed"/);
     expect(result.executed).toBe(0);
     expect(result.claimedExecution).toBe(1);
@@ -306,6 +306,56 @@ describe("reading the code is not a probe — the `unexecuted` gate", () => {
     // would re-admit the prose transcript that quotes a command it never ran.
     expect(oneVerdict({ verdict: "reproduced", command: RAN }, [["H-001.txt", `\n\n${RAN}\nok\n`]]).satisfied).toBe(true);
     expect(oneVerdict({ verdict: "reproduced", command: RAN }, [["H-001.txt", `preamble\n${RAN}\n`]]).satisfied).toBe(false);
+  });
+
+  describe("a differential probe's two commands, on two different lines", () => {
+    // Measured 2026-09-22 on prreview__skillspro-1587-r1/spec-004: both
+    // commands genuinely ran, and the gate failed the verdict anyway, because
+    // base and head are two separate tool calls and only the first can land on
+    // line one — the second hadn't run yet when line one was written.
+    const BASE_CMD = "git show origin/main:auth.ts | grep -n expiresIn";
+    const HEAD_CMD = "grep -n expiresIn auth.ts";
+    const COMMAND = `BASE: ${BASE_CMD}; HEAD: ${HEAD_CMD}`;
+
+    it("PASSES when each half is echoed where it actually ran", () => {
+      const result = oneVerdict({ verdict: "refuted", command: COMMAND, differential: true }, [
+        ["H-001.txt", `BASE: ${BASE_CMD}\n24h\n${HEAD_CMD}\n24h\n`],
+      ]);
+      expect(result.satisfied).toBe(true);
+      expect(result.executed).toBe(1);
+    });
+
+    it("still FAILS when the HEAD half never ran at all", () => {
+      const result = oneVerdict({ verdict: "refuted", command: COMMAND }, [
+        ["H-001.txt", `BASE: ${BASE_CMD}\n24h\n`],
+      ]);
+      expect(result.satisfied).toBe(false);
+      expect(result.gaps[0].kind).toBe("unexecuted");
+    });
+
+    it("still FAILS when the BASE half — the one that must open the file — is missing", () => {
+      const result = oneVerdict({ verdict: "refuted", command: COMMAND }, [
+        ["H-001.txt", `something else\n${HEAD_CMD}\n24h\n`],
+      ]);
+      expect(result.satisfied).toBe(false);
+    });
+
+    it("still checks a non-differential command against the whole first line, unsplit", () => {
+      // No `BASE:`/`HEAD:` pair ⇒ falls through to the original behaviour.
+      const result = oneVerdict({ verdict: "reproduced", command: RAN }, ["H-001.txt"]);
+      expect(result.satisfied).toBe(true);
+    });
+
+    it("still passes a differential probe that really is ONE command", () => {
+      // e.g. a single `git diff base...head` — tier 1 run as one invocation,
+      // not two. The BASE:/HEAD: split must not demand a HEAD half that was
+      // never claimed.
+      const oneShot = "git diff origin/main...HEAD -- auth.ts";
+      const result = oneVerdict({ verdict: "refuted", command: oneShot, differential: true }, [
+        ["H-001.txt", `${oneShot}\nno changes\n`],
+      ]);
+      expect(result.satisfied).toBe(true);
+    });
   });
 
   it("leaves `unprobed` COMPLETELY free — no command, no transcript, still closed", () => {

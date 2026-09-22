@@ -1861,8 +1861,32 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      * It gates BOTH halves of the change (the rendered input and the typed
      * output) because they move one phase's measured surface together; see
      * `ReviewAnalysisConfig.adjudicate`.
+     *
+     * `!= "legacy"` rather than `=== "dossier"`: `"jev"` (#399 idea 2) IMPLIES
+     * the dossier rendering and typed output — it only adds an extra
+     * annotation phase before `dossier`, never a different adjudicate input
+     * shape. Two adjudicate modes needing the dossier must not require two
+     * separate reads of this key.
      */
-    ...(review.analysis.adjudicate === "dossier" ? { dossierEnabled: "true" } : {}),
+    ...(review.analysis.adjudicate !== "legacy" ? { dossierEnabled: "true" } : {}),
+    /**
+     * #399 idea 2's own gate — `skip_if: "jevClassifyEnabled != true"` on the
+     * `jev-classify` phase. A FOURTH separate key, same reasoning as
+     * `probesEnabled`/`dossierEnabled`: `evalSkipIf` compares scalars, and
+     * this is a third, narrower decision than "render the dossier" — run one
+     * TypeSafe call per hypothesis and annotate it in.
+     *
+     * Present only when the operator asked for `"jev"` specifically, so the
+     * absence rule holds a third time: a deployment on `"dossier"` gets
+     * exactly what it measured, with no annotation phase added underneath it.
+     */
+    ...(review.analysis.adjudicate === "jev"
+      ? {
+          jevClassifyEnabled: "true",
+          jevModel: review.analysis.jevModel ?? "",
+          jevTimeoutSeconds: String(review.analysis.jevTimeoutSeconds),
+        }
+      : {}),
     /**
      * The three sub-switches, projected only when probes are on at all.
      *

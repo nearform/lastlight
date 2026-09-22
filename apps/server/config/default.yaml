@@ -554,8 +554,31 @@ review:
     # case) re-deriving records the harness already holds — about a third of
     # case cost — and makes its actual judgement at the end of that transcript.
     #
-    # `legacy` until the arm has run. An unrecognised value lands there too.
+    #   jev      — implies `dossier` (same rendering, same typed output) and
+    #              additionally runs `jev-classify`: one TypeSafe `systemOne`
+    #              call PER HYPOTHESIS (not per finding — hypotheses vastly
+    #              outnumber findings, and per-hypothesis is the volume a
+    #              System-1 primitive is for), asking only the category axis
+    #              measured at AUC 0.897 (never correctness, measured dead at
+    #              AUC 0.534). Its category is rendered into the dossier as an
+    #              ADVISORY line — Sonnet still writes every disposition
+    #              itself. Measured 2026-09-22: 260 hypotheses / 8 cases,
+    #              83.6% agreement with Sonnet's own call on identical
+    #              evidence, $0.0053. Weakest on the rarest, highest-stakes
+    #              categories (`defect` 33%, `correctness-risk` 40% recall
+    #              against Sonnet) — that is why it annotates rather than
+    #              decides. Needs `TYPESAFE_KEY` (or `TYPESAFE_API_KEY`); its
+    #              absence degrades the phase to "no annotation", never a
+    #              failed run.
+    #
+    # `legacy` until an arm has run for each. An unrecognised value lands there
+    # too.
     adjudicate: legacy
+    # The TypeSafe model `jev-classify` calls, under `adjudicate: "jev"`.
+    # `null` = the CLI's own default (`TYPESAFE_MODEL` env, else `jev-latest`).
+    # Kept out of the `models:` map above — TypeSafe is a distinct provider
+    # from the `provider/model` chat models that map resolves.
+    jevModel: null
 
     # Which D2 minting rules `lastlight-facts seed` runs beyond the original
     # four. A comma-list; the valid tokens are `all-in-diff` (contract
@@ -679,6 +702,11 @@ review:
     # construction (a differential `git` run, a copied pure function under plain
     # `node`) and whose real cost is model latency.
     falsifyTimeoutSeconds: 600
+    # The WHOLE-PHASE ceiling on `jev-classify`, under `adjudicate: "jev"`.
+    # Each call is a TypeSafe `systemOne` round trip (~100ms typically) but the
+    # phase makes one per hypothesis and a case can carry dozens; 120s covers
+    # a slow provider day without threatening the falsify-sized budget above.
+    jevTimeoutSeconds: 120
     # The attention boundary (WP6b). Preserving internal recall and spending a
     # human's attention are two different budgets; conflating them is how a
     # recall-first reviewer becomes unreadable.
