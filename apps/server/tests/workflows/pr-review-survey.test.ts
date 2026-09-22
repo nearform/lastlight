@@ -708,6 +708,7 @@ describe("shared survey guidance has ONE home — the skill, not six prompts", (
     "they will never see one you graded away as fine",
     "deleting evidence on behalf of a stage that has not run yet",
     "read code from this local checkout, never the api",
+    "name the boundary the input crosses and a capability the supplier does not already have",
   ];
 
   for (const phrase of SKILL_ONLY) {

@@ -41,13 +41,7 @@ A changed symbol sits in a file a scanner also flagged. The question is whether 
 Injection, authn/authz, secret handling, untrusted input, and what a guard does
 with an input shape it was not written for.
 
-**A hazard is not a boundary crossing.** Before you record anything as
-`Critical`, name the boundary the input crosses AND a capability its supplier
-does not already have. A local CLI parsing a manifest the user themselves wrote
-is codegen robustness, not a security boundary — the supplier already holds
-every capability the finding would grant. Record it, at its real tier. Severity
-is what the adjudicator ranks on, so an inflated one spends a maintainer's top
-slot on a hazard nobody can reach.
+**A hazard is not a boundary crossing.** The `Critical` bar is the `survey-pass` skill's. The half that is yours: a hazard that fails that bar is still **recorded, at its real tier** — demoting is not dropping — and an inflated one spends a maintainer's top slot on a hazard nobody can reach.
 
 ### The change-scoped checklist
 
