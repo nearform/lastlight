@@ -171,6 +171,20 @@ Anything that needs a tier **above** these — a real install, a service, a
 network call, a full test suite — is `unprobed` with that named as the reason,
 and it **survives** to adjudication. Do not install anything to reach it.
 
+**Every probe must terminate on its own.** A probe is a question that gets an
+answer and stops; a command that keeps running is not a probe, whatever it
+prints on the way. So: no servers, watchers, REPLs, `--watch`/`--serve`/
+`--inspect`/`--ui` modes, and nothing that opens a port or waits for input. If
+a tool has a one-shot form, use it — `--run` not `--watch`, `--list` not the
+interactive picker, `--print-config` not `--inspect-config`. Redirect nothing
+to a pager. This is not a style rule: `npx @eslint/config-inspector`, reached
+through an innocuous-looking `npx eslint --inspect-config`, starts a web
+server that never exits and held one review hostage for **7.5 hours**. Every
+bash call is now capped, so the worst case is a wasted cap rather than a wedged
+run — but a hypothesis burned on a hung command is a hypothesis you did not
+settle. Note the `npx` there too: it *fetched* a package, which tier 3 already
+forbids. If the runner is not already on disk, it does not exist for you.
+
 This ordering is not just frugality. The large false-positive-elimination
 results in the literature come from pipelines that never compile the project at
 all: Tencent's industrial study reports 94–98% of false positives eliminated
