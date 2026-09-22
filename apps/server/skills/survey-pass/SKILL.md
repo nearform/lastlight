@@ -146,3 +146,17 @@ can both be true of the same quoted line, and your family's question is always
 the **strongest** bar it cares about, never the weakest true statement. If you
 cannot name the bar, record the mechanism with no verdict and let the probe
 settle it.
+
+**In a changed hunk: record the risk, not the reassurance.** Put the falsifiable
+risk in `claim` and set `needsProbe: true`.
+
+| don't write | write |
+|---|---|
+| `MAX_USER_PAGES is properly enforced` | `if the page cap fires, the roster returns truncated with no signal to the caller` |
+| `createSlackClient sets explicit retry and 429 handling` | `a 429 from chat.postMessage is not retried` |
+
+`needsProbe` is the only field that routes a record to the one stage that can
+execute against it. Set it whenever your record asserts a behavioural property
+a four-line probe could contradict — in EITHER direction. Today only suspicions
+ask for probes and reassurances never do, which is backwards: the reassurance is
+the direction nothing downstream can flip.

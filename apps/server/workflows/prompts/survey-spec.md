@@ -104,6 +104,23 @@ bar is always the stronger one. If you cannot name the bar, record the
 mechanism with no verdict: the probe and the adjudicator can remove a risk you
 wrote down, but they will never see the one you graded away as fine.
 
+**In a changed hunk: record the risk, not the reassurance.** Put the falsifiable
+risk in `claim`, set `needsProbe: true`, and leave the reasoning that reassured
+you in the discharge field.
+
+| don't write | write |
+|---|---|
+| `Backend enforces the nearform.com domain by checking the hd claim` | `an account whose primary address is an alias domain loses all access` |
+| `LoginPage shows the Sign In button when loginState is loginRequired` | `after a successful sign-in loginState never leaves loginRequired` |
+
+Same reading, same evidence. Only the right column can be probed — and the probe
+is the only thing that moves a verdict in the direction you graded against. If
+you were right, it gets refuted and withheld, and the bar was tested rather than
+asserted.
+
+Measured on `1587-r3`: both left-column lines above are real survey output, from
+the run that found none of its four gold.
+
 ## Output
 
 Append one JSON object per line to `.lastlight/pr-review/hypotheses/spec.jsonl`,

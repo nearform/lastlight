@@ -122,6 +122,25 @@ name the bar, record the mechanism with `needsProbe: true` and no verdict: the
 probe and the adjudicator can remove a risk you wrote down, but they will never
 see the one you graded away as fine.
 
+**In a changed hunk: record the risk, not the reassurance.** Put the falsifiable
+risk in `claim`, set `needsProbe: true`, and leave the reasoning that reassured
+you in the discharge field.
+
+| don't write | write |
+|---|---|
+| `MAX_USER_PAGES is properly enforced` | `if the page cap fires, the roster returns truncated with no signal to the caller` |
+| `createSlackClient sets explicit retry and 429 handling` | `a 429 from chat.postMessage is not retried` |
+| `strictDryRun validates dryRun is boolean` | `a non-object JSON body reaches \`'dryRun' in body\` and throws` |
+
+Same reading, same evidence. Only the right column can be probed — and the probe
+is the only thing that moves a verdict in the direction you graded against. If
+you were right, it gets refuted and withheld, and the bar was tested rather than
+asserted.
+
+Measured on `1667`: survey stood at four of the five gold defects and wrote the
+left column at each. The one gold that got posted is the one it wrote as the
+right column.
+
 ## Output
 
 Append one JSON object per line to `.lastlight/pr-review/hypotheses/enforcement.jsonl`,
