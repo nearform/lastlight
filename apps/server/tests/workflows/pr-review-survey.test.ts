@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { getWorkflow, loadPromptTemplate } from "#src/workflows/loader.js";
+import { getWorkflow, loadPromptTemplate, loadSkillRaw } from "#src/workflows/loader.js";
 import { BRANCH_CONTEXT_HEADING } from "#src/workflows/handlers/fanout.js";
 import { renderTemplate } from "lastlight-workflow-engine";
 import type { PhaseDefinition, TemplateContext } from "lastlight-workflow-engine";
@@ -678,4 +678,50 @@ describe("AC4 — regression: the `spec` prompt must not contradict its own bloc
       expect(rendered, `survey-${family}.md`).not.toMatch(/\{\{|\}\}/);
     }
   });
+});
+
+// ── One home per rule ───────────────────────────────────────────────────────
+// Every survey branch reads `survey-pass/SKILL.md` as its first action — 40 of
+// 40 branches across one 8-case arm, because the prompt's opening line tells it
+// to. So a rule stated in BOTH the skill and the prompt is read twice per
+// branch and paid five times per case.
+//
+// The hedge that created the duplication was reasonable — Pi surfaces skills as
+// a name+description catalogue and reads SKILL.md on demand, so anything
+// load-bearing got copied into the prompt to guarantee it was seen. The read is
+// now measured, so the copy is waste.
+//
+// Rule: shared survey guidance lives in the SKILL. A prompt carries the family's
+// question, its obligations, its output file, and whatever needs a {{template}}
+// (skills are never rendered, so `{{baseBranch}}` cannot live in one).
+describe("shared survey guidance has ONE home — the skill, not six prompts", () => {
+  const skill = loadSkillRaw("survey-pass");
+
+  // Markdown wraps, so compare on collapsed whitespace rather than exact runs.
+  const flat = (s: string) => s.replace(/\s+/g, " ").toLowerCase();
+
+  // Each entry is a distinctive fragment of the RULE ITSELF — never of a
+  // pointer to it. "see the survey-pass skill for X" is the shape we want in a
+  // prompt; restating X is what this forbids.
+  const SKILL_ONLY = [
+    "the reassurance is the direction nothing downstream can flip",
+    "they will never see one you graded away as fine",
+    "deleting evidence on behalf of a stage that has not run yet",
+    "read code from this local checkout, never the api",
+  ];
+
+  for (const phrase of SKILL_ONLY) {
+    it(`"${phrase.slice(0, 40)}…" is in the skill`, () => {
+      expect(flat(skill)).toContain(flat(phrase));
+    });
+
+    it(`"${phrase.slice(0, 40)}…" is not restated in any prompt`, () => {
+      for (const family of BRANCH_FAMILIES) {
+        expect(
+          flat(promptText(family)),
+          `survey-${family}.md restates a rule the skill already owns`,
+        ).not.toContain(flat(phrase));
+      }
+    });
+  }
 });
