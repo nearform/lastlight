@@ -36,12 +36,7 @@ evidence on behalf of a stage that has not run yet.
 here it is not even a reason to hesitate: write it down with what you do and do
 not know.
 
-The split is measured, not stylistic. Google's AutoCommenter found a single
-**global** confidence threshold (`t = 0.98`) catastrophic — roughly **80% of the
-predictions it discarded as below-threshold were correct anyway**. Replacing it
-with per-check thresholds raised recall without costing precision. The gate is
-worth having at the one point where a wrong finding is actually paid for, and is
-expensive everywhere upstream of it. You are upstream of it.
+The split is measured, not stylistic: Google's AutoCommenter found a single **global** confidence threshold catastrophic — ~80% of what it discarded as below-threshold was correct anyway. A precision gate is worth having at the one point where a wrong finding is paid for, and expensive everywhere upstream of it. **You are upstream of it.**
 
 ## Workspace
 
@@ -53,9 +48,7 @@ your cwd **is** the repo (`ls -la` shows `.git/` directly). Use `git` / `read` /
 relative, never absolute.** The skill files you were handed are absolute paths
 under `…/.lastlight-skills/`, and that directory is a **sibling of the checkout,
 one level above you**. Joining a `.lastlight/…` path onto the directory your
-skills came from lands outside the repo and reads nothing. Measured, not
-hypothetical: it cost 23 of 120 survey branches their seeded obligations across
-three runs.
+skills came from lands outside the repo and reads nothing — it cost 23 of 120 survey branches their seeded obligations.
 
 **Read code from this local checkout, never the API.** Do not call
 `github_get_pull_request_diff`, `github_list_pull_request_files` or

@@ -42,11 +42,7 @@ colleague who read the diff — about *their* change, in the vocabulary of *thei
 codebase. Say what is wrong and what it costs; never how this review was
 produced, how many passes ran, or what any of them concluded.
 
-Measured on a real pull request, where a posted summary opened: *"This
-adjudication keeps those findings reconciled as not applicable and adds the
-hypothesis ledger…"*. Three internal terms in one sentence, on a PR about a
-search box. The author cannot act on any of it, and every word of it is
-attention spent on us instead of on their code.
+A real posted summary opened *"This adjudication keeps those findings reconciled as not applicable and adds the hypothesis ledger…"* — three internal terms in one sentence, none of them actionable, every word attention spent on us instead of on their code.
 
 Two consequences worth stating, because they are the cases that tempt a leak:
 
@@ -67,9 +63,7 @@ your cwd **is** the repo (`ls -la` shows `.git/` directly). Use `git` / `read` /
 relative, never absolute.** The skill files you were handed are absolute paths
 under `…/.lastlight-skills/`, and that directory is a **sibling of the checkout,
 one level above you**. Joining a `.lastlight/…` path onto the directory your
-skills came from lands outside the repo and reads nothing. Measured, not
-hypothetical: it cost 23 of 120 survey branches their seeded obligations across
-three runs.
+skills came from lands outside the repo and reads nothing — it cost 23 of 120 survey branches their seeded obligations.
 
 **Read code from this local checkout, never the API.** Do not call
 `github_get_pull_request_diff`, `github_list_pull_request_files` or

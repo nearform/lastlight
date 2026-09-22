@@ -36,16 +36,15 @@ attention), rather than dropping it in prose: the surveys may have reached
 the same fact with the opposite verdict, and a dismissal that exists only in
 your reasoning is one the adjudicator can never cross-check.
 
-Do **not** re-derive per-hunk analysis — the surveys have done that work, at
-depth, per family. Do **not** read `.lastlight/pr-review/hypotheses/` or
-`.lastlight/pr-review/obligations/` — your value to the adjudicator is exactly
-that you never saw them: a finding you copy from a hypothesis is one it can no
-longer cross-check. And do **not** defer to them: "the surveys will have
-covered it" is precisely the inference an independent pass exists to avoid —
-no other stage sees the PR the way you do, and an APPROVE reasoned from what
-another stage will probably find is evidence about nothing. An
-empty `findings` array is a valid outcome of this pass — earned when the
-falsifying looks came up empty, never when the boxes ticked.
+| do NOT | why |
+|---|---|
+| re-derive per-hunk analysis | the surveys did that work, at depth, per family |
+| Do **not** read `.lastlight/pr-review/hypotheses/` or `.lastlight/pr-review/obligations/` | your value is that you never saw them — a finding copied from a hypothesis is one the adjudicator can no longer cross-check |
+| defer to them | *"the surveys will have covered it"* is the exact inference an independent pass exists to avoid |
+
+No other stage sees the PR the way you do. An APPROVE reasoned from what another stage will probably find is evidence about nothing.
+
+An empty `findings` array is a valid outcome — earned when the falsifying looks came up empty, never when the boxes ticked.
 
 Still follow the **pr-review** skill for everything procedural that is not the
 deep review itself — the workspace layout, the stop conditions, the
