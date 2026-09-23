@@ -171,6 +171,63 @@ npx tsx apps/evals/scripts/micro-survey.ts \
 - The obligations block tells the pass *"write it at `severity: "Minor"` and let a later phase decide what is worth posting"* (`code-facts/src/seed-render.ts`), while the skill's tier table asks for a real judgement. **These pull in opposite directions** and that tension is a prime suspect for both failure modes — the all-`Minor` collapse and the false Criticals.
 - `unknown` severities are not harmless: `rankOf` reads a missing or unrecognised severity as `important` (weight 2), so they land mid-rank by default. Three of the five families on `1641` emitted rows with no severity at all.
 
+### Baseline measured (2026-09-23) — `1641` / `spec`, post-`noSkills`
+
+**Haiku 4.5 — the model the pipeline runs, and the one that exhibits the failure.** 4 repeats, $1.40 (`spec-canary-haiku`):
+
+| repeat | rows | Critical | Important | Minor | above-Minor |
+|---|---|---|---|---|---|
+| 1 | 10 | 0 | 1 | 9 | 1 |
+| 2 | 10 | **4** | **5** | 1 | **9** ← blow-up |
+| 3 | 20 | 0 | 2 | 18 | 2 |
+| 4 | 10 | 0 | 1 | 9 | 1 |
+
+**Blow-up rate 1/4.** Spreads: `critical 0/4/0/0`, `minor 9/1/18/9`. Three repeats are well-behaved and one **inverts completely** — this is an occasional total collapse of tier discipline, not a drift. Row count moves independently (10/10/20/10): repeat 3 produced twice the rows and stayed calm, so "more rows ⇒ more Criticals" is not the mechanism.
+
+This also explains the arms: arm 1 hit the collapse on `1641` and arm 2 did not. Two samples of one bimodal process, not two behaviours.
+
+**`glm-5p3-flash` — 0/6 blow-ups, and that is NOT a pass.** 6 repeats, $0.344: 61 rows, **zero `Critical` ever**, two `Important` in total. That is the all-`Minor` collapse, the same one Sonnet-5 shows on `enforcement` (12/13/12 rows all `Minor`). A model that never uses the top tiers cannot mis-grade a zero-gold PR *and* cannot rank a real finding above a trivial one — which is severity's only job. **So flash cannot be the iteration model for this experiment**, despite being 4× cheaper. Iterate on Haiku (~$0.36/repeat).
+
+### All five families are implicated, in three different ways
+
+On `1641` (arm 1), severity failed differently per family — so a fix aimed only at `spec` would leave two other failure modes untouched:
+
+| family | rows | what went wrong |
+|---|---|---|
+| `spec` | 10 | **over-grading** — 9 `Critical` on a zero-gold PR |
+| `state` | 8 | **all-`Minor` collapse** — 8/8, no discrimination |
+| `contract` / `enforcement` / `security` | 1 / 2 / 1 | **no severity at all** — every row `unknown` |
+
+The third is the quietest and arguably the worst: `rankOf` reads a missing or unrecognised severity as **`important`** (weight 2), so those rows land mid-rank *by default rather than by judgement*, and nothing anywhere reports it.
+
+## NEXT STEPS — the plan for a fresh session
+
+The baseline above is accepted as sufficient to start from (operator decision, 2026-09-23). Do not re-derive it.
+
+**1. Write a new version of the survey prompts + skill, targeting severity across ALL FIVE families** — not `spec` alone. The three failure modes above are one problem (severity is not being decided) wearing three faces. Prime suspects, in order:
+
+- **The two instructions contradict each other.** `code-facts/src/seed-render.ts` tells the pass *"write it at `severity: "Minor"` and let a later phase decide what is worth posting"*, while `survey-pass/SKILL.md`'s tier table asks for a real judgement with a trust-boundary bar on `Critical`. **One of them should own severity.** This is the most likely single cause of both the all-`Minor` collapse and the blow-ups.
+- **`spec`'s brief is restatement-adjacent** — its job is checking the PR description's claims — and the blow-up rows are restatements of the intended change, which the skill's "Not findings" table already forbids. That rule is not binding on this branch.
+- **Nothing forces a severity to be written at all**, hence the `unknown` rows. Consider making it non-optional in the discharge contract, or deriving it.
+
+**2. Run 8 repeats per arm on Haiku**, baseline vs candidate, on `1641`/`spec`:
+
+```bash
+T=eval-results/pr-review-config/2026-09-22_191307-e014b96/sessions/prreview__skillspro-1641__*/trial-1/08-survey_branch_spec.jsonl
+npx tsx apps/evals/scripts/micro-survey.ts \
+  --fixture ~/lastlight-micro-fixtures/arm1/prreview__skillspro-1641 \
+  --family spec --spec-from $T \
+  --instances evals/datasets/pr-review/instances.json \
+  --repeats 8 --model anthropic/claude-haiku-4-5-20251001 \
+  --label spec-canary-<candidate>
+```
+
+~$3 per arm, ~40 min. Read `severity.critical + severity.important`; a repeat is a **blow-up** above 2 on a zero-gold PR. Compare blow-up rate against the 1/4 baseline. **If the comparison is not decisive, run more repeats rather than concluding** — 8 vs 4 on a ~25% rate is still weak, and the house rule is that an indecisive result is indecisive, not a pass.
+
+**3. Check the other families too** — `state` (all-`Minor`) and any of `contract`/`enforcement`/`security` (missing severity) on the same fixture, which need no `--spec-from`.
+
+**4. The counterpart case is MANDATORY before accepting any candidate.** The canary measures precision only, and grading everything `Minor` scores a perfect 0 — which `glm-5p3-flash` already demonstrates. Pick a fixture WITH gold (e.g. `1667`, 5 gold, or `1587-r3`, 4 gold) and check that real findings are lifted above `Minor`. A candidate that improves the canary while flattening the gold case has made things worse.
+
 ### Candidate levers, untested
 
 1. **Reconcile the two instructions** — the seed-render default-to-`Minor` line vs the skill's tier table. One of them should own severity.
