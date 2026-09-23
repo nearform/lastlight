@@ -79,8 +79,11 @@ import { basename, join, resolve } from "node:path";
 
 import { renderTemplate } from "lastlight-workflow-engine";
 
-/** The four families whose obligations are seeded to disk by `lastlight-facts seed`. */
-const FAMILIES = ["contract", "enforcement", "security", "state"] as const;
+/** The four families whose obligations are seeded to disk by `lastlight-facts seed`.
+ * `spec` is the fifth branch but its obligations are built HARNESS-side and
+ * rendered straight into the prompt as `{{specObligations}}`, so there is no
+ * `obligations/spec.md` to replay — see `--spec-from`. */
+const FAMILIES = ["contract", "enforcement", "security", "state", "spec"] as const;
 type Family = (typeof FAMILIES)[number];
 
 /** Mirrors `BRANCH_CONTEXT_HEADING` in `apps/server/src/workflows/handlers/fanout.ts`.
@@ -103,6 +106,10 @@ const thinking = flag("--thinking");
 const repeats = Number(flag("--repeats") ?? "1");
 const label = flag("--label") ?? "micro";
 const instancesPath = flag("--instances");
+/** Mirrors `gate.timeoutSeconds` (config/default.yaml). Core always sets it; so must this. */
+const gateTimeoutSeconds = Number(flag("--gate-timeout") ?? "900");
+/** A preserved `NN-survey_branch_spec.jsonl`, to recover `{{specObligations}}`. */
+const specFrom = flag("--spec-from");
 /** Drop the workspace `AGENTS.md` — an ABLATION of the agent-context, not the default. */
 const noAgentsMd = has("--no-agents-md");
 /** Ambient skill discovery is OFF, which is what core now does on every backend
@@ -121,7 +128,13 @@ if (!fixture || !family) {
   process.exit(2);
 }
 if (!FAMILIES.includes(family)) {
-  console.error(`--family must be one of ${FAMILIES.join(" | ")} (spec is harness-built and has no seeded block to replay)`);
+  console.error(`--family must be one of ${FAMILIES.join(" | ")}`);
+  process.exit(2);
+}
+if (family === "spec" && !specFrom) {
+  console.error("--family spec needs --spec-from <NN-survey_branch_spec.jsonl>: its obligations are built harness-side\n" +
+    "and rendered into the prompt, so they exist only inside a preserved transcript. Passing none would\n" +
+    "render the prompt's `no obligations were attached` branch and measure a pass that never ran.");
   process.exit(2);
 }
 
@@ -166,6 +179,33 @@ function readRows(checkout: string, fam: Family): Row[] {
 /** A LEXICAL tripwire, not a judge — see the header. Reassurance is a claim that
  * asserts the code is fine and asks for no probe. */
 const REASSURANCE = /\b(correctly|properly|is enforced|are enforced|is validated|are validated|is handled|are handled|ensures|guarantees|no issue|as expected|is safe|is correct)\b/i;
+/**
+ * Severity counts, normalised the way the POSTER reads them.
+ *
+ * Severity is not decoration: after WP6a it is effectively the only ranking
+ * input for what reaches a maintainer. `review-poster.ts` ranks on
+ * `SEVERITY_WEIGHT = { critical: 3, important: 2, minor: 1 }` alone —
+ * `confidence` was dropped from `rankOf` (AUROC 0.228, inverted) and the
+ * per-family thresholds are gone — so with three distinct values, document
+ * order decides most of the body cut and `maxBodyComments` trims the tail.
+ * A run that grades two rows `Important` instead of `Minor` can therefore post
+ * a different set from an identical run.
+ *
+ * `unknown` mirrors the poster's own fallback: a missing or unrecognised
+ * severity is read as `important` there (`rankOf`), so it does NOT drop out —
+ * it lands mid-rank. Counting it separately is what makes that visible rather
+ * than silently folded into the `Important` bucket.
+ */
+function severityCounts(rows: Row[]): Record<string, number> {
+  const out: Record<string, number> = { critical: 0, important: 0, minor: 0, unknown: 0 };
+  for (const r of rows) {
+    const k = (r.severity ?? "").trim().toLowerCase();
+    if (k === "critical" || k === "important" || k === "minor") out[k]++;
+    else out.unknown++;
+  }
+  return out;
+}
+
 function summarise(rows: Row[]) {
   const needs = rows.filter((r) => r.needsProbe === true).length;
   const reassurance = rows.filter((r) => r.needsProbe !== true && REASSURANCE.test(r.claim ?? "")).length;
@@ -174,6 +214,7 @@ function summarise(rows: Row[]) {
     needsProbe: needs,
     needsProbePct: rows.length ? (100 * needs) / rows.length : 0,
     reassuranceShaped: reassurance,
+    severity: severityCounts(rows),
   };
 }
 
@@ -181,7 +222,7 @@ const { taskDir, repo: repoDirName, checkout } = resolveCheckout(fixture);
 assertHeadingInSync();
 
 const obligationsPath = join(checkout, ".lastlight/pr-review/obligations", `${family}.md`);
-if (!existsSync(obligationsPath)) throw new Error(`no seeded obligations at ${obligationsPath}`);
+if (family !== "spec" && !existsSync(obligationsPath)) throw new Error(`no seeded obligations at ${obligationsPath}`);
 
 // The prompt, rendered exactly as the fan-out renders it, then the obligations
 // block appended under the same heading the harness uses.
@@ -200,8 +241,64 @@ const ctx = {
   baseBranch: pr.base_ref ?? "main",
   prTitle: pr.title ?? "",
 };
+/**
+ * Recover `{{specObligations}}` from a preserved branch transcript.
+ *
+ * The obligations for `spec` are built harness-side (`renderContext` →
+ * `specObligations`) and rendered INTO the prompt, so unlike the other four
+ * families there is no file on disk to replay. They are, however, sitting
+ * verbatim inside the rendered prompt the branch was given — the first `user`
+ * message of its session — so they can be sliced back out.
+ *
+ * The slice is anchored, not guessed: render the CURRENT template with a
+ * sentinel in the placeholder, split on it, and take the recorded prompt
+ * between the same two anchors. That means the surrounding prompt can still be
+ * edited freely (which is the point — iterating on it is the experiment) while
+ * the obligations stay byte-identical to the ones the arm actually discharged.
+ * If either anchor fails to match, the template has moved too far from the
+ * recorded run to splice safely and this REFUSES rather than silently
+ * measuring a pass with no obligations.
+ */
+function recoverSpecObligations(template: string, transcriptPath: string): string {
+  const SENTINEL = "__LL_SPEC_OBLIGATIONS__";
+  const withSentinel = renderTemplate(template, { ...ctx, specObligations: SENTINEL } as never);
+  const [pre, post] = withSentinel.split(SENTINEL);
+  if (pre === undefined || post === undefined) throw new Error("the prompt template no longer renders {{specObligations}}");
+
+  let recorded = "";
+  for (const line of readFileSync(transcriptPath, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    let o: { type?: string; message?: { content?: unknown } };
+    try { o = JSON.parse(line); } catch { continue; }
+    if (o.type !== "user") continue;
+    const c = o.message?.content;
+    recorded = typeof c === "string" ? c : Array.isArray(c) ? c.map((b) => (b as { text?: string }).text ?? "").join("") : "";
+    break;
+  }
+  if (!recorded) throw new Error(`no first user message in ${transcriptPath}`);
+
+  // Anchor on a generous tail/head of the static halves: enough to be unique,
+  // short enough that an unrelated edit elsewhere in the prompt does not break it.
+  const a = pre.trimEnd().slice(-160), b = post.trimStart().slice(0, 160);
+  const i = recorded.indexOf(a), j = recorded.indexOf(b, i + a.length);
+  if (i < 0 || j < 0) {
+    throw new Error(
+      "could not locate {{specObligations}} in the transcript — the template has diverged from the recorded run.\n" +
+      "Splicing anyway would measure a different prompt than the one the arm ran.",
+    );
+  }
+  return recorded.slice(i + a.length, j).trim();
+}
+
+if (family === "spec") {
+  (ctx as Record<string, unknown>).specObligations = recoverSpecObligations(readFileSync(promptPath, "utf8"), specFrom!);
+}
 const rendered = renderTemplate(readFileSync(promptPath, "utf8"), ctx as never);
-const prompt = [rendered, "", BRANCH_CONTEXT_HEADING, "", readFileSync(obligationsPath, "utf8")].join("\n");
+// `spec` carries its obligations INSIDE the rendered prompt; the other four get
+// theirs appended under the heading the fan-out uses.
+const prompt = family === "spec"
+  ? rendered
+  : [rendered, "", BRANCH_CONTEXT_HEADING, "", readFileSync(obligationsPath, "utf8")].join("\n");
 if (/\{\{|\}\}/.test(rendered)) {
   console.warn("! unrendered {{marker}} left in the prompt — the template context is missing a key");
 }
@@ -290,16 +387,23 @@ for (let i = 1; i <= repeats; i++) {
     skillPaths: [join(skillDir, "survey-pass")],
     noSkills: !discoverSkills,
     sandbox: "none",
+    // Core passes this on EVERY agent run, and agentic-pi arms its bash reaper
+    // only when it is set (`gate-timeout.ts`: an absent timeout was "left
+    // alone", which is how one probe ran unbounded for 7h29m). Not passing it
+    // made this replay unfaithful in the one way that can cost hours.
+    // Mirrors `gate.timeoutSeconds` in `config/default.yaml`.
+    gateTimeoutSeconds,
     ...(thinking ? { thinking } : {}),
   })) as unknown as { ok?: boolean; stats?: { cost?: number; turns?: number; toolCalls?: number } };
 
   const rows = readRows(work, family);
   const s = summarise(rows);
-  results.push({ ...s, costUsd: r.stats?.cost ?? 0 } as never);
+  results.push({ ...s, costUsd: r.stats?.cost ?? 0, durationSec: (Date.now() - started) / 1000, turns: r.stats?.turns ?? null, toolCalls: r.stats?.toolCalls ?? null } as never);
   claims.push(rows.map((x) => `${x.needsProbe === true ? "PROBE" : "  .  "} [${x.severity ?? "?"}] ${(x.claim ?? "").slice(0, 110)}`));
   const secs = ((Date.now() - started) / 1000).toFixed(0);
   console.log(`\nrepeat ${i}/${repeats}  ${secs}s  $${(r.stats?.cost ?? 0).toFixed(3)}  tools=${r.stats?.toolCalls ?? "?"}  ok=${r.ok !== false}`);
   console.log(`  rows ${s.rows}  needsProbe ${s.needsProbe} (${s.needsProbePct.toFixed(1)}%)  reassurance-shaped ${s.reassuranceShaped}`);
+  console.log(`  severity  critical ${s.severity.critical}  important ${s.severity.important}  minor ${s.severity.minor}` + (s.severity.unknown ? `  unknown ${s.severity.unknown}` : ""));
   for (const c of claims[i - 1]) console.log(`    ${c}`);
   rmSync(scratch, { recursive: true, force: true });
   writeReport(false);
@@ -312,6 +416,14 @@ const fired = results.filter((r) => r.needsProbe > 0).length;
 console.log(`\n== ${label} · ${family} · ${model}`);
 console.log(`   baseline needsProbe ${baseline.needsProbePct.toFixed(1)}%   replay ${pct.map((p) => p.toFixed(1) + "%").join(" / ")}`);
 console.log(`   FIRE RATE ${fired}/${results.length} repeats asked for at least one probe`);
+for (const tier of ["critical", "important", "minor", "unknown"] as const) {
+  const v = results.map((r) => (r as unknown as { severity: Record<string, number> }).severity[tier]);
+  if (!v.some((n) => n > 0)) continue;
+  const lo = Math.min(...v), hi = Math.max(...v);
+  // Severity drives the posting rank on its own, so the SPREAD across identical
+  // runs is the number that says whether the attention boundary is stable.
+  console.log(`   severity ${tier.padEnd(9)} ${v.join(" / ")}${lo === hi ? "  (stable)" : `  (spread ${hi - lo})`}`);
+}
 if (results.length < 8) {
   console.log(`   (${results.length} repeats — this metric is BIMODAL, so treat it as ${results.length} coin flips; 8+ before ranking anything)`);
 }

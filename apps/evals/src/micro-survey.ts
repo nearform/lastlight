@@ -48,9 +48,21 @@ export interface MicroSurveyStats {
   reassuranceShaped: number;
 }
 
-/** One replayed repeat: the stats plus what that repeat cost. */
+/** One replayed repeat: the stats plus what that repeat cost — in money and in
+ * time. Everything but the stats themselves is OPTIONAL, and absent means NOT
+ * RECORDED: reports written before the script measured latency carry none of
+ * these, and `turns`/`toolCalls` can be `null` even on a report that does. A
+ * consumer must render absence as absence, never as a measured zero — see
+ * {@link microSeries}. */
 export interface MicroSurveyResult extends MicroSurveyStats {
   costUsd?: number;
+  /** Wall clock for this repeat, seconds. */
+  durationSec?: number | null;
+  /** Assistant turns the repeat spent; `null` when the harness could not read
+   * them. The usual explanation for a slow repeat. */
+  turns?: number | null;
+  /** Tool calls the repeat made; `null` when unreadable. */
+  toolCalls?: number | null;
 }
 
 /** One `eval-results/micro-survey/*.json` file, verbatim. */
@@ -134,6 +146,19 @@ export interface MicroSurveyEntry {
   reassuranceShaped: number[];
   /** Summed over the repeats that completed. */
   costUsd: number;
+  /**
+   * Wall clock per completed repeat, seconds — `null` for a repeat whose report
+   * predates the measurement. Carried as an ARRAY, like every other per-repeat
+   * series here, because the honest aggregate is the points plus a range and
+   * the list must be able to show that without fetching the whole report.
+   * Read it through {@link microSeries}, and never without
+   * {@link MICRO_LATENCY_CAVEAT}.
+   */
+  durationSec: (number | null)[];
+  /** Assistant turns per completed repeat; `null` where unrecorded. */
+  turns: (number | null)[];
+  /** Tool calls per completed repeat; `null` where unrecorded. */
+  toolCalls: (number | null)[];
 }
 
 export interface MicroSurveyIndex {
@@ -153,8 +178,15 @@ export interface MicroSurveyIndex {
  * render `undefined/undefined`.
  */
 export function withMicroEntryDefaults(e: MicroSurveyEntry): MicroSurveyEntry {
-  if (typeof e?.repeatsDone === "number" && typeof e.firedRepeats === "number") return e;
+  const hasLive = typeof e?.repeatsDone === "number" && typeof e?.firedRepeats === "number";
+  const hasLatency =
+    Array.isArray(e?.durationSec) && Array.isArray(e?.turns) && Array.isArray(e?.toolCalls);
+  if (hasLive && hasLatency) return e;
   const pcts = Array.isArray(e?.needsProbePct) ? e.needsProbePct : [];
+  // An older index recorded no latency at all. One `null` per completed repeat
+  // is the truthful filler: the repeats happened, nobody timed them.
+  const unmeasured = (xs: unknown): (number | null)[] =>
+    Array.isArray(xs) ? (xs as (number | null)[]) : pcts.map(() => null);
   const repeatsDone = typeof e?.repeatsDone === "number" ? e.repeatsDone : pcts.length;
   const firedRepeats =
     typeof e?.firedRepeats === "number" ? e.firedRepeats : pcts.filter((p) => num(p) > 0).length;
@@ -167,6 +199,9 @@ export function withMicroEntryDefaults(e: MicroSurveyEntry): MicroSurveyEntry {
     heartbeat: typeof e?.heartbeat === "string" ? e.heartbeat : null,
     ambientSkills: typeof e?.ambientSkills === "boolean" ? e.ambientSkills : null,
     agentsMd: typeof e?.agentsMd === "boolean" ? e.agentsMd : null,
+    durationSec: unmeasured(e?.durationSec),
+    turns: unmeasured(e?.turns),
+    toolCalls: unmeasured(e?.toolCalls),
   };
 }
 
@@ -271,6 +306,10 @@ export function parseMicroStamp(id: string): string | null {
 }
 
 const num = (x: unknown): number => (typeof x === "number" && Number.isFinite(x) ? x : 0);
+/** The optional counterpart of {@link num}: a value that was never recorded
+ * stays `null` rather than becoming a measured zero. */
+const opt = (x: unknown): number | null =>
+  typeof x === "number" && Number.isFinite(x) ? x : null;
 
 /**
  * One parsed file → its index entry, or `null` if it isn't a micro-survey
@@ -321,5 +360,64 @@ export function summariseMicroReport(
     rows: results.map((x) => num(x?.rows)),
     reassuranceShaped: results.map((x) => num(x?.reassuranceShaped)),
     costUsd: results.reduce((a, x) => a + num(x?.costUsd), 0),
+    // `opt`, not `num`: an unmeasured repeat must not land in the band as a
+    // zero-second one. It carries `null` all the way to the screen.
+    durationSec: results.map((x) => opt(x?.durationSec)),
+    turns: results.map((x) => opt(x?.turns)),
+    toolCalls: results.map((x) => opt(x?.toolCalls)),
+  };
+}
+
+// ── latency ─────────────────────────────────────────────────────────────────
+
+/**
+ * The caveat that must ride with **every arm-level latency aggregate**, in the
+ * list and in the detail view alike. Permanent, not a dismissible hint.
+ *
+ * Micro-surveys are run `--sandbox none`, in process, and several are routinely
+ * launched at once on one host (the model screen ran six side by side). Repeats
+ * that overlap contend for CPU, so wall clock is inflated by an amount nothing
+ * in the report records — there is no concurrency field to read and none is
+ * inferred here, because a guess would be indistinguishable from a measurement.
+ * Cost, fire rate, needsProbe% and severity are unaffected: they are counts over
+ * what the model produced, not over how long the box took to produce it.
+ */
+export const MICRO_LATENCY_CAVEAT =
+  "Wall clock is only comparable between runs KNOWN to have run serially. Micro-surveys run in-process (--sandbox none) and are often launched several at a time on one host; overlapping repeats contend for CPU and nothing in the report records whether that happened. Cost, fire rate and severity are unaffected.";
+
+/**
+ * A per-repeat series that may be partly unmeasured, summarised the only way
+ * this module summarises anything: the points, a min–max range, and — for a
+ * quantity that ACCUMULATES, like seconds or turns — a total.
+ *
+ * Deliberately no mean and no SD, for the same reason {@link microRange} offers
+ * none: a handful of repeats at temperature 1 supports a spread and nothing
+ * finer. And deliberately `null`-preserving: `missing` counts the repeats that
+ * were never timed, so a partial band can say so instead of quietly reporting a
+ * total over half its repeats as if it were the whole run.
+ */
+export interface MicroSeries {
+  /** The finite points, in repeat order, with the unmeasured repeats dropped. */
+  measured: number[];
+  /** Repeats carrying no value — absent field, or an explicit `null`. */
+  missing: number;
+  /** Min–max over {@link measured}; `null` when nothing was measured. */
+  range: { min: number; max: number } | null;
+  /** Sum over {@link measured}; `null` when nothing was measured — a total of
+   * nothing is not zero. */
+  total: number | null;
+  /** Is there anything to show at all? */
+  any: boolean;
+}
+
+export function microSeries(values: readonly (number | null | undefined)[] | undefined): MicroSeries {
+  const list = Array.isArray(values) ? values : [];
+  const measured = list.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+  return {
+    measured,
+    missing: list.length - measured.length,
+    range: microRange(measured),
+    total: measured.length ? measured.reduce((a, b) => a + b, 0) : null,
+    any: measured.length > 0,
   };
 }

@@ -32,7 +32,7 @@ A fixture holds the checkout, the staged diff, the seeded obligations *and their
 | **Copy the TASK dir, not the checkout** | the composed `AGENTS.md` (12,540 chars of operational rules) is a **sibling** of the repo, and Pi auto-loads the first `AGENTS.md` walking **up** from cwd. Copying only the checkout silently runs the agent with no persona or rules at all. |
 | **Stage the skill fresh from core**, never the fixture's frozen bundle | iterating on `skills/survey-pass/SKILL.md` is the entire point; the bundle is a snapshot of the old one. |
 | **Ambient skill discovery follows core** (`noSkills: true` since `559a7fa6`) | pre-fix, Pi's discovery added whatever was on the host. `--ambient-skills` reproduces that, and exists ONLY to re-derive an archived number. |
-| **`spec` is unsupported** | its obligations are built harness-side, not seeded to `obligations/spec.md`. An empty block would read as a clean family rather than an unrunnable one. |
+| **`spec` needs `--spec-from`** | its obligations are built harness-side, not seeded to `obligations/spec.md`, so they exist only inside a preserved transcript. Without the flag the prompt renders its *"no obligations were attached"* branch and measures a pass that never ran — so the script refuses instead. |
 | **Verify a claim about the agent's context against the run, not the code** | see "ambient skills" below — the doc comment and the reality disagreed twice, in both directions. |
 
 ## The metrics, and the traps in them
@@ -100,11 +100,89 @@ Two distinct problems. **`Critical` is a lottery on the `1587` family** — 0→
 
 Also: **`unknown` severities exist** (4–8 rows on several cases). They do not drop out — `rankOf` reads a missing/unrecognised severity as `important` (weight 2), so they land mid-rank by default rather than by judgement.
 
-## Levers to test, ranked
+### The model screen (2026-09-23) — parked, and what it settled
 
-1. **Severity stability.** Now ahead of the discharge rule: severity decides whether a finding is *posted at all*, it swings by ±20 points across identical arms, and it collapsed on the precision canary. Questions: is the trust-boundary bar in `survey-pass/SKILL.md` doing any work? Should severity be **derived** (from probe verdict + category + mechanism completeness) rather than model-assigned? Would a two-value scale be more stable than three? Per-severity counts and a spread line are now emitted per repeat.
+Nine models, `enforcement` on `1587-r3`, 3 repeats each. **Screening only** — 3 repeats cannot rank (see `fireRate` above).
+
+| model | fired | cost / 3 repeats |
+|---|---|---|
+| `glm-5p3-flash` | 3/3 | **$0.089** |
+| `haiku-4-5` (incumbent) | 3/3 | $0.67 |
+| `glm-5p3` | 3/3 | $1.279 |
+| `sonnet-4-6` | 2/2 (3rd killed by operator error) | $1.34 |
+| `sonnet-5` | 3/3 | $1.51 |
+
+`kimi-k3`, `deepseek-v4p1-flash`, `qwen3p8-max`, `minimax-m3` were queued and not reached.
+
+**What it settled:** every model tested drives the agent loop and holds the discharge contract — there is no "this model cannot do the task" result hiding here. And `glm-5p3-flash` matched its full-size sibling on fire rate, row count and severity mix at **1/14th the cost**, which makes it the obvious iteration model and a serious candidate for the five-branch fan-out (survey is ~40% of pipeline spend).
+
+**What it did not settle, and why it was parked:** nothing about *quality*. Fire rate separates broken from working, not better from worse, and at 3 repeats the bands overlap completely. Pushing to 8–10 repeats per model would cost hours to answer a question that is not the bottleneck. Severity is.
+
+Also: `models.json` is stale — it still lists `glm-5p2`, `deepseek-v4-pro`, `gpt-oss-120b`. The live Fireworks registry is the source of truth.
+
+## The severity experiment (open — this is the active thread)
+
+**The question.** Severity is the only ranking input to what a maintainer sees, and it is neither stable nor discriminating. Can a prompt change make it either?
+
+### Why `1641` / `spec` is the right fixture
+
+`1641` is the campaign's **empty-gold precision canary** — a PR with **zero** gold findings. So *any* row graded above `Minor` is wrong **by construction**, which makes the metric deterministic, judge-free and free to score. Target is **0**.
+
+Arm 1 graded **9 of 22 rows `Critical`** on it; arm 2 graded 0 Critical / 1 Important. And the nine came from exactly one branch:
+
+| family | rows | above-Minor |
+|---|---|---|
+| `spec` | 10 | **9** (all Critical) |
+| `state` | 8 | 0 |
+| `contract` / `enforcement` / `security` | 1 / 2 / 1 | 0 (all severity-less) |
+
+So the case-level instability is **one family mis-grading**, not diffuse drift.
+
+### The claims say what is wrong
+
+> `[Critical] The PR replaces the four .eslintrc* files (root, backend, sheets-scripts, forms-scripts) with …`
+> `[Critical] Apps Script globals (DriveApp, FormApp, Logger, MailApp, etc.) are restored for sheets-scripts/ …`
+> `[Critical] The prettier/prettier rule remains enabled and require-extensions is configured for the backend, …`
+
+These are **restatements of the intended change**, not findings. Two rules already forbid this and neither bound: the skill's *"Not findings"* table (*"If the diff is doing X on purpose, 'this does X' is a restatement, not a finding"*) and its `Critical` bar (*name the boundary the input crosses and a capability the supplier does not already have*).
+
+**So the first question is not "what rule do we add" but "why are two existing rules not binding on this branch."** `survey-spec.md`'s own job — checking the PR description's claims against the code — is inherently restatement-adjacent, and may be undercutting them.
+
+### Running it
+
+`spec` is the one family with no `obligations/spec.md`: its obligations are built harness-side and rendered into the prompt as `{{specObligations}}`. `--spec-from <NN-survey_branch_spec.jsonl>` recovers them from a preserved transcript — rendering the CURRENT template with a sentinel, splitting on it, and slicing the recorded prompt between the same anchors. The surrounding prompt stays editable (that is the experiment) while the obligations stay byte-identical to what the arm discharged. **It refuses rather than splices** when an anchor fails to match, because a silent miss would render the "no obligations were attached" branch and measure a pass that never ran.
+
+```bash
+T=eval-results/pr-review-config/2026-09-22_191307-e014b96/sessions/prreview__skillspro-1641__*/trial-1/08-survey_branch_spec.jsonl
+npx tsx apps/evals/scripts/micro-survey.ts \
+  --fixture ~/lastlight-micro-fixtures/arm1/prreview__skillspro-1641 \
+  --family spec --spec-from $T \
+  --instances evals/datasets/pr-review/instances.json \
+  --repeats 8 --model fireworks/accounts/fireworks/models/glm-5p3-flash \
+  --label spec-canary-<candidate>
+```
+
+~$0.03/repeat, so 8 repeats is ~$0.25 and minutes. Read `severity.critical + severity.important`; **target 0**.
+
+### Rules for this experiment
+
+- **Tuning on `glm-5p3-flash` may not transfer to Haiku**, which is what the pipeline runs. Flash is for iteration speed; any candidate that wins gets one confirmation run on Haiku before it is believed.
+- **A zero on the canary is necessary, not sufficient.** Grading everything `Minor` scores perfectly here and destroys the ranking signal — which is exactly what Sonnet-5 and `glm-5p3-flash` already do on `enforcement` (12/13/12 and 14/15 rows all `Minor`). **Any candidate must be checked against a case WITH gold** so it is not rewarded for refusing to use the top tiers at all. This is the trap that makes the canary alone misleading.
+- The obligations block tells the pass *"write it at `severity: "Minor"` and let a later phase decide what is worth posting"* (`code-facts/src/seed-render.ts`), while the skill's tier table asks for a real judgement. **These pull in opposite directions** and that tension is a prime suspect for both failure modes — the all-`Minor` collapse and the false Criticals.
+- `unknown` severities are not harmless: `rankOf` reads a missing or unrecognised severity as `important` (weight 2), so they land mid-rank by default. Three of the five families on `1641` emitted rows with no severity at all.
+
+### Candidate levers, untested
+
+1. **Reconcile the two instructions** — the seed-render default-to-`Minor` line vs the skill's tier table. One of them should own severity.
+2. **Make `spec` inherit the "Not findings" restatement rule explicitly**, since its brief invites restatement.
+3. **Derive severity rather than ask for it** — from probe verdict + category + mechanism completeness — which is what `computeTier` already does for the adjudicator's output.
+4. **Collapse to two tiers.** Three values with one ranking input may be more precision than the model can hold; `Important` vs `Minor` might be more stable.
+
+
+
+1. **Severity stability — ACTIVE, see "The severity experiment" above.** Ahead of the discharge rule: severity decides whether a finding is *posted at all*, it swings by ±20 points across identical arms, and it collapsed on the precision canary.
 2. **Why the discharge rule is inert.** It is read and ignored. Before rewriting it again, find out whether the model treats it as inapplicable (most rows are genuinely not in a changed hunk?) or simply overrides it. The micro-eval dumps every claim, so this is readable rather than inferable.
-3. **Model choice.** A screen across 8 models (3 Anthropic + 5 current Fireworks — `glm-5p3`, `kimi-k3`, `deepseek-v4p1-flash`, `qwen3p8-max`, `minimax-m3`) is the first real use. Screen at 3 repeats to separate *works* from *broken*, then 8–10 on survivors. Note `evals/models.json` is stale — it still lists `glm-5p2` / `deepseek-v4-pro` / `gpt-oss-120b`.
+3. **Model choice — PARKED**, see the model screen above. Everything works; `glm-5p3-flash` is 14× cheaper than its full sibling and is now the iteration model. Resume only if a quality question needs it.
 4. **`AGENTS.md` ablation** (`--no-agents-md`). Never measured in isolation; it is 12.5 KB of rules in every branch.
 5. **The cost of closing the ambient-skills hole.** Preliminary and inconclusive (bands overlap): ambient ON 41.7/41.7/41.7 vs OFF 16.7/0.0/41.7 and 0.0/0.0/41.7. At 8+ repeats this is answerable.
 6. **Temperature — blocked upstream.** `pi-ai` exposes `temperature?: number`, but `agentic-pi` builds its agent through `pi-coding-agent`'s `createAgentSession({ cwd, model, thinkingLevel, … })`, which does **not** surface it. Needs an upstream change. And survey runs under extended thinking, where Anthropic pins temperature to 1 — so it is only a live variable for non-thinking runs or non-Anthropic models.

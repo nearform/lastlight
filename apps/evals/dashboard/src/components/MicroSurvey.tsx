@@ -1,15 +1,18 @@
 import clsx from "clsx";
 
 import {
+  MICRO_LATENCY_CAVEAT,
   MICRO_RANKABLE_REPEATS,
   microRange,
   microRankable,
+  microSeries,
   microStatus,
+  type MicroSeries,
   type MicroStatus,
 } from "../../../src/micro-survey.js";
 import type { MicroSurveyEntry, MicroSurveyReport } from "../types";
 import { useMicroReport } from "../lib/api";
-import { fmtDate, fmtPct, fmtProbePct, modelDisplay } from "../lib/format";
+import { fmtDate, fmtPct, fmtProbePct, fmtSecs, modelDisplay } from "../lib/format";
 import { MICRO_TIER_KEY, useNavigate } from "../lib/router";
 
 /**
@@ -41,6 +44,16 @@ import { MICRO_TIER_KEY, useNavigate } from "../lib/router";
  *     and below {@link MICRO_RANKABLE_REPEATS} completed repeats it is labelled
  *     unrankable rather than hidden.
  *
+ *  4. **Latency is a first-class number, and a contaminated one.** A full
+ *     pr-review case is 23-47 minutes, so a model is being judged on speed as
+ *     well as behaviour and the wall clock belongs beside the cost, per repeat
+ *     and per arm. But micro-surveys run in-process and are routinely launched
+ *     several at a time on one host, and NOTHING in the report says whether
+ *     that happened — so every arm-level latency aggregate carries
+ *     {@link MICRO_LATENCY_CAVEAT} permanently, and no concurrency is invented
+ *     or inferred. Absent timings stay absent: a repeat written before the
+ *     script measured latency renders as an em dash, never as `0s`.
+ *
  * And one thing the markup exists to *prevent*: a dead run reading as a live
  * one. A report is rewritten after every repeat and its `live` flag is stuck
  * true if the script is killed, so {@link microStatus} — shared with the index —
@@ -64,6 +77,44 @@ function rangeText(values: number[]): string {
   const r = microRange(values);
   if (!r) return "—";
   return r.min === r.max ? fmtProbePct(r.min) : `${fmtProbePct(r.min)}–${fmtProbePct(r.max)}`;
+}
+
+// ── latency ─────────────────────────────────────────────────────────────────
+
+/** `2m 5s / 3m 1s / —` — every repeat in order, an untimed one as a dash. The
+ * points are the result here exactly as they are for needsProbe%. */
+function seriesList(values: (number | null)[], fmt: (x: number | null) => string): string {
+  return values.length ? values.map((v) => fmt(v)).join(" / ") : "—";
+}
+
+/** The min–max spread of a partly-measured series, in that series' own units.
+ * One point prints as itself — an observation, not a range. */
+function seriesRangeText(s: MicroSeries, fmt: (x: number | null) => string): string {
+  if (!s.range) return "—";
+  return s.range.min === s.range.max
+    ? fmt(s.range.min)
+    : `${fmt(s.range.min)}–${fmt(s.range.max)}`;
+}
+
+/** A plain count (turns, tool calls), or an em dash when it was never read. */
+const fmtCount = (x: number | null): string => (x === null || !Number.isFinite(x) ? "—" : String(x));
+
+/** "2 of 3 repeats timed" — said out loud whenever a total or a range is
+ * computed over only part of the band, so a partial total is never mistaken for
+ * the run's wall clock. */
+function partialNote(s: MicroSeries): string {
+  return s.missing > 0 ? ` · ${s.measured.length} of ${s.measured.length + s.missing} repeats timed` : "";
+}
+
+/** The permanent latency caveat, rendered wherever an arm-level aggregate is.
+ * Not a tooltip: the contamination is invisible in the data, so the warning
+ * cannot be something a reader has to go looking for. */
+function LatencyCaveat({ className = "" }: { className?: string }) {
+  return (
+    <p className={clsx("max-w-3xl font-mono text-2xs leading-5 text-warning/80", className)}>
+      <b className="font-semibold">wall clock is contaminated by concurrency.</b> {MICRO_LATENCY_CAVEAT}
+    </p>
+  );
 }
 
 // ── live / interrupted / complete ───────────────────────────────────────────
@@ -205,6 +256,134 @@ function ProvenanceChips({ entry }: { entry: MicroSurveyEntry }) {
   );
 }
 
+/**
+ * The arm-level latency line: total wall clock for the run, then the min–max
+ * spread of its repeats, then the turn/tool-call shape when the report recorded
+ * it — a model burning many turns per repeat is the usual reason it is slow.
+ *
+ * Total leads because that is what the operator actually waits for. Absent
+ * everywhere (an older report) it says so in words rather than printing zeros,
+ * and a band only partly timed says how much of it was.
+ */
+function LatencySummary({ entry, align = "left" }: { entry: MicroSurveyEntry; align?: "left" | "right" }) {
+  const dur = microSeries(entry.durationSec);
+  const turns = microSeries(entry.turns);
+  const tools = microSeries(entry.toolCalls);
+  if (!dur.any) {
+    return (
+      <div
+        className={clsx("text-2xs text-base-content/30", align === "right" && "text-right")}
+        title="This report was written before the micro-survey recorded latency. Not zero — unmeasured."
+      >
+        no wall clock recorded
+      </div>
+    );
+  }
+  const shape = [
+    turns.any ? `${turns.total} turns` : null,
+    tools.any ? `${tools.total} tools` : null,
+  ].filter(Boolean);
+  return (
+    <div className={clsx("text-2xs text-base-content/50", align === "right" && "text-right")} title={MICRO_LATENCY_CAVEAT}>
+      <div>
+        {fmtSecs(dur.total)} total
+        {dur.measured.length > 1 && (
+          <span className="text-base-content/40"> · {seriesRangeText(dur, fmtSecs)} per repeat</span>
+        )}
+        <span className="text-base-content/30">{partialNote(dur)}</span>
+      </div>
+      {shape.length > 0 && <div className="text-base-content/35">{shape.join(" · ")}</div>}
+    </div>
+  );
+}
+
+/**
+ * The detail view's latency panel — the same shape as every other number on
+ * this page: the per-repeat points first, the aggregate underneath, and the
+ * aggregate is a TOTAL plus a min–max range. Never a mean.
+ *
+ * `turns` / `toolCalls` sit beside it because they are the mechanism behind the
+ * number: a repeat that is slow because it took 60 turns is a different finding
+ * from one that is slow because the host was busy. They are omitted entirely
+ * when the report recorded none.
+ */
+function LatencyBlock({ entry }: { entry: MicroSurveyEntry }) {
+  const dur = microSeries(entry.durationSec);
+  const turns = microSeries(entry.turns);
+  const tools = microSeries(entry.toolCalls);
+  if (!dur.any && !turns.any && !tools.any) {
+    return (
+      <div>
+        <div className="font-mono text-2xs uppercase tracking-wide text-base-content/40">wall clock</div>
+        <div
+          className="font-mono text-sm text-base-content/30"
+          title="This report predates the latency measurement. Unmeasured — not instant."
+        >
+          not recorded
+        </div>
+      </div>
+    );
+  }
+  return (
+    <>
+      <div>
+        <div
+          className="font-mono text-2xs uppercase tracking-wide text-base-content/40"
+          title={MICRO_LATENCY_CAVEAT}
+        >
+          wall clock per repeat
+        </div>
+        <div className="font-mono text-sm tabular-nums text-base-content">
+          {seriesList(entry.durationSec, fmtSecs)}
+        </div>
+        <div className="font-mono text-2xs text-base-content/40" title={MICRO_LATENCY_CAVEAT}>
+          total <span className="text-base-content/60">{fmtSecs(dur.total)}</span>
+          {dur.measured.length > 1 && (
+            <>
+              {" "}
+              · range (min–max) <span className="text-base-content/60">{seriesRangeText(dur, fmtSecs)}</span> — not a
+              mean
+            </>
+          )}
+          {partialNote(dur)}
+        </div>
+      </div>
+
+      {(turns.any || tools.any) && (
+        <div>
+          <div
+            className="font-mono text-2xs uppercase tracking-wide text-base-content/40"
+            title="Assistant turns and tool calls per repeat — the usual explanation for a slow repeat. Absent on a report that did not record them."
+          >
+            per repeat: turns · tool calls
+          </div>
+          {/* One labelled line each: both series use `/` between repeats, so
+              running them together on one line makes the boundary guesswork. */}
+          <div className="font-mono text-sm tabular-nums text-base-content/70">
+            {turns.any && (
+              <div>
+                <span className="text-base-content/40">turns </span>
+                {seriesList(entry.turns, fmtCount)}
+              </div>
+            )}
+            {tools.any && (
+              <div>
+                <span className="text-base-content/40">tools </span>
+                {seriesList(entry.toolCalls, fmtCount)}
+              </div>
+            )}
+          </div>
+          <div className="font-mono text-2xs text-base-content/40">
+            {turns.any && <>{turns.total} turns total</>}
+            {turns.any && tools.any && " · "}
+            {tools.any && <>{tools.total} tool calls total</>}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 // ── list ────────────────────────────────────────────────────────────────────
 
 /** Every micro-survey report on disk, newest first. */
@@ -227,8 +406,11 @@ export function MicroSurveyList({ reports }: { reports: MicroSurveyEntry[] }) {
         <b className="font-semibold text-base-content/70">min–max spread, not a mean</b>. Every replay number is
         read against the <b className="font-semibold text-base-content/70">baseline</b> beside it — what the
         preserved arm itself wrote for that family. Below {MICRO_RANKABLE_REPEATS} completed repeats a fire rate is
-        shown but is <b className="font-semibold text-warning">not rankable</b>.
+        shown but is <b className="font-semibold text-warning">not rankable</b>. Cost and{" "}
+        <b className="font-semibold text-base-content/70">wall clock</b> ride together in the last column, so a
+        model that is cheap but slow is visible beside its fire rate.
       </p>
+      <LatencyCaveat className="mb-6" />
 
       {!reports.length ? (
         <MicroSurveyEmpty />
@@ -247,7 +429,9 @@ export function MicroSurveyList({ reports }: { reports: MicroSurveyEntry[] }) {
                 </th>
                 <th className="px-3 py-3 text-right font-semibold">baseline</th>
                 <th className="px-3 py-3 text-left font-semibold">replay needsProbe% (per repeat)</th>
-                <th className="px-3 py-3 text-right font-semibold">cost</th>
+                <th className="px-3 py-3 text-right font-semibold" title={MICRO_LATENCY_CAVEAT}>
+                  cost · wall clock
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -299,7 +483,10 @@ export function MicroSurveyList({ reports }: { reports: MicroSurveyEntry[] }) {
                         <span className="ml-2 text-2xs text-base-content/40">range {rangeText(r.needsProbePct)}</span>
                       )}
                     </td>
-                    <td className="px-3 py-2.5 text-right font-mono tabular-nums">${r.costUsd.toFixed(3)}</td>
+                    <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono tabular-nums">
+                      <div className="text-base-content">${r.costUsd.toFixed(3)}</div>
+                      <LatencySummary entry={r} align="right" />
+                    </td>
                   </tr>
                 );
               })}
@@ -394,6 +581,11 @@ export function MicroSurveyDetail({ entry }: { entry: MicroSurveyEntry }) {
  * without the others. */
 function Headline({ entry }: { entry: MicroSurveyEntry }) {
   const n = entry.needsProbePct.length;
+  // The concurrency caveat is permanent WHERE AN AGGREGATE IS SHOWN, and this
+  // report may carry no timings at all — in which case there is nothing to
+  // caveat and the warning would only teach the reader to skip it.
+  const timed =
+    microSeries(entry.durationSec).any || microSeries(entry.turns).any || microSeries(entry.toolCalls).any;
   return (
     <div className="rounded-xl border border-base-300 bg-base-200 px-4 py-3.5">
       <div className="flex flex-wrap items-end gap-x-10 gap-y-4">
@@ -490,12 +682,15 @@ function Headline({ entry }: { entry: MicroSurveyEntry }) {
           <div className="font-mono text-2xs uppercase tracking-wide text-base-content/40">cost</div>
           <div className="font-mono text-sm tabular-nums text-base-content">${entry.costUsd.toFixed(3)}</div>
         </div>
+
+        <LatencyBlock entry={entry} />
       </div>
 
       <p className="mt-3 max-w-3xl border-t border-base-300 pt-2.5 font-mono text-2xs leading-5 text-base-content/40">
         Every repeat is listed because the spread is the finding. Two or three points give a range, never a standard
         deviation — a summary statistic here would claim precision this measurement does not have.
       </p>
+      {timed && <LatencyCaveat className="mt-1.5" />}
     </div>
   );
 }
@@ -544,6 +739,24 @@ function Repeats({
             <span>
               cost <span className="text-base-content/70">${(res.costUsd ?? 0).toFixed(3)}</span>
             </span>
+            {/* Beside the cost, because the two are read together — and only
+                when the repeat was actually timed: an absent duration is left
+                out rather than printed as 0s. */}
+            {typeof res.durationSec === "number" && Number.isFinite(res.durationSec) && (
+              <span title="Wall clock for this repeat. Comparable with its siblings in this run; comparable with another RUN only if both are known to have run serially.">
+                time <span className="text-base-content/70">{fmtSecs(res.durationSec)}</span>
+              </span>
+            )}
+            {typeof res.turns === "number" && Number.isFinite(res.turns) && (
+              <span title="Assistant turns this repeat spent — the usual reason one repeat is slower than another.">
+                turns <span className="text-base-content/70">{res.turns}</span>
+              </span>
+            )}
+            {typeof res.toolCalls === "number" && Number.isFinite(res.toolCalls) && (
+              <span title="Tool calls this repeat made.">
+                tools <span className="text-base-content/70">{res.toolCalls}</span>
+              </span>
+            )}
           </div>
           <ClaimLines lines={claims[i] ?? []} />
         </div>

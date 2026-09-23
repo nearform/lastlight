@@ -5,10 +5,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  MICRO_LATENCY_CAVEAT,
   MICRO_RANKABLE_REPEATS,
   MICRO_STALE_HEARTBEAT_MS,
   microFireRate,
   microRange,
+  microSeries,
   microRankable,
   microStatus,
   withMicroEntryDefaults,
@@ -213,9 +215,120 @@ describe("withMicroEntryDefaults", () => {
     expect(microStatus(e, Date.now())).toBe("complete");
   });
 
+  it("gives an index baked before latency existed one null per completed repeat", () => {
+    const e = withMicroEntryDefaults(legacy);
+    expect(e.durationSec).toEqual([null, null, null]);
+    expect(e.turns).toEqual([null, null, null]);
+    expect(e.toolCalls).toEqual([null, null, null]);
+    expect(microSeries(e.durationSec).any).toBe(false);
+  });
+
   it("passes a current entry straight through", () => {
     const current = summariseMicroReport("x", report({ live: true, heartbeat: "2026-09-23T06:41:02.123Z" }), "x")!;
     expect(withMicroEntryDefaults(current)).toBe(current);
+  });
+});
+
+describe("microSeries", () => {
+  it("summarises a timed band as points + range + total, and no mean", () => {
+    const s = microSeries([145.2, 92.5, 200]);
+    expect(s.measured).toEqual([145.2, 92.5, 200]);
+    expect(s.missing).toBe(0);
+    expect(s.range).toEqual({ min: 92.5, max: 200 });
+    expect(s.total).toBeCloseTo(437.7, 5);
+    expect(s.any).toBe(true);
+    expect(Object.keys(s)).not.toContain("mean");
+  });
+
+  it("drops the untimed repeats from the arithmetic and counts them instead", () => {
+    const s = microSeries([145.2, null, undefined, 92.5]);
+    expect(s.measured).toEqual([145.2, 92.5]);
+    expect(s.missing).toBe(2);
+    expect(s.total).toBeCloseTo(237.7, 5);
+    expect(s.range).toEqual({ min: 92.5, max: 145.2 });
+  });
+
+  it("has a null total and range when nothing was measured — never a zero one", () => {
+    for (const band of [[], [null, null], undefined]) {
+      const s = microSeries(band as (number | null)[] | undefined);
+      expect(s.total).toBeNull();
+      expect(s.range).toBeNull();
+      expect(s.any).toBe(false);
+    }
+    expect(microSeries([null, null]).missing).toBe(2);
+  });
+
+  it("reports a single point as itself, not as a spread", () => {
+    expect(microSeries([145.2]).range).toEqual({ min: 145.2, max: 145.2 });
+  });
+
+  it("ships a permanent concurrency caveat for every arm-level aggregate", () => {
+    expect(MICRO_LATENCY_CAVEAT).toMatch(/serial/i);
+    expect(MICRO_LATENCY_CAVEAT).toMatch(/cost, fire rate and severity are unaffected/i);
+  });
+});
+
+describe("latency in the index entry", () => {
+  const timed = () =>
+    report({
+      results: [
+        {
+          rows: 12,
+          needsProbe: 2,
+          needsProbePct: 16.7,
+          reassuranceShaped: 0,
+          costUsd: 0.32,
+          durationSec: 145.2,
+          turns: 31,
+          toolCalls: 39,
+        },
+        {
+          rows: 12,
+          needsProbe: 0,
+          needsProbePct: 0,
+          reassuranceShaped: 1,
+          costUsd: 0.28,
+          durationSec: 92.5,
+          turns: null,
+          toolCalls: null,
+        },
+      ],
+    });
+
+  it("carries wall clock, turns and tool calls per repeat", () => {
+    const e = summariseMicroReport("x", timed(), "x")!;
+    expect(e.durationSec).toEqual([145.2, 92.5]);
+    expect(e.turns).toEqual([31, null]);
+    expect(e.toolCalls).toEqual([39, null]);
+    expect(microSeries(e.durationSec).total).toBeCloseTo(237.7, 5);
+    // The list reads the index alone, so the same arithmetic must be available
+    // there as in the detail view — one function, no second implementation.
+    expect(microSeries(e.turns).total).toBe(31);
+    expect(microSeries(e.turns).missing).toBe(1);
+  });
+
+  it("degrades to nulls — not zeros — on a report written before latency existed", () => {
+    const e = summariseMicroReport("x", report(), "x")!;
+    expect(e.durationSec).toEqual([null, null]);
+    expect(e.turns).toEqual([null, null]);
+    expect(e.toolCalls).toEqual([null, null]);
+    const s = microSeries(e.durationSec);
+    expect(s.any).toBe(false);
+    expect(s.total).toBeNull();
+    expect(s.missing).toBe(2);
+  });
+
+  it("survives a repeat that recorded a duration but no turn counts", () => {
+    const e = summariseMicroReport(
+      "x",
+      report({
+        results: [{ rows: 12, needsProbe: 1, needsProbePct: 8.3, reassuranceShaped: 0, durationSec: 10 }],
+      }),
+      "x",
+    )!;
+    expect(e.durationSec).toEqual([10]);
+    expect(e.turns).toEqual([null]);
+    expect(microSeries(e.toolCalls).any).toBe(false);
   });
 });
 

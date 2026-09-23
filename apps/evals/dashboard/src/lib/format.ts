@@ -48,6 +48,15 @@ export function fmtDuration(ms: number): string {
   return m ? `${h}h ${m}m` : `${h}h`;
 }
 
+/**
+ * A wall-clock figure the micro-survey recorded in SECONDS, through the one
+ * duration formatter. `null`/`undefined` is an em dash: a repeat that was never
+ * timed has no duration, and `0s` would read as an instant one.
+ */
+export function fmtSecs(x: number | null | undefined): string {
+  return x === null || x === undefined || !Number.isFinite(x) ? "\u2014" : fmtDuration(x * 1000);
+}
+
 /** `2026-06-28 14:30 UTC` from an ISO string (best-effort). */
 export function fmtDate(iso: string): string {
   const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(iso);
