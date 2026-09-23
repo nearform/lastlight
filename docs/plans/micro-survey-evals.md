@@ -218,11 +218,22 @@ Three options, and this is a judgement call rather than a mechanical edit:
 
 **(b) is the recommendation** — it is the only one that keeps both properties — but it needs sign-off before implementation because it changes what the adjudicator is allowed to do.
 
-### 2. Measure the five families that have never been measured
+### 2. The five families — MEASURED 2026-09-23, and what it caught
 
-Only `enforcement` has been run with the evidence record. `contract`, `security`, `state`, `tests` and `spec` received the shared record and a one-paragraph definition of what *closes the mechanism* for them, and **none has been executed even once**. At minimum: 3 repeats each on a preserved fixture, reading derivation compliance. `spec` needs `--spec-from`; the others do not.
+All four runnable families now write evidence on 100% of rows, fire probes in 3/3 repeats, and produce **zero `Critical` in twelve repeats**:
 
-The specific risk is that `control_site` does not fit a family. For `tests`, "the line that closes it" is an assertion — plausible. For `state` it is an invalidation, which may not exist as a single line at all, and a family whose control is inherently multi-line will report `control_site: none` constantly and derive `ABSENT` for healthy code.
+| family | rows | evidence | probes | derived severity |
+|---|---|---|---|---|
+| `contract` | 12 | 12/12 × 3 | 75 / 58 / 75% | 12 Minor × 3 (stable) |
+| `security` | 8 | 8/8 × 3 | 62 / 62 / 37% | 8 Minor (spread 1) |
+| `state` | 8 | 8/8 × 3 | 87.5% × 3 | 6/4/4 Important · 2/4/4 Minor |
+| `spec` | 10 | 10/10 × 3 | 100 / — / 80% | 1/0/1 Important · 9/10/9 Minor |
+
+**`tests` cannot be run at all** — `pr-review.yaml` declares no branch for it (the AC3 test pins that), so the family is seeded with obligations that nothing ever discharges and `survey-tests.md` is dormant. Its evidence section is untested and will stay that way until a branch exists.
+
+**The first attempt at this failed, and the failure is the lesson.** Only `enforcement` had been iterated on, and only its prompt carried a worked example with the record inline; the others had a pointer. Under a replay — frozen obligations block, still prescribing the old row shape — three of four followed the block and wrote no evidence, `severityOf` fell back to the pass's own guess, and `spec` graded **ten of ten rows `Critical`** on the zero-gold canary while every other number looked ordinary. Fixed by giving every family its own worked row plus an explicit "ignore the block's `severity`/`needsProbe`", and by making `missingEvidence` a reported fact.
+
+**Still unresolved:** `contract` returns 12 Minor and `security` 8 Minor in every repeat. That is either correct for this PR or the all-Minor flattening, and **this fixture cannot tell them apart** because its gold sits on the enforcement axis. Before trusting either family, run one case with known `contract` or `security` gold.
 
 ### 3. Then the full `pr-review` run
 
@@ -246,6 +257,9 @@ Each is a candidate **deterministic normalisation over the evidence**, which is 
 4. **`unknown` may be underused.** `authority: unknown` and `order_ok: unknown` both force a probe, so they are honest and cheap — but a model that dislikes saying "I do not know" will round to `binding`/`true` and escape verification. **Hypothesis:** count `unknown` usage per repeat; near-zero across many repeats is evidence of rounding, not of clarity.
 5. **Row count is suspiciously constant** (12/12 on every repeat of every arm, matching the obligation count exactly). The pass discharges its list and adds nothing. **Hypothesis:** the obligations are acting as a ceiling on discovery, not a floor — which would cap recall regardless of how good the verdict is, and would explain why a gold defect within reach of an obligation is reassured away rather than missed.
 6. **The gold row asserts a consequence in 1 of 8 repeats.** Probes now fire on it regardless (clean discharge over a changed hunk), so the verdict path is doing its job; what is not happening is *discovery*. **Hypothesis:** this is a sampling problem, not a prompt problem, and it is the same conclusion the union-vs-intersection analysis reached. No normalisation will fix it.
+
+7. **The reassurance-verification clause has no budget.** `QUOTE && in_changed_hunk ⇒ probe` is what rescued the probe rate from 0/0/0, and it is unbounded: on the zero-gold canary every one of ten rows was a clean discharge over a touched file, so it asked for ten probes that can find nothing. Measured probe rates are now 37–100% of rows per repeat, against ~16–42% before. **Hypothesis:** the rule is right and needs a cap — probe the N highest-value clean discharges per family, or narrow the trigger from "any touched file" to "a hunk the obligation itself names". This is the one tightening that is about COST rather than correctness, and it should be measured before the full run rather than discovered in its bill.
+
 
 ## The verdict is derived in code now — and one half is still outstanding
 
