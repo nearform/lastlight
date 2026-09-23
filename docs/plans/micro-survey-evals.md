@@ -120,7 +120,9 @@ Nine models, `enforcement` on `1587-r3`, 3 repeats each. **Screening only** — 
 
 Also: `models.json` is stale — it still lists `glm-5p2`, `deepseek-v4-pro`, `gpt-oss-120b`. The live Fireworks registry is the source of truth.
 
-## The severity experiment (open — this is the active thread)
+## The severity experiment (SUPERSEDED 2026-09-23 — kept for the measurements)
+
+> **This thread is closed.** It asked whether a prompt change could make severity stable, and the answer turned out to be that the question was wrong: severity is now DERIVED from an evidence record in code, so no prompt decides it. Read the next two sections for what shipped. What follows is kept because the MEASUREMENTS are expensive and still true — the blow-up rates, the per-family failure modes, and the `1641` canary baseline — and because the candidate levers it lists were tested and their outcomes are recorded below.
 
 **The question.** Severity is the only ranking input to what a maintainer sees, and it is neither stable nor discriminating. Can a prompt change make it either?
 
@@ -200,49 +202,74 @@ On `1641` (arm 1), severity failed differently per family — so a fix aimed onl
 
 The third is the quietest and arguably the worst: `rankOf` reads a missing or unrecognised severity as **`important`** (weight 2), so those rows land mid-rank *by default rather than by judgement*, and nothing anywhere reports it.
 
-## NEXT STEPS — the plan for a fresh session
+## NEXT STEPS — landing this, then the full run
 
-The baseline above is accepted as sufficient to start from (operator decision, 2026-09-23). Do not re-derive it.
+The severity thread is no longer "rewrite the prompt until it ranks consistently". The verdict is derived in code (next section), and what remains is finishing the seam and measuring it. In order:
 
-**1. Write a new version of the survey prompts + skill, targeting severity across ALL FIVE families** — not `spec` alone. The three failure modes above are one problem (severity is not being decided) wearing three faces. Prime suspects, in order:
+### 1. Decide the one open design question: who owns severity at POSTING time
 
-- **The two instructions contradict each other.** `code-facts/src/seed-render.ts` tells the pass *"write it at `severity: "Minor"` and let a later phase decide what is worth posting"*, while `survey-pass/SKILL.md`'s tier table asks for a real judgement with a trust-boundary bar on `Critical`. **One of them should own severity.** This is the most likely single cause of both the all-`Minor` collapse and the blow-ups.
-- **`spec`'s brief is restatement-adjacent** — its job is checking the PR description's claims — and the blow-up rows are restatements of the intended change, which the skill's "Not findings" table already forbids. That rule is not binding on this branch.
-- **Nothing forces a severity to be written at all**, hence the `unknown` rows. Consider making it non-optional in the discharge contract, or deriving it.
+Derivation currently reaches the dossier and stops. `adjudicate-pass/SKILL.md` gives the adjudicator its **own** two-value vocabulary (`Critical` / `Important`) and it re-decides severity for every finding it keeps; `review-poster.ts` then ranks that. So the survey's derived severity bounds what the adjudicator *sees*, and does not determine what is *posted*.
 
-**2. Run 8 repeats per arm on Haiku**, baseline vs candidate, on `1641`/`spec`:
+Three options, and this is a judgement call rather than a mechanical edit:
 
-```bash
-T=eval-results/pr-review-config/2026-09-22_191307-e014b96/sessions/prreview__skillspro-1641__*/trial-1/08-survey_branch_spec.jsonl
-npx tsx apps/evals/scripts/micro-survey.ts \
-  --fixture ~/lastlight-micro-fixtures/arm1/prreview__skillspro-1641 \
-  --family spec --spec-from $T \
-  --instances evals/datasets/pr-review/instances.json \
-  --repeats 8 --model anthropic/claude-haiku-4-5-20251001 \
-  --label spec-canary-<candidate>
-```
+- **(a) The adjudicator inherits.** Findings resolving to a hypothesis keep the derived severity; the adjudicator may drop a finding but not re-rank it. Fully deterministic. **Cost:** the adjudicator sees probe results the survey never had, so it is strictly better informed — this throws that away.
+- **(b) The adjudicator may only DEMOTE.** It inherits, and may lower a severity when a probe contradicted the row, never raise one. Keeps the new information, keeps the ceiling deterministic, matches the one-way direction `EDIT_CONDITIONAL` already uses.
+- **(c) Leave it.** Accept that posting-time rank is a model judgement and that survey-level stability does not transfer.
 
-~$3 per arm, ~40 min. Read `severity.critical + severity.important`; a repeat is a **blow-up** above 2 on a zero-gold PR. Compare blow-up rate against the 1/4 baseline. **If the comparison is not decisive, run more repeats rather than concluding** — 8 vs 4 on a ~25% rate is still weak, and the house rule is that an indecisive result is indecisive, not a pass.
+**(b) is the recommendation** — it is the only one that keeps both properties — but it needs sign-off before implementation because it changes what the adjudicator is allowed to do.
 
-**3. Check the other families too** — `state` (all-`Minor`) and any of `contract`/`enforcement`/`security` (missing severity) on the same fixture, which need no `--spec-from`.
+### 2. Measure the five families that have never been measured
 
-**4. The counterpart case is MANDATORY before accepting any candidate.** The canary measures precision only, and grading everything `Minor` scores a perfect 0 — which `glm-5p3-flash` already demonstrates. Pick a fixture WITH gold (e.g. `1667`, 5 gold, or `1587-r3`, 4 gold) and check that real findings are lifted above `Minor`. A candidate that improves the canary while flattening the gold case has made things worse.
+Only `enforcement` has been run with the evidence record. `contract`, `security`, `state`, `tests` and `spec` received the shared record and a one-paragraph definition of what *closes the mechanism* for them, and **none has been executed even once**. At minimum: 3 repeats each on a preserved fixture, reading derivation compliance. `spec` needs `--spec-from`; the others do not.
 
-### Candidate levers, untested
+The specific risk is that `control_site` does not fit a family. For `tests`, "the line that closes it" is an assertion — plausible. For `state` it is an invalidation, which may not exist as a single line at all, and a family whose control is inherently multi-line will report `control_site: none` constantly and derive `ABSENT` for healthy code.
 
-1. **Reconcile the two instructions** — the seed-render default-to-`Minor` line vs the skill's tier table. One of them should own severity.
-2. **Make `spec` inherit the "Not findings" restatement rule explicitly**, since its brief invites restatement.
-3. **Derive severity rather than ask for it** — from probe verdict + category + mechanism completeness — which is what `computeTier` already does for the adjudicator's output.
-4. **Collapse to two tiers.** Three values with one ranking input may be more precision than the model can hold; `Important` vs `Minor` might be more stable.
+### 3. Then the full `pr-review` run
 
+Not before 1 and 2. A full arm is ~$30 and an hour, and its ranking is the thing under test — running it while posting-rank is still undecided measures a configuration we do not intend to ship.
 
+**Config to run it with, as currently believed correct:** Haiku 4.5 on the survey branches, the `full` contract, declared skills only (`noSkills: true`), `review.analysis.enabled`, probes ON. Record the config in the arm label. And per the house rules, **two arms minimum** — one arm has never been a result in this campaign.
 
-1. **Severity stability — ACTIVE, see "The severity experiment" above.** Ahead of the discharge rule: severity decides whether a finding is *posted at all*, it swings by ±20 points across identical arms, and it collapsed on the precision canary.
-2. **Why the discharge rule is inert.** It is read and ignored. Before rewriting it again, find out whether the model treats it as inapplicable (most rows are genuinely not in a changed hunk?) or simply overrides it. The micro-eval dumps every claim, so this is readable rather than inferable.
-3. **Model choice — PARKED**, see the model screen above. Everything works; `glm-5p3-flash` is 14× cheaper than its full sibling and is now the iteration model. Resume only if a quality question needs it.
-4. **`AGENTS.md` ablation** (`--no-agents-md`). Never measured in isolation; it is 12.5 KB of rules in every branch.
-5. **The cost of closing the ambient-skills hole.** Preliminary and inconclusive (bands overlap): ambient ON 41.7/41.7/41.7 vs OFF 16.7/0.0/41.7 and 0.0/0.0/41.7. At 8+ repeats this is answerable.
-6. **Temperature — blocked upstream.** `pi-ai` exposes `temperature?: number`, but `agentic-pi` builds its agent through `pi-coding-agent`'s `createAgentSession({ cwd, model, thinkingLevel, … })`, which does **not** surface it. Needs an upstream change. And survey runs under extended thinking, where Anthropic pins temperature to 1 — so it is only a live variable for non-thinking runs or non-Anthropic models.
+### 4. Known gaps to close while you are in here
+
+- **`apps/evals/scripts/` is not typechecked.** The package tsconfig has `include: ["src/**/*"]`, so `micro-survey.ts` is invisible to `tsc`; a deletion that removed three live functions passed typecheck and failed at runtime. Either widen the include or give scripts their own tsconfig.
+- **The declared-vs-derived signal goes silent in production.** The pass no longer writes `severity`/`needsProbe`, so `verdict.agrees` — which caught BOTH rule bugs in this thread — will have nothing to compare once the new contract ships. Replays still show it because a fixture's contract is frozen. Decide whether to keep asking purely as telemetry.
+- **`confidence` is no longer asked for**, but `findings.ts` still passes one through when a row carries it. That is deliberate (audit data, and the internal record exists to carry the row), not an oversight.
+
+## Hypotheses for further tightening — untested, in rough order of expected value
+
+Each is a candidate **deterministic normalisation over the evidence**, which is the lever this thread discovered: once the verdict is derived, a bad verdict is fixed by reading what the pass wrote, not by another paragraph. All are testable for free against the persisted rows under `eval-results/micro-survey/rows/` before any spend.
+
+1. **The borderline `consequence` decision is the whole remaining spread.** Measured over 8 repeats on one fixture, 4 of 12 rows are perfectly stable and the variance is one binary question — *does this constant's situation constitute a consequence?* — on duplicated-constant rows that flip 7-1 or 6-2, not 50/50. **Hypothesis:** a row whose `consequence` names no runtime behaviour, only a divergence between two copies of a value, is a duplication note. Detectable from the text, and it is the same family of tell as `EDIT_CONDITIONAL`.
+2. **`crosses_boundary` is asserted far more often than it is earned.** It is a free `true` today. **Hypothesis:** require it to be justified by a *named* boundary, i.e. treat `crosses_boundary: true` with an empty or generic `capability_gained` as `false`. One-way, demote-only.
+3. **`cannot_distinguish: "nothing"` is the single most load-bearing claim in the record** — it is what lets a clean discharge escape a probe — and it is unverifiable. **Hypothesis:** it is also the cheapest thing to probe. Rather than tightening it, route it: a `"nothing"` on a changed hunk already forces a probe, so measure how often the probe contradicts it. If it contradicts often, the field is not trustworthy and the clause should widen to untouched code too.
+4. **`unknown` may be underused.** `authority: unknown` and `order_ok: unknown` both force a probe, so they are honest and cheap — but a model that dislikes saying "I do not know" will round to `binding`/`true` and escape verification. **Hypothesis:** count `unknown` usage per repeat; near-zero across many repeats is evidence of rounding, not of clarity.
+5. **Row count is suspiciously constant** (12/12 on every repeat of every arm, matching the obligation count exactly). The pass discharges its list and adds nothing. **Hypothesis:** the obligations are acting as a ceiling on discovery, not a floor — which would cap recall regardless of how good the verdict is, and would explain why a gold defect within reach of an obligation is reassured away rather than missed.
+6. **The gold row asserts a consequence in 1 of 8 repeats.** Probes now fire on it regardless (clean discharge over a changed hunk), so the verdict path is doing its job; what is not happening is *discovery*. **Hypothesis:** this is a sampling problem, not a prompt problem, and it is the same conclusion the union-vs-intersection analysis reached. No normalisation will fix it.
+
+## The verdict is derived in code now — and one half is still outstanding
+
+**Done (2026-09-23).** `severity` and `needsProbe` are no longer asked of the survey. A pass fills a typed `evidence` record — `control_site`, `control_text`, `authority` (`binding|advisory|unknown`), `order_ok`, `cannot_distinguish`, `bypass`, `in_changed_hunk`, `consequence`, `trigger` (`input|state|code_change|unknown`), `crosses_boundary`, `capability_gained` — and `deriveVerdict()` in `packages/code-facts/src/survey-verdict.ts` computes the verdict from it. The fields are named for the shape all six families share (a mechanism, and a line that closes it), so one record serves every pass: a comparison closes a value's boundary, a sanitiser closes a tainted path, an invalidation closes a cache, an assertion closes an untested line, an implementation closes a criterion. Each prompt fixes only what *closing* means for it.
+
+It is applied once, in `readHypothesisSet`, which records the derived verdict **and** what the row declared, plus `agrees: {severity, needsProbe}` — the disagreement is prompt telemetry, and flattening it would destroy the only signal that says a pass is not doing what it was asked. `apps/evals/scripts/micro-survey.ts` imports the same function rather than keeping a copy (which is why `apps/evals` now depends on `lastlight-code-facts`); two authorities over one rule is the bug this whole thread is about.
+
+Two rules were corrected BY the measurement and are pinned in `packages/code-facts/tests/survey-verdict.test.ts`. Absence alone must not force a probe — it demanded probes for harmless never-compared constants, and the model was right to refuse. And `Critical` needs `trigger in (input, state)`: without it, a consequence of the form *"if this constant is later changed…"* gets promoted, though whoever makes that edit already holds every capability it would grant.
+
+### STILL OUTSTANDING — the downstream half
+
+Nothing on the **posting** path reads the derived verdict yet.
+
+- `adjudicate-render.ts`, `jev-classify.ts`, `findings.ts` and `probes.ts` now go through `severityOf(row)` (derived, falling back to whatever the row declared), so the dossier and the probe priority are correct.
+- But `review-poster.ts` ranks `ReviewFinding.severity` off `findings.json`, which the **adjudicator model** writes. The value that actually decides what a maintainer sees is still a model's judgement, one stage later. Deriving the survey's severity bounds the input to that stage; it does not make its output deterministic.
+- **The change to make:** carry the derived verdict through adjudication so a finding's rank is a function of evidence, or have the poster rank on the hypothesis verdict wherever a finding resolves to one. Until that lands, **ranking is not deterministic in production** and the stability measured at survey level does not transfer to what gets posted.
+
+Smaller, same thread: `confidence` is no longer asked for anywhere, but `findings.ts` still reads `row.confidence` and will now always see `null`. Harmless — it measured AUROC 0.228, inverted, and `rankOf` already ignores it — but a field that can only ever be null should be deleted rather than left being read.
+
+## Contamination removed from the shipped prompts
+
+The `full` discharge contract used to ship a worked exemplar built from a real defect in a repository whose PRs are **in this eval set**, so any arm measured against it was handed a worked answer to a neighbouring case. Both exemplars (`EXAMPLE_ROW` in `seed-render.ts`, `SPEC_EXAMPLE_ROW` in `review-spec.ts`) are now invented — a fictional upload route — and teach the same lesson: a real line, really quoted, that still does not close the mechanism because it runs on the side the other party controls. Every rendered string naming a dataset symbol, repository or issue number is gone. Code comments recording *which run measured what* are provenance and stay.
+
+**For anyone replaying:** a fixture's obligations block is **frozen**, so a replay renders the contract as it stood when the arm ran. Changes to `seed-render.ts` / `review-spec.ts` are therefore not measurable through `micro-survey.ts` at all — only the prompt and the skill are.
 
 ## Open, and unresolved
 
