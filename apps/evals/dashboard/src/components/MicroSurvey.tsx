@@ -412,23 +412,35 @@ export function MicroSurveyList({ reports }: { reports: MicroSurveyEntry[] }) {
       </p>
       <LatencyCaveat className="mb-6" />
 
+      {/* The table can still exceed a narrow window. `overflow-x-auto` makes it
+          scrollable; macOS hides the scrollbar until it moves, so SAY so — a
+          clipped cost column that looks like the end of the table is exactly
+          the failure this whole layout pass was about. */}
+      {reports.length > 0 && (
+        <p className="mb-2 font-mono text-2xs text-base-content/40 xl:hidden">
+          narrow window — the table scrolls sideways; cost and wall clock are its last column.
+        </p>
+      )}
+
       {!reports.length ? (
         <MicroSurveyEmpty />
       ) : (
-        <div className="overflow-hidden rounded-xl border border-base-300 bg-base-200">
+        /* `overflow-x-auto`, never `overflow-hidden`: at a narrow viewport the
+           right-hand columns (cost, wall clock) were CLIPPED AWAY with no
+           indication they existed. Scrolling is a visible failure; clipping is a
+           silent one. Nine columns became five so the default width fits. */
+        <div className="overflow-x-auto rounded-xl border border-base-300 bg-base-200">
           <table className="w-full border-collapse text-sm">
             <thead>
               <tr className="bg-neutral text-2xs uppercase tracking-wide text-neutral-content/70">
-                <th className="px-3 py-3 text-left font-semibold">when</th>
-                <th className="px-3 py-3 text-left font-semibold">label</th>
-                <th className="px-3 py-3 text-left font-semibold">family</th>
-                <th className="px-3 py-3 text-left font-semibold">model</th>
+                <th className="px-3 py-3 text-left font-semibold">run</th>
                 <th className="px-3 py-3 text-left font-semibold">progress</th>
                 <th className="px-3 py-3 text-left font-semibold" title={FIRE_RATE_HINT}>
                   fire rate
                 </th>
-                <th className="px-3 py-3 text-right font-semibold">baseline</th>
-                <th className="px-3 py-3 text-left font-semibold">replay needsProbe% (per repeat)</th>
+                <th className="px-3 py-3 text-left font-semibold">
+                  needsProbe% — baseline · per repeat
+                </th>
                 <th className="px-3 py-3 text-right font-semibold" title={MICRO_LATENCY_CAVEAT}>
                   cost · wall clock
                 </th>
@@ -441,16 +453,25 @@ export function MicroSurveyList({ reports }: { reports: MicroSurveyEntry[] }) {
                   <tr
                     key={r.id}
                     onClick={() => navigate(MICRO_TIER_KEY, r.id)}
-                    className="cursor-pointer border-t border-base-300 hover:bg-base-300/40"
+                    className="cursor-pointer border-t border-base-300 align-top hover:bg-base-300/40"
                   >
-                    <td className="whitespace-nowrap px-3 py-2.5 font-mono text-info hover:underline">
-                      {fmtDate(r.generatedAt)}
-                    </td>
-                    <td className="px-3 py-2.5 font-mono text-xs text-base-content">{r.label}</td>
-                    <td className="px-3 py-2.5 font-mono text-xs text-base-content/70">{r.family}</td>
-                    <td className="px-3 py-2.5 font-mono text-xs text-base-content/60" title={model.title}>
-                      {model.label}
-                      {r.thinking && <span className="ml-1.5 text-base-content/40">· thinking {r.thinking}</span>}
+                    {/* when + label + family + model, stacked. Rows are taller
+                        and that is the trade: an identifier broken across three
+                        lines (`glm-` / `5p3-` / `flash`) cannot be compared at a
+                        glance with its neighbour, which is the whole job of this
+                        column — so every identifier is `whitespace-nowrap`. */}
+                    <td className="px-3 py-2.5">
+                      <div className="whitespace-nowrap font-mono text-xs text-info hover:underline">
+                        {fmtDate(r.generatedAt)}
+                      </div>
+                      <div className="whitespace-nowrap font-mono text-sm text-base-content">{r.label}</div>
+                      <div
+                        className="whitespace-nowrap font-mono text-2xs text-base-content/50"
+                        title={model.title}
+                      >
+                        {r.family} · {model.label}
+                        {r.thinking && <span className="text-base-content/40"> · thinking {r.thinking}</span>}
+                      </div>
                     </td>
                     <td className="px-3 py-2.5">
                       <ProgressChip entry={r} />
@@ -458,29 +479,40 @@ export function MicroSurveyList({ reports }: { reports: MicroSurveyEntry[] }) {
                         <ProvenanceChips entry={r} />
                       </div>
                     </td>
-                    <td className="whitespace-nowrap px-3 py-2.5 font-mono tabular-nums" title={FIRE_RATE_HINT}>
+                    {/* The value never wraps; the rankability note is allowed to,
+                        so this column can give width back at a narrow viewport
+                        instead of pushing cost off the screen. */}
+                    <td className="px-3 py-2.5 font-mono tabular-nums" title={FIRE_RATE_HINT}>
                       <span
                         className={clsx(
-                          "text-sm font-semibold",
+                          "whitespace-nowrap text-sm font-semibold",
                           r.fireRate === null ? "text-base-content/40" : "text-base-content",
                         )}
                       >
                         {fireRateText(r)}
                       </span>
-                      <div className="text-2xs font-normal">
+                      {/* A floor on the width: allowed to wrap, but not down to
+                          one word per line. */}
+                      <div className="min-w-44 text-2xs font-normal leading-4">
                         <RankabilityNote repeatsDone={r.repeatsDone} />
                       </div>
                     </td>
-                    <td
-                      className="whitespace-nowrap px-3 py-2.5 text-right font-mono tabular-nums text-base-content/60"
-                      title="What the preserved arm itself wrote for this family — the comparator."
-                    >
-                      {fmtProbePct(r.baselineNeedsProbePct)}
-                    </td>
+                    {/* Baseline and replay share ONE cell now — adjacency was
+                        previously a column order, which a reflow could break;
+                        here they cannot be separated at all. */}
                     <td className="whitespace-nowrap px-3 py-2.5 font-mono tabular-nums">
-                      <span className="text-base-content">{repeatsList(r.needsProbePct)}</span>
+                      <div
+                        className="text-2xs text-base-content/60"
+                        title="What the preserved arm itself wrote for this family — the comparator."
+                      >
+                        baseline{" "}
+                        <span className="text-base-content/80">{fmtProbePct(r.baselineNeedsProbePct)}</span>
+                      </div>
+                      <div className="text-base-content">{repeatsList(r.needsProbePct)}</div>
                       {r.needsProbePct.length > 1 && (
-                        <span className="ml-2 text-2xs text-base-content/40">range {rangeText(r.needsProbePct)}</span>
+                        <div className="text-2xs text-base-content/40">
+                          range (min–max) {rangeText(r.needsProbePct)}
+                        </div>
                       )}
                     </td>
                     <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono tabular-nums">
