@@ -7,6 +7,8 @@
  *   GET /api/index             → the live index (filesystem scan of eval-results,
  *                                recomputed per request, so accumulating runs +
  *                                live in-flight writes show up by polling).
+ *   GET /api/micro             → the micro-survey index (the same scan, over the
+ *                                loose reports in eval-results/micro-survey/).
  *   GET /data/<tier>/<run>/…   → the raw run artifacts (scorecard.json, …),
  *                                served straight from `eval-results/`.
  *   GET /*                     → the built dashboard SPA (with an index.html
@@ -20,7 +22,7 @@ import { createServer, type Server } from "node:http";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve, sep } from "node:path";
 
-import { buildIndex } from "./report.js";
+import { buildIndex, buildMicroIndex } from "./report.js";
 
 export interface ServeOptions {
   /** `eval-results/` root to index + serve raw artifacts from. */
@@ -112,7 +114,21 @@ export function startServer(opts: ServeOptions): Promise<RunningServer> {
       return;
     }
 
-    // 2) Raw run artifacts straight out of eval-results/.
+    // 2) The micro-survey index — a SECOND filesystem scan, of the loose JSON
+    //    files `scripts/micro-survey.ts` drops in `eval-results/micro-survey/`.
+    //    Separate from `/api/index` because a micro-survey is not a run: it has
+    //    no tier, no scorecard and no graded cases, and folding it into the tier
+    //    index would have every existing consumer reason about an entry that
+    //    answers none of the questions that index is for. Recomputed per request
+    //    for the same reason as the index above.
+    if (path === "/api/micro") {
+      const body = JSON.stringify(buildMicroIndex(resultsRoot, new Date().toISOString()));
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-cache" });
+      res.end(body);
+      return;
+    }
+
+    // 3) Raw run artifacts straight out of eval-results/.
     if (path.startsWith("/data/")) {
       const file = safeJoin(resultsRoot, path.slice("/data/".length));
       if (file && sendFile(res, file)) return;
@@ -121,7 +137,7 @@ export function startServer(opts: ServeOptions): Promise<RunningServer> {
       return;
     }
 
-    // 3) The dashboard SPA (static assets, else index.html fallback for routes).
+    // 4) The dashboard SPA (static assets, else index.html fallback for routes).
     const indexHtml = join(dashboardRoot, "index.html");
     if (path !== "/") {
       const asset = safeJoin(dashboardRoot, path);

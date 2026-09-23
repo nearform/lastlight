@@ -9,12 +9,17 @@
  *    is consumable by SWE-bench's own harness.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { InstanceResult } from "./schema.js";
 import type { CoreProvenance } from "./bootstrap.js";
 import { fLabel } from "./grade.js";
+import {
+  summariseMicroReport,
+  type MicroSurveyEntry,
+  type MicroSurveyIndex,
+} from "./micro-survey.js";
 import {
   boundaryMetrics,
   DETECTION_FLOOR_MICRO_RECALL,
@@ -875,6 +880,45 @@ export function buildIndex(resultsRoot: string, generatedAt: string): DashboardI
     return ka < kb ? 1 : ka > kb ? -1 : 0;
   });
   return { generatedAt, tiers };
+}
+
+/** The directory `scripts/micro-survey.ts` writes into, under `eval-results/`.
+ * It holds loose JSON files rather than run subdirs, so {@link indexTier} finds
+ * no `scorecard.json` in it and {@link buildIndex} skips it — the two indexes
+ * never collide over the same directory. */
+export const MICRO_SURVEY_DIR = "micro-survey";
+
+/**
+ * Build the micro-survey index from `eval-results/micro-survey/` on disk,
+ * newest first. Recomputed per request exactly like {@link buildIndex}, so a
+ * replay that lands mid-session shows up by polling with no manifest to keep in
+ * sync — and an absent directory (nobody has run one here) is an empty list,
+ * never an error.
+ */
+export function buildMicroIndex(resultsRoot: string, generatedAt: string): MicroSurveyIndex {
+  const dir = join(resultsRoot, MICRO_SURVEY_DIR);
+  if (!existsSync(dir)) return { generatedAt, reports: [] };
+  const reports: MicroSurveyEntry[] = [];
+  for (const ent of readdirSync(dir, { withFileTypes: true })) {
+    if (!ent.isFile() || !ent.name.endsWith(".json")) continue;
+    const file = join(dir, ent.name);
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFileSync(file, "utf8"));
+    } catch {
+      continue; // half-written or malformed — skip rather than abort the index
+    }
+    let mtime = generatedAt;
+    try {
+      mtime = statSync(file).mtime.toISOString();
+    } catch {
+      /* raced with a delete; the filename stamp is the usual source anyway */
+    }
+    const entry = summariseMicroReport(ent.name.replace(/\.json$/, ""), raw, mtime);
+    if (entry) reports.push(entry);
+  }
+  reports.sort((a, b) => (a.generatedAt < b.generatedAt ? 1 : a.generatedAt > b.generatedAt ? -1 : 0));
+  return { generatedAt, reports };
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────

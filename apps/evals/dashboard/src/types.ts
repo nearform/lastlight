@@ -25,6 +25,16 @@ import type {
   TrialSession,
 } from "../../src/schema.js";
 import type { BoundaryMetrics, FamilyFunnel, MicroReview } from "../../src/review-metrics.js";
+// `/api/micro` + the micro-survey report files. Imported, not copied, for the
+// same reason as the two above: `micro-survey.ts` is node-free on purpose, so
+// the one definition serves the scan and the browser alike.
+import type {
+  MicroSurveyEntry,
+  MicroSurveyIndex,
+  MicroSurveyReport,
+  MicroSurveyResult,
+  MicroSurveyStats,
+} from "../../src/micro-survey.js";
 
 export type {
   InstanceResult,
@@ -35,6 +45,11 @@ export type {
   BoundaryMetrics,
   FamilyFunnel,
   MicroReview,
+  MicroSurveyEntry,
+  MicroSurveyIndex,
+  MicroSurveyReport,
+  MicroSurveyResult,
+  MicroSurveyStats,
 };
 
 /** The judge's inspectable working for one pr-review grade — the harness declares

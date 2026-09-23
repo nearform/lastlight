@@ -1,0 +1,318 @@
+/**
+ * Replay ONE survey branch against a preserved workspace, in seconds not hours.
+ *
+ * ── Why this exists ────────────────────────────────────────────────────────
+ *
+ * A full `pr-review` eval case runs ~13 phases and took **23–47 minutes** per
+ * case at `--concurrency 3` (2026-09-22 arms `191307` / `201815`), so the
+ * feedback loop on a survey-prompt edit was a $30, hour-long, 8-case arm whose
+ * run-to-run band is wider than most effects being tested: those two arms,
+ * identical in every input, scored **12/25 and 8/25**, sharing only 6 gold.
+ *
+ * Almost none of that machinery is involved in the question that actually
+ * moves: **does a survey branch, standing at a real defect, write the RISK or
+ * the REASSURANCE?** The 2026-09-22 CONFIRM audit of `1587-r3` found the pass
+ * reaching two gold and recording them as *"Dual-roster race condition
+ * resolved"* and *"Nonce max-age enforced server-side"* — right lines, opposite
+ * verdict. `review.analysis`'s discharge rule (`c4810269`) exists to convert
+ * exactly those, and was then measured **inert**: `needsProbe` ran at 11.5% and
+ * 12.7% across the two arms against a 15.6% baseline, i.e. the rule is read and
+ * ignored.
+ *
+ * So this runs ONE branch, on the SAME workspace the real arm ran on, with the
+ * same prompt + obligations + model, and reports the leading indicator. One
+ * branch is ~1–3 minutes and a few cents.
+ *
+ * ── What it holds fixed, and what it does not ──────────────────────────────
+ *
+ * Fixed by replaying a preserved workspace: the checkout, the staged diff, the
+ * seeded obligations (`obligations/<family>.md`) and their discharge contract.
+ * Those are deterministic upstream artifacts — the plan records the seed as
+ * byte-identical across runs — so replaying them removes the *upstream* half of
+ * the variance and leaves the half under test.
+ *
+ * NOT fixed: the model's own sampling. Survey runs with extended thinking, so
+ * temperature is pinned to 1 by the provider and cannot be lowered; `--repeats`
+ * is therefore the only honest way to read a result here, exactly as at arm
+ * level. Two repeats give a range, never an SD.
+ *
+ * **Skills are staged FRESH from core on every run** (never the frozen
+ * `.lastlight-skills/` bundle inside the fixture), because iterating on
+ * `skills/survey-pass/SKILL.md` is the point. `noSkills` is set so Pi's own
+ * discovery is off: eval runs use `--sandbox none` on the host, and an operator's
+ * personal `~/.agents/skills` catalogue otherwise reaches the agent and makes the
+ * run unreproducible on another machine (an open item in the campaign notes).
+ *
+ * ── Reading the output ─────────────────────────────────────────────────────
+ *
+ * `needsProbe%` is the metric this was built for and the only deterministic
+ * one. `reassurance-shaped` is a LEXICAL heuristic over the claim text — a
+ * cheap tripwire, not a judge; it cannot tell a true "this is fine" from a
+ * missed defect, and a prompt edit that merely teaches the model to avoid the
+ * word "correctly" would move it while changing nothing. Read the dumped claims.
+ *
+ * The fixture's OWN hypotheses are reported beside the replay as `baseline`,
+ * free: that is what the real arm produced from this identical input.
+ *
+ * Usage:
+ *   npx tsx scripts/micro-survey.ts --fixture <dir> --family <f> [options]
+ *
+ *   --fixture <dir>    a preserved workspace (see `--keep-workspace`, copied out
+ *                      of $TMPDIR — macOS purges /var/folders, and the campaign
+ *                      already lost 216 of 237 preserved workspaces that way)
+ *   --instances <p>    instances.json, for the PR fields the prompt renders
+ *   --family <f>       contract | enforcement | security | state
+ *   --model <m>        default: anthropic/claude-haiku-4-5-20251001
+ *   --thinking <t>     pi thinking level (omit for the harness default)
+ *   --repeats <n>      default 1; anything you intend to CONCLUDE from wants >1
+ *   --label <s>        names the run in the JSON report
+ *   --dry-run          render + resolve + price, spend nothing
+ *
+ * `spec` is deliberately unsupported: its obligations are built harness-side
+ * from the PR description rather than seeded to `obligations/spec.md`, so there
+ * is nothing on disk to replay and a silent empty block would read as a clean
+ * family.
+ */
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join, resolve } from "node:path";
+
+import { renderTemplate } from "lastlight-workflow-engine";
+
+/** The four families whose obligations are seeded to disk by `lastlight-facts seed`. */
+const FAMILIES = ["contract", "enforcement", "security", "state"] as const;
+type Family = (typeof FAMILIES)[number];
+
+/** Mirrors `BRANCH_CONTEXT_HEADING` in `apps/server/src/workflows/handlers/fanout.ts`.
+ * Duplicated rather than imported because the evals barrel does not export it;
+ * `assertHeadingInSync` below fails loudly if core ever changes it. */
+const BRANCH_CONTEXT_HEADING = "## Attached: the file this pass was seeded with";
+
+const argv = process.argv.slice(2);
+const flag = (name: string): string | undefined => {
+  const i = argv.indexOf(name);
+  return i >= 0 ? argv[i + 1] : undefined;
+};
+const has = (name: string) => argv.includes(name);
+
+const dryRun = has("--dry-run");
+const fixture = flag("--fixture");
+const family = flag("--family") as Family | undefined;
+const model = flag("--model") ?? "anthropic/claude-haiku-4-5-20251001";
+const thinking = flag("--thinking");
+const repeats = Number(flag("--repeats") ?? "1");
+const label = flag("--label") ?? "micro";
+const instancesPath = flag("--instances");
+/** Drop the workspace `AGENTS.md` — an ABLATION of the agent-context, not the default. */
+const noAgentsMd = has("--no-agents-md");
+/** Ambient skill discovery is OFF, which is what core now does on every backend
+ * (`noSkills: true` — `apps/server/tests/sandbox/declared-skills-only.test.ts`).
+ * A phase gets exactly the skills its YAML declares.
+ *
+ * `--ambient-skills` restores the PRE-FIX behaviour, and exists only to
+ * reproduce an arm measured before it: every one of the 69 agent sessions in
+ * arm `201815` recorded `"noSkills":false` and carried the operator's personal
+ * `~/.agents/skills` catalogue, so any archived number was produced that way
+ * and cannot be re-derived without it. */
+const discoverSkills = has("--ambient-skills");
+
+if (!fixture || !family) {
+  console.error("usage: micro-survey.ts --fixture <dir> --family <contract|enforcement|security|state> [--instances p] [--model m] [--thinking t] [--repeats n] [--label s] [--dry-run]");
+  process.exit(2);
+}
+if (!FAMILIES.includes(family)) {
+  console.error(`--family must be one of ${FAMILIES.join(" | ")} (spec is harness-built and has no seeded block to replay)`);
+  process.exit(2);
+}
+
+const coreRoot = resolve(process.env.LASTLIGHT_CORE_DIR ?? resolve(import.meta.dirname, "../../server"), ".");
+const serverRoot = existsSync(join(coreRoot, "workflows")) ? coreRoot : join(coreRoot, "apps/server");
+
+/** The fixture's checkout: `<fixture>/sandboxes/<taskId>/<repoName>`. */
+function resolveCheckout(dir: string): { taskDir: string; repo: string; checkout: string } {
+  const sandboxes = join(dir, "sandboxes");
+  if (!existsSync(sandboxes)) throw new Error(`no sandboxes/ under ${dir} — is this a preserved workspace?`);
+  const task = readdirSync(sandboxes)[0];
+  const taskDir = join(sandboxes, task);
+  const repo = readdirSync(taskDir).find((e) => existsSync(join(taskDir, e, ".git")));
+  if (!repo) throw new Error(`no git checkout under ${taskDir}`);
+  // The TASK dir, not the checkout: `AGENTS.md` (the composed agent-context) is
+  // a SIBLING of the repo, and Pi auto-loads the first AGENTS.md walking UP from
+  // cwd. Copying only the checkout silently drops the operational rules — the
+  // agent then runs with no persona at all, which is not what the arm measured.
+  return { taskDir, repo, checkout: join(taskDir, repo) };
+}
+
+/** Fail loudly if core renamed the heading this script duplicates. */
+function assertHeadingInSync(): void {
+  const p = join(serverRoot, "src/workflows/handlers/fanout.ts");
+  if (!existsSync(p)) return;
+  if (!readFileSync(p, "utf8").includes(BRANCH_CONTEXT_HEADING)) {
+    throw new Error(`BRANCH_CONTEXT_HEADING drifted: ${p} no longer contains "${BRANCH_CONTEXT_HEADING}"`);
+  }
+}
+
+interface Row { needsProbe?: boolean; claim?: string; severity?: string; id?: string }
+
+function readRows(checkout: string, fam: Family): Row[] {
+  const p = join(checkout, ".lastlight/pr-review/hypotheses", `${fam}.jsonl`);
+  if (!existsSync(p)) return [];
+  return readFileSync(p, "utf8")
+    .split("\n")
+    .filter((l) => l.trim())
+    .flatMap((l) => { try { return [JSON.parse(l) as Row]; } catch { return []; } });
+}
+
+/** A LEXICAL tripwire, not a judge — see the header. Reassurance is a claim that
+ * asserts the code is fine and asks for no probe. */
+const REASSURANCE = /\b(correctly|properly|is enforced|are enforced|is validated|are validated|is handled|are handled|ensures|guarantees|no issue|as expected|is safe|is correct)\b/i;
+function summarise(rows: Row[]) {
+  const needs = rows.filter((r) => r.needsProbe === true).length;
+  const reassurance = rows.filter((r) => r.needsProbe !== true && REASSURANCE.test(r.claim ?? "")).length;
+  return {
+    rows: rows.length,
+    needsProbe: needs,
+    needsProbePct: rows.length ? (100 * needs) / rows.length : 0,
+    reassuranceShaped: reassurance,
+  };
+}
+
+const { taskDir, repo: repoDirName, checkout } = resolveCheckout(fixture);
+assertHeadingInSync();
+
+const obligationsPath = join(checkout, ".lastlight/pr-review/obligations", `${family}.md`);
+if (!existsSync(obligationsPath)) throw new Error(`no seeded obligations at ${obligationsPath}`);
+
+// The prompt, rendered exactly as the fan-out renders it, then the obligations
+// block appended under the same heading the harness uses.
+const promptPath = join(serverRoot, "workflows/prompts", `survey-${family}.md`);
+const instance = instancesPath
+  ? (JSON.parse(readFileSync(instancesPath, "utf8")) as { instance_id: string; repo?: string; pr?: Record<string, unknown> }[])
+      .find((i) => i.instance_id === basename(fixture))
+  : undefined;
+const pr = (instance?.pr ?? {}) as Record<string, string | number>;
+const [owner, repoName] = (instance?.repo ?? "owner/repo").split("/");
+const ctx = {
+  owner,
+  repo: repoName,
+  prNumber: pr.number ?? 0,
+  headSha: pr.head_commit ?? "HEAD",
+  baseBranch: pr.base_ref ?? "main",
+  prTitle: pr.title ?? "",
+};
+const rendered = renderTemplate(readFileSync(promptPath, "utf8"), ctx as never);
+const prompt = [rendered, "", BRANCH_CONTEXT_HEADING, "", readFileSync(obligationsPath, "utf8")].join("\n");
+if (/\{\{|\}\}/.test(rendered)) {
+  console.warn("! unrendered {{marker}} left in the prompt — the template context is missing a key");
+}
+
+const baseline = summarise(readRows(checkout, family));
+
+console.log(`fixture   ${fixture}`);
+console.log(`checkout  ${checkout}`);
+console.log(`family    ${family}   model ${model}${thinking ? `  thinking ${thinking}` : ""}   repeats ${repeats}`);
+console.log(`prompt    ${promptPath} (${prompt.length} chars incl. obligations)`);
+console.log(`skill     ${join(serverRoot, "skills/survey-pass/SKILL.md")} (staged fresh)`);
+console.log(`context   AGENTS.md ${noAgentsMd ? "REMOVED (ablation)" : "present"}   ambient skill discovery ${discoverSkills ? "ON" : "off"}`);
+console.log(`\nbaseline (what the preserved arm itself wrote for this family):`);
+console.log(`  rows ${baseline.rows}  needsProbe ${baseline.needsProbe} (${baseline.needsProbePct.toFixed(1)}%)  reassurance-shaped ${baseline.reassuranceShaped}`);
+
+if (dryRun) {
+  console.log("\n--dry-run: resolved and rendered only, nothing spent.");
+  process.exit(0);
+}
+
+const { run } = (await import("agentic-pi")) as { run: (o: Record<string, unknown>) => Promise<Record<string, never>> };
+
+const results: ReturnType<typeof summarise>[] = [];
+const claims: string[][] = [];
+
+// The report is written after EVERY repeat, not once at the end, so a sweep is
+// visible while it runs rather than appearing all at once ~25 minutes later.
+// `live` + `heartbeat` mirror `scorecard.json`'s contract (`report.ts`): a live
+// report whose heartbeat has gone stale was killed, which reads differently
+// from one still working. The filename is fixed up front so every write lands
+// on the same file.
+const outDir = join(process.cwd(), "eval-results", "micro-survey");
+mkdirSync(outDir, { recursive: true });
+const out = join(outDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${label}-${family}.json`);
+
+/**
+ * `fireRate` is the headline for a bimodal metric. Measured on `enforcement`:
+ * a run marks either ~5 rows `needsProbe` or none at all, almost nothing in
+ * between — so a per-run PERCENTAGE is 3 Bernoulli trials wearing a continuous
+ * disguise, and a mean over them is meaningless. The fraction of repeats in
+ * which the family asked for ANY probe is the quantity that actually varies.
+ */
+const writeReport = (done: boolean) => {
+  const fired = results.filter((r) => r.needsProbe > 0).length;
+  writeFileSync(out, JSON.stringify({
+    label, family, model, thinking, fixture,
+    repeats, repeatsDone: results.length,
+    live: !done,
+    heartbeat: new Date().toISOString(),
+    ambientSkills: discoverSkills,
+    agentsMd: !noAgentsMd,
+    baseline,
+    fireRate: results.length ? fired / results.length : null,
+    firedRepeats: fired,
+    results, claims,
+  }, null, 2));
+};
+writeReport(false);
+
+// A repeat takes 2-5 MINUTES and `writeReport` only runs BETWEEN repeats, so a
+// heartbeat refreshed per repeat goes stale mid-repeat and a perfectly healthy
+// run reads as killed (the dashboard's staleness bar is 90 s — "silence is not
+// progress", inverted). Tick it independently, as `run.ts` does for a live
+// scorecard. `unref` so the timer never holds a finished script open.
+const heartbeat = setInterval(() => writeReport(false), 15_000);
+heartbeat.unref?.();
+for (let i = 1; i <= repeats; i++) {
+  // A scratch COPY per repeat: the branch writes into `.lastlight/pr-review/`
+  // and the fixture must stay pristine for the next iteration.
+  const scratch = mkdtempSync(join(tmpdir(), `micro-survey-${family}-`));
+  const workspace = join(scratch, "ws");
+  cpSync(taskDir, workspace, { recursive: true });
+  const work = join(workspace, repoDirName);
+  if (noAgentsMd) rmSync(join(workspace, "AGENTS.md"), { force: true });
+  rmSync(join(work, ".lastlight/pr-review/hypotheses", `${family}.jsonl`), { force: true });
+
+  const skillDir = join(scratch, "skills");
+  mkdirSync(skillDir, { recursive: true });
+  cpSync(join(serverRoot, "skills/survey-pass"), join(skillDir, "survey-pass"), { recursive: true });
+
+  const started = Date.now();
+  const r = (await run({
+    model,
+    prompt,
+    cwd: work,
+    skillPaths: [join(skillDir, "survey-pass")],
+    noSkills: !discoverSkills,
+    sandbox: "none",
+    ...(thinking ? { thinking } : {}),
+  })) as unknown as { ok?: boolean; stats?: { cost?: number; turns?: number; toolCalls?: number } };
+
+  const rows = readRows(work, family);
+  const s = summarise(rows);
+  results.push({ ...s, costUsd: r.stats?.cost ?? 0 } as never);
+  claims.push(rows.map((x) => `${x.needsProbe === true ? "PROBE" : "  .  "} [${x.severity ?? "?"}] ${(x.claim ?? "").slice(0, 110)}`));
+  const secs = ((Date.now() - started) / 1000).toFixed(0);
+  console.log(`\nrepeat ${i}/${repeats}  ${secs}s  $${(r.stats?.cost ?? 0).toFixed(3)}  tools=${r.stats?.toolCalls ?? "?"}  ok=${r.ok !== false}`);
+  console.log(`  rows ${s.rows}  needsProbe ${s.needsProbe} (${s.needsProbePct.toFixed(1)}%)  reassurance-shaped ${s.reassuranceShaped}`);
+  for (const c of claims[i - 1]) console.log(`    ${c}`);
+  rmSync(scratch, { recursive: true, force: true });
+  writeReport(false);
+}
+clearInterval(heartbeat);
+writeReport(true);
+
+const pct = results.map((r) => r.needsProbePct);
+const fired = results.filter((r) => r.needsProbe > 0).length;
+console.log(`\n== ${label} · ${family} · ${model}`);
+console.log(`   baseline needsProbe ${baseline.needsProbePct.toFixed(1)}%   replay ${pct.map((p) => p.toFixed(1) + "%").join(" / ")}`);
+console.log(`   FIRE RATE ${fired}/${results.length} repeats asked for at least one probe`);
+if (results.length < 8) {
+  console.log(`   (${results.length} repeats — this metric is BIMODAL, so treat it as ${results.length} coin flips; 8+ before ranking anything)`);
+}
+console.log(`   report → ${out}`);

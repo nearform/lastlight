@@ -290,6 +290,12 @@ export class SmolSandbox {
       }
       piArgs.push("--skill", dir);
     }
+    // The declared `skills:` list is the WHOLE list. Without this, Pi's own
+    // discovery adds whatever is on the host — same ambient-capability shape
+    // as `--no-web-search` above. Explicit `--skill` dirs still load.
+    // (Measured: 69/69 agent sessions of one eval arm carried the operator's
+    // personal `~/.agents/skills` catalogue into a declared-`[survey-pass]` pass.)
+    piArgs.push("--no-skills");
     if (!PATH_RE.test(model)) {
       throw new Error(`Refusing to pass model "${model}" — bad charset`);
     }

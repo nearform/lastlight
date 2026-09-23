@@ -66,6 +66,16 @@ export function fmtPct(x: number | null | undefined): string {
   return x === null || x === undefined || !Number.isFinite(x) ? "—" : `${(x * 100).toFixed(0)}%`;
 }
 
+/**
+ * A percentage the harness already expressed as 0..100 — the micro-survey's
+ * `needsProbePct`. One decimal, because the underlying quantity is a count over
+ * ~12 rows and a whole percent would collapse distinct counts onto one number.
+ * Deliberately separate from {@link fmtPct}, which takes a 0..1 ratio.
+ */
+export function fmtProbePct(x: number | null | undefined): string {
+  return x === null || x === undefined || !Number.isFinite(x) ? "—" : `${x.toFixed(1)}%`;
+}
+
 /** The primary success metric for a tier (higher = better), matching the
  * harness scorecard semantics: code-fix → resolved%, pr-review → micro-recall,
  * everything else → behavioral%. */

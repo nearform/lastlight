@@ -418,6 +418,12 @@ export class DockerSandbox {
       }
       extraArgs.push("--skill", dir);
     }
+    // The declared `skills:` list is the WHOLE list. Without this, Pi's own
+    // discovery adds whatever is on the host — same ambient-capability shape
+    // as `--no-web-search` above. Explicit `--skill` dirs still load.
+    // (Measured: 69/69 agent sessions of one eval arm carried the operator's
+    // personal `~/.agents/skills` catalogue into a declared-`[survey-pass]` pass.)
+    extraArgs.push("--no-skills");
     if (!/^[A-Za-z0-9/_.-]+$/.test(model)) {
       throw new Error(`Refusing to pass model "${model}" — bad charset`);
     }

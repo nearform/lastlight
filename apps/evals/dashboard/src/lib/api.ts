@@ -1,6 +1,7 @@
 import { useQueries, useQuery } from "@tanstack/react-query";
 
-import type { DashboardIndex, Scorecard } from "../types";
+import { microStatus, withMicroEntryDefaults } from "../../../src/micro-survey.js";
+import type { DashboardIndex, MicroSurveyIndex, MicroSurveyReport, Scorecard } from "../types";
 import {
   buildFamilyDrilldown,
   type FamilyDrilldown,
@@ -25,6 +26,73 @@ export function useIndex() {
     queryKey: ["index"],
     queryFn: () => getJson<DashboardIndex>("/api/index"),
     refetchInterval: (q) => (anyLive(q.state.data) ? 1500 : 15000),
+  });
+}
+
+/**
+ * A micro-survey run rewrites its report after EVERY repeat, so a replay is
+ * visible while it happens: `live` is true on every write but the last, and
+ * `heartbeat` is refreshed each time. {@link microStatus} turns the pair into
+ * running / interrupted / complete — the same function the index uses, so the
+ * two cannot disagree.
+ *
+ * The list polls fast while anything is genuinely running. It also polls fast
+ * for a while after the newest report landed, because the file for a replay
+ * that has just been launched does not exist yet and recency is the only signal
+ * that another is probably on its way.
+ */
+const MICRO_ACTIVE_WINDOW_MS = 10 * 60 * 1000;
+
+const microActive = (idx?: MicroSurveyIndex): boolean => {
+  if (!idx?.reports.length) return false;
+  const now = Date.now();
+  if (idx.reports.some((r) => microStatus(r, now) === "running")) return true;
+  const t = Date.parse(idx.reports[0]?.generatedAt ?? "");
+  return Number.isFinite(t) && now - t < MICRO_ACTIVE_WINDOW_MS;
+};
+
+/**
+ * The micro-survey index. A 404 is an EMPTY list, not an error: a dashboard
+ * built before this endpoint existed (the baked static site on
+ * evals.lastlight.dev) has no `/api/micro`, and that must read as "no replays
+ * here", exactly as an absent `eval-results/micro-survey/` directory does.
+ */
+export function useMicroIndex() {
+  return useQuery({
+    queryKey: ["micro-index"],
+    queryFn: async (): Promise<MicroSurveyIndex> => {
+      const res = await fetch("/api/micro", { headers: { accept: "application/json" } });
+      if (res.status === 404) return { generatedAt: new Date().toISOString(), reports: [] };
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText} — /api/micro`);
+      const idx = (await res.json()) as MicroSurveyIndex;
+      // The index may have been computed — or BAKED, by `scripts/build-site.ts`
+      // — by an older harness that knew nothing about the live/fire-rate
+      // fields. Degrade those entries rather than render holes.
+      return { ...idx, reports: (idx.reports ?? []).map(withMicroEntryDefaults) };
+    },
+    refetchInterval: (q) => (microActive(q.state.data) ? 1500 : 15000),
+  });
+}
+
+/**
+ * One micro-survey report in full (per-repeat stats + claim lines).
+ *
+ * A report used to be written once, at the end, which is why this cached it
+ * forever. It is now rewritten after every repeat, so a LIVE one must be
+ * re-fetched at the live cadence and must not be served from cache — while a
+ * settled one keeps the old treatment, because that file really never changes
+ * again. `live` is part of the query key so the transition live→done forces one
+ * last fetch of the final write, with the previous data held on screen
+ * meanwhile rather than flashing a loading state on every poll.
+ */
+export function useMicroReport(url: string | undefined, live = false) {
+  return useQuery({
+    queryKey: ["micro-report", url, live],
+    queryFn: () => getJson<MicroSurveyReport>(url as string),
+    enabled: !!url,
+    refetchInterval: live ? 1500 : false,
+    staleTime: live ? 0 : Infinity,
+    placeholderData: (prev) => prev,
   });
 }
 

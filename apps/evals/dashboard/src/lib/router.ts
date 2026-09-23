@@ -11,6 +11,19 @@ import { useSyncExternalStore, useCallback } from "react";
  */
 export type RunViewName = "repeats";
 
+/**
+ * The reserved first segment for the micro-survey views — `#/micro-survey` for
+ * the list, `#/micro-survey/<report-id>` for one report.
+ *
+ * It sits in the tier-key position holding something that is not a tier, which
+ * is safe because it is also the literal directory name
+ * `eval-results/micro-survey/`, and that directory holds loose report files
+ * rather than run subdirs — so `buildIndex` never emits a tier with this key and
+ * the two can never collide. Reusing the grammar rather than growing a fourth
+ * segment keeps every existing link unchanged.
+ */
+export const MICRO_TIER_KEY = "micro-survey";
+
 export interface Route {
   tierKey?: string;
   runId?: string;
