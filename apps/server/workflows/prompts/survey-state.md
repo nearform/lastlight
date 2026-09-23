@@ -117,8 +117,19 @@ The recurring shapes for THIS family:
 The `survey-pass` skill's evidence record is shared by every pass; `control_site` is the
 only field whose meaning is yours to fix. For this family the control is an **invalidation, guard or ordering constraint** — the line that resets the entry, releases the lock, or makes the second call behave like the first. Ask what runs on the SECOND call, not the first.
 
-Fill the record for every obligation. `severity` and `needsProbe` follow from it by the
-table in the skill — compute them, do not judge them.
+**Every row carries an `evidence` object**, in the shape the `survey-pass` skill defines. It is
+how the verdict is computed, and a row without one cannot be ranked by anything — it falls back
+to a guess. Add it to every row you write.
+
+**You do not write `severity` or `needsProbe`.** If the attached block's example row shows them,
+ignore those two fields: they are derived from your evidence, not chosen by you. Everything else
+the attachment prescribes still applies.
+
+Worked example — invented, for SHAPE only, showing the fields this family fills:
+
+```json
+{"id": "state-001", "obligation": "O-001", "family": "state", "evidence": {"subject": "rosterCache", "control_site": "none", "control_text": "", "authority": "unknown", "order_ok": "unknown", "cannot_distinguish": "nothing", "bypass": "none found", "in_changed_hunk": true, "consequence": "the second request after a member is removed still reads the cached roster; nothing clears it and no TTL bounds it", "trigger": "state", "crosses_boundary": false, "capability_gained": null}, "claim": "nothing invalidates the roster cache when membership changes, so the second call serves a removed member"}
+```
 
 ## State the residual risk, not the reassurance
 

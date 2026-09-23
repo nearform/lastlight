@@ -86,8 +86,19 @@ The recurring shape this family keeps missing:
 The `survey-pass` skill's evidence record is shared by every pass; `control_site` is the
 only field whose meaning is yours to fix. For this family the control is a **consumer that satisfies the moved shape** — the line where the consumer reads the field, with the type, schema or guard that makes the shape it expects the shape it gets. A caller the diff never opened is where this lives.
 
-Fill the record for every obligation. `severity` and `needsProbe` follow from it by the
-table in the skill — compute them, do not judge them.
+**Every row carries an `evidence` object**, in the shape the `survey-pass` skill defines. It is
+how the verdict is computed, and a row without one cannot be ranked by anything — it falls back
+to a guess. Add it to every row you write.
+
+**You do not write `severity` or `needsProbe`.** If the attached block's example row shows them,
+ignore those two fields: they are derived from your evidence, not chosen by you. Everything else
+the attachment prescribes still applies.
+
+Worked example — invented, for SHAPE only, showing the fields this family fills:
+
+```json
+{"id": "contract-001", "obligation": "O-001", "family": "contract", "evidence": {"subject": "OrderSummary.total", "control_site": "none", "control_text": "", "authority": "unknown", "order_ok": "unknown", "cannot_distinguish": "nothing", "bypass": "none found", "in_changed_hunk": true, "consequence": "the reporting service reads `total` as a number and the producer now emits a string; its arithmetic silently coerces and the monthly figures are wrong", "trigger": "state", "crosses_boundary": true, "capability_gained": "silently wrong financial output where the old shape failed loudly"}, "claim": "the producer now emits `total` as a string; the reporting consumer the diff never opened still does arithmetic on it"}
+```
 
 ## State the residual risk, not the reassurance
 

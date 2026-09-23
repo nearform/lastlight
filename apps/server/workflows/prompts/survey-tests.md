@@ -64,8 +64,19 @@ This family reads a coverage report. If your block says NOT MEASURED, that is th
 The `survey-pass` skill's evidence record is shared by every pass; `control_site` is the
 only field whose meaning is yours to fix. For this family the control is an **assertion that would fail if the behaviour changed** — the line that checks the result. A test that exercises a path without asserting on it closes nothing.
 
-Fill the record for every obligation. `severity` and `needsProbe` follow from it by the
-table in the skill — compute them, do not judge them.
+**Every row carries an `evidence` object**, in the shape the `survey-pass` skill defines. It is
+how the verdict is computed, and a row without one cannot be ranked by anything — it falls back
+to a guess. Add it to every row you write.
+
+**You do not write `severity` or `needsProbe`.** If the attached block's example row shows them,
+ignore those two fields: they are derived from your evidence, not chosen by you. Everything else
+the attachment prescribes still applies.
+
+Worked example — invented, for SHAPE only, showing the fields this family fills:
+
+```json
+{"id": "tests-001", "obligation": "O-001", "family": "tests", "evidence": {"subject": "retryWithBackoff()", "control_site": "none", "control_text": "", "authority": "unknown", "order_ok": "unknown", "cannot_distinguish": "nothing", "bypass": "none found", "in_changed_hunk": true, "consequence": "the changed backoff arithmetic is executed by no test, so an off-by-one in the delay ships unnoticed", "trigger": "code_change", "crosses_boundary": false, "capability_gained": null}, "claim": "the changed lines run in no test; the suite exercises the caller but asserts nothing about the delay"}
+```
 
 ## State the residual risk, not the reassurance
 

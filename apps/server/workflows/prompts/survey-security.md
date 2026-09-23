@@ -127,8 +127,19 @@ how a caller learns it fired. The recurring shapes:
 The `survey-pass` skill's evidence record is shared by every pass; `control_site` is the
 only field whose meaning is yours to fix. For this family the control is a **sanitiser, escape or authorisation check between the source and the sink** — the line that makes the tainted value safe, at a point the attacker does not control.
 
-Fill the record for every obligation. `severity` and `needsProbe` follow from it by the
-table in the skill — compute them, do not judge them.
+**Every row carries an `evidence` object**, in the shape the `survey-pass` skill defines. It is
+how the verdict is computed, and a row without one cannot be ranked by anything — it falls back
+to a guess. Add it to every row you write.
+
+**You do not write `severity` or `needsProbe`.** If the attached block's example row shows them,
+ignore those two fields: they are derived from your evidence, not chosen by you. Everything else
+the attachment prescribes still applies.
+
+Worked example — invented, for SHAPE only, showing the fields this family fills:
+
+```json
+{"id": "security-001", "obligation": "O-001", "family": "security", "evidence": {"subject": "req.query.next", "control_site": "src/routes/login.ts:88", "control_text": "const next = String(req.query.next ?? \"/\");", "authority": "advisory", "order_ok": true, "cannot_distinguish": "a relative path and an absolute URL to another origin", "bypass": "none found", "in_changed_hunk": true, "consequence": "a caller supplies an absolute URL and the redirect leaves the origin, carrying the session referer", "trigger": "input", "crosses_boundary": true, "capability_gained": "redirecting an authenticated user to an origin the attacker controls"}, "claim": "the redirect target is coerced to a string but never constrained to this origin, so an absolute URL passes through"}
+```
 
 ## State the residual risk, not the reassurance
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { type SurveyEvidence, deriveVerdict, hasEvidence } from "../src/survey-verdict.js";
+import { type SurveyEvidence, deriveVerdict, hasEvidence, severityOf } from "../src/survey-verdict.js";
 
 /** A row whose mechanism is fully closed: binding control, in time, nothing past it. */
 const clean: SurveyEvidence = {
@@ -175,5 +175,21 @@ describe("a consequence that only bites after an edit", () => {
       trigger: "input",
     });
     expect(v.severity).toBe("Critical");
+  });
+});
+
+describe("a row with no evidence is a reported fact", () => {
+  /**
+   * The failure that hides. Severity and needsProbe are derived FROM evidence,
+   * so a row without it falls back to whatever the pass wrote — the ungoverned
+   * guess the derivation exists to replace. Measured once as ten of ten rows
+   * graded `Critical` on a pull request with nothing wrong, while every other
+   * number looked ordinary. It has to be visible as a contract violation, not
+   * absorbed as a clean run.
+   */
+  it("derives nothing and falls back, rather than inventing a verdict", () => {
+    expect(hasEvidence({})).toBe(false);
+    expect(severityOf({ severity: "Critical", evidence: {} })).toBe("Critical");
+    expect(severityOf({ severity: "Critical", evidence: { consequence: null, control_site: "a.ts:1", authority: "binding", order_ok: true, cannot_distinguish: "nothing", bypass: "none found" } })).toBe("Minor");
   });
 });

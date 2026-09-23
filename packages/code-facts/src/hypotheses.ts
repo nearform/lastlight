@@ -164,6 +164,21 @@ export interface HypothesisSet {
   unknownObligations: Map<string, string[]>;
   /** Whether a question set was supplied to resolve citations against. */
   obligationsChecked: boolean;
+  /**
+   * Canonical ids of rows carrying NO evidence record.
+   *
+   * **Reported, never silently tolerated.** `severity` and `needsProbe` are
+   * derived from evidence; a row without it falls back to whatever the pass
+   * wrote, which is exactly the ungoverned guess the derivation exists to
+   * replace. Measured: a family whose prompt only POINTED at the record wrote
+   * none, fell back, and graded ten of ten rows `Critical` on a pull request
+   * with nothing wrong — while every surface reported success.
+   *
+   * So this is a first-class fact, like `malformed` and `unknownObligations`:
+   * a pass that ignored its contract must be visible as that, not as a clean
+   * run. Loud in the artifact, never fatal to the run.
+   */
+  missingEvidence: string[];
 }
 
 /** The verdict for a row, or `null` when it carried no evidence to derive from. */
@@ -274,6 +289,8 @@ export function readHypothesisSet(
     });
   }
 
+  const missingEvidence = records.filter((r) => r.verdict === null).map((r) => r.id);
+
   const byId = new Map(records.map((r) => [r.id, r]));
 
   // Aliases, in two passes: collect every claim on a declared id, then keep only
@@ -320,6 +337,7 @@ export function readHypothesisSet(
     ambiguous,
     families,
     malformed,
+    missingEvidence,
     declared,
     unknownObligations,
     obligationsChecked: known !== null,

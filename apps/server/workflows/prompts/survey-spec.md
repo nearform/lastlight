@@ -47,6 +47,39 @@ sentence the code can falsify is a finding.
 Every other "what to check" item in the review rubric is a STANDARDS check; this
 is the other axis, and it is the one a clean standards review cannot answer.
 
+## What closes the mechanism, for `spec`
+
+The `survey-pass` skill's evidence record is shared by every pass; `control_site` is the
+only field whose meaning is yours to fix. For this family the control is a **line in a
+changed file that implements the criterion** — not one that mentions it, and not a promise
+in the description.
+
+<!-- This family's brief is restatement-adjacent: its job is checking the PR's own claims,
+     so the sentence it reaches for first describes the intended change. A criterion the PR
+     MEETS is a clean control with `consequence: null`, which the table grades Minor. The
+     scale of a change is not a severity. -->
+
+**Every row carries an `evidence` object**, in the shape the `survey-pass` skill defines. It is
+how the verdict is computed, and a row without one cannot be ranked by anything — it falls back
+to a guess. Add it to every row you write.
+
+**You do not write `severity` or `needsProbe`.** If the attached block's example row shows them,
+ignore those two fields: they are derived from your evidence, not chosen by you. Everything else
+the attachment prescribes still applies.
+
+Worked example — invented, for SHAPE only, showing the fields this family fills:
+
+```json
+{"id": "spec-001", "obligation": "O-001", "family": "spec", "evidence": {"subject": "acceptance criterion: expired sessions are rejected", "control_site": "src/auth/session.ts:120", "control_text": "if (session.expiresAt < now) return null;", "authority": "binding", "order_ok": true, "cannot_distinguish": "a session expiring during the request and one already expired", "bypass": "the refresh endpoint reads the session before this check runs", "in_changed_hunk": true, "consequence": "a session that expired mid-request is refreshed rather than rejected, extending it indefinitely", "trigger": "input", "crosses_boundary": true, "capability_gained": "holding a session past its stated lifetime"}, "claim": "the criterion is implemented on the read path but the refresh endpoint reaches the session before the check"}
+```
+
+<!-- KEEP EVERYTHING BELOW `{{specObligations}}` BYTE-STABLE. The eval
+     replay (`apps/evals/scripts/micro-survey.ts`) recovers this family's
+     obligations out of a preserved transcript by anchoring on ~160
+     characters either side of the placeholder, so an edit below it makes
+     the splice refuse and `spec` becomes unmeasurable against every
+     archived arm. New prose goes ABOVE this line. -->
+
 Your obligations are **inline below**. This is the only family whose obligations
 do not come from the deterministic code analysis — they are built by the harness
 from the PR body and the issues this PR closes — so unlike the other five there
@@ -79,21 +112,6 @@ obligation of your own and say where you got it. If they genuinely state nothing
 checkable, that is a real review observation and it gets a row of its own: the
 change's intent is unstated.
 {{/if}}
-
-## What closes the mechanism, for `spec`
-
-The `survey-pass` skill's evidence record is shared by every pass; `control_site` is the
-only field whose meaning is yours to fix. For this family the control is a **line in a
-changed file that implements the criterion** — not one that mentions it, and not a promise
-in the description.
-
-<!-- This family's brief is restatement-adjacent: its job is checking the PR's own claims,
-     so the sentence it reaches for first describes the intended change. A criterion the PR
-     MEETS is a clean control with `consequence: null`, which the table grades Minor. The
-     scale of a change is not a severity. -->
-
-Fill the record for every obligation. `severity` and `needsProbe` follow from it by the
-table in the skill — compute them, do not judge them.
 
 ## State the residual risk, not the reassurance
 

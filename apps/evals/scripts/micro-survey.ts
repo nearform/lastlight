@@ -226,16 +226,19 @@ function complianceOf(rows: Row[]) {
   const violations: string[] = [];
   for (const r of withEvidence) {
     const want = deriveVerdict(r.evidence as SurveyEvidence);
-    // A row that declares NEITHER field is following the current contract, not
-    // disagreeing with it. Counting that as a violation would measure the
-    // prompt we replaced.
-    if (r.severity === undefined && r.needsProbe === undefined) { undeclared++; continue; }
+    // Judged PER FIELD. A pass that declares neither is following the current
+    // contract, not disagreeing with it — and one that declares only `needsProbe`
+    // must not have its (correctly) absent `severity` graded as a mismatch.
+    // Counting either as a violation measures the prompt we replaced.
+    const declaredSev = typeof r.severity === "string" && r.severity.trim() !== "";
+    const declaredProbe = typeof r.needsProbe === "boolean";
+    if (!declaredSev && !declaredProbe) { undeclared++; continue; }
     const gotProbe = r.needsProbe === true;
     const gotSev = (r.severity ?? "").trim().toLowerCase();
-    if (gotProbe === want.needsProbe) probeOk++;
+    if (!declaredProbe || gotProbe === want.needsProbe) probeOk++;
     else violations.push(`${r.id ?? "?"} needsProbe=${gotProbe} want ${want.needsProbe} (${want.discharge}; site=${r.evidence?.control_site}; authority=${r.evidence?.authority}; cannot=${r.evidence?.cannot_distinguish})`);
-    if (gotSev === want.severity.toLowerCase()) sevOk++;
-    else violations.push(`${r.id ?? "?"} severity=${r.severity} want ${want.severity} (consequence=${r.evidence?.consequence === null ? "null" : "set"}; trigger=${r.evidence?.trigger}; crosses=${r.evidence?.crosses_boundary})`);
+    if (!declaredSev || gotSev === want.severity.toLowerCase()) sevOk++;
+    else violations.push(`${r.id ?? "?"} severity=${r.severity ?? "(none)"} want ${want.severity} (consequence=${r.evidence?.consequence === null ? "null" : "set"}; trigger=${r.evidence?.trigger}; crosses=${r.evidence?.crosses_boundary})`);
   }
   const graded = withEvidence.length - undeclared;
   return { rows: rows.length, withEvidence: withEvidence.length, undeclared, graded, probeOk, sevOk, violations };
@@ -469,20 +472,33 @@ for (let i = 1; i <= repeats; i++) {
   if (existsSync(rawRows)) cpSync(rawRows, join(rowsDir, `repeat-${i}.jsonl`));
   const s = summarise(rows);
   results.push({ ...s, costUsd: r.stats?.cost ?? 0, durationSec: (Date.now() - started) / 1000, turns: r.stats?.turns ?? null, toolCalls: r.stats?.toolCalls ?? null } as never);
-  claims.push(rows.map((x) => `${x.needsProbe === true ? "PROBE" : "  .  "} [${x.severity ?? "?"}] ${(x.claim ?? "").slice(0, 110)}`));
+  // DERIVED, like every other number here. The pass no longer writes `severity`
+  // or `needsProbe`, so reading the declared fields renders every row as
+  // `. [?]` while the aggregate above correctly reports the derived rate — two
+  // readings of different things, in one view, disagreeing.
+  claims.push(rows.map((x) => `${needsProbeOf(x) ? "PROBE" : "  .  "} [${severityOf(x) ?? "?"}] ${(x.claim ?? "").slice(0, 110)}`));
   const secs = ((Date.now() - started) / 1000).toFixed(0);
   console.log(`\nrepeat ${i}/${repeats}  ${secs}s  $${(r.stats?.cost ?? 0).toFixed(3)}  tools=${r.stats?.toolCalls ?? "?"}  ok=${r.ok !== false}`);
   console.log(`  rows ${s.rows}  needsProbe ${s.needsProbe} (${s.needsProbePct.toFixed(1)}%)  reassurance-shaped ${s.reassuranceShaped}`);
   console.log(`  severity  critical ${s.severity.critical}  important ${s.severity.important}  minor ${s.severity.minor}` + (s.severity.unknown ? `  unknown ${s.severity.unknown}` : ""));
   if (s.compliance.withEvidence > 0) {
     const c = s.compliance;
+    if (c.withEvidence < c.rows) {
+      console.log(`  derivation  ✗ ${c.rows - c.withEvidence}/${c.rows} rows carry NO evidence — those fall back to the pass's own guess`);
+    }
     console.log(c.graded === 0
       ? `  derivation  evidence on ${c.withEvidence}/${c.rows} rows · verdict derived for all of them (the pass declared none, as asked)`
       : `  derivation  evidence on ${c.withEvidence}/${c.rows} rows · ${c.undeclared} left to the deriver · of ${c.graded} it still graded: needsProbe ${c.probeOk} agree · severity ${c.sevOk} agree`);
     for (const v of c.violations.slice(0, 6)) console.log(`    ✗ ${v}`);
     if (c.violations.length > 6) console.log(`    … ${c.violations.length - 6} more`);
   } else if (rows.length > 0) {
-    console.log("  derivation  no `evidence` on any row — this prompt does not ask for it");
+    // Loud, because this is the failure that hides. Every prompt asks for the
+    // record now, so its absence means the pass ignored the contract and the
+    // verdict fell back to whatever it felt like — measured once as ten of ten
+    // rows `Critical` on a PR with nothing wrong, while every other number
+    // looked ordinary.
+    console.log(`  derivation  ✗✗ NO \`evidence\` ON ANY OF ${rows.length} ROWS — the pass ignored the record, so`);
+    console.log("              severity/needsProbe fell back to its own guess. Treat this run as VOID.");
   }
   for (const c of claims[i - 1]) console.log(`    ${c}`);
   rmSync(scratch, { recursive: true, force: true });
