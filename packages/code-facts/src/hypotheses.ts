@@ -74,8 +74,14 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 
+import { type SurveyEvidence, type SurveyVerdict, deriveVerdict, hasEvidence } from "./survey-verdict.js";
+
 /** A hypothesis line, as far as the gates care. Everything else rides along. */
 export interface HypothesisRow {
+  /** The typed record a pass fills in so the verdict can be DERIVED — see
+   * `survey-verdict.ts`. Absent on rows written by a prompt that never asked
+   * for one, which is not a fault and is not scored as one. */
+  evidence?: unknown;
   id?: unknown;
   family?: unknown;
   obligation?: unknown;
@@ -110,6 +116,27 @@ export interface HypothesisRecord {
    */
   obligation: string | null;
   row: HypothesisRow;
+  /**
+   * The verdict computed from {@link HypothesisRow.evidence}, and what the
+   * pass itself wrote.
+   *
+   * `null` when the row carries no evidence — then the pass's own values stand,
+   * exactly as before, so a prompt that predates this asks for nothing it
+   * cannot deliver.
+   *
+   * **Both halves are kept on purpose.** The derived verdict is the one every
+   * consumer should read; the declared one is how a disagreement stays
+   * visible, and a disagreement is evidence about the prompt rather than noise
+   * to be flattened. Overwriting in place would have destroyed the only signal
+   * that says the pass is not doing what it was asked.
+   */
+  verdict: {
+    derived: SurveyVerdict;
+    declaredSeverity: string | null;
+    declaredNeedsProbe: boolean | null;
+    /** Did the pass's own answer match what its evidence implies? */
+    agrees: { severity: boolean; needsProbe: boolean };
+  } | null;
 }
 
 export interface HypothesisSet {
@@ -137,6 +164,24 @@ export interface HypothesisSet {
   unknownObligations: Map<string, string[]>;
   /** Whether a question set was supplied to resolve citations against. */
   obligationsChecked: boolean;
+}
+
+/** The verdict for a row, or `null` when it carried no evidence to derive from. */
+function verdictFor(row: HypothesisRow): HypothesisRecord["verdict"] {
+  const evidence = row.evidence as SurveyEvidence | undefined;
+  if (!hasEvidence(evidence)) return null;
+  const derived = deriveVerdict(evidence as SurveyEvidence);
+  const declaredSeverity = typeof row.severity === "string" ? row.severity : null;
+  const declaredNeedsProbe = typeof row.needsProbe === "boolean" ? row.needsProbe : null;
+  return {
+    derived,
+    declaredSeverity,
+    declaredNeedsProbe,
+    agrees: {
+      severity: (declaredSeverity ?? "").trim().toLowerCase() === derived.severity.toLowerCase(),
+      needsProbe: declaredNeedsProbe === derived.needsProbe,
+    },
+  };
 }
 
 function asString(value: unknown): string | null {
@@ -224,6 +269,7 @@ export function readHypothesisSet(
         declaredObligation,
         obligation,
         row,
+        verdict: verdictFor(row),
       });
     });
   }

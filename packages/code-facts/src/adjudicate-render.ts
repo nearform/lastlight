@@ -69,6 +69,7 @@ import { buildFindingsLedger, type FindingsLedger } from "./findings.js";
 import { readHypothesisSet, type HypothesisRecord } from "./hypotheses.js";
 import { readJevClassifyDocument, type JevResult } from "./jev-classify-io.js";
 import { readProbeAnswers, type ProbeAnswer } from "./probes.js";
+import { severityOf } from "./survey-verdict.js";
 
 export interface DossierOptions {
   /** The `.lastlight/pr-review` directory. */
@@ -381,7 +382,7 @@ function renderEntry(entry: DossierEntry, jev?: JevResult | null): string[] {
   const { record, probe } = entry;
   const row = record.row;
   const out: string[] = [];
-  const severity = asString(row.severity) ?? "(no severity)";
+  const severity = severityOf(row) ?? "(no severity)";
   const obligation = record.obligation ?? record.declaredObligation ?? "(no obligation cited)";
   out.push(`### ${record.id} · ${obligation} · ${severity}`);
   out.push("");

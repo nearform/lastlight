@@ -288,3 +288,5 @@ export { noopLogger } from "./log.js";
 export type { LoggerPort } from "./log.js";
 
 export * from "./schema.js";
+
+export { deriveVerdict, hasEvidence, severityOf, needsProbeOf, type SurveyEvidence, type SurveyVerdict, type Discharge, type Severity } from "./survey-verdict.js";

@@ -80,6 +80,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { readHypothesisSet, resolveHypothesis } from "./hypotheses.js";
+import { severityOf } from "./survey-verdict.js";
 
 /** A hypothesis line, as far as this gate cares. Everything else is ignored. */
 interface HypothesisLine {
@@ -164,7 +165,7 @@ export function readJsonl<T>(path: string): { rows: T[]; malformed: number } {
  */
 export function requiresProbe(row: HypothesisLine): boolean {
   if (row.needsProbe === true) return true;
-  return typeof row.severity === "string" && row.severity.toLowerCase() === "critical";
+  return (severityOf(row) ?? "").toLowerCase() === "critical";
 }
 
 export interface CheckProbesOptions {

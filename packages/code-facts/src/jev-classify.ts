@@ -29,6 +29,7 @@ import { choice, TypeSafeClient, type ChoiceResponse, type EntryType } from "@ty
 import { buildEntries, type DossierEntry, type DossierOptions } from "./adjudicate-render.js";
 import { jevClassifyPath, readJevClassifyDocument, writeJevClassifyDocument, type JevClassifyDocument, type JevResult } from "./jev-classify-io.js";
 import { noopLogger, type LoggerPort } from "./log.js";
+import { severityOf } from "./survey-verdict.js";
 
 export { jevClassifyPath, readJevClassifyDocument, writeJevClassifyDocument };
 export type { JevClassifyDocument, JevResult };
@@ -113,7 +114,7 @@ export function buildJevState(entry: DossierEntry): Record<string, unknown> {
   const ends = row.bothEnds as { introducedAt?: unknown; enforcedAt?: unknown } | undefined;
   return {
     family: entry.record.family,
-    severity: asString(row.severity) ?? null,
+    severity: severityOf(row),
     claim: asString(row.claim) ?? null,
     mechanism: {
       introducedAt: asString(ends?.introducedAt) ?? null,
