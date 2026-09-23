@@ -80,6 +80,21 @@ checkable, that is a real review observation and it gets a row of its own: the
 change's intent is unstated.
 {{/if}}
 
+## What closes the mechanism, for `spec`
+
+The `survey-pass` skill's evidence record is shared by every pass; `control_site` is the
+only field whose meaning is yours to fix. For this family the control is a **line in a
+changed file that implements the criterion** — not one that mentions it, and not a promise
+in the description.
+
+<!-- This family's brief is restatement-adjacent: its job is checking the PR's own claims,
+     so the sentence it reaches for first describes the intended change. A criterion the PR
+     MEETS is a clean control with `consequence: null`, which the table grades Minor. The
+     scale of a change is not a severity. -->
+
+Fill the record for every obligation. `severity` and `needsProbe` follow from it by the
+table in the skill — compute them, do not judge them.
+
 ## State the residual risk, not the reassurance
 
 The `survey-pass` skill carries this rule and its examples. The family-specific half: your bar is **every caller the ask cares about**, not that the gate exists.

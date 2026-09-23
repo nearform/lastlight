@@ -121,6 +121,15 @@ how a caller learns it fired. The recurring shapes:
    rejection the contract promises — not an unhandled error the caller reads
    as a server fault."
 
+
+## What closes the mechanism, for `security`
+
+The `survey-pass` skill's evidence record is shared by every pass; `control_site` is the
+only field whose meaning is yours to fix. For this family the control is a **sanitiser, escape or authorisation check between the source and the sink** — the line that makes the tainted value safe, at a point the attacker does not control.
+
+Fill the record for every obligation. `severity` and `needsProbe` follow from it by the
+table in the skill — compute them, do not judge them.
+
 ## State the residual risk, not the reassurance
 
 The `survey-pass` skill carries this rule and its examples. The family-specific half: your bar is the **trust boundary crossed**, not that a check exists somewhere.

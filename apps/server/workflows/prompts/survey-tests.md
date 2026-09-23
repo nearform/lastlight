@@ -58,6 +58,15 @@ A block that was never delivered is **not** a clean result, and not a finding ab
 
 This family reads a coverage report. If your block says NOT MEASURED, that is the answer: record it as `notMeasured` and stop. Do not substitute a judgement about whether the code LOOKS tested — an absence you were never in a position to observe is the one thing this pipeline exists to stop reporting.
 
+
+## What closes the mechanism, for `tests`
+
+The `survey-pass` skill's evidence record is shared by every pass; `control_site` is the
+only field whose meaning is yours to fix. For this family the control is an **assertion that would fail if the behaviour changed** — the line that checks the result. A test that exercises a path without asserting on it closes nothing.
+
+Fill the record for every obligation. `severity` and `needsProbe` follow from it by the
+table in the skill — compute them, do not judge them.
+
 ## State the residual risk, not the reassurance
 
 The `survey-pass` skill carries this rule and its examples. The family-specific half: your bar is what the test **would still pass with broken**, not that a test is present.

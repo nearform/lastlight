@@ -111,6 +111,15 @@ The recurring shapes for THIS family:
     — the lock, the reservation, the single-use credential — or state that the
     failure path leaves it live."
 
+
+## What closes the mechanism, for `state`
+
+The `survey-pass` skill's evidence record is shared by every pass; `control_site` is the
+only field whose meaning is yours to fix. For this family the control is an **invalidation, guard or ordering constraint** — the line that resets the entry, releases the lock, or makes the second call behave like the first. Ask what runs on the SECOND call, not the first.
+
+Fill the record for every obligation. `severity` and `needsProbe` follow from it by the
+table in the skill — compute them, do not judge them.
+
 ## State the residual risk, not the reassurance
 
 The `survey-pass` skill carries this rule and its examples. The family-specific half: your bar is what the quoted line **cannot tell apart**, not that the line exists.

@@ -80,6 +80,15 @@ The recurring shape this family keeps missing:
    the line inside it a caller cannot see and would be surprised by — a retry
    policy, a timeout, a swallowed error class."
 
+
+## What closes the mechanism, for `contract`
+
+The `survey-pass` skill's evidence record is shared by every pass; `control_site` is the
+only field whose meaning is yours to fix. For this family the control is a **consumer that satisfies the moved shape** — the line where the consumer reads the field, with the type, schema or guard that makes the shape it expects the shape it gets. A caller the diff never opened is where this lives.
+
+Fill the record for every obligation. `severity` and `needsProbe` follow from it by the
+table in the skill — compute them, do not judge them.
+
 ## State the residual risk, not the reassurance
 
 The `survey-pass` skill carries this rule and its examples. The family-specific half: your bar is the **consumer the diff never opened**, not the signature.

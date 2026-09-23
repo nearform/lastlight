@@ -106,7 +106,7 @@ export interface SpecObligation {
   id: string;
   /** END ONE: what was asked, quoted. */
   criterion: string;
-  /** Human-readable provenance for end one, e.g. `issue #1587`. */
+  /** Human-readable provenance for end one, e.g. `issue #NNN`. */
   source: string;
   /**
    * END TWO: the changed files that could satisfy it, best match first, and
@@ -482,9 +482,9 @@ export function buildSpecObligations(inputs: SpecInputs): SpecObligationSet {
  *
  * The out-of-scope case the fifth code served is real and it keeps an answer:
  * `ABSENT` is *factually* what it is — no changed file implements it — written
- * at `severity: "Minor"` with `failureScenario: null` and the reason in `claim`.
- * The code records WHAT WAS FOUND; `severity` records how much it matters, and
- * the adjudicator decides what is worth posting. That is the same division of
+ * with `consequence: null` and `failureScenario: null`, and the reason in
+ * `claim`. The code records WHAT WAS FOUND; the evidence record says how much
+ * it matters, and `deriveVerdict` computes the rest. That is the same division of
  * labour the five siblings already run on ("A clean QUOTE gets a row too").
  */
 const SPEC_DISCHARGE = [
@@ -504,9 +504,9 @@ const SPEC_DISCHARGE = [
   "",
   "THERE IS NO FIFTH CODE. A criterion that turns out not to be about code in this PR — a follow-up, a",
   "process step, a promise about docs — is still ABSENT: it is factually true that no changed file",
-  'implements it. Write it at `severity: "Minor"` with `failureScenario: null` and say in `claim` why it',
-  "was out of scope. The four codes record WHAT YOU FOUND; `severity` records how much it matters, and a",
-  "later phase decides what is worth posting. A code outside the four puts the row outside every gate.",
+  'implements it. Give it `consequence: null` and `failureScenario: null`, and say in `claim` why it was',
+  "out of scope. The four codes record WHAT YOU FOUND; the evidence records how much it matters, and the",
+  "verdict is derived from it. A code outside the four puts the row outside every gate.",
   "",
   "OVER-PRODUCE. A plausible mechanism you cannot yet refute is a hypothesis, not noise — a later phase runs a",
   "probe and a stronger model adjudicates, and both can only remove. Nothing downstream can recover a mechanism",
@@ -551,9 +551,9 @@ const SPEC_DISCHARGE_MINIMAL = [
   "",
   "THERE IS NO FIFTH CODE. A criterion that turns out not to be about code in this PR — a follow-up, a",
   "process step, a promise about docs — is still ABSENT: it is factually true that no changed file",
-  'implements it. Write it at `severity: "Minor"` and say in `claim` why it was out of scope. The four',
-  "codes record WHAT YOU FOUND; `severity` records how much it matters, and a later phase decides what is",
-  "worth posting. A code outside the four puts the row outside every gate.",
+  'implements it. Give it `consequence: null` and say in `claim` why it was out of scope. The four codes',
+  "record WHAT YOU FOUND; the evidence records how much it matters, and the verdict is derived from it.",
+  "A code outside the four puts the row outside every gate.",
   "",
   "OVER-PRODUCE. A plausible mechanism you cannot yet refute is a hypothesis, not noise — a later phase runs a",
   "probe and a stronger model adjudicates, and both can only remove. Nothing downstream can recover a mechanism",
@@ -564,19 +564,17 @@ const SPEC_DISCHARGE_MINIMAL = [
  * The one worked exemplar, and — as in `renderFamilyBlock` — the only positive
  * example this family's prompt carries.
  *
- * **It is the same real defect the sibling exemplar is built from**
- * (`prreview__skillspro-1587-r2`: `SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS` reaches
- * the browser as a cookie `maxAge` and is never compared server-side), restated
- * on THIS axis — the issue asked for a 5-minute lifetime, and the PR delivers
- * one only for a client that chooses to honour it. It is a real finding cast
- * into this family's shape, not a row lifted out of a real `spec` pass; no
- * measured `spec.jsonl` has ever carried a shape worth copying, which is the
- * defect this whole block is fixing.
+ * **Invented, for the reason its sibling is.** Both used to restate one real
+ * defect from a real repository, and that repository's pull requests are in
+ * the evaluation set: any arm measured there was handed a worked answer to a
+ * neighbouring case. A fictional upload route carries the same lesson and
+ * leaks nothing into a measurement.
  *
- * **It is `PARTIAL` and that is the entire lesson**, for the same measured
- * reason: the run discharged the underlying obligation `QUOTE` against a line
- * that MENTIONS the constant and compares nothing, looked perfectly discharged,
- * and reported nothing.
+ * **It is `PARTIAL` and that is the entire lesson**, cast on THIS family's
+ * axis: the criterion was asked for, a line implementing it exists and is
+ * quotable, and it runs where the other party controls it — so the criterion
+ * is met only for callers that choose to honour it. "A line exists" and "the
+ * ask is satisfied" are different facts.
  *
  * Emitted as ONE line via `JSON.stringify`, because that is the shape a JSONL
  * file wants. Key order is load-bearing in one small way: no nested object may
@@ -591,25 +589,36 @@ const SPEC_EXAMPLE_ROW = {
   discharge: "PARTIAL",
   family: "spec",
   claim:
-    "the issue asks for a 5-minute nonce lifetime enforced server-side; the change sets it as a cookie maxAge and never compares issuedAt against it",
+    "the issue asks that oversized uploads be refused; the change adds a browser-side check and the route that writes the file compares nothing",
   bothEnds: {
-    introducedAt: "issue #1587",
-    enforcedAt: "packages/backend/src/routes/auth.ts:95",
+    introducedAt: "issue #412",
+    enforcedAt: "client/upload.ts:52",
   },
-  path: "packages/backend/src/routes/auth.ts",
+  path: "client/upload.ts",
   quotes: [
     {
-      path: "packages/backend/src/routes/auth.ts",
-      line: 95,
-      text: "      maxAge: SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS",
+      path: "client/upload.ts",
+      line: 52,
+      text: "if (file.size > MAX_UPLOAD_BYTES) return reject(file);",
     },
   ],
-  existingCode: "maxAge: SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS",
+  existingCode: "if (file.size > MAX_UPLOAD_BYTES) return reject(file);",
+  evidence: {
+      "subject": "acceptance criterion: uploads above the cap are refused",
+      "control_site": "client/upload.ts:52",
+      "control_text": "if (file.size > MAX_UPLOAD_BYTES) return reject(file);",
+      "authority": "advisory",
+      "order_ok": true,
+      "cannot_distinguish": "a request from the app and a request from curl",
+      "bypass": "any direct POST to /files skips upload.ts entirely",
+      "in_changed_hunk": true,
+      "consequence": "the criterion is met only for callers that run the browser code; the route itself refuses nothing",
+      "trigger": "input",
+      "crosses_boundary": true,
+      "capability_gained": "writing unbounded data to server disk"
+  },
   failureScenario:
-    "a scripted client, a browser with clock skew or a proxy replaying the header keeps the cookie past its stated expiry; nothing server-side compares issuedAt, so the criterion is met only by a client that chooses to honour it and the replay window is unbounded rather than 5 minutes",
-  needsProbe: false,
-  severity: "Critical",
-  confidence: 0.6,
+    "a scripted client or a direct POST skips the browser check; the route streams whatever arrives to disk, so the criterion holds only for callers that choose to honour it",
 };
 
 /** The outstanding-id list, wrapped rather than truncated. `seed-render.ts`'s. */
@@ -670,12 +679,23 @@ function rowShape(family = "spec"): string[] {
     "",
     `  { "id": "${family}-001", "obligation": "S-1", "discharge": "QUOTE|ABSENT|PARTIAL|PROBE",`,
     `    "family": "${family}", "claim": "…",`,
-    '    "bothEnds": { "introducedAt": "issue #1587" | "the PR body", "enforcedAt": "path:line" | null },',
+    '    "bothEnds": { "introducedAt": "issue #NNN" | "the PR body", "enforcedAt": "path:line" | null },',
     '    "path": "the changed file this row is about",',
     '    "quotes": [ { "path": "…", "line": 12, "text": "the line, verbatim" } ],',
     '    "existingCode": "the verbatim excerpt this is about",',
     '    "failureScenario": "what input or state makes this behave wrongly, and what it does then" | null,',
-    '    "needsProbe": false, "severity": "Critical|Important|Minor", "confidence": 0.0-1.0 }',
+    '    "evidence": { "subject": "…", "control_site": "path:line" | "none", "control_text": "the line, verbatim",',
+    '      "authority": "binding|advisory|unknown", "order_ok": true|false|"unknown",',
+    '      "cannot_distinguish": "two situations it treats alike" | "nothing",',
+    '      "bypass": "a path reaching use without it" | "none found", "in_changed_hunk": true|false,',
+    '      "consequence": "what goes wrong, and what it does then" | null,',
+    '      "trigger": "input|state|code_change|unknown", "crosses_boundary": true|false,',
+    '      "capability_gained": "something the supplier lacks without this" | null } }',
+    '',
+    '`severity` and `needsProbe` are NOT yours to write and are not on this row. They are DERIVED from',
+    '`evidence` downstream, so that identical evidence always ranks identically — a judgement call there',
+    'made the answer depend on wording and measured unstable across identical runs. Fill the record',
+    'honestly and the verdict follows. `unknown` is a real answer; never round it to a clean value.',
     "",
     "`obligation` names WHICH one and `discharge` is its ANSWER — one of the four codes, uppercase. Listing",
     "an obligation without a `discharge` discharges nothing. `bothEnds` names both ends the same way the",
@@ -707,11 +727,22 @@ function rowShapeMinimal(family = "spec"): string[] {
     `Append one JSON object per hypothesis to .lastlight/pr-review/hypotheses/${family}.jsonl — one line each:`,
     "",
     `  { "id": "${family}-001", "obligation": "S-1", "family": "${family}", "claim": "…",`,
-    '    "bothEnds": { "introducedAt": "issue #1587" | "the PR body", "enforcedAt": "path:line" | null },',
+    '    "bothEnds": { "introducedAt": "issue #NNN" | "the PR body", "enforcedAt": "path:line" | null },',
     '    "path": "the changed file this row is about",',
     '    "quotes": [ { "path": "…", "line": 12, "text": "the line, verbatim" } ],',
     '    "existingCode": "the verbatim excerpt this is about",',
-    '    "needsProbe": false, "severity": "Critical|Important|Minor", "confidence": 0.0-1.0 }',
+    '    "evidence": { "subject": "…", "control_site": "path:line" | "none", "control_text": "the line, verbatim",',
+    '      "authority": "binding|advisory|unknown", "order_ok": true|false|"unknown",',
+    '      "cannot_distinguish": "two situations it treats alike" | "nothing",',
+    '      "bypass": "a path reaching use without it" | "none found", "in_changed_hunk": true|false,',
+    '      "consequence": "what goes wrong, and what it does then" | null,',
+    '      "trigger": "input|state|code_change|unknown", "crosses_boundary": true|false,',
+    '      "capability_gained": "something the supplier lacks without this" | null } }',
+    '',
+    '`severity` and `needsProbe` are NOT yours to write and are not on this row. They are DERIVED from',
+    '`evidence` downstream, so that identical evidence always ranks identically — a judgement call there',
+    'made the answer depend on wording and measured unstable across identical runs. Fill the record',
+    'honestly and the verdict follows. `unknown` is a real answer; never round it to a clean value.',
     "",
     "`bothEnds` names both ends the same way the obligation does: end one is WHERE THE CRITERION WAS ASKED",
     "(an issue, or the PR body — this family's first end is a document, not a code site), end two is",
@@ -723,7 +754,7 @@ function rowShapeMinimal(family = "spec"): string[] {
 /** The rules that travel with the row shape, in `renderFamilyBlock`'s words. */
 const ROW_RULES = [
   "A clean QUOTE gets a row too. That row is the RECORD that the criterion was answered, not a finding you",
-  'are proposing — write it at `severity: "Minor"` and let a later phase decide what is worth posting.',
+  'are proposing — give it `consequence: null`, and the verdict follows from that. Do NOT grade it yourself.',
   "",
   "`failureScenario` is REQUIRED on every row that claims a defect — ABSENT, PARTIAL, PROBE, or a QUOTE you",
   "are raising: *what input or state makes this behave wrongly, and what does it do then?* A finding with no",

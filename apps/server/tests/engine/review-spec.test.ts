@@ -359,6 +359,9 @@ describe("the spec block and renderFamilyBlock prescribe ONE contract", () => {
         ...Object.keys(row),
         ...Object.keys(row.bothEnds as object),
         ...Object.keys((row.quotes as object[])[0]!),
+        // `evidence` is prescribed field-by-field like `bothEnds`, so its keys
+        // are part of the shape the block promises and belong in this union.
+        ...Object.keys(row.evidence as object),
       ]),
     ].sort();
     expect(keys).toEqual(

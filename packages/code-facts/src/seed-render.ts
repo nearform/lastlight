@@ -132,17 +132,19 @@ const DISCHARGE_MINIMAL = [
  * The one worked exemplar, and the only positive example anywhere in this
  * pipeline's prompts.
  *
- * **It is a real row, from a real run, about the one gold finding this whole
- * investigation has ever converted** — `prreview__skillspro-1587-r2`, obligation
- * `O-002`: `SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS` is set as a cookie `maxAge`
- * and the server never compares `issuedAt` against it, so a 5-minute lifetime is
- * enforced only by a browser choosing to honour it.
+ * **Invented, and deliberately so.** It used to be a real row from a real run
+ * on a real repository. That is a better teaching example in the abstract and
+ * an unusable one in practice: the case it came from sits in the evaluation
+ * set, so every arm measured against that set was shown a worked answer to a
+ * sibling case and the numbers could not be trusted to mean what they said. A
+ * fictional upload route teaches the same distinction and leaks nothing.
  *
- * **It is `PARTIAL` and that is the entire lesson.** The measured run discharged
- * this obligation `QUOTE`, citing `auth.ts:95` — a line that MENTIONS the
- * constant and compares nothing — and therefore produced no finding while
- * looking perfectly discharged. Every counter-example in these prompts teaches
- * what not to write; this one teaches the distinction that actually converted.
+ * **It is `PARTIAL` and that is the entire lesson.** A real line is quoted and
+ * it compares the real value — but it runs in the browser, which is the side
+ * the other party controls, so `authority` is `advisory` and the discharge
+ * derives to `PARTIAL`. A line that names a constraint is not a line that
+ * applies it, and that gap is where the findings are. An exemplar showing a
+ * clean `QUOTE` would teach the opposite habit.
  *
  * Emitted as ONE line, via `JSON.stringify`, because that is the shape a JSONL
  * file wants and a pretty-printed exemplar in a block a cheap model reads is an
@@ -156,24 +158,35 @@ const EXAMPLE_ROW = {
   discharge: "PARTIAL",
   family: "enforcement",
   claim:
-    "the 5-minute nonce lifetime reaches the browser as a cookie maxAge and is never compared server-side",
+    "the size cap is compared only in the browser; the route streams the body to disk without comparing it, so any non-browser client writes an unbounded file",
   bothEnds: {
-    introducedAt: "packages/backend/src/utils/constants.ts:33",
-    enforcedAt: "packages/backend/src/routes/auth.ts:95",
+    introducedAt: "client/upload.ts:14",
+    enforcedAt: "client/upload.ts:52",
   },
   quotes: [
     {
-      path: "packages/backend/src/routes/auth.ts",
-      line: 95,
-      text: "      maxAge: SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS",
+      path: "client/upload.ts",
+      line: 52,
+      text: "if (file.size > MAX_UPLOAD_BYTES) return reject(file);",
     },
   ],
-  existingCode: "maxAge: SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS",
+  existingCode: "if (file.size > MAX_UPLOAD_BYTES) return reject(file);",
+  evidence: {
+      "subject": "MAX_UPLOAD_BYTES",
+      "control_site": "client/upload.ts:52",
+      "control_text": "if (file.size > MAX_UPLOAD_BYTES) return reject(file);",
+      "authority": "advisory",
+      "order_ok": true,
+      "cannot_distinguish": "a request from the app and a request from curl",
+      "bypass": "any direct POST to /files skips upload.ts entirely",
+      "in_changed_hunk": true,
+      "consequence": "a client that does not run this check uploads a file of any size; the route writes it to disk",
+      "trigger": "input",
+      "crosses_boundary": true,
+      "capability_gained": "writing unbounded data to server disk"
+  },
   failureScenario:
-    "a scripted client, a browser with clock skew or a proxy replaying the header keeps the cookie past its stated expiry; nothing server-side compares issuedAt, so the same nonce stays valid indefinitely and the replay window is unbounded rather than 5 minutes",
-  needsProbe: false,
-  severity: "Critical",
-  confidence: 0.6,
+    "a scripted client or a direct POST skips the browser check entirely; the route streams whatever arrives to disk, so the cap bounds only callers that choose to honour it",
 };
 
 /** The outstanding-id list, wrapped rather than truncated. */
@@ -422,7 +435,18 @@ function minimalTail(family: SeedFamily): string[] {
     '    "bothEnds": { "introducedAt": "path:line", "enforcedAt": "path:line" | null },',
     '    "quotes": [ { "path": "…", "line": 12, "text": "the line, verbatim" } ],',
     '    "existingCode": "the verbatim excerpt this is about",',
-    '    "needsProbe": false, "severity": "Critical|Important|Minor", "confidence": 0.0-1.0 }',
+    '    "evidence": { "subject": "…", "control_site": "path:line" | "none", "control_text": "the line, verbatim",',
+    '      "authority": "binding|advisory|unknown", "order_ok": true|false|"unknown",',
+    '      "cannot_distinguish": "two situations it treats alike" | "nothing",',
+    '      "bypass": "a path reaching use without it" | "none found", "in_changed_hunk": true|false,',
+    '      "consequence": "what goes wrong, and what it does then" | null,',
+    '      "trigger": "input|state|code_change|unknown", "crosses_boundary": true|false,',
+    '      "capability_gained": "something the supplier lacks without this" | null } }',
+    '',
+    '`severity` and `needsProbe` are NOT yours to write and are not on this row. They are DERIVED from',
+    '`evidence` downstream, so that identical evidence always ranks identically — a judgement call there',
+    'made the answer depend on wording and measured unstable across identical runs. Fill the record',
+    'honestly and the verdict follows. `unknown` is a real answer; never round it to a clean value.',
     "",
     `\`id\` is \`${family}-001\`, \`${family}-002\`, … — numbered within THIS family. Six passes append to six files`,
     "and none of them can see another's, so a bare `H-001` collides with whatever another family minted and",
@@ -642,7 +666,18 @@ export function renderFamilyBlock(
     '    "quotes": [ { "path": "…", "line": 12, "text": "the line, verbatim" } ],',
     '    "existingCode": "the verbatim excerpt this is about",',
     '    "failureScenario": "what input or state makes this behave wrongly, and what it does then" | null,',
-    '    "needsProbe": false, "severity": "Critical|Important|Minor", "confidence": 0.0-1.0 }',
+    '    "evidence": { "subject": "…", "control_site": "path:line" | "none", "control_text": "the line, verbatim",',
+    '      "authority": "binding|advisory|unknown", "order_ok": true|false|"unknown",',
+    '      "cannot_distinguish": "two situations it treats alike" | "nothing",',
+    '      "bypass": "a path reaching use without it" | "none found", "in_changed_hunk": true|false,',
+    '      "consequence": "what goes wrong, and what it does then" | null,',
+    '      "trigger": "input|state|code_change|unknown", "crosses_boundary": true|false,',
+    '      "capability_gained": "something the supplier lacks without this" | null } }',
+    '',
+    '`severity` and `needsProbe` are NOT yours to write and are not on this row. They are DERIVED from',
+    '`evidence` downstream, so that identical evidence always ranks identically — a judgement call there',
+    'made the answer depend on wording and measured unstable across identical runs. Fill the record',
+    'honestly and the verdict follows. `unknown` is a real answer; never round it to a clean value.',
     "",
     "`obligation` names WHICH one and `discharge` is its ANSWER — one of the four codes, uppercase. Listing",
     "an obligation without a `discharge` discharges nothing, and this is GRADED by a machine rather than taken",
@@ -651,7 +686,7 @@ export function renderFamilyBlock(
     ...wrapIds(mine.map((o) => o.id)),
     "",
     "A clean QUOTE gets a row too. That row is the RECORD that the question was answered, not a finding you",
-    'are proposing — write it at `severity: "Minor"` and let a later phase decide what is worth posting.',
+    'are proposing — give it `consequence: null`, and the verdict follows from that. Do NOT grade it yourself.',
     "",
     "`failureScenario` is REQUIRED on every row that claims a defect — ABSENT, PARTIAL, PROBE, or a QUOTE you",
     "are raising: *what input or state makes this behave wrongly, and what does it do then?* A finding with no",
@@ -659,16 +694,17 @@ export function renderFamilyBlock(
     "a bar: nothing anywhere drops a hypothesis for a thin scenario, so write the weakest honest one rather",
     "than dropping the row — a row you decline to write is the one thing no later phase can recover.",
     "",
-    "WORKED EXAMPLE — one real row, from a real `enforcement` pass on another PR. Copy the SHAPE, not the",
-    `content: your rows carry ${family} ids and the obligations listed above. It answers "Quote the line that`,
-    'compares or enforces SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS, or state that no such line exists.":',
+    "WORKED EXAMPLE — an invented row, for SHAPE only. Copy the shape, never the content: your rows carry",
+    `${family} ids and the obligations listed above. It answers "Quote the line that compares or enforces`,
+    'MAX_UPLOAD_BYTES, or state that no such line exists.":',
     "",
     `  ${JSON.stringify(EXAMPLE_ROW)}`,
     "",
-    "PARTIAL, not QUOTE: `auth.ts:95` MENTIONS the constant and compares nothing against it — the cookie is",
-    "the only thing enforcing the lifetime, and a client is free not to honour it. A line that names a value",
-    "is not a line that enforces it, and that gap IS the finding. A run that called this one QUOTE looked",
-    "perfectly discharged and reported nothing.",
+    "PARTIAL, not QUOTE — and that is the whole lesson. A real line is quoted and it really does compare the",
+    "value, but it runs in the browser, which is the side the other party controls: `authority` is `advisory`,",
+    "so the discharge is PARTIAL and the cap binds only callers that choose to honour it. A line that names a",
+    "constraint is not a line that applies it, and that gap IS the finding. Calling this one QUOTE would look",
+    "perfectly discharged and report nothing.",
     "",
     `\`id\` is \`${family}-001\`, \`${family}-002\`, … — numbered within THIS family. Six passes append to six files`,
     "and none of them can see another's, so a bare `H-001` collides with whatever another family minted and",
