@@ -20,6 +20,9 @@ importers:
       chalk:
         specifier: ^6.0.0
         version: 6.0.0
+      lastlight-code-facts:
+        specifier: workspace:*
+        version: link:../../packages/code-facts
       lastlight-core:
         specifier: workspace:*
         version: link:../server

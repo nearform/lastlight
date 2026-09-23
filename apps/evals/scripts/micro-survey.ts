@@ -77,6 +77,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
+import { type SurveyEvidence, deriveVerdict, hasEvidence, needsProbeOf, severityOf } from "lastlight-code-facts";
 import { renderTemplate } from "lastlight-workflow-engine";
 
 /** The four families whose obligations are seeded to disk by `lastlight-facts seed`.
@@ -122,6 +123,14 @@ const noAgentsMd = has("--no-agents-md");
  * `~/.agents/skills` catalogue, so any archived number was produced that way
  * and cannot be re-derived without it. */
 const discoverSkills = has("--ambient-skills");
+/** Run the branch with NO skill mapped at all — the ablation that asks whether a
+ * separate skill file earns its keep, or whether the same words work better
+ * inlined into the prompt. Pair it with `--prompt <p>` pointing at a prompt that
+ * carries the shared half itself, or the branch loses those rules entirely. */
+const noSkill = has("--no-skill");
+/** Render a prompt from somewhere OTHER than core's `workflows/prompts/`, so a
+ * candidate rewrite can be measured before it is committed. */
+const promptOverride = flag("--prompt");
 
 if (!fixture || !family) {
   console.error("usage: micro-survey.ts --fixture <dir> --family <contract|enforcement|security|state> [--instances p] [--model m] [--thinking t] [--repeats n] [--label s] [--dry-run]");
@@ -165,7 +174,17 @@ function assertHeadingInSync(): void {
   }
 }
 
-interface Row { needsProbe?: boolean; claim?: string; severity?: string; id?: string }
+interface Row { needsProbe?: boolean; claim?: string; severity?: string; id?: string; evidence?: SurveyEvidence }
+
+/**
+ * The derivation lives in `lastlight-code-facts` (`survey-verdict.ts`) and the
+ * PIPELINE reads the same function.
+ *
+ * It used to be a second copy here, which is the bug class this whole
+ * experiment is about: two authorities over one rule, free to disagree and
+ * certain to. An eval that grades against its own private copy measures the
+ * copy.
+ */
 
 function readRows(checkout: string, fam: Family): Row[] {
   const p = join(checkout, ".lastlight/pr-review/hypotheses", `${fam}.jsonl`);
@@ -179,17 +198,9 @@ function readRows(checkout: string, fam: Family): Row[] {
 /** A LEXICAL tripwire, not a judge — see the header. Reassurance is a claim that
  * asserts the code is fine and asks for no probe. */
 const REASSURANCE = /\b(correctly|properly|is enforced|are enforced|is validated|are validated|is handled|are handled|ensures|guarantees|no issue|as expected|is safe|is correct)\b/i;
+
 /**
- * Severity counts, normalised the way the POSTER reads them.
- *
- * Severity is not decoration: after WP6a it is effectively the only ranking
- * input for what reaches a maintainer. `review-poster.ts` ranks on
- * `SEVERITY_WEIGHT = { critical: 3, important: 2, minor: 1 }` alone —
- * `confidence` was dropped from `rankOf` (AUROC 0.228, inverted) and the
- * per-family thresholds are gone — so with three distinct values, document
- * order decides most of the body cut and `maxBodyComments` trims the tail.
- * A run that grades two rows `Important` instead of `Minor` can therefore post
- * a different set from an identical run.
+ * Severity counts, as the POSTER reads them.
  *
  * `unknown` mirrors the poster's own fallback: a missing or unrecognised
  * severity is read as `important` there (`rankOf`), so it does NOT drop out —
@@ -199,22 +210,56 @@ const REASSURANCE = /\b(correctly|properly|is enforced|are enforced|is validated
 function severityCounts(rows: Row[]): Record<string, number> {
   const out: Record<string, number> = { critical: 0, important: 0, minor: 0, unknown: 0 };
   for (const r of rows) {
-    const k = (r.severity ?? "").trim().toLowerCase();
+    const k = (severityOf(r) ?? "").trim().toLowerCase();
     if (k === "critical" || k === "important" || k === "minor") out[k]++;
     else out.unknown++;
   }
   return out;
 }
 
+/** Per-repeat compliance: of the rows that CARRY evidence, how many agree with
+ * their own derivation? Reported as counts, never a bare rate — one repeat of
+ * twelve rows is not a percentage worth trusting on its own. */
+function complianceOf(rows: Row[]) {
+  const withEvidence = rows.filter((r) => hasEvidence(r.evidence));
+  let probeOk = 0, sevOk = 0, undeclared = 0;
+  const violations: string[] = [];
+  for (const r of withEvidence) {
+    const want = deriveVerdict(r.evidence as SurveyEvidence);
+    // A row that declares NEITHER field is following the current contract, not
+    // disagreeing with it. Counting that as a violation would measure the
+    // prompt we replaced.
+    if (r.severity === undefined && r.needsProbe === undefined) { undeclared++; continue; }
+    const gotProbe = r.needsProbe === true;
+    const gotSev = (r.severity ?? "").trim().toLowerCase();
+    if (gotProbe === want.needsProbe) probeOk++;
+    else violations.push(`${r.id ?? "?"} needsProbe=${gotProbe} want ${want.needsProbe} (${want.discharge}; site=${r.evidence?.control_site}; authority=${r.evidence?.authority}; cannot=${r.evidence?.cannot_distinguish})`);
+    if (gotSev === want.severity.toLowerCase()) sevOk++;
+    else violations.push(`${r.id ?? "?"} severity=${r.severity} want ${want.severity} (consequence=${r.evidence?.consequence === null ? "null" : "set"}; trigger=${r.evidence?.trigger}; crosses=${r.evidence?.crosses_boundary})`);
+  }
+  const graded = withEvidence.length - undeclared;
+  return { rows: rows.length, withEvidence: withEvidence.length, undeclared, graded, probeOk, sevOk, violations };
+}
+
+/**
+ * Every metric here reads the DERIVED verdict, never what the row declared.
+ *
+ * The pass no longer writes `severity` or `needsProbe` — they are computed from
+ * `evidence` (`lastlight-code-facts/survey-verdict.ts`), and the derived value
+ * is what the pipeline acts on. Counting the declared field would now report
+ * zero probes for a pass that is behaving exactly as instructed, which is a
+ * property of the instrument rather than of the run.
+ */
 function summarise(rows: Row[]) {
-  const needs = rows.filter((r) => r.needsProbe === true).length;
-  const reassurance = rows.filter((r) => r.needsProbe !== true && REASSURANCE.test(r.claim ?? "")).length;
+  const needs = rows.filter((r) => needsProbeOf(r)).length;
+  const reassurance = rows.filter((r) => !needsProbeOf(r) && REASSURANCE.test(r.claim ?? "")).length;
   return {
     rows: rows.length,
     needsProbe: needs,
     needsProbePct: rows.length ? (100 * needs) / rows.length : 0,
     reassuranceShaped: reassurance,
     severity: severityCounts(rows),
+    compliance: complianceOf(rows),
   };
 }
 
@@ -226,7 +271,7 @@ if (family !== "spec" && !existsSync(obligationsPath)) throw new Error(`no seede
 
 // The prompt, rendered exactly as the fan-out renders it, then the obligations
 // block appended under the same heading the harness uses.
-const promptPath = join(serverRoot, "workflows/prompts", `survey-${family}.md`);
+const promptPath = promptOverride ? resolve(promptOverride) : join(serverRoot, "workflows/prompts", `survey-${family}.md`);
 const instance = instancesPath
   ? (JSON.parse(readFileSync(instancesPath, "utf8")) as { instance_id: string; repo?: string; pr?: Record<string, unknown> }[])
       .find((i) => i.instance_id === basename(fixture))
@@ -308,8 +353,10 @@ const baseline = summarise(readRows(checkout, family));
 console.log(`fixture   ${fixture}`);
 console.log(`checkout  ${checkout}`);
 console.log(`family    ${family}   model ${model}${thinking ? `  thinking ${thinking}` : ""}   repeats ${repeats}`);
-console.log(`prompt    ${promptPath} (${prompt.length} chars incl. obligations)`);
-console.log(`skill     ${join(serverRoot, "skills/survey-pass/SKILL.md")} (staged fresh)`);
+console.log(`prompt    ${promptPath} (${prompt.length} chars incl. obligations)${promptOverride ? "  [OVERRIDE]" : ""}`);
+console.log(noSkill
+  ? "skill     NONE — --no-skill ablation; the prompt must carry the shared half itself"
+  : `skill     ${join(serverRoot, "skills/survey-pass/SKILL.md")} (staged fresh)`);
 console.log(`context   AGENTS.md ${noAgentsMd ? "REMOVED (ablation)" : "present"}   ambient skill discovery ${discoverSkills ? "ON" : "off"}`);
 console.log(`\nbaseline (what the preserved arm itself wrote for this family):`);
 console.log(`  rows ${baseline.rows}  needsProbe ${baseline.needsProbe} (${baseline.needsProbePct.toFixed(1)}%)  reassurance-shaped ${baseline.reassuranceShaped}`);
@@ -332,7 +379,21 @@ const claims: string[][] = [];
 // on the same file.
 const outDir = join(process.cwd(), "eval-results", "micro-survey");
 mkdirSync(outDir, { recursive: true });
-const out = join(outDir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${label}-${family}.json`);
+const stamp = `${new Date().toISOString().replace(/[:.]/g, "-")}-${label}-${family}`;
+const out = join(outDir, `${stamp}.json`);
+/**
+ * Every repeat's rows, kept.
+ *
+ * The scratch workspace is a `mkdtemp` that the next repeat overwrites and the
+ * OS eventually purges, so until now the only trace of a run was the summary
+ * plus a 110-char slice of each claim — which is enough to see THAT a pass
+ * wrote a reassurance and never enough to see WHY. Grading a structured
+ * prompt's derivation, re-reading a quote, or auditing a row against gold all
+ * need the row itself. It is a few KB per repeat against a $0.25 repeat that
+ * cannot be reproduced once the fixture ages out.
+ */
+const rowsDir = join(outDir, "rows", stamp);
+mkdirSync(rowsDir, { recursive: true });
 
 /**
  * `fireRate` is the headline for a bimodal metric. Measured on `enforcement`:
@@ -349,6 +410,8 @@ const writeReport = (done: boolean) => {
     live: !done,
     heartbeat: new Date().toISOString(),
     ambientSkills: discoverSkills,
+    skill: !noSkill,
+    promptPath,
     agentsMd: !noAgentsMd,
     baseline,
     fireRate: results.length ? fired / results.length : null,
@@ -376,15 +439,17 @@ for (let i = 1; i <= repeats; i++) {
   rmSync(join(work, ".lastlight/pr-review/hypotheses", `${family}.jsonl`), { force: true });
 
   const skillDir = join(scratch, "skills");
-  mkdirSync(skillDir, { recursive: true });
-  cpSync(join(serverRoot, "skills/survey-pass"), join(skillDir, "survey-pass"), { recursive: true });
+  if (!noSkill) {
+    mkdirSync(skillDir, { recursive: true });
+    cpSync(join(serverRoot, "skills/survey-pass"), join(skillDir, "survey-pass"), { recursive: true });
+  }
 
   const started = Date.now();
   const r = (await run({
     model,
     prompt,
     cwd: work,
-    skillPaths: [join(skillDir, "survey-pass")],
+    ...(noSkill ? {} : { skillPaths: [join(skillDir, "survey-pass")] }),
     noSkills: !discoverSkills,
     sandbox: "none",
     // Core passes this on EVERY agent run, and agentic-pi arms its bash reaper
@@ -397,6 +462,11 @@ for (let i = 1; i <= repeats; i++) {
   })) as unknown as { ok?: boolean; stats?: { cost?: number; turns?: number; toolCalls?: number } };
 
   const rows = readRows(work, family);
+  // Copy the raw file, not `JSON.stringify(rows)` — a row the parser dropped
+  // (truncated line, pretty-printed JSON) is exactly the kind of failure this
+  // needs to stay visible, and re-serialising would hide it.
+  const rawRows = join(work, ".lastlight/pr-review/hypotheses", `${family}.jsonl`);
+  if (existsSync(rawRows)) cpSync(rawRows, join(rowsDir, `repeat-${i}.jsonl`));
   const s = summarise(rows);
   results.push({ ...s, costUsd: r.stats?.cost ?? 0, durationSec: (Date.now() - started) / 1000, turns: r.stats?.turns ?? null, toolCalls: r.stats?.toolCalls ?? null } as never);
   claims.push(rows.map((x) => `${x.needsProbe === true ? "PROBE" : "  .  "} [${x.severity ?? "?"}] ${(x.claim ?? "").slice(0, 110)}`));
@@ -404,6 +474,16 @@ for (let i = 1; i <= repeats; i++) {
   console.log(`\nrepeat ${i}/${repeats}  ${secs}s  $${(r.stats?.cost ?? 0).toFixed(3)}  tools=${r.stats?.toolCalls ?? "?"}  ok=${r.ok !== false}`);
   console.log(`  rows ${s.rows}  needsProbe ${s.needsProbe} (${s.needsProbePct.toFixed(1)}%)  reassurance-shaped ${s.reassuranceShaped}`);
   console.log(`  severity  critical ${s.severity.critical}  important ${s.severity.important}  minor ${s.severity.minor}` + (s.severity.unknown ? `  unknown ${s.severity.unknown}` : ""));
+  if (s.compliance.withEvidence > 0) {
+    const c = s.compliance;
+    console.log(c.graded === 0
+      ? `  derivation  evidence on ${c.withEvidence}/${c.rows} rows · verdict derived for all of them (the pass declared none, as asked)`
+      : `  derivation  evidence on ${c.withEvidence}/${c.rows} rows · ${c.undeclared} left to the deriver · of ${c.graded} it still graded: needsProbe ${c.probeOk} agree · severity ${c.sevOk} agree`);
+    for (const v of c.violations.slice(0, 6)) console.log(`    ✗ ${v}`);
+    if (c.violations.length > 6) console.log(`    … ${c.violations.length - 6} more`);
+  } else if (rows.length > 0) {
+    console.log("  derivation  no `evidence` on any row — this prompt does not ask for it");
+  }
   for (const c of claims[i - 1]) console.log(`    ${c}`);
   rmSync(scratch, { recursive: true, force: true });
   writeReport(false);
