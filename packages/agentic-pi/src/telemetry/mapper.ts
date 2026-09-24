@@ -43,6 +43,8 @@ interface MessageLike {
   responseModel?: string;
   responseId?: string;
   stopReason?: string;
+  rawStopReason?: string;
+  providerThinkingLevel?: string;
   usage?: {
     input?: number;
     output?: number;
@@ -270,6 +272,10 @@ export class SpanMapper {
     span.setAttribute(GenAI.RESPONSE_MODEL, message.responseModel ?? model);
     if (message.responseId) span.setAttribute(GenAI.RESPONSE_ID, message.responseId);
     if (message.stopReason) span.setAttribute(GenAI.RESPONSE_FINISH_REASONS, [message.stopReason]);
+    if (message.rawStopReason) span.setAttribute(AgenticPi.RAW_STOP_REASON, message.rawStopReason);
+    if (message.providerThinkingLevel) {
+      span.setAttribute(AgenticPi.PROVIDER_THINKING_LEVEL, message.providerThinkingLevel);
+    }
 
     if (usage) {
       const dims = { [GenAI.SYSTEM]: system, [GenAI.REQUEST_MODEL]: model };

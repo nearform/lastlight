@@ -271,6 +271,8 @@ function unwrapLine(raw: Record<string, unknown>): JsonlMessage[] {
     const content = msg.content;
     const model = msg.model as string | undefined;
     const stopReason = msg.stop_reason as string | undefined;
+    const rawStopReason = msg.raw_stop_reason as string | undefined;
+    const responseModel = msg.response_model as string | undefined;
 
     let textContent: string | undefined;
     let toolCalls: unknown[] | undefined;
@@ -310,7 +312,9 @@ function unwrapLine(raw: Record<string, unknown>): JsonlMessage[] {
       tool_calls: toolCalls,
       reasoning,
       finish_reason: stopReason,
+      ...(rawStopReason ? { raw_stop_reason: rawStopReason } : {}),
       model,
+      ...(responseModel ? { response_model: responseModel } : {}),
       timestamp,
     }];
   }

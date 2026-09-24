@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { SessionLog, projectSlugForCwd } from "#src/session-log.js";
-import { AgenticShim } from "#src/engine/event-shim.js";
+import { AgenticShim, systemMessageContent } from "#src/engine/event-shim.js";
 
 const tmpDirs: string[] = [];
 
@@ -210,5 +210,98 @@ describe("AgenticShim auto-retry breadcrumbs", () => {
     expect(String(ends[0]?.content)).toContain("recovered after 2 attempt");
     expect(String(ends[1]?.content)).toContain("gave up after 3 attempt");
     expect(String(ends[1]?.content)).toContain("still 429");
+  });
+});
+
+describe("AgenticShim response metadata + system prompt", () => {
+  it("carries why the turn ended and what served it onto the assistant envelope", async () => {
+    const { shim, filePath } = await makeShim();
+    shim.feed({ type: "session", id: "sess1" });
+    shim.feed({
+      type: "message_end",
+      sessionId: "sess1",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "partial" }],
+        stopReason: "length",
+        rawStopReason: "max_tokens",
+        responseModel: "kimi-k2.6-0917",
+        providerThinkingLevel: "high",
+        diagnostics: [{ type: "stream_retry", timestamp: 1 }],
+      },
+    });
+    await shim.flush();
+
+    const assistant = (await readEnvelopes(filePath)).find((e) => e.type === "assistant");
+    expect(assistant?.message).toMatchObject({
+      stop_reason: "length",
+      raw_stop_reason: "max_tokens",
+      response_model: "kimi-k2.6-0917",
+      provider_thinking_level: "high",
+      diagnostics: [{ type: "stream_retry", timestamp: 1 }],
+    });
+
+    // The SessionReader surfaces them to the dashboard.
+    const records = await new SessionLog(path.dirname(path.dirname(path.dirname(filePath)))).readNormalizedFile(filePath);
+    const msg = records.map((r) => r.msg).find((m) => m.role === "assistant");
+    expect(msg).toMatchObject({
+      finish_reason: "length",
+      raw_stop_reason: "max_tokens",
+      response_model: "kimi-k2.6-0917",
+    });
+  });
+
+  it("omits the fields a response did not report", async () => {
+    const { shim, filePath } = await makeShim();
+    shim.feed({ type: "session", id: "sess1" });
+    shim.feed({
+      type: "message_end",
+      sessionId: "sess1",
+      message: { role: "assistant", content: [{ type: "text", text: "hi" }], diagnostics: [] },
+    });
+    await shim.flush();
+    const message = (await readEnvelopes(filePath)).find((e) => e.type === "assistant")?.message as Record<string, unknown>;
+    for (const key of ["stop_reason", "raw_stop_reason", "response_model", "provider_thinking_level", "diagnostics"]) {
+      expect(message).not.toHaveProperty(key);
+    }
+  });
+
+  it("renders pi's system message as a role-based system line: summary, then the prompt", async () => {
+    const { shim, filePath } = await makeShim();
+    shim.feed({ type: "session", id: "sess1" });
+    shim.feed({
+      type: "message_end",
+      sessionId: "sess1",
+      message: {
+        role: "system",
+        content: "",
+        sections: { preamble: "You are an agent.", rules: "Be terse." },
+        toolsAdded: [{ name: "read", parameters: {} }, { name: "bash", parameters: {} }],
+      },
+    });
+    await shim.flush();
+
+    const line = (await readEnvelopes(filePath)).find((e) => e.subtype === "system_prompt");
+    expect(line?.role).toBe("system");
+    const [summary, , ...body] = String(line?.content).split("\n");
+    expect(summary).toBe("System prompt · 28 chars · sections: preamble, rules · tools: read, bash");
+    expect(body.join("\n")).toBe("You are an agent.\n\nBe terse.");
+  });
+});
+
+describe("systemMessageContent", () => {
+  it("describes a mid-run update that only changes the tool set", () => {
+    expect(
+      systemMessageContent({ role: "system", content: "", sections: { docs: null }, toolsRemoved: [{ name: "bash" }] }),
+    ).toBe("System prompt · 0 chars · removed sections: docs · tools removed: bash");
+  });
+
+  it("returns undefined for an empty or malformed message", () => {
+    expect(systemMessageContent({ role: "system", content: "" })).toBeUndefined();
+    expect(systemMessageContent(undefined)).toBeUndefined();
+  });
+
+  it("reads text-block content", () => {
+    expect(systemMessageContent({ content: [{ type: "text", text: "base" }] })).toBe("System prompt · 4 chars\n\nbase");
   });
 });

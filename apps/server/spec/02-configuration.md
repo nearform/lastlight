@@ -1018,7 +1018,11 @@ configure the exporter endpoint/headers/resources. A run exports a nested
 OpenInference span tree — `lastlight.workflow.run` (CHAIN) → `.workflow.phase`
 (CHAIN) → `.agent.execute` (AGENT) → per-turn (LLM) → per-tool (TOOL) — with
 per-turn/per-run tokens + cost, so an OpenInference backend (e.g. Arize Phoenix)
-renders a proper agent tree. Constants: `src/telemetry/openinference.ts`; tree:
+renders a proper agent tree. Each turn span also records what the response
+reported about itself (`LlmResponse`): `gen_ai.response.model` — which a gateway
+such as OpenRouter or OpenCode Zen may set to something other than the requested
+`llm.model_name` — plus `lastlight.llm.stop_reason`, `.raw_stop_reason` and
+`.provider_thinking_level`. Constants: `src/telemetry/openinference.ts`; tree:
 `AgentSpanTree` (`src/telemetry/pi-events.ts`).
 
 A **feedback signal** (issue #255) exports one more span,

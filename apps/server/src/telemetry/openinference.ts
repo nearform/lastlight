@@ -53,6 +53,20 @@ export const OI = {
 } as const;
 
 /**
+ * What a model response reported about itself, on the LLM (turn) span. Not
+ * OpenInference — it has no keys for these — so the model uses the GenAI
+ * convention's key and the rest are ours. `response.model` is what a gateway
+ * (OpenRouter, OpenCode Zen) actually served, which can differ from
+ * `llm.model_name`, the one requested.
+ */
+export const LlmResponse = {
+  MODEL: "gen_ai.response.model",
+  STOP_REASON: "lastlight.llm.stop_reason",
+  RAW_STOP_REASON: "lastlight.llm.raw_stop_reason",
+  PROVIDER_THINKING_LEVEL: "lastlight.llm.provider_thinking_level",
+} as const;
+
+/**
  * Split a `provider/model` id into its OpenInference `llm.system` (the provider)
  * and `llm.model_name` (the model, provider prefix stripped). Handles the plain
  * `provider/model` form and OpenRouter's `openrouter/<vendor>/<model>` (only the

@@ -787,7 +787,8 @@ The translation lives in `AgenticShim`.
 | agentic-pi event | JSONL envelope |
 |---|---|
 | `session` | (opens the file; emits the initial `user` envelope with the prompt) |
-| `message_end` (assistant) | `assistant` envelope with text + tool_use blocks (thinking blocks dropped) |
+| `message_end` (assistant) | `assistant` envelope with text, thinking and tool_use blocks, per-message `usage`, plus — when the response reported them — `stop_reason`, `raw_stop_reason` (the provider's own reason), `response_model` (what served the turn; differs from `model` behind a gateway), `provider_thinking_level` and `diagnostics`. The reader maps `stop_reason` → `finish_reason`, and the dashboard flags an abnormal stop or a differing `response_model` on the assistant card |
+| `message_end` (system, pi 0.86+) | role-based `system` line, `subtype: "system_prompt"`: a summary first line (size, section names, tool names), then the prompt text as sent. Tool schemas are reduced to names. Renders as a collapsed meta card |
 | `tool_execution_end` | `user` envelope with `tool_result` block |
 | `usage_snapshot` | `result` envelope with cost, tokens, turns, `stop_reason` |
 | `fatal_error` | `assistant` envelope with `isApiErrorMessage: true` |

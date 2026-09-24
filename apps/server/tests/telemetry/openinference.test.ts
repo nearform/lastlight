@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { trace, type Span } from "@opentelemetry/api";
 import { AgentSpanTree } from "#src/telemetry/pi-events.js";
 import {
+  LlmResponse,
   OI,
   SpanKind,
   llmTokenAttributes,
@@ -160,6 +161,28 @@ describe("AgentSpanTree", () => {
     expect(tool.attributes[OI.TOOL_CALL_FUNCTION_NAME]).toBe("bash");
     expect(tool.attributes[OI.TOOL_IS_ERROR]).toBe(false);
     expect(tool.ended).toBe(true);
+  });
+
+  it("records what the response reported about itself on the turn span", () => {
+    const { spans, root } = installFakeTracer();
+    const tree = new AgentSpanTree({ parent: root as unknown as Span, includeContent: false, model: "opencode/kimi-k2.6" });
+    tree.feed({ type: "turn_start" });
+    const end = assistantMessageEnd("done");
+    Object.assign(end.message, {
+      responseModel: "kimi-k2.6-0917",
+      stopReason: "length",
+      rawStopReason: "max_tokens",
+      providerThinkingLevel: "high",
+    });
+    tree.feed(end);
+    tree.feed({ type: "turn_end" });
+    tree.end();
+
+    const llm = spans.find((s) => s.name === "turn 1")!;
+    expect(llm.attributes[LlmResponse.MODEL]).toBe("kimi-k2.6-0917");
+    expect(llm.attributes[LlmResponse.STOP_REASON]).toBe("length");
+    expect(llm.attributes[LlmResponse.RAW_STOP_REASON]).toBe("max_tokens");
+    expect(llm.attributes[LlmResponse.PROVIDER_THINKING_LEVEL]).toBe("high");
   });
 
   it("omits content by default and includes it (args + results + text) when opted in", () => {
