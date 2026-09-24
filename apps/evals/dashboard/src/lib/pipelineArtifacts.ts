@@ -150,23 +150,65 @@ export function hypothesisId(family: string, ordinal: number): string {
 }
 
 /**
- * Split a `.jsonl` into rows, mirroring code-facts' `readJsonlRows` exactly:
- * blank lines are skipped, an unparseable line is skipped **without consuming
- * an ordinal** (a torn final line is normal on a killed run), and anything that
- * parses is kept even if it is not an object.
+ * Split a `.jsonl` into rows — a copy of code-facts' `parseJsonl`
+ * (`packages/code-facts/src/jsonl.ts`), which this package cannot import.
+ * Ordinals are identity, so it must accept exactly the rows that does: a line
+ * that parses on its own (object or not), or a pretty-printed / run-together
+ * value recovered by a brace-balanced scan. An unreadable line consumes no
+ * ordinal. Keep the two in step.
  */
 export function parseJsonlRows(text: string): unknown[] {
   const rows: unknown[] = [];
-  for (const line of text.split("\n")) {
-    const t = line.trim();
-    if (!t) continue;
-    try {
-      rows.push(JSON.parse(t) as unknown);
-    } catch {
-      /* consumes no ordinal */
+  let pos = 0;
+  while (pos < text.length) {
+    const newline = text.indexOf("\n", pos);
+    const lineEnd = newline === -1 ? text.length : newline;
+    const raw = text.slice(pos, lineEnd);
+    const line = raw.trim();
+    if (!line) {
+      pos = lineEnd + 1;
+      continue;
     }
+    try {
+      rows.push(JSON.parse(line) as unknown);
+      pos = lineEnd + 1;
+      continue;
+    } catch {
+      /* not a row on its own — try it as the start of a span */
+    }
+    const start = pos + raw.length - raw.trimStart().length;
+    const end = text[start] === "{" || text[start] === "[" ? closingIndex(text, start) : -1;
+    if (end !== -1) {
+      try {
+        rows.push(JSON.parse(text.slice(start, end)) as unknown);
+        pos = end;
+        continue;
+      } catch {
+        /* balanced but not JSON */
+      }
+    }
+    pos = lineEnd + 1; // unreadable: consumes no ordinal, and never the next line
   }
   return rows;
+}
+
+/** Where the value opening at `start` closes, or -1 if the text ends first. */
+function closingIndex(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === "\\") i += 1;
+      else if (ch === '"') inString = false;
+    } else if (ch === '"') inString = true;
+    else if (ch === "{" || ch === "[") depth += 1;
+    else if (ch === "}" || ch === "]") {
+      depth -= 1;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
 }
 
 const asRecord = (row: unknown): Record<string, unknown> =>

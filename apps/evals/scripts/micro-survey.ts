@@ -54,6 +54,25 @@
  * The fixture's OWN hypotheses are reported beside the replay as `baseline`,
  * free: that is what the real arm produced from this identical input.
  *
+ * ── The gold overlay: counts are not quality ───────────────────────────────
+ *
+ * `needsProbe%` and the fire rate are COUNTS. A pass that finds nothing and asks
+ * to verify all twelve rows scores 100%, exactly like one that found twelve real
+ * risks — so neither can say whether the pass stood at a real defect, or what
+ * it said when it did. With `--instances`, every repeat (and the baseline) is
+ * also graded against the case's `review_gold`:
+ *
+ *   asserted  a row states that gold's defect — the internal-recall judge
+ *             (MATCH + CONFIRM, ~$0.02 a repeat), which scores a verification
+ *             report at the right location as a NON-match
+ *   reached   no row asserted it, but one cited its file within ±15 lines —
+ *             right lines, opposite verdict; deterministic and free
+ *   missed    no row went near it
+ *
+ * plus the probe requests split into those on rows at a gold and those
+ * elsewhere. The gold is the whole CASE's, so one family is not expected to
+ * reach all of it; read it per gold, not as a recall.
+ *
  * Usage:
  *   npx tsx scripts/micro-survey.ts --fixture <dir> --family <f> [options]
  *
@@ -66,6 +85,11 @@
  *   --thinking <t>     pi thinking level (omit for the harness default)
  *   --repeats <n>      default 1; anything you intend to CONCLUDE from wants >1
  *   --label <s>        names the run in the JSON report
+ *   --judge-model <m>  the gold judge (default: EVAL_JUDGE_MODEL, else by key)
+ *   --no-judge         gold overlay by LOCATION only: no `asserted`, no spend
+ *   --judge-votes <n>  majority of n judge passes per repeat (default 1). The
+ *                      baseline is ALWAYS judged by 3 and cached on disk, so
+ *                      every run on the same fixture shows the same baseline
  *   --dry-run          render + resolve + price, spend nothing
  *
  * `spec` is deliberately unsupported: its obligations are built harness-side
@@ -73,12 +97,25 @@
  * is nothing on disk to replay and a silent empty block would read as a clean
  * family.
  */
+import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
-import { type SurveyEvidence, deriveVerdict, hasEvidence, needsProbeOf, severityOf } from "lastlight-code-facts";
+import { type SurveyEvidence, deriveVerdict, parseJsonl, hasEvidence, needsProbeOf, severityOf } from "lastlight-code-facts";
 import { renderTemplate } from "lastlight-workflow-engine";
+import { gradeInternalRecall } from "../src/grade.js";
+import { defaultJudgeModel } from "../src/judge.js";
+import {
+  type MicroGoldRef,
+  type MicroGoldRepeat,
+  type MicroSeedStats,
+  microGoldRepeat,
+  microGoldScore,
+  microGoldVote,
+} from "../src/micro-survey.js";
+import type { GoldComment } from "../src/schema.js";
+import { checksOf, claimOf, rowsViewOf, seedStatsIn } from "../src/micro-survey-node.js";
 
 /** The four families whose obligations are seeded to disk by `lastlight-facts seed`.
  * `spec` is the fifth branch but its obligations are built HARNESS-side and
@@ -131,6 +168,16 @@ const noSkill = has("--no-skill");
 /** Render a prompt from somewhere OTHER than core's `workflows/prompts/`, so a
  * candidate rewrite can be measured before it is committed. */
 const promptOverride = flag("--prompt");
+/** Grade by location only — the `reached`/`missed` half of the gold overlay,
+ * free. `asserted` needs the judge and is then reported unknown, not zero. */
+const noJudge = has("--no-judge");
+const judgeModelFlag = flag("--judge-model");
+const judgeVotes = Math.max(1, Number(flag("--judge-votes") ?? "1"));
+/** The baseline is judged by more passes than a repeat: it is read beside every
+ * run on the fixture, once, so its cost is paid once and its noise would show
+ * up in every comparison. Measured: five independent single-pass judgements of
+ * the same preserved rows came back 0/4 three times and 1/4 twice. */
+const BASELINE_JUDGE_VOTES = 3;
 
 if (!fixture || !family) {
   console.error("usage: micro-survey.ts --fixture <dir> --family <contract|enforcement|security|state> [--instances p] [--model m] [--thinking t] [--repeats n] [--label s] [--dry-run]");
@@ -174,7 +221,15 @@ function assertHeadingInSync(): void {
   }
 }
 
-interface Row { needsProbe?: boolean; claim?: string; severity?: string; id?: string; evidence?: SurveyEvidence }
+interface Row {
+  needsProbe?: boolean;
+  claim?: string;
+  severity?: string;
+  id?: string;
+  evidence?: SurveyEvidence;
+  quotes?: { path?: string; line?: number }[];
+  bothEnds?: Record<string, unknown>;
+}
 
 /**
  * The derivation lives in `lastlight-code-facts` (`survey-verdict.ts`) and the
@@ -189,10 +244,7 @@ interface Row { needsProbe?: boolean; claim?: string; severity?: string; id?: st
 function readRows(checkout: string, fam: Family): Row[] {
   const p = join(checkout, ".lastlight/pr-review/hypotheses", `${fam}.jsonl`);
   if (!existsSync(p)) return [];
-  return readFileSync(p, "utf8")
-    .split("\n")
-    .filter((l) => l.trim())
-    .flatMap((l) => { try { return [JSON.parse(l) as Row]; } catch { return []; } });
+  return parseJsonl(readFileSync(p, "utf8")).rows as Row[];
 }
 
 /** A LEXICAL tripwire, not a judge — see the header. Reassurance is a claim that
@@ -276,9 +328,140 @@ if (family !== "spec" && !existsSync(obligationsPath)) throw new Error(`no seede
 // block appended under the same heading the harness uses.
 const promptPath = promptOverride ? resolve(promptOverride) : join(serverRoot, "workflows/prompts", `survey-${family}.md`);
 const instance = instancesPath
-  ? (JSON.parse(readFileSync(instancesPath, "utf8")) as { instance_id: string; repo?: string; pr?: Record<string, unknown> }[])
-      .find((i) => i.instance_id === basename(fixture))
+  ? (JSON.parse(readFileSync(instancesPath, "utf8")) as {
+      instance_id: string;
+      repo?: string;
+      pr?: Record<string, unknown>;
+      review_gold?: GoldComment[];
+    }[]).find((i) => i.instance_id === basename(fixture))
   : undefined;
+const gold: GoldComment[] = Array.isArray(instance?.review_gold) ? instance.review_gold : [];
+const goldRefs: MicroGoldRef[] = gold.map((g) => ({
+  ...(g.file ? { file: g.file } : {}),
+  ...(typeof g.line === "number" ? { line: g.line } : {}),
+  severity: g.severity,
+  summary: g.description.replace(/\*\*[^*]*\*\*/g, "").replace(/\s+/g, " ").trim().slice(0, 160),
+}));
+let goldJudge: string | null = null;
+if (gold.length && !noJudge) {
+  try {
+    goldJudge = judgeModelFlag ?? defaultJudgeModel();
+  } catch (err) {
+    // No judge key is not a reason to lose the free half. Say so, loudly.
+    console.warn(`! gold judge unavailable (${(err as Error).message}) — overlay is LOCATION-ONLY`);
+  }
+}
+
+/**
+ * What a row SAYS, for the judge: the claim, plus the consequence it recorded.
+ * Both are the row's own words — the consequence is where a pass that writes a
+ * mild claim spells out what actually breaks, and leaving it out would grade
+ * the headline and ignore the finding.
+ */
+function rowStatement(r: Row): string {
+  const consequence = typeof r.evidence?.consequence === "string" ? r.evidence.consequence.trim() : "";
+  return [r.claim ?? "", consequence && `Consequence: ${consequence}`].filter(Boolean).join(" ");
+}
+
+/** The gold overlay for one set of rows. `undefined` when the case has no gold. */
+async function goldOverlayOf(rows: Row[], judge: boolean, votes = judgeVotes): Promise<MicroGoldRepeat | undefined> {
+  if (!gold.length) return undefined;
+  // A row CLAIMS a defect when its derived severity is Important or Critical
+  // and it is not a clean discharge — see `claimOf` (`src/micro-survey-node.ts`).
+  const base = { rows, gold: goldRefs, probeOf: (r: Row) => needsProbeOf(r), claimOf };
+  if (!judge || !goldJudge || !rows.length) {
+    // No rows: nothing to judge, and nothing can have asserted anything — that
+    // IS a measured zero, unlike an unjudged repeat.
+    return microGoldRepeat({ ...base, rowForGold: rows.length ? null : gold.map(() => null) });
+  }
+  const findings = rows.map((r) => ({ description: rowStatement(r), file: r.quotes?.[0]?.path ?? null }));
+  const passes = await Promise.all(
+    Array.from({ length: votes }, () => gradeInternalRecall({ gold, findings, judgeModel: goldJudge as string })),
+  );
+  // A failed pass is dropped from the vote, not counted as "credited nothing" —
+  // that would bias every flaky call toward a miss.
+  const ok = passes.filter((g) => g && !g.error);
+  if (!ok.length) {
+    const err = passes.find((g) => g?.error)?.error ?? "no grade returned";
+    return { ...microGoldRepeat({ ...base, rowForGold: null }), judgeError: err };
+  }
+  const { rowForGold, creditVotes } = microGoldVote(ok.map((g) => g!.goldToFinding), gold.length);
+  const unconfirmed = ok.find((g) => g!.confirmUngraded)?.confirmUngraded;
+  return {
+    ...microGoldRepeat({ ...base, rowForGold }),
+    ...(ok.length > 1 ? { votes: ok.length, creditVotes } : {}),
+    ...(unconfirmed ? { confirmUngraded: unconfirmed } : {}),
+  };
+}
+
+/**
+ * The baseline's overlay, judged ONCE per fixture and shared.
+ *
+ * Every run on a fixture reads the same preserved rows, so they must all show
+ * the same baseline — which independent judging did not deliver (see
+ * {@link BASELINE_JUDGE_VOTES}). Keyed on everything that could change the
+ * answer: the rows' raw bytes, the family, the gold and the judge model. Runs
+ * started together all miss at once; the first to write wins (`wx`), and every
+ * one then reads the file back, so they converge on one answer.
+ */
+async function cachedBaselineOverlay(): Promise<MicroGoldRepeat | undefined> {
+  const fam = family as Family;
+  const rows = readRows(checkout, fam);
+  if (!gold.length || !goldJudge) return goldOverlayOf(rows, false);
+  const rawPath = join(checkout, ".lastlight/pr-review/hypotheses", `${fam}.jsonl`);
+  const key = createHash("sha256")
+    .update(JSON.stringify({
+      v: 1,
+      family,
+      rows: existsSync(rawPath) ? readFileSync(rawPath, "utf8") : "",
+      gold,
+      judge: goldJudge,
+      votes: BASELINE_JUDGE_VOTES,
+    }))
+    .digest("hex")
+    .slice(0, 24);
+  const dir = join(process.cwd(), "eval-results", "micro-survey", ".judge-cache");
+  const file = join(dir, `baseline-${basename(fixture as string)}-${family}-${key}.json`);
+  if (existsSync(file)) return JSON.parse(readFileSync(file, "utf8")) as MicroGoldRepeat;
+  const fresh = await goldOverlayOf(rows, true, BASELINE_JUDGE_VOTES);
+  if (!fresh || fresh.judgeError) return fresh; // never cache a failure
+  mkdirSync(dir, { recursive: true });
+  try {
+    writeFileSync(file, JSON.stringify(fresh, null, 2), { flag: "wx" });
+  } catch {
+    // Another run wrote first — its answer is the shared one.
+  }
+  return JSON.parse(readFileSync(file, "utf8")) as MicroGoldRepeat;
+}
+
+/**
+ * The seeded checklist for this family, and what the rows under `repoDir` did
+ * with it — the discharge gate's own ledger, never a re-implementation of it.
+ */
+function seedStatsOf(repoDir: string): MicroSeedStats | undefined {
+  return seedStatsIn(join(repoDir, ".lastlight/pr-review"), family as Family);
+}
+
+function seedLine(x: MicroSeedStats | undefined): string {
+  if (!x) return "";
+  const codes = Object.entries(x.byCode).map(([k, v]) => `${k} ${v}`).join(" · ");
+  return `checks  seeded ${x.seeded}${x.droppedByCap ? ` (+${x.droppedByCap} dropped by cap)` : ""} · answered ${x.answered}${codes ? ` (${codes})` : ""} · skipped ${x.skipped} · own rows ${x.ownRows}` +
+    `${x.malformed ? ` · ${x.malformed} UNPARSEABLE LINES (rows lost)` : ""}${x.recovered ? ` · ${x.recovered} multi-line rows recovered` : ""} · gate ${x.gateSatisfied ? "pass" : "FAIL"}`;
+}
+
+/** `G3` style labels, 1-based to match how the gold is discussed. */
+const gid = (j: number) => `G${j + 1}`;
+function goldLine(o: MicroGoldRepeat | undefined): string {
+  if (!o) return "";
+  const by = (v: string) => o.cells.flatMap((c, j) => (c.verdict === v ? [gid(j)] : []));
+  const asserted = o.asserted === null ? "unjudged" : by("asserted").join(" ") || "none";
+  const note = o.judgeError ? `  [judge failed: ${o.judgeError}]` : o.confirmUngraded ? "  [CONFIRM did not run — raw MATCH]" : "";
+  const vote = o.votes && o.creditVotes ? `  [votes ${o.creditVotes.map((v, j) => `${gid(j)} ${v}/${o.votes}`).filter((_, j) => o.creditVotes![j] > 0).join(" ") || "none credited"}]` : "";
+  const sc = microGoldScore(o, gold.length);
+  const f1 = sc ? `   P ${sc.precision.toFixed(2)} R ${sc.recall.toFixed(2)} F1 ${sc.f1.toFixed(2)} (claims ${o.claimed})` : "";
+  return `gold  asserted ${asserted} · reached-not-asserted ${by("reached").join(" ") || "none"} · missed ${by("missed").join(" ") || "none"}` +
+    `   probes on-gold ${o.probesOnGold} · off-gold ${o.probesOffGold}${f1}${vote}${note}`;
+}
 const pr = (instance?.pr ?? {}) as Record<string, string | number>;
 const [owner, repoName] = (instance?.repo ?? "owner/repo").split("/");
 const ctx = {
@@ -363,11 +546,34 @@ console.log(noSkill
 console.log(`context   AGENTS.md ${noAgentsMd ? "REMOVED (ablation)" : "present"}   ambient skill discovery ${discoverSkills ? "ON" : "off"}`);
 console.log(`\nbaseline (what the preserved arm itself wrote for this family):`);
 console.log(`  rows ${baseline.rows}  needsProbe ${baseline.needsProbe} (${baseline.needsProbePct.toFixed(1)}%)  reassurance-shaped ${baseline.reassuranceShaped}`);
+if (gold.length) {
+  console.log(`\ngold (${gold.length}, the whole case's — one family is not expected to reach all of it)  judge ${goldJudge ?? "NONE — location only"}`);
+  goldRefs.forEach((g, j) => console.log(`  ${gid(j)}  ${g.file ?? "(no file)"}${g.line ? `:${g.line}` : ""}  [${g.severity}]  ${g.summary.slice(0, 110)}`));
+} else {
+  console.log(`\ngold      none — ${instancesPath ? "this case has no review_gold" : "pass --instances"}; no quality view, counts only`);
+}
 
 if (dryRun) {
+  // The location half costs nothing, so a dry run still shows where the
+  // preserved arm stood — just not what it asserted.
+  const bl = await goldOverlayOf(readRows(checkout, family), false);
+  if (bl) console.log(`  baseline ${goldLine(bl)}`);
+  const bs = seedStatsOf(checkout);
+  if (bs) console.log(`  baseline ${seedLine(bs)}`);
   console.log("\n--dry-run: resolved and rendered only, nothing spent.");
   process.exit(0);
 }
+
+// The comparator gets the same judge as every repeat — the preserved arm's
+// rows, graded once.
+const baselineGold = await cachedBaselineOverlay();
+if (baselineGold) console.log(`  baseline ${goldLine(baselineGold)}`);
+const baselineSeed = seedStatsOf(checkout);
+/** The family's seeded checks — id and question — so a row can be labelled with
+ * the check it answers. */
+const checks = checksOf(join(checkout, ".lastlight/pr-review/obligations.json"), family);
+const checkIds = new Set(checks.map((c) => c.id));
+if (baselineSeed) console.log(`  baseline ${seedLine(baselineSeed)}`);
 
 const { run } = (await import("agentic-pi")) as { run: (o: Record<string, unknown>) => Promise<Record<string, never>> };
 
@@ -417,6 +623,9 @@ const writeReport = (done: boolean) => {
     promptPath,
     agentsMd: !noAgentsMd,
     baseline,
+    ...(gold.length ? { gold: goldRefs, goldJudge, ...(baselineGold ? { baselineGold } : {}) } : {}),
+    ...(baselineSeed ? { baselineSeed } : {}),
+    checks,
     fireRate: results.length ? fired / results.length : null,
     firedRepeats: fired,
     results, claims,
@@ -471,16 +680,23 @@ for (let i = 1; i <= repeats; i++) {
   const rawRows = join(work, ".lastlight/pr-review/hypotheses", `${family}.jsonl`);
   if (existsSync(rawRows)) cpSync(rawRows, join(rowsDir, `repeat-${i}.jsonl`));
   const s = summarise(rows);
-  results.push({ ...s, costUsd: r.stats?.cost ?? 0, durationSec: (Date.now() - started) / 1000, turns: r.stats?.turns ?? null, toolCalls: r.stats?.toolCalls ?? null } as never);
+  const durationSec = (Date.now() - started) / 1000;
+  const goldOverlay = await goldOverlayOf(rows, true);
+  // Before the scratch workspace is removed: the ledger reads its files.
+  const seed = seedStatsOf(work);
+  const rowsView = rowsViewOf(rows, checkIds);
+  results.push({ ...s, costUsd: r.stats?.cost ?? 0, durationSec, turns: r.stats?.turns ?? null, toolCalls: r.stats?.toolCalls ?? null, ...(goldOverlay ? { gold: goldOverlay } : {}), ...(seed ? { seed } : {}), rowsView } as never);
   // DERIVED, like every other number here. The pass no longer writes `severity`
   // or `needsProbe`, so reading the declared fields renders every row as
   // `. [?]` while the aggregate above correctly reports the derived rate — two
   // readings of different things, in one view, disagreeing.
   claims.push(rows.map((x) => `${needsProbeOf(x) ? "PROBE" : "  .  "} [${severityOf(x) ?? "?"}] ${(x.claim ?? "").slice(0, 110)}`));
-  const secs = ((Date.now() - started) / 1000).toFixed(0);
+  const secs = durationSec.toFixed(0);
   console.log(`\nrepeat ${i}/${repeats}  ${secs}s  $${(r.stats?.cost ?? 0).toFixed(3)}  tools=${r.stats?.toolCalls ?? "?"}  ok=${r.ok !== false}`);
   console.log(`  rows ${s.rows}  needsProbe ${s.needsProbe} (${s.needsProbePct.toFixed(1)}%)  reassurance-shaped ${s.reassuranceShaped}`);
   console.log(`  severity  critical ${s.severity.critical}  important ${s.severity.important}  minor ${s.severity.minor}` + (s.severity.unknown ? `  unknown ${s.severity.unknown}` : ""));
+  if (goldOverlay) console.log(`  ${goldLine(goldOverlay)}`);
+  if (seed) console.log(`  ${seedLine(seed)}`);
   if (s.compliance.withEvidence > 0) {
     const c = s.compliance;
     if (c.withEvidence < c.rows) {
@@ -519,6 +735,28 @@ for (const tier of ["critical", "important", "minor", "unknown"] as const) {
   // Severity drives the posting rank on its own, so the SPREAD across identical
   // runs is the number that says whether the attention boundary is stable.
   console.log(`   severity ${tier.padEnd(9)} ${v.join(" / ")}${lo === hi ? "  (stable)" : `  (spread ${hi - lo})`}`);
+}
+if (gold.length) {
+  // Per gold, across repeats — the quality view. `asserted` counts only judged
+  // repeats, so its denominator is printed rather than assumed.
+  const overlays = results.map((r) => (r as unknown as { gold?: MicroGoldRepeat }).gold);
+  console.log(`   gold (asserted / reached-not-asserted / missed, of ${results.length}; probed = a row at it asked for a probe)`);
+  goldRefs.forEach((g, j) => {
+    const cells = overlays.map((o) => o?.cells[j]).filter(Boolean);
+    const judged = overlays.filter((o) => o && o.asserted !== null).length;
+    const n = (v: string) => cells.filter((c) => c?.verdict === v).length;
+    const bl = baselineGold?.cells[j]?.verdict ?? "—";
+    console.log(`     ${gid(j)} ${(g.file ?? "").split("/").pop()}${g.line ? `:${g.line}` : ""}`.padEnd(30) +
+      ` asserted ${n("asserted")}/${judged}  reached ${n("reached")}  missed ${n("missed")}  probed ${cells.filter((c) => c?.probed).length}   baseline ${bl}`);
+  });
+  const on = overlays.reduce((a, o) => a + (o?.probesOnGold ?? 0), 0);
+  const off = overlays.reduce((a, o) => a + (o?.probesOffGold ?? 0), 0);
+  console.log(`   probes on-gold ${on} · off-gold ${off}${on + off ? `  (${((100 * on) / (on + off)).toFixed(0)}% of probe requests landed at a gold)` : ""}`);
+  const f1s = overlays.map((o) => microGoldScore(o, gold.length)?.f1).filter((x): x is number => typeof x === "number");
+  if (f1s.length) {
+    // A range, never a mean — same rule as every other per-repeat series here.
+    console.log(`   F1 per repeat ${f1s.map((x) => x.toFixed(2)).join(" / ")}  (range ${Math.min(...f1s).toFixed(2)}–${Math.max(...f1s).toFixed(2)}; recall is over the whole case's gold)`);
+  }
 }
 if (results.length < 8) {
   console.log(`   (${results.length} repeats — this metric is BIMODAL, so treat it as ${results.length} coin flips; 8+ before ranking anything)`);

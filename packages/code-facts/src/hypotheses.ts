@@ -74,6 +74,7 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 
+import { type JsonlParse, parseJsonl } from "./jsonl.js";
 import { type SurveyEvidence, type SurveyVerdict, deriveVerdict, hasEvidence } from "./survey-verdict.js";
 
 /** A hypothesis line, as far as the gates care. Everything else rides along. */
@@ -152,6 +153,12 @@ export interface HypothesisSet {
   families: string[];
   /** Lines that were not JSON at all, counted rather than silently skipped. */
   malformed: number;
+  /**
+   * Rows that were NOT one object per line (pretty-printed, or run together)
+   * and were read anyway. Counted because it is the pass ignoring its format,
+   * which is worth seeing even when nothing was lost.
+   */
+  recovered: number;
   /** How many rows carried a usable `id` of their own — the compliance rate. */
   declared: number;
   /**
@@ -208,21 +215,10 @@ export function hypothesisId(family: string, ordinal: number): string {
   return `${family}-${String(ordinal).padStart(3, "0")}`;
 }
 
-/** Split a JSONL file into rows, counting what would not parse. */
-function readJsonlRows(path: string): { rows: HypothesisRow[]; malformed: number } {
-  if (!existsSync(path)) return { rows: [], malformed: 0 };
-  const rows: HypothesisRow[] = [];
-  let malformed = 0;
-  for (const line of readFileSync(path, "utf8").split("\n")) {
-    const text = line.trim();
-    if (!text) continue;
-    try {
-      rows.push(JSON.parse(text) as HypothesisRow);
-    } catch {
-      malformed += 1;
-    }
-  }
-  return { rows, malformed };
+/** Read a JSONL file into rows — see `jsonl.ts` for what counts as a row. */
+function readJsonlRows(path: string): JsonlParse {
+  if (!existsSync(path)) return { rows: [], recovered: 0, malformed: 0 };
+  return parseJsonl(readFileSync(path, "utf8"));
 }
 
 /**
@@ -258,6 +254,7 @@ export function readHypothesisSet(
   const records: HypothesisRecord[] = [];
   const families: string[] = [];
   let malformed = 0;
+  let recovered = 0;
   let declared = 0;
 
   for (const file of files) {
@@ -265,7 +262,8 @@ export function readHypothesisSet(
     families.push(family);
     const parsed = readJsonlRows(join(hypothesesDir, file));
     malformed += parsed.malformed;
-    parsed.rows.forEach((row, index) => {
+    recovered += parsed.recovered;
+    (parsed.rows as HypothesisRow[]).forEach((row, index) => {
       const ordinal = index + 1;
       const declaredId = asString(row.id);
       if (declaredId) declared += 1;
@@ -337,6 +335,7 @@ export function readHypothesisSet(
     ambiguous,
     families,
     malformed,
+    recovered,
     missingEvidence,
     declared,
     unknownObligations,

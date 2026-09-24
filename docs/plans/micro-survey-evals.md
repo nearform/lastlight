@@ -325,9 +325,52 @@ The `full` discharge contract used to ship a worked exemplar built from a real d
 - **`1667` is a genuine discovery miss**, not a saying miss: arm 2's misses on the auth-ordering and rate-limiting gold are `MISS` at the *internal* level — never generated. No prompt lever recovers those; only sampling or a different model would.
 - **Repeated survey sampling is ruled out on latency grounds** (operator decision, 2026-09-23) even though union ≫ single-arm recall. Any "harvest the variance" design has to fit inside the current wall clock.
 
+## Open-model screens, and the quality view they forced (2026-09-24)
+
+Five models screened on two fixtures, 8 repeats each, all via OpenCode Zen except the reference: GLM 5.3 Flash, DeepSeek V4.1 Flash, DeepSeek V4 Flash, MiniMax M3, and Haiku 4.5 on current code (`haiku-current`). Fixtures: `arm2/1680-r1` · `enforcement` (seeded with **zero** checks — open discovery) and `arm2/1667` · `contract` (12 seeded checks). Reports live in `nearform-evals/eval-results/micro-survey/2026-09-24T03-43-39-*` and `…T03-58-*`/`…T04-*`.
+
+### The instrument changed first — counts are not quality
+
+`needsProbe%` and `fireRate` count probe requests. A pass that finds nothing and asks to verify every row scores 100% — measured: GLM 5.3 Flash on `1667` scored 100% on repeats whose rows were **10–12 clean discharges** (`verify`) and 0–2 real risk claims. So the report now also carries, per repeat:
+
+- **the gold overlay** — per gold: *found it* (the internal-recall judge, MATCH + CONFIRM, credits a row), *looked, said fine* (a row cites within ±15 lines of the anchor but asserts nothing wrong), *never looked*; and probes split on-gold / off-gold. Plus an F1: recall = gold found ÷ the case's gold, precision = credited claims ÷ claims, where a *claim* is a row with derived severity Important+ that is not a clean discharge, or any row the judge credited.
+- **the seed ledger** — the discharge gate's own `checkDischarge`: seeded / answered (by back-pointer — under `minimal` no code exists) / skipped / own rows / **lines lost** (unparseable) / gate.
+- **per-row view** — the check each row answers and why it probes: `verify` (clean discharge over a changed hunk), `risk`, `gap`, `unknown` — from `probeReasonOf`, beside `deriveVerdict`.
+
+The baseline's gold overlay is judged ONCE per fixture by a 3-vote majority and cached (`.judge-cache/`): five single-pass judgements of the same stored rows came back 0/4 three times and 1/4 twice, at temperature 0.
+
+### A dead fixture: `1587-r3`
+
+Every CONFIRM-era full Haiku arm (`023026`, `094738`, `191307`, `201815`, `150604`) found **0 of its 4 gold across all families**, and so did every model in a screen. It measures cost and nothing else. `1680-r1` enforcement and `1667` contract are the informative pairs — full arms found gold through those families.
+
+### What the screens found (each is now enforced or visible)
+
+1. **A prompt contradiction made Haiku skip unseeded families.** The family tables said *"NOT MEASURED → record that and stop"*, the skill comment said *"does not substitute a judgement for a measurement"*, and the seed block said *"not a licence to skip"*. Haiku wrote one `NOT MEASURED` row and stopped on 2 of 3 repeats of `1680-r1` ($0.43 each). Fixed in the prompts and skill (record it, THEN work the diff); `tests` alone keeps *stop*, because without coverage it can observe nothing. After the fix Haiku skipped 0 of 8 — and GLM went from gold in 1/8 repeats to 3/8 on the same fixture.
+2. **The gate passed a placeholder-only pass**, and under `minimal` (the shipped default) passed anything with one row. `checkDischarge` now fails, under either contract: a zero-obligation family with no real claim; a seeded check no row names; a claim row with no `evidence` record. Measured case for the last two: **MiniMax M3 on `1667` answered 4 of 12 checks with no evidence on any row**, and the gate read only `fileState`.
+3. **Multi-line / pretty-printed JSON loses rows silently — in prod too.** GLM (repeat 5, 72 lines) and DeepSeek V4 Flash (repeat 3) wrote ~9 KB of real rows the line reader dropped; and the preserved *full Haiku arm* on `1680-r1` lost 33 lines the same way. The ledger now shows `lines lost`. **Not yet fixed**: `hypotheses.ts` still parses line by line — it should parse a JSON object stream and count recovered objects.
+4. **The seeder is blind to literals.** `1680-r1` enforcement seeded 0 because `constants` found no named constant: the TTL is a bare `120` passed to `imgCache.set`, the MIME filter an inline string, and the key file is in no tsconfig ("ended up in no program at all"). **Not yet fixed.**
+5. **Seed location ≠ seed question.** `scripts/seed-questions.ts` (a judge per fixture) over 20 gold: 11 have a seeded question that would surface the defect, 4 are seeded but asked wrong, 5 are not seeded. Location recall alone (±15 lines) is 17/25 and flatters it.
+6. **Unseeded markers need a defined shape.** Models write the "ran unseeded" first row as an ordinary claim (derived Minor), which reads as a finding and slips past a prefix test. Proposed: one marker row `{"id":"<family>-unseeded","unseeded":true,"surveyed":[…]}`, no claim.
+
+### Standings (8 repeats each; repeats that found ≥1 gold)
+
+| model | `1680-r1` enforcement (unseeded) | `1667` contract (seeded) | cost / repeat |
+|---|---|---|---|
+| DeepSeek V4.1 Flash | **6/8** | 6/8 | ~$0.08 |
+| GLM 5.3 Flash | 3/8 | **7/8** | ~$0.02 |
+| MiniMax M3 | 3/8 | 7/7 judged of 8 — gate fails 3/8 (no evidence r1; 2/12, 3/12 checks answered r2, r4) | ~$0.22 |
+| DeepSeek V4 Flash | 0/8 | 7/8 | ~$0.03 |
+| Haiku 4.5 (current code) | 1/8 | 5/8 | ~$0.28 |
+| baseline (preserved arm) | G1 | G5 | — |
+
+The continuation — process, tooling, backlog and run order for the full arms — is [`open-model-evals.md`](open-model-evals.md).
+
+Read with the house rules below: 8 repeats rank a fire rate, not a gold rate, and two fixtures are two fixtures. What it does support: on **open discovery** DeepSeek V4.1 Flash is the only model that finds gold most of the time; on **seeded checks** the cheap models (GLM, DeepSeek V4 Flash) match or beat Haiku at a tenth of the cost; and Haiku on today's prompts is not the recall winner it was measured as on the Martian corpus.
+
 ## House rules this file encodes
 
 - Never report one arm, or one repeat, as a result.
+- A count is not a quality number. `needsProbe%` beside the gold overlay, always — and a fixture where nothing ever finds gold (`1587-r3`) measures cost only.
 - Never show a mean or an SD of a bimodal metric; show every repeat plus a range, and `fireRate` as the aggregate.
 - Always print the baseline beside the replay — a replay number alone is meaningless.
 - A harness fault must never be reportable as a model result. (`timeout` does not exist on macOS; a first sweep reported 8 model "failures" that were entirely that.)

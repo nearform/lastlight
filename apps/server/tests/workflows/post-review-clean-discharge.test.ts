@@ -19,7 +19,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { readCleanDischarges } from "#src/workflows/handlers/post-review.js";
+import { parseJsonlRows, readCleanDischarges } from "#src/workflows/handlers/post-review.js";
 
 let dir: string;
 
@@ -170,5 +170,24 @@ describe("readCleanDischarges — a model-declared id is an ALIAS, and only when
   it("does not credit an alias whose canonical row is not clean", () => {
     seed("contract", [{ id: "H-009", ...DEFECT }]);
     expect([...readCleanDischarges(dir)!]).toEqual([]);
+  });
+});
+
+describe("parseJsonlRows", () => {
+  // Mirrors packages/code-facts/tests/jsonl.test.ts — this is a copy of that
+  // reader, and ordinals are identity, so the two must accept the same rows.
+  it("reads one value per line, recovering pretty-printed and run-together rows", () => {
+    const pretty = JSON.stringify({ claim: "if (x) { \"}\" }", n: 2 }, null, 2);
+    expect(parseJsonlRows(`{"n":1}\n${pretty}\n42\n{"n":3}{"n":4}\n`)).toEqual([
+      { n: 1 },
+      { claim: "if (x) { \"}\" }", n: 2 },
+      42,
+      { n: 3 },
+      { n: 4 },
+    ]);
+  });
+
+  it("never lets a broken or torn line swallow the rows after it", () => {
+    expect(parseJsonlRows(`{"n": 1, "bad": }\n{"n":2}\n\`\`\`\n{\n  "claim": "cut off`)).toEqual([{ n: 2 }]);
   });
 });

@@ -8,8 +8,14 @@ import {
   MICRO_LATENCY_CAVEAT,
   MICRO_RANKABLE_REPEATS,
   MICRO_STALE_HEARTBEAT_MS,
+  MICRO_GOLD_LINE_WINDOW,
   microFireRate,
+  microGoldRepeat,
+  microGoldScore,
+  microGoldSeries,
+  microGoldVote,
   microRange,
+  microRowReachesGold,
   microSeries,
   microRankable,
   microStatus,
@@ -349,5 +355,193 @@ describe("buildMicroIndex", () => {
 
     const idx = buildMicroIndex(root, "now");
     expect(idx.reports.map((r) => r.label)).toEqual(["late", "with-agents-md"]);
+  });
+});
+
+// ── the gold overlay ─────────────────────────────────────────────────────────
+
+const G = [
+  { file: "packages/backend/src/routes/users.ts", line: 103, severity: "medium", summary: "dual roster" },
+  { file: "packages/backend/src/routes/auth.ts", line: 141, severity: "medium", summary: "nonce not burned" },
+  { file: "packages/frontend/src/contexts/AuthContext.tsx", line: 65, severity: "high", summary: "login never set" },
+];
+type R = { id: string; probe: boolean; quotes?: { path: string; line: number }[]; bothEnds?: Record<string, string>; evidence?: { control_site?: string } };
+const probeOf = (r: R) => r.probe;
+
+describe("microRowReachesGold", () => {
+  it("reaches a gold through any cited site within the window — quote, bothEnds or control site", () => {
+    const g = G[0];
+    expect(microRowReachesGold({ quotes: [{ path: g.file, line: 103 + MICRO_GOLD_LINE_WINDOW }] }, g)).toBe(true);
+    expect(microRowReachesGold({ bothEnds: { enforcedAt: `${g.file}:110` } }, g)).toBe(true);
+    expect(microRowReachesGold({ evidence: { control_site: `${g.file}:96-99` } }, g)).toBe(true);
+    expect(microRowReachesGold({ quotes: [{ path: g.file, line: 103 + MICRO_GOLD_LINE_WINDOW + 1 }] }, g)).toBe(false);
+  });
+
+  it("matches the file by path suffix, and never across files", () => {
+    expect(microRowReachesGold({ quotes: [{ path: "./packages/backend/src/routes/users.ts", line: 103 }] }, G[0])).toBe(true);
+    expect(microRowReachesGold({ quotes: [{ path: "packages/backend/src/routes/auth.ts", line: 103 }] }, G[0])).toBe(false);
+  });
+
+  it("treats a gold with no line as reachable anywhere in its file, and one with no file as unreachable", () => {
+    expect(microRowReachesGold({ quotes: [{ path: G[0].file, line: 900 }] }, { file: G[0].file })).toBe(true);
+    expect(microRowReachesGold({ quotes: [{ path: G[0].file, line: 103 }] }, {})).toBe(false);
+  });
+
+  it("ignores a control site of `none` rather than parsing it", () => {
+    expect(microRowReachesGold({ evidence: { control_site: "none" } }, G[0])).toBe(false);
+  });
+});
+
+describe("microGoldRepeat", () => {
+  const rows: R[] = [
+    { id: "e-1", probe: true, quotes: [{ path: G[0].file, line: 104 }] }, // at G1, reassures
+    { id: "e-2", probe: true, quotes: [{ path: G[1].file, line: 150 }] }, // at G2
+    { id: "e-3", probe: false, quotes: [{ path: G[1].file, line: 139 }] }, // also at G2
+    { id: "e-4", probe: true, quotes: [{ path: "src/elsewhere.ts", line: 1 }] }, // at nothing
+  ];
+
+  it("an asserting row wins over location: the judge's credit is the verdict", () => {
+    const o = microGoldRepeat({ rows, gold: G, rowForGold: [null, 1, null], probeOf });
+    expect(o.cells.map((c) => c.verdict)).toEqual(["reached", "asserted", "missed"]);
+    expect(o.cells[1]).toEqual({ verdict: "asserted", rows: ["e-2"], probed: true });
+    expect(o.asserted).toBe(1);
+    expect(o.reached).toBe(1);
+  });
+
+  it("a reached gold carries every row in reach, and is probed if any of them asked", () => {
+    const o = microGoldRepeat({ rows, gold: G, rowForGold: [null, null, null], probeOf });
+    expect(o.cells[1]).toEqual({ verdict: "reached", rows: ["e-2", "e-3"], probed: true });
+  });
+
+  it("splits every probe request into on-gold and off-gold, summing to the probes asked", () => {
+    const o = microGoldRepeat({ rows, gold: G, rowForGold: [null, 1, null], probeOf });
+    expect(o.probesOnGold).toBe(2); // e-1 (reaches G1), e-2 (asserts G2)
+    expect(o.probesOffGold).toBe(1); // e-4
+    expect(o.probesOnGold + o.probesOffGold).toBe(rows.filter(probeOf).length);
+  });
+
+  it("an asserting row counts as on-gold even when it cites nowhere near the anchor", () => {
+    const o = microGoldRepeat({ rows, gold: G, rowForGold: [null, null, 3], probeOf });
+    expect(o.cells[2].verdict).toBe("asserted");
+    expect(o.probesOffGold).toBe(0);
+  });
+
+  it("an unjudged repeat has asserted `null`, never zero — and keeps its location verdicts", () => {
+    const o = microGoldRepeat({ rows, gold: G, rowForGold: null, probeOf });
+    expect(o.asserted).toBeNull();
+    expect(o.cells.map((c) => c.verdict)).toEqual(["reached", "reached", "missed"]);
+  });
+});
+
+describe("microGoldSeries", () => {
+  const cell = (verdict: "asserted" | "reached" | "missed", probed = false) => ({ verdict, rows: [], probed });
+  const overlay = (cells: ReturnType<typeof cell>[], asserted: number | null, on = 0, off = 0) => ({
+    cells, asserted, reached: cells.filter((c) => c.verdict === "reached").length, probesOnGold: on, probesOffGold: off,
+  });
+
+  it("tallies each gold across repeats, counting `asserted` only over judged repeats", () => {
+    const s = microGoldSeries(G, [
+      { gold: overlay([cell("reached", true), cell("asserted", true), cell("missed")], 1, 2, 5) },
+      { gold: overlay([cell("reached"), cell("reached"), cell("missed")], null, 0, 3) },
+      {}, // a repeat that carried no overlay at all
+    ]);
+    expect(s.goldAsserted).toEqual([1, null, null]);
+    expect(s.goldReached).toEqual([1, 2, null]);
+    expect(s.probesOnGold).toEqual([2, 0, null]);
+    expect(s.probesOffGold).toEqual([5, 3, null]);
+    expect(s.perGold?.[1]).toEqual({ asserted: 1, reached: 1, missed: 0, probedAtGold: 1, repeats: 2, judged: 1 });
+    expect(s.perGold?.[0].probedAtGold).toBe(1);
+  });
+
+  it("a report with no gold yields no quality view rather than a row of zeros", () => {
+    expect(microGoldSeries(null, [{}])).toEqual({
+      gold: null, goldAsserted: [], goldReached: [], probesOnGold: [], probesOffGold: [], perGold: null,
+      goldF1: [], goldPrecision: [], goldRecall: [],
+    });
+  });
+
+  it("reaches the index entry through summariseMicroReport, with the baseline overlay beside it", () => {
+    const baselineGold = overlay([cell("reached"), cell("missed"), cell("missed")], 0);
+    const e = summariseMicroReport(
+      "2026-09-24T10-00-00-000Z-x-enforcement",
+      report({
+        gold: G,
+        baselineGold,
+        results: [{ rows: 12, needsProbe: 2, needsProbePct: 16.7, reassuranceShaped: 0, gold: overlay([cell("asserted", true), cell("missed"), cell("missed")], 1, 2, 0) }],
+      }),
+      "2026-09-24T10:00:00.000Z",
+    );
+    expect(e?.goldAsserted).toEqual([1]);
+    expect(e?.baselineGold).toEqual(baselineGold);
+    expect(e?.gold).toHaveLength(3);
+  });
+
+  it("an entry from an older server degrades to no quality view", () => {
+    const old = summariseMicroReport("2026-09-24T10-00-00-000Z-x-enforcement", report(), "x")!;
+    const { gold, goldAsserted, perGold, baselineGold, ...legacy } = old;
+    void gold; void goldAsserted; void perGold; void baselineGold;
+    const filled = withMicroEntryDefaults(legacy as never);
+    expect(filled.goldAsserted).toEqual([]);
+    expect(filled.perGold).toBeNull();
+    expect(filled.baselineGold).toBeNull();
+  });
+});
+
+describe("microGoldScore", () => {
+  const rows = [
+    { id: "a", probe: false, claim: true, quotes: [{ path: G[1].file, line: 141 }] }, // claims + credited to G2
+    { id: "b", probe: false, claim: true, quotes: [{ path: "x.ts", line: 1 }] }, // claims a defect the gold lacks
+    { id: "c", probe: true, claim: false, quotes: [{ path: G[0].file, line: 103 }] }, // a reassurance
+  ];
+  const o = microGoldRepeat({ rows, gold: G, rowForGold: [null, 0, null], probeOf: (r) => r.probe, claimOf: (r) => r.claim });
+
+  it("counts claims and the credited claims, ignoring reassurance rows", () => {
+    expect(o.claimed).toBe(2);
+    expect(o.claimedAsserting).toBe(1);
+  });
+
+  it("scores precision over claims and recall over ALL the case's gold", () => {
+    const s = microGoldScore(o, G.length)!;
+    expect(s.precision).toBeCloseTo(1 / 2, 10);
+    expect(s.recall).toBeCloseTo(1 / 3, 10);
+    expect(s.f1).toBeCloseTo(2 * (0.5 * (1 / 3)) / (0.5 + 1 / 3), 10);
+  });
+
+  it("is null for an unjudged repeat, and for an overlay that predates the claim counts", () => {
+    expect(microGoldScore({ ...o, asserted: null }, G.length)).toBeNull();
+    const { claimed, claimedAsserting, ...legacy } = o;
+    void claimed; void claimedAsserting;
+    expect(microGoldScore(legacy, G.length)).toBeNull();
+  });
+
+  it("counts a row the judge credited as a claim even when its evidence is a reassurance", () => {
+    const o2 = microGoldRepeat({ rows, gold: G, rowForGold: [2, null, null], probeOf: (r) => r.probe, claimOf: (r) => r.claim });
+    expect(o2.claimed).toBe(3); // a, b, and the credited reassurance c
+    expect(o2.claimedAsserting).toBe(1);
+    expect(microGoldScore(o2, G.length)!.precision).toBeGreaterThan(0);
+  });
+
+  it("scores a repeat that claims nothing as zero, not as undefined", () => {
+    const none = microGoldRepeat({ rows: [], gold: G, rowForGold: [null, null, null], probeOf: () => false, claimOf: () => true });
+    expect(microGoldScore(none, G.length)).toEqual({ precision: 0, recall: 0, f1: 0 });
+  });
+});
+
+describe("microGoldVote", () => {
+  it("credits a gold only when more than half the passes did", () => {
+    const v = microGoldVote([[0, null], [0, null], [null, 3]], 2);
+    expect(v.rowForGold).toEqual([0, null]);
+    expect(v.creditVotes).toEqual([2, 1]);
+  });
+
+  it("names the row most passes named, ties to the lower index", () => {
+    expect(microGoldVote([[4], [2], [4]], 1).rowForGold).toEqual([4]);
+    // Every pass credited the gold — they only disagree on WHICH row — so it is
+    // credited, to the lower index on the tie.
+    expect(microGoldVote([[5], [2], [5], [2]], 1).rowForGold).toEqual([2]);
+  });
+
+  it("with one pass, is that pass", () => {
+    expect(microGoldVote([[1, null, 0]], 3).rowForGold).toEqual([1, null, 0]);
   });
 });

@@ -114,3 +114,23 @@ describe("readHypothesisSet — obligation back-pointers", () => {
     expect(set.declared).toBe(1);
   });
 });
+
+describe("readHypothesisSet — rows that are not one object per line", () => {
+  it("keeps a pretty-printed row, at its ordinal, and counts it", () => {
+    // Measured on GLM, DeepSeek V4 Flash and a full Haiku arm: the reader used
+    // to count every line of this row malformed and drop the claim.
+    const dir = mkdtempSync(join(tmpdir(), "ll-hyp-"));
+    dirs.push(dir);
+    mkdirSync(join(dir, "hypotheses"), { recursive: true });
+    const pretty = JSON.stringify({ claim: "second", obligation: "O-002" }, null, 2);
+    writeFileSync(join(dir, "hypotheses", "contract.jsonl"), `{"claim":"first"}\n${pretty}\n{"claim":"third"}\n`);
+    const set = readHypothesisSet(dir);
+    expect(set.records.map((r) => [r.id, r.row.claim])).toEqual([
+      ["contract-001", "first"],
+      ["contract-002", "second"],
+      ["contract-003", "third"],
+    ]);
+    expect(set.recovered).toBe(1);
+    expect(set.malformed).toBe(0);
+  });
+});

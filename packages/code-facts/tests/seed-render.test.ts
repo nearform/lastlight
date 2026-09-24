@@ -643,30 +643,49 @@ describe("the discharge gate degrades under `minimal`", () => {
     { claim: "the nonce lifetime is never compared server-side" },
   ];
 
-  it("passes on one parsed row, and says it graded nothing", () => {
-    const dir = workspace(doc({ contract: "minimal" }), {
-      enforcement: freeForm,
-    });
+  /** Rows that NAME every seeded enforcement check, with evidence, and no
+   * discharge code — exactly what the `minimal` block asks for. */
+  const EVIDENCE = {
+    subject: "X", control_site: "src/a.ts:1", control_text: "if (x) reject()", authority: "binding",
+    order_ok: true, cannot_distinguish: "nothing", bypass: "none found", in_changed_hunk: false,
+    consequence: null, trigger: "unknown", crosses_boundary: false, capability_gained: null,
+  };
+  const named = ["O-002", "O-003", "O-004"].map((id) => ({ obligation: id, claim: `about ${id}`, evidence: EVIDENCE }));
+
+  it("grades no discharge CODE under `minimal`: rows that name every check pass without one", () => {
+    const dir = workspace(doc({ contract: "minimal" }), { enforcement: named });
     const result = checkDischarge({ dir, family: "enforcement" });
 
     expect(result.satisfied).toBe(true);
     expect(result.contract).toBe("minimal");
     expect(result.discharged).toEqual([]);
     expect(result.notes.join(" ")).toMatch(/contract: "minimal"/);
-    expect(result.notes.join(" ")).toMatch(/test -s/);
+    expect(result.notes.join(" ")).toMatch(/no discharge CODE was graded/);
+  });
+
+  it("still grades COVERAGE under `minimal`: a row naming no seeded check fails, and lists them", () => {
+    // The block says DISCHARGE EVERY OBLIGATION and prescribes the back-pointer;
+    // only the code is gone. 2026-09-24: MiniMax M3 answered 4 of 12.
+    const dir = workspace(doc({ contract: "minimal" }), {
+      enforcement: freeForm.map((r) => ({ ...r, evidence: EVIDENCE })),
+    });
+    const result = checkDischarge({ dir, family: "enforcement" });
+    expect(result.satisfied).toBe(false);
+    expect(result.notes.join(" ")).toMatch(/3 of 3 seeded enforcement obligation\(s\) are named by no row/);
   });
 
   it("NON-VACUITY: the SAME rows under `full` fail — the degrade is the contract, not the rows", () => {
     // If this passed, the branch above would be indistinguishable from the gate
     // simply having stopped working.
-    const dir = workspace(doc(), { enforcement: freeForm });
+    const dir = workspace(doc(), { enforcement: named });
     const result = checkDischarge({ dir, family: "enforcement" });
 
     expect(result.satisfied).toBe(false);
     expect(result.outstanding.map((e) => e.status)).toEqual([
-      "undischarged",
-      "undischarged",
-      "undischarged",
+      // Named, but no code: under `full` a code is what discharges a check.
+      "no-code",
+      "no-code",
+      "no-code",
     ]);
   });
 
