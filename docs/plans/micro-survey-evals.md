@@ -247,6 +247,39 @@ Not before 1 and 2. A full arm is ~$30 and an hour, and its ranking is the thing
 - **The declared-vs-derived signal goes silent in production.** The pass no longer writes `severity`/`needsProbe`, so `verdict.agrees` — which caught BOTH rule bugs in this thread — will have nothing to compare once the new contract ships. Replays still show it because a fixture's contract is frozen. Decide whether to keep asking purely as telemetry.
 - **`confidence` is no longer asked for**, but `findings.ts` still passes one through when a row carries it. That is deliberate (audit data, and the internal record exists to carry the row), not an oversight.
 
+## The first full arm on the derived verdict (2026-09-23, `2026-09-23_150604-e014b96`)
+
+Config byte-identical to `wp3-minimal-d2ab-probes-sonnet-dossier` below `models:` — `overlays/verdict-derived` in the evals workspace. Nothing in the config is the variable; the change is entirely core.
+
+| arm | matched /25 | precision | recall | $/case |
+|---|---|---|---|---|
+| `191307` | 12 | 0.48 | 0.48 | 3.69 |
+| `201815` | 8 | 0.38 | 0.32 | 4.41 |
+| **`150604` (this)** | **11** | 0.38 | 0.44 | **3.49** |
+
+Inside the band on every axis, cheapest of the three, 8/8 behavioural. **One arm against two orders nothing** — it can only fall inside or outside that band, and it fell inside.
+
+### The probe result is the finding, and it kills the budget plan
+
+| arm | probes | reproduced | refuted | **unprobed** |
+|---|---|---|---|---|
+| `191307` | 45 | 18 | 24 | 3 (7%) |
+| `201815` | 95 | 39 | 50 | 6 (6%) |
+| **`150604`** | 87 | **4** | **18** | **65 (75%)** |
+
+The reassurance-verification clause did exactly what it was built to do — it routed clean discharges to the oracle — and **the oracle cannot settle three quarters of them.** `unprobed` ("nothing you could run would decide this") went from ~6% to 75% of verdicts.
+
+**So hypothesis 7's premise was wrong.** The question is not *which* reassurances to probe but that reassurances are largely unprobeable AS A CLASS: a clean discharge asserts "I read the line and it is fine", and there is often no differential experiment that contradicts that. The 50%-refutation figure mined from the archive (165 of 332) came from probes on rows the model itself FLAGGED — suspicions — and **it does not transfer to reassurances.** That was foreseeable and was not flagged hard enough before the run.
+
+Yield: 4 reproduced + 18 refuted against 65 dead ends, versus ~90% actionable in both comparators. Not free either — 87 attempts is comparable to `201815`'s 95, which ran at $4.41/case.
+
+**Two candidate responses, neither measured:**
+
+- **Narrow the trigger** so it fires only where a probe could bite — require `cannot_distinguish != "nothing"` even on a changed hunk, that being the field naming a testable ambiguity. Likely collapses probe count toward the old rate while keeping the contradictable rows.
+- **Keep it, change the consumer** — treat an `unprobed` reassurance as a signal in its own right (a claim nothing can verify) rather than spending an oracle turn to discover that.
+
+Either way the next arm should test one of them, and a second arm on THIS config is still owed before 11/25 or the 75% is treated as stable.
+
 ## Hypotheses for further tightening — untested, in rough order of expected value
 
 Each is a candidate **deterministic normalisation over the evidence**, which is the lever this thread discovered: once the verdict is derived, a bad verdict is fixed by reading what the pass wrote, not by another paragraph. All are testable for free against the persisted rows under `eval-results/micro-survey/rows/` before any spend.
