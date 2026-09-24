@@ -56,7 +56,7 @@ The setup wizard walks you through:
 4. **Model provider + API key** — pick from any of pi-ai's 15+ supported
    providers (Anthropic, OpenAI, Google Gemini, Mistral, Groq, Cerebras, xAI,
    Hugging Face, Moonshot, NVIDIA, Fireworks, Together, DeepSeek, Z.AI,
-   Kimi for Coding, MiniMax, OpenRouter), then enter the model id and the
+   Kimi for Coding, MiniMax, OpenCode Zen, OpenRouter), then enter the model id and the
    matching API key. See `packages/shared/src/providers.ts` for the full registry.
 5. **Webhook secret** — auto-generated if you don't have one
 6. **Slack** — optional bot token and app token for Slack integration
@@ -126,6 +126,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 # GROQ_API_KEY=gsk_...      GEMINI_API_KEY=AIza...   HF_TOKEN=hf_...
 # XAI_API_KEY=...
 # ZAI_API_KEY=...        MISTRAL_API_KEY=...    FIREWORKS_API_KEY=...
+# OPENCODE_API_KEY=...   (OpenCode Zen: Claude, GPT, Kimi, GLM, DeepSeek, … at cost)
 
 # Sandbox backend (default: gondolin; alternatives: docker, none)
 # LASTLIGHT_SANDBOX=gondolin
@@ -220,7 +221,7 @@ same set.
 
 ### Authentication
 
-pi-ai picks credentials from the provider env vars the harness forwards (the full listed set lives in `packages/shared/src/providers.ts` — Anthropic / OpenAI / OpenRouter / Google / Mistral / Groq / Cerebras / xAI / HuggingFace / Moonshot / NVIDIA / Fireworks / Together / DeepSeek / Z.AI / Kimi / MiniMax). The harness forwards them into each sandbox container (or VM) so workflow runs can reach the API.
+pi-ai picks credentials from the provider env vars the harness forwards (the full listed set lives in `packages/shared/src/providers.ts` — Anthropic / OpenAI / OpenRouter / Google / Mistral / Groq / Cerebras / xAI / HuggingFace / Moonshot / NVIDIA / Fireworks / Together / DeepSeek / Z.AI / Kimi / MiniMax / OpenCode Zen). The harness forwards them into each sandbox container (or VM) so workflow runs can reach the API.
 
 #### Subscription logins (OAuth) — Codex, Claude Pro, Copilot
 
@@ -487,6 +488,7 @@ Legacy `OPENCODE_*` names are still read as fallbacks for the corresponding `LAS
 | `ZAI_API_KEY` | One of | API key for `zai/…` (GLM) |
 | `KIMI_API_KEY` | One of | API key for `kimi-coding/…` |
 | `MINIMAX_API_KEY` | One of | API key for `minimax/…` |
+| `OPENCODE_API_KEY` | One of | API key for `opencode/…` (OpenCode Zen gateway — one key for Claude, GPT, Gemini, Kimi, GLM, DeepSeek, Qwen, MiniMax) |
 | _… or any other `provider/model` whose key is forwarded by `packages/shared/src/providers.ts`_ | | The wizard surfaces the registered set; see `packages/shared/src/providers.ts` for the full list. |
 | `LASTLIGHT_OVERLAY_DIR` | No | Trusted deployment overlay directory (the docker-compose stack mounts `instance/` here as `/app/instance`). Startup loads `config/default.yaml`, optional `$LASTLIGHT_OVERLAY_DIR/config.yaml`, then env overrides; overlay assets under `workflows/`, `workflows/prompts/`, `skills/`, and `agent-context/` replace built-ins. Secrets live in `$LASTLIGHT_OVERLAY_DIR/secrets/`. Restart required after changes. See [Deployment overlay](#deployment-overlay). |
 | `LASTLIGHT_MODEL` | No | Default model (default: `anthropic/claude-sonnet-4-6`). Legacy: `OPENCODE_MODEL`. |

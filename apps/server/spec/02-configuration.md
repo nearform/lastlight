@@ -623,14 +623,16 @@ Without it, the Slack connector never registers.
 | `ANTHROPIC_API_KEY` | provider auth | — |
 | `OPENAI_API_KEY` | provider auth | — |
 | `OPENROUTER_API_KEY` | provider auth | — |
+| `OPENCODE_API_KEY` | provider auth for `opencode/…` (OpenCode Zen gateway) | — |
 | `<PREFIX>_BASE_URL` | endpoint override for one provider (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `KIMI_CODING_BASE_URL`, …) | the registry default |
 | `LASTLIGHT_PROVIDERS` | endpoint overrides as JSON — the only env route that can declare a provider the registry has never heard of | `{}` |
 | `LASTLIGHT_ALLOW_INSECURE_PROVIDER_URLS` | permit a plaintext `http://` endpoint on a non-loopback host | off |
 
-`OPENCODE_*` names are kept as legacy aliases — the runtime is now
-agentic-pi / pi-ai, but production deployments may still set the old
-names and we don't want to break them. New deployments should prefer
-`LASTLIGHT_*`.
+The four `OPENCODE_MODEL(S)` / `OPENCODE_VARIANT(S)` names are kept as legacy
+aliases — the runtime is now agentic-pi / pi-ai, but production deployments may
+still set the old names and we don't want to break them. New deployments should
+prefer `LASTLIGHT_*`. `OPENCODE_API_KEY` is unrelated: it is the key for the
+OpenCode Zen provider, not an alias.
 
 JSON parse failures on `*_MODELS` / `*_VARIANTS` log a warning and use
 `{}` — they do not crash boot.

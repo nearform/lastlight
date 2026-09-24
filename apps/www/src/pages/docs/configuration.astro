@@ -172,6 +172,12 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 				<td>OpenRouter API key (<code>sk-or-…</code>). Required if any active model is <code>openrouter/&lt;vendor&gt;/&lt;model&gt;</code>. One key gives you Claude, GPT, Gemini, Llama, Mistral, DeepSeek, etc. through a single endpoint; OpenRouter takes a small per-token markup over going direct. Sign up at <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>.</td>
 			</tr>
 			<tr>
+				<td><code>OPENCODE_API_KEY</code></td>
+				<td>If using OpenCode Zen</td>
+				<td>—</td>
+				<td>OpenCode Zen API key. Required if any active model is <code>opencode/&lt;model&gt;</code> (e.g. <code>opencode/kimi-k2.6</code>, <code>opencode/glm-5.3</code>, <code>opencode/claude-sonnet-5</code>). One prepaid key for Claude, GPT, Gemini, Kimi, GLM, DeepSeek, Qwen and MiniMax, sold at the providers' list price with no per-token markup (card top-ups carry a processing fee). Its free models may use your prompts for training. See <a href="https://opencode.ai/docs/zen/" target="_blank" rel="noopener">opencode.ai/docs/zen</a>.</td>
+			</tr>
+			<tr>
 				<td><code>LASTLIGHT_MODEL</code></td>
 				<td>No</td>
 				<td><code>anthropic/claude-sonnet-4-6</code></td>

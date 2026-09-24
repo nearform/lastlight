@@ -52,6 +52,7 @@ export function hasProviderKey(): boolean {
       process.env.ANTHROPIC_API_KEY ||
       process.env.OPENROUTER_API_KEY ||
       process.env.FIREWORKS_API_KEY ||
+      process.env.OPENCODE_API_KEY ||
       process.env.DEEPSEEK_API_KEY ||
       process.env.KIMI_API_KEY ||
       process.env.MOONSHOT_API_KEY,
@@ -140,6 +141,7 @@ export function familyForId(id: string): string {
     openai: "OPENAI_API_KEY",
     anthropic: "ANTHROPIC_API_KEY",
     fireworks: "FIREWORKS_API_KEY",
+    opencode: "OPENCODE_API_KEY",
     openrouter: "OPENROUTER_API_KEY",
     deepseek: "DEEPSEEK_API_KEY",
     "kimi-coding": "KIMI_API_KEY",
