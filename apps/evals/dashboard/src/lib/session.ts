@@ -75,7 +75,7 @@ export interface SessionLog {
 export function branchVocabulary(phases: { phase: string }[] | undefined): Map<string, string> {
   const vocab = new Map<string, string>();
   for (const p of phases ?? []) {
-    const m = /^(.+)_branch_(.+?)(?:_retry|_check)?$/.exec(p.phase);
+    const m = /^(.+)_branch_(.+?)(?:_retry|_check|_regate)?$/.exec(p.phase);
     if (m) vocab.set(m[2], p.phase);
   }
   return vocab;
@@ -92,10 +92,10 @@ export function branchVocabulary(phases: { phase: string }[] | undefined): Map<s
  * `falsify_iter_2`, is exactly how the probe loop shows up and a reader looking
  * at a probe loop needs to see it.
  *
- * `_retry` / `_check` are stripped from a branch family for parity with
+ * `_retry` / `_check` / `_regate` are stripped from a branch family for parity with
  * {@link branchVocabulary}, which strips them when building the vocabulary. */
 export function prettyPhase(phase: string): string {
-  const branch = /^(?:.+)_branch_(.+?)(?:_retry|_check)?$/.exec(phase);
+  const branch = /^(?:.+)_branch_(.+?)(?:_retry|_check|_regate)?$/.exec(phase);
   if (branch) return branch[1];
   return phase.replace(/_iter_\d+$/, "");
 }

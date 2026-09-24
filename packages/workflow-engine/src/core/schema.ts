@@ -145,8 +145,8 @@ const FanoutBranchSchema = z
         /^[A-Za-z0-9][A-Za-z0-9-]*$/,
         "a fanout branch name must be alphanumeric with hyphens (no underscores — see PhaseRef)",
       )
-      .refine((n) => !/-(retry|check)$/.test(n), {
-        message: "a fanout branch name may not end in `-retry` or `-check` (reserved ledger suffixes)",
+      .refine((n) => !/-(retry|check|regate)$/.test(n), {
+        message: "a fanout branch name may not end in `-retry`, `-check` or `-regate` (reserved ledger suffixes)",
       }),
     /** Prompt template for this branch. Falls back to the phase's own `prompt`. */
     prompt: z.string().optional(),
@@ -501,6 +501,28 @@ const PhaseDefinitionSchema = z
         then: z.enum(["fail", "complete"]).default("complete"),
       })
       .optional(),
+    /**
+     * What a branch whose `until_bash` gate did NOT close gets: `retries: 1`
+     * re-runs that branch once, in the same workspace, with the gate's own
+     * output appended to its prompt as the instruction ("O-003…O-011 are named
+     * by no row; rows 1–4 carry no evidence"), then runs the gate again.
+     *
+     * Absent ⇒ `{ retries: 0 }`: the gate stays OBSERVATIONAL, recording
+     * `condition_met` / `condition_not_met` and changing nothing — the
+     * behaviour every fan-out had before this key. Capped at 1 because the
+     * point is one directed correction, not a loop: a branch that cannot close
+     * its gate in two attempts is reporting something the next phase has to
+     * read, and paying for a third attempt hides it.
+     *
+     * Only a gate that RAN and said no triggers it. A gate that timed out or
+     * could not run, a branch that hard-failed, and a branch skipped on resume
+     * are never re-run.
+     */
+    on_branch_gate_failure: z
+      .object({
+        retries: z.number().int().min(0).max(1).default(0),
+      })
+      .optional(),
     /** Rules applied to agent output */
     on_output: PhaseOnOutputSchema.optional(),
     /** Actions taken on successful completion */
@@ -583,7 +605,7 @@ const PhaseDefinitionSchema = z
         }
       }
     } else {
-      for (const key of ["branches", "max_concurrent", "on_branch_soft_failure"] as const) {
+      for (const key of ["branches", "max_concurrent", "on_branch_soft_failure", "on_branch_gate_failure"] as const) {
         if (p[key] !== undefined) {
           ctx.addIssue({ code: z.ZodIssueCode.custom, message: `\`${key}:\` is only valid on type \`fanout\`` });
         }

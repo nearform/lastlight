@@ -48,7 +48,7 @@ export function modelTemplateForRow(phases: readonly PhaseModelSource[], label: 
   if (declared) return { template: declared.model, fallbackPhase: undefined };
 
   const ref = PhaseRef.parse(label);
-  if (ref.kind === "branch" || ref.kind === "branchRetry" || ref.kind === "branchCheck") {
+  if (ref.kind === "branch" || ref.kind === "branchRetry" || ref.kind === "branchCheck" || ref.kind === "branchRegate") {
     const parent = phases.find((p) => p.name === ref.base);
     const branch = parent?.branches?.find((b) => b.name === ref.branch);
     // `branch.model ?? phase.model` — the branch may declare its own override

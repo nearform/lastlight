@@ -741,7 +741,7 @@ describe("modelTemplateForRow — ledger label → YAML model template (phase-mo
   });
 
   it("maps branch rows to the parent's template with the parent as fallback task", () => {
-    for (const label of ["survey_branch_contract", "survey_branch_contract_retry", "survey_branch_contract_check"]) {
+    for (const label of ["survey_branch_contract", "survey_branch_contract_retry", "survey_branch_contract_check", "survey_branch_contract_regate"]) {
       expect(modelTemplateForRow(phases, label)).toEqual({
         template: "{{models.review-survey}}",
         fallbackPhase: "survey",

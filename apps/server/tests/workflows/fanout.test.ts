@@ -69,6 +69,8 @@ class CountingSandbox extends FakeSandbox {
       /** Prompt substring → ms to stall, so overlap is observable. */
       delayOn?: Record<string, number>;
       commandExit?: number;
+      /** Command substring → results handed out in order (the last one repeats). */
+      commandScript?: Record<string, { exitCode: number; stdout?: string; timedOut?: boolean }[]>;
     } = {},
   ) {
     // A real terminal RunResult: without one the accumulator sees no events,
@@ -117,6 +119,11 @@ class CountingSandbox extends FakeSandbox {
 
   override async runCommand(taskId: string, command: string, opts: never) {
     this.commands.push(command);
+    const script = Object.entries(this.opts.commandScript ?? {}).find(([k]) => command.includes(k))?.[1];
+    if (script) {
+      const next = script.length > 1 ? script.shift()! : script[0];
+      return { stdout: "", stderr: "", timedOut: false, ...next };
+    }
     const res = await super.runCommand(taskId, command, opts);
     return this.opts.commandExit === undefined ? res : { ...res, exitCode: this.opts.commandExit };
   }
@@ -398,6 +405,81 @@ describe("fanout — the ledger", () => {
 
     expect(second.agentPrompts).toEqual([]);
     expect(outcome.status).toBe("succeeded");
+  });
+});
+
+describe("fanout — `on_branch_gate_failure` re-runs a branch whose gate said no", () => {
+  const OUTSTANDING = "discharge[contract]: 2/5 obligations discharged\n  ✗ O-003 [undischarged]: no row names it";
+  const withRegate = () => fanoutPhase({ on_branch_gate_failure: { retries: 1 } });
+
+  it("changes nothing without the key — the gate stays observational", async () => {
+    const sandbox = new CountingSandbox({ commandExit: 3 });
+    await runFanout(fanoutPhase(), sandbox);
+    expect(sandbox.agentPrompts).toHaveLength(3);
+    expect(sandbox.commands).toEqual(["test -s a.jsonl", "test -s b.jsonl"]);
+  });
+
+  it("re-runs ONLY the failing branch, with the gate's output, then gates it again", async () => {
+    const store = new InMemoryStateStore(RUN_ID);
+    const reporter = new WindowReporter();
+    const sandbox = new CountingSandbox({
+      commandScript: { "a.jsonl": [{ exitCode: 3, stdout: OUTSTANDING }, { exitCode: 0 }] },
+    });
+    const { outcome } = await runFanout(withRegate(), sandbox, "none", store, reporter);
+
+    expect(sandbox.agentPrompts).toHaveLength(4);
+    const rerun = sandbox.agentPrompts[3];
+    // The first attempt's prompt is the head — same branch, same cached prefix —
+    // and the gate's own words are the instruction.
+    expect(rerun.startsWith(sandbox.agentPrompts.find((p) => p.includes("prompts/a.md") && p !== rerun)!.trimEnd())).toBe(true);
+    expect(rerun).toContain(OUTSTANDING);
+    expect(rerun).toContain("test -s a.jsonl");
+    expect(sandbox.commands).toEqual(["test -s a.jsonl", "test -s b.jsonl", "test -s a.jsonl"]);
+
+    const key = `pr-review:${PhaseRef.branchRegate("survey", "contract").format()}`;
+    expect(await store.executions.shouldRunPhase(key, "acme/widgets#7", RUN_ID)).toBe("done");
+    expect(reporter.opened).toContain("survey_branch_contract_regate");
+    expect([...reporter.closed].sort()).toEqual([...reporter.opened].sort());
+    expect(outcome.status).toBe("succeeded");
+  });
+
+  it("re-runs once at most, however the second gate comes out", async () => {
+    const sandbox = new CountingSandbox({ commandScript: { "a.jsonl": [{ exitCode: 3, stdout: OUTSTANDING }] } });
+    await runFanout(withRegate(), sandbox);
+    expect(sandbox.agentPrompts).toHaveLength(4);
+    expect(sandbox.commands.filter((c) => c === "test -s a.jsonl")).toHaveLength(2);
+  });
+
+  it("does not re-run on a gate that timed out — it said nothing about the work", async () => {
+    const sandbox = new CountingSandbox({ commandScript: { "a.jsonl": [{ exitCode: 124, timedOut: true }] } });
+    await runFanout(withRegate(), sandbox);
+    expect(sandbox.agentPrompts).toHaveLength(3);
+  });
+
+  it("does not re-run a branch that HARD-failed", async () => {
+    const sandbox = new CountingSandbox({ failOn: { "prompts/a.md": "boom" }, commandExit: 3 });
+    await runFanout(withRegate(), sandbox);
+    // Only `enforcement` (gate failed, branch fine) is re-run; `security` has no gate.
+    expect(sandbox.agentPrompts).toHaveLength(4);
+    expect(sandbox.agentPrompts[3]).toContain("prompts/b.md");
+  });
+
+  it("keeps the first attempt's result when the re-run itself fails", async () => {
+    const sandbox = new CountingSandbox({
+      failOn: { "second and final attempt": "boom" },
+      commandScript: { "a.jsonl": [{ exitCode: 3, stdout: OUTSTANDING }] },
+    });
+    const { outcome } = await runFanout(withRegate(), sandbox);
+    expect(outcome.status).toBe("succeeded");
+    expect(outcome.results.find((r) => r.phase === "survey_branch_contract")?.success).toBe(true);
+  });
+
+  it("refuses more than one re-run, and the key off a fanout", () => {
+    const parse = (phase: Record<string, unknown>) => AgentWorkflowSchema.safeParse({ name: "wf", phases: [phase] });
+    const base = { name: "survey", type: "fanout", skills: ["pr-review"], branches: [{ name: "a", prompt: "prompts/a.md" }] };
+    expect(parse({ ...base, on_branch_gate_failure: { retries: 1 } }).success).toBe(true);
+    expect(parse({ ...base, on_branch_gate_failure: { retries: 2 } }).success).toBe(false);
+    expect(parse({ name: "x", prompt: "p.md", on_branch_gate_failure: { retries: 1 } }).success).toBe(false);
   });
 });
 

@@ -49,6 +49,7 @@ describe("PhaseRef — the fan-out branch labels", () => {
       PhaseRef.branch("pr_review_survey", "contract"),
       PhaseRef.branchRetry("pr_review_survey", "contract"),
       PhaseRef.branchCheck("pr_review_survey", "contract"),
+      PhaseRef.branchRegate("pr_review_survey", "contract"),
     ]) {
       const back = PhaseRef.parse(ref.format());
       expect(back.base, ref.format()).toBe("pr_review_survey");
@@ -61,6 +62,7 @@ describe("PhaseRef — the fan-out branch labels", () => {
     expect(PhaseRef.parse("survey_branch_spec")).toMatchObject({ kind: "branch", branch: "spec" });
     expect(PhaseRef.parse("survey_branch_spec_retry")).toMatchObject({ kind: "branchRetry", branch: "spec" });
     expect(PhaseRef.parse("survey_branch_spec_check")).toMatchObject({ kind: "branchCheck", branch: "spec" });
+    expect(PhaseRef.parse("survey_branch_spec_regate")).toMatchObject({ kind: "branchRegate", branch: "spec" });
   });
 
   it("leaves the loop forms alone — the two namespaces do not collide", () => {
@@ -72,7 +74,7 @@ describe("PhaseRef — the fan-out branch labels", () => {
     // This is what the dashboard's `WorkflowPipeline.tsx` grouping relies on:
     // the parent phase name is a prefix of every label it owns, so a fan-out's
     // branches nest under `survey` with no dashboard change at all.
-    for (const label of ["survey_branch_spec", "survey_branch_spec_retry", "survey_branch_spec_check"]) {
+    for (const label of ["survey_branch_spec", "survey_branch_spec_retry", "survey_branch_spec_check", "survey_branch_spec_regate"]) {
       expect(label.startsWith("survey")).toBe(true);
     }
   });
