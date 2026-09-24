@@ -367,6 +367,19 @@ The continuation — process, tooling, backlog and run order for the full arms �
 
 Read with the house rules below: 8 repeats rank a fire rate, not a gold rate, and two fixtures are two fixtures. What it does support: on **open discovery** DeepSeek V4.1 Flash is the only model that finds gold most of the time; on **seeded checks** the cheap models (GLM, DeepSeek V4 Flash) match or beat Haiku at a tenth of the cost; and Haiku on today's prompts is not the recall winner it was measured as on the Martian corpus.
 
+### The full arms that followed (2026-09-24)
+
+The screens' two survey picks, run through the whole pipeline beside the Anthropic baseline — runs `2026-09-24_054639-bc10db3` (`verdict-derived`, `oc-centre`, `oc-survey-glmf`) and `2026-09-24_105043-bc10db3` (`oc-survey-glmf-noprobes`), 8 cases / 25 gold each:
+
+| arm | survey | matched | posted | P | R | F1 | $/case | min/case |
+|---|---|---|---|---|---|---|---|---|
+| `verdict-derived` (Anthropic) | Haiku 4.5 | 9/25 | 25 | 0.36 | 0.36 | 0.36 | $3.71 | 25.4 |
+| `oc-centre` | DeepSeek V4.1 Flash | **20/25** | 63 | 0.32 | **0.80** | 0.45 | $2.33 | 45.9 |
+| `oc-survey-glmf` | GLM 5.3 Flash | 18/25 | 47 | **0.38** | 0.72 | **0.50** | $1.96 | 29.7 |
+| `oc-survey-glmf-noprobes` | GLM 5.3 Flash, no falsify | 16/25 | 47 | 0.34 | 0.64 | 0.44 | **$1.95** | **23.7** |
+
+The screens held up at full scale: GLM 5.3 Flash's seeded-check strength carried it to the best F1, DeepSeek V4.1 Flash's discovery edge showed up as 2 more gold at 16 more posts, and both beat Haiku by far more than the screens implied. Precision did not move (0.32–0.38 everywhere) — the recall came with volume. Conclusions, caveats and next steps: [`open-model-evals.md` → "The finding"](open-model-evals.md#the-finding-2026-09-24--open-weights-beat-the-anthropic-stack-on-recall-at-half-the-cost).
+
 ## House rules this file encodes
 
 - Never report one arm, or one repeat, as a result.

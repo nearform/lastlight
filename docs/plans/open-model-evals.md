@@ -1,6 +1,29 @@
 # Open-model evals — where we are, how we got here, and how to continue
 
-> **Status: 2026-09-24.** Micro-survey screens of four open models (via OpenCode Zen) against Haiku 4.5 are done on two fixtures. Five full-pipeline arms are written but **not yet run**. This file is the handoff: the process, the tooling, what was found, what is still broken, and the order to run the broader evals in. The measurements themselves are recorded, with run ids, in [`micro-survey-evals.md` → "Open-model screens"](micro-survey-evals.md#open-model-screens-and-the-quality-view-they-forced-2026-09-24).
+> **Status: 2026-09-24.** Micro-survey screens of four open models (via OpenCode Zen) against Haiku 4.5 are done on two fixtures, and the first three full-pipeline open arms have run — **see "The finding" below: an all-open stack roughly doubles recall at half the cost.** This file is the handoff: the process, the tooling, what was found, what is still broken, and the order to run the broader evals in. The measurements themselves are recorded, with run ids, in [`micro-survey-evals.md` → "Open-model screens"](micro-survey-evals.md#open-model-screens-and-the-quality-view-they-forced-2026-09-24).
+
+## The finding (2026-09-24) — open weights beat the Anthropic stack on recall, at half the cost
+
+Same build (`bc10db3`), same 8 cases (25 gold), same judge (Sonnet 4.6). Runs `2026-09-24_054639-bc10db3` (first three arms) and `2026-09-24_105043-bc10db3` (no-probes). The open arms share Kimi K3 (review), GLM 5.3 (adjudicate), GLM 5.3 Flash (triage); falsify on DeepSeek V4.1 Flash where probes run.
+
+| arm | survey | matched | posted | P | R | F1 | $/case | min/case |
+|---|---|---|---|---|---|---|---|---|
+| `verdict-derived` (Anthropic) | Haiku 4.5 | 9/25 | 25 | 0.36 | 0.36 | 0.36 | $3.71 | 25.4 |
+| `oc-centre` | DeepSeek V4.1 Flash | **20/25** | 63 | 0.32 | **0.80** | 0.45 | $2.33 | 45.9 |
+| `oc-survey-glmf` | GLM 5.3 Flash | 18/25 | 47 | **0.38** | 0.72 | **0.50** | $1.96 | 29.7 |
+| `oc-survey-glmf-noprobes` | GLM 5.3 Flash, no falsify | 16/25 | 47 | 0.34 | 0.64 | 0.44 | **$1.95** | **23.7** |
+
+1. **The open stacks find about twice the gold at about half the cost** — 16–20/25 matched against 9/25, at $1.95–2.33 a case against $3.71. Well outside the band identical Anthropic arms have shown (8–12/25).
+2. **They get there by posting more, not by being more accurate.** 47–63 posts against 25; precision flat at 0.32–0.38. On `1641` (no gold at all) every open arm posted 3–4 comments, all false positives, where the baseline posted none.
+3. **GLM 5.3 Flash is the survey model.** Against DeepSeek V4.1 Flash it gives up 2 gold (18 vs 20) for 16 fewer posts and 16 fewer minutes per case — best F1, and ~1.5 min per survey branch against ~10.
+4. **Dropping probes saves 6 min/case and nothing else.** Cost unchanged ($1.96 → $1.95), matched 18 → 16, with per-case swings in both directions (`1587-r2` +1, `1680-r2` +1, `1667` −2, `1680-r1` −1, `1587-r3` −1) — noise. The oracle buys nothing measurable here. (The probed GLM arm still ran two falsify rounds; `probeRounds: 1` is now set on every active overlay.)
+5. **Nothing was masked.** Triage skipped no case (every case surveyed) and the gate re-run fired **zero** times in 32 case-runs.
+
+**What it does not show.** *Which role* drives the recall — the open arms move every role at once, so the extra posts could be Kimi's review, GLM 5.3's adjudication or the survey. *That the ranking is stable* — one sample per arm, and identical arms have swung 12 vs 8; the 9 → 16–20 gap is large enough to trust, the 20/18/16 order among open arms is not. *What the extra comments cost a reader* — about two thirds of posts are false positives in every arm, but the open arms post twice as many.
+
+**Working candidate: `oc-survey-glmf-noprobes`** — F1 0.44 vs 0.36, half the cost, the shortest wall clock. Next: repeats of it beside the baseline (bands, not points); a role-isolation arm (Sonnet review over an open survey) to find where the recall comes from; then precision — false positives on clean PRs are now the main cost.
+
+**Why it was slow.** `oc-centre` averaged 46 min/case: DeepSeek survey branches ran ~13 min each in the full arm against 4.5–6 min in screens, because the run held up to 45 concurrent Zen sessions (3 arms × 3 cases × 5 branches) and Zen slows ~2× per turn under load. Run one open arm at a time, or at lower `--concurrency`, when wall clock matters.
 
 ## The question
 
@@ -57,7 +80,7 @@ What it supports, within the house rules (8 repeats, two fixtures):
 - **MiniMax** finds gold but is the priciest open model and the least compliant with the evidence contract.
 - **Zen is fast per request** (TTFT 0.4–3 s, 80–230 tok/s) but slowed ~2× per turn when 8 screens ran at once. Latency differences are turns × thinking tokens: DeepSeek/MiniMax take 3–6× GLM's tool calls, and `low` DeepSeek still emits 600–800 tokens for a one-sentence answer.
 
-## Fixed on `feat/pi-0.87-opencode-zen` (uncommitted, prod-facing — needs a release)
+## Fixed on `feat/pi-0.87-opencode-zen` (committed, prod-facing — needs a release)
 
 - **Prompts + shared skill**: `NOT MEASURED` / "no obligations could be built" → record it, then work the diff (not "record and stop"). `tests` keeps *stop* on purpose.
 - **Discharge gate** (both contracts, incl. the shipped `minimal`): fails a zero-obligation family with no real claim, a seeded check no row names, and a claim row with no `evidence` record.
@@ -78,7 +101,7 @@ What it supports, within the house rules (8 repeats, two fixtures):
 
 **Re-screen after every shared prompt/skill/gate change**, same two fixtures, and add a third informative pair if one can be found (candidates: `1587-r1` · `contract`, `1680-r2`). Delete stale reports before re-running.
 
-**Revisit the survey workhorse in the arms** (`overlays/oc-*`): the screens say DeepSeek V4.1 Flash for open discovery, GLM 5.3 Flash for seeded checks. `oc-centre` (V4.1) and `oc-survey-glmf` (GLM) are exactly that pair, so they are the first two to run.
+**Survey workhorse — settled for now: GLM 5.3 Flash** (see "The finding"). `oc-centre` (V4.1) and `oc-survey-glmf` (GLM) have both run; GLM wins on F1, speed and cost.
 
 **Then the config arms**, from `~/work/nearform-evals`, always with the same-binary baseline in the same command:
 
@@ -92,7 +115,7 @@ lastlight-evals run pr-review --mode config \
 
 Use the source harness (`npx tsx <lastlight>/apps/evals/src/run.ts …`) rather than a globally installed `lastlight-evals` — the global one lags the branch. Read triage depths first on every open arm (GLM 5.3 Flash does triage; a wrong `light` skips the pipeline), then internal recall per gold, then posted. Copy the preserved workspaces into `~/lastlight-micro-fixtures/<arm>/` before macOS purges them — that is also what makes the next micro-survey possible.
 
-**Then the one-role moves** — `oc-adj-kimi`, `oc-adj-minimax`, `oc-floor` — only if `oc-centre` is viable. See `nearform-evals/overlays/README-open-models.md` for the arm table and the per-model evidence behind each pick.
+**Then the one-role moves** — `oc-adj-kimi`, `oc-adj-minimax`, `oc-floor` — now that the open stack is viable; rebase them on `oc-survey-glmf-noprobes` rather than `oc-centre`. Also unscreened: full GLM 5.3 vs GLM 5.3 Flash in the survey role (~$2–4 micro-survey screen). See `nearform-evals/overlays/README-open-models.md` for the arm table and the per-model evidence behind each pick.
 
 ## Gotchas collected on the way
 
