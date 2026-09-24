@@ -100,6 +100,13 @@ phases:
       }
 
       ARGS="--repo . --out $OUT"
+      # The INSTALL decision, and the only one whose default direction is
+      # inverted: anything that is not the literal "true" adds `--no-install`,
+      # so `probes: static` — and an absent value — prepares the tree without
+      # ever running a package manager. `env.json` then says
+      # `install: "skipped"` with `installed` still read off the filesystem,
+      # which is the one field `falsify` branches on.
+      [ "{{probeInstall}}" != "true" ] && ARGS="$ARGS --no-install"
       # Each switch arrives as the literal "true"/"false"; absent means off.
       [ "{{probeLifecycleScripts}}" = "true" ] && ARGS="$ARGS --lifecycle-scripts"
       [ "{{probeTypecheck}}" = "true" ] && ARGS="$ARGS --typecheck"
@@ -278,13 +285,26 @@ phases:
   - name: falsify
     label: Falsify · run the probe
     prompt: prompts/review-falsify.md
-    model: "{{models.review-survey}}"
+    # Its OWN key, falling through to `models.review-survey`. Hard-wiring the
+    # survey key meant the oracle's model could not be moved without moving all
+    # five survey branches with it — two variables, so "is a cheap model good
+    # enough at WRITING AND RUNNING a probe?" was not a runnable experiment.
+    # The `{{#if}}` pair is load-bearing, exactly as on `adjudicate` below: a
+    # bare unset `{{models.review-falsify}}` renders EMPTY, and an empty model
+    # falls back to the DEFAULT model rather than to `models.review-survey`.
+    model: "{{#if models.review-falsify}}{{models.review-falsify}}{{/if}}{{#if !models.review-falsify}}{{models.review-survey}}{{/if}}"
     skip_if:
       - "analysisEnabled != true"
       - "probesEnabled != true"
       - "scratch.reviewTriage.depth == 'light'"
     depends_on: [survey]
     trigger_rule: all_done
+    # A WHOLE-PHASE ceiling, across every round. `probeRounds` bounds how many
+    # times the loop may go round and not what it may spend, and this is the
+    # one phase in the pipeline that executes code — so it is the one that
+    # needs a wall-clock bound rather than a count. Like every other budget
+    # here it names a context key, never a literal (#385).
+    timeout_seconds: { from: falsifyTimeoutSeconds }
     generic_loop:
       on_soft_failure: { retries: 1, then: complete }
       max_iterations: { from: probeRounds, default: 2 }
@@ -314,6 +334,93 @@ phases:
     model: "{{models.review}}"
     variant: "{{variants.review}}"
 
+  # #399 idea 2. One TypeSafe `systemOne` call PER HYPOTHESIS (not per
+  # finding — hypotheses vastly outnumber findings, and per-hypothesis is the
+  # volume a System-1 primitive is for), asking only the category axis
+  # measured at AUC 0.897 (never correctness, measured dead at AUC 0.534).
+  # Writes `.lastlight/pr-review/jev.json`, which `dossier` below renders as
+  # an ADVISORY line per hypothesis — `adjudicate` still writes every
+  # disposition itself. Measured 2026-09-22: 260 hypotheses / 8 cases, 83.6%
+  # agreement with Sonnet's own adjudicate call on identical evidence,
+  # $0.0053 — weakest on the rarest, highest-stakes categories, which is why
+  # this annotates rather than decides.
+  #
+  # `dossier` depends on this PHASE (not just on the file it writes) so the
+  # DAG itself enforces the ordering the render call needs — `jev.json` must
+  # exist before `dossier --json`'s underlying render reads it.
+  #
+  # `|| true`: no `TYPESAFE_KEY`, a network error, a malformed answer — all of
+  # it degrades to "no annotation" inside the CLI command itself (see
+  # `jev-classify.ts`), and this phase must never fail the run on a third
+  # party's API health that `legacy`/`dossier` deployments never needed at all.
+  - name: jev-classify
+    label: System-1 per-hypothesis pre-read
+    type: bash
+    skip_if:
+      - "analysisEnabled != true"
+      - "jevClassifyEnabled != true"
+      - "scratch.reviewTriage.depth == 'light'"
+    depends_on: [review]
+    trigger_rule: all_done
+    timeout_seconds: { from: jevTimeoutSeconds }
+    command: |
+      set -u
+      FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+      "$FACTS" jev-classify --dir .lastlight/pr-review --repo . \
+        {{#if jevModel}}--model "{{jevModel}}"{{/if}} || true
+
+  # #399. Every record `adjudicate` needs, joined and quote-checked ONCE, by
+  # code, instead of thirty shell calls inside the phase.
+  #
+  # Measured on the 8-case probes arm: `adjudicate` made 137 bash calls across
+  # 8 adjudications — 35 turns and 30 bash on `1587-r2`, one `write`, about a
+  # third of case cost — `cat`-ing hypothesis files `readHypothesisSet` had
+  # parsed, transcripts `checkProbes` had located, the ledger twice, and dozens
+  # of `sed -n '<N>p'` re-reads to check quotes it was handed.
+  #
+  # It goes to STDOUT as well as to disk, and that is the delivery mechanism:
+  # `output_var` puts it in `{{phaseOutputs.dossier.output}}`, which
+  # `review-adjudicate.md` interpolates. The alternative — a path in the prompt
+  # — is the failure `context_file` exists to remove: of 120 non-spec survey
+  # branches, 27 first-turn reads of a prompt-named path resolved against the
+  # wrong root and hit ENOENT, and 23 never recovered. The on-disk copy is for
+  # the eval harness's artifact capture and for the one case the dossier
+  # deliberately does not inline in full, a truncated probe transcript.
+  #
+  # `|| true` and a fallback line for the same reason every deterministic phase
+  # here has one: a non-zero exit fails the phase, and this is an input, not a
+  # gate. An adjudication with no dossier is the shipped phase; an adjudication
+  # that never ran is a review that never posts.
+  - name: dossier
+    label: Adjudication dossier
+    type: bash
+    skip_if:
+      - "analysisEnabled != true"
+      - "dossierEnabled != true"
+      - "scratch.reviewTriage.depth == 'light'"
+    # `jev-classify` too, not just `review` — `all_done` already tolerates a
+    # skipped dependency (it is what `review` itself already relies on here;
+    # the stricter `none_failed_min_one_success` below is for `adjudicate`,
+    # which must not run if `review` genuinely FAILED). Declaring the
+    # dependency is what makes the DAG run `jev-classify` to completion (or
+    # skip) before this phase reads the file it writes.
+    depends_on: [review, jev-classify]
+    trigger_rule: all_done
+    output_var: dossier
+    timeout_seconds: { from: reconcileTimeoutSeconds }
+    command: |
+      set -u
+      FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+      "$FACTS" dossier --dir .lastlight/pr-review --repo . \
+        --out .lastlight/pr-review/dossier.md || true
+      if [ -s .lastlight/pr-review/dossier.md ]; then
+        cat .lastlight/pr-review/dossier.md
+      else
+        echo "DOSSIER NOT AVAILABLE — \`lastlight-facts dossier\` produced nothing."
+        echo "Read .lastlight/pr-review/ yourself: hypotheses/*.jsonl, probes/verdicts.jsonl,"
+        echo "probes/*.txt, findings.json, and \`lastlight-facts findings --ledger\`."
+      fi
+
   # The exit of the funnel, and the only phase that can move recall: it ranks,
   # re-tiers and demotes the hypotheses into the review. It DELETES only when a
   # probe transcript refutes a claim.
@@ -334,9 +441,25 @@ phases:
     skip_if:
       - "analysisEnabled != true"
       - "scratch.reviewTriage.depth == 'light'"
-    # `all_success` (the default) where `review` uses `all_done`: a failed
-    # review must NOT post.
-    depends_on: [review]
+    # `none_failed_min_one_success`, NOT `all_success`, and the difference is
+    # load-bearing in both directions:
+    #
+    #   - a FAILED review must still not post, and it does not: a failed dep
+    #     fails this rule exactly as it fails `all_success`;
+    #   - a SKIPPED `dossier` must not take this phase down with it, and under
+    #     `all_success` it WOULD. `evaluateTriggerRule` requires every dep to be
+    #     literally `succeeded`, and `skip_if` sets `skipped`
+    #     (`scheduler.ts` — "Uses the same non-failing skip mechanics"), so on
+    #     every deployment left on `review.analysis.adjudicate: legacy` the
+    #     dossier skips and `all_success` would silently skip the adjudicator
+    #     with it. The whole pipeline would go quiet with no phase failing.
+    #
+    # Declaring the dependency at all is what ORDERS the dossier before this
+    # phase. The sequential scheduler happens to run the earliest-declared ready
+    # node, so declaration order alone would work today — but a data dependency
+    # that survives only until someone reorders the file is not a dependency.
+    depends_on: [review, dossier]
+    trigger_rule: none_failed_min_one_success
     generic_loop:
       on_soft_failure: { retries: 1, then: complete }
       max_iterations: 2

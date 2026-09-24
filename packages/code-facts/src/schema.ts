@@ -716,6 +716,30 @@ export const ReviewFindingSchema = z.looseObject({
    */
   tier: z.enum(["inline", "body", "internal"]).optional(),
   /**
+   * #399's typed attributes — what a finding CLAIMS is wrong, what KIND of
+   * wrong it is, and what to change. Under
+   * `review.analysis.adjudicate: "dossier"` these are what the adjudicator
+   * writes and a pure `computeTier()` derives `tier` from them; under `legacy`
+   * they are absent and `tier` is the model's own verdict.
+   *
+   * The split exists because of what was measured on the two axes. Asking a
+   * model *"is this finding correct?"* is dead three times over — over 2,145
+   * labelled AACR comments, keep-all scores F1 **0.825** and Haiku 0.803, GLM
+   * 0.745 and Jev 0.789 all sit under it. The SAME probabilities separate Code
+   * Defect from Maintainability at **AUC 0.897**. So the question that gets
+   * asked is the category, never the correctness — and `confidence`, measured
+   * at AUROC 0.228 and already gone from the ranking, is not asked for at all.
+   *
+   * `claim` is what is WRONG, not what the code does: a finding that cannot
+   * state one is a verification report whatever its category says. `fix` is
+   * what to change; a claim with no available fix is an observation. Both
+   * being present is what separates an actionable finding from a note, and
+   * `computeTier` reads exactly that.
+   */
+  claim: z.string().nullish(),
+  category: z.enum(["defect", "correctness-risk", "maintainability", "nit", "verification"]).nullish(),
+  fix: z.string().nullish(),
+  /**
    * The hypothesis ids this finding discharges. **Optional on purpose**: a
    * finding with none is the shipped reviewer's own, which was never
    * hypothesis-derived, and requiring the field would delete the reviewer we

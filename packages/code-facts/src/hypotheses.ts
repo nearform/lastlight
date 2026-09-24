@@ -49,12 +49,39 @@
  * Canonical ids always beat aliases. A row declaring `contract-001` while
  * sitting third in `contract.jsonl` does not get to shadow the real
  * `contract-001`; the alias is dropped and both remain reachable.
+ *
+ * ── The same bug, one field along: `obligation` ─────────────────────────────
+ *
+ * `row.obligation` is the back-pointer from a claim to the question that
+ * provoked it, and it is **also written by the model and was also never
+ * checked**. Measured 2026-09-21 across 20 preserved runs: one case's repeats
+ * cite **44 distinct obligation ids against a seeded question set of 33**, and
+ * two repeats of `skillspro-1667` — handed a byte-identical 7-question seed —
+ * cite *disjoint* sets. Nothing noticed, because nothing looked.
+ *
+ * The deterministic stage is genuinely deterministic (verified: every repeat of
+ * every case produced an identical obligation list), so this is recoverable
+ * rather than inherent: pass the seeded ids to {@link readHypothesisSet} and
+ * every citation is resolved against them, with the misses reported by name in
+ * {@link HypothesisSet.unknownObligations}.
+ *
+ * Resolution is EXACT, then whitespace/case-normalised, and then it gives up.
+ * No fuzzy matching and no nearest-neighbour: inventing a plausible target is
+ * the failure being fixed, not the fix. An unresolvable citation reads as
+ * `null`, which is a different thing from "no citation" and is why
+ * {@link HypothesisRecord.declaredObligation} is kept alongside it.
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 
+import { type SurveyEvidence, type SurveyVerdict, deriveVerdict, hasEvidence } from "./survey-verdict.js";
+
 /** A hypothesis line, as far as the gates care. Everything else rides along. */
 export interface HypothesisRow {
+  /** The typed record a pass fills in so the verdict can be DERIVED — see
+   * `survey-verdict.ts`. Absent on rows written by a prompt that never asked
+   * for one, which is not a fault and is not scored as one. */
+  evidence?: unknown;
   id?: unknown;
   family?: unknown;
   obligation?: unknown;
@@ -76,7 +103,40 @@ export interface HypothesisRecord {
   ordinal: number;
   /** Whatever the model put in `id`, kept for the alias map and for reporting. */
   declaredId: string | null;
+  /** Whatever the model put in `obligation`, unresolved and unjudged. */
+  declaredObligation: string | null;
+  /**
+   * The seeded obligation this row cites, or `null`.
+   *
+   * `null` means one of three different things and the caller must not conflate
+   * them: the row cited nothing (`declaredObligation === null`), the row cited
+   * something that is not in the question set (it will be in
+   * {@link HypothesisSet.unknownObligations}), or nobody supplied a question
+   * set to check against ({@link HypothesisSet.obligationsChecked} is false).
+   */
+  obligation: string | null;
   row: HypothesisRow;
+  /**
+   * The verdict computed from {@link HypothesisRow.evidence}, and what the
+   * pass itself wrote.
+   *
+   * `null` when the row carries no evidence — then the pass's own values stand,
+   * exactly as before, so a prompt that predates this asks for nothing it
+   * cannot deliver.
+   *
+   * **Both halves are kept on purpose.** The derived verdict is the one every
+   * consumer should read; the declared one is how a disagreement stays
+   * visible, and a disagreement is evidence about the prompt rather than noise
+   * to be flattened. Overwriting in place would have destroyed the only signal
+   * that says the pass is not doing what it was asked.
+   */
+  verdict: {
+    derived: SurveyVerdict;
+    declaredSeverity: string | null;
+    declaredNeedsProbe: boolean | null;
+    /** Did the pass's own answer match what its evidence implies? */
+    agrees: { severity: boolean; needsProbe: boolean };
+  } | null;
 }
 
 export interface HypothesisSet {
@@ -94,6 +154,49 @@ export interface HypothesisSet {
   malformed: number;
   /** How many rows carried a usable `id` of their own — the compliance rate. */
   declared: number;
+  /**
+   * A cited `obligation` that is not in the seeded question set → the canonical
+   * hypothesis ids citing it. Empty when everything resolved.
+   *
+   * Always empty when {@link obligationsChecked} is false, which is why that
+   * flag exists: an unchecked run and a clean run must not read alike.
+   */
+  unknownObligations: Map<string, string[]>;
+  /** Whether a question set was supplied to resolve citations against. */
+  obligationsChecked: boolean;
+  /**
+   * Canonical ids of rows carrying NO evidence record.
+   *
+   * **Reported, never silently tolerated.** `severity` and `needsProbe` are
+   * derived from evidence; a row without it falls back to whatever the pass
+   * wrote, which is exactly the ungoverned guess the derivation exists to
+   * replace. Measured: a family whose prompt only POINTED at the record wrote
+   * none, fell back, and graded ten of ten rows `Critical` on a pull request
+   * with nothing wrong — while every surface reported success.
+   *
+   * So this is a first-class fact, like `malformed` and `unknownObligations`:
+   * a pass that ignored its contract must be visible as that, not as a clean
+   * run. Loud in the artifact, never fatal to the run.
+   */
+  missingEvidence: string[];
+}
+
+/** The verdict for a row, or `null` when it carried no evidence to derive from. */
+function verdictFor(row: HypothesisRow): HypothesisRecord["verdict"] {
+  const evidence = row.evidence as SurveyEvidence | undefined;
+  if (!hasEvidence(evidence)) return null;
+  const derived = deriveVerdict(evidence as SurveyEvidence);
+  const declaredSeverity = typeof row.severity === "string" ? row.severity : null;
+  const declaredNeedsProbe = typeof row.needsProbe === "boolean" ? row.needsProbe : null;
+  return {
+    derived,
+    declaredSeverity,
+    declaredNeedsProbe,
+    agrees: {
+      severity: (declaredSeverity ?? "").trim().toLowerCase() === derived.severity.toLowerCase(),
+      needsProbe: declaredNeedsProbe === derived.needsProbe,
+    },
+  };
 }
 
 function asString(value: unknown): string | null {
@@ -132,7 +235,19 @@ function readJsonlRows(path: string): { rows: HypothesisRow[]; malformed: number
  * lose one. The restatement costs a duplicate disposition; the alternative cost
  * a hypothesis.
  */
-export function readHypothesisSet(dir: string): HypothesisSet {
+export function readHypothesisSet(
+  dir: string,
+  /**
+   * The seeded obligation ids, off `obligations.json`. Omit and citations are
+   * carried through unresolved rather than being guessed at — see
+   * {@link HypothesisSet.obligationsChecked}.
+   */
+  knownObligations?: Iterable<string>,
+): HypothesisSet {
+  const known = knownObligations ? new Set(knownObligations) : null;
+  /** Normalised → canonical, for the one tolerance this resolver allows. */
+  const loose = new Map<string, string>();
+  if (known) for (const id of known) loose.set(normaliseObligation(id), id);
   const hypothesesDir = join(dir, "hypotheses");
   const files = existsSync(hypothesesDir)
     ? readdirSync(hypothesesDir)
@@ -154,9 +269,27 @@ export function readHypothesisSet(dir: string): HypothesisSet {
       const ordinal = index + 1;
       const declaredId = asString(row.id);
       if (declaredId) declared += 1;
-      records.push({ id: hypothesisId(family, ordinal), family, ordinal, declaredId, row });
+      const declaredObligation = asString(row.obligation);
+      const obligation =
+        known === null || declaredObligation === null
+          ? null
+          : known.has(declaredObligation)
+            ? declaredObligation
+            : (loose.get(normaliseObligation(declaredObligation)) ?? null);
+      records.push({
+        id: hypothesisId(family, ordinal),
+        family,
+        ordinal,
+        declaredId,
+        declaredObligation,
+        obligation,
+        row,
+        verdict: verdictFor(row),
+      });
     });
   }
+
+  const missingEvidence = records.filter((r) => r.verdict === null).map((r) => r.id);
 
   const byId = new Map(records.map((r) => [r.id, r]));
 
@@ -182,7 +315,38 @@ export function readHypothesisSet(dir: string): HypothesisSet {
     else ambiguous.set(declaredId, claimedBy);
   }
 
-  return { records, byId, aliases, ambiguous, families, malformed, declared };
+  // Citations that name nothing in the question set, by name — the same
+  // treatment `ambiguous` gives a colliding id, for the same reason: a
+  // back-pointer that resolves to nothing has to fail loudly or it will be
+  // trusted by whatever reads it next.
+  const unknownObligations = new Map<string, string[]>();
+  if (known !== null) {
+    for (const record of records) {
+      if (record.declaredObligation === null || record.obligation !== null) continue;
+      unknownObligations.set(record.declaredObligation, [
+        ...(unknownObligations.get(record.declaredObligation) ?? []),
+        record.id,
+      ]);
+    }
+  }
+
+  return {
+    records,
+    byId,
+    aliases,
+    ambiguous,
+    families,
+    malformed,
+    missingEvidence,
+    declared,
+    unknownObligations,
+    obligationsChecked: known !== null,
+  };
+}
+
+/** Case and whitespace only. Deliberately not a similarity measure. */
+function normaliseObligation(id: string): string {
+  return id.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
 export type HypothesisResolution =

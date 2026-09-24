@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildBodyOnlyReview,
   buildReview,
+  internalJargon,
   renderDemotedGrouped,
   tierFindings,
   unknownSeverity,
@@ -24,8 +25,6 @@ import {
 
 const BOUNDARY: AttentionBoundary = {
   maxInlineComments: 8,
-  thresholds: { contract: 0.35, security: 0.3, tests: 0.6 },
-  internalFloor: 0.15,
 };
 
 /** Every line 1..40 on the RIGHT of one file is commentable. */
@@ -112,7 +111,7 @@ describe("tierFindings — AC1b, nothing is lost past the budget", () => {
     expect(t.body.every((d) => d.reason === "overflow")).toBe(true);
   });
 
-  it("ranks by severity × confidence, so the budget is spent on the worst", () => {
+  it("ranks by severity, so the budget is spent on the worst", () => {
     const t = tierFindings(
       [
         f({ line: 1, severity: "Minor", title: "minor" }),
@@ -139,11 +138,11 @@ describe("tierFindings — AC1b, nothing is lost past the budget", () => {
 });
 
 describe("tierFindings — the three demotion causes stay distinguishable", () => {
-  it("labels off-diff, below-threshold and overflow separately", () => {
+  it("labels off-diff, adjudicated and overflow separately", () => {
     const t = tierFindings(
       [
         f({ line: 999, title: "off" }),
-        f({ line: 1, family: "tests", confidence: 0.4, title: "under" }),
+        f({ line: 1, tier: "body", title: "sent" }),
         f({ line: 2, title: "in" }),
         f({ line: 3, title: "over" }),
       ],
@@ -153,16 +152,70 @@ describe("tierFindings — the three demotion causes stay distinguishable", () =
     expect(t.inline.map((x) => x.title)).toEqual(["in"]);
     expect(t.body.map((d) => [d.finding.title, d.reason])).toEqual([
       ["off", "off-diff"],
-      ["under", "below-threshold"],
+      ["sent", "adjudicated"],
       ["over", "overflow"],
     ]);
   });
 });
 
-describe("tierFindings — an absent confidence never demotes and never suppresses", () => {
-  it("keeps a finding with no confidence inline even under a high family bar", () => {
-    // The failure this guards: every finding today's shipped reviewer writes
-    // carries no `confidence`. Reading absence as 0 would delete all of them.
+/**
+ * **`confidence` is not a gate any more, and these tests are what pins that.**
+ *
+ * Two gates used to read it — an `internalFloor` of 0.15 and per-family bars
+ * of 0.30–0.60 — and both were removed once the axis was measured. Over 516
+ * findings from 20 preserved case-runs, labelled by the same MATCH judge a
+ * live run uses, `confidence` scores **AUROC 0.228 [0.171, 0.299]**: not a
+ * weak signal but a strong one pointing the wrong way, because the model
+ * prices certainty about an OBSERVATION and is surest where nothing is wrong
+ * (withheld findings carried a HIGHER median confidence, 0.99, than posted
+ * ones at 0.85–0.90). The removal cost no recall either: across the preserved
+ * archive not one gold finding was ever lost to `below-floor` or
+ * `below-threshold`.
+ *
+ * So the assertion below is the inverse of the one it replaced — a finding the
+ * old floor would have buried is now POSTED.
+ */
+describe("tierFindings — no confidence gate, at any value", () => {
+  it("posts a finding at confidence 0.01, which the old floor buried", () => {
+    // Was: `internal` with reason `below-floor`. See the block comment — the
+    // axis is anti-predictive, so a low self-score is not evidence of noise.
+    const t = tierFindings(
+      [f({ line: 1, confidence: 0.01, title: "dark" })],
+      COMMENTABLE,
+      BOUNDARY,
+    );
+    expect(t.inline.map((x) => x.title)).toEqual(["dark"]);
+    expect(t.internal).toHaveLength(0);
+  });
+
+  it("posts a low-confidence finding INLINE whatever family it came from", () => {
+    // Was: demoted to the body with reason `below-threshold` (tests barred at
+    // 0.60). The family survives for grouping and the disposition record; it
+    // no longer keys a bar.
+    const t = tierFindings(
+      [f({ line: 1, family: "tests", confidence: 0.05, title: "low" })],
+      COMMENTABLE,
+      BOUNDARY,
+    );
+    expect(t.inline.map((x) => x.title)).toEqual(["low"]);
+    expect(t.body).toHaveLength(0);
+  });
+
+  it("routes an off-diff low-confidence finding to the BODY, not internal", () => {
+    // The floor used to be asked before anchorability, so this landed
+    // `internal`. With no floor, anchorability is the first routing question
+    // and the honest answer is "posted, just not inline".
+    const t = tierFindings(
+      [f({ line: 999, confidence: 0.05 })],
+      COMMENTABLE,
+      BOUNDARY,
+    );
+    expect(t.internal).toHaveLength(0);
+    expect(t.body.map((d) => d.reason)).toEqual(["off-diff"]);
+  });
+
+  it("keeps a finding with no confidence inline", () => {
+    // Every finding today's shipped reviewer writes carries no `confidence`.
     const t = tierFindings(
       [f({ line: 1, family: "tests" })],
       COMMENTABLE,
@@ -184,52 +237,37 @@ describe("tierFindings — an absent confidence never demotes and never suppress
     expect(t.inline.map((x) => x.title)).toEqual(["unscored"]);
   });
 
-  it("applies no bar at all to a finding with no family", () => {
-    const t = tierFindings(
-      [f({ line: 1, confidence: 0.2 })],
-      COMMENTABLE,
-      BOUNDARY,
-    );
-    expect(t.inline).toHaveLength(1);
-  });
-
-  it("applies no bar to a family the operator did not configure", () => {
-    const t = tierFindings(
-      [f({ line: 1, family: "state", confidence: 0.2 })],
-      COMMENTABLE,
-      BOUNDARY,
-    );
-    expect(t.inline).toHaveLength(1);
-  });
-});
-
-describe("tierFindings — the internal tier", () => {
-  it("holds back a finding below the floor, and nothing else", () => {
+  it("posts every rung of the old calibration ladder", () => {
+    // The three values the retired floor and bars sat between. All inline now.
     const t = tierFindings(
       [
         f({ line: 1, confidence: 0.1, title: "dark" }),
-        f({ line: 2, confidence: 0.15, title: "at the floor" }),
-        f({ line: 3, confidence: 0.2, title: "above" }),
+        f({ line: 2, confidence: 0.15, title: "at the old floor" }),
+        f({ line: 3, family: "state", confidence: 0.2, title: "under a bar" }),
       ],
       COMMENTABLE,
       BOUNDARY,
     );
-    expect(t.internal.map((x) => x.finding.title)).toEqual(["dark"]);
-    expect(t.internal.map((x) => x.reason)).toEqual(["below-floor"]);
-    expect(t.inline).toHaveLength(2);
+    expect(t.inline).toHaveLength(3);
+    expect(t.internal).toHaveLength(0);
+    expect(t.body).toHaveLength(0);
   });
+});
 
-  it("does not consider anchorability first — an off-diff low-confidence finding is internal", () => {
-    // Order matters: "is this worth a human's attention at all" is asked before
-    // "can GitHub anchor it". Otherwise the body fills with sub-floor findings
-    // purely because they happened to be off-diff.
+describe("tierFindings — the internal tier", () => {
+  it("is empty for a document nothing adjudicated internal", () => {
+    // Nothing reaches `internal` on confidence any more; the tier is for a
+    // decision the adjudicator made, an anti-finding, a prose disposition, or
+    // the body budget.
     const t = tierFindings(
-      [f({ line: 999, confidence: 0.05 })],
+      [
+        f({ line: 1, confidence: 0.01 }),
+        f({ line: 2, confidence: 1 }),
+      ],
       COMMENTABLE,
       BOUNDARY,
     );
-    expect(t.internal).toHaveLength(1);
-    expect(t.body).toHaveLength(0);
+    expect(t.internal).toHaveLength(0);
   });
 });
 
@@ -282,13 +320,16 @@ describe("tierFindings — an EXPLICIT tier, which is a cross-package seam", () 
     expect(many.body.map((d) => d.reason)).toEqual(["overflow"]);
   });
 
-  it("still applies the floor to an untagged low-confidence finding", () => {
+  it("posts an untagged low-confidence finding — no tier, no gate", () => {
+    // Was a floor test. The floor is gone (AUROC 0.228), so an absent `tier`
+    // on a self-doubting finding means exactly what it says: no opinion.
     const t = tierFindings(
       [f({ line: 1, confidence: 0.01 })],
       COMMENTABLE,
       BOUNDARY,
     );
-    expect(t.internal).toHaveLength(1);
+    expect(t.internal).toHaveLength(0);
+    expect(t.inline).toHaveLength(1);
   });
 });
 
@@ -304,7 +345,8 @@ describe("tierFindings — an EXPLICIT tier, which is a cross-package seam", () 
  * Measured on `prreview__skillspro-1587-r2` (three identical repeats,
  * 2026-08-23): 23 / 25 / 30 of 45 / 48 / 46 hypotheses were clean discharges,
  * 17 / 14 / 7 findings traced entirely to them, and on the first repeat all 17
- * were POSTED. The confidence bars cannot reach them — minimum confidence
+ * were POSTED. The confidence bars that used to sit below this rule could
+ * never have reached them — minimum confidence
  * across that whole document is 0.75 — which is why this is a rule about what
  * the finding SAYS, not about how sure it is.
  */
@@ -428,17 +470,19 @@ describe("tierFindings — findings whose evidence is entirely clean discharges"
     expect(t.internal.map((x) => x.reason)).toEqual(["adjudicated"]);
   });
 
-  it("prefers `clean-discharge` over `below-floor` when both apply", () => {
-    // Same tier either way; the more specific reason is the one worth keeping,
-    // because "we withheld it because it says nothing" and "we withheld it
-    // because we were unsure" are different facts about the same run.
-    const t = tierFindings(
-      [f({ line: 1, confidence: 0.01, hypotheses: ["spec-001"] })],
-      COMMENTABLE,
-      BOUNDARY,
-      CLEAN,
-    );
-    expect(t.internal.map((x) => x.reason)).toEqual(["clean-discharge"]);
+  it("withholds an anti-finding whatever its confidence says", () => {
+    // The rule that outlived the confidence gates, and the reason it had to:
+    // an anti-finding is not an unconfident finding, it is a CONFIDENT report
+    // of nothing. Both ends of the range land in the same place.
+    for (const confidence of [0.01, 1]) {
+      const t = tierFindings(
+        [f({ line: 1, confidence, hypotheses: ["spec-001"] })],
+        COMMENTABLE,
+        BOUNDARY,
+        CLEAN,
+      );
+      expect(t.internal.map((x) => x.reason)).toEqual(["clean-discharge"]);
+    }
   });
 
   it("holds back an OFF-DIFF anti-finding too, rather than folding it into the body", () => {
@@ -488,7 +532,7 @@ describe("tierFindings — the body budget (maxBodyComments)", () => {
     const t = tierFindings(
       [
         f({ line: 999, title: "off" }),
-        f({ line: 1, family: "tests", confidence: 0.4, title: "under" }),
+        f({ line: 1, tier: "body", title: "sent" }),
         f({ line: 2, title: "in" }),
       ],
       COMMENTABLE,
@@ -498,16 +542,18 @@ describe("tierFindings — the body budget (maxBodyComments)", () => {
     expect(t.body).toHaveLength(0);
     expect(t.internal.map((x) => [x.finding.title, x.reason])).toEqual([
       ["off", "body-budget"],
-      ["under", "body-budget"],
+      ["sent", "body-budget"],
     ]);
     // Conservation: re-routed, never dropped.
     expect(t.inline.length + t.body.length + t.internal.length).toBe(3);
   });
 
-  it("a cap of 2 keeps the top 2 by severity × confidence, in document order", () => {
-    // Ranks: critHigh 0.9×3=2.7 · imp (no confidence → 1.0)×2=2.0 ·
-    // critLow 0.5×3=1.5 · minor 1.0×1=1.0. Keep critHigh + imp; the kept
-    // entries keep their document order rather than being re-sorted.
+  it("a cap of 2 keeps the top 2 by severity, in document order", () => {
+    // Ranks are severity alone: critHigh 3 · critLow 3 · imp 2 · minor 1.
+    // Confidence is NOT a factor — it used to be, and `critLow` (0.5) lost to
+    // `imp` because of it. See `rankOf`: confidence scored AUROC 0.228 against
+    // gold, so multiplying it in was sorting the wrong way. The two Criticals
+    // now tie and document order breaks it.
     const t = tierFindings(
       [
         f({ line: 999, severity: "Minor", title: "minor" }),
@@ -528,32 +574,67 @@ describe("tierFindings — the body budget (maxBodyComments)", () => {
       COMMENTABLE,
       { ...BOUNDARY, maxBodyComments: 2 },
     );
-    expect(t.body.map((d) => d.finding.title)).toEqual(["critHigh", "imp"]);
+    expect(t.body.map((d) => d.finding.title)).toEqual(["critHigh", "critLow"]);
     expect(t.internal.map((x) => [x.finding.title, x.reason])).toEqual([
       ["minor", "body-budget"],
-      ["critLow", "body-budget"],
+      ["imp", "body-budget"],
     ]);
   });
 
-  it("ranks an absent confidence as 1.0 — severity order, exactly as the inline overflow does", () => {
-    // Same rule as `rankOf` for the inline budget: absence is not low
-    // confidence. An unscored Important (2.0) outranks a scored one (1.8).
+  it("ignores confidence entirely — the budget cannot be spent on how sure the model says it is", () => {
+    // The regression this pins is the measured one. Over 516 labelled pipeline
+    // findings, confidence ranked BACKWARDS (AUROC 0.228): withheld findings
+    // carried a higher median confidence (0.99) than posted ones, because the
+    // claims a model is most certain of are the ones where nothing is wrong.
+    // A budget that sorts on it spends itself on verification reports.
+    //
+    // Same severity, opposite ends of the confidence range, and a cap of 1.
+    // The certain one must NOT win: the two tie, and document order decides.
     const t = tierFindings(
       [
-        f({ line: 999, severity: "Important", title: "unscored" }),
         f({
           line: 999,
           severity: "Important",
-          confidence: 0.9,
-          title: "scored",
+          confidence: 0.2,
+          title: "hedged defect",
+        }),
+        f({
+          line: 999,
+          severity: "Important",
+          confidence: 1,
+          title: "certain non-finding",
         }),
       ],
       COMMENTABLE,
       { ...BOUNDARY, maxBodyComments: 1 },
     );
-    expect(t.body.map((d) => d.finding.title)).toEqual(["unscored"]);
+    expect(t.body.map((d) => d.finding.title)).toEqual(["hedged defect"]);
     expect(t.internal.map((x) => [x.finding.title, x.reason])).toEqual([
-      ["scored", "body-budget"],
+      ["certain non-finding", "body-budget"],
+    ]);
+  });
+
+  it("an absent confidence is not a penalty either — severity alone orders", () => {
+    // Absence used to need its own rule (`?? 1`) so that the shipped reviewer,
+    // which writes no confidence at all, was not sorted below every
+    // hypothesis-derived finding. With confidence out of `rankOf` the rule is
+    // gone and absence is simply not a fact about rank.
+    const t = tierFindings(
+      [
+        f({ line: 999, severity: "Minor", title: "unscored minor" }),
+        f({
+          line: 999,
+          severity: "Critical",
+          confidence: 0.3,
+          title: "scored critical",
+        }),
+      ],
+      COMMENTABLE,
+      { ...BOUNDARY, maxBodyComments: 1 },
+    );
+    expect(t.body.map((d) => d.finding.title)).toEqual(["scored critical"]);
+    expect(t.internal.map((x) => [x.finding.title, x.reason])).toEqual([
+      ["unscored minor", "body-budget"],
     ]);
   });
 
@@ -575,14 +656,14 @@ describe("tierFindings — the body budget (maxBodyComments)", () => {
   it("does not relabel findings that were internal for a more specific reason", () => {
     const t = tierFindings(
       [
-        f({ line: 1, confidence: 0.01, title: "dark" }),
+        f({ line: 1, tier: "internal", title: "dark" }),
         f({ line: 999, title: "off" }),
       ],
       COMMENTABLE,
       { ...BOUNDARY, maxBodyComments: 0 },
     );
     expect(t.internal.map((x) => [x.finding.title, x.reason])).toEqual([
-      ["dark", "below-floor"],
+      ["dark", "adjudicated"],
       ["off", "body-budget"],
     ]);
   });
@@ -742,7 +823,7 @@ describe("buildReview — the boundary is opt-in, and absent means today", () =>
       findings: [
         f({
           line: 1,
-          confidence: 0.01,
+          tier: "internal",
           title: "dark",
           body: "SHOULD NOT APPEAR",
         }),
@@ -760,17 +841,17 @@ describe("renderDemotedGrouped — three causes must not share one heading", () 
     const out = renderDemotedGrouped([
       { finding: f({ line: 1, title: "A" }), reason: "overflow" },
       { finding: f({ line: 2, title: "B" }), reason: "off-diff" },
-      { finding: f({ line: 3, title: "C" }), reason: "below-threshold" },
+      { finding: f({ line: 3, title: "C" }), reason: "adjudicated" },
     ]);
     expect(out.match(/### Additional findings/g)).toHaveLength(1);
     expect(out).toContain("Outside this PR's diff");
-    expect(out).toContain("Below the confidence bar");
+    expect(out).toContain("Raised for context");
     expect(out).toContain("Beyond this review's inline comment limit");
-    // Ordered off-diff → below-threshold → overflow regardless of input order.
+    // Ordered off-diff → adjudicated → overflow regardless of input order.
     expect(out.indexOf("Outside this PR's diff")).toBeLessThan(
-      out.indexOf("Below the confidence"),
+      out.indexOf("Raised for context"),
     );
-    expect(out.indexOf("Below the confidence")).toBeLessThan(
+    expect(out.indexOf("Raised for context")).toBeLessThan(
       out.indexOf("Beyond this review"),
     );
   });
@@ -787,3 +868,73 @@ describe("renderDemotedGrouped — three causes must not share one heading", () 
     expect(renderDemotedGrouped([])).toBe("");
   });
 });
+
+describe("tierFindings — a disposition written in the prose", () => {
+  /**
+   * The measured failure, verbatim in shape. `prreview__skillspro-1680-r1`
+   * (2026-09-21): the adjudicator reviewed two claims, concluded both were
+   * non-defects, wrote that conclusion into the title and body, and left
+   * `tier` unset. Both were posted as INLINE comments on the pull request —
+   * taking both inline slots — while the one finding that matched real gold
+   * went to the body.
+   */
+  const dismissed = (line: number) =>
+    f({
+      line,
+      title: "finally-purge correctness — dismissed",
+      body:
+        "internal: The `finally` block runs even when `populateProfiles` throws. " +
+        "`imgCache.del` is synchronous and cannot itself throw. Reviewed and dismissed; no defect.",
+    });
+
+  it("records an untiered finding whose prose carries the disposition label", () => {
+    const t = tierFindings([dismissed(1)], COMMENTABLE, BOUNDARY);
+    expect(t.inline).toHaveLength(0);
+    expect(t.body).toHaveLength(0);
+    expect(t.internal.map((x) => x.reason)).toEqual(["prose-disposition"]);
+  });
+
+  it("does not touch an untiered finding whose prose is ordinary review English", () => {
+    // The other half of the conjunction. An absent tier means "no opinion",
+    // the shipped reviewer never writes one, and burying on that alone failed
+    // 27 tests that encode exactly this contract.
+    const t = tierFindings([f({ line: 2, title: "Null deref", body: "`x` may be undefined here." })], COMMENTABLE, BOUNDARY);
+    expect(t.inline).toHaveLength(1);
+    expect(t.internal).toHaveLength(0);
+  });
+
+  it("obeys an explicit tier even when the prose carries the label", () => {
+    // A document that filled the field in is not in violation, whatever its
+    // prose says — so a `body` disposition stays `body` rather than being
+    // re-judged by a regex.
+    const t = tierFindings([{ ...dismissed(3), tier: "body" }], COMMENTABLE, BOUNDARY);
+    expect(t.body.map((x) => x.reason)).toEqual(["adjudicated"]);
+    expect(t.internal).toHaveLength(0);
+  });
+
+  it("is not tripped by a defect that merely discusses dismissal or internal state", () => {
+    // The part-two regression, pinned. A rule keyed on verification WORDING
+    // buried two confirmed defects written in that grammar. These labels are
+    // line-anchored so a real finding cannot phrase its way into silence.
+    const t = tierFindings(
+      [
+        f({ line: 4, title: "Error dismissed silently", body: "The catch block swallows it; internal state is left half-written." }),
+        f({ line: 5, title: "Leak", body: "This is not a defect in the happy path, but it is one on retry." }),
+      ],
+      COMMENTABLE,
+      BOUNDARY,
+    );
+    expect(t.inline).toHaveLength(2);
+    expect(t.internal).toHaveLength(0);
+  });
+
+  it("internalJargon catches the label it used to miss", () => {
+    // Every other entry in that list names a MECHANISM; this one names a
+    // verdict, which is why a body opening `internal:` walked through the leak
+    // detector and onto a pull request.
+    expect(internalJargon({ findings: [dismissed(6)] })).toContain("internal:");
+    // …and still does not fire on the ordinary adjective.
+    expect(internalJargon({ findings: [f({ line: 7, body: "an internal API boundary" })] })).toEqual([]);
+  });
+});
+

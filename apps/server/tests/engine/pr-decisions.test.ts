@@ -1692,7 +1692,6 @@ describe("renderContext — the spec axis", () => {
     // boundary at all (found by the reviewer on the pipeline's own PR).
     const ctx = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOn);
     expect(ctx.maxInlineComments).toBe("10");
-    expect(ctx.internalFloor).toBe("0.15");
     // The shipped default is 5; the STRING "null" is the documented
     // "unlimited body overflow" value and must survive the projection.
     expect(ctx.maxBodyComments).toBe("5");
@@ -1703,10 +1702,11 @@ describe("renderContext — the spec axis", () => {
     expect(
       renderContext(reviewable(), fix, defaultDependenciesConfig(), nullCap).maxBodyComments,
     ).toBe("null");
-    // The one JSON-valued key — a per-family map has no scalar form.
-    expect(JSON.parse(String(ctx.boundaryThresholds))).toEqual(
-      defaultReviewConfig().analysis.thresholds,
-    );
+    // The two confidence-gate keys this used to project — `internalFloor` and
+    // `boundaryThresholds` — went with the gates they fed (AUROC 0.228); the
+    // boundary is two budgets now, and nothing reads a confidence.
+    expect(ctx.internalFloor).toBeUndefined();
+    expect(ctx.boundaryThresholds).toBeUndefined();
   });
 
   it("projects the PR body and the linked issue once the axis is on (§E2's missing plumbing)", () => {

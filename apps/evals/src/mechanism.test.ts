@@ -932,6 +932,36 @@ describe("Arm seam — model-selection adapters (arm.ts)", () => {
       }
     });
 
+    it("records the falsify {{#if}} pair too — it falls through to review-survey, not default", () => {
+      const { root, overlay } = makeRoots();
+      try {
+        // The literal template from apps/server/workflows/pr-review.yaml. The
+        // oracle got its own key so "is this model good enough at writing AND
+        // RUNNING a probe?" is one variable; the `{{#if}}` pair is what keeps
+        // the unset case landing on `review-survey` rather than on `default`.
+        const tpl =
+          "{{#if models.review-falsify}}{{models.review-falsify}}{{/if}}" +
+          "{{#if !models.review-falsify}}{{models.review-survey}}{{/if}}";
+        const base = "models:\n  default: openai/gpt-5.4-mini\n  review-survey: anthropic/claude-haiku-4-5\n";
+        writeFileSync(join(overlay, "config.yaml"), base);
+        const unset = configArm(root, overlay).recordPhaseModel(tpl, "falsify");
+        expect(unset).toBe("anthropic/claude-haiku-4-5");
+        expect(unset).not.toContain("{{");
+        writeFileSync(join(overlay, "config.yaml"), `${base}  review-falsify: openai/gpt-5.5\n`);
+        expect(configArm(root, overlay).recordPhaseModel(tpl, "falsify")).toBe("openai/gpt-5.5");
+        // And through the LEDGER label the loop actually reports under —
+        // `falsify` is a generic_loop, so its rows arrive as `falsify_iter_N`.
+        writeFileSync(join(overlay, "config.yaml"), base);
+        const phases = [{ name: "falsify", model: tpl }];
+        const { template, fallbackPhase } = modelTemplateForRow(phases, "falsify_iter_1");
+        expect(configArm(root, overlay).recordPhaseModel(template, "falsify_iter_1", fallbackPhase)).toBe(
+          "anthropic/claude-haiku-4-5",
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
     it("records the adjudicate {{#if}} fallback pair as a real model id, never template residue", () => {
       const { root, overlay } = makeRoots();
       try {

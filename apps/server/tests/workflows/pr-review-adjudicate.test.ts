@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { getWorkflow, loadPromptTemplate } from "#src/workflows/loader.js";
-import { renderTemplate } from "lastlight-workflow-engine";
+import { evaluateTriggerRule, renderTemplate } from "lastlight-workflow-engine";
 import type { TemplateContext } from "lastlight-workflow-engine";
 
 /**
@@ -111,7 +111,7 @@ describe("adjudicate — the phase", () => {
 
 describe("adjudicate — the sibling placement, which is the load-bearing part", () => {
   it("hangs off `review` beside `post-review`, never in front of it", () => {
-    expect(adjudicate!.depends_on).toEqual(["review"]);
+    expect(adjudicate!.depends_on).toContain("review");
     expect(byName.get("post-review")?.depends_on).toEqual(["review"]);
   });
 
@@ -133,6 +133,100 @@ describe("adjudicate — the sibling placement, which is the load-bearing part",
     expect(names.indexOf("adjudicate")).toBeLessThan(names.indexOf("post-review"));
     expect(names.indexOf("reconcile")).toBeLessThan(names.indexOf("post-review"));
     expect(names.indexOf("adjudicate")).toBeLessThan(names.indexOf("reconcile"));
+  });
+});
+
+describe("the dossier phase (#399), and the skip that must not take the adjudicator with it", () => {
+  const dossier = byName.get("dossier");
+  const prompt = loadPromptTemplate("prompts/review-adjudicate.md");
+
+  it("is deterministic and cannot fail the run", () => {
+    // It is an INPUT, not a gate. A non-zero exit here would fail the phase,
+    // and with `adjudicate` depending on it that is a review that never posts
+    // because a document renderer had a bad day.
+    expect(dossier?.type).toBe("bash");
+    expect(dossier?.prompt).toBeUndefined();
+    expect(dossier?.command).toContain("|| true");
+    expect(dossier?.command).toContain("dossier --dir .lastlight/pr-review");
+  });
+
+  it("reaches the adjudicator through `output_var`, not through a path in the prompt", () => {
+    // Of 120 non-spec survey branches, 27 first-turn reads of a prompt-named
+    // path resolved against the wrong root and hit ENOENT; 23 never recovered.
+    // The bytes go in the prompt. The file on disk is for the artifact capture
+    // and for a truncated transcript, not for the model to go and find.
+    expect(dossier?.output_var).toBe("dossier");
+    // `{{phaseOutputs.dossier}}`, NOT `{{phaseOutputs.dossier.output}}`. The
+    // engine stores a command phase's stdout as a plain STRING
+    // (`outputVars[phaseName] = rawOutput`), so the `.output` suffix walks off
+    // the end of it and renders EMPTY — the adjudicator would get the whole
+    // "everything you need is attached below" preamble with nothing attached,
+    // and no error anywhere. `${dossier.output}` is the other spelling that
+    // works (a separate substitution pass) and is not the one used here.
+    expect(prompt).toContain("{{phaseOutputs.dossier}}");
+    expect(prompt).not.toContain("{{phaseOutputs.dossier.output}}");
+  });
+
+  it("says so loudly when it produced nothing", () => {
+    // "Nobody looked" must never render as "looked and found none" — the
+    // founding invariant of the deterministic layer, applied to its own output.
+    expect(dossier?.command).toContain("DOSSIER NOT AVAILABLE");
+  });
+
+  it("is off unless an operator asks, and the adjudicator survives that skip", () => {
+    // THE regression this file exists to prevent from here on.
+    // `evaluateTriggerRule("all_success", …)` requires every dep to be
+    // literally `succeeded`, and `skip_if` sets `skipped` — so with
+    // `all_success` every deployment still on `adjudicate: legacy` would skip
+    // the dossier and silently skip the ADJUDICATOR with it, no phase failing
+    // and no error anywhere.
+    expect(dossier?.skip_if).toContain("dossierEnabled != true");
+    expect(adjudicate!.depends_on).toEqual(["review", "dossier"]);
+    expect(adjudicate!.trigger_rule).toBe("none_failed_min_one_success");
+
+    expect(evaluateTriggerRule("none_failed_min_one_success", ["succeeded", "skipped"])).toBe(true);
+    expect(evaluateTriggerRule("all_success", ["succeeded", "skipped"])).toBe(false);
+  });
+
+  it("still refuses to adjudicate a failed review", () => {
+    // The invariant the rule change must not cost. A failed dep fails
+    // `none_failed_min_one_success` exactly as it fails `all_success`.
+    expect(evaluateTriggerRule("none_failed_min_one_success", ["failed", "skipped"])).toBe(false);
+    expect(evaluateTriggerRule("none_failed_min_one_success", ["failed", "succeeded"])).toBe(false);
+    // And with the whole pipeline off, both deps skip and the adjudicator does
+    // too — which is what its own `skip_if` says anyway.
+    expect(evaluateTriggerRule("none_failed_min_one_success", ["skipped", "skipped"])).toBe(false);
+  });
+
+  it("renders exactly one of the two halves, with nothing left unrendered", () => {
+    // The legacy half must survive byte-for-byte while `adjudicate: legacy` is
+    // the default — an arm that changes the control is not an arm.
+    const legacy = renderTemplate(prompt, { phaseOutputs: { dossier: "BYTES" } } as unknown as TemplateContext);
+    const dossierOn = renderTemplate(prompt, {
+      dossierEnabled: "true",
+      phaseOutputs: { dossier: "BYTES" },
+    } as unknown as TemplateContext);
+
+    expect(legacy).toContain("Confidence prices the defect");
+    expect(legacy).not.toContain("Say what is wrong, what kind of wrong");
+    expect(legacy).not.toContain("BYTES");
+
+    expect(dossierOn).toContain("Say what is wrong, what kind of wrong");
+    expect(dossierOn).toContain("BYTES");
+    // `confidence` is not merely unasked-for in the new shape, it is absent:
+    // AUROC 0.228, inverted, already gone from the ranking.
+    expect(dossierOn).not.toContain("Confidence prices the defect");
+    expect(dossierOn).toMatch(/"category": "defect"/);
+
+    for (const rendered of [legacy, dossierOn]) expect(rendered).not.toMatch(/\{\{/);
+  });
+
+  it("runs before the adjudicator by an EDGE, not by declaration order", () => {
+    const names = def.phases.map((p) => p.name);
+    expect(names.indexOf("dossier")).toBeLessThan(names.indexOf("adjudicate"));
+    // Order alone would work with this scheduler and would not survive someone
+    // moving a block, so the edge is the thing under test.
+    expect(adjudicate!.depends_on).toContain("dossier");
   });
 });
 
@@ -262,4 +356,52 @@ describe("the adjudicate prompt carries the constraints that have money on them"
     expect(rendered).not.toContain("{{");
     expect(rendered).not.toContain("}}");
   });
+});
+
+// ── Eval-dataset leakage ────────────────────────────────────────────────────
+// Twice now a prompt has grown an example lifted verbatim from the `pr-review`
+// eval dataset: adjudicate's output schema carried a gold defect's own constant,
+// reader function and field, and its prose-disposition example carried a second
+// case's gold verbatim. A prompt that names the answer scores on the dataset for
+// a reason that has nothing to do with the pipeline being better, and nothing in
+// the score says so.
+//
+// The dataset lives in a separate private repo, so this cannot diff against it.
+// It pins the identifiers we have actually caught, plus the repo name — a
+// regression guard, not a proof. The RULE is: examples in a prompt are
+// placeholders (`<path/to/file.ext>`, `<symbol>`, `<topic>`) or invented, never
+// copied from a case you are measuring against.
+describe("no eval-dataset leakage in the pr-review prompts", () => {
+  const LEAKED = [
+    "skillspro",
+    "SILENT_SIGN_IN_NONCE_MAX_AGE_SECONDS",
+    "readPendingNonces",
+    "populateProfiles",
+    "finally-purge",
+    "MAX_USER_PAGES",
+    "createSlackClient",
+    "strictDryRun",
+    "spreadsheetLoader",
+    "sheetsDataStore",
+    "activeUserEmails",
+  ];
+
+  const PROMPTS = [
+    "prompts/review-adjudicate.md",
+    "prompts/review-falsify.md",
+    "prompts/review-triage.md",
+    "prompts/review.md",
+    ...["contract", "enforcement", "security", "spec", "state", "tests"].map(
+      (f) => `prompts/survey-${f}.md`,
+    ),
+  ];
+
+  for (const prompt of PROMPTS) {
+    it(`${prompt} names no identifier from a graded case`, () => {
+      const text = loadPromptTemplate(prompt).toLowerCase();
+      for (const id of LEAKED) {
+        expect(text, `${prompt} leaks "${id}"`).not.toContain(id.toLowerCase());
+      }
+    });
+  }
 });

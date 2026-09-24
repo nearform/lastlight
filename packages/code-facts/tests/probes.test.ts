@@ -39,7 +39,8 @@ interface Fixture {
 function workspace(files: {
   hypotheses?: Record<string, unknown[] | string>;
   verdicts?: unknown[] | string;
-  transcripts?: string[];
+  /** A name (default body: a real command on line 1) or `[name, body]`. */
+  transcripts?: (string | [string, string])[];
 }): Fixture {
   const root = mkdtempSync(join(tmpdir(), "ll-probes-"));
   dirs.push(root);
@@ -58,11 +59,16 @@ function workspace(files: {
         : files.verdicts.map((r) => JSON.stringify(r)).join("\n");
     writeFileSync(join(dir, "probes", "verdicts.jsonl"), `${body}\n`, "utf8");
   }
-  for (const name of files.transcripts ?? []) {
-    writeFileSync(join(dir, "probes", name), "npx eslint probe.js\n  1:1 error …\n", "utf8");
+  for (const entry of files.transcripts ?? []) {
+    const [name, body] = typeof entry === "string" ? [entry, DEFAULT_TRANSCRIPT] : entry;
+    writeFileSync(join(dir, "probes", name), body, "utf8");
   }
   return { dir, root };
 }
+
+/** What a real probe leaves behind: the command, then what it printed. */
+const RAN = "npx eslint probe.js";
+const DEFAULT_TRANSCRIPT = `${RAN}\n  1:1 error …\n`;
 
 const critical = { id: "H-001", severity: "Critical", needsProbe: false };
 const asked = { id: "H-002", severity: "Minor", needsProbe: true };
@@ -143,6 +149,7 @@ describe("only a transcript may refute", () => {
           hypothesis: "H-001",
           verdict: "refuted",
           transcript: ".lastlight/pr-review/probes/H-001.txt",
+          command: RAN,
         },
       ],
       transcripts: ["H-001.txt"],
@@ -153,7 +160,9 @@ describe("only a transcript may refute", () => {
   it("rejects `refuted` with no transcript — the rule with money on it", () => {
     const { dir, root } = workspace({
       hypotheses: { contract: [critical] },
-      verdicts: [{ hypothesis: "H-001", verdict: "refuted", reason: "on reflection, fine" }],
+      verdicts: [
+        { hypothesis: "H-001", verdict: "refuted", command: RAN, reason: "on reflection, fine" },
+      ],
     });
     const result = checkProbes({ dir, repo: root });
     expect(result.satisfied).toBe(false);
@@ -169,6 +178,7 @@ describe("only a transcript may refute", () => {
           hypothesis: "H-001",
           verdict: "refuted",
           transcript: ".lastlight/pr-review/probes/H-001.txt",
+          command: RAN,
         },
       ],
     });
@@ -200,10 +210,204 @@ describe("only a transcript may refute", () => {
     // a path convention would cost a round of probing for nothing.
     const { dir, root } = workspace({
       hypotheses: { contract: [critical] },
-      verdicts: [{ hypothesis: "H-001", verdict: "refuted", transcript: "probes/H-001.txt" }],
+      verdicts: [
+        { hypothesis: "H-001", verdict: "refuted", transcript: "probes/H-001.txt", command: RAN },
+      ],
       transcripts: ["H-001.txt"],
     });
     expect(checkProbes({ dir, repo: root }).satisfied).toBe(true);
+  });
+});
+
+describe("reading the code is not a probe — the `unexecuted` gate", () => {
+  /**
+   * The measurement this block exists for. `review.analysis.probes` became
+   * tri-state, `falsify` ran for the first time ever, and eval run
+   * `2026-09-21_113136-7d490df` (`prreview__skillspro-1587-r2`, Haiku 4.5)
+   * returned **9 verdicts, 9 `reproduced`, every one `"command": "code
+   * inspection"` with a transcript of prose** — *"Reading source at … lines
+   * 78-80 … VERDICT: The claim is ACCURATE"*. Zero executed commands, and the
+   * gate passed all nine, because it only ever checked that the file existed.
+   *
+   * `reproduced` is documented as the strongest evidence in the pipeline and
+   * `refuted` is the only thing that lets the adjudicator DELETE a finding, so
+   * this was a licence to delete a real defect by reasoning.
+   */
+  const PROSE = [
+    "PROBE: contract-007 - canBeginRedirectSignIn sessionStorage error handling",
+    "",
+    "Reading source at packages/frontend/src/utils/redirect-sign-in.ts lines 78-80:",
+    "VERDICT: The claim is ACCURATE - the function throws without its own try-catch.",
+  ].join("\n");
+
+  function oneVerdict(row: Record<string, unknown>, transcripts: (string | [string, string])[]) {
+    const { dir, root } = workspace({
+      hypotheses: { contract: [critical] },
+      verdicts: [{ hypothesis: "H-001", transcript: "probes/H-001.txt", ...row }],
+      transcripts,
+    });
+    return checkProbes({ dir, repo: root });
+  }
+
+  it('rejects the real run: `reproduced`, "code inspection", a transcript of prose', () => {
+    const result = oneVerdict({ verdict: "reproduced", command: "code inspection" }, [
+      ["H-001.txt", PROSE],
+    ]);
+    expect(result.satisfied).toBe(false);
+    expect(result.gaps[0].kind).toBe("unexecuted");
+    expect(result.gaps[0].detail).toMatch(/must show every command you claim/);
+    expect(result.gaps[0].detail).toMatch(/"unprobed"/);
+    expect(result.executed).toBe(0);
+    expect(result.claimedExecution).toBe(1);
+  });
+
+  it("rejects a `refuted` whose transcript exists but names no command at all", () => {
+    // Worse than the above, not better: this is the verdict that DELETES.
+    for (const row of [
+      { verdict: "refuted" },
+      { verdict: "refuted", command: null },
+      { verdict: "refuted", command: "   " },
+    ]) {
+      const result = oneVerdict(row, ["H-001.txt"]);
+      expect(result.satisfied, JSON.stringify(row)).toBe(false);
+      expect(result.gaps[0].kind).toBe("unexecuted");
+      expect(result.gaps[0].detail).toMatch(/names no command/);
+    }
+  });
+
+  it("PASSES the same verdict when the transcript opens with the command", () => {
+    const result = oneVerdict({ verdict: "reproduced", command: RAN }, ["H-001.txt"]);
+    expect(result.satisfied).toBe(true);
+    expect(result.gaps).toEqual([]);
+    expect(result.executed).toBe(1);
+    expect(result.claimedExecution).toBe(1);
+  });
+
+  it("tolerates a shell prompt, a label and quoting noise around that first line", () => {
+    // The gate separates *ran something* from *read something*; it does not
+    // police transcript formatting, and a false failure costs a probe round for
+    // nothing. `BASE:`/`HEAD:` labels are what the prompt itself asks for on a
+    // differential probe.
+    for (const first of [
+      `$ ${RAN}`,
+      `BASE: ${RAN}`,
+      `  ${RAN}   `,
+      "npx  eslint   probe.js --then --more",
+    ]) {
+      const result = oneVerdict({ verdict: "reproduced", command: RAN }, [
+        ["H-001.txt", `${first}\nout\n`],
+      ]);
+      expect(result.satisfied, first).toBe(true);
+    }
+  });
+
+  it("skips blank lines to find that first line, and only that one", () => {
+    // A command buried in the body is not "the first line", and accepting it
+    // would re-admit the prose transcript that quotes a command it never ran.
+    expect(oneVerdict({ verdict: "reproduced", command: RAN }, [["H-001.txt", `\n\n${RAN}\nok\n`]]).satisfied).toBe(true);
+    expect(oneVerdict({ verdict: "reproduced", command: RAN }, [["H-001.txt", `preamble\n${RAN}\n`]]).satisfied).toBe(false);
+  });
+
+  describe("a differential probe's two commands, on two different lines", () => {
+    // Measured 2026-09-22 on prreview__skillspro-1587-r1/spec-004: both
+    // commands genuinely ran, and the gate failed the verdict anyway, because
+    // base and head are two separate tool calls and only the first can land on
+    // line one — the second hadn't run yet when line one was written.
+    const BASE_CMD = "git show origin/main:auth.ts | grep -n expiresIn";
+    const HEAD_CMD = "grep -n expiresIn auth.ts";
+    const COMMAND = `BASE: ${BASE_CMD}; HEAD: ${HEAD_CMD}`;
+
+    it("PASSES when each half is echoed where it actually ran", () => {
+      const result = oneVerdict({ verdict: "refuted", command: COMMAND, differential: true }, [
+        ["H-001.txt", `BASE: ${BASE_CMD}\n24h\n${HEAD_CMD}\n24h\n`],
+      ]);
+      expect(result.satisfied).toBe(true);
+      expect(result.executed).toBe(1);
+    });
+
+    it("still FAILS when the HEAD half never ran at all", () => {
+      const result = oneVerdict({ verdict: "refuted", command: COMMAND }, [
+        ["H-001.txt", `BASE: ${BASE_CMD}\n24h\n`],
+      ]);
+      expect(result.satisfied).toBe(false);
+      expect(result.gaps[0].kind).toBe("unexecuted");
+    });
+
+    it("still FAILS when the BASE half — the one that must open the file — is missing", () => {
+      const result = oneVerdict({ verdict: "refuted", command: COMMAND }, [
+        ["H-001.txt", `something else\n${HEAD_CMD}\n24h\n`],
+      ]);
+      expect(result.satisfied).toBe(false);
+    });
+
+    it("still checks a non-differential command against the whole first line, unsplit", () => {
+      // No `BASE:`/`HEAD:` pair ⇒ falls through to the original behaviour.
+      const result = oneVerdict({ verdict: "reproduced", command: RAN }, ["H-001.txt"]);
+      expect(result.satisfied).toBe(true);
+    });
+
+    it("still passes a differential probe that really is ONE command", () => {
+      // e.g. a single `git diff base...head` — tier 1 run as one invocation,
+      // not two. The BASE:/HEAD: split must not demand a HEAD half that was
+      // never claimed.
+      const oneShot = "git diff origin/main...HEAD -- auth.ts";
+      const result = oneVerdict({ verdict: "refuted", command: oneShot, differential: true }, [
+        ["H-001.txt", `${oneShot}\nno changes\n`],
+      ]);
+      expect(result.satisfied).toBe(true);
+    });
+  });
+
+  it("leaves `unprobed` COMPLETELY free — no command, no transcript, still closed", () => {
+    // Load-bearing, and the whole reason the bar rose on two verdicts and not
+    // three: an unsatisfiable gate pushes the model into dishonesty, which is
+    // WP3's `$LL_FAMILY` lesson. `unprobed` is the honest answer and it must
+    // stay costless.
+    const { dir, root } = workspace({
+      hypotheses: { contract: [critical] },
+      verdicts: [
+        { hypothesis: "H-001", verdict: "unprobed", reason: "no runner in this image" },
+      ],
+    });
+    const result = checkProbes({ dir, repo: root });
+    expect(result.satisfied).toBe(true);
+    expect(result.claimedExecution).toBe(0);
+    expect(result.executed).toBe(0);
+  });
+
+  it("counts execution as a NUMBER, so nobody has to read nine files by hand", () => {
+    // LD6: the interesting figure is the one that can be zero while everything
+    // else looks clean. `reproduced=2 executed=0` is the whole defect, on one
+    // line of the phase log.
+    const { dir, root } = workspace({
+      hypotheses: { contract: [critical, asked] },
+      verdicts: [
+        { hypothesis: "H-001", verdict: "reproduced", command: "code inspection", transcript: "probes/H-001.txt" },
+        { hypothesis: "H-002", verdict: "reproduced", command: "code inspection", transcript: "probes/H-002.txt" },
+      ],
+      transcripts: [["H-001.txt", PROSE], ["H-002.txt", PROSE]],
+    });
+    const result = checkProbes({ dir, repo: root });
+    expect(result.claimedExecution).toBe(2);
+    expect(result.executed).toBe(0);
+    expect(result.notes.join(" ")).toMatch(/NOT ONE of them executed anything/);
+    const text = renderProbeCheck(result);
+    expect(text).toContain("executed: 0/2");
+    expect(text).toContain("reproduced=2");
+  });
+
+  it("an unreadable transcript is `unexecuted`, never a silent pass", () => {
+    // `null` is not `[]`: could-not-read must not look like read-and-matched.
+    const { dir, root } = workspace({
+      hypotheses: { contract: [critical] },
+      verdicts: [
+        { hypothesis: "H-001", verdict: "reproduced", command: RAN, transcript: "probes/H-001.txt" },
+      ],
+      transcripts: [["H-001.txt", ""]],
+    });
+    const result = checkProbes({ dir, repo: root });
+    expect(result.satisfied).toBe(false);
+    expect(result.gaps[0].kind).toBe("unexecuted");
   });
 });
 
@@ -216,7 +420,7 @@ describe("the file is append-only, so the LAST line wins", () => {
       hypotheses: { contract: [critical] },
       verdicts: [
         { hypothesis: "H-001", verdict: "unprobed", reason: "no runner" },
-        { hypothesis: "H-001", verdict: "refuted", transcript: "probes/H-001.txt" },
+        { hypothesis: "H-001", verdict: "refuted", transcript: "probes/H-001.txt", command: RAN },
       ],
       transcripts: ["H-001.txt"],
     });

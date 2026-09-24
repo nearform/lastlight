@@ -522,6 +522,23 @@ export interface ReviewPipelineStats {
    */
   internalGold?: (number | null)[];
   /**
+   * `internalMatched` BEFORE the CONFIRM pass dropped anything, and by its
+   * presence the marker that `internalMatched` IS confirm-filtered.
+   *
+   * Absent on every run recorded before 2026-09-21, whose `internalMatched` is
+   * a raw MATCH count the audit puts ~⅓ high (`docs/plans/probe-oracle.md`).
+   * Keeping both is what lets a corrected arm be compared against the archive
+   * without re-running anything: the old number is still derivable.
+   */
+  internalMatchedPreConfirm?: number;
+  /** Pairs MATCH credited and CONFIRM rejected, `{gold, finding}` in the same
+   * index spaces as `internalGold`. Recorded so a correction can be eyeballed,
+   * and so it is reversible. */
+  internalConfirmRejected?: { gold: number; finding: number }[];
+  /** CONFIRM did not run or did not parse, and why. Present ⇒ `internalMatched`
+   * is MATCH's raw count and carries MATCH's known error rate. */
+  internalConfirmUngraded?: string;
+  /**
    * The internal-recall judge did not run or did not parse, and why.
    *
    * Present ⇒ `internalMatched` is deliberately ABSENT rather than 0. An
@@ -723,6 +740,34 @@ export interface InstanceResult {
    *
    * On a `--runs N` aggregate this is **trial 1's** workspace, like every other
    * field `aggregateTrials` carries through; the runner prints all N paths.
+   *
+   * **It is not a retention policy.** The temp dir it names is reclaimed by the
+   * OS within days; see {@link pipelineArtifactRel}, which is.
    */
   workspaceDir?: string;
+  /**
+   * The pipeline's artifacts (`facts.json`, `obligations/`,
+   * `hypotheses/*.jsonl`, `probes/`, `findings.json`, `disposition.json`),
+   * copied into the run directory at `<sessionTrialRel>/pr-review` — relative,
+   * so a run dir stays portable.
+   *
+   * Written on every run that produced artifacts, with no flag, because
+   * `--keep-workspace` kept them somewhere the operating system deletes. Absent
+   * means the arm ran no pipeline, OR that the copy failed — in which case
+   * {@link pipelineArtifactError} says so. Those are different facts and a
+   * reader must not have to guess which one an empty field means.
+   */
+  pipelineArtifactRel?: string;
+  /**
+   * Why the artifact copy failed, when it did.
+   *
+   * The copy is wrapped so a disk-full or permissions error cannot fail a
+   * measured run over its own bookkeeping. But a `console.warn` on a
+   * background process is functionally silent — the run would record success
+   * and simply have no artifacts, which is precisely the silent loss
+   * `persistPipelineArtifacts` exists to prevent. Recording the reason here is
+   * what keeps "ran no pipeline" and "could not write what it produced"
+   * distinguishable downstream.
+   */
+  pipelineArtifactError?: string;
 }

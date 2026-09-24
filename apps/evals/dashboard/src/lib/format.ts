@@ -48,6 +48,15 @@ export function fmtDuration(ms: number): string {
   return m ? `${h}h ${m}m` : `${h}h`;
 }
 
+/**
+ * A wall-clock figure the micro-survey recorded in SECONDS, through the one
+ * duration formatter. `null`/`undefined` is an em dash: a repeat that was never
+ * timed has no duration, and `0s` would read as an instant one.
+ */
+export function fmtSecs(x: number | null | undefined): string {
+  return x === null || x === undefined || !Number.isFinite(x) ? "\u2014" : fmtDuration(x * 1000);
+}
+
 /** `2026-06-28 14:30 UTC` from an ISO string (best-effort). */
 export function fmtDate(iso: string): string {
   const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(iso);
@@ -64,6 +73,16 @@ export function fmtRatio(x: number | null | undefined, digits = 3): string {
 /** A 0..1 ratio as a whole percent, or an em dash when undefined. */
 export function fmtPct(x: number | null | undefined): string {
   return x === null || x === undefined || !Number.isFinite(x) ? "—" : `${(x * 100).toFixed(0)}%`;
+}
+
+/**
+ * A percentage the harness already expressed as 0..100 — the micro-survey's
+ * `needsProbePct`. One decimal, because the underlying quantity is a count over
+ * ~12 rows and a whole percent would collapse distinct counts onto one number.
+ * Deliberately separate from {@link fmtPct}, which takes a 0..1 ratio.
+ */
+export function fmtProbePct(x: number | null | undefined): string {
+  return x === null || x === undefined || !Number.isFinite(x) ? "—" : `${x.toFixed(1)}%`;
 }
 
 /** The primary success metric for a tier (higher = better), matching the

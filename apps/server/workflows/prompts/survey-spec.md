@@ -10,41 +10,29 @@ Reviewing **{{owner}}/{{repo}}#{{prNumber}}**, head `{{headSha}}` against `{{bas
 Your job is to DISCHARGE obligations — questions that each name BOTH ENDS of a
 possible defect mechanism — and to record what you found as hypotheses.
 
-You are **not** the last word. A later phase runs probes against what you record,
-and a stronger model adjudicates. Both of them can only REMOVE. Nothing
-downstream can recover a mechanism you declined to write down.
+> **Nothing downstream can recover a mechanism you declined to write down.**
 
-So the instruction here is the opposite of the usual one: **over-produce**. A
-plausible mechanism you cannot yet refute is a hypothesis, not noise. Do not
-apply a confidence gate — you are not being scored on precision, and the
-guardrail is elsewhere.
+So: **over-produce** — see the `survey-pass` skill for why the precision gate does not fire on you.
 
 ## Hard limits on this pass
 
-- **Do NOT post a review.** Do not call `github_create_pull_request_review` or any
-  other posting tool.
-- **Do NOT write `.lastlight/pr-review/findings.json`.** A later phase owns it.
-- **Do NOT read or write any other family's file.** Another pass owns each of the
-  others, and passes never reconcile — appending to disjoint files is what makes
-  a consensus collapse impossible by construction rather than by instruction.
-- **Do NOT re-derive this PR's range with `git diff` or `git show`.** The
-  deterministic layer resolved the merge-base range once and staged it:
-  `.lastlight/pr-review/diff/index.md` lists every changed file with its status,
-  its changed line ranges and the per-file patch that holds its diff, all under
-  `.lastlight/pr-review/diff/`. Read those. The paths are relative to your
-  working directory — open them exactly as written and never join them onto an
-  absolute path. Re-deriving the range is how a two-dot diff creeps back in and
-  claims commits the author never wrote; if the index says NOT AVAILABLE, derive
-  it yourself as `git diff origin/{{baseBranch}}...HEAD`, three dots.
+| do NOT | why |
+|---|---|
+| **Do NOT read or write any other family's file** | another pass owns each; appending to disjoint files makes a consensus collapse impossible **by construction**, not by instruction |
+| **Do NOT re-derive this PR's range with `git diff` or `git show`.** | it is already staged — see below |
+
+**The range is already resolved.** `.lastlight/pr-review/diff/index.md` lists every changed file with its status, its changed line ranges, and the per-file patch under `.lastlight/pr-review/diff/`. Read those. Paths are relative to your working directory — open them exactly as written, never joined onto an absolute path.
+
+If the index says NOT AVAILABLE, derive it yourself as `git diff origin/{{baseBranch}}...HEAD` — **three dots**.
+
+<!-- Re-deriving is how a two-dot diff creeps back in and claims commits the
+author never wrote. -->
 
 ## What you have: the whole checkout
 
-You are sitting in the complete repository at head, not in a patch file. The
-staged diff is your STARTING POINT, not your scope. Open the changed files
-whole, read the code on either side of every hunk, grep for the callers and
-references the patch never shows you, follow a changed symbol out into the files
-this PR did not touch. That is the work, not a licence: **the defects worth
-finding live in the code the diff touches but does not display.**
+The staged diff is your STARTING POINT, not your scope: open the changed files whole, grep for the callers the patch never shows you, and follow a changed symbol out into files this PR did not touch.
+
+**The defects worth finding live in the code the diff touches but does not display.**
 
 ## Your family: `spec`
 
@@ -58,6 +46,39 @@ sentence the code can falsify is a finding.
 
 Every other "what to check" item in the review rubric is a STANDARDS check; this
 is the other axis, and it is the one a clean standards review cannot answer.
+
+## What closes the mechanism, for `spec`
+
+The `survey-pass` skill's evidence record is shared by every pass; `control_site` is the
+only field whose meaning is yours to fix. For this family the control is a **line in a
+changed file that implements the criterion** — not one that mentions it, and not a promise
+in the description.
+
+<!-- This family's brief is restatement-adjacent: its job is checking the PR's own claims,
+     so the sentence it reaches for first describes the intended change. A criterion the PR
+     MEETS is a clean control with `consequence: null`, which the table grades Minor. The
+     scale of a change is not a severity. -->
+
+**Every row carries an `evidence` object**, in the shape the `survey-pass` skill defines. It is
+how the verdict is computed, and a row without one cannot be ranked by anything — it falls back
+to a guess. Add it to every row you write.
+
+**You do not write `severity` or `needsProbe`.** If the attached block's example row shows them,
+ignore those two fields: they are derived from your evidence, not chosen by you. Everything else
+the attachment prescribes still applies.
+
+Worked example — invented, for SHAPE only, showing the fields this family fills:
+
+```json
+{"id": "spec-001", "obligation": "O-001", "family": "spec", "evidence": {"subject": "acceptance criterion: expired sessions are rejected", "control_site": "src/auth/session.ts:120", "control_text": "if (session.expiresAt < now) return null;", "authority": "binding", "order_ok": true, "cannot_distinguish": "a session expiring during the request and one already expired", "bypass": "the refresh endpoint reads the session before this check runs", "in_changed_hunk": true, "consequence": "a session that expired mid-request is refreshed rather than rejected, extending it indefinitely", "trigger": "input", "crosses_boundary": true, "capability_gained": "holding a session past its stated lifetime"}, "claim": "the criterion is implemented on the read path but the refresh endpoint reaches the session before the check"}
+```
+
+<!-- KEEP EVERYTHING BELOW `{{specObligations}}` BYTE-STABLE. The eval
+     replay (`apps/evals/scripts/micro-survey.ts`) recovers this family's
+     obligations out of a preserved transcript by anchoring on ~160
+     characters either side of the placeholder, so an edit below it makes
+     the splice refuse and `spec` becomes unmeasurable against every
+     archived arm. New prose goes ABOVE this line. -->
 
 Your obligations are **inline below**. This is the only family whose obligations
 do not come from the deterministic code analysis — they are built by the harness
@@ -94,15 +115,9 @@ change's intent is unstated.
 
 ## State the residual risk, not the reassurance
 
-A discharge that concludes "implemented as asked" or "enforced" is a CLAIM,
-not a measurement — and its direction is the one thing no downstream stage can
-flip. Before you write `QUOTE`, name the bar you graded against: what input,
-caller or state would make the claim false, and where you looked for it. Two
-readings can both be true of one quoted line — "the gate exists" and "the gate
-holds for every caller the ask cares about" are different bars — and the ask's
-bar is always the stronger one. If you cannot name the bar, record the
-mechanism with no verdict: the probe and the adjudicator can remove a risk you
-wrote down, but they will never see the one you graded away as fine.
+The `survey-pass` skill carries this rule and its examples. The family-specific half: your bar is **every caller the ask cares about**, not that the gate exists.
+
+Name that bar before you write "correct". In a changed hunk, the falsifiable risk goes in `claim` with `needsProbe: true`.
 
 ## Output
 

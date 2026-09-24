@@ -235,6 +235,73 @@ export function isReviewTrigger(value: unknown): value is ReviewTrigger {
 }
 
 /**
+ * `review.analysis.probes` — what WP4's two phases are allowed to cost.
+ *
+ * See {@link ReviewConfig.analysis.probes} for what each value buys. The three
+ * spellings exist because `prepare` and `falsify` were gated on ONE boolean,
+ * which made "run the oracle" and "install a pull request author's
+ * dependencies into the workspace" the same decision when they are not.
+ */
+export type ProbeMode = "off" | "static" | "full";
+
+/**
+ * Read an operator's `probes` value. **Total**, and every failure direction is
+ * the cheap one.
+ *
+ * The one compatibility property that matters: a bare `true` — every deployment
+ * and every eval overlay that opted into WP4 before this key was tri-stated —
+ * lands on `"static"`, so nothing silently gains an install by upgrading. Only
+ * the literal string `"full"` buys a package manager.
+ *
+ * Everything else, including the truthy strings (`"true"`, `"yes"`, `"1"`),
+ * lands on `"off"`. That preserves the spirit of the `=== true` parsing this
+ * replaces: a value that merely LOOKS enabled must never spend the operator's
+ * compute, and a typo must be inert rather than expensive.
+ */
+export function coerceProbeMode(raw: unknown): ProbeMode {
+  if (raw === "full") return "full";
+  if (raw === "static" || raw === true) return "static";
+  return "off";
+}
+
+/**
+ * What `adjudicate` reads and what it writes. See
+ * {@link ReviewAnalysisConfig.adjudicate}.
+ *
+ * Three literals rather than a boolean because this selects a PHASE SHAPE.
+ * `"jev"` is the third value this type's doc comment predicted — a per-row
+ * System-1 classifier over the same dossier
+ * ([#399](https://github.com/nearform/lastlight/issues/399) idea 2) — built
+ * and measured 2026-09-22: 260 hypotheses across an 8-case arm, 83.6%
+ * agreement with a Sonnet adjudicate call on the identical dossier evidence,
+ * for $0.0053. It **implies** `"dossier"` (the rendering and the typed
+ * `claim`/`category`/`fix` output are unchanged) and additionally runs
+ * `jev-classify`, whose per-hypothesis category is rendered into the dossier
+ * as an ADVISORY line — Sonnet still writes every disposition itself. Not a
+ * replacement of the adjudicator: the measured agreement is weakest exactly
+ * on the rarest, highest-stakes categories (`defect` 33%, `correctness-risk`
+ * 40% recall against Sonnet's own call), so nothing here skips or overrides
+ * Sonnet's judgement yet. `obligationContract` has the same three-value shape
+ * for the same reason (a phase shape, not a flag).
+ */
+export type AdjudicateMode = "legacy" | "dossier" | "jev";
+
+/**
+ * Read an operator's `adjudicate` value. **Total**, and it fails toward the
+ * shipped phase.
+ *
+ * Only the literals `"dossier"` and `"jev"` move a deployment. A bare `true`
+ * does NOT — unlike {@link coerceProbeMode}, where `true` meant something
+ * specific historically, nothing has ever written `adjudicate: true`, so
+ * there is no compatibility to preserve and no reason to let a truthy-ish
+ * value select an unmeasured phase shape.
+ */
+export function coerceAdjudicateMode(raw: unknown): AdjudicateMode {
+  if (raw === "jev") return "jev";
+  return raw === "dossier" ? "dossier" : "legacy";
+}
+
+/**
  * How much automation a trigger mode buys, ascending — the scale the repo-layer
  * clamp takes the minimum on.
  *
@@ -349,6 +416,36 @@ export interface ReviewAnalysisConfig {
    */
   obligationContract: "full" | "minimal";
   /**
+   * What `adjudicate` is handed, and what shape it writes back.
+   *
+   * - `legacy` — the shipped phase. The prompt names the files and the model
+   *   shells out to assemble them, then writes a `tier` and a `confidence` per
+   *   finding.
+   * - `dossier` — a deterministic `dossier` phase renders every record the
+   *   phase needs (`lastlight-facts dossier`) and the harness attaches it, and
+   *   the model writes typed ATTRIBUTES (`claim` / `category` / `fix`) from
+   *   which a pure `computeTier()` derives the tier. `confidence` is not asked
+   *   for.
+   *
+   * **One key for both halves on purpose.** They change the same phase's
+   * measured surface — its input and its output — so shipping them together
+   * costs ONE comparability break with the archive instead of two, and one arm
+   * validates both. Splitting them would buy a second baseline nobody wants.
+   *
+   * What it is fixing, measured on the 8-case probes arm: `adjudicate` spends
+   * **137 bash calls across 8 adjudications** (35 turns / 30 bash on the
+   * stress case) re-deriving records the harness already holds — about a third
+   * of case cost — and then makes its actual judgement at the end of a long,
+   * noisy transcript, which is the condition under which every measured
+   * failure of this phase has happened. See
+   * [#399](https://github.com/nearform/lastlight/issues/399).
+   *
+   * Defaults to `legacy`, and an unrecognised value lands there too: the same
+   * direction every switch in this block fails. No deployment changes
+   * behaviour until an operator asks and an arm has measured it.
+   */
+  adjudicate: AdjudicateMode;
+  /**
    * Which D2 minting arms `lastlight-facts seed` runs, as a comma-list over
    * `all-in-diff` (contract obligations for symbols whose every reference is
    * inside the diff) and `registrations` (security obligations for route/hook
@@ -398,23 +495,36 @@ export interface ReviewAnalysisConfig {
    */
   surveyConcurrency: number;
   /**
-   * WP4 — the `prepare` + `falsify` pair: install dependencies so a probe can be
-   * **run**, then write probes and run them.
+   * WP4 — the `prepare` + `falsify` pair: prepare the probe environment, then
+   * write probes and run them. **Tri-state**, and the middle value is the point.
    *
-   * A second switch under an already-gated block, deliberately. `prepare` is the
-   * phase that decides whether the review workspace has a `node_modules`, and
-   * that one fact changes three things at once: it is what makes a
-   * package-extending `tsconfig` resolve (so `contract` can seed at all on a
-   * normal monorepo), it is the only route to a coverage artifact (so `tests`
-   * can), and it re-arms the memory profile of a *different* phase. Bundling it
-   * into `enabled` would have made "run the surveys" and "install the PR
-   * author's dependencies" the same decision.
+   * One key used to gate both phases, so the only way to reach the oracle was
+   * to buy an install of the PR author's dependencies. That was an accident of
+   * gating, not a design constraint: `review-falsify.md` already reads
+   * `probes/env.json` as a fact and branches on `installed: false` — anything
+   * it cannot run becomes `unprobed` with a stated reason and **survives** to
+   * adjudication. The pass was written for the zero-install world before
+   * anything could put it there.
    *
-   * `false` reproduces WP3 exactly. Default posture is **off in production, on
-   * in the eval overlay** — the ablation rung is what decides whether it ships
-   * on, and that is a number, not a judgement call.
+   * - **`"off"`** — neither phase runs. Reproduces WP3 exactly, and it is the
+   *   shipped default (LD8: the whole pipeline is off out of the box).
+   * - **`"static"`** — both phases run and **nothing is ever installed**.
+   *   `prepare` runs with `--no-install`, so it writes a real `env.json`
+   *   (`install: "skipped"`, `installed` read off the filesystem as always) and
+   *   `falsify` gets the fact its prompt is written against. Seconds of CPU and
+   *   no package manager, no test suite, no `postinstall` from a pull request
+   *   head.
+   * - **`"full"`** — today's behaviour: `prepare` installs. That buys the
+   *   DISCOVERY side rather than the probe side — a `tsconfig` that `extends` a
+   *   bare package specifier resolves, so `contract` can seed on a normal
+   *   monorepo (measured over the 50-PR corpus: tier-1 cases 21 → 5, contract
+   *   deltas 73 → 19 without it) — and it is separately decidable from wanting
+   *   an oracle at all.
+   *
+   * **A bare `true` coerces to `"static"`**, never `"full"`: no deployment may
+   * silently gain an install by upgrading. See {@link coerceProbeMode}.
    */
-  probes: boolean;
+  probes: ProbeMode;
   /**
    * Let `prepare`'s install run the tree's own lifecycle scripts.
    *
@@ -463,6 +573,15 @@ export interface ReviewAnalysisConfig {
   /** Phase budget for the `reconcile` step, in seconds. */
   reconcileTimeoutSeconds: number;
   /**
+   * Phase budget for `falsify`, the oracle, in seconds.
+   *
+   * It had none at all until probes could run without an install, and
+   * `probeRounds` was never a budget: two rounds of an agent that may write
+   * and run code is a count, not a ceiling, and CPU is the constraint this
+   * pipeline is bounded by. A whole-phase ceiling covering every round.
+   */
+  falsifyTimeoutSeconds: number;
+  /**
    * How many rounds `falsify` gets to write and run probes.
    *
    * Two. v3's lesson 3 is the sizing argument: the loop's exit condition is a
@@ -488,27 +607,15 @@ export interface ReviewAnalysisConfig {
    */
   maxInlineComments: number;
   /**
-   * Per-obligation-family confidence bar for an INLINE comment. Below the bar a
-   * finding goes to the body; it is never deleted.
-   *
-   * **Per-family, not global, and that is a measured choice.** AutoCommenter
-   * (Google Critique) found a global threshold catastrophic — at `t = 0.98`,
-   * ~80% of below-threshold predictions were still correct — while per-URL
-   * thresholds raised recall without hurting precision.
-   *
-   * **These numbers are initial guesses to be tuned on the train split, not
-   * measurements.** Record each retune in the eval journal.
+   * **REMOVED (2026-09-21): `internalFloor` and the per-family `thresholds`.**
+   * Both were confidence gates, and `finding.confidence` was measured at AUROC
+   * 0.228 [0.171, 0.299] over 516 findings from 20 preserved case-runs — a
+   * strong signal pointing the WRONG way. They also cost nothing to remove:
+   * across the preserved archive not one gold finding was lost to
+   * `below-floor` or `below-threshold`. An overlay still carrying either key
+   * is accepted and ignored (`config.ts` warns). See `rankOf` in
+   * `apps/server/src/engine/github/review-poster.ts`.
    */
-  thresholds: Record<string, number>;
-  /**
-   * Below this confidence a finding is recorded but not posted at all.
-   *
-   * The one tier that costs recall, so it is deliberately low and deliberately
-   * auditable. A finding carrying NO confidence is never affected — see
-   * `tierFindings`; treating an absent field as zero would silently delete every
-   * finding from any prompt that has not been taught to self-score.
-   */
-  internalFloor: number;
   /**
    * Cap on findings rendered into the review BODY (the "Additional findings"
    * section) — the body-side sibling of `maxInlineComments`, and the one
@@ -521,9 +628,8 @@ export interface ReviewAnalysisConfig {
    *   inline lands in the body.
    * - `0` — no overflow at all: nothing tiers to body; anything that would
    *   have gone there is recorded `internal` instead.
-   * - `N > 0` — at most N body findings, ranked by severity × confidence
-   *   exactly as the inline overflow ranks (an absent confidence ranks as
-   *   1.0, so an unscored document degenerates to severity order).
+   * - `N > 0` — at most N body findings, ranked by severity exactly as the
+   *   inline overflow ranks.
    *
    * **`5` is the shipped default, and the number it replaced is the reason.**
    * `0` was measured rather than assumed: under the production
@@ -540,6 +646,19 @@ export interface ReviewAnalysisConfig {
    * explicitly instead of inheriting whatever it currently is.
    */
   maxBodyComments: number | null;
+  /**
+   * The TypeSafe model id `jev-classify` calls, under `adjudicate: "jev"`.
+   * `null` ⇒ the CLI's own default (`TYPESAFE_MODEL` env, else `jev-latest`) —
+   * kept out of the `models:` map because TypeSafe is a separate provider
+   * from the `provider/model` chat models that map resolves, and conflating
+   * them would let an unrelated key silently redirect a model call nothing
+   * else reads.
+   */
+  jevModel: string | null;
+  /** Phase budget for `jev-classify`, in seconds. Cheap and fast per call (a
+   * TypeSafe `systemOne` round trip is ~100ms), but the phase makes one call
+   * per hypothesis and a case can carry dozens. */
+  jevTimeoutSeconds: number;
 }
 
 /**
@@ -683,7 +802,9 @@ export type ReviewAnalysisDurationKey =
   | "coverageTimeoutSeconds"
   | "factsTimeoutSeconds"
   | "seedTimeoutSeconds"
-  | "reconcileTimeoutSeconds";
+  | "reconcileTimeoutSeconds"
+  | "falsifyTimeoutSeconds"
+  | "jevTimeoutSeconds";
 
 /**
  * A {@link ReviewConfig} WITHOUT its duration leaves (`triage.timeoutSeconds`
@@ -751,25 +872,22 @@ export function defaultReviewPolicy(): ReviewPolicy {
       // remains the opt-in telemetry arm (discharge codes + the
       // clean-discharge demotion at the posting boundary).
       obligationContract: "minimal",
+      // `dossier` measured 2026-09-22 (mechanism confirmed; posted-recall
+      // guardrail inconclusive on n=1 — repeats pending). `jev` built and
+      // screened the same day (83.6% agreement with Sonnet, $0.0053) but not
+      // yet compared against gold. Neither has an arm behind it yet. See the
+      // field's doc.
+      adjudicate: "legacy",
       // Both D2 rules — the measured shipped shape. See the field's doc.
       mint: "all-in-diff,registrations",
       surveyPasses: 6,
       surveyConcurrency: 6,
-      probes: false,
+      probes: "off",
       probeLifecycleScripts: false,
       probeTypecheck: false,
       probeCoverage: false,
       probeRounds: 2,
       maxInlineComments: 10,
-      thresholds: {
-        contract: 0.35,
-        enforcement: 0.35,
-        security: 0.3,
-        state: 0.5,
-        tests: 0.6,
-        spec: 0.45,
-      },
-      internalFloor: 0.15,
       // A bounded body overflow. Cap 0 measured better under the production
       // Sonnet adjudicator (precision 0.263→0.492 / F1 0.362→0.479) but that
       // win is adjudicator-shape-conditional — under Haiku-everywhere the body
@@ -778,6 +896,9 @@ export function defaultReviewPolicy(): ReviewPolicy {
       // compromise; `null` restores the legacy unlimited funnel. See the
       // field's doc.
       maxBodyComments: 5,
+      // `null` ⇒ jev-classify's own default (TYPESAFE_MODEL env, else
+      // jev-latest). Inert unless `adjudicate: "jev"`.
+      jevModel: null,
     },
   };
 }

@@ -646,6 +646,18 @@ class InProcessSandbox implements Sandbox {
       cwd: opts.agentCwd,
       noSession: true,
       skillPaths: opts.skillDirs,
+      // A phase's `skills:` key is the WHOLE list, not a starting point.
+      // Without this, Pi's own discovery runs and every skill that happens to
+      // be on the host joins the catalogue: measured 2026-09-22, all 69 agent
+      // sessions of an 8-case eval arm carried the operator's personal
+      // `~/.agents/skills` (writing-great-skills, tdd, to-prd, triage, …) into
+      // a `pr-review` reviewer that had declared exactly `[survey-pass]`. That
+      // makes a measurement machine-dependent and puts unreviewed instructions
+      // in front of a `repo-write` agent. Same shape as `--no-web-search`
+      // below/in docker.ts: an ambient capability is ON unless switched off.
+      // Pi loads explicit `skillPaths` even with this set, so the declared
+      // list still arrives — it is the ONLY thing that arrives.
+      noSkills: true,
       allowedHttpHosts,
       webSearch: opts.webSearch === true,
       webSearchProvider: opts.webSearchProvider,

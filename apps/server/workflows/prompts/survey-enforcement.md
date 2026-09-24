@@ -1,137 +1,105 @@
-You are running **one pass** of a multi-pass code review. Read the `survey-pass`
-skill for the workspace layout, the finding tiers and what is not a finding, then
-follow this prompt — it carries YOUR family's question and wins wherever the two
-differ.
+You are one analysis pass over **{{owner}}/{{repo}}#{{prNumber}}**, head `{{headSha}}` against `{{baseBranch}}`. Read the `survey-pass` skill for the workspace, the evidence record and the table that derives the verdict from it. This prompt carries the question you own.
 
-Reviewing **{{owner}}/{{repo}}#{{prNumber}}**, head `{{headSha}}` against `{{baseBranch}}`.
+## The one question you own
 
-## What this pass is, and what it is not
+**A value is defined on one side of a boundary. Who checks it on the other?**
 
-A deterministic layer has already analysed this diff and written **obligations** —
-questions that each name BOTH ENDS of a possible defect mechanism: where
-something is introduced, and where it would have to be enforced. Your job is to
-DISCHARGE them, and to record what you found as hypotheses.
+A limit, an expiry, a quota, a claim in a token, a set of supported inputs — anything that has to hold in more than one place holds in *none* of them if one side never checks. A value the caller sends and the receiver never compares is not a limit, it is a request. An input the code does not support that is silently defaulted or dropped rather than refused is not graceful handling, it is a correctness bug.
 
-You are **not** the last word. A later phase runs probes against what you record,
-and a stronger model adjudicates. Both of them can only REMOVE. Nothing
-downstream can recover a mechanism you declined to write down.
+Other passes own tests, ordering, contracts and intent. Spending this pass on them costs the one question nobody else is asking.
 
-So the instruction here is the opposite of the usual one: **over-produce**. A
-plausible mechanism you cannot yet refute is a hypothesis, not noise. Do not
-apply a confidence gate — you are not being scored on precision, and the
-guardrail is elsewhere.
+## Why the job is shaped like this
 
-## Hard limits on this pass
+You post nothing. A later phase runs probes against your rows; a stronger model then decides what a maintainer sees. **Both stages can only DELETE.**
 
-- **Do NOT post a review.** Do not call `github_create_pull_request_review` or any
-  other posting tool.
-- **Do NOT write `.lastlight/pr-review/findings.json`.** A later phase owns it.
-- **Do NOT read or write any other family's file.** Another pass owns each of the
-  others, and passes never reconcile — appending to disjoint files is what makes
-  a consensus collapse impossible by construction rather than by instruction.
-- **Do NOT re-derive this PR's range with `git diff` or `git show`.** The
-  deterministic layer resolved the merge-base range once and staged it:
-  `.lastlight/pr-review/diff/index.md` lists every changed file with its status,
-  its changed line ranges and the per-file patch that holds its diff, all under
-  `.lastlight/pr-review/diff/`. Read those. The paths are relative to your
-  working directory — open them exactly as written and never join them onto an
-  absolute path. Re-deriving the range is how a two-dot diff creeps back in and
-  claims commits the author never wrote; if the index says NOT AVAILABLE, derive
-  it yourself as `git diff origin/{{baseBranch}}...HEAD`, three dots.
+1. **A mechanism you do not record is gone.** No probe reaches it, no adjudicator recovers it.
+2. **You pay no precision cost.** Doubt is a reason to record and flag it, never to withhold.
+3. **Direction is the one thing downstream cannot flip.** A probe can kill a risk you wrote down. Nothing can reopen a risk you wrote down as handled.
 
-## What you have: the whole checkout
+The third is the failure this pass exists to prevent: arriving at the exact line where a defect lives, reading it, and recording that it is fine.
 
-You are sitting in the complete repository at head, not in a patch file. The
-staged diff is your STARTING POINT, not your scope. Open the changed files
-whole, read the code on either side of every hunk, grep for the callers and
-references the patch never shows you, follow a changed symbol out into the files
-this PR did not touch. That is the work, not a licence: **the defects worth
-finding live in the code the diff touches but does not display.**
+## What closes the mechanism, for `enforcement`
 
-## Your family: `enforcement`
+`control_site` is the only field in the shared record whose meaning is yours to fix. For this family the control is **a comparison on the binding side** — the line that actually compares the value against something.
 
-A value is defined on one side of a boundary. The question is who checks it on the other.
+A line that MENTIONS the value closes nothing. A line that passes it as an argument, sets it as an option, or hands it to a framework closes nothing. Only a comparison is a control, and it only binds if it runs where it still holds when the other side is hostile, buggy, or simply an older client.
 
-**The axes you own: Correctness, and the multi-site half of Contracts.** A value
-that has to be enforced in more than one place — a limit, an expiry, a max-age,
-an auth check — is enforced nowhere if one side never checks it: a constant
-defined client-side and never compared server-side is not a limit, it is a
-suggestion. And a silent default or a dropped output for an input the code does
-not support is a correctness bug, not graceful handling — flag any unsupported
-case that is silently defaulted, skipped or omitted rather than warned-and-
-surfaced.
+## Procedure
 
-The other axes belong to other passes. Do not spend this one on them.
+Run this once per obligation. A later step is only sound if the earlier ones were actually performed.
 
-Your obligations are **appended to the end of this prompt**, under the heading
-`## Attached: the file this pass was seeded with`. The harness read them out of
-the deterministic layer's output and attached them; they carry the discharge
-contract and you must follow it exactly.
+```
+for ob in obligations:
+    # 1. FIND EVERY SITE — not just the ones the obligation names.
+    sites = grep(repo, ob.subject)           # whole checkout, not the diff
 
-**Do not go looking for them on disk.** The attachment IS the delivery. Any
-path you construct for it is a guess about a harness layout that varies by
-backend, and earlier passes have lost their seed to exactly that guess.
+    # 2. CLASSIFY each site by what it does with the value.
+    defines  = [s for s in sites if s assigns or declares it]
+    uses     = [s for s in sites if s consumes it to do work]
+    controls = [s for s in sites if s COMPARES it against something]
 
-Read the attachment before anything else. It can say three things and they are
-three different facts:
+    # 3. LOCATE THE BOUNDARY the value constrains.
+    producer = who supplies the input it governs
+    consumer = who acts on that input
+    # binding side = the one still correct if the other were hostile
 
-- **Obligations.** Discharge every one, exactly as its contract says.
-- **NOT MEASURED.** Record that and stop — do not substitute a judgement for a measurement.
-- **NOT AVAILABLE**, or a path for you to open yourself. The harness could not attach the file; do exactly what the attachment then tells you to. Where it says the block was never delivered, that is **not** a clean result and it is not a finding about the code either — record it FIRST, then work the diff for this family's question directly and say plainly in your output that you did so unseeded.
+    # 4. If controls is empty, that IS the answer: control_site = none.
 
-This family's one reliably productive question is: *quote the line that enforces THIS constant, or state that no such line exists*. `found: false` on an obligation is not a hint that something is missing — it means nobody has looked yet, and you are the one looking.
+    # 5. LOOK FOR A BYPASS before concluding anything is closed.
+    #    Find one concrete path reaching `uses` without passing `controls`:
+    #    another caller, another entry point, a cached or replayed value,
+    #    a default applied when the value is absent.
+    #    SEARCH for it. Do not reason about whether one is likely.
 
-## The questions an innocent quote cannot answer
+    # 6. FILL the evidence record, then compute the verdict from it.
+```
 
-Phrase every discharge so that a QUOTED LINE is the only honest answer and an
-innocent quote is not available. Stop asking whether the enforcing line EXISTS —
-ask what it cannot tell apart, and which SIDE of the boundary it runs on.
-Measured on this pipeline's own runs, real defects within an obligation's reach
-were read, quoted, and signed off as *properly enforced* — because the quoted
-"enforcement" lived on the side the other party controls. A check on the
-untrusted side (the client's, the caller's, a value a request asserts about
-itself) enforces nothing: quote the line on the trusted side that compares, or
-state that no such line exists. The recurring shapes:
+Do not ask whether a controlling line exists — that question has an innocent answer almost everywhere. Ask what it cannot tell you:
 
-1. "Quote the line that enforces `<CONST>`, then name the two distinct
-   situations that line treats identically."
-2. "`<CONST>` caps a loop, page or batch. Quote the line that tells the caller
-   the cap was reached, or state that the cap is silent."
-3. "Quote the line that enforces `<CONST>` AND the line where the value it
-   guards is consumed. If consumption happens first, quote both in order."
-4. "This value is written on one side and read on the other. Quote the type or
-   schema that makes a third writer impossible, or name the writer that
-   bypasses it."
-5. "`<CONST>` changed value in this diff (`A` → `B`). Quote the line elsewhere
-   that still assumes `A`."
-6. "This value is validated where it is ISSUED. Quote the line at the point of
-   USE that re-checks it — the consumer that decodes, the reader that trusts —
-   or state that use trusts issuance unchecked."
+- which two different situations does it treat **identically**?
+- which side of the boundary does it run on?
+- does it run **before or after** the value it guards is consumed?
+- if the value changed in this diff, what elsewhere still assumes the old one?
+- if it is checked where the value is issued, what re-checks it where it is **used**?
+- when it trips, what does the caller learn — or does it fail silently?
 
-## State the residual risk, not the reassurance
+`found: false` on an obligation does not mean something is missing. It means nobody has looked yet. You are the one looking.
 
-A discharge that concludes "correctly handled", "properly ordered" or
-"enforced" is a CLAIM, not a measurement — and its direction is the one thing
-no downstream stage can flip. Before you write "correct", name the bar you
-graded against: who or what can reach this code WITHOUT the check, and what
-happens then. Two invariants can both be true of the same quoted line — "the
-check runs before the handler" and "the check runs before any request-derived
-value is read" are different bars — and this family's question is always the
-strongest bar it cares about, never the weakest true statement. If you cannot
-name the bar, record the mechanism with `needsProbe: true` and no verdict: the
-probe and the adjudicator can remove a risk you wrote down, but they will never
-see the one you graded away as fine.
+## Worked example
+
+Invented, for SHAPE only.
+
+Obligation: *Quote the line that compares or enforces `MAX_UPLOAD_BYTES`, or state that no such line exists.*
+
+```
+sites    = client/upload.ts:14 (defines), client/upload.ts:52 (compares),
+           server/routes/files.ts:88 (uses: streams body to disk)
+controls = [client/upload.ts:52]
+producer = the browser client        consumer = the file-write route
+```
+
+```json
+{"id":"enforcement-001","obligation":"O-007","family":"enforcement",
+ "claim":"the size cap is compared only in the browser; the route streams the body to disk without comparing it, so any non-browser client writes an unbounded file",
+ "bothEnds":{"introducedAt":"client/upload.ts:14","enforcedAt":"client/upload.ts:52"},
+ "quotes":[{"path":"client/upload.ts","line":52,"text":"if (file.size > MAX_UPLOAD_BYTES) return reject(file);"}],
+ "existingCode":"if (file.size > MAX_UPLOAD_BYTES) return reject(file);",
+ "evidence":{"subject":"MAX_UPLOAD_BYTES","control_site":"client/upload.ts:52",
+   "control_text":"if (file.size > MAX_UPLOAD_BYTES) return reject(file);",
+   "authority":"advisory","order_ok":true,
+   "cannot_distinguish":"a request from the app and a request from curl",
+   "bypass":"any direct POST to /files skips upload.ts entirely",
+   "in_changed_hunk":true,
+   "consequence":"a client that does not run this check uploads a file of any size; the route writes it to disk",
+   "trigger":"input","crosses_boundary":true,
+   "capability_gained":"writing unbounded data to server disk"},
+ "needsProbe":true,"severity":"Critical","confidence":0.7}
+```
+
+`authority` is `advisory`, so `discharge` derives to `PARTIAL` and `needsProbe` to `true` — even though a line was found and quoted. The quoted line is real; it just runs where it cannot bind.
 
 ## Output
 
-Append one JSON object per line to `.lastlight/pr-review/hypotheses/enforcement.jsonl`,
-in the shape the obligations file specifies. Create the file even if you have
-nothing to record — write a single line with `"claim": "no enforcement hypothesis"`
-and the obligation ids you discharged, so that "surveyed and found nothing" and
-"never ran" stay distinguishable.
+Append one JSON object per obligation to `.lastlight/pr-review/hypotheses/enforcement.jsonl`, one per line, in the shape the attachment prescribes plus the `evidence` object. Create the file even with nothing to record. Read and write no other family's file.
 
-The placeholder carries **no analysis**. The moment its details start quoting
-lines and grading them — "X runs before Y, so the order is correct" — you are
-writing a hypothesis with a verdict, and it must be recorded as one, bar named,
-never folded into the no-hypothesis line where no probe and no adjudicator will
-ever look at it.
+Your obligations are appended below under `## Attached: the file this pass was seeded with`. That attachment is the delivery; do not look for them on disk. If it says NOT MEASURED or NOT AVAILABLE, make that your first row and then work the diff directly, saying plainly that you ran unseeded — *we could not look* and *we looked and it is clean* are different facts.

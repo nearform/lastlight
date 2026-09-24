@@ -6,6 +6,7 @@
  * via `readdirSync` — have to be pre-baked into plain files here:
  *
  *   /api/index            ← buildIndex(eval-results)  (the filesystem scan)
+ *   /api/micro            ← buildMicroIndex(eval-results) (micro-survey reports)
  *   /data/<tier>/<run>/…  ← a verbatim copy of eval-results/
  *
  * plus the dashboard SPA shell at the root. The result (`dist-site/`) is served
@@ -23,7 +24,7 @@ import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { buildIndex } from "../src/report.js";
+import { buildIndex, buildMicroIndex } from "../src/report.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dashboardDist = join(root, "dashboard", "dist");
@@ -54,7 +55,16 @@ mkdirSync(join(out, "api"), { recursive: true });
 const index = buildIndex(resultsRoot, new Date().toISOString());
 writeFileSync(join(out, "api", "index"), JSON.stringify(index));
 
+// 4) The /api/micro companion — micro-survey replays. Baked for the same reason
+// as the index: no filesystem at the edge. An empty list here is the honest
+// answer for a results tree with no `micro-survey/` directory.
+const micro = buildMicroIndex(resultsRoot, new Date().toISOString());
+writeFileSync(join(out, "api", "micro"), JSON.stringify(micro));
+
 const tiers = index.tiers.length;
 const runs = index.tiers.reduce((n, t) => n + t.runs.length, 0);
 const src = liveHasRuns ? "eval-results/" : "sample-results/ (vendored)";
-console.log(`Built static site → dist-site/  (${tiers} tier-combos, ${runs} runs from ${src})`);
+console.log(
+  `Built static site → dist-site/  (${tiers} tier-combos, ${runs} runs, ` +
+    `${micro.reports.length} micro-survey reports from ${src})`,
+);

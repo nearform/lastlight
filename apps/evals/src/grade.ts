@@ -441,6 +441,61 @@ const INTERNAL_MATCH_SYSTEM =
   "report of the defect. " +
   'Output ONLY JSON: {"matches":[{"finding":<finding index>,"gold":<gold index>}]}';
 
+/**
+ * The internal-recall CONFIRM prompt — a second, per-pair pass over what
+ * {@link INTERNAL_MATCH_SYSTEM} credited.
+ *
+ * Audited 2026-09-21 over both arms of the probe pair (`docs/plans/probe-oracle.md`
+ * §"The blocker on every per-gold number"; journal §"Rung 5"): **11 of 30
+ * credited pairs were wrong**, in two even halves.
+ *
+ *   - *Polarity* (5) — a VERIFICATION REPORT credited to the gold it refutes.
+ *     `INTERNAL_MATCH_SYSTEM` already forbids this in prose and still does it,
+ *     so the clause is measured-insufficient; asking again is not the fix, and
+ *     the fix here is not another clause but a different QUESTION. MATCH ranks
+ *     candidates and must choose SOMETHING for every gold it can; CONFIRM is
+ *     asked one closed question about one pair and may answer no to all of them.
+ * The line between a verification report and a DISMISSAL is drawn deliberately,
+ * and it is the one judgement call in here. `1667` gold #1 (auth runs after
+ * body validation, so an unauthenticated caller gets a 400 before a 401) was
+ * generated as *"preValidation rejects unauthenticated callers before
+ * bearerTokenAuth can … recording as a dismissal: there is no unauthenticated
+ * action this enables"* — the exact mechanism, correctly described, then talked
+ * out of. That is a DISCOVERY the pipeline withheld, which is the one thing
+ * internal recall exists to separate from never finding it at all, so it counts
+ * as a match. A first pass of this prompt rejected it, which would have folded
+ * a triage failure back into the discovery ceiling — the collapse the whole
+ * instrument was built to undo.
+ *
+ *   - *Wrong subject* (6) — the transposition. Where two golds discuss the same
+ *     subsystem, MATCH assigns between them on topic, and a finding that is
+ *     precisely gold #4's claim lands on gold #3 while #4 reads MISS. Judged
+ *     pair-at-a-time, against the gold's actual claim, that is visible.
+ *
+ * Kept OUT of `INTERNAL_MATCH_SYSTEM` rather than folded into it. The match
+ * prompt is pinned by every back-filled run in the archive; this is additive, so
+ * a corrected number and the number it corrects both exist, and the archive can
+ * be re-judged without re-running MATCH (whose reply is stored as
+ * `internalGold`).
+ */
+const INTERNAL_CONFIRM_SYSTEM =
+  "You check, one pair at a time, whether a code-review finding really reports a specific known defect. " +
+  "For each pair you are given the GOLD (a defect a human reviewer confirmed is real) and a FINDING. " +
+  'Answer "asserts": true ONLY if the finding CLAIMS THAT SAME THING IS WRONG. Specifically, answer false when: ' +
+  "(a) the finding says the mechanism is correct, verified, consistent, properly enforced, intentional, documented, " +
+  "safe, required, backward-compatible, or already fixed — a verification report about the right code is NOT a report " +
+  "of the defect, however exactly it names the same file, constant, function or mechanism; " +
+  "(b) the finding merely describes behaviour, or raises a DIFFERENT defect in the same file, subsystem, feature or " +
+  "change — same topic is not the same claim; " +
+  "(c) the finding's concern would be fully addressed without fixing the gold's defect, or vice versa. " +
+  'Answer "asserts": true, however, when the finding states the same thing is wrong and then argues it is ' +
+  "low-impact, out of scope, pre-existing, already mitigated, or not worth acting on. That is a disagreement " +
+  "about severity, not about what the code does — the finding identified the defect, and whether it was then " +
+  "said out loud is a separate question this check does not ask. The false cases above are findings that " +
+  "assert the code is CORRECT, or that never state the gold's defect at all. " +
+  "Judge each pair independently and on substance, not wording. It is expected and correct for many pairs to be false. " +
+  'Output ONLY JSON: {"pairs":[{"pair":<pair index>,"asserts":<true|false>}]}';
+
 /** Cap on the PR diff fed to the judge (diff-aware mode). */
 const DIFF_CAP = 20_000;
 /** Prefix a judge user turn with the PR diff for context, when provided. */
@@ -749,9 +804,24 @@ function acceptPairs(matches: { finding: number; gold: number }[], nFindings: nu
 export interface InternalRecallGrade {
   /** `goldToFinding[j]` — the index into the supplied findings that matched gold
    * `j`, or `null`. Same index space the caller passed in, so a match can be
-   * attributed back to the finding's family and tier. */
+   * attributed back to the finding's family and tier. CONFIRM-filtered when a
+   * confirm pass ran (see {@link matchedPreConfirm}). */
   goldToFinding: (number | null)[];
   matched: number;
+  /** MATCH's count BEFORE the confirm pass dropped anything.
+   *
+   * Presence is the marker that `matched` is confirm-filtered — every run
+   * recorded before 2026-09-21 has none, and its `matched` is a raw MATCH count
+   * that the audit puts ~⅓ high. Absent also when the confirm pass was switched
+   * off or had nothing to check. */
+  matchedPreConfirm?: number;
+  /** The pairs CONFIRM rejected, in gold order — kept so a rejection can be
+   * eyeballed rather than taken on faith, and so the correction is reversible. */
+  confirmRejected?: { gold: number; finding: number }[];
+  /** The confirm pass did not run or did not parse, and why. `matched` is then
+   * MATCH's raw count and carries MATCH's known error rate — stamped, not
+   * silently trusted. */
+  confirmUngraded?: string;
   /** The judge failed. `matched` is then 0 and must NOT be read as a result —
    * an ungraded internal pass is not an internal recall of zero. */
   error?: string;
@@ -770,16 +840,25 @@ export interface InternalRecallGrade {
  * is how "the filters kept their hands off gold" and "the boundary is inert"
  * were both believed at once.
  *
- * **One judge call, not two.** The EXTRACT step exists to distil free-text prose
- * into discrete findings; `findings.json` is already a structured list, so this
- * runs only MATCH. That is what makes it ~$0.01 a case and affordable to
- * back-fill across every preserved run.
+ * **No EXTRACT step.** That step exists to distil free-text prose into discrete
+ * findings; `findings.json` is already a structured list. So this is MATCH,
+ * then a CONFIRM pass over what MATCH credited
+ * ({@link INTERNAL_CONFIRM_SYSTEM}) — two small calls, ~$0.02 a case, still
+ * cheap enough to back-fill across every preserved run.
+ *
+ * CONFIRM defaults ON because the 2026-09-21 audit measured raw MATCH at 11
+ * wrong credits in 30, concentrated in exactly the withheld findings this
+ * instrument exists to count (`internal`-tier credits audited 1 correct in 10).
+ * `confirm: false` reproduces the pre-2026-09-21 grader, which is what
+ * re-judging an archived run for comparison needs.
  */
 export async function gradeInternalRecall(opts: {
   gold: GoldComment[];
   findings: ExtractedFinding[];
   judgeModel?: string;
   diff?: string;
+  /** Default `true`. See above. */
+  confirm?: boolean;
 }): Promise<InternalRecallGrade | undefined> {
   const { gold, findings } = opts;
   // Nothing to measure. Distinct from "measured zero", hence `undefined`.
@@ -815,7 +894,55 @@ export async function gradeInternalRecall(opts: {
   const findingToGold = acceptPairs(matches, findings.length, gold.length);
   const goldToFinding: (number | null)[] = gold.map(() => null);
   for (const [f, g] of findingToGold) goldToFinding[g] = f;
-  return { goldToFinding, matched: findingToGold.size };
+  const matchedRaw = findingToGold.size;
+  if (opts.confirm === false || matchedRaw === 0) return { goldToFinding, matched: matchedRaw };
+
+  // ── CONFIRM ───────────────────────────────────────────────────────────────
+  // Re-ask, one credited pair at a time, whether the finding asserts the gold's
+  // defect. Pairs are numbered here and referenced by number in the reply, so a
+  // model that renumbers or reorders cannot silently move a verdict onto a
+  // different pair.
+  const pairs = [...findingToGold].map(([finding, gold]) => ({ finding, gold }));
+  const confirmUser = JSON.stringify({
+    pairs: pairs.map((p, i) => ({
+      pair: i,
+      gold: gold[p.gold]?.description ?? "",
+      finding: findings[p.finding]?.description ?? "",
+    })),
+  });
+  let verdicts: { pair: number; asserts: boolean }[];
+  try {
+    const { parsed } = await judgeParsed<{ pairs?: { pair: number; asserts: boolean }[] }>(
+      model,
+      INTERNAL_CONFIRM_SYSTEM,
+      withDiffContext(diff, "resolve what the finding and the gold issue each claim about the code", confirmUser),
+      (p) => Array.isArray(p?.pairs),
+    );
+    if (!parsed?.pairs) throw new Error("unparseable confirm reply");
+    verdicts = parsed.pairs;
+  } catch (err) {
+    // An unrun CONFIRM leaves MATCH's raw count standing — the alternative,
+    // dropping every pair, would read as "the pipeline found nothing". Stamped,
+    // so no reader takes it for a confirmed number.
+    return { goldToFinding, matched: matchedRaw, confirmUngraded: `internal confirm: ${(err as Error).message}` };
+  }
+
+  // A pair the reply never mentions is UNCONFIRMED, not confirmed: the whole
+  // point is that CONFIRM may reject everything, so silence has to fall the
+  // same way as "no".
+  const asserted = new Set(verdicts.filter((v) => v.asserts === true).map((v) => v.pair));
+  const rejected: { gold: number; finding: number }[] = [];
+  pairs.forEach((p, i) => {
+    if (asserted.has(i)) return;
+    goldToFinding[p.gold] = null;
+    rejected.push(p);
+  });
+  return {
+    goldToFinding,
+    matched: matchedRaw - rejected.length,
+    matchedPreConfirm: matchedRaw,
+    ...(rejected.length ? { confirmRejected: rejected } : {}),
+  };
 }
 
 // ── Execution grade (SWE-bench resolved) ────────────────────────────────────

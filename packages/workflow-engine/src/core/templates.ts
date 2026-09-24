@@ -6,6 +6,7 @@
  *   {{slugify varName}}    — slugify helper applied to a variable
  *   {{branchUrl file}}     — generate a GitHub branch URL for a file in issueDir
  *   {{#if varName}}...{{/if}} — conditional blocks (no nesting, truthy check)
+ *   <!-- … -->              — MAINTAINER NOTE: stripped, never sent to the model
  */
 
 export interface TemplateContext {
@@ -154,7 +155,23 @@ export function lookupContextKey(ctx: TemplateContext, key: string): unknown {
 export function renderTemplate(template: string, ctx: TemplateContext): string {
   let result = template;
 
-  // 0. Phase output substitution: ${phaseName.output} → phaseOutputs[phaseName]
+  // 0. Maintainer notes: `<!-- … -->` is stripped and never reaches the model.
+  //
+  //    A prompt rule is only half a rule without the reason it exists — strip
+  //    that and the next editor reverts it. But the reason is for the NEXT
+  //    EDITOR, not for the model: it is measurement history, and paying context
+  //    for it on every phase of every run is a real cost. So the comment is the
+  //    seam: it survives in the file and in `git blame`, and costs zero tokens.
+  //
+  //    Stripped FIRST, so a note may quote `{{placeholders}}` without them
+  //    rendering. Safe to apply to every template: no `workflows/prompts/*.md`
+  //    has ever contained one. Skill bundles are UNAFFECTED — the agent reads
+  //    those from disk with its own tools, never through here — which is what
+  //    keeps the security-review `<!-- fp:… -->` markers, a real part of that
+  //    skill's output contract, working.
+  result = result.replace(/<!--[\s\S]*?-->\n?/g, "");
+
+  // 1. Phase output substitution: ${phaseName.output} → phaseOutputs[phaseName]
   if (ctx.phaseOutputs) {
     const phaseOutputs = ctx.phaseOutputs;
     result = result.replace(/\$\{(\w+)\.output\}/g, (_match, phaseName: string) => {
@@ -166,7 +183,7 @@ export function renderTemplate(template: string, ctx: TemplateContext): string {
 
   const walkKey = (key: string): unknown => lookupContextKey(ctx, key);
 
-  // 1. Conditional blocks: {{#if varName}}...{{/if}} (supports dot notation).
+  // 2. Conditional blocks: {{#if varName}}...{{/if}} (supports dot notation).
   //    Key segments allow hyphens so phase/model keys like `pr-fix` resolve
   //    (e.g. {{models.pr-fix}}); \w alone would leave them unrendered.
   result = result.replace(
@@ -185,14 +202,14 @@ export function renderTemplate(template: string, ctx: TemplateContext): string {
     }
   );
 
-  // 2. Slugify helper: {{slugify varName}}
+  // 3. Slugify helper: {{slugify varName}}
   result = result.replace(/\{\{slugify\s+(\w+)\}\}/g, (_match, varName) => {
     const val = ctx[varName];
     if (val === undefined || val === null) return "";
     return slugify(String(val));
   });
 
-  // 3. Branch URL helper: {{branchUrl filename}}
+  // 4. Branch URL helper: {{branchUrl filename}}
   // Generates: https://github.com/{owner}/{repo}/blob/{branch}/.lastlight/issue-{N}/{file}
   result = result.replace(/\{\{branchUrl\s+(\S+)\}\}/g, (_match, file) => {
     const encoded = encodeURIComponent(ctx.branch);
@@ -231,7 +248,7 @@ export function renderTemplate(template: string, ctx: TemplateContext): string {
     return `${base}/admin/?approval=${encodeURIComponent(String(ctx.approvalId))}`;
   });
 
-  // 4. Simple variable substitution: {{varName}} and {{a.b.c...}}.
+  // 5. Simple variable substitution: {{varName}} and {{a.b.c...}}.
   //    Dotted access first checks top-level ctx, then falls back to
   //    ctx.phaseOutputs[parent] for the first segment so YAML phases can
   //    emit structured output via `output_var` and downstream prompts can

@@ -246,8 +246,14 @@ export type {
   HypothesisRow,
   HypothesisSet,
 } from "./hypotheses.js";
-export { checkProbes, readJsonl, renderProbeCheck, requiresProbe } from "./probes.js";
-export type { CheckProbesOptions, CheckProbesResult, ProbeGapKind } from "./probes.js";
+export { checkProbes, readJsonl, readProbeAnswers, renderProbeCheck, requiresProbe } from "./probes.js";
+export type { CheckProbesOptions, CheckProbesResult, ProbeAnswer, ProbeGapKind } from "./probes.js";
+
+export { buildEntries, locateExcerpt, pathOfRow, renderAdjudicationDossier } from "./adjudicate-render.js";
+export type { DossierEntries, DossierEntry, DossierOptions, DossierQuote, ExcerptLocation } from "./adjudicate-render.js";
+
+export { classifyHypotheses, jevClassifyPath, readJevClassifyDocument, writeJevClassifyDocument } from "./jev-classify.js";
+export type { JevClassifyDocument, JevClassifyOptions, JevResult } from "./jev-classify.js";
 
 export {
   buildFindingsLedger,
@@ -282,3 +288,5 @@ export { noopLogger } from "./log.js";
 export type { LoggerPort } from "./log.js";
 
 export * from "./schema.js";
+
+export { deriveVerdict, hasEvidence, severityOf, needsProbeOf, type SurveyEvidence, type SurveyVerdict, type Discharge, type Severity } from "./survey-verdict.js";

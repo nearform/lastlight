@@ -18,12 +18,15 @@ import type { Message } from "../timeline/message";
 export interface SessionLane {
   /** `""` for lines the shim wrote without one (bash phases, harness notices). */
   sessionId: string;
-  /** Display name — a harness-recorded branch name when one can be confirmed,
-   * else a positional fallback. See {@link deriveLaneLabel}. */
+  /** Display name — the session's own `phase` stamp reduced to something
+   * readable (`survey_branch_contract` → `contract`, `falsify_iter_1` →
+   * `falsify`), else a mined branch name, else a positional fallback. See
+   * {@link deriveLaneLabel}. */
   label: string;
-  /** True when {@link label} is a real name read off the session's own opening
-   * prompt, false when it is a positional placeholder. Drives the "named vs
-   * guessing" affordance — a reader should be able to tell them apart. */
+  /** True when {@link label} is a real name — stamped by the shim, or read off
+   * the session's own opening prompt — and false when it is a positional
+   * placeholder. Drives the "named vs guessing" affordance — a reader should be
+   * able to tell them apart. */
   named: boolean;
   /** `command` for a deterministic `bash`/`script` run the shim mirrored into a
    * session (its opening "prompt" is the shell command, prefixed `$ ` by
@@ -34,10 +37,13 @@ export interface SessionLane {
   kind: "agent" | "command";
   /** For a `command` lane, the first real line of the command — the tooltip. */
   command?: string;
-  /** The harness's own ledger label for this branch (`survey_branch_contract`),
-   * when the case's recorded `phases[]` confirms the mined name. Absent while a
-   * run is still in flight, since the scorecard has no `phases[]` until the case
-   * finishes. */
+  /** The harness's own ledger label for this lane (`survey_branch_contract`,
+   * `falsify_iter_1`) — the unreduced form, so the tooltip keeps what the label
+   * drops: WHICH iteration of a loop this was. It is the session's own `phase`
+   * stamp when the shim wrote one; for a stamp-less (pre-2026-08-22) log it is
+   * the case's recorded `phases[]` confirming the mined name, and is therefore
+   * absent while such a run is still in flight, since the scorecard has no
+   * `phases[]` until the case finishes. */
   full?: string;
   items: TimelineItemT[];
   messageCount: number;
@@ -75,27 +81,25 @@ export function branchVocabulary(phases: { phase: string }[] | undefined): Map<s
   return vocab;
 }
 
-/** Name a lane, preferring something the HARNESS recorded over something mined.
+/** Reduce a harness phase label to what a reader wants on a lane chip.
  *
- * The honest position first: nothing in the stream ties a `sessionId` to a phase
- * or branch. `sessionId` is a bare uuid, the `system` lines carry only extension
- * status, and the harness cannot help either — a fan-out reports ONE phase window
- * (`fanout.ts` calls `reporter.onStart(phase.name)` once) inside which six
- * sessions start milliseconds apart, so `bucketSessionsByPhase`'s
- * last-phase-started-before-this rule assigns all six to `survey` and stops.
- * Closing that properly means writing the phase label into the session jsonl,
- * which is a core change and is reported rather than attempted here.
+ * `survey_branch_contract` → `contract` (the family is the only thing that
+ * distinguishes six simultaneous branches), `falsify_iter_1` → `falsify`,
+ * `adjudicate_iter_2` → `adjudicate`; `facts` / `seed` / `prepare` / `review`
+ * pass through. The iteration number is dropped from the chip but never thrown
+ * away — the caller keeps the raw stamp as `full`, which the sidebar renders in
+ * the lane's `title`. A two-iteration adjudicate, or `falsify_iter_1` vs
+ * `falsify_iter_2`, is exactly how the probe loop shows up and a reader looking
+ * at a probe loop needs to see it.
  *
- * So the family is read out of the opening prompt, and `vocab` CONFIRMS it —
- * two different jobs, deliberately not collapsed into one. The marker is
- * purpose-built and unambiguous (`## Your family: \`contract\``), which is why it
- * can stand alone; the heuristic it replaced was a loose "first markdown heading"
- * match that labelled a lane `process that DIES.` from a shell comment inside a
- * prompt. Requiring the vocabulary outright would have been the safer-looking
- * rule and the wrong one: a live run's scorecard has no `phases[]` until the case
- * finishes, so every lane would sit unnamed for exactly the half-hour someone is
- * watching it. A confirmed name additionally carries the harness's own ledger
- * label, which is what `full` reports in its tooltip. */
+ * `_retry` / `_check` are stripped from a branch family for parity with
+ * {@link branchVocabulary}, which strips them when building the vocabulary. */
+export function prettyPhase(phase: string): string {
+  const branch = /^(?:.+)_branch_(.+?)(?:_retry|_check)?$/.exec(phase);
+  if (branch) return branch[1];
+  return phase.replace(/_iter_\d+$/, "");
+}
+
 /** The text of a lane's opening user message.
  *
  * `toBaseMessages` normalises a user turn to `content: { text }` — an OBJECT, not
@@ -116,25 +120,78 @@ function firstUserText(items: TimelineItemT[]): string {
   return "";
 }
 
-function deriveLaneLabel(
-  items: TimelineItemT[],
+/** Name a lane, preferring something the HARNESS recorded over something mined.
+ *
+ * The stamp landed. `apps/server/src/engine/event-shim.ts` writes a `phase`
+ * field onto each session's opening and closing envelopes, and a fan-out branch
+ * carries its OWN branch label (`survey_branch_contract`) rather than its
+ * parent's — which is the thing this function used to report as impossible and
+ * unattempted. `sessionId` is still a bare uuid and the harness still reports
+ * one phase window per fan-out, so nothing downstream could have recovered the
+ * mapping; the stamp is the mapping, written where the ambiguity is. It is
+ * therefore FIRST, and `bucketSessionsByPhase` in the harness applies the same
+ * precedence for the same reason.
+ *
+ * Prompt-mining stays as the fallback, and must: every run archived before the
+ * stamp shipped has no `phase` anywhere in its jsonl, and those logs have to
+ * keep rendering exactly as they do today. So the family is read out of the
+ * opening prompt, and `vocab` CONFIRMS it — two different jobs, deliberately not
+ * collapsed into one. The marker is purpose-built and unambiguous
+ * (`## Your family: \`contract\``), which is why it can stand alone; the
+ * heuristic it replaced was a loose "first markdown heading" match that labelled
+ * a lane `process that DIES.` from a shell comment inside a prompt. Requiring
+ * the vocabulary outright would have been the safer-looking rule and the wrong
+ * one: a live run's scorecard has no `phases[]` until the case finishes, so
+ * every lane would sit unnamed for exactly the half-hour someone is watching it.
+ * A confirmed name additionally carries the harness's own ledger label, which is
+ * what `full` reports in its tooltip. */
+export function deriveLaneLabel(
+  text: string,
   index: number,
   vocab: Map<string, string>,
+  phase?: string,
 ): { label: string; named: boolean; full?: string; kind: "agent" | "command"; command?: string } {
-  const text = firstUserText(items);
   // A command run, not a conversation. The `$ ` prefix is written by the shim
   // for every `bash`/`script` phase, so this identifies rather than guesses.
+  // The `kind` is decided here and NOT by the stamp: it drives the `$` glyph and
+  // the command tooltip, and a stamped command lane is still a command lane. All
+  // the stamp does is give it its name — `facts`, not `command`.
   if (text.startsWith("$ ")) {
     const command = text
       .slice(2)
       .split("\n")
       .map((l) => l.trim())
       .find((l) => l && !l.startsWith("#"));
+    if (phase) {
+      return { label: prettyPhase(phase), named: true, full: phase, kind: "command", command };
+    }
     return { label: "command", named: true, kind: "command", command };
   }
+  if (phase) return { label: prettyPhase(phase), named: true, full: phase, kind: "agent" };
   const mined = text.match(/^##\s*Your family:\s*`([^`]+)`/m)?.[1];
   if (mined) return { label: mined, named: true, full: vocab.get(mined), kind: "agent" };
   return { label: `session ${index + 1}`, named: false, kind: "agent" };
+}
+
+/** The session's own phase stamp, off the RAW lines.
+ *
+ * It has to be read here rather than after {@link unwrapLine} + `toBaseMessages`
+ * because neither carries it: `unwrapLine` projects a line onto a role-based
+ * `Message` (and drops the `result` envelope, one of the two lines the shim
+ * stamps) and `toBaseMessages` then normalises that to `{ type, content }`. The
+ * field is top-level on the envelope, and `fetchSessionItems` already holds the
+ * raw lines per session, so nothing has to be plumbed through the adapter —
+ * it just has to be read before the adapter throws it away.
+ *
+ * Only for a real session. The `""` lane is not one session: it collects every
+ * line the shim wrote without a session id, from every phase, so the first
+ * stamp it happens to hold names one of many and would be a confident lie. */
+function phaseOf(sessionId: string, raws: Record<string, unknown>[]): string | undefined {
+  if (!sessionId) return undefined;
+  for (const raw of raws) {
+    if (typeof raw.phase === "string" && raw.phase) return raw.phase;
+  }
+  return undefined;
 }
 
 function tsOf(item: TimelineItemT): string {
@@ -240,7 +297,12 @@ async function fetchSessionItems(url: string, vocab: Map<string, string>): Promi
       (r) => r.type === "assistant" && !r.isApiErrorMessage && !r.error,
     ).length;
     const items = processMessages(toBaseMessages(messages));
-    const { label, named, full, kind, command } = deriveLaneLabel(items, lanes.length, vocab);
+    const { label, named, full, kind, command } = deriveLaneLabel(
+      firstUserText(items),
+      lanes.length,
+      vocab,
+      phaseOf(sessionId, raws),
+    );
     lanes.push({
       sessionId,
       label,

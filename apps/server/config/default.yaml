@@ -39,6 +39,7 @@ models:
   #   diagnose: anthropic/claude-haiku-4-5-20251001     # the CI-failure classifier
   #   pr-fix-retry: anthropic/claude-opus-4-8           # used above fix.escalateModelAfterAttempt
   #   review-adjudicate: anthropic/claude-sonnet-4-6      # the adjudication pass
+  #   review-falsify: anthropic/claude-haiku-4-5-20251001 # the probe oracle
   # A per-task entry wins over `default`. `classifier`/`screener` are the cheap
   # one-shot helpers (src/engine/llm.ts); when unset they fall back to the first
   # configured provider's fast model, NOT `default`.
@@ -53,8 +54,8 @@ models:
   #
   # `review-survey` is SET above, and it is the one entry in this block that is
   # not an example. It is the key the five survey branches of `pr-review.yaml`
-  # declare (`model: "{{models.review-survey}}"`, one per obligation family)
-  # and, since it has no key of its own, the `falsify` phase too — six phases.
+  # declare (`model: "{{models.review-survey}}"`, one per obligation family),
+  # and the `falsify` phase's fall-through.
   #
   # Pinning it to Haiku 4.5 is NOT a cost downgrade, and that is the unusual
   # part: on review RECALL, Haiku 4.5 BEATS Sonnet 4.6 on two independent evals
@@ -78,6 +79,15 @@ models:
   # SO: a non-Anthropic deployment must override this key in its overlay
   # `config.yaml` (a cheap, fast model of its own provider), exactly as it
   # already overrides `models.default`.
+  #
+  # `review-falsify` is the ORACLE's own key — the one phase that runs code.
+  # Unset, it falls through to `review-survey` (its template is the same
+  # `{{#if}}` pair `adjudicate` uses, so an unset key lands on the survey model
+  # and not on `default`), which is exactly the behaviour before the key
+  # existed. It exists so the oracle's model can be moved on its own: it was
+  # hard-wired to `review-survey`, so asking "is a cheap model good enough at
+  # WRITING AND RUNNING a probe?" meant moving all five survey branches too —
+  # two variables, and therefore not a runnable experiment.
   #
   # `review-adjudicate` is the adjudicate phase's own key in `pr-review.yaml` —
   # the RANKING pass over what the surveys found, a different task from survey
@@ -524,6 +534,51 @@ review:
     # telemetry (and the clean-discharge demotion it enables at the posting
     # boundary), at the cost of the verification-report volume above.
     obligationContract: minimal
+    # What `adjudicate` is handed, and what shape it writes back (#399).
+    #
+    #   legacy   — the shipped phase. The prompt names the files and the model
+    #              shells out to assemble them, then writes a `tier` and a
+    #              `confidence` per finding.
+    #   dossier  — a deterministic `dossier` phase renders every record the
+    #              phase needs and the harness attaches it, and the model writes
+    #              typed attributes (`claim` / `category` / `fix`) from which a
+    #              pure function derives the tier. `confidence` is not asked for.
+    #
+    # ONE key for both halves deliberately: they move the same phase's measured
+    # surface — its input and its output — so shipping them together costs one
+    # comparability break with the archive instead of two, and one arm validates
+    # both.
+    #
+    # What it targets, measured on the 8-case probes arm: adjudicate spends 137
+    # bash calls across 8 adjudications (35 turns, 30 of them bash on the stress
+    # case) re-deriving records the harness already holds — about a third of
+    # case cost — and makes its actual judgement at the end of that transcript.
+    #
+    #   jev      — implies `dossier` (same rendering, same typed output) and
+    #              additionally runs `jev-classify`: one TypeSafe `systemOne`
+    #              call PER HYPOTHESIS (not per finding — hypotheses vastly
+    #              outnumber findings, and per-hypothesis is the volume a
+    #              System-1 primitive is for), asking only the category axis
+    #              measured at AUC 0.897 (never correctness, measured dead at
+    #              AUC 0.534). Its category is rendered into the dossier as an
+    #              ADVISORY line — Sonnet still writes every disposition
+    #              itself. Measured 2026-09-22: 260 hypotheses / 8 cases,
+    #              83.6% agreement with Sonnet's own call on identical
+    #              evidence, $0.0053. Weakest on the rarest, highest-stakes
+    #              categories (`defect` 33%, `correctness-risk` 40% recall
+    #              against Sonnet) — that is why it annotates rather than
+    #              decides. Needs `TYPESAFE_KEY` (or `TYPESAFE_API_KEY`); its
+    #              absence degrades the phase to "no annotation", never a
+    #              failed run.
+    #
+    # `legacy` until an arm has run for each. An unrecognised value lands there
+    # too.
+    adjudicate: legacy
+    # The TypeSafe model `jev-classify` calls, under `adjudicate: "jev"`.
+    # `null` = the CLI's own default (`TYPESAFE_MODEL` env, else `jev-latest`).
+    # Kept out of the `models:` map above — TypeSafe is a distinct provider
+    # from the `provider/model` chat models that map resolves.
+    jevModel: null
 
     # Which D2 minting rules `lastlight-facts seed` runs beyond the original
     # four. A comma-list; the valid tokens are `all-in-diff` (contract
@@ -567,27 +622,51 @@ review:
 
     # ── WP4: `prepare` (the affordance) + `falsify` (the oracle) ──────────────
     #
-    # A SECOND switch under an already-gated block, and deliberately so. What
-    # `probes: true` buys is a review workspace with a `node_modules` in it, and
-    # that one fact changes three things at once:
+    # A SECOND switch under an already-gated block, and TRI-STATE — the middle
+    # value is the point of it.
     #
-    #   - `contract` can seed at all on a normal monorepo. A tsconfig that
-    #     `extends` a bare package specifier (`@calcom/tsconfig/react-library`)
-    #     does not resolve on a bare checkout, tsgo excludes the project, and the
-    #     case drops to tier 2 with `contracts` emitting nothing. Measured over
-    #     the 50-PR corpus: tier-1 cases 21 -> 5, contract deltas 73 -> 19.
-    #   - `tests` can seed at all. The `coverage` extractor READS a report and
-    #     never runs a suite; it found ZERO artifacts across all 50 corpus cases
-    #     and all 8 gate cases. Until `probeCoverage` produces one, that family
-    #     is NOT MEASURED — a different row from "did not convert".
-    #   - the `facts` phase inherits an installed tree, on every re-review too
-    #     (the cross-run refresh is `git clean -fdx -e node_modules`). Peak RSS
-    #     there is UNMEASURED on the current engine.
+    #   "off"    — neither `prepare` nor `falsify` runs. Reproduces WP3 exactly,
+    #              and it is the shipped posture: the whole pipeline is off out
+    #              of the box (LD8).
+    #   "static" — both phases run and NOTHING IS EVER INSTALLED. `prepare` runs
+    #              with `--no-install`, so it writes a real `env.json`
+    #              (`install: "skipped"`, `installed` still read off the
+    #              filesystem) and `falsify` gets the fact its prompt is written
+    #              against: it already branches on `installed: false`, records
+    #              what it cannot run as `unprobed` with a reason, and those
+    #              hypotheses SURVIVE to adjudication. The oracle was written
+    #              for the zero-install world; one shared gate was all that kept
+    #              it out of one. Seconds of CPU, no package manager, no test
+    #              suite, no `postinstall` from a pull request head.
+    #   "full"   — `prepare` installs. What that buys is the DISCOVERY side, not
+    #              the probe side: a tsconfig that `extends` a bare package
+    #              specifier (`@calcom/tsconfig/react-library`) does not resolve
+    #              on a bare checkout, tsgo excludes the project, and the case
+    #              drops to tier 2 with `contracts` emitting nothing — measured
+    #              over the 50-PR corpus, tier-1 cases 21 -> 5 and contract
+    #              deltas 73 -> 19. It is also the only route to a coverage
+    #              artifact, so until `probeCoverage` produces one the `tests`
+    #              family is NOT MEASURED, a different row from "did not
+    #              convert".
     #
-    # Default posture: OFF in production, ON in the eval overlay — whether it
-    # ships on is an ablation number, not a judgement call.
-    probes: false
-    # Let the install run the tree's own postinstall. OFF, as a SECURITY default:
+    #              Two costs that are NOT metered anywhere, and this is the only
+    #              place they are written down. There is no disk guard — not in
+    #              `prepare`, not in `prepareTree`, not in the workflow — and
+    #              the warm-workspace refresh is deliberately
+    #              `git clean -fdx -e node_modules`, so `node_modules` PERSISTS
+    #              across reviews by design. `full` is therefore a permanent
+    #              per-target disk cost with nothing watching the volume. And
+    #              the `facts` phase inherits the installed tree on every
+    #              re-review; peak RSS there is UNMEASURED on the current
+    #              engine.
+    #
+    # A bare `true` reads as "static", never "full": no deployment may silently
+    # gain an install by upgrading. Anything else — including the truthy strings
+    # — reads as "off", the same direction every switch in this block fails.
+    probes: "off"
+    # Let the install run the tree's own postinstall. Applies to `full` alone —
+    # there is no install to attach a script to under `static`, and the phase
+    # never claims otherwise in `env.json`. OFF, as a SECURITY default:
     # `prepare` installs at a PULL REQUEST HEAD, so a lifecycle script there is
     # code the PR author wrote running on this machine — and `pr-review`'s
     # workspace has never installed anything, which makes this the first thing in
@@ -615,6 +694,19 @@ review:
     # five-line existence gate, not a validator — v2's full quote validator was
     # overkill and cost 2.4x for a worse result.
     probeRounds: 2
+    # The WHOLE-PHASE ceiling on `falsify`, across every round. It had none at
+    # all until the oracle could run without an install, and `probeRounds` was
+    # never a budget: a round count bounds how many times the loop may go round,
+    # not what it may spend, and CPU is this pipeline's binding constraint. Ten
+    # minutes covers two rounds of a pass whose probes are sub-second by
+    # construction (a differential `git` run, a copied pure function under plain
+    # `node`) and whose real cost is model latency.
+    falsifyTimeoutSeconds: 600
+    # The WHOLE-PHASE ceiling on `jev-classify`, under `adjudicate: "jev"`.
+    # Each call is a TypeSafe `systemOne` round trip (~100ms typically) but the
+    # phase makes one per hypothesis and a case can carry dozens; 120s covers
+    # a slow provider day without threatening the falsify-sized budget above.
+    jevTimeoutSeconds: 120
     # The attention boundary (WP6b). Preserving internal recall and spending a
     # human's attention are two different budgets; conflating them is how a
     # recall-first reviewer becomes unreadable.
@@ -632,7 +724,7 @@ review:
     maxInlineComments: 10
     # The BODY budget — how many findings the review body's "Additional
     # findings" list may carry. N (the default is 5) keeps the top N ranked by
-    # severity × confidence and records the rest in disposition.json at
+    # severity and records the rest in disposition.json at
     # `internal` with reason `body-budget` — capped attention, never a lost
     # record. 0 = NO overflow at all (nothing tiers to body); null = unlimited
     # (the pre-2026-08-24 funnel).
@@ -650,25 +742,15 @@ review:
     # should still pin this key (`null` for the open funnel) explicitly rather
     # than inherit it.
     maxBodyComments: 5
-    # Per-family confidence bar for an INLINE comment; below it, the body.
-    # Per-family and not global because AutoCommenter (Google Critique) measured
-    # a global threshold as catastrophic — at t=0.98, ~80% of below-threshold
-    # predictions were still CORRECT — while per-URL thresholds raised recall
-    # without hurting precision.
-    #
-    # THESE ARE INITIAL GUESSES TO BE TUNED ON THE TRAIN SPLIT, NOT
-    # MEASUREMENTS. Record each retune in the eval journal.
-    thresholds:
-      contract: 0.35      # converts; cheap to check; bias to surface
-      enforcement: 0.35
-      security: 0.30
-      state: 0.50
-      tests: 0.60         # mechanical provenance, but noisier as prose
-      spec: 0.45
-    # Below this, recorded in findings.json but not posted at all. The one tier
-    # that costs recall, so it is low. A finding carrying NO confidence is never
-    # affected — an absent field is not a zero.
-    internalFloor: 0.15
+    # REMOVED 2026-09-21: `thresholds` (the per-family confidence bars) and
+    # `internalFloor`. Both gated on a finding's self-reported `confidence`,
+    # which measured AUROC 0.228 [0.171, 0.299] over 516 findings from 20
+    # preserved case-runs — a strong signal pointing the WRONG way, because the
+    # model is surest about the observations where nothing is wrong (withheld
+    # findings carried a HIGHER median confidence, 0.99, than posted ones).
+    # They also cost nothing: across the preserved archive not one gold finding
+    # was ever lost to `below-floor` or `below-threshold`. An overlay that
+    # still pins either key is accepted and ignored, with a warning in the log.
 
 # The software-factory pipeline (label-driven autonomy).
 #

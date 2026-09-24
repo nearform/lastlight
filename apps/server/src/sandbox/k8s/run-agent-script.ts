@@ -61,6 +61,11 @@ function agentRunFlags(input: RunAgentScriptInput): string {
     input.thinking ? `--thinking "$4"` : "",
     webSearchFlag,
     ...input.skillDirs.map((dir) => `--skill ${dir}`),
+    // The declared `skills:` list is the WHOLE list — same reasoning as
+    // `--no-web-search` above, and for the same reason it is REQUIRED rather
+    // than cosmetic: Pi's own discovery otherwise adds every skill present in
+    // the image or the pod's home. Explicit `--skill` dirs still load.
+    "--no-skills",
   ]
     .filter(Boolean)
     .join(" ");

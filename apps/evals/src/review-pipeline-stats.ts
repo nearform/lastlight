@@ -24,7 +24,7 @@
  * degrades to posted-only rather than reporting a row of zeros.
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { flattenToolchain } from "./paths.js";
@@ -32,6 +32,36 @@ import type { ReviewFamilyStats, ReviewPipelineStats } from "./schema.js";
 
 /** Where the pipeline writes, relative to the seeded repo checkout. */
 const ARTIFACT_DIR = join(".lastlight", "pr-review");
+
+/**
+ * Copy the pipeline's artifacts out of the throwaway workspace into a directory
+ * that outlives it. Returns the destination, or `undefined` when the arm wrote
+ * no artifacts (a baseline run) — absent is not empty.
+ *
+ * `--keep-workspace` was never a retention policy. It keeps the trial's
+ * `stateDir`, which lives under `os.tmpdir()` — on macOS a per-user folder
+ * beneath `/var/folders/` whose periodic purge deletes every FILE after a few
+ * days while leaving the directory tree standing. The loss is silent twice
+ * over: nothing errors, and `existsSync(workspaceDir)` still returns true. On
+ * 2026-09-21, 216 of 237 recorded `workspaceDir` paths still resolved and **not
+ * one** still held a single file under `.lastlight/` — 94 runs, 319 case-runs,
+ * the evidence behind every one of them gone, while `run.ts` went on printing
+ * "nothing else will remove them".
+ *
+ * So this is deliberately NOT behind `--keep-workspace`, for exactly the reason
+ * {@link readPipelineStats} is not behind it either: a record that exists only
+ * when someone remembers a debugging flag is a record that will not exist when
+ * it is needed. The cost is a few kilobytes of JSON per case. The artifacts ARE
+ * the telemetry; the checkout is the expensive part and is not copied.
+ */
+export function persistPipelineArtifacts(repoDir: string, destDir: string): string | undefined {
+  const src = join(repoDir, ARTIFACT_DIR);
+  if (!existsSync(src)) return undefined;
+  const dest = join(destDir, "pr-review");
+  mkdirSync(destDir, { recursive: true });
+  cpSync(src, dest, { recursive: true });
+  return dest;
+}
 
 /**
  * The four discharge codes, plus the bucket for a row that carries none.
@@ -84,6 +114,35 @@ export interface PipelineFinding {
   family?: string;
   /** `inline` / `body` / `internal`, from `disposition.json`. */
   tier?: string;
+  /**
+   * WHY the boundary put it there — the machine token from `disposition.json`
+   * (`adjudicated`, `clean-discharge`, `prose-disposition`, `below-floor`,
+   * `off-diff`, `below-threshold`, `overflow`, `body-budget`), `null` on an
+   * inline row that was never demoted.
+   *
+   * Carried for the same reason `severity` is: without it nothing can say
+   * whether a gold finding was buried by the adjudicator's own `tier` or by a
+   * cap the boundary applied afterwards, and those are different bugs with
+   * different fixes. `say-gap.ts` is the reader.
+   *
+   * **Pre-`47ee595c` artifacts are void on this field.** The original WP6b
+   * `recordDisposition` hard-coded `"below the internal floor"` for every
+   * internal row — 255 of the archive's 259 such rows carry a confidence at or
+   * above the 0.15 floor, 116 of them at exactly 1.00. Anything reading this
+   * across the 2026-08-22/23 keepers is pooling two incompatible vocabularies.
+   */
+  reason?: string | null;
+  /**
+   * `Critical` / `Important` / `Minor` as the adjudicator wrote it — NOT
+   * normalised, because `review-poster.ts` has a separate job flagging a
+   * vocabulary it does not share (`Blocker`, `p1`) rather than defaulting it.
+   *
+   * Carried because it is the other half of the boundary's ranking function
+   * (`rankOf = confidence x SEVERITY_WEIGHT`), and a reader that drops it makes
+   * that ranking un-measurable — a back-fill would silently score confidence
+   * alone and report it as the rank.
+   */
+  severity?: string;
   confidence?: number;
   /** Ids of the survey hypotheses this finding was built from. May be empty —
    * see {@link ReviewPipelineStats.unprovenanced}. */
@@ -234,6 +293,7 @@ interface FindingsDoc {
     path?: string;
     line?: number;
     family?: string;
+    severity?: string;
     confidence?: number;
     hypotheses?: string[];
   }[];
@@ -414,11 +474,15 @@ export function readPipelineArtifacts(
   // which is how an inert attention boundary stays invisible.
   const tiers: Partial<Record<"inline" | "body" | "internal", number>> = {};
   const tierOf = new Map<string, string>();
+  const reasonOf = new Map<string, string | null>();
   for (const d of dispositionDoc?.findings ?? []) {
     if (d.tier === "inline" || d.tier === "body" || d.tier === "internal")
       tiers[d.tier] = (tiers[d.tier] ?? 0) + 1;
     const f = d.finding as { title?: string; path?: string } | undefined;
-    if (f?.title && d.tier) tierOf.set(findingKey(f), d.tier);
+    if (f?.title && d.tier) {
+      tierOf.set(findingKey(f), d.tier);
+      reasonOf.set(findingKey(f), d.reason ?? null);
+    }
   }
 
   const findings: PipelineFinding[] = [];
@@ -447,6 +511,10 @@ export function readPipelineArtifacts(
       line: f.line,
       family: f.family,
       tier,
+      // Only where the join landed: an absent reason and a finding the
+      // boundary never saw must not read the same.
+      ...(tier !== undefined ? { reason: reasonOf.get(findingKey(f)) ?? null } : {}),
+      severity: f.severity,
       confidence: f.confidence,
       hypotheses: ids,
       // Every supporting hypothesis must RESOLVE and be clean. An id that names
@@ -507,9 +575,14 @@ export function readPipelineArtifacts(
  * `disposition.json`. Keying on the line silently failed to join 10 of 32
  * findings on the measured case — and a failed join looks exactly like a
  * finding that was never tiered.
+ *
+ * The separator is written `\u0000` rather than as a literal NUL byte: an
+ * embedded NUL makes the whole file read as BINARY to `grep`/`rg`, which then
+ * skip it silently — a repo-wide search for anything in this module matched
+ * nothing at all until 2026-09-21.
  */
 function findingKey(f: { title?: string; path?: string }): string {
-  return `${f.path ?? ""} ${f.title ?? ""}`;
+  return `${f.path ?? ""}\u0000${f.title ?? ""}`;
 }
 
 /**
@@ -541,7 +614,14 @@ export function internalJudgeInputs(
 export function withInternalRecall(
   readout: PipelineReadout,
   internal:
-    | { goldToFinding: (number | null)[]; matched: number; error?: string }
+    | {
+        goldToFinding: (number | null)[];
+        matched: number;
+        matchedPreConfirm?: number;
+        confirmRejected?: { gold: number; finding: number }[];
+        confirmUngraded?: string;
+        error?: string;
+      }
     | undefined,
 ): ReviewPipelineStats {
   const stats = readout.stats;
@@ -573,6 +653,12 @@ export function withInternalRecall(
   return {
     ...stats,
     internalMatched: internal.matched,
+    // The CONFIRM pass's working, when one ran. `internalMatched` alone cannot
+    // say whether it is a confirmed count or a raw MATCH count, and those
+    // differ by ~a third — so the distinguishing fields travel with it.
+    ...(internal.matchedPreConfirm !== undefined ? { internalMatchedPreConfirm: internal.matchedPreConfirm } : {}),
+    ...(internal.confirmRejected?.length ? { internalConfirmRejected: internal.confirmRejected } : {}),
+    ...(internal.confirmUngraded ? { internalConfirmUngraded: internal.confirmUngraded } : {}),
     // The judge's reply, verbatim. The count above is this vector's non-null
     // count; without the vector itself, per-gold internal union/intersection
     // across repeats cannot be computed and can never be back-filled — the

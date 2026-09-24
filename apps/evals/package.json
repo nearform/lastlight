@@ -1,7 +1,7 @@
 {
   "name": "lastlight-evals",
   "version": "0.13.5",
-  "description": "Eval harness for Last Light workflows — drives the real production workflows against a mocked GitHub and grades deterministically (SWE-bench compatible).",
+  "description": "Eval harness for Last Light workflows \u2014 drives the real production workflows against a mocked GitHub and grades deterministically (SWE-bench compatible).",
   "type": "module",
   "bin": {
     "lastlight-evals": "dist/run.js"
@@ -43,15 +43,17 @@
   "license": "MIT",
   "dependencies": {
     "@clack/prompts": "^1.7.0",
+    "chalk": "^6.0.0",
+    "lastlight-code-facts": "workspace:*",
     "lastlight-core": "workspace:*",
     "lastlight-workflow-engine": "workspace:*",
-    "chalk": "^6.0.0",
     "yaml": "^2.5.0"
   },
   "peerDependencies": {
     "agentic-pi": "^0.6.1"
   },
   "devDependencies": {
+    "@typesafe-ai/sdk": "^0.6.0",
     "@types/node": "^26.2.0",
     "agentic-pi": "workspace:*",
     "tsx": "^4.23.12",

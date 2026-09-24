@@ -1459,7 +1459,9 @@ async function cmdOAuth(): Promise<void> {
 async function cmdFacts(): Promise<void> {
   const { runCli } = await import("lastlight-code-facts");
   // The one place `console.*` is correct — this is the terminal surface.
-  const code = runCli(process.argv.slice(3), {
+  // Every command but `jev-classify` returns a plain number immediately;
+  // `await` on one is a no-op, so this costs nothing on the deterministic path.
+  const code = await runCli(process.argv.slice(3), {
     out: (s) => console.log(s),
     err: (s) => console.error(chalk.red(s)),
   });

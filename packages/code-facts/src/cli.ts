@@ -45,6 +45,8 @@ import {
   type MintOptions,
   type SeedFamily,
 } from "./seed.js";
+import { buildEntries, renderAdjudicationDossier } from "./adjudicate-render.js";
+import { classifyHypotheses, writeJevClassifyDocument, jevClassifyPath } from "./jev-classify.js";
 import { renderFamilyBlock } from "./seed-render.js";
 import { loadManifest, resolveFactsBin, toolchainStamp } from "./toolchain.js";
 import { compilerInfo } from "./project.js";
@@ -74,9 +76,16 @@ Commands:
               QUOTE / ABSENT / PARTIAL / PROBE discharge in its .jsonl
   probes      the \`falsify\` loop's exit gate — every hypothesis that needed a
               probe has a verdict, and every claim of execution has a transcript
+              that OPENS with the command it ran
   findings    the \`adjudicate\` loop's exit gate — the CONSERVATION check: every
               hypothesis has exactly one disposition, and every deletion names a
               transcript that exists
+  dossier     the \`adjudicate\` phase's INPUT — every hypothesis, probe verdict,
+              transcript and conservation row joined into one document, with
+              every quote already checked against the tree
+  jev-classify  #399 idea 2 — one TypeSafe System-One call PER HYPOTHESIS
+              asking the category axis, written for \`dossier\` to render as an
+              ADVISORY annotation. Never decides; never fails the run.
   toolchain   print the pinned manifest and what actually resolved
 
 \`discharge\` options (WP3 — it replaces \`test -s\`, which one line of any content
@@ -93,10 +102,15 @@ passes; it reads no quote and judges no claim):
   hypotheses/<family>.jsonl at all, no readable obligations.json, or a --family
   the document does not name. ANY non-zero means "iterate again".
 
-\`probes\` options (an existence gate, not a validator — it reads no transcript):
+\`probes\` options (a near-existence gate, not a validator — it reads a
+transcript's FIRST LINE and nothing else):
   --dir <dir>         the .lastlight/pr-review directory
                       (default: .lastlight/pr-review)
   --repo <dir>        what a transcript path is relative to (default: cwd)
+  A \`reproduced\`/\`refuted\` verdict must name a \`command\` and a transcript that
+  exists and opens with that command — \`"command": "code inspection"\` over a
+  page of prose is \`unexecuted\`, not evidence. \`unprobed\` needs neither and
+  always closes the gate.
   Exit 0 = the loop may stop. Non-zero = something still owes a verdict, which
   a pass can always discharge honestly by recording \`unprobed\`.
 
@@ -116,6 +130,32 @@ passes; it reads no quote and judges no claim):
                       .jsonl files. Reports; never grades — ALWAYS exits 0.
   Exit 0 = the loop may stop. Non-zero = a hypothesis is unaccounted for, a
   deletion has nothing to show for it, or there is no readable findings.json.
+
+\`dossier\` options (it reads the pipeline's own artifacts; no --base/--head):
+  --dir <dir>         the .lastlight/pr-review directory
+                      (default: .lastlight/pr-review)
+  --repo <dir>        what a quote path and a transcript path are relative to
+                      (default: cwd)
+  --out <file>        write the dossier here                   (default: stdout)
+  --transcript-chars <n>  cap on an inlined probe transcript   (default: 4000).
+                      Truncation is always announced with the path.
+  --json              the structured rows behind the Markdown, keyed by
+                      hypothesis id — for a consumer that reads one row per
+                      hypothesis rather than a document meant for a model
+  Always exits 0. Its consumer is the harness, which attaches the result to the
+  phase — a missing artifact is a thinner dossier that SAYS so, never a failure
+  that strands the phase with nothing.
+
+\`jev-classify\` options (annotates the dossier; decides nothing):
+  --dir <dir>         the .lastlight/pr-review directory
+                      (default: .lastlight/pr-review)
+  --repo <dir>        what a quote path is relative to        (default: cwd)
+  --model <id>        the TypeSafe model                (default: jev-latest)
+  --concurrency <n>   parallel systemOne calls                     (default: 8)
+  --out <file>        write jev.json here    (default: .lastlight/pr-review/jev.json)
+  Needs TYPESAFE_KEY (or TYPESAFE_API_KEY). Always exits 0 — a missing key, a
+  network error, or a malformed answer writes a document that SAYS so (an
+  \`error\`, per hypothesis or for the whole run) rather than failing the phase.
 
 \`prepare\` options (it acts on a tree; no --base/--head, and it runs no analysis):
   --repo <dir>        the checkout to prepare               (default: cwd)
@@ -296,11 +336,19 @@ function selfVersion(): string {
  * `process.exit`, so a test can assert the §D12 contract — that `--never-fail`
  * returns 0 on a repo that cannot be analysed — without spawning.
  */
+/**
+ * Every command here is synchronous and deterministic — the whole design
+ * point of a "deterministic layer" — except `jev-classify`, the one command
+ * that calls a third-party API. Rather than make every command async for one
+ * that needs it, the return type widens to admit a `Promise<number>` ONLY
+ * from that branch; every other command still returns a plain `number`
+ * immediately, so no existing synchronous caller changes behaviour.
+ */
 export function runCli(
   argv: string[],
   io: { out: (s: string) => void; err: (s: string) => void },
   log?: LoggerPort,
-): number {
+): number | Promise<number> {
   const { command, flags } = parseArgv(argv);
 
   if (flags.version === true || flags.v === true) {
@@ -443,6 +491,58 @@ export function runCli(
     });
     io.out(renderFindingsCheck(result));
     return result.satisfied ? EXIT_OK : EXIT_DEGRADED;
+  }
+
+  if (command === "dossier") {
+    // Always exits 0, and for the same reason `findings --ledger` does: this is
+    // not a gate. It renders what exists. A run whose surveys wrote nothing
+    // gets a dossier that says so in a labelled block — which is strictly more
+    // than the phase had before — and a non-zero exit here would strand
+    // `adjudicate` with no input at all rather than with a thin one.
+    const dossierOptions = {
+      dir: stringFlag(flags.dir) ?? ".lastlight/pr-review",
+      repo: stringFlag(flags.repo),
+      transcriptChars: numberFlag(flags["transcript-chars"]),
+    };
+    // `--json` hands back the STRUCTURED rows `buildEntries` already computed
+    // for the rendered Markdown — same excerpt resolution, same probe join,
+    // same ids — for a consumer that wants to key off `record.id` rather than
+    // re-parse prose. First consumer: the per-hypothesis System-1 probe (#399
+    // idea 2), which needs one row per hypothesis, not a document meant to be
+    // read top to bottom by a model.
+    const text =
+      flags.json === true
+        ? JSON.stringify(buildEntries(dossierOptions), null, 2)
+        : renderAdjudicationDossier(dossierOptions);
+    const out = stringFlag(flags.out);
+    if (out) writeDocument(out, text, { raw: true });
+    else io.out(text);
+    return EXIT_OK;
+  }
+
+  if (command === "jev-classify") {
+    // The one async, network-calling command in this CLI — see `runCli`'s own
+    // doc comment. Always exits 0: a missing key, a network error, or a
+    // malformed answer writes a document that SAYS so (`error`, whole-run or
+    // per-hypothesis) rather than failing the phase — see `jev-classify.ts`.
+    const dir = stringFlag(flags.dir) ?? ".lastlight/pr-review";
+    return classifyHypotheses({
+      dir,
+      repo: stringFlag(flags.repo),
+      model: stringFlag(flags.model),
+      concurrency: numberFlag(flags.concurrency),
+      log,
+    }).then((doc) => {
+      const outFlag = stringFlag(flags.out);
+      if (outFlag) writeDocument(outFlag, JSON.stringify(doc, null, 2), { raw: true });
+      else writeJevClassifyDocument(dir, doc);
+      io.out(
+        doc.error
+          ? `jev-classify: ${doc.error} — wrote an empty annotation set`
+          : `jev-classify: classified ${doc.results.length} hypothesis(es) with ${doc.model} → ${outFlag ?? jevClassifyPath(dir)}`,
+      );
+      return EXIT_OK;
+    });
   }
 
   if (command === "seed") {
@@ -652,19 +752,24 @@ const isMain = (() => {
 })();
 
 if (isMain) {
-  let code: number;
-  try {
-    code = runCli(process.argv.slice(2), {
-      out: (s) => process.stdout.write(`${s}\n`),
-      err: (s) => process.stderr.write(`${s}\n`),
-    });
-  } catch (err) {
-    // Reached only WITHOUT --never-fail, where a non-zero exit is the right
-    // signal — a human or a test is reading it.
-    process.stderr.write(
-      `${err instanceof Error ? err.message : String(err)}\n`,
-    );
-    code = EXIT_UNAVAILABLE;
-  }
-  process.exitCode = code;
+  void (async () => {
+    let code: number;
+    try {
+      // Every command but `jev-classify` returns a plain `number`
+      // immediately; `await` on one is a no-op, so this costs nothing on the
+      // synchronous, deterministic path.
+      code = await runCli(process.argv.slice(2), {
+        out: (s) => process.stdout.write(`${s}\n`),
+        err: (s) => process.stderr.write(`${s}\n`),
+      });
+    } catch (err) {
+      // Reached only WITHOUT --never-fail, where a non-zero exit is the right
+      // signal — a human or a test is reading it.
+      process.stderr.write(
+        `${err instanceof Error ? err.message : String(err)}\n`,
+      );
+      code = EXIT_UNAVAILABLE;
+    }
+    process.exitCode = code;
+  })();
 }

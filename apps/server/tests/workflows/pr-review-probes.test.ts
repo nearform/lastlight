@@ -3,7 +3,7 @@ import { getWorkflow, loadPromptTemplate } from "#src/workflows/loader.js";
 import { renderTemplate } from "lastlight-workflow-engine";
 import type { PhaseDefinition, TemplateContext } from "lastlight-workflow-engine";
 import type { PrState } from "#src/engine/pr-state.js";
-import { renderContext } from "#src/engine/pr-decisions.js";
+import { renderContext, STATIC_PREPARE_BUDGET_SECONDS } from "#src/engine/pr-decisions.js";
 import {
   defaultDependenciesConfig,
   defaultFixConfig,
@@ -89,7 +89,14 @@ function renderedCommand(over: AnalysisOverrides): string {
   } as unknown as TemplateContext);
 }
 
-const ON: AnalysisOverrides = { enabled: true, probes: true };
+/**
+ * `full` — the install arm, and what every assertion below was written
+ * against. It is no longer the only way to reach the probe phases.
+ */
+const ON: AnalysisOverrides = { enabled: true, probes: "full" };
+
+/** `static` — the phases run, and nothing is ever installed. */
+const STATIC: AnalysisOverrides = { enabled: true, probes: "static" };
 
 // ── the projection ───────────────────────────────────────────────────────────
 
@@ -107,6 +114,8 @@ describe("the four switches reach the phase, and absence means off", () => {
       "probeCoverage",
       "probeRounds",
       "probePhaseTimeoutSeconds",
+      "probeInstall",
+      "falsifyTimeoutSeconds",
     ]) {
       expect(Object.prototype.hasOwnProperty.call(ctx, key), key).toBe(false);
     }
@@ -115,12 +124,37 @@ describe("the four switches reach the phase, and absence means off", () => {
   it("projects nothing when probes are on but the pipeline is not", () => {
     // An unreachable config through the normal path, and the projection is
     // where that has to be true rather than a fact about the YAML.
-    const ctx = contextFor({ probes: true });
+    const ctx = contextFor({ probes: "full" });
     expect(ctx.probesEnabled).toBeUndefined();
   });
 
   it("projects `probesEnabled` as the literal string the YAML compares against", () => {
     expect(contextFor(ON).probesEnabled).toBe("true");
+  });
+
+  it("opens the gate under `static` as well as `full` — the oracle is not the install", () => {
+    // One key gated both phases, so reaching the oracle meant buying an
+    // install of the PR author's dependencies. `probesEnabled` is the
+    // off/not-off half now; `probeInstall` carries the other decision.
+    expect(contextFor(STATIC).probesEnabled).toBe("true");
+    expect(contextFor(STATIC).probeInstall).toBe("false");
+    expect(contextFor(ON).probeInstall).toBe("true");
+  });
+
+  it("gives `static` a budget sized for what it actually does", () => {
+    // No install, so the operator's install budget is not the right ceiling:
+    // with `--no-install` the command detects the package manager and writes
+    // one JSON file. 60 + 30 of CLI slack, against `full`'s 330.
+    expect(contextFor(STATIC).probePhaseTimeoutSeconds).toBe(
+      String(STATIC_PREPARE_BUDGET_SECONDS + 30),
+    );
+    expect(contextFor({ ...ON, prepareTimeoutSeconds: 300 }).probePhaseTimeoutSeconds).toBe("330");
+    // The two opt-in steps keep their own budgets on top, because a warm
+    // workspace can still hold a `node_modules` a typecheck really runs in.
+    expect(
+      contextFor({ ...STATIC, probeCoverage: true, coverageTimeoutSeconds: 900 })
+        .probePhaseTimeoutSeconds,
+    ).toBe(String(STATIC_PREPARE_BUDGET_SECONDS + 900 + 30));
   });
 
   it("sums the PHASE timeout across the steps that will actually run", () => {
@@ -200,6 +234,41 @@ describe("the rendered command", () => {
     expect(renderedCommand({ ...ON, probeLifecycleScripts: true })).toContain(
       '[ "true" = "true" ] && ARGS="$ARGS --lifecycle-scripts"',
     );
+  });
+
+  it("renders `--no-install` under `static`, and does not under `full`", () => {
+    // The whole change, in one line of the ARGS ladder. `static` still RUNS
+    // `prepare` — it has to, or `env.json` would not exist and `falsify`'s
+    // prompt reads it as "the probe environment was never prepared" — it just
+    // runs it without a package manager.
+    expect(renderedCommand(STATIC)).toContain('[ "false" != "true" ] && ARGS="$ARGS --no-install"');
+    expect(renderedCommand(ON)).toContain('[ "true" != "true" ] && ARGS="$ARGS --no-install"');
+  });
+
+  it("spells NO install command at all under `static` — not even a guarded one", () => {
+    // CPU is the binding constraint on this pipeline: the default path must
+    // never run a package manager and never run a test suite. The flag ladder
+    // is the mechanism, and this is the assertion that the mechanism has no
+    // hole in it — no `npm ci` anywhere in the phase, guarded or otherwise.
+    const command = renderedCommand(STATIC);
+    // No package manager is NAMED anywhere in the phase, so there is no
+    // branch, guarded or otherwise, that could reach one.
+    expect(command).not.toMatch(/\b(npm|pnpm|yarn|bun)\b/);
+    // And the one flag that decides it is rendered the cheap way.
+    expect(command).toContain('ARGS="$ARGS --no-install"');
+    expect(command).toContain('[ "false" != "true" ]');
+    // …and no suite either, on the same path.
+    expect(command).not.toMatch(/\bvitest\b|\bjest\b|\bgo test\b|\bmvn\b/);
+  });
+
+  it("refuses lifecycle scripts under `static`, whatever the sub-switch says", () => {
+    // There is no install to attach a `postinstall` to, so passing the flag
+    // would stamp `lifecycleScripts: true` into `env.json` on a run where no
+    // script could possibly have executed — a claim the phase cannot honour.
+    expect(contextFor({ ...STATIC, probeLifecycleScripts: true }).probeLifecycleScripts).toBe(
+      "false",
+    );
+    expect(contextFor({ ...ON, probeLifecycleScripts: true }).probeLifecycleScripts).toBe("true");
   });
 
   it("resolves the binary in §D1's order — env, PATH, then the image path", () => {
@@ -402,13 +471,52 @@ describe("control", () => {
 const falsify = byName.get("falsify");
 if (!falsify) throw new Error("pr-review.yaml has no `falsify` phase");
 
+const FALSIFY_MODEL =
+  "{{#if models.review-falsify}}{{models.review-falsify}}{{/if}}" +
+  "{{#if !models.review-falsify}}{{models.review-survey}}{{/if}}";
+
 describe("falsify — the loop, its gate, and the rule with money on it", () => {
-  it("runs on the cheap survey model, not the review model", () => {
+  it("has its OWN model key, falling through to the cheap survey model", () => {
     // The oracle's value is EXECUTION, not reasoning power. Paying review-model
     // rates to run `eslint` against a four-line probe file buys nothing, and the
     // measured ordering (Haiku beats Sonnet on review recall on two independent
-    // evals) says the cheap model is not the compromise it looks like.
-    expect(falsify!.model).toBe("{{models.review-survey}}");
+    // evals) says the cheap model is not the compromise it looks like — so
+    // `models.review-survey` stays the DEFAULT here.
+    //
+    // But it was HARD-WIRED to that key, which made "is a cheap model good
+    // enough at writing and RUNNING a probe?" unrunnable: moving the oracle
+    // moved all five survey branches with it, two variables in one arm.
+    expect(falsify!.model).toBe(FALSIFY_MODEL);
+  });
+
+  it("uses the explicit `{{#if}}` PAIR, exactly as `adjudicate` does", () => {
+    // Load-bearing and already measured once: a bare unset
+    // `{{models.review-falsify}}` renders EMPTY, and an empty model resolves to
+    // the DEFAULT model rather than to the intended fall-through. The
+    // adjudicate case cost a scorecard that recorded literal `{{#if …}}`
+    // residue as `PhaseMetric.model`.
+    const adjudicateModel = byName.get("adjudicate")?.model ?? "";
+    expect(adjudicateModel).toContain("{{#if models.review-adjudicate}}");
+    expect(adjudicateModel).toContain("{{#if !models.review-adjudicate}}");
+    expect(falsify!.model).toContain("{{#if models.review-falsify}}");
+    expect(falsify!.model).toContain("{{#if !models.review-falsify}}");
+    expect(falsify!.model).not.toBe("{{models.review-falsify}}");
+  });
+
+  it("renders to the pinned model when set, and to review-survey when not", () => {
+    // Through CORE'S OWN engine — the function `resolveModelVariant` feeds
+    // these templates through — and the residue assertion is the whole point:
+    // an empty or `{{#if}}`-carrying render is not a model id.
+    const render = (models: Record<string, string>) =>
+      renderTemplate(falsify!.model!, { models } as unknown as TemplateContext).trim();
+
+    const base = { default: "openai/gpt-5.4-mini", "review-survey": "anthropic/claude-haiku-4-5" };
+    expect(render(base)).toBe("anthropic/claude-haiku-4-5");
+    expect(render({ ...base, "review-falsify": "openai/gpt-5.5" })).toBe("openai/gpt-5.5");
+    for (const models of [base, { ...base, "review-falsify": "openai/gpt-5.5" }]) {
+      expect(render(models)).not.toMatch(/\{\{|\}\}/);
+      expect(render(models)).not.toBe("");
+    }
   });
 
   it("reads its round budget from the operator's config", () => {
@@ -427,6 +535,26 @@ describe("falsify — the loop, its gate, and the rule with money on it", () => 
     expect(gate).not.toMatch(/\{\{|\}\}/);
     expect(gate).toContain("${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts");
     expect(gate).toContain("probes --dir .lastlight/pr-review");
+  });
+
+  it("runs under `static` — the oracle never needed the install", () => {
+    // Its prompt was already written for a tree with no dependencies on it:
+    // it reads `installed` off `env.json`, records what it cannot run as
+    // `unprobed` with a reason, and those hypotheses survive to adjudication.
+    // The only thing keeping it out of the zero-install world was the shared
+    // gate, and that was an accident of gating rather than a constraint.
+    expect(falsify!.skip_if).toContain("probesEnabled != true");
+    expect(contextFor(STATIC).probesEnabled).toBe("true");
+  });
+
+  it("has a WHOLE-PHASE budget, not just a round count", () => {
+    // `probeRounds` bounds how many times the loop may go round and says
+    // nothing about what it may spend, and this is the one phase that
+    // executes code. Named from config like every other budget (#385).
+    expect(falsify!.timeout_seconds).toEqual({ from: "falsifyTimeoutSeconds" });
+    expect(contextFor(STATIC).falsifyTimeoutSeconds).toBe(
+      String(defaultReviewConfig().analysis.falsifyTimeoutSeconds),
+    );
   });
 
   it("sits between the survey fan-out and the review, on `all_done`", () => {
@@ -496,6 +624,41 @@ describe("the falsify prompt carries the constraints, not just the task", () => 
     expect(prompt).toMatch(/"installed": false/);
   });
 
+  it("carries a cost-ordered probe ladder, every tier of which is zero-install", () => {
+    // The static tier has to be PRODUCTIVE, not merely degraded. Four tiers,
+    // cheapest first, none of which needs a `node_modules`: differential git,
+    // an isolated pure function under plain `node`, a binary already on disk,
+    // and a scoped `lastlight-facts` re-query — the last being the one that
+    // grounds a verdict in an artefact NO earlier pass produced, which is
+    // where an oracle's value actually comes from.
+    expect(prompt).toMatch(/Differential git probe/i);
+    expect(prompt).toMatch(/Isolated pure-function execution/i);
+    expect(prompt).toMatch(/Vendored-binary probe/i);
+    expect(prompt).toMatch(/Deterministic re-query/i);
+    expect(prompt).toContain(".lastlight/pr-review/probes/<hypothesis-id>.mjs");
+  });
+
+  it("forbids the install and the suite outright, whatever env.json says", () => {
+    expect(prompt).toMatch(/do not run `npm`\/`pnpm`\/`yarn`\/`bun install`/i);
+    expect(prompt).toMatch(/"install": "skipped"/);
+  });
+
+  it("says reading the code is not a probe, and that the rule is machine-checked", () => {
+    // The mechanism half landed in `packages/code-facts/src/probes.ts`; this is
+    // the half that tells the model. First real run of this phase: 9 verdicts,
+    // 9 `reproduced`, every one `"command": "code inspection"` over a prose
+    // transcript, zero executed commands. An instruction is not a mechanism —
+    // and now that there IS a mechanism, the prompt has to name it, or the
+    // phase fails a gate for a rule it was never told about.
+    expect(prompt).toMatch(/Reading the code is NOT a probe/i);
+    expect(prompt).toMatch(/`?"code inspection"`? is not a command/i);
+    expect(prompt).toMatch(/If you executed nothing, the verdict is `unprobed`/i);
+    // …and that it costs the finding nothing, which is what keeps the gate
+    // satisfiable honestly rather than pushing the pass into a fabrication.
+    expect(prompt).toMatch(/survives to\s+adjudication at lowered confidence/i);
+    expect(prompt).toMatch(/first line/i);
+  });
+
   it("forbids the four things that would corrupt a later phase", () => {
     expect(prompt).toMatch(/Do NOT post a review/);
     expect(prompt).toMatch(/Do NOT write `?\.lastlight\/pr-review\/findings\.json/);
@@ -509,7 +672,9 @@ describe("the falsify prompt carries the constraints, not just the task", () => 
     // The gate keys on `hypothesis` and `verdict`, and demands `transcript` for
     // the two verdicts that claim execution. A prompt that named different
     // fields would produce an unsatisfiable loop.
-    for (const field of ['"hypothesis"', '"verdict"', '"transcript"']) {
+    // `command` joins them: the gate now checks it against the transcript's
+    // first line, so a prompt that stopped naming it would be unsatisfiable.
+    for (const field of ['"hypothesis"', '"verdict"', '"transcript"', '"command"']) {
       expect(prompt, field).toContain(field);
     }
   });

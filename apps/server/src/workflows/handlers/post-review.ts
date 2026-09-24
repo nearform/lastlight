@@ -248,30 +248,6 @@ function toBudget(v: unknown, fallback: number): number {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
 }
 
-/** Like {@link toBudget} but fractional — `internalFloor` is a 0..1 bar. */
-function toFloor(v: unknown, fallback: number): number {
-  const n = Number(v);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-}
-
-/** The one JSON-valued context key; an unparseable value means "no bars". */
-function parseThresholds(v: unknown): Record<string, number> {
-  if (typeof v !== "string" || v === "") return {};
-  try {
-    const parsed: unknown = JSON.parse(v);
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
-      return {};
-    const out: Record<string, number> = {};
-    for (const [k, val] of Object.entries(parsed)) {
-      const n = Number(val);
-      if (Number.isFinite(n)) out[k] = n;
-    }
-    return out;
-  } catch {
-    return {};
-  }
-}
-
 /**
  * The `type: post-review` phase — the one workflow body genuinely coupled to
  * GitHub, lifted out of the engine into an app-registered {@link PhaseTypeHandler}.
@@ -517,6 +493,29 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
           ...anchored.stats,
         });
       }
+      // Warn, never fail, and deliberately NOT inside the `if` above: that
+      // one fires only when something RESOLVED, so the case where every
+      // excerpt failed — the case worth knowing about — logged nothing at all.
+      // Measured 2026-09-21 over all 54 off-diff demotions in the preserved
+      // archive: 26 carried an excerpt matching nothing, and 22 of those came
+      // from ONE case-run whose `existingCode` held prose rather than code.
+      // The cascade is behaving correctly there; the adjudicator is not
+      // honouring its own output contract, and nothing a run wrote said so.
+      if (anchored.stats.unresolved > 0) {
+        log.warn(
+          "findings quote code that is not in the file they name — anchoring to the body",
+          {
+            repo: `${owner}/${repo}`,
+            prNumber,
+            count: anchored.stats.unresolved,
+            // Capped: one measured case produced 22 of these and a log line
+            // is not a report. The count above is the honest total.
+            findings: anchored.unresolvedExcerpts
+              .slice(0, 10)
+              .map((f) => `${f.path}: ${f.title}`),
+          },
+        );
+      }
       doc = { ...doc, findings: anchored.findings };
     }
 
@@ -554,8 +553,8 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     // WP6b — the attention boundary, and it exists ONLY when the evidence
     // pipeline is on. `undefined` here is not a default, it is the whole
     // inertness guarantee: `buildReview` takes its pre-WP6b branch and a
-    // deployment that never opted in gets no cap, no thresholds and no
-    // `internal` tier, whatever a findings.json happens to carry.
+    // deployment that never opted in gets no cap and no `internal` tier,
+    // whatever a findings.json happens to carry.
     const boundary = this.attentionBoundary();
     // The anti-finding rule (below). Read ONLY when a boundary exists, so a
     // deployment that never opted in does not even stat the directory — the
@@ -793,21 +792,16 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     // `getRuntimeConfig()` silently applies the packaged defaults to every
     // eval arm — found on this pipeline's own PR after three repeats of an
     // arm that pinned `maxBodyComments: null` each recorded 5–14
-    // `body-budget` demotions. `specContext` projects all four fields
-    // together, so their presence is atomic; production projects them from
-    // the same runtime config this fallback reads, so the two authorities
-    // cannot disagree there.
+    // `body-budget` demotions. `specContext` projects both fields together,
+    // so their presence is atomic — the test is on `maxInlineComments` for
+    // both — and production projects them from the same runtime config this
+    // fallback reads, so the two authorities cannot disagree there.
     const ctx = this.run.ctx as Record<string, unknown>;
     if (typeof ctx.maxInlineComments === "string") {
       return {
         maxInlineComments: toBudget(
           ctx.maxInlineComments,
           defaultReviewPolicy().analysis.maxInlineComments,
-        ),
-        thresholds: parseThresholds(ctx.boundaryThresholds),
-        internalFloor: toFloor(
-          ctx.internalFloor,
-          defaultReviewPolicy().analysis.internalFloor,
         ),
         // `"null"` is the literal the projection writes for the documented
         // "unlimited body overflow" value; anything else degrades to the
@@ -827,8 +821,6 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       getRuntimeConfig()?.review?.analysis ?? defaultReviewPolicy().analysis;
     return {
       maxInlineComments: analysis.maxInlineComments,
-      thresholds: analysis.thresholds ?? {},
-      internalFloor: analysis.internalFloor,
       // Nullable on purpose — `null` is the documented "unlimited body
       // overflow" value, so it must survive this projection rather than be
       // defaulted away. `??` here would erase the operator's explicit choice.

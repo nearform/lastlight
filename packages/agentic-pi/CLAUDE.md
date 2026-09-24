@@ -79,8 +79,15 @@ src/
                           rate-limit windows (e.g. Fireworks TPM). Pure/testable.
   gate-timeout.ts         --gate-timeout / gateTimeoutSeconds: wraps the bash
                           ToolDefinition (host built-in replacement or gondolin
-                          override) with one promptGuideline + a timeout floor for
-                          recognised install/build/test commands. Unset = no-op.
+                          override) with one promptGuideline + a CLAMP of the
+                          model's timeout to the gate value — raised for
+                          recognised install/build/test commands, lowered for
+                          anything above it, and supplied when the model passes
+                          none at all (Pi's default is NO limit, which let a
+                          server-starting probe wedge a run for 7.5h). Killing
+                          is Pi's (detached spawn + killProcessTree); this only
+                          schedules it. Unset = no-op, so callers that want any
+                          bound must pass the flag — lastlight always does.
   runner.ts               Drives Pi: createAgentSession → subscribe → prompt → agent_end.
                           Sink-agnostic — takes an EmitterSink + onWarn callback as deps.
   extensions/github/

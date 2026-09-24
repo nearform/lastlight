@@ -134,6 +134,8 @@ export type { DisabledConfig, RouteConfig } from "lastlight-shared/config-types"
 // surface for the runtime config shape.
 import {
   DIAGNOSIS_CLASSES,
+  coerceAdjudicateMode,
+  coerceProbeMode,
   defaultDependenciesConfig,
   defaultFixConfig,
   defaultNotificationsConfig,
@@ -155,6 +157,7 @@ export type {
   FixConfig,
   GateConfig,
   NotificationsConfig,
+  ProbeMode,
   ReviewConfig,
   ReviewPolicy,
   ReviewTrigger,
@@ -847,6 +850,8 @@ export function withReviewDurations(policy: ReviewPolicy, operator: ReviewConfig
       factsTimeoutSeconds: operator.analysis.factsTimeoutSeconds,
       seedTimeoutSeconds: operator.analysis.seedTimeoutSeconds,
       reconcileTimeoutSeconds: operator.analysis.reconcileTimeoutSeconds,
+      falsifyTimeoutSeconds: operator.analysis.falsifyTimeoutSeconds,
+      jevTimeoutSeconds: operator.analysis.jevTimeoutSeconds,
     },
   };
 }
@@ -1238,6 +1243,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const exploreRaw = isPlainObject(raw.explore) ? raw.explore : {};
   const reviewRaw = isPlainObject(raw.review) ? raw.review : {};
   const analysisRaw = isPlainObject(reviewRaw.analysis) ? reviewRaw.analysis : {};
+  warnRemovedBoundaryKeys(analysisRaw);
   const triageRaw = isPlainObject(reviewRaw.triage) ? reviewRaw.triage : {};
   const autonomyRaw = isPlainObject(raw.autonomy) ? raw.autonomy : {};
   const fixRaw = isPlainObject(raw.fix) ? raw.fix : {};
@@ -1420,12 +1426,22 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
       // effective value and the run logs when the host overrides it.
       surveyConcurrency:
         nonNegativeNumber(analysisRaw.surveyConcurrency) ?? reviewDefaults.analysis.surveyConcurrency,
-      // WP4. Every one of these four reads `=== true` for the same reason
-      // `enabled` does: each buys the operator's compute, and two of them —
-      // `probes` (which installs a PR author's dependencies) and
-      // `probeLifecycleScripts` (which runs that author's postinstall) — are
-      // decisions a truthy-ish string in an overlay must never make by accident.
-      probes: analysisRaw.probes === true,
+      // WP4. `probes` is TRI-STATE (`off` | `static` | `full`) and the other
+      // three still read `=== true`, for the same reason `enabled` does: each
+      // buys the operator's compute, and two of them — `full` (which installs a
+      // PR author's dependencies) and `probeLifecycleScripts` (which runs that
+      // author's postinstall) — are decisions a truthy-ish string in an overlay
+      // must never make by accident. `coerceProbeMode` keeps exactly that
+      // spirit: only the literal `"full"` installs, a bare `true` lands on
+      // `"static"` (so no existing deployment gains an install by upgrading),
+      // and every other value — including `"true"` and `"yes"` — is `"off"`.
+      probes: coerceProbeMode(analysisRaw.probes),
+      // #399. Selects what `adjudicate` is handed and what shape it writes
+      // back, in ONE key because both halves move the same phase's measured
+      // surface. Only the literal `"dossier"` moves a deployment; everything
+      // else is the shipped phase, which is the direction the whole block
+      // fails.
+      adjudicate: coerceAdjudicateMode(analysisRaw.adjudicate),
       probeLifecycleScripts: analysisRaw.probeLifecycleScripts === true,
       probeTypecheck: analysisRaw.probeTypecheck === true,
       probeCoverage: analysisRaw.probeCoverage === true,
@@ -1443,21 +1459,16 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
         analysisRaw.reconcileTimeoutSeconds,
         "review.analysis.reconcileTimeoutSeconds",
       ),
+      falsifyTimeoutSeconds: requiredSeconds(
+        analysisRaw.falsifyTimeoutSeconds,
+        "review.analysis.falsifyTimeoutSeconds",
+      ),
       probeRounds: nonNegativeNumber(analysisRaw.probeRounds) ?? reviewDefaults.analysis.probeRounds,
       // WP6b, the attention boundary. `maxInlineComments` allows 0 — a
       // deployment that wants every finding in the review body is a coherent
       // choice — so `nonNegativeNumber` is right and `|| default` would not be.
       maxInlineComments:
         nonNegativeNumber(analysisRaw.maxInlineComments) ?? reviewDefaults.analysis.maxInlineComments,
-      // The per-family bars merge onto the packaged set rather than replacing
-      // it: an overlay tuning ONE family must not silently un-bar the other
-      // five, which a whole-map replacement would do.
-      thresholds: {
-        ...reviewDefaults.analysis.thresholds,
-        ...numericMap(analysisRaw.thresholds),
-      },
-      internalFloor:
-        nonNegativeNumber(analysisRaw.internalFloor) ?? reviewDefaults.analysis.internalFloor,
       // The body-side budget. Nullable exactly like `fix.maxCostUsd` above: an
       // explicit `null` is the documented "unlimited body overflow" value (the
       // legacy funnel), distinct from an absent/typo'd key, which falls back
@@ -1468,6 +1479,11 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
         analysisRaw.maxBodyComments === null
           ? null
           : nonNegativeNumber(analysisRaw.maxBodyComments) ?? reviewDefaults.analysis.maxBodyComments,
+      // #399 idea 2. `null` ⇒ `jev-classify`'s own default. A non-string is
+      // the same direction every switch in this block fails: the default,
+      // never a fabricated model id.
+      jevModel: typeof analysisRaw.jevModel === "string" ? analysisRaw.jevModel.trim() : reviewDefaults.analysis.jevModel,
+      jevTimeoutSeconds: requiredSeconds(analysisRaw.jevTimeoutSeconds, "review.analysis.jevTimeoutSeconds"),
     },
   };
 
@@ -1740,19 +1756,27 @@ function nonNegativeNumber(raw: unknown): number | undefined {
 }
 
 /**
- * The numeric leaves of a flat map, dropping anything that is not a finite
- * number. Used for `review.analysis.thresholds`, where a non-numeric value must
- * fall through to the packaged bar rather than silently becoming `NaN` — every
- * comparison against which is `false`, so the family would lose its bar while
- * looking configured.
+ * Keys this config once honoured under `review.analysis` and now IGNORES.
+ *
+ * Both were confidence gates on the attention boundary, removed 2026-09-21
+ * after `finding.confidence` measured AUROC 0.228 [0.171, 0.299] over 516
+ * findings — a strong signal pointing the wrong way — and after the preserved
+ * archive showed neither had ever cost a gold finding. Two overlay repos and
+ * ~17 eval overlays may still pin them, so they are ACCEPTED AND IGNORED
+ * rather than rejected: this loader reads only the keys it knows, so an
+ * unknown leaf was already inert. The warning is so an operator who pinned one
+ * learns it stopped meaning anything, instead of believing a bar is in force.
  */
-function numericMap(raw: unknown): Record<string, number> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const out: Record<string, number> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
-  }
-  return out;
+const REMOVED_ANALYSIS_KEYS = ["internalFloor", "thresholds"] as const;
+
+function warnRemovedBoundaryKeys(analysisRaw: Record<string, unknown>): void {
+  const present = REMOVED_ANALYSIS_KEYS.filter((k) => analysisRaw[k] !== undefined);
+  if (present.length === 0) return;
+  log.warn("review.analysis keys were removed and are ignored", {
+    keys: present,
+    detail:
+      "the attention boundary no longer gates on finding.confidence (AUROC 0.228); remove these keys from your overlay",
+  });
 }
 
 /**

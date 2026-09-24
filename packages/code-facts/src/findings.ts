@@ -59,6 +59,7 @@ import {
 } from "./hypotheses.js";
 import { noopLogger, type LoggerPort } from "./log.js";
 import { FindingsDocumentSchema } from "./schema.js";
+import { severityOf } from "./survey-verdict.js";
 
 export type FindingsGapKind =
   /** In no `findings[].hypotheses` and no `dropped[]`. Silent omission. */
@@ -195,12 +196,16 @@ function internalFinding(
   const claim = row ? asString(row.claim) : null;
   const path = row ? pathOf(row) : null;
   const existingCode = row ? asString(row.existingCode) : null;
-  const severity = (row ? asString(row.severity) : null) ?? "Important";
+  const severity = (row ? severityOf(row) : null) ?? "Important";
+  // Still read, never asked for: the row contract no longer requests
+  // `confidence` (it measured AUROC 0.228, inverted, and `rankOf` ignores it),
+  // but a row that carries one is audit data and this record exists to carry
+  // the row. New rows simply have none.
+  const confidence = row && typeof row.confidence === "number" ? row.confidence : null;
   // The FILENAME's family, not the row's self-report — the survey branch owns
   // its file, and a free-form row carries no `family` field at all.
   const family = record?.family ?? (row ? asString(row.family) : null);
   const obligation = row ? asString(row.obligation) : null;
-  const confidence = row && typeof row.confidence === "number" ? row.confidence : null;
 
   const finding: Record<string, unknown> = {};
   if (path) finding.path = path;
@@ -715,7 +720,7 @@ export function buildFindingsLedger(options: CheckFindingsOptions): FindingsLedg
       family,
       obligation: asString(row.obligation),
       path: pathOf(row),
-      severity: asString(row.severity),
+      severity: severityOf(row),
       confidence: typeof row.confidence === "number" ? row.confidence : null,
       title: claim ? titleFrom(claim) : `(no claim recorded on ${id})`,
       accounted: covered.has(id),

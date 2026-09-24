@@ -1,8 +1,9 @@
 import { Moon, Sun } from "lucide-react";
-import { useIndex } from "./lib/api";
-import { useNavigate, useRoute } from "./lib/router";
+import { useIndex, useMicroIndex } from "./lib/api";
+import { MICRO_TIER_KEY, useNavigate, useRoute } from "./lib/router";
 import { useTheme } from "./hooks/useTheme";
 import { Home } from "./components/Home";
+import { MicroSurveyDetail, MicroSurveyList } from "./components/MicroSurvey";
 import { NearformLogo } from "./components/NearformLogo";
 import { Overview } from "./components/Overview";
 import { RepeatView } from "./components/RepeatView";
@@ -10,11 +11,20 @@ import { RunView } from "./components/RunView";
 
 export default function App() {
   const { data: index, isLoading, error } = useIndex();
+  // A second, independent index: micro-survey replays are not runs (no tier, no
+  // scorecard, no graded cases), so they have their own endpoint and their own
+  // route. Its failure must never take the runs view down with it.
+  const { data: micro, isLoading: microLoading } = useMicroIndex();
   const route = useRoute();
   const navigate = useNavigate();
   const { isDark, toggleTheme } = useTheme();
 
   const tiers = index?.tiers ?? [];
+  const microReports = micro?.reports ?? [];
+  // `micro-survey` occupies the tier-key slot in the hash but is never a tier —
+  // see MICRO_TIER_KEY for why that cannot collide.
+  const microRoute = route.tierKey === MICRO_TIER_KEY;
+  const microEntry = microRoute && route.runId ? microReports.find((r) => r.id === route.runId) : undefined;
   // No tier in the URL → the Home landing (all tiers + recent runs). A tier is
   // only "selected" when its key is actually in the route.
   const selectedTier = route.tierKey ? tiers.find((t) => t.key === route.tierKey) : undefined;
@@ -44,6 +54,21 @@ export default function App() {
                 <span className="ml-1.5 text-base-content/40">{t.runs.length}</span>
               </button>
             ))}
+            {microReports.length > 0 && (
+              <button
+                onClick={() => navigate(MICRO_TIER_KEY)}
+                title="Micro-survey replays — one survey branch against a preserved workspace, ~2 minutes each"
+                className={
+                  "rounded-lg border px-3 py-1.5 font-mono text-xs font-semibold " +
+                  (microRoute
+                    ? "border-info bg-info/15 text-info"
+                    : "border-base-300 bg-base-200 text-base-content/60 hover:border-info hover:text-base-content")
+                }
+              >
+                micro-survey
+                <span className="ml-1.5 text-base-content/40">{microReports.length}</span>
+              </button>
+            )}
             <button
               onClick={toggleTheme}
               className="rounded-lg border border-base-300 bg-base-200 p-1.5 text-base-content/60 hover:border-info hover:text-base-content"
@@ -63,6 +88,25 @@ export default function App() {
 
         {error && !index ? (
           <ServerDown message={(error as Error).message} />
+        ) : microRoute && microLoading && !micro ? (
+          <Loading />
+        ) : microRoute && microEntry ? (
+          <div>
+            <button
+              onClick={() => navigate(MICRO_TIER_KEY)}
+              className="mb-5 font-mono text-xs text-info hover:underline"
+            >
+              ← all micro-survey reports
+            </button>
+            <MicroSurveyDetail entry={microEntry} />
+          </div>
+        ) : microRoute ? (
+          <div>
+            <button onClick={() => navigate()} className="mb-5 font-mono text-xs text-info hover:underline">
+              ← overview
+            </button>
+            <MicroSurveyList reports={microReports} />
+          </div>
         ) : isLoading && !index ? (
           <Loading />
         ) : !tiers.length ? (

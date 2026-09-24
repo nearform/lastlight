@@ -72,11 +72,21 @@ describe("resolveGateTimeout", () => {
   test("leaves a non-gate command's timeout alone", () => {
     assert.equal(resolveGateTimeout("ls", 5, 900), 5);
   });
-  test("leaves an absent timeout (no limit) alone", () => {
-    assert.equal(resolveGateTimeout("pnpm test", undefined, 900), undefined);
+  // The hang fix: an omitted timeout used to mean "no limit", which let a
+  // `npx eslint --inspect-config` probe wedge an eval case for 7.5 hours.
+  test("bounds an absent timeout at the gate value, gate command or not", () => {
+    assert.equal(resolveGateTimeout("pnpm test", undefined, 900), 900);
+    assert.equal(resolveGateTimeout("npx eslint --inspect-config", undefined, 900), 900);
+    assert.equal(resolveGateTimeout("ls", undefined, 900), 900);
   });
-  test("never lowers a larger timeout", () => {
-    assert.equal(resolveGateTimeout("pnpm test", 1200, 900), 1200);
+  test("lowers a timeout above the gate value", () => {
+    assert.equal(resolveGateTimeout("pnpm test", 1200, 900), 900);
+    assert.equal(resolveGateTimeout("node server.js", 86_400, 900), 900);
+  });
+  test("is total — never returns undefined", () => {
+    for (const t of [undefined, 1, 900, 5000]) {
+      assert.equal(typeof resolveGateTimeout("ls", t, 900), "number");
+    }
   });
 });
 
@@ -92,7 +102,7 @@ describe("withGateTimeout", () => {
     assert.equal(base.promptGuidelines?.includes(gateTimeoutGuideline(1500)), false);
   });
 
-  test("raises the timeout passed to operations for gate commands only", async () => {
+  test("clamps the timeout passed to operations: raise gates, cap the rest", async () => {
     const { ops, timeouts } = recordingOps();
     const tool = withGateTimeout(
       createBashToolDefinition("/tmp", { operations: ops, exposeSessionEnvironment: false }),
@@ -100,7 +110,9 @@ describe("withGateTimeout", () => {
     );
     await callBash(tool, "pnpm --filter lastlight-core test", 120);
     await callBash(tool, "ls", 3);
-    assert.deepEqual(timeouts, [600, 3]);
+    await callBash(tool, "npx eslint --inspect-config");
+    await callBash(tool, "node server.js", 99_999);
+    assert.deepEqual(timeouts, [600, 3, 600, 600]);
   });
 
   test("works on the gondolin-style AgentTool from createBashTool", async () => {

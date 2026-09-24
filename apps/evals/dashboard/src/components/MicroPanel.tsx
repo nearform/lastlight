@@ -1,6 +1,9 @@
+import { useState } from "react";
+
 import { DETECTION_FLOOR_MICRO_RECALL } from "../../../src/review-metrics.js";
-import type { ModelSummary } from "../types";
+import type { InstanceResult, ModelSummary } from "../types";
 import { fmtPct, fmtRatio, modelLabel } from "../lib/format";
+import { FamilyDrilldownModal, type DrilldownCase } from "./FamilyDrilldown";
 
 /**
  * The recall-first instrument, rendered.
@@ -14,9 +17,39 @@ import { fmtPct, fmtRatio, modelLabel } from "../lib/format";
  * `boundaries` and `families` render only for an arm that emitted an evidence
  * packet. Their absence is a clean degrade (the posted numbers above are still
  * complete), never a row of zeros.
+ *
+ * A funnel row is a **button** when the arm's cases recorded a
+ * `pipelineArtifactRel` — the run then still holds the obligations, hypotheses
+ * and findings the counts were computed from, and {@link FamilyDrilldownModal}
+ * shows them. When it did not (every run before the artifacts became durable),
+ * the row stays inert and says so: the counts are real, the evidence behind
+ * them was written to a temp dir the OS reclaimed.
  */
-export function MicroPanel({ models, labels }: { models: ModelSummary[]; labels: Record<string, string> }) {
+export function MicroPanel({
+  models,
+  labels,
+  results = [],
+  scorecardUrl,
+}: {
+  models: ModelSummary[];
+  labels: Record<string, string>;
+  /** This tier's results — the source of each case's `pipelineArtifactRel`. */
+  results?: InstanceResult[];
+  /** This run's `scorecard.json` URL; artifact paths resolve relative to it. */
+  scorecardUrl?: string;
+}) {
   const withMicro = models.filter((m) => m.micro);
+  const [open, setOpen] = useState<{ family: string; arm: string; cases: DrilldownCase[] } | null>(null);
+  // `pipelineArtifactRel` is relative to the run dir, deliberately, so the run
+  // stays portable — resolve it the same way session logs are resolved.
+  const artifactUrl = (rel: string) => (scorecardUrl ? scorecardUrl.replace(/scorecard\.json$/, rel) : rel);
+  const casesOf = (model: string): DrilldownCase[] =>
+    results
+      .filter((r) => r.model === model)
+      .map((r) => ({
+        instanceId: r.instance_id,
+        ...(r.pipelineArtifactRel ? { base: artifactUrl(r.pipelineArtifactRel) } : {}),
+      }));
   if (!withMicro.length) return null;
 
   return (
@@ -97,43 +130,12 @@ export function MicroPanel({ models, labels }: { models: ModelSummary[]; labels:
               )}
 
               {m.families && m.families.length > 0 && (
-                <div className="mt-3 border-t border-base-300 pt-2.5">
-                  <div className="mb-1.5 font-mono text-2xs uppercase tracking-wide text-base-content/40">
-                    per-family funnel
-                  </div>
-                  <table className="w-full max-w-xl border-collapse font-mono text-2xs">
-                    <thead>
-                      <tr className="text-base-content/40">
-                        <th className="py-1 text-left font-normal">family</th>
-                        <th className="py-1 text-right font-normal">obligations</th>
-                        <th className="py-1 text-right font-normal">hypotheses</th>
-                        <th className="py-1 text-right font-normal">posted</th>
-                        <th className="py-1 text-right font-normal">matched</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {m.families.map((f) => (
-                        <tr key={f.family} className="border-t border-base-300/60">
-                          <td className="py-1 text-base-content/70">
-                            {f.family}
-                            {f.notMeasured && (
-                              <span
-                                className="ml-1.5 rounded bg-base-300 px-1 text-base-content/50"
-                                title="The analyser for this family was absent on the measuring host. Not measured is a different fact from did not convert."
-                              >
-                                not measured
-                              </span>
-                            )}
-                          </td>
-                          <td className="py-1 text-right tabular-nums text-base-content/60">{f.obligations}</td>
-                          <td className="py-1 text-right tabular-nums text-base-content/60">{f.hypotheses}</td>
-                          <td className="py-1 text-right tabular-nums text-base-content/60">{f.posted}</td>
-                          <td className="py-1 text-right tabular-nums text-base-content">{f.matched}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                <FamilyFunnelTable
+                  families={m.families}
+                  arm={modelLabel(labels, m.model)}
+                  cases={casesOf(m.model)}
+                  onOpen={(family, arm, cases) => setOpen({ family, arm, cases })}
+                />
               )}
             </div>
           );
@@ -143,6 +145,111 @@ export function MicroPanel({ models, labels }: { models: ModelSummary[]; labels:
         Detection floor ≈ {fmtPct(DETECTION_FLOOR_MICRO_RECALL)} micro-recall on this gold set: below it, a difference
         of one or two findings between runs is indistinguishable from chance. Gate on mechanism metrics; report this.
       </p>
+      {open && (
+        <FamilyDrilldownModal
+          family={open.family}
+          arm={open.arm}
+          cases={open.cases}
+          onClose={() => setOpen(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * The funnel, with each row a door into the evidence behind it.
+ *
+ * Pooled, exactly like the counts: one row sums every case in the arm, so the
+ * drill-down pools too and names the case beside every obligation, hypothesis
+ * and finding it shows.
+ */
+function FamilyFunnelTable({
+  families,
+  arm,
+  cases,
+  onOpen,
+}: {
+  families: NonNullable<ModelSummary["families"]>;
+  arm: string;
+  cases: DrilldownCase[];
+  onOpen: (family: string, arm: string, cases: DrilldownCase[]) => void;
+}) {
+  const retained = cases.filter((c) => c.base).length;
+  return (
+    <div className="mt-3 border-t border-base-300 pt-2.5">
+      <div className="mb-1.5 flex flex-wrap items-baseline gap-2 font-mono text-2xs uppercase tracking-wide text-base-content/40">
+        per-family funnel
+        {retained > 0 ? (
+          <span className="normal-case tracking-normal text-base-content/30">
+            click a row — obligations, hypotheses and what became of them ({retained} of {cases.length}{" "}
+            case{cases.length === 1 ? "" : "s"} retained artifacts)
+          </span>
+        ) : (
+          <span
+            className="normal-case tracking-normal text-base-content/30"
+            title="No case in this arm recorded a pipelineArtifactRel. Runs before the artifacts became durable wrote them into a temp workspace the OS reclaims; the counts below were read while it existed and stand."
+          >
+            artifacts not retained for this run — counts only
+          </span>
+        )}
+      </div>
+      <table className="w-full max-w-xl border-collapse font-mono text-2xs">
+        <thead>
+          <tr className="text-base-content/40">
+            <th className="py-1 text-left font-normal">family</th>
+            <th className="py-1 text-right font-normal">obligations</th>
+            <th className="py-1 text-right font-normal">hypotheses</th>
+            <th className="py-1 text-right font-normal">posted</th>
+            <th className="py-1 text-right font-normal">matched</th>
+          </tr>
+        </thead>
+        <tbody>
+          {families.map((f) => (
+            <tr
+              key={f.family}
+              onClick={retained ? () => onOpen(f.family, arm, cases) : undefined}
+              onKeyDown={
+                retained
+                  ? (e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        onOpen(f.family, arm, cases);
+                      }
+                    }
+                  : undefined
+              }
+              {...(retained ? { role: "button" as const, tabIndex: 0 } : {})}
+              title={
+                retained
+                  ? `Open the obligations, hypotheses and findings behind ${f.family}`
+                  : "Artifacts not retained for this run — the evidence behind these counts was not kept"
+              }
+              className={
+                "border-t border-base-300/60 " +
+                (retained ? "cursor-pointer hover:bg-base-300/40" : "cursor-default")
+              }
+            >
+              <td className="py-1 text-base-content/70">
+                {retained && <span className="mr-1 text-base-content/30" aria-hidden>›</span>}
+                {f.family}
+                {f.notMeasured && (
+                  <span
+                    className="ml-1.5 rounded bg-base-300 px-1 text-base-content/50"
+                    title="The analyser for this family was absent on the measuring host. Not measured is a different fact from did not convert."
+                  >
+                    not measured
+                  </span>
+                )}
+              </td>
+              <td className="py-1 text-right tabular-nums text-base-content/60">{f.obligations}</td>
+              <td className="py-1 text-right tabular-nums text-base-content/60">{f.hypotheses}</td>
+              <td className="py-1 text-right tabular-nums text-base-content/60">{f.posted}</td>
+              <td className="py-1 text-right tabular-nums text-base-content">{f.matched}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

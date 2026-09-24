@@ -531,33 +531,40 @@ review:
                                # you raise one of those ceilings
     obligationContract: minimal  # minimal | full — how much each survey records
                                # per obligation. minimal is the measured default
+    adjudicate: legacy         # legacy | dossier. dossier renders every record
+                               # the adjudication needs (hypotheses, probe
+                               # transcripts, the conservation ledger, quotes
+                               # already checked against the tree) instead of
+                               # having the model shell out ~30 times to
+                               # assemble them — and asks it for claim /
+                               # category / fix instead of a tier and a
+                               # confidence
     mint: all-in-diff,registrations  # extra seeding rules beyond the original
                                # four; "" = the pre-D2 baseline set
     surveyPasses: 6            # RECORDED, not consumed — the fan-out branch list
                                # is the authority
     surveyConcurrency: 6       # survey families running at once (a ceiling,
                                # clamped per sandbox backend)
-    probes: false              # install deps so a probe can be RUN. Its own switch
-    probeLifecycleScripts: false  # let the PR's own postinstall run. Off: it is the
-                               # author's code, on your machine
+    probes: "off"              # off | static | full. static runs the probe
+                               # phases WITHOUT installing anything; full also
+                               # installs the PR's dependencies. A bare `true`
+                               # reads as static
+    probeLifecycleScripts: false  # full only: let the PR's own postinstall run.
+                               # Off: it is the author's code, on your machine
     probeTypecheck: false      # the repo's own tsc --noEmit, for per-line diagnostics
     probeCoverage: false       # the one step that runs a test suite
     prepareTimeoutSeconds: 300
     coverageTimeoutSeconds: 900
     probeRounds: 2
+    falsifyTimeoutSeconds: 600 # the oracle's whole-phase ceiling, all rounds
     maxInlineComments: 10      # the attention boundary — findings past this go
                                # to the review body, never dropped
-    maxBodyComments: 5         # body-tier budget. N = top N by severity ×
-                               # confidence (default 5); 0 = no overflow at all;
+    maxBodyComments: 5         # body-tier budget. N = top N by severity
+                               # (default 5); 0 = no overflow at all;
                                # null = unlimited
-    thresholds:                # per-family confidence bar for an INLINE comment;
-      contract: 0.35           # below it, the body
-      enforcement: 0.35
-      security: 0.30
-      state: 0.50
-      tests: 0.60
-      spec: 0.45
-    internalFloor: 0.15        # below this, recorded in findings.json, not posted
+                               # (`thresholds` and `internalFloor` were removed
+                               #  in 2026-09 — the boundary no longer gates on a
+                               #  finding's confidence; both keys are ignored)
 
 fix:                           # every PR-fixing workflow: pr-fix, dependabot-ci-fix
   maxAttempts: 3               # attempts ACROSS runs for one PR, then a human is asked
@@ -729,14 +736,61 @@ dependencies:
 	</p>
 
 	<p>
+		<code>adjudicate</code> selects what the adjudication phase reads and
+		what shape it writes back, in one key because both halves change the
+		same phase. Under <code>legacy</code> the prompt names the files and
+		the model shells out to assemble them; measured on an eight-case arm
+		that was <strong>137 shell calls across 8 adjudications</strong>, about
+		a third of the run's cost, spent re-deriving records the harness had
+		already parsed. Under <code>dossier</code> a deterministic phase
+		renders them once — every hypothesis, every probe transcript, the
+		conservation ledger, and every quote already checked against the actual
+		file it names — and the model spends its budget deciding rather than
+		fetching. It also stops asking for a tier and a confidence and asks
+		instead for what is <em>wrong</em>, what <em>kind</em> of wrong, and
+		what to <em>change</em>; the tier is then arithmetic. Off until you ask
+		for it.
+	</p>
+
+	<p>
 		<code>probes</code> is a <strong>second switch</strong> under the same
-		block, and it is separate because it buys something different: a review
-		workspace with a <code>node_modules</code> in it. That one fact is what lets
-		a <code>tsconfig</code> that extends a package resolve — without it the
-		analysis quietly drops a tier and the contract checks find nothing — and it
-		is the only route to a coverage report, without which "no untested changed
-		lines" means <em>nobody measured</em> rather than <em>well tested</em>. The
-		three sub-switches under it are priced separately on purpose:
+		block, and it has three values because it used to conflate two decisions.
+		It turns on the <em>oracle</em> — a pass that settles a claim by running
+		something instead of reasoning about it — and, separately, it can install
+		the pull request's dependencies. One boolean bought both, so the only way
+		to get the oracle was to pay for an install.
+	</p>
+
+	<p>
+		<code>static</code> runs both probe phases and <strong>never installs
+		anything</strong>: no package manager, no test suite, no
+		<code>postinstall</code> from a pull request head. The oracle works down a
+		cost-ordered ladder that needs none of it — the same input run against the
+		base branch and the head, a changed pure function copied out and run under
+		plain <code>node</code>, a tool that is already on disk, and a re-query of
+		Last Light's own deterministic analysis scoped to the claim. Anything it
+		genuinely cannot run is recorded as unprobed with the reason and still
+		reaches the review. That is not a degraded mode: the best published
+		false-positive-elimination results come from pipelines that never compile
+		the project at all.
+	</p>
+
+	<p>
+		<code>full</code> adds the install, and what that buys is the
+		<em>analysis</em> rather than the probes: a review workspace with a
+		<code>node_modules</code> in it is what lets a <code>tsconfig</code> that
+		extends a package resolve — without it the analysis quietly drops a tier and
+		the contract checks find nothing — and it is the only route to a coverage
+		report, without which "no untested changed lines" means <em>nobody
+		measured</em> rather than <em>well tested</em>. It also has a cost nothing
+		meters: warm review workspaces deliberately keep their
+		<code>node_modules</code> between runs, so this is a standing per-repo disk
+		cost on your host. A bare <code>true</code> reads as <code>static</code>, so
+		upgrading never buys you an install you did not ask for.
+	</p>
+
+	<p>
+		The sub-switches under it are priced separately on purpose:
 		<code>probeTypecheck</code> is seconds and gives per-line diagnostics (it is
 		not a CI re-run — Last Light already reads your CI result);
 		<code>probeCoverage</code> is the one step that runs your test suite, and it
@@ -745,11 +799,11 @@ dependencies:
 	</p>
 
 	<p>
-		<code>probeLifecycleScripts</code> is off as a <strong>security</strong>
-		default rather than a performance one. The install happens at a pull request
-		head, so a <code>postinstall</code> there is code the PR author wrote,
-		running on your infrastructure — and nothing <code>probes</code> exists for
-		needs it.
+		<code>probeLifecycleScripts</code> applies to <code>full</code> alone, and
+		is off as a <strong>security</strong> default rather than a performance one.
+		The install happens at a pull request head, so a <code>postinstall</code>
+		there is code the PR author wrote, running on your infrastructure — and
+		nothing <code>probes</code> exists for needs it.
 	</p>
 
 	<p>

@@ -20,12 +20,12 @@
  * class of error this module exists to stop.
  */
 
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { readPipelineStats, readPipelineArtifacts, internalJudgeInputs, withInternalRecall } from "./review-pipeline-stats.js";
+import { readPipelineStats, readPipelineArtifacts, persistPipelineArtifacts, internalJudgeInputs, withInternalRecall } from "./review-pipeline-stats.js";
 import { boundaryMetrics, familyFunnels } from "./review-metrics.js";
 import type { InstanceResult, ReviewPipelineStats } from "./schema.js";
 
@@ -90,7 +90,7 @@ function measuredShape() {
     },
     findings: {
       findings: [
-        { title: "Defect", path: "a.ts", line: 1, family: "enforcement", confidence: 0.8, hypotheses: ["enforcement-001"] },
+        { title: "Defect", path: "a.ts", line: 1, family: "enforcement", severity: "Critical", confidence: 0.8, hypotheses: ["enforcement-001"] },
         { title: "Properly enforced", path: "b.ts", line: 2, family: "enforcement", confidence: 1.0, hypotheses: ["enforcement-002"] },
         { title: "Verified", path: "c.ts", line: 3, family: "state", confidence: 1.0, hypotheses: ["state-001"] },
         { title: "No provenance", path: "d.ts", line: 4, family: "spec", confidence: 0.9, hypotheses: [] },
@@ -98,10 +98,10 @@ function measuredShape() {
     },
     disposition: {
       findings: [
-        { tier: "inline", finding: { title: "Defect", path: "a.ts", line: 1 } },
-        { tier: "body", finding: { title: "Properly enforced", path: "b.ts", line: 2 } },
+        { tier: "inline", reason: null, finding: { title: "Defect", path: "a.ts", line: 1 } },
+        { tier: "body", reason: "off-diff", finding: { title: "Properly enforced", path: "b.ts", line: 2 } },
         { tier: "body", finding: { title: "Verified", path: "c.ts", line: 3 } },
-        { tier: "internal", finding: { title: "No provenance", path: "d.ts", line: 4 } },
+        { tier: "internal", reason: "adjudicated", finding: { title: "No provenance", path: "d.ts", line: 4 } },
       ],
     },
   });
@@ -446,5 +446,80 @@ describe("the metrics this finally unblocks", () => {
     expect(r.stats.tiers).toBeUndefined();
     expect(r.stats.byFamily!.state.posted).toBeUndefined();
     expect(r.stats.byFamily!.state.hypotheses).toBe(1);
+  });
+});
+
+describe("persistPipelineArtifacts", () => {
+  /** A destination that is NOT inside the workspace — the whole point. */
+  function dest() {
+    const d = mkdtempSync(join(tmpdir(), "ll-persist-"));
+    temps.push(d);
+    return d;
+  }
+
+  it("copies the artifact tree out of the workspace", () => {
+    const to = dest();
+    const at = persistPipelineArtifacts(measuredShape(), to);
+    expect(at).toBe(join(to, "pr-review"));
+    expect(existsSync(join(to, "pr-review", "findings.json"))).toBe(true);
+    expect(existsSync(join(to, "pr-review", "hypotheses", "enforcement.jsonl"))).toBe(true);
+    // The copy has to be readable by the reader that will back-fill from it,
+    // or it is a pile of bytes rather than a calibration row.
+    expect(readPipelineStats(to)).toBeUndefined(); // wrong root: `to` is not a repo dir
+    expect(JSON.parse(readFileSync(join(to, "pr-review", "findings.json"), "utf8")).findings).toHaveLength(4);
+  });
+
+  it("returns undefined for an arm that wrote no artifacts, rather than an empty dir", () => {
+    const root = mkdtempSync(join(tmpdir(), "ll-baseline-"));
+    temps.push(root);
+    const to = dest();
+    expect(persistPipelineArtifacts(root, to)).toBeUndefined();
+    expect(existsSync(join(to, "pr-review"))).toBe(false);
+  });
+
+  it("creates the destination when it does not exist yet", () => {
+    const to = join(dest(), "sessions", "case__model", "trial-1");
+    expect(persistPipelineArtifacts(measuredShape(), to)).toBe(join(to, "pr-review"));
+    expect(existsSync(join(to, "pr-review", "obligations.json"))).toBe(true);
+  });
+});
+
+describe("the disposition reason", () => {
+  it("is carried through, because tier alone cannot say WHO withheld a finding", () => {
+    const r = readPipelineStats(measuredShape())!;
+    // The whole point: `internal | adjudicated` is the adjudicator's own
+    // verdict, `body | off-diff` is the boundary re-anchoring. Different bugs,
+    // different fixes, and `say-gap.ts` cannot tell them apart without this.
+    expect(r.findings[3].reason).toBe("adjudicated");
+    expect(r.findings[1].reason).toBe("off-diff");
+  });
+
+  it("is null on a row the boundary recorded without one, and ABSENT on a row it never saw", () => {
+    const r = readPipelineStats(measuredShape())!;
+    // An inline row carries no demotion reason — but the boundary did place it,
+    // so `null` is the honest answer.
+    expect(r.findings[0].reason).toBeNull();
+    // A tiered row whose disposition entry omitted `reason` is also null.
+    expect(r.findings[2].reason).toBeNull();
+    // And a finding the join could not place has no `tier`, so no `reason`
+    // key at all — a broken join must not read as "the boundary said nothing".
+    const orphan = readPipelineStats(
+      workspace({
+        findings: { findings: [{ title: "Unplaced", path: "z.ts", hypotheses: [] }] },
+        disposition: { findings: [] },
+      }),
+    )!;
+    expect(orphan.findings[0].tier).toBeUndefined();
+    expect("reason" in orphan.findings[0]).toBe(false);
+  });
+});
+
+describe("severity", () => {
+  it("is carried through, because it is the other half of the boundary's ranking function", () => {
+    const r = readPipelineStats(measuredShape())!;
+    expect(r.findings[0].severity).toBe("Critical");
+    // Not normalised and not defaulted: a finding that names none reads as
+    // absent, so a back-fill cannot mistake "unstated" for "Important".
+    expect(r.findings[1].severity).toBeUndefined();
   });
 });

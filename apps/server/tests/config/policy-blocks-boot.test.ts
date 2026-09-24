@@ -228,11 +228,129 @@ describe("loadConfig — review.analysis.maxBodyComments", () => {
 });
 
 /**
+ * `review.analysis.probes` — the TRI-STATE gate, and the one compatibility
+ * property that matters.
+ *
+ * It was a boolean, and it gated `prepare` and `falsify` identically — so the
+ * only way to reach the oracle was to buy an install of the pull request
+ * author's dependencies. A bare `true` must therefore land on `"static"`: an
+ * existing deployment (or eval overlay) that opted into WP4 keeps the oracle
+ * and silently LOSES the install on upgrade, which is the safe direction, and
+ * nothing gains one.
+ */
+describe("loadConfig — review.analysis.probes", () => {
+  beforeEach(() => {
+    for (const k of ["GITHUB_APP_ID", "SLACK_BOT_TOKEN", "LASTLIGHT_MODEL", "LASTLIGHT_MODELS"]) {
+      vi.stubEnv(k, "");
+    }
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetRuntimeConfigForTests();
+  });
+
+  const probesFor = (yaml: string) => {
+    resetRuntimeConfigForTests();
+    vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlayWith(yaml));
+    return loadConfig().review.analysis.probes;
+  };
+
+  it("ships off — the whole pipeline is inert out of the box", () => {
+    expect(probesFor("review:\n  analysis:\n    enabled: true\n")).toBe("off");
+  });
+
+  it("reads a bare `true` as `static`, so no upgrade silently buys an install", () => {
+    expect(probesFor("review:\n  analysis:\n    probes: true\n")).toBe("static");
+  });
+
+  it("takes the two explicit spellings", () => {
+    expect(probesFor("review:\n  analysis:\n    probes: static\n")).toBe("static");
+    expect(probesFor("review:\n  analysis:\n    probes: full\n")).toBe("full");
+  });
+
+  it("reads everything else as off, including the truthy-looking strings", () => {
+    // The `=== true` parsing this replaced existed so a truthy string in an
+    // overlay could never install a PR author's dependencies. Same spirit: a
+    // value that merely LOOKS enabled spends nothing.
+    for (const bad of ['"true"', '"yes"', "1", '"FULL"', '"on"', "false", '"off"']) {
+      expect(probesFor(`review:\n  analysis:\n    probes: ${bad}\n`), bad).toBe("off");
+    }
+  });
+});
+
+/**
  * Issue #385 — every timeout comes from config, with no numeric default in
  * code. `config/default.yaml` is the single source; a missing or invalid key
  * FAILS the boot naming the key, instead of resolving to a number buried in a
  * backend.
  */
+/**
+ * The REMOVED boundary keys — `review.analysis.internalFloor` and
+ * `review.analysis.thresholds`.
+ *
+ * Both were confidence gates, deleted 2026-09-21 after `finding.confidence`
+ * measured AUROC 0.228 [0.171, 0.299] over 516 findings. Two overlay repos in
+ * the wild and ~17 eval overlays may still pin them, so the contract is
+ * **accepted and ignored, never rejected**: this loader only ever reads keys
+ * it knows, so a stale leaf cannot fail a boot — and it says so, because an
+ * operator who pinned a floor should learn it stopped meaning anything rather
+ * than believe a bar is in force.
+ */
+describe("loadConfig — a config still pinning the removed confidence gates", () => {
+  beforeEach(() => {
+    for (const k of ["GITHUB_APP_ID", "SLACK_BOT_TOKEN", "LASTLIGHT_MODEL", "LASTLIGHT_MODELS"]) {
+      vi.stubEnv(k, "");
+    }
+    warnSpy.mockClear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetRuntimeConfigForTests();
+  });
+
+  it("loads, does not throw, and keeps the rest of the block", () => {
+    vi.stubEnv(
+      "LASTLIGHT_OVERLAY_DIR",
+      overlayWith(
+        "review:\n  analysis:\n    enabled: true\n    internalFloor: 0.4\n" +
+          "    thresholds:\n      contract: 0.9\n    maxBodyComments: 3\n",
+      ),
+    );
+
+    const analysis = loadConfig().review.analysis as Record<string, unknown>;
+    expect(analysis.enabled).toBe(true);
+    expect(analysis.maxBodyComments).toBe(3);
+    // Gone from the shape entirely, not carried through as dead config.
+    expect(analysis.internalFloor).toBeUndefined();
+    expect(analysis.thresholds).toBeUndefined();
+  });
+
+  it("warns, naming the keys it ignored", () => {
+    vi.stubEnv(
+      "LASTLIGHT_OVERLAY_DIR",
+      overlayWith("review:\n  analysis:\n    internalFloor: 0.4\n"),
+    );
+    loadConfig();
+
+    const said = warnSpy.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].includes("removed"),
+    );
+    expect(said, "a warning naming the removed keys").toBeTruthy();
+    expect((said?.[1] as { keys: string[] }).keys).toEqual(["internalFloor"]);
+  });
+
+  it("says nothing when no removed key is present", () => {
+    vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlayWith("review:\n  analysis:\n    enabled: true\n"));
+    loadConfig();
+
+    expect(
+      warnSpy.mock.calls.filter((c) => typeof c[0] === "string" && c[0].includes("removed")),
+    ).toEqual([]);
+  });
+});
+
 describe("loadConfig — timeouts and the gate block (#385)", () => {
   beforeEach(() => {
     for (const k of ["GITHUB_APP_ID", "SLACK_BOT_TOKEN", "LASTLIGHT_MODEL", "LASTLIGHT_MODELS"]) {

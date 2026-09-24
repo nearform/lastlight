@@ -1668,6 +1668,23 @@ const MAX_PRIOR_REVIEW_BODY_CHARS = 4000;
 /** How many changed paths the triage prompt is handed. */
 const MAX_TRIAGE_PATHS = 100;
 
+/**
+ * The install term of `prepare`'s phase budget under `probes: static`.
+ *
+ * Not the operator's `prepareTimeoutSeconds`, which sizes a package manager
+ * resolving a dependency graph over the network. With `--no-install` the whole
+ * command is: detect the package manager (a handful of `existsSync` calls and
+ * one small JSON read), skip the install, and write one `env.json`. That is
+ * milliseconds on any tree; sixty seconds is three orders of magnitude of slack
+ * and still bounds a pathological filesystem rather than leaving the phase to
+ * the sandbox's global command timeout.
+ *
+ * It is a constant rather than a config key on purpose: an operator who wants a
+ * bigger budget wants an install, and that is what `full` is. Adding a key here
+ * would be a second way to spell the same decision.
+ */
+export const STATIC_PREPARE_BUDGET_SECONDS = 60;
+
 function boundPriorReviewBody(body: string): string {
   return body.length > MAX_PRIOR_REVIEW_BODY_CHARS
     ? `${body.slice(0, MAX_PRIOR_REVIEW_BODY_CHARS)}\n… truncated at ${MAX_PRIOR_REVIEW_BODY_CHARS} characters`
@@ -1803,15 +1820,14 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      * `maxBodyComments` serialises `null` as the literal string `"null"` —
      * null is the documented "unlimited" value and must survive a string
      * projection; the consumer parses it back and degrades garbage to `0`,
-     * the same direction `config.ts` coerces. `boundaryThresholds` is the one
-     * JSON-valued key (a per-family map has no scalar form); nothing renders
-     * it into a prompt — `post-review` is its only reader.
+     * the same direction `config.ts` coerces. Nothing renders either key into
+     * a prompt — `post-review` is their only reader. `internalFloor` and
+     * `boundaryThresholds` were projected here too until the confidence gates
+     * they fed were removed (see `rankOf` in `review-poster.ts`).
      */
     maxInlineComments: String(review.analysis.maxInlineComments),
-    internalFloor: String(review.analysis.internalFloor),
     maxBodyComments:
       review.analysis.maxBodyComments === null ? "null" : String(review.analysis.maxBodyComments),
-    boundaryThresholds: JSON.stringify(review.analysis.thresholds ?? {}),
     /**
      * WP4's gate, and a SEPARATE one — `skip_if: "probesEnabled != true"`.
      *
@@ -1820,10 +1836,57 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      * WP3's phases and none of WP4's, and a typo anywhere still fails towards
      * "the probe phases skip". It is its own key rather than a richer
      * `analysis` object because `evalSkipIf` compares scalars, and because the
-     * decision it encodes — install a pull request author's dependencies into
-     * the workspace — is not the same decision as "run the surveys".
+     * decision it encodes — run an executable oracle over the hypotheses — is
+     * not the same decision as "run the surveys".
+     *
+     * `probes` is tri-state now, and `probesEnabled` is the OFF/not-off half of
+     * it: `static` and `full` both reach the phases. Which of the two it is
+     * rides on `probeInstall` below, because that — installing a pull request
+     * author's dependencies into the workspace — is a third decision again, and
+     * it belongs to `prepare` alone. `falsify` never cared: its prompt reads
+     * `installed` off `env.json` and records what it could not run.
      */
-    ...(review.analysis.probes ? { probesEnabled: "true" } : {}),
+    ...(review.analysis.probes !== "off" ? { probesEnabled: "true" } : {}),
+    /**
+     * #399's gate, and a third separate one — `skip_if: "dossierEnabled != true"`
+     * on the `dossier` phase, and the `{{#if dossierEnabled}}` pair that selects
+     * which half of `review-adjudicate.md` renders.
+     *
+     * Present only when the operator asked, so the absence rule holds here too:
+     * a deployment with the pipeline on and this off gets today's adjudicator
+     * byte-for-byte, and a typo anywhere still fails toward it. Its own key
+     * rather than a richer object because `evalSkipIf` compares scalars — the
+     * same reason `probesEnabled` is one.
+     *
+     * It gates BOTH halves of the change (the rendered input and the typed
+     * output) because they move one phase's measured surface together; see
+     * `ReviewAnalysisConfig.adjudicate`.
+     *
+     * `!= "legacy"` rather than `=== "dossier"`: `"jev"` (#399 idea 2) IMPLIES
+     * the dossier rendering and typed output — it only adds an extra
+     * annotation phase before `dossier`, never a different adjudicate input
+     * shape. Two adjudicate modes needing the dossier must not require two
+     * separate reads of this key.
+     */
+    ...(review.analysis.adjudicate !== "legacy" ? { dossierEnabled: "true" } : {}),
+    /**
+     * #399 idea 2's own gate — `skip_if: "jevClassifyEnabled != true"` on the
+     * `jev-classify` phase. A FOURTH separate key, same reasoning as
+     * `probesEnabled`/`dossierEnabled`: `evalSkipIf` compares scalars, and
+     * this is a third, narrower decision than "render the dossier" — run one
+     * TypeSafe call per hypothesis and annotate it in.
+     *
+     * Present only when the operator asked for `"jev"` specifically, so the
+     * absence rule holds a third time: a deployment on `"dossier"` gets
+     * exactly what it measured, with no annotation phase added underneath it.
+     */
+    ...(review.analysis.adjudicate === "jev"
+      ? {
+          jevClassifyEnabled: "true",
+          jevModel: review.analysis.jevModel ?? "",
+          jevTimeoutSeconds: String(review.analysis.jevTimeoutSeconds),
+        }
+      : {}),
     /**
      * The three sub-switches, projected only when probes are on at all.
      *
@@ -1833,14 +1896,35 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      * never has to know the config shape — and an absent one degrades to "do
      * the cheap thing", which is the direction every default here points.
      */
-    ...(review.analysis.probes
+    ...(review.analysis.probes !== "off"
       ? {
-          probeLifecycleScripts: review.analysis.probeLifecycleScripts ? "true" : "false",
+          /**
+           * The install decision, projected as its own scalar so `prepare`'s
+           * ARGS ladder reads one string rather than knowing the enum.
+           * `static` renders `--no-install`, which makes `env.json` say
+           * `install: "skipped"` with `installed` still read off the
+           * filesystem — a warm workspace keeps whatever a previous `full`
+           * run left, and that is the honest answer to the only question
+           * `falsify` asks.
+           */
+          probeInstall: review.analysis.probes === "full" ? "true" : "false",
+          /**
+           * Forced off without an install, because the flag would otherwise
+           * be a claim the phase cannot honour: lifecycle scripts are
+           * something an INSTALL runs, so `--no-install --lifecycle-scripts`
+           * would stamp `lifecycleScripts: true` into `env.json` on a run
+           * where no script could possibly have executed.
+           */
+          probeLifecycleScripts:
+            review.analysis.probes === "full" && review.analysis.probeLifecycleScripts
+              ? "true"
+              : "false",
           probeTypecheck: review.analysis.probeTypecheck ? "true" : "false",
           probeCoverage: review.analysis.probeCoverage ? "true" : "false",
           prepareTimeoutSeconds: String(review.analysis.prepareTimeoutSeconds),
           coverageTimeoutSeconds: String(review.analysis.coverageTimeoutSeconds),
           probeRounds: String(review.analysis.probeRounds),
+          falsifyTimeoutSeconds: String(review.analysis.falsifyTimeoutSeconds),
           /**
            * The PHASE's ceiling, which is not any one step's.
            *
@@ -1851,9 +1935,18 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
            * outcome the whole design is against. Summed here rather than in
            * YAML because `templated-number` reads a context value and cannot do
            * arithmetic. The 30 s of slack covers the CLI's own startup.
+           *
+           * Under `static` the install term is
+           * {@link STATIC_PREPARE_BUDGET_SECONDS} rather than the operator's
+           * install budget — there is no install to pay for, and a ceiling
+           * sized for one is not a budget. The other two terms are unchanged:
+           * both are their own opt-in switch, and a warm workspace can still
+           * have a `node_modules` a typecheck genuinely runs against.
            */
           probePhaseTimeoutSeconds: String(
-            review.analysis.prepareTimeoutSeconds +
+            (review.analysis.probes === "full"
+              ? review.analysis.prepareTimeoutSeconds
+              : STATIC_PREPARE_BUDGET_SECONDS) +
               (review.analysis.probeTypecheck ? review.analysis.prepareTimeoutSeconds : 0) +
               (review.analysis.probeCoverage ? review.analysis.coverageTimeoutSeconds : 0) +
               30,

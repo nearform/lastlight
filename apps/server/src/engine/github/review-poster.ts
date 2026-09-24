@@ -47,7 +47,13 @@ export interface ReviewFinding {
    * the full price of a wrong answer. See {@link resolveAnchor}.
    */
   existingCode?: string;
-  /** The obligation family this came from — the key for the per-family threshold (WP6b). */
+  /**
+   * The obligation family this came from (WP6b).
+   *
+   * It keyed the per-family confidence threshold until that bar was removed —
+   * see {@link rankOf}. It survives because the grouping and the disposition
+   * record still name it.
+   */
   family?: string;
   /** 0..1. Absent is NOT zero — see {@link tierFindings}. */
   confidence?: number;
@@ -76,6 +82,20 @@ export interface ReviewFinding {
    * them means.
    */
   tier?: "inline" | "body" | "internal";
+  /**
+   * #399's typed attributes, written INSTEAD of `tier` under
+   * `review.analysis.adjudicate: "dossier"`. {@link computeTier} turns them
+   * into a tier; absent, everything below behaves exactly as it did.
+   *
+   * `claim` is what is WRONG (not what the code does), `fix` is what to
+   * change, and `category` is the axis that measured **AUC 0.897** where
+   * blind correctness adjudication measured worse than keeping everything.
+   * There is no `confidence` here on purpose: it measured AUROC 0.228 and is
+   * already gone from {@link rankOf}.
+   */
+  claim?: string | null;
+  category?: "defect" | "correctness-risk" | "maintainability" | "nit" | "verification" | null;
+  fix?: string | null;
 }
 
 /** A finding that has an anchor. Narrowed by {@link splitFindings}. */
@@ -141,7 +161,7 @@ export interface BuiltReview {
   comments: InlineComment[];
   inlineCount: number;
   demotedCount: number;
-  /** Below the floor: recorded, never posted. Always 0 without an {@link AttentionBoundary}. */
+  /** Recorded, never posted. Always 0 without an {@link AttentionBoundary}. */
   internalCount: number;
   /**
    * The tiering this review was built from, present only when an
@@ -484,7 +504,25 @@ export function anchorFindings(
   findings: ReviewFinding[],
   files: DiffFile[],
   readHeadFile?: (path: string) => string | null,
-): { findings: ReviewFinding[]; stats: AnchorStats } {
+): {
+  findings: ReviewFinding[];
+  stats: AnchorStats;
+  /**
+   * The findings behind `stats.unresolved`, named so the warning can be acted
+   * on. An excerpt that matches nothing in the file it names, nothing in that
+   * file at head, and nothing unique anywhere in the diff is almost always the
+   * adjudicator having written a SUMMARY where a quote goes — measured
+   * 2026-09-21 over all 54 off-diff demotions in the preserved archive
+   * (`apps/evals/scripts/anchor-forensics.ts`): 26 of them had an excerpt that
+   * matched nowhere, and 22 of those 26 came from a single case-run whose
+   * `existingCode` fields held prose (`"Lines 165-169 declare appsScriptGlobals
+   * (DriveApp, FormApp, Logger, etc.)"`). Nothing in a run recorded that, so it
+   * took a bespoke script and a human reading 54 rows to find.
+   *
+   * Capped by the caller, not here — this is the whole list.
+   */
+  unresolvedExcerpts: { path: string; title: string }[];
+} {
   const stats: AnchorStats = {
     hunk: 0,
     file: 0,
@@ -492,6 +530,7 @@ export function anchorFindings(
     unresolved: 0,
     noExcerpt: 0,
   };
+  const unresolvedExcerpts: { path: string; title: string }[] = [];
   const out = findings.map((f) => {
     if (!f || !f.path) return f;
     if (!needleOf(f.existingCode).length) {
@@ -501,6 +540,7 @@ export function anchorFindings(
     const res = resolveAnchor(f, files, readHeadFile);
     if (!res) {
       stats.unresolved++;
+      unresolvedExcerpts.push({ path: f.path, title: f.title ?? "" });
       return f;
     }
     if (res.via === "hunk") stats.hunk++;
@@ -517,7 +557,7 @@ export function anchorFindings(
       ...(res.start_line ? { start_line: res.start_line } : {}),
     };
   });
-  return { findings: out, stats };
+  return { findings: out, stats, unresolvedExcerpts };
 }
 
 /** True when a finding anchors onto a line that appears in the diff. */
@@ -560,11 +600,13 @@ export function splitFindings(
 /**
  * Why a finding is in the review body rather than inline. Three causes, and
  * they must stay distinguishable: "Additional findings" meaning off-diff AND
- * below-threshold AND overflowed-the-cap, under one heading, is a worse review
- * to read than the one it replaced (§D11).
+ * adjudicated-to-body AND overflowed-the-cap, under one heading, is a worse
+ * review to read than the one it replaced (§D11).
+ *
+ * `below-threshold` was a fourth, retired with the per-family confidence bars
+ * it named — see {@link rankOf} for the measurement.
  */
-export type DemotionReason =
-  "off-diff" | "below-threshold" | "overflow" | "adjudicated";
+export type DemotionReason = "off-diff" | "overflow" | "adjudicated";
 
 /** One demoted finding, carrying the reason it did not earn an inline comment. */
 export interface DemotedFinding {
@@ -579,12 +621,19 @@ export interface DemotedFinding {
  * not say, and why?"* — which is the only thing separating an attention
  * boundary from v2's suppressor.
  *
+ * `below-floor` was a fifth, retired with the confidence floor it named — see
+ * {@link rankOf}.
+ *
  * - `adjudicated` — the document said `tier: "internal"` itself. That includes
  *   every hypothesis the conservation floor repaired, which carries no
  *   confidence at all.
  * - `clean-discharge` — every supporting hypothesis is a clean QUOTE, so the
  *   finding is an ANTI-finding. See {@link tierFindings}.
- * - `below-floor` — under {@link AttentionBoundary.internalFloor}.
+ * - `prose-disposition` — no `tier`, AND the finding's own prose carries this
+ *   pipeline's disposition label. The adjudicator decided, and wrote the
+ *   decision where the boundary cannot read it. A CONTRACT VIOLATION rather
+ *   than a judgement about the finding — see {@link tierFindings} for why it is
+ *   a conjunction and what each half costs alone.
  * - `body-budget` — demoted to the body and then past
  *   {@link AttentionBoundary.maxBodyComments}. The only reason applied to a
  *   finding the boundary had already ROUTED somewhere visible, which is why it
@@ -593,7 +642,19 @@ export interface DemotedFinding {
  *   the reader's attention.
  */
 export type InternalReason =
-  "adjudicated" | "clean-discharge" | "below-floor" | "body-budget";
+  | "adjudicated"
+  | "clean-discharge"
+  | "prose-disposition"
+  | "body-budget"
+  /**
+   * #399: the tier was DERIVED from the finding's typed attributes rather than
+   * stated by the model — a `verification` category, or a finding that could
+   * state no `claim` and no `fix`. Its own token because the question "how
+   * often does the computed tier withhold something" is the whole point of the
+   * typed-attribute arm, and folded into `adjudicated` it would be
+   * unanswerable from `disposition.json`.
+   */
+  | "computed";
 
 /** One recorded-not-posted finding, carrying the reason it was withheld. */
 export interface InternalFinding {
@@ -602,17 +663,19 @@ export interface InternalFinding {
 }
 
 /**
- * The attention budget. Absent ⇒ today's behaviour exactly: no cap, no
- * thresholds, no `internal` tier — every finding is inline or body, decided by
- * anchorability alone.
+ * The attention budget — two budgets and nothing else. Absent ⇒ today's
+ * behaviour exactly: no cap, no `internal` tier — every finding is inline or
+ * body, decided by anchorability alone.
+ *
+ * **There is no confidence gate here any more.** `internalFloor` and the
+ * per-family `thresholds` used to live in this shape and both read
+ * `finding.confidence`, an axis measured at AUROC 0.228 — see {@link rankOf}.
+ * What remains are budgets, which spend the reader's attention rather than
+ * judge a finding's truth.
  */
 export interface AttentionBoundary {
-  /** Rank by confidence × severity; everything past this goes to the body, never away. */
+  /** Rank by severity; everything past this goes to the body, never away. */
   maxInlineComments: number;
-  /** Per-obligation-family confidence bar for an INLINE comment. Below it: the body. */
-  thresholds: Record<string, number>;
-  /** Below this, recorded but not posted. See {@link TieredFindings.internal}. */
-  internalFloor: number;
   /**
    * Cap on the FINAL body list — applied last, after every other rule has
    * routed findings there (including the inline overflow), because it governs
@@ -622,9 +685,8 @@ export interface AttentionBoundary {
    * Unlike `maxInlineComments` this budget DOES filter: the excess is tiered
    * `internal` with reason `body-budget` — recorded in the disposition, never
    * posted. `null` or absent = unlimited, the legacy funnel; `0` = nothing
-   * tiers to body at all. Ranked by {@link rankOf} — the same severity ×
-   * confidence rank the inline budget spends, so an absent confidence ranks
-   * as 1.0 (severity order), never as low confidence. Shipped default is `5`
+   * tiers to body at all. Ranked by {@link rankOf} — the same severity rank the
+   * inline budget spends. Shipped default is `5`
    * (see `ReviewAnalysisConfig.maxBodyComments` in lastlight-shared for the
    * measurements, and for why the measured-best `0` is not the shipped one);
    * optional here so every existing constructor keeps today's behaviour.
@@ -637,7 +699,7 @@ export interface TieredFindings {
   inline: AnchoredFinding[];
   body: DemotedFinding[];
   /**
-   * Below the floor: kept in `findings.json` with its reason, never posted.
+   * Kept in `findings.json` with its reason, never posted.
    *
    * **This is an attention boundary, not v2's suppressor**, and the difference
    * is that it is auditable — WP7's `review_findings` table is where it becomes
@@ -653,24 +715,88 @@ const SEVERITY_WEIGHT: Record<string, number> = {
 };
 
 /**
- * Rank for the inline budget: confidence × severity.
+ * Rank for the inline budget: severity, and deliberately NOT confidence.
  *
- * **An absent `confidence` ranks as 1.0, not as 0.** Nothing the shipped
- * reviewer writes carries the field, so treating absence as low confidence
- * would push every one of today's findings below every hypothesis-derived one —
- * a silent re-ranking of the reviewer that ships, caused by a field it does not
- * know about. With 1.0 the ranking degenerates to severity order, which is what
- * a document with no confidences should get.
+ * **`confidence` used to be a factor here and it was ranking backwards.**
+ * Measured 2026-09-21 over 516 pipeline findings from 20 preserved case-runs,
+ * labelled against gold by the same MATCH judge a live run uses
+ * (`apps/evals/scripts/finding-calibration.ts`; write-up in
+ * `nearform-evals/research-notes.md`):
+ *
+ * | axis                                   | AUROC | 95% CI         |
+ * | -------------------------------------- | ----- | -------------- |
+ * | the adjudicator's own tier             | 0.767 | [0.665, 0.846] |
+ * | severity alone                         | 0.521 | [0.414, 0.630] |
+ * | *a coin*                               | 0.500 |                |
+ * | **confidence × severity — this rank**  | 0.370 | [0.240, 0.521] |
+ * | **confidence alone**                   | 0.228 | [0.171, 0.299] |
+ *
+ * 0.228 is not a weak signal, it is a strong one pointing the wrong way, and
+ * multiplying it into the rank dragged the rank below a coin. The cause is
+ * structural rather than a bad prompt: the model rates how certain it is of an
+ * OBSERVATION, and the observations it is most certain of are the ones where
+ * nothing is wrong — 36% of findings are written in verification grammar and
+ * their median confidence is 0.99 against 0.92 for everything else. Withheld
+ * findings scored a HIGHER median confidence (0.99) than posted ones (0.85 body,
+ * 0.90 inline). So the ranking's top was a coin flip between a real defect and
+ * "Enforcement check passed: LOGIN_HINT_STORAGE_KEY" — 21 rows tied at the
+ * maximum rank of 3.00, 11 of them verification reports.
+ *
+ * `review-adjudicate.md` already tells the model to price the defect and not its
+ * own certainty, and warns that confidences which do not spread have disabled
+ * the thresholds. The instruction does not take, and this is what it cost.
+ *
+ * **Severity stays** — at 0.521 with a CI straddling 0.500 it is indistinguishable
+ * from neutral, so it is not carrying the rank but it is not poisoning it either,
+ * and it is the ordering a reader expects. Its own breakdown is worse than that
+ * summary suggests (Critical converted at 1.1% against Important at 9.7%, n=87
+ * and 290), which is a live question for the prompts rather than for this sort.
  *
  * **An UNRECOGNISED severity is warned about, not just defaulted.** Absence is a
- * known state and ranks Important on purpose (above). A string nobody defined —
+ * known state and ranks Important on purpose. A string nobody defined —
  * `Blocker`, `High`, `p1` — is a different thing: it means some prompt is
  * emitting a vocabulary this code does not share, and the `?? 2` below turns
  * that into an ordinary-looking Important. See {@link unknownSeverity}.
+ *
+ * **`internalFloor` and the per-family `thresholds` are gone too**, removed
+ * here for the same reason and confirmed inert before they went. They read the
+ * same inverted axis, and they never cost a single gold finding: across the
+ * preserved archive (`apps/evals/scripts/say-gap.ts`, 2026-09-21), of every
+ * gold finding not posted inline, 12 were demoted because the adjudicator
+ * itself wrote `body`, 6 were off-diff and 1 was withheld `adjudicated` —
+ * ZERO to `below-floor`, `below-threshold`, `body-budget`, `overflow` or
+ * `clean-discharge`. The 259 archived rows labelled "below the internal floor"
+ * are a MISLABEL from the original `recordDisposition` (5abb03de), which
+ * hard-coded that string: 255 of them carry confidence at or above the 0.15
+ * floor and 116 sit at exactly 1.00. Since 47ee595c wired the real reasons,
+ * 97 of 97 internal findings are `adjudicated` and not one is `below-floor`.
+ * The floor never fired on an honestly-labelled row.
  */
 function rankOf(f: ReviewFinding): number {
-  const sev = SEVERITY_WEIGHT[(f.severity || "important").toLowerCase()] ?? 2;
-  return (f.confidence ?? 1) * sev;
+  return SEVERITY_WEIGHT[(f.severity || "important").toLowerCase()] ?? 2;
+}
+
+/**
+ * The disposition labels a model writes when it is answering the schema in
+ * prose instead of in the `tier` field.
+ *
+ * **Line-anchored, and that is not incidental.** These have to match a LABEL
+ * the model prefixed to its own output, never a claim about the code. The
+ * unanchored version of this idea is the rule part two removed: it fired on
+ * verification *wording* and buried two confirmed defects that happened to be
+ * written in that grammar. A finding may say "the dismissal path is wrong" or
+ * "internal state leaks here" all it likes — neither starts a line with the
+ * label, so neither trips this.
+ */
+const DISPOSITION_LABEL: RegExp[] = [
+  /^\s*internal\s*:/im,
+  /^\s*(?:dismissed|not a (?:defect|finding))\s*[:.]/im,
+];
+
+/** Did the model write its disposition into the prose? See {@link DISPOSITION_LABEL}. */
+function proseDisposition(f: ReviewFinding): boolean {
+  const prose = `${f.title ?? ""}\n${f.body ?? ""}`;
+  return DISPOSITION_LABEL.some((re) => re.test(prose));
 }
 
 /**
@@ -723,6 +849,13 @@ const INTERNAL_JARGON: RegExp[] = [
   /\bconservation (?:holds|floor)\b/i,
   /\battention boundary\b/i,
   /\binternal tier\b/i,
+  // The disposition label itself, anchored to the start of a line so it is the
+  // LABEL rather than the ordinary adjective ("an internal API", "internal
+  // state"). Measured on `prreview__skillspro-1680-r1`: two inline comments
+  // were posted whose bodies opened `internal: …`, and nothing in this list
+  // caught it, because every other entry names a mechanism and this one names
+  // a verdict.
+  /^\s*internal:/im,
   /\bdischarges?d?\b/i,
   /\.lastlight\//i,
 ];
@@ -790,18 +923,17 @@ function allHypothesesClean(
 /**
  * Split findings across the three destinations.
  *
- * Order matters and each step is a different question: does this SAY anything
- * (the clean-discharge rule) · is it worth a human's attention at all (the
- * floor) · can it even be anchored (GitHub's constraint) · is it confident
- * enough for an inline comment (the family threshold) · is there room (the
- * budget) · and, last, may the body still grow (the body budget,
- * {@link AttentionBoundary.maxBodyComments} — the one step that moves a
- * finding OUT of the posted review, to `internal` with reason `body-budget`).
+ * Order matters and each step is a different question: did the adjudicator
+ * already decide (the explicit tier) · does this SAY anything (the
+ * clean-discharge rule) · can it even be anchored (GitHub's constraint) · is
+ * there room (the inline budget) · and, last, may the body still grow (the
+ * body budget, {@link AttentionBoundary.maxBodyComments} — the one step that
+ * moves a finding OUT of the posted review, to `internal` with reason
+ * `body-budget`).
  *
- * **A missing `confidence` never demotes and never suppresses.** Both bars are
- * `confidence !== undefined && confidence < bar`, so a finding that declines to
- * self-score is treated as passing — the alternative silently deletes every
- * finding from any prompt that has not been taught the field.
+ * **No step reads `confidence`.** Two did — an `internalFloor` and a
+ * per-family bar — and both were removed once the axis was measured at AUROC
+ * 0.228 and shown to have cost no gold finding; see {@link rankOf}.
  *
  * ## The clean-discharge rule, and why it is not a confidence rule
  *
@@ -828,22 +960,72 @@ function allHypothesesClean(
  * count there is **0 of 16** and this rule is a verified no-op, which is what
  * keeps the control arm single-variable. On the first repeat **all 17 were posted**
  * — "Type contract: consolidateData correctly accepts…", "GOOGLE_CLIENT_ID
- * constant imported and passed correctly". The confidence bars cannot catch
- * them: confidence on those rows is uniformly ≥ 0.7 (median 0.95–1.00, minimum
- * 0.75 across the whole document), so `internalFloor` and every family
- * threshold pass them. That is the point — **an anti-finding is not an
- * unconfident finding, it is a confident report of nothing**, and only its
- * provenance says so.
- *
- * It is checked BEFORE the floor because it is the more specific answer to
- * "why was this withheld?", not because the two disagree about the tier — they
- * cannot; both are `internal`.
+ * constant imported and passed correctly". The confidence bars that used to
+ * sit below this rule could never have caught them: confidence on those rows
+ * is uniformly ≥ 0.7 (median 0.95–1.00, minimum 0.75 across the whole
+ * document), so the 0.15 floor and every 0.30–0.60 family bar passed them.
+ * That is the point — **an anti-finding is not an unconfident finding, it is a
+ * confident report of nothing**, and only its provenance says so. It is also
+ * half of why those bars are gone (see {@link rankOf}): the one thing they
+ * were imagined to catch, they could not.
  *
  * `clean` is supplied by the caller (`post-review` reads the sibling
  * `hypotheses/*.jsonl`), never read here: this module does no I/O. Absent or
  * empty ⇒ the rule cannot fire, which is the inertness guarantee for every
  * deployment and every arm that runs no evidence pipeline.
  */
+/**
+ * The tier a finding's typed attributes imply, or `undefined` when it has none.
+ *
+ * #399's output half. The adjudicator under `review.analysis.adjudicate:
+ * "dossier"` is not asked for a `tier` at all — it writes `claim` (what is
+ * wrong), `category` (what kind of wrong) and `fix` (what to change), and this
+ * decides. Three reasons that is the better question to ask a model:
+ *
+ *  - **"Is this finding correct?" is measured-dead.** Over 2,145 labelled AACR
+ *    comments, keep-all scores F1 0.825 and every blind adjudicator tried came
+ *    in under it (Haiku 0.803, Jev 0.789, GLM 0.745). The same probabilities
+ *    separate Code Defect from Maintainability at **AUC 0.897**. Category is
+ *    where the signal is.
+ *  - **The failures this phase actually had were unstated decisions, not wrong
+ *    ones.** Two findings on `1680-r1` were correctly judged non-defects and
+ *    filed in prose — "— dismissed", "internal: … no defect" — with `tier`
+ *    unset, so both took an inline slot. A model that must answer "defect or
+ *    verification?" cannot make that mistake; a model asked for a tier can
+ *    simply not write one.
+ *  - **It is checkable.** A `claim` is a sentence about what is wrong, and a
+ *    `verification` category with a claim, or a `defect` with none, is a
+ *    contradiction a human or a script can see. A tier is a verdict with
+ *    nothing behind it.
+ *
+ * The mapping is deliberately GENEROUS at the top: the measured constraint is
+ * the found→said gap (the pipeline withholds ~31% of what it finds), so
+ * `defect` and `correctness-risk` both ask for inline and the cascade below —
+ * anchorability, then the inline cap, then the body cap — does the narrowing
+ * with evidence this function does not have. SNR is the guardrail on that
+ * choice.
+ *
+ * Returns `undefined` for a finding with no attributes, which is every finding
+ * written under `adjudicate: "legacy"` and every one the shipped reviewer
+ * writes. That is what keeps this inert until an operator asks for it.
+ */
+export function computeTier(f: ReviewFinding): "inline" | "body" | "internal" | undefined {
+  const category = f.category;
+  if (!category) return undefined;
+  // A verification report is always internal. Long-standing rule; the typed
+  // category is the first time it has been machine-checkable rather than a
+  // sentence in a prompt.
+  if (category === "verification") return "internal";
+  const claim = typeof f.claim === "string" ? f.claim.trim() : "";
+  const fix = typeof f.fix === "string" ? f.fix.trim() : "";
+  // Nothing wrong, or nothing to do about it. Recorded, never posted — which
+  // is what `internal` has always meant, now reached without asking the model
+  // to name the tier.
+  if (!claim || !fix) return "internal";
+  if (category === "defect" || category === "correctness-risk") return "inline";
+  return "body";
+}
+
 export function tierFindings(
   findings: ReviewFinding[],
   commentable: Map<string, Set<string>> | null,
@@ -854,23 +1036,65 @@ export function tierFindings(
   const body: DemotedFinding[] = [];
   const candidates: AnchoredFinding[] = [];
 
-  for (const f of findings) {
-    if (!f) continue;
+  for (const raw of findings) {
+    if (!raw) continue;
+    // #399. A finding carrying typed attributes and no `tier` gets one
+    // derived here, ONCE, before any rule below reads `f.tier` — so the whole
+    // cascade (clean-discharge, prose-disposition, anchorability, the two
+    // budgets) is shared by both shapes instead of forked. A finding that
+    // states a tier keeps it: an operator mid-migration, or the conservation
+    // floor's repaired rows, must not have their explicit `internal`
+    // recomputed out from under them.
+    //
+    // `derived` is tracked so the withholding can be attributed. "How often
+    // does the computed tier bury something, and what?" is the question the
+    // typed-attribute arm exists to answer, and `disposition.json` is where it
+    // gets answered.
+    const derived = raw.tier ? undefined : computeTier(raw);
+    const f = derived ? { ...raw, tier: derived } : raw;
     // An explicit `internal` is obeyed unconditionally and FIRST. The
     // conservation floor writes unaccounted-for hypotheses at this tier with no
     // `confidence` at all, and a confidence-only rule would have posted every
     // one of them — turning "we recorded what we could not adjudicate" into
     // "we published what we could not adjudicate".
     if (f.tier === "internal") {
-      internal.push({ finding: f, reason: "adjudicated" });
+      internal.push({ finding: f, reason: derived ? "computed" : "adjudicated" });
       continue;
     }
     if (allHypothesesClean(f, clean)) {
       internal.push({ finding: f, reason: "clean-discharge" });
       continue;
     }
-    if (f.confidence !== undefined && f.confidence < boundary.internalFloor) {
-      internal.push({ finding: f, reason: "below-floor" });
+    // The adjudicator recorded its DISPOSITION in the prose instead of in the
+    // `tier` field — and so posted the thing it had decided not to say.
+    //
+    // Measured on `prreview__skillspro-1680-r1` (2026-09-21): it reviewed two
+    // claims, concluded both were non-defects, and said so in the only place
+    // the boundary cannot read — titles ending "— dismissed", bodies opening
+    // "internal: … Reviewed and dismissed; no defect." — while leaving `tier`
+    // unset. Both took an inline slot on the pull request. The one finding
+    // that matched real gold went to the body.
+    //
+    // **Deliberately a CONJUNCTION, and that is the whole design.** Neither
+    // half is safe alone:
+    //
+    //  - Untiered alone is not a defect. This module's contract is that an
+    //    absent tier means "no opinion", and the shipped reviewer never writes
+    //    one; keying on it buries ordinary findings (it failed 27 tests that
+    //    encode exactly that, which is how this shape was found).
+    //  - Prose alone is the mistake part two already paid for — a rule keyed
+    //    on verification WORDING buried two confirmed defects written in that
+    //    grammar. `disposition()` is deliberately not that: it matches a
+    //    line-anchored LABEL the model prefixed to its own output, not a claim
+    //    about the code, so a defect described in any English cannot trip it.
+    //
+    // Together they are unambiguous: a required field is missing AND its value
+    // is sitting in the prose. Recorded, never dropped — it lands in
+    // `disposition.json` with this reason, so the omission is findable rather
+    // than silently posted, and the fix upstream is a prompt that fills in the
+    // field.
+    if (!f.tier && proseDisposition(f)) {
+      internal.push({ finding: f, reason: "prose-disposition" });
       continue;
     }
     if (!f.path || !f.line || !isAnchored(f, commentable)) {
@@ -880,11 +1104,6 @@ export function tierFindings(
     // An explicit `body` is a demotion, and a demotion is always safe to obey.
     if (f.tier === "body") {
       body.push({ finding: f, reason: "adjudicated" });
-      continue;
-    }
-    const bar = f.family ? boundary.thresholds[f.family] : undefined;
-    if (bar !== undefined && f.confidence !== undefined && f.confidence < bar) {
-      body.push({ finding: f, reason: "below-threshold" });
       continue;
     }
     candidates.push(f as AnchoredFinding);
@@ -901,12 +1120,14 @@ export function tierFindings(
   // The body budget — LAST, over the FINAL body list, so the inline overflow
   // has already landed there and competes for body slots like everything else
   // (under a cap of 0 the inline excess therefore goes `internal`, not to a
-  // body the cap just closed). Ranked by the same severity × confidence rank
-  // the inline budget spends — {@link rankOf}, absent confidence = 1.0 — and
+  // body the cap just closed). Ranked by the same severity rank the inline
+  // budget spends — {@link rankOf} — and
   // the sort is over a COPY: the survivors keep their document order, so the
   // grouped rendering and the disposition rows read as before. Ties across
   // the cut fall to document order (stable sort), the same tie-break the
-  // inline budget uses. `null`/absent = unlimited, the legacy funnel.
+  // inline budget uses — and after {@link rankOf} dropped its confidence
+  // factor there are only three distinct ranks, so document order now decides
+  // far more of this cut than it used to. `null`/absent = unlimited.
   const cap = boundary.maxBodyComments;
   if (cap === null || cap === undefined || body.length <= Math.max(0, cap)) {
     return { inline, body, internal };
@@ -984,17 +1205,11 @@ export function renderDemoted(list: ReviewFinding[]): string {
  */
 const DEMOTION_LEAD: Record<DemotionReason, string> = {
   "off-diff": "_Outside this PR's diff — GitHub cannot anchor a comment here._",
-  "below-threshold": "_Below the confidence bar for an inline comment._",
   overflow: "_Beyond this review's inline comment limit, ranked by severity._",
   adjudicated: "_Raised for context rather than as an inline comment._",
 };
 
-const DEMOTION_ORDER: DemotionReason[] = [
-  "off-diff",
-  "below-threshold",
-  "adjudicated",
-  "overflow",
-];
+const DEMOTION_ORDER: DemotionReason[] = ["off-diff", "adjudicated", "overflow"];
 
 /**
  * The "Additional findings" section, grouped by why each finding is here.

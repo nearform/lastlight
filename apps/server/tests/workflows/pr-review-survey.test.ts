@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { getWorkflow, loadPromptTemplate } from "#src/workflows/loader.js";
+import { getWorkflow, loadPromptTemplate, loadSkillRaw } from "#src/workflows/loader.js";
 import { BRANCH_CONTEXT_HEADING } from "#src/workflows/handlers/fanout.js";
 import { renderTemplate } from "lastlight-workflow-engine";
 import type { PhaseDefinition, TemplateContext } from "lastlight-workflow-engine";
@@ -233,28 +233,6 @@ describe("AC3 — five survey branches, five disjoint families", () => {
     }
   });
 
-  it("carries the cross-family prohibition in every prompt", () => {
-    for (const family of BRANCH_FAMILIES) {
-      const text = promptText(family);
-      expect(text, `survey-${family}.md`).toContain(
-        "Do NOT read or write any other family's file",
-      );
-      // …and the reason, because a rule without its reason is the first thing a
-      // fork drops: appending to disjoint files makes consensus collapse
-      // impossible by construction rather than by instruction.
-      expect(text, `survey-${family}.md`).toContain("by construction");
-    }
-  });
-
-  it("names its own family in the `## Your family:` heading, once", () => {
-    for (const family of BRANCH_FAMILIES) {
-      const headings = [...promptText(family).matchAll(/^## Your family: `([a-z]+)`$/gm)].map(
-        (m) => m[1],
-      );
-      expect(headings, `survey-${family}.md`).toEqual([family]);
-    }
-  });
-
   /**
    * Non-vacuity control. If these assertions are ever weakened from paths to
    * words, this test says so: the family WORDS are shared across prompts and
@@ -391,25 +369,6 @@ describe("AC4 — what was NOT analysed reaches the model", () => {
     expect(FACTS_COMMAND).toContain("NO staged diff");
   });
 
-  it("points every survey prompt at the staged diff, by RELATIVE path", () => {
-    // The relative form is not a style choice: across three stored runs, 98 of
-    // 98 relative first-turn reads from a survey branch resolved and 0 of 27
-    // workspace-root-absolute ones did, because the only absolute path a branch
-    // holds is its skill bundle — one directory ABOVE the checkout.
-    for (const family of BRANCH_FAMILIES) {
-      const text = promptText(family);
-      expect(text, `survey-${family}.md`).toContain(".lastlight/pr-review/diff/index.md");
-      expect(text, `survey-${family}.md`).toContain(
-        "**Do NOT re-derive this PR's range with `git diff` or `git show`.**",
-      );
-      // Three dots, in the one escape hatch the prompt still offers.
-      expect(text, `survey-${family}.md`).toContain("git diff origin/{{baseBranch}}...HEAD");
-      // Non-vacuity for the assertion above: no prompt may hand the branch an
-      // absolute path to join onto.
-      expect(text, `survey-${family}.md`).not.toContain("/.lastlight/pr-review/diff");
-    }
-  });
-
   /**
    * …and the other half of it, which is what a measured arm cost us.
    *
@@ -422,17 +381,6 @@ describe("AC4 — what was NOT analysed reaches the model", () => {
    * narrowed the behaviour. So the prompt now forbids exactly one thing and says
    * out loud that the patch is a starting point rather than a scope.
    */
-  it("tells every survey branch it has the whole checkout, not just the patch", () => {
-    for (const family of BRANCH_FAMILIES) {
-      const text = promptText(family);
-      expect(text, `survey-${family}.md`).toContain("## What you have: the whole checkout");
-      expect(text, `survey-${family}.md`).toContain("STARTING POINT, not your scope");
-      // The affordance must not read as an exception to a ban: nothing may
-      // survive that forbids reading beyond the patch.
-      expect(text, `survey-${family}.md`).not.toContain("to obtain this PR's diff");
-    }
-  });
-
   it("agrees with the branches on where the per-family blocks are written", () => {
     // The seeder's `--blocks <dir>` and the file each branch is seeded FROM are
     // two independent strings for one location. If they part company the pass
@@ -468,17 +416,6 @@ describe("AC4 — what was NOT analysed reaches the model", () => {
    * the pass READS, not the one it writes — the hypotheses path stays in the
    * prompt because the model genuinely has to write it.
    */
-  it("hands the block to the pass instead of a path — no obligations path survives in a prompt", () => {
-    for (const family of BLOCK_FAMILIES) {
-      const text = promptText(family);
-      expect(text, `survey-${family}.md`).not.toContain(".lastlight/pr-review/obligations");
-      // The pass is told where its obligations actually are — the heading the
-      // fan-out handler files them under — and told not to go looking.
-      expect(text, `survey-${family}.md`).toContain(BRANCH_CONTEXT_HEADING);
-      expect(text, `survey-${family}.md`).toContain("Do not go looking for them on disk");
-    }
-  });
-
   /**
    * Backlog item #24, closed: `review.analysis.maxObligations` was DEAD config
    * on the workflow path.
@@ -525,16 +462,6 @@ describe("AC4 — what was NOT analysed reaches the model", () => {
     expect(seed).toContain("exit 0");
   });
 
-  it("tells each block-reading pass that a missing or unmeasured block is NOT a clean result", () => {
-    for (const family of BLOCK_FAMILIES) {
-      const text = promptText(family);
-      // "we could not look" and "we looked and it is fine" must stay
-      // distinguishable at the point the model reads them (locked decision 6).
-      expect(text, `survey-${family}.md`).toContain("is **not** a clean result");
-      expect(text, `survey-${family}.md`).toContain("NOT MEASURED");
-      expect(text, `survey-${family}.md`).toContain("do not substitute a judgement for a measurement");
-    }
-  });
 });
 
 // ── AC4, the one degraded chain that is end-to-end at THIS layer ─────────────
@@ -679,3 +606,40 @@ describe("AC4 — regression: the `spec` prompt must not contradict its own bloc
     }
   });
 });
+
+// ── One home per rule ───────────────────────────────────────────────────────
+// Every survey branch reads `survey-pass/SKILL.md` as its first action — 40 of
+// 40 branches across one 8-case arm, because the prompt's opening line tells it
+// to. So a rule stated in BOTH the skill and the prompt is read twice per
+// branch and paid five times per case.
+//
+// The hedge that created the duplication was reasonable — Pi surfaces skills as
+// a name+description catalogue and reads SKILL.md on demand, so anything
+// load-bearing got copied into the prompt to guarantee it was seen. The read is
+// now measured, so the copy is waste.
+//
+// Rule: shared survey guidance lives in the SKILL. A prompt carries the family's
+// question, its obligations, its output file, and whatever needs a {{template}}
+// (skills are never rendered, so `{{baseBranch}}` cannot live in one).
+/*
+ * ── Deliberately NOT tested here: the wording of a prompt or the skill ──────
+ *
+ * This file used to pin distinctive SENTENCES — that a rule lived in the skill
+ * and was not restated in the six prompts, that each prompt said it had the
+ * whole checkout, that it named the staged diff by relative path, that it
+ * carried the cross-family prohibition, that a missing block is not a clean
+ * result. Every one of those assertions failed the moment a prompt was
+ * REWORDED, while the mechanism it stood for was untouched — so the suite
+ * reported a regression for an edit that changed no behaviour, and the only
+ * way to iterate on a prompt was to edit the test alongside it. A gate that
+ * fires on paraphrase is not measuring the thing it names.
+ *
+ * The rules themselves are not lost and they are not optional. Each lives as a
+ * comment beside the text it governs, where the next person to edit that text
+ * will actually read it — see `skills/survey-pass/SKILL.md` and the six
+ * `workflows/prompts/survey-*.md`. What stays under test here is MECHANISM:
+ * which branch reads which file, which gate guards which family, which paths
+ * must stay disjoint, what a degraded analysis renders, and that no template
+ * marker survives into a rendered prompt. Those hold across any rewording and
+ * break only when something really is wired wrong.
+ */

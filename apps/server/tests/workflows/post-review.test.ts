@@ -609,8 +609,6 @@ describe("post-review action (runPostReview)", () => {
           // The literal `specContext` writes for the documented "unlimited
           // body overflow" value — it must survive the string projection.
           maxBodyComments: "null",
-          internalFloor: "0.15",
-          boundaryThresholds: "{}",
         });
         expect((await executor.execute(NODE, {})).status).toBe("succeeded");
         const posted = reviews[0]!.body as { comments: { line: number }[]; body: string };
