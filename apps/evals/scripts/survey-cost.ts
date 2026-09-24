@@ -46,7 +46,8 @@ function die(msg: string): never {
 /** Below this a rate is marked † and must not be quoted alone. */
 const SMALL = 5;
 
-const BRANCH = /^survey_branch_(.+)$/;
+/** A branch's retry and gate re-run bill to the branch's own family. */
+const BRANCH = /^survey_branch_([A-Za-z0-9-]+)(?:_retry|_regate)?$/;
 
 interface CaseRun {
   instanceId: string;

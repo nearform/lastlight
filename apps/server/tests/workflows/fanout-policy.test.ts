@@ -39,6 +39,10 @@ describe("the survey fan-out's soft-failure policy survives parsing", () => {
     expect(survey?.on_branch_soft_failure).toEqual({ retries: 1, then: "complete" });
   });
 
+  it("re-runs a branch once when its gate says no, AFTER the schema has had it", () => {
+    expect(survey?.on_branch_gate_failure).toEqual({ retries: 1 });
+  });
+
   it("does not rely on `on_soft_failure`, the name that gets stripped here", () => {
     // The trap, pinned as a negative: if anyone renames the key back, this test
     // fails rather than the review silently hard-failing on a degenerate turn.

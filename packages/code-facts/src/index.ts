@@ -7,6 +7,10 @@
  * CLI depends on it.
  */
 export { runCli, parseArgv } from "./cli.js";
+/** The discharge gate's ledger — read by the micro-survey eval so the eval and
+ * the pipeline grade a family's obligations with ONE function. */
+export { checkDischarge } from "./discharge.js";
+export type { CheckDischargeResult } from "./discharge.js";
 export {
   runExtractor,
   runWrapped,
@@ -240,6 +244,9 @@ export {
 export type { ExecFn, ExecResult, PackageManagerId, PrepareOptions } from "./prepare.js";
 
 export { hypothesisId, readHypothesisSet, resolveHypothesis } from "./hypotheses.js";
+/** The one JSONL reader — recovers pretty-printed rows; evals reads through it too. */
+export { parseJsonl } from "./jsonl.js";
+export type { JsonlParse } from "./jsonl.js";
 export type {
   HypothesisRecord,
   HypothesisResolution,
@@ -289,4 +296,4 @@ export type { LoggerPort } from "./log.js";
 
 export * from "./schema.js";
 
-export { deriveVerdict, hasEvidence, severityOf, needsProbeOf, type SurveyEvidence, type SurveyVerdict, type Discharge, type Severity } from "./survey-verdict.js";
+export { deriveVerdict, hasEvidence, severityOf, needsProbeOf, isReassurance, probeReasonOf, type ProbeReason, type SurveyEvidence, type SurveyVerdict, type Discharge, type Severity } from "./survey-verdict.js";

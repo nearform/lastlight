@@ -29,7 +29,8 @@ API credentials are read from the provider env vars in the registry at
 `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `XAI_API_KEY`, `HF_TOKEN`,
 `MOONSHOT_API_KEY`, `NVIDIA_API_KEY`, `FIREWORKS_API_KEY`,
 `TOGETHER_API_KEY`, `DEEPSEEK_API_KEY`, `ZAI_API_KEY`,
-`KIMI_API_KEY`, `MINIMAX_API_KEY`. Set whichever provider(s)
+`KIMI_API_KEY`, `MINIMAX_API_KEY`, `OPENCODE_API_KEY` (OpenCode Zen — an at-cost
+gateway to Claude, GPT, Kimi, GLM, DeepSeek, …). Set whichever provider(s)
 match your `LASTLIGHT_MODEL` / `LASTLIGHT_MODELS` (the legacy `OPENCODE_MODEL` /
 `OPENCODE_MODELS` names are still accepted as aliases). No `claude` CLI, no
 Anthropic SDK in the runtime path.
@@ -1036,7 +1037,7 @@ Required:
 - One of the provider API-key env vars from `packages/shared/src/providers.ts`
   (Anthropic / OpenAI / OpenRouter / Google / Mistral / Groq / Cerebras /
   xAI / Hugging Face / Moonshot / NVIDIA / Fireworks / Together / DeepSeek /
-  Z.AI / Kimi / MiniMax) matching your `LASTLIGHT_MODEL` (set multiple if
+  Z.AI / Kimi / MiniMax / OpenCode Zen) matching your `LASTLIGHT_MODEL` (set multiple if
   `LASTLIGHT_MODELS` routes phases to different providers)
 - `<PREFIX>_BASE_URL` (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`,
   `KIMI_CODING_BASE_URL`, …) / `LASTLIGHT_PROVIDERS` (JSON) /

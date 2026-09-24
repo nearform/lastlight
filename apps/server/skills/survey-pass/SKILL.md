@@ -110,6 +110,8 @@ Append one JSON object per line to your family's file under `.lastlight/pr-revie
 
 Create the file even with nothing to record, so *surveyed and found nothing* and *never ran* stay distinguishable. But a placeholder row carries **no analysis**: the moment it quotes lines and grades them, it is a hypothesis with a verdict and must be written as one, bar named — not folded into a no-findings line where no probe and no adjudicator will ever look.
 
+**An unseeded block is not an empty task.** If your attachment says NOT MEASURED, NOT AVAILABLE, or that no obligations could be built, record that as your FIRST row — then work the diff for your family's question yourself and write what you find. A file holding only that row is a pass that stopped at the door; the gate fails it. (The one exception is a family whose own prompt says NOT MEASURED *is* its answer — `tests`, which can observe nothing without a coverage report.)
+
 Do not write `findings.json` and do not post a review. Neither is yours.
 
 <!-- The cross-family rule is "by construction, not by instruction": six passes
@@ -120,7 +122,11 @@ Do not write `findings.json` and do not post a review. Neither is yours.
 
      And on the seeded block: "we could not look" and "we looked and it is
      clean" are different facts at every layer (locked decision 6). A pass that
-     was handed NOT MEASURED, or nothing at all, records that FIRST and does
-     not substitute a judgement for a measurement. The block is delivered INTO
+     was handed NOT MEASURED, or nothing at all, records that FIRST — and then
+     works the diff unseeded, because the seed is a head start, not the scope.
+     (This comment once ended at "does not substitute a judgement for a
+     measurement", and on 2026-09-24 Haiku read that as "stop": 2 of 3 repeats
+     of an unseeded branch wrote the one placeholder row and nothing else, on
+     a fixture whose gold other models found unseeded.) The block is delivered INTO
      the prompt rather than left on disk because any path a pass constructs for
      it is a guess about a harness layout that varies by backend. -->

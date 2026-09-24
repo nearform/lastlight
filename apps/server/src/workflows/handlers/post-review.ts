@@ -129,6 +129,69 @@ function isCleanDischarge(row: unknown): boolean {
 }
 
 /**
+ * Split a `hypotheses/*.jsonl` into rows — a copy of code-facts' `parseJsonl`
+ * (`packages/code-facts/src/jsonl.ts`), which core does not depend on. The
+ * ordinal a row lands on is the id `findings[].hypotheses[]` cites, so this
+ * must accept exactly the rows that does: a line that parses on its own, or a
+ * pretty-printed / run-together value recovered by a brace-balanced scan (some
+ * models pretty-print their rows; a line reader dropped them). A torn final
+ * line on a killed run is normal and consumes no ordinal. Keep the two in step.
+ */
+export function parseJsonlRows(text: string): unknown[] {
+  const rows: unknown[] = [];
+  let pos = 0;
+  while (pos < text.length) {
+    const newline = text.indexOf("\n", pos);
+    const lineEnd = newline === -1 ? text.length : newline;
+    const raw = text.slice(pos, lineEnd);
+    const line = raw.trim();
+    if (!line) {
+      pos = lineEnd + 1;
+      continue;
+    }
+    try {
+      rows.push(JSON.parse(line) as unknown);
+      pos = lineEnd + 1;
+      continue;
+    } catch {
+      /* not a row on its own — try it as the start of a span */
+    }
+    const start = pos + raw.length - raw.trimStart().length;
+    const end = text[start] === "{" || text[start] === "[" ? closingIndex(text, start) : -1;
+    if (end !== -1) {
+      try {
+        rows.push(JSON.parse(text.slice(start, end)) as unknown);
+        pos = end;
+        continue;
+      } catch {
+        /* balanced but not JSON */
+      }
+    }
+    pos = lineEnd + 1; // unreadable: consumes no ordinal, and never the next line
+  }
+  return rows;
+}
+
+/** Where the value opening at `start` closes, or -1 if the text ends first. */
+function closingIndex(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === "\\") i += 1;
+      else if (ch === '"') inString = false;
+    } else if (ch === '"') inString = true;
+    else if (ch === "{" || ch === "[") depth += 1;
+    else if (ch === "}" || ch === "]") {
+      depth -= 1;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
+}
+
+/**
  * Which hypothesis ids in `<dir>/hypotheses/*.jsonl` are clean discharges.
  *
  * **`undefined` means there is no `hypotheses/` directory at all** — the
@@ -175,17 +238,7 @@ export function readCleanDischarges(
     const family = basename(file, ".jsonl");
     let rows: unknown[];
     try {
-      rows = readFileSync(join(dir, "hypotheses", file), "utf8")
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0)
-        .flatMap((line) => {
-          try {
-            return [JSON.parse(line) as unknown];
-          } catch {
-            return []; // a torn final line on a killed run is normal
-          }
-        });
+      rows = parseJsonlRows(readFileSync(join(dir, "hypotheses", file), "utf8"));
     } catch {
       continue; // unreadable file — the other families still count
     }

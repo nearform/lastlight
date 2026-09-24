@@ -224,7 +224,11 @@ Phase kinds the runner recognises:
   gates run **after** the join and **sequentially** —
   `InProcessSandbox.runCommand` is a `spawnSync` that blocks the event
   loop, so interleaving would serialise the whole fan-out on the one
-  backend it exists to speed up. No `approval_gate` (a fan-out cannot
+  backend it exists to speed up. They are observational unless the phase
+  declares `on_branch_gate_failure: { retries: 1 }` (the `pr-review`
+  survey does): then a branch whose gate ran and said no is re-run once
+  (`_regate` row) with the gate's output appended to its prompt, and
+  gated again. No `approval_gate` (a fan-out cannot
   pause mid-flight) and no `loop:`/`generic_loop:` (the branches are the
   iteration shape). Isolation is by **disjoint output paths**, not
   separate checkouts. A branch may also declare **`context_file`** — a
@@ -491,9 +495,10 @@ cycle:
   only: it is never a phase, never enters `phase_history`, and never becomes
   `current_phase`.
 - `${parentPhaseName}_branch_${name}` — one branch of a `type: fanout` phase,
-  plus `_retry` (its one-shot soft retry) and `_check` (its `until_bash` gate).
+  plus `_retry` (its one-shot soft retry), `_check` (its `until_bash` gate) and
+  `_regate` (its `on_branch_gate_failure` re-run).
   This is why a fanout **branch name may not contain an underscore** and may not
-  end in `-retry`/`-check`: the name is a ledger key and `PhaseRef` parses these
+  end in `-retry`/`-check`/`-regate`: the name is a ledger key and `PhaseRef` parses these
   suffixes off it. The schema rejects both, and `parse()` is ordered so the
   suffixed forms win.
 

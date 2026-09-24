@@ -27,6 +27,8 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
+import { parseJsonl } from "lastlight-code-facts";
+
 import { flattenToolchain } from "./paths.js";
 import type { ReviewFamilyStats, ReviewPipelineStats } from "./schema.js";
 
@@ -212,14 +214,10 @@ function isNotMeasuredMarker(row: Record<string, unknown>): boolean {
 }
 
 /**
- * Parse a `hypotheses/<family>.jsonl`.
- *
- * **Mirrors `code-facts`' own `readJsonlRows` exactly**, because the ordinal a
- * row lands on IS its canonical identity: blank lines are skipped, unparseable
- * lines are skipped *without consuming an ordinal*, and anything that parses is
- * kept even if it is not an object — a scalar or array line still consumes its
- * ordinal there, and a reader that dropped it would shift every later row's id
- * and silently mis-resolve every citation after it rather than miss one.
+ * Parse a `hypotheses/<family>.jsonl` through `code-facts`' own reader, because
+ * the ordinal a row lands on IS its canonical identity: a mirror that dropped a
+ * row the pipeline kept (a scalar line, a pretty-printed object) would shift
+ * every later row's id and silently mis-resolve every citation after it.
  */
 function readJsonlRows(path: string): unknown[] {
   let text: string;
@@ -228,17 +226,7 @@ function readJsonlRows(path: string): unknown[] {
   } catch {
     return [];
   }
-  const rows: unknown[] = [];
-  for (const line of text.split("\n")) {
-    const t = line.trim();
-    if (!t) continue;
-    try {
-      rows.push(JSON.parse(t) as unknown);
-    } catch {
-      /* a torn final line is normal on a killed run — it consumes no ordinal */
-    }
-  }
-  return rows;
+  return parseJsonl(text).rows;
 }
 
 const asRecord = (row: unknown): Record<string, unknown> =>

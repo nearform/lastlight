@@ -219,6 +219,38 @@ export function severityOf(row: { severity?: unknown; evidence?: unknown }): str
 }
 
 /** {@link severityOf}'s counterpart for the probe flag. */
+/**
+ * WHY a row asks for a probe — the same branches as {@link deriveVerdict},
+ * named, for display and for measurement. Nothing in the pipeline reads it; it
+ * lives here, beside the rule, so the eval never keeps a second copy.
+ *
+ *   `verify`  the pass QUOTED a binding control and found nothing it cannot
+ *             tell apart — a clean discharge, probed only because it sits over
+ *             a changed hunk (the reassurance-verification clause). A
+ *             consequence written on such a row is hypothetical ("if the
+ *             constant changed…"): the pass has said the mechanism holds.
+ *   `risk`    a consequence is stated and the control is not clean.
+ *   `gap`     there is something the control cannot tell apart.
+ *   `unknown` order or authority could not be established.
+ */
+export type ProbeReason = "verify" | "risk" | "gap" | "unknown";
+
+/** A clean discharge: a binding, correctly-ordered, unbypassed control that the
+ * pass says separates every case it was asked about. Structural — read off the
+ * evidence, never off the claim's wording. */
+export function isReassurance(e: SurveyEvidence): boolean {
+  return deriveVerdict(e).discharge === "QUOTE" && str(e.cannot_distinguish) === "nothing";
+}
+
+export function probeReasonOf(e: SurveyEvidence): ProbeReason | null {
+  const v = deriveVerdict(e);
+  if (!v.needsProbe) return null;
+  if (isReassurance(e)) return "verify";
+  if (stated(e.consequence)) return "risk";
+  if (str(e.cannot_distinguish) !== "nothing") return "gap";
+  return "unknown";
+}
+
 export function needsProbeOf(row: { needsProbe?: unknown; evidence?: unknown }): boolean {
   const e = row.evidence as SurveyEvidence | undefined;
   if (hasEvidence(e)) return deriveVerdict(e as SurveyEvidence).needsProbe;

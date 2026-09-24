@@ -58,12 +58,12 @@ contract and you must follow it exactly.
 path you construct for it is a guess about a harness layout that varies by
 backend, and earlier passes have lost their seed to exactly that guess.
 
-Read the attachment before anything else. It says one of three things, and they are three different facts:
+Read the attachment before anything else. It says one of these, and they are different facts:
 
 | it says | you do |
 |---|---|
 | **obligations** | discharge every one, exactly as its contract says |
-| **NOT MEASURED** | record that and stop — do not substitute a judgement for a measurement |
+| **NOT MEASURED**, or **no obligations could be built** | make that your FIRST row, then work the diff for this family's question yourself. It is not a result and not a licence to stop: a pass that writes only that row surveyed nothing, and the gate fails it |
 | **NOT AVAILABLE** (or a path to open yourself) | do exactly what it tells you to |
 
 A block that was never delivered is **not** a clean result, and not a finding about the code either. Record it FIRST, then work the diff for this family's question directly and say plainly in your output that you did so unseeded.

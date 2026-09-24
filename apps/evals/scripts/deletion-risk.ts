@@ -92,6 +92,8 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { parseJsonl } from "lastlight-code-facts";
+
 import { goldHits, internalGoldHits } from "../src/review-metrics.js";
 import type { Scorecard } from "../src/report.js";
 import type { InstanceResult } from "../src/schema.js";
@@ -243,7 +245,7 @@ export interface DeletionRow {
   goldWindowHits: number[];
 }
 
-// ── Positional identity (mirror of code-facts' readJsonlRows ingest) ────────
+// ── Positional identity (read through code-facts' parseJsonl) ─────────────
 
 /** `<family>-NNN` — the identity `code-facts` assigns at ingest. */
 export const hypothesisId = (family: string, ordinal: number): string =>
@@ -323,15 +325,8 @@ export function indexHypotheses(files: Map<string, string>): {
 
   for (const [family, text] of [...files].sort()) {
     let ordinal = 0;
-    for (const line of text.split("\n")) {
-      const t = line.trim();
-      if (!t) continue;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(t) as unknown;
-      } catch {
-        continue; // consumes no ordinal, exactly as code-facts does
-      }
+    // code-facts' own reader, so ordinals cannot drift from the pipeline's.
+    for (const parsed of parseJsonl(text).rows) {
       ordinal += 1;
       const row = asRecord(parsed);
       const id = hypothesisId(family, ordinal);

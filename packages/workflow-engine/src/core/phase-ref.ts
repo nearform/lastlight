@@ -51,14 +51,15 @@ export type PhaseKind =
   | "check"
   | "branch"
   | "branchRetry"
-  | "branchCheck";
+  | "branchCheck"
+  | "branchRegate";
 
 export class PhaseRef {
   constructor(
     readonly base: string,
     readonly kind: PhaseKind = "phase",
     readonly index?: number,
-    /** Fan-out branch name — set for the three `branch*` kinds only. */
+    /** Fan-out branch name — set for the `branch*` kinds only. */
     readonly branch?: string,
   ) {}
 
@@ -107,6 +108,15 @@ export class PhaseRef {
     return new PhaseRef(base, "branchCheck", undefined, name);
   }
 
+  /**
+   * The re-run of a fan-out branch whose gate did not close
+   * (`on_branch_gate_failure`). Its own suffix, not `_retry`: the soft retry
+   * may already hold that ledger key, and a done row is skipped on dedup.
+   */
+  static branchRegate(base: string, name: string): PhaseRef {
+    return new PhaseRef(base, "branchRegate", undefined, name);
+  }
+
   format(): string {
     switch (this.kind) {
       case "phase":
@@ -127,13 +137,16 @@ export class PhaseRef {
         return `${this.base}_branch_${this.branch}_retry`;
       case "branchCheck":
         return `${this.base}_branch_${this.branch}_check`;
+      case "branchRegate":
+        return `${this.base}_branch_${this.branch}_regate`;
     }
   }
 
   /**
    * Parse a label back into a PhaseRef. Recognizes only the generated
    * `_fix_N` / `_recheck_N` / `_iter_N` / `_iter_N_retry` / `_iter_N_check`
-   * and `_branch_<name>` / `_branch_<name>_retry` / `_branch_<name>_check`
+   * and `_branch_<name>` / `_branch_<name>_retry` / `_branch_<name>_check` /
+   * `_branch_<name>_regate`
    * suffixes; anything else (including a
    * bare declared name or the dropped legacy `_N` form) parses as a plain
    * `phase` whose base is the whole string.
@@ -147,6 +160,8 @@ export class PhaseRef {
     if (m) return new PhaseRef(m[1], "branchRetry", undefined, m[2]);
     m = label.match(/^(.*)_branch_([A-Za-z0-9-]+)_check$/);
     if (m) return new PhaseRef(m[1], "branchCheck", undefined, m[2]);
+    m = label.match(/^(.*)_branch_([A-Za-z0-9-]+)_regate$/);
+    if (m) return new PhaseRef(m[1], "branchRegate", undefined, m[2]);
     m = label.match(/^(.*)_branch_([A-Za-z0-9-]+)$/);
     if (m) return new PhaseRef(m[1], "branch", undefined, m[2]);
     m = label.match(/^(.*)_iter_(\d+)_retry$/);

@@ -38,6 +38,11 @@ export interface Message {
   timestamp?: string | number;
   reasoning?: unknown;
   finish_reason?: string;
+  /** The provider's own stop reason (`content_filter`, `refusal`, …) behind `finish_reason`. */
+  raw_stop_reason?: string;
+  model?: string;
+  /** The model the provider says served the turn — differs from `model` behind a gateway. */
+  response_model?: string;
   [k: string]: unknown;
 }
 

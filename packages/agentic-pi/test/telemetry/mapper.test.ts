@@ -67,6 +67,8 @@ const SAMPLE: AgentSessionEvent[] = [
       responseModel: "gpt-5.4-nano-2026",
       responseId: "resp_42",
       stopReason: "toolUse",
+      rawStopReason: "tool_calls",
+      providerThinkingLevel: "low",
       usage: {
         input: 100,
         output: 20,
@@ -149,6 +151,8 @@ describe("SpanMapper — span tree", () => {
     assert.equal(llm.attributes["gen_ai.response.id"], "resp_42");
     assert.equal(llm.attributes["gen_ai.response.model"], "gpt-5.4-nano-2026");
     assert.deepEqual(llm.attributes["gen_ai.response.finish_reasons"], ["toolUse"]);
+    assert.equal(llm.attributes["agentic_pi.response.raw_stop_reason"], "tool_calls");
+    assert.equal(llm.attributes["agentic_pi.response.provider_thinking_level"], "low");
 
     const tool = byName(spans, "execute_tool bash");
     assert.equal(tool.attributes["gen_ai.tool.name"], "bash");

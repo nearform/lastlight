@@ -258,6 +258,81 @@ interface BranchOutcome {
   result: ExecutionResult;
   /** A dedup hit on resume — the work was already done, don't re-report it. */
   deduped: boolean;
+  /** The prompt the branch ran with — the head a gate re-run is built on. */
+  prompt?: string;
+  /** The last `until_bash` verdict. Absent when the branch declares no gate. */
+  gate?: GateVerdict;
+}
+
+/** What one `until_bash` run said. */
+interface GateVerdict {
+  met: boolean;
+  /** False when the command could not run at all (validation, sandbox error). */
+  ran: boolean;
+  timedOut: boolean;
+  /** stdout + stderr — for a `discharge` gate, the list of what is outstanding. */
+  output: string;
+}
+
+/**
+ * The most gate output a re-run prompt carries. `discharge` already bounds its
+ * own listing; this only stops an arbitrary gate from flooding the prompt.
+ */
+const MAX_GATE_OUTPUT_CHARS = 8000;
+
+/**
+ * The section appended to a branch's prompt when its gate did not close.
+ *
+ * Appended LAST, after the branch's own prompt and context file, so the six
+ * branches keep sharing one cached prefix (§D4) and the re-run shares the first
+ * attempt's prefix too.
+ *
+ * The instruction is to EDIT, not only append: a row flagged for a missing
+ * `evidence` record stays flagged however many corrected copies follow it. That
+ * is safe at this stage — hypothesis ids are assigned by position at ingest,
+ * after the survey, and nothing has cited one yet.
+ */
+export function gateRetrySection(command: string, output: string): string {
+  const trimmed = output.trim();
+  const shown =
+    trimmed.length > MAX_GATE_OUTPUT_CHARS
+      ? `${trimmed.slice(0, MAX_GATE_OUTPUT_CHARS)}\n… (truncated)`
+      : trimmed || "(the check printed nothing — it exited non-zero)";
+  return [
+    "## Your exit check did not pass — second and final attempt",
+    "",
+    "You already ran this pass once, in this workspace, and your output files are still there. The check below then ran and did NOT pass. Fix exactly what its output names, and nothing else:",
+    "",
+    "- Rows you already wrote stay. Fix a flagged row IN PLACE (for example, add its missing `evidence` record) rather than appending a corrected copy; add new rows only for what is unanswered.",
+    "- Do not redo work the check did not flag.",
+    "- Run the check yourself before you stop — it must exit 0.",
+    "",
+    "The check:",
+    "",
+    "```bash",
+    command,
+    "```",
+    "",
+    "What it printed:",
+    "",
+    "```",
+    shown,
+    "```",
+  ].join("\n");
+}
+
+/**
+ * Does this branch get an `on_branch_gate_failure` re-run?
+ *
+ * Only when its gate RAN and said no. A timed-out gate says nothing about the
+ * work; a gate that could not run is an infrastructure fault a re-run cannot
+ * fix; a HARD branch failure is never retried (`isSoftOutcome`'s split, the
+ * same rule the soft retry follows); a deduped branch is not ours to redo.
+ */
+function gateRetryWanted(o: BranchOutcome): boolean {
+  if (o.deduped || !o.gate || o.prompt === undefined) return false;
+  if (o.gate.met || !o.gate.ran || o.gate.timedOut) return false;
+  return o.result.success || isSoftOutcome(o.result);
 }
 
 /**
@@ -343,13 +418,16 @@ export class FanoutHandler implements PhaseTypeHandler {
           const ran = await mapPool(branches, concurrency, (branch) =>
             this.runBranch(session, phase, branch, outputs, policy),
           );
-          // Gates run AFTER the join, and SEQUENTIALLY. `InProcessSandbox.runCommand`
-          // is a `spawnSync` — it blocks the event loop — so interleaving a gate
-          // with the agent turns would serialise the whole fan-out on the very
-          // backend (`none`) the fan-out exists to speed up.
-          for (const outcome of ran) {
-            if (outcome.deduped) continue;
-            await this.runBranchGate(session, phase, outcome);
+          await this.runGates(session, phase, ran);
+          // `on_branch_gate_failure`: one directed re-run per branch whose gate
+          // ran and said no, concurrently like the first round, then those
+          // branches' gates again. Nothing else is re-run.
+          if ((phase.on_branch_gate_failure?.retries ?? 0) > 0) {
+            const failing = ran.filter((o) => gateRetryWanted(o));
+            if (failing.length > 0) {
+              await mapPool(failing, concurrency, (o) => this.rerunForGate(session, phase, o));
+              await this.runGates(session, phase, failing);
+            }
           }
           return ran;
         },
@@ -446,7 +524,7 @@ export class FanoutHandler implements PhaseTypeHandler {
 
       const result = this.run.observeResult(pr.result);
       const soft = !result.success && isSoftOutcome(result);
-      if (!soft || attempt >= policy.retries) return { branch, label, result, deduped: false };
+      if (!soft || attempt >= policy.retries) return { branch, label, result, deduped: false, prompt };
 
       log.info("fan-out branch came back soft — retrying once", {
         phase: phase.name,
@@ -582,15 +660,75 @@ export class FanoutHandler implements PhaseTypeHandler {
   }
 
   /**
-   * A branch's `until_bash`, recorded as its own `<phase>_branch_<name>_check`
-   * row.
+   * Every non-deduped branch's gate, recording each verdict on its outcome.
    *
-   * Observational, and that is not a weakening — it is what the six chained
-   * survey phases already did. Each declared `generic_loop: { max_iterations: 1,
-   * until_bash: … }`, and with one iteration the gate can never cause a re-run:
-   * it runs once, records `condition_met` / `condition_not_met`, and the loop
-   * ends either way. Reproducing that exactly is what makes this a speed change
-   * rather than a behaviour change.
+   * AFTER the join, and SEQUENTIALLY. `InProcessSandbox.runCommand` is a
+   * `spawnSync` — it blocks the event loop — so interleaving a gate with the
+   * agent turns would serialise the whole fan-out on the very backend (`none`)
+   * the fan-out exists to speed up.
+   */
+  private async runGates(session: SandboxSession, phase: PhaseDefinition, outcomes: BranchOutcome[]): Promise<void> {
+    for (const outcome of outcomes) {
+      if (outcome.deduped) continue;
+      outcome.gate = await this.runBranchGate(session, phase, outcome);
+    }
+  }
+
+  /**
+   * Re-run one branch whose gate did not close, with the gate's output as the
+   * instruction — `on_branch_gate_failure`.
+   *
+   * Its own ledger row (`<phase>_branch_<name>_regate`) and its own phase
+   * window, for the same reason every branch has one: the evals harness
+   * attributes cost by window, and a turn outside any window is billed to
+   * nothing.
+   *
+   * A re-run that succeeds replaces the branch's result; one that fails leaves
+   * the first attempt's result standing, because its rows are still on disk
+   * and a failed correction does not un-write them.
+   */
+  private async rerunForGate(session: SandboxSession, phase: PhaseDefinition, outcome: BranchOutcome): Promise<void> {
+    const label = PhaseRef.branchRegate(phase.name, outcome.branch.name).format();
+    const command = outcome.branch.until_bash?.trim() ?? "";
+    const prompt = `${(outcome.prompt ?? "").trimEnd()}\n\n${gateRetrySection(command, outcome.gate?.output ?? "")}`;
+    log.info("fan-out branch gate did not close — re-running the branch once with the gate's output", {
+      phase: phase.name,
+      branch: outcome.branch.name,
+    });
+
+    await this.reporter.onStart(label);
+    let result: ExecutionResult | undefined;
+    try {
+      const pr = await this.runBranchOnce(session, phase, outcome.branch, label, prompt);
+      if (pr.skipped) return;
+      result = this.run.observeResult(pr.result);
+      if (result.success) outcome.result = result;
+      else {
+        log.warn("fan-out branch re-run failed — the first attempt's result stands", {
+          phase: phase.name,
+          branch: outcome.branch.name,
+          stopReason: result.stopReason,
+        });
+      }
+    } finally {
+      await this.reporter.onEnd(
+        label,
+        result
+          ? { phase: label, success: result.success, output: result.output ?? "", error: result.error }
+          : { phase: label, success: false, output: "", error: "fan-out gate re-run threw" },
+      );
+    }
+  }
+
+  /**
+   * A branch's `until_bash`, recorded as its own `<phase>_branch_<name>_check`
+   * row, and returned so `on_branch_gate_failure` can act on it.
+   *
+   * Without that key it is observational — what the six chained survey phases
+   * did, each a `generic_loop: { max_iterations: 1, until_bash: … }` that ran
+   * the gate once and ended either way. With it, a gate that ran and said no
+   * buys the branch one directed re-run and then runs again, recording a
+   * second `_check` row under the same label.
    *
    * Like the generic loop's check row it bypasses the dedup ledger: a condition
    * must be re-evaluated every time it is asked, and `success` records whether
@@ -600,9 +738,9 @@ export class FanoutHandler implements PhaseTypeHandler {
     session: SandboxSession,
     phase: PhaseDefinition,
     outcome: BranchOutcome,
-  ): Promise<void> {
+  ): Promise<GateVerdict | undefined> {
     const command = outcome.branch.until_bash?.trim();
-    if (!command) return;
+    if (!command) return undefined;
 
     const { workflowName, triggerId, githubAccess, workflowId, store: db } = this.run;
     const label = PhaseRef.branchCheck(phase.name, outcome.branch.name).format();
@@ -628,6 +766,8 @@ export class FanoutHandler implements PhaseTypeHandler {
 
     let met = false;
     let error: string | undefined;
+    let timedOut = false;
+    let output = "";
     try {
       validateShellCommand(command);
       const res = await session.runCommand(
@@ -636,6 +776,8 @@ export class FanoutHandler implements PhaseTypeHandler {
         { timeoutSeconds: this.gateTimeoutSeconds(phase, outcome.branch), writeSession: false },
       );
       met = res.success;
+      timedOut = res.stopReason === "error_timeout";
+      output = res.output ?? "";
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     }
@@ -661,6 +803,7 @@ export class FanoutHandler implements PhaseTypeHandler {
         log.warn("Failed to finish fan-out branch check row", { label, err });
       }
     }
+    return { met, ran: error === undefined, timedOut, output };
   }
 
   // ── Reporting ──────────────────────────────────────────────────────────────

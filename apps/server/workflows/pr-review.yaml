@@ -236,6 +236,14 @@ phases:
     # at phase level the schema strips it silently, reverting to
     # `{retries: 0, then: fail}` — one degenerate turn then fails the review.
     on_branch_soft_failure: { retries: 1, then: complete }
+    # A branch whose gate RAN and said no — seeded checks no row names, claim
+    # rows with no evidence record, a zero-obligation family with no claim —
+    # is re-run ONCE with the gate's output as the instruction, then gated
+    # again. Without it the gate only recorded `condition_not_met` and the
+    # half-done file went downstream as if complete (measured: MiniMax M3
+    # answered 2 and 3 of 12 seeded checks on two of eight repeats). One extra
+    # branch turn, only on failure.
+    on_branch_gate_failure: { retries: 1 }
     # `context_file` is read by the HARNESS, host-side, from the cwd the
     # deterministic phases wrote in, and appended to the branch's prompt — the
     # model resolves no path of its own. An unreadable file appends a loud NOT

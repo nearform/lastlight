@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { type SurveyEvidence, deriveVerdict, hasEvidence, severityOf } from "../src/survey-verdict.js";
+import { type SurveyEvidence, deriveVerdict, hasEvidence, isReassurance, probeReasonOf, severityOf } from "../src/survey-verdict.js";
 
 /** A row whose mechanism is fully closed: binding control, in time, nothing past it. */
 const clean: SurveyEvidence = {
@@ -191,5 +191,49 @@ describe("a row with no evidence is a reported fact", () => {
     expect(hasEvidence({})).toBe(false);
     expect(severityOf({ severity: "Critical", evidence: {} })).toBe("Critical");
     expect(severityOf({ severity: "Critical", evidence: { consequence: null, control_site: "a.ts:1", authority: "binding", order_ok: true, cannot_distinguish: "nothing", bypass: "none found" } })).toBe("Minor");
+  });
+});
+
+describe("probeReasonOf — why a row asks for a probe", () => {
+  it("is null when the row asks for none", () => {
+    expect(probeReasonOf(clean)).toBeNull();
+  });
+
+  it("is `verify` for a clean discharge over a changed hunk — the reassurance clause", () => {
+    expect(probeReasonOf({ ...clean, in_changed_hunk: true })).toBe("verify");
+  });
+
+  it("stays `verify` when a clean discharge also carries a (hypothetical) consequence", () => {
+    // Measured 2026-09-24: GLM 5.3 Flash wrote a consequence on 10 of 10 clean
+    // discharges. The control still holds, so the row is still a reassurance.
+    const e = { ...clean, in_changed_hunk: true, consequence: "if the constant changed, callers would drift" };
+    expect(isReassurance(e)).toBe(true);
+    expect(probeReasonOf(e)).toBe("verify");
+  });
+
+  it("is `risk` when a consequence is stated and the control is not clean", () => {
+    expect(probeReasonOf({ ...clean, authority: "advisory", consequence: "a caller bypasses it" })).toBe("risk");
+    expect(probeReasonOf({ ...clean, control_site: "none", consequence: "nothing enforces it" })).toBe("risk");
+  });
+
+  it("is `gap` when the control cannot tell two cases apart", () => {
+    expect(probeReasonOf({ ...clean, cannot_distinguish: "a stale token and a fresh one" })).toBe("gap");
+  });
+
+  it("is `unknown` when only order or authority is unknown", () => {
+    expect(probeReasonOf({ ...clean, authority: "unknown" })).toBe("unknown");
+  });
+
+  it("never names a reason for a row deriveVerdict would not probe, and always names one for a row it would", () => {
+    const variants: SurveyEvidence[] = [
+      clean,
+      { ...clean, in_changed_hunk: true },
+      { ...clean, authority: "advisory" },
+      { ...clean, order_ok: "unknown" },
+      { ...clean, control_site: "none" },
+      { ...clean, control_site: "none", consequence: "x" },
+      { ...clean, cannot_distinguish: "y" },
+    ];
+    for (const v of variants) expect(probeReasonOf(v) !== null).toBe(deriveVerdict(v).needsProbe);
   });
 });

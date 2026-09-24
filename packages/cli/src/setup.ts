@@ -207,7 +207,7 @@ export function buildEnvContent(config: SetupConfig): string {
     "# Set the env var that matches your LASTLIGHT_MODEL's provider.",
     "# See src/providers.ts for the full registry (anthropic, openai,",
     "# openrouter, google, mistral, groq, cerebras, xai, huggingface,",
-    "# moonshotai, nvidia, fireworks, together, deepseek, zai,",
+    "# moonshotai, nvidia, fireworks, together, deepseek, zai, opencode,",
     "# kimi-coding, minimax).",
   );
   if (config.providerApiKey) {

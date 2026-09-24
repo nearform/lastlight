@@ -77,6 +77,22 @@ interface Fixture {
  * and this helper has to be able to build both, or the tests below cannot tell
  * them apart either.
  */
+/** A well-formed `evidence` record — the shape `survey-verdict.ts` derives from. */
+const EVIDENCE = {
+  subject: "X",
+  control_site: "src/a.ts:1",
+  control_text: "if (x) reject()",
+  authority: "binding",
+  order_ok: true,
+  cannot_distinguish: "nothing",
+  bypass: "none found",
+  in_changed_hunk: false,
+  consequence: null,
+  trigger: "unknown",
+  crosses_boundary: false,
+  capability_gained: null,
+};
+
 function workspace(files: {
   obligations?: Record<string, unknown> | string;
   hypotheses?: Record<string, unknown[] | string>;
@@ -94,10 +110,16 @@ function workspace(files: {
     writeFileSync(join(dir, "obligations.json"), `${body}\n`, "utf8");
   }
   for (const [family, rows] of Object.entries(files.hypotheses ?? {})) {
+    // Every survey row since #398 carries a typed `evidence` record, and the
+    // gate now fails a claim row without one. So a claim row that does not SET
+    // the key gets a well-formed one here; a test about a bare row says so with
+    // `evidence: null`.
+    const withEvidence = (r: unknown) =>
+      r && typeof r === "object" && "claim" in r && !("evidence" in r) ? { ...r, evidence: EVIDENCE } : r;
     const body =
       typeof rows === "string"
         ? rows
-        : rows.map((r) => JSON.stringify(r)).join("\n") + (rows.length > 0 ? "\n" : "");
+        : rows.map((r) => JSON.stringify(withEvidence(r))).join("\n") + (rows.length > 0 ? "\n" : "");
     writeFileSync(join(dir, "hypotheses", `${family}.jsonl`), body, "utf8");
   }
   return {
@@ -395,17 +417,106 @@ describe("a family with nothing to discharge", () => {
     expect(result.notes.join(" ")).toMatch(/not evidence the family is clean/);
   });
 
-  it("still names the missing file when a zero-obligation family never wrote one", () => {
-    // It passes — nothing mechanical was asked of it — but the two facts stay
-    // separable in the output, because "the survey never ran" and "the survey
-    // ran and had nothing to say" are not the same run.
+  it("FAILS a zero-obligation family that never wrote a file, and names it", () => {
+    // The block told the pass to work the diff itself; no file means it did
+    // not. Still separable from "ran and wrote a placeholder" in the notes.
     const { dir } = workspace({
       obligations: doc({ families: [fam("security", 0)], obligations: [] }),
     });
     const result = checkDischarge({ dir, family: "security" });
-    expect(result.satisfied).toBe(true);
+    expect(result.satisfied).toBe(false);
     expect(result.fileState).toBe("missing");
     expect(result.notes.join(" ")).toMatch(/NOBODY LOOKED/);
+  });
+
+  it("FAILS a zero-obligation family whose only row is the NOT MEASURED placeholder", () => {
+    // The 2026-09-24 shape, verbatim: one row, no claim, an `outcome` marker.
+    const { dir } = workspace({
+      obligations: doc({ families: [fam("enforcement", 0)], obligations: [] }),
+      hypotheses: {
+        enforcement: [{ id: "enforcement-not-measured", outcome: "NOT MEASURED", reason: "no obligations were built" }],
+      },
+    });
+    const result = checkDischarge({ dir, family: "enforcement" });
+    expect(result.satisfied).toBe(false);
+    expect(dischargeExitCode(result)).not.toBe(EXIT_OK);
+    expect(result.notes.join(" ")).toMatch(/surveys NOTHING/);
+  });
+
+  it("does not count a claim that is only the marker as the pass's own claim", () => {
+    const { dir } = workspace({
+      obligations: doc({ families: [fam("enforcement", 0)], obligations: [] }),
+      hypotheses: { enforcement: [{ claim: "NOT MEASURED — ran unseeded" }] },
+    });
+    expect(checkDischarge({ dir, family: "enforcement" }).satisfied).toBe(false);
+  });
+
+  it("applies the placeholder rule under `contract: minimal` too — the shipped default", () => {
+    const placeholderOnly = workspace({
+      obligations: doc({ contract: "minimal", families: [fam("enforcement", 0)], obligations: [] }),
+      hypotheses: { enforcement: [{ id: "enforcement-not-measured", outcome: "NOT MEASURED" }] },
+    });
+    expect(checkDischarge({ dir: placeholderOnly.dir, family: "enforcement" }).satisfied).toBe(false);
+    const worked = workspace({
+      obligations: doc({ contract: "minimal", families: [fam("enforcement", 0)], obligations: [] }),
+      hypotheses: { enforcement: [{ claim: "the backfill trusts the client-supplied mimeType" }] },
+    });
+    expect(checkDischarge({ dir: worked.dir, family: "enforcement" }).satisfied).toBe(true);
+  });
+
+  it("FAILS under `contract: minimal` when seeded checks are named by no row, and lists them", () => {
+    // The 2026-09-24 shape: 4 of 12 checks answered, gate read only fileState.
+    const obligations = Array.from({ length: 4 }, (_, i) => ob(`O-00${i + 1}`, "contract"));
+    const { dir } = workspace({
+      obligations: doc({ contract: "minimal", families: [fam("contract", 4)], obligations }),
+      hypotheses: { contract: [{ obligation: "O-001", claim: "a" }, { obligation: "O-002", claim: "b" }] },
+    });
+    const result = checkDischarge({ dir, family: "contract" });
+    expect(result.satisfied).toBe(false);
+    expect(result.notes.join(" ")).toMatch(/2 of 4 seeded contract obligation\(s\) are named by no row \(O-003, O-004\)/);
+  });
+
+  it("passes `contract: minimal` when every seeded check is named, with no code asked for", () => {
+    const { dir } = workspace({
+      obligations: doc({ contract: "minimal", families: [fam("contract", 2)], obligations: [ob("O-001", "contract"), ob("O-002", "contract")] }),
+      hypotheses: { contract: [{ obligation: "O-001", claim: "a" }, { obligation: "O-002", claim: "b" }] },
+    });
+    expect(checkDischarge({ dir, family: "contract" }).satisfied).toBe(true);
+  });
+
+  it("FAILS a claim row with no evidence record, under either contract, and names it", () => {
+    for (const contract of ["minimal", "full"] as const) {
+      const { dir } = workspace({
+        obligations: doc({ contract, families: [fam("contract", 1)], obligations: [ob("O-001", "contract")] }),
+        hypotheses: { contract: [{ obligation: "O-001", discharge: "QUOTE", claim: "a", evidence: null }] },
+      });
+      const result = checkDischarge({ dir, family: "contract" });
+      expect(result.satisfied).toBe(false);
+      expect(result.notes.join(" ")).toMatch(/1 of 1 row\(s\) carry no `evidence` record/);
+    }
+  });
+
+  it("does not ask a placeholder row for evidence", () => {
+    const { dir } = workspace({
+      obligations: doc({ families: [fam("enforcement", 0)], obligations: [] }),
+      hypotheses: {
+        enforcement: [{ id: "enforcement-not-measured", outcome: "NOT MEASURED" }, { claim: "a real finding" }],
+      },
+    });
+    expect(checkDischarge({ dir, family: "enforcement" }).satisfied).toBe(true);
+  });
+
+  it("passes the zero-obligation family once the pass records the seed AND works the diff", () => {
+    const { dir } = workspace({
+      obligations: doc({ families: [fam("enforcement", 0)], obligations: [] }),
+      hypotheses: {
+        enforcement: [
+          { id: "enforcement-not-measured", outcome: "NOT MEASURED" },
+          { claim: "the backfill trusts the client-supplied mimeType when selecting files" },
+        ],
+      },
+    });
+    expect(checkDischarge({ dir, family: "enforcement" }).satisfied).toBe(true);
   });
 
   it("grades obligations that exist even when the header says NOT MEASURED", () => {

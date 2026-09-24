@@ -60,7 +60,10 @@ OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod</code></pre>
 			<a href="https://github.com/Arize-ai/openinference">OpenInference</a>
 			attributes (<code>openinference.span.kind</code> of <code>CHAIN</code> /
 			<code>AGENT</code> / <code>LLM</code> / <code>TOOL</code>, plus
-			<code>llm.model_name</code>, token counts, and cost), so an
+			<code>llm.model_name</code>, token counts, and cost). Each turn also records
+			what the provider reported: <code>gen_ai.response.model</code> (the model that
+			actually served it, which a gateway may change), the stop reason and the
+			provider's raw stop reason. So an
 			OpenInference-aware backend such as <a href="https://arize.com/docs/phoenix">Phoenix</a>
 			renders a run as a proper agent tree with per-turn tokens and cost
 			instead of a flat span. The flat <code>pi.*</code> span events are also

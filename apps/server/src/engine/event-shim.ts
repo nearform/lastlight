@@ -377,7 +377,13 @@ export class AgenticShim {
       role?: string;
       content?: Array<Record<string, unknown>>;
       usage?: Record<string, unknown>;
+      stopReason?: unknown;
+      rawStopReason?: unknown;
+      responseModel?: unknown;
+      providerThinkingLevel?: unknown;
+      diagnostics?: unknown;
     };
+    if (message.role === "system") return this.translateSystemMessage(r.message, ts, sessionId);
     if (message.role !== "assistant" || !Array.isArray(message.content)) {
       return [];
     }
@@ -421,6 +427,20 @@ export class AgenticShim {
     };
     const usage = shimUsage(message.usage);
     if (usage) assistantMessage.usage = usage;
+    // Why the turn ended and what actually served it. `stop_reason` is pi's
+    // normalised reason (the Claude-SDK key the SessionReader already maps to
+    // `finish_reason`); `raw_stop_reason` is the provider's own word for it
+    // (`content_filter`, `refusal`, …), and `response_model` differs from the
+    // requested model when a gateway (OpenRouter, OpenCode Zen) re-routes.
+    if (typeof message.stopReason === "string") assistantMessage.stop_reason = message.stopReason;
+    if (typeof message.rawStopReason === "string") assistantMessage.raw_stop_reason = message.rawStopReason;
+    if (typeof message.responseModel === "string") assistantMessage.response_model = message.responseModel;
+    if (typeof message.providerThinkingLevel === "string") {
+      assistantMessage.provider_thinking_level = message.providerThinkingLevel;
+    }
+    if (Array.isArray(message.diagnostics) && message.diagnostics.length > 0) {
+      assistantMessage.diagnostics = message.diagnostics;
+    }
 
     return [
       {
@@ -430,6 +450,21 @@ export class AgenticShim {
         sessionId,
       },
     ];
+  }
+
+  /**
+   * Pi (0.86+) carries the system prompt in the transcript as a `system`
+   * message: the leading one declares the base prompt, its named `sections`
+   * and the tools; a later one updates them mid-run. Rendered as a role-based
+   * `system` line (a collapsed MetaMessage card): the first line summarises,
+   * the expanded body is the prompt exactly as the model received it. Tool
+   * schemas are reduced to names — they are large and derivable from the
+   * profile, where the prompt text is not.
+   */
+  private translateSystemMessage(raw: unknown, ts: string, sessionId: string): object[] {
+    const content = systemMessageContent(raw);
+    if (!content) return [];
+    return [{ role: "system", subtype: "system_prompt", content, timestamp: ts, sessionId }];
   }
 
   private translateToolEnd(
@@ -575,4 +610,45 @@ export function truncateForLog(
   if (s.length <= maxBytes) return s;
   const dropped = s.length - maxBytes;
   return `${s.slice(0, maxBytes)}\n…[truncated ${dropped} chars]`;
+}
+
+/**
+ * Render a pi `SystemMessage` as a summary line plus the prompt text, or
+ * `undefined` when it carries nothing. Exported for tests.
+ */
+export function systemMessageContent(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const m = raw as {
+    content?: unknown;
+    sections?: Record<string, unknown>;
+    toolsAdded?: Array<{ name?: unknown }>;
+    toolsRemoved?: Array<{ name?: unknown } | string>;
+  };
+  const base =
+    typeof m.content === "string"
+      ? m.content
+      : Array.isArray(m.content)
+        ? m.content
+            .map((b) => (b && typeof b === "object" && typeof (b as { text?: unknown }).text === "string" ? (b as { text: string }).text : ""))
+            .join("")
+        : "";
+  const sections = Object.entries(m.sections ?? {});
+  const kept = sections.filter(([, v]) => typeof v === "string") as Array<[string, string]>;
+  const removed = sections.filter(([, v]) => v === null).map(([k]) => k);
+  const names = (list: unknown[] | undefined) =>
+    (list ?? [])
+      .map((t) => (typeof t === "string" ? t : t && typeof t === "object" ? (t as { name?: unknown }).name : undefined))
+      .filter((n): n is string => typeof n === "string");
+  const added = names(m.toolsAdded);
+  const dropped = names(m.toolsRemoved);
+
+  const body = [base, ...kept.map(([, v]) => v)].filter((t) => t.length > 0).join("\n\n");
+  if (!body && removed.length === 0 && added.length === 0 && dropped.length === 0) return undefined;
+
+  const parts = [`System prompt · ${body.length.toLocaleString("en-US")} chars`];
+  if (kept.length > 0) parts.push(`sections: ${kept.map(([k]) => k).join(", ")}`);
+  if (removed.length > 0) parts.push(`removed sections: ${removed.join(", ")}`);
+  if (added.length > 0) parts.push(`tools: ${added.join(", ")}`);
+  if (dropped.length > 0) parts.push(`tools removed: ${dropped.join(", ")}`);
+  return body ? `${parts.join(" · ")}\n\n${body}` : parts.join(" · ");
 }

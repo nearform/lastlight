@@ -40,7 +40,7 @@ export interface PhaseRow {
 }
 
 /** `<phase>_branch_<family>`, with the loop/gate suffixes the ledger appends. */
-const BRANCH_RE = /^(.+)_branch_(.+?)(?:_retry|_check)?$/;
+const BRANCH_RE = /^(.+)_branch_(.+?)(?:_retry|_check|_regate)?$/;
 
 /**
  * Join the ledger and the archive into one ordered phase list.

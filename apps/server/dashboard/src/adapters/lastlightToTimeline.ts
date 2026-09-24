@@ -63,6 +63,20 @@ function parseToolCalls(raw: unknown): ToolUseContent[] {
   });
 }
 
+const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
+
+/** Why the turn ended and what served it — only the keys the message carries. */
+function assistantMetadata(msg: Message): BaseMessage["metadata"] {
+  const meta = {
+    model: str(msg.model),
+    responseModel: str(msg.response_model),
+    finishReason: str(msg.finish_reason),
+    rawStopReason: str(msg.raw_stop_reason),
+  };
+  const present = Object.fromEntries(Object.entries(meta).filter(([, v]) => v !== undefined));
+  return Object.keys(present).length > 0 ? present : undefined;
+}
+
 /**
  * Convert raw lastlight session messages to BaseMessage[].
  * The JSONL format uses role-based lines identical to Hermes:
@@ -89,6 +103,7 @@ export function toBaseMessages(messages: Message[]): BaseMessage[] {
           timestamp: ts,
           type: "assistant",
           content: { text, reasoning: extractText(msg.reasoning) },
+          metadata: assistantMetadata(msg),
         });
       }
       for (let i = 0; i < toolCalls.length; i++) {

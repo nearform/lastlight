@@ -54,9 +54,16 @@
  *     and the note says why, because failing a family for the absence of the
  *     thing it audits is how a gate takes a run down.
  *
- * A family with **zero obligations** passes too. Nothing mechanical was asked
- * of it; the survey still worked the diff, and this gate is in no position to
- * grade that.
+ * A family with **zero obligations** passes only if the pass wrote at least
+ * one CLAIM of its own. Nothing mechanical was asked of it, but the block it
+ * was handed says, in as many words, *work the diff for this family's question
+ * directly* — so a file holding only a "NOT MEASURED" placeholder, or no file,
+ * is a pass that recorded the missing seed and STOPPED. Measured 2026-09-24:
+ * Haiku 4.5 did exactly that on 2 of 3 repeats of an unseeded `enforcement`
+ * branch, spending $0.43 to write one placeholder, while the same fixture's
+ * gold was found unseeded by other models. The gate cannot grade WHAT the pass
+ * found, only that it looked; that much the agent can always satisfy, so this
+ * is not the unsatisfiable-gate failure below.
  *
  * ── The one degradation, and why it is not a loophole ───────────────────────
  *
@@ -92,6 +99,7 @@
  * investigation's only gold match and v2's full validator is what made it
  * expensive. This checks that the work was *recorded*, per obligation.
  */
+import { hasEvidence } from "./survey-verdict.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -163,6 +171,8 @@ export interface CheckDischargeResult {
   rows: number;
   /** Lines that were not JSON at all, counted rather than silently skipped. */
   malformed: number;
+  /** Rows read despite not being one object per line — see `jsonl.ts`. */
+  recovered: number;
   /** Cited ids that belong to ANOTHER family's obligations. Reported, not failed. */
   foreign: string[];
   /** Cited ids no obligation declares. Reported, not failed. */
@@ -328,6 +338,17 @@ function loadObligations(dir: string): LoadedObligations {
 }
 
 /**
+ * A row that says something about the code, as against one that only records
+ * why nothing was said. A placeholder carries no `claim`, or a claim that is
+ * just the NOT MEASURED / NOT AVAILABLE marker.
+ */
+const PLACEHOLDER_CLAIM = /^\s*(not[\s_-]*measured|not[\s_-]*available|unseeded)\b/i;
+function isOwnClaim(row: { claim?: unknown }): boolean {
+  const claim = typeof row?.claim === "string" ? row.claim.trim() : "";
+  return claim.length > 0 && !PLACEHOLDER_CLAIM.test(claim);
+}
+
+/**
  * Did this family discharge its obligations?
  *
  * Pure: it reads two artifacts and writes nothing, ever. There is no `--repair`
@@ -481,20 +502,51 @@ export function checkDischarge(options: CheckDischargeOptions): CheckDischargeRe
     // told to write. That is WP3's `$LL_FAMILY` bug reconstructed out of a config
     // key instead of an unset shell variable.
     //
-    // What it costs today is a false signal rather than money: since WP11c the
-    // survey is a `type: fanout` and `runBranchGate` is OBSERVATIONAL — it runs
-    // the command once, records `condition_met` / `condition_not_met`, and never
-    // re-runs the branch (`apps/server/src/workflows/handlers/fanout.ts`). So a
-    // gate that could not close would burn no iterations at present. It is
-    // degraded anyway, for two reasons: five branches recording
-    // `condition_not_met` on every run of the control arm is a pipeline failure
-    // signature the arm would then have to be read around; and that handler's
-    // own comment frames single-shot as *reproducing* the old chained loops
-    // exactly, which means the loop can come back and the money with it.
+    // It costs money, not just a false signal: the survey fan-out declares
+    // `on_branch_gate_failure: { retries: 1 }`, so a gate that says no buys its
+    // branch a re-run (`apps/server/src/workflows/handlers/fanout.ts`). Grading
+    // a field the block never asked for would re-run every branch of every
+    // control-arm run, for nothing the re-run could fix.
     satisfied = fileState === "present";
     notes.push(
-      `obligations.json records \`contract: "minimal"\` — the block this run rendered prescribes no \`discharge\` field, so NOTHING was graded and this fell back to the \`test -s\` floor this gate exists to replace. That is the control arm behaving correctly, not a clean discharge`,
+      `obligations.json records \`contract: "minimal"\` — the block this run rendered prescribes no \`discharge\` field, so no discharge CODE was graded; coverage (every seeded check named by a row) and the evidence record still are`,
     );
+    // COVERAGE needs no discharge field either. The minimal block still says
+    // "DISCHARGE EVERY OBLIGATION BELOW" and its prescribed row still carries
+    // `"obligation": "O-…"` — only the CODE is gone. So a seeded check that no
+    // row even names is a check the pass dropped, and that is gradeable here
+    // without grading anything the block did not ask for. Measured 2026-09-24:
+    // MiniMax M3 answered 4 of 12 seeded contract checks and this gate, reading
+    // only `fileState`, passed it.
+    const unnamed = entries.filter((e) => e.citedBy.length === 0);
+    if (mine.length > 0 && unnamed.length > 0) {
+      satisfied = false;
+      notes.push(
+        `${unnamed.length} of ${mine.length} seeded ${family} obligation(s) are named by no row ` +
+          `(${unnamed.map((e) => e.obligation).join(", ")}) — ` +
+          `the block says DISCHARGE EVERY OBLIGATION, and a row must at least name the one it answers`,
+      );
+    }
+    // The zero-obligation rule needs no discharge field — only a claim — so it
+    // holds under `minimal` too. It has to: `minimal` is the shipped default
+    // (`config/default.yaml`), and the placeholder-only pass it catches was
+    // measured under exactly that contract.
+    if (measured && mine.length === 0 && !records.some((r) => isOwnClaim(r.row))) {
+      satisfied = false;
+      notes.push(
+        `no ${family} obligations were built, and the pass wrote no claim of its own (${fileState === "present" ? "only placeholder rows" : fileState === "empty" ? "an empty file" : "no file"}). ` +
+          `The block told it to work the diff for this family's question directly — recording the missing seed and stopping surveys NOTHING`,
+      );
+    }
+  } else if (measured && mine.length === 0) {
+    // Seeded with nothing, told to work the diff. See the module header.
+    satisfied = records.some((r) => isOwnClaim(r.row));
+    if (!satisfied) {
+      notes.push(
+        `no ${family} obligations were built, and the pass wrote no claim of its own (${fileState === "present" ? "only placeholder rows" : fileState === "empty" ? "an empty file" : "no file"}). ` +
+          `The block told it to work the diff for this family's question directly — recording the missing seed and stopping surveys NOTHING`,
+      );
+    }
   } else if (!measured && mine.length === 0) {
     // NOT MEASURED is not a failure and is not a pass either — it is the third
     // answer, and the note is what keeps it from being read as the second.
@@ -504,6 +556,23 @@ export function checkDischarge(options: CheckDischargeOptions): CheckDischargeRe
     );
   } else {
     satisfied = outstanding.length === 0;
+  }
+
+  // ── Evidence, under either contract. Every survey prompt asks each row for
+  // a typed `evidence` record and the verdict is DERIVED from it
+  // (`survey-verdict.ts`); a row without one falls back to the pass's own
+  // severity and needsProbe — the guess the derivation exists to replace. A
+  // placeholder row is exempt: it makes no claim to derive a verdict for.
+  if (documentError === null && familyError === null) {
+    const claims = records.filter((r) => isOwnClaim(r.row));
+    const bare = claims.filter((r) => !hasEvidence((r.row as { evidence?: unknown }).evidence as never));
+    if (bare.length > 0) {
+      satisfied = false;
+      notes.push(
+        `${bare.length} of ${claims.length} row(s) carry no \`evidence\` record (${bare.map((r) => `row ${r.ordinal}`).join(", ")} of ${family}.jsonl) — ` +
+          `their severity and needsProbe fall back to the pass's own guess instead of being derived`,
+      );
+    }
   }
 
   // ── Notes. Everything a next iteration or a human needs that is not a gap.
@@ -539,6 +608,7 @@ export function checkDischarge(options: CheckDischargeOptions): CheckDischargeRe
     );
   }
   if (set.malformed > 0) notes.push(`${set.malformed} unparseable JSONL line(s) were ignored`);
+  if (set.recovered > 0) notes.push(`${set.recovered} row(s) were not one object per line and were read anyway`);
 
   log.debug?.("graded a family's discharge", {
     dir: options.dir,
@@ -562,6 +632,7 @@ export function checkDischarge(options: CheckDischargeOptions): CheckDischargeRe
     byCode,
     rows: records.length,
     malformed: set.malformed,
+    recovered: set.recovered,
     foreign,
     unknownCitations,
     documentError,

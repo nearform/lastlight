@@ -60,6 +60,15 @@ describe("providerByPrefix", () => {
     expect(providerByPrefix("GROQ")?.prefix).toBe("groq");
   });
 
+  it("registers OpenCode Zen so its key is forwarded and its host allowlisted", () => {
+    const zen = providerByPrefix("opencode");
+    expect(zen?.envKey).toBe("OPENCODE_API_KEY");
+    expect(zen?.baseUrl).toBe("https://opencode.ai/zen/v1");
+    expect(zen?.api).toBe("openai-completions");
+    expect(PROVIDER_ENV_KEYS).toContain("OPENCODE_API_KEY");
+    expect(PROVIDER_HOSTS).toContain("opencode.ai");
+  });
+
   it("returns undefined for unregistered prefixes", () => {
     expect(providerByPrefix("acme")).toBeUndefined();
     expect(providerByPrefix("")).toBeUndefined();

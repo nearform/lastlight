@@ -41,6 +41,7 @@ import {
 import { loadSkillsExtension, buildSkillsStatusEvent } from "./extensions/skills/index.js";
 import { registerProviderOverrides, resolveModel } from "./models.js";
 import { resolveRetrySettings } from "./retry.js";
+import { cacheWarmingVeto } from "./cache-warming.js";
 import { applyGateTimeout } from "./gate-timeout.js";
 import { buildSandbox, type ImageDescriptor, type SandboxResult } from "./sandbox/index.js";
 import { ensureImage, ImageLoaderError } from "./sandbox/images/loader.js";
@@ -266,10 +267,12 @@ export async function runOnce(
     ),
   });
 
+  const warmingVeto = cacheWarmingVeto(settingsManager.getGlobalSettings().cacheWarming);
   const resourceLoader = new DefaultResourceLoader({
     cwd: config.cwd,
     agentDir,
     additionalExtensionPaths: fileSearch.packageDir ? [fileSearch.packageDir] : [],
+    extensionFactories: warmingVeto ? [warmingVeto] : [],
     // Operator-mapped skill folders (e.g. --skill ~/.claude/skills). Additive
     // even when noSkills is true (Pi semantics): --skill X --no-skills loads
     // exactly X and nothing from default discovery.
@@ -420,8 +423,9 @@ export async function runOnce(
   // (quota/auth/5xx) isn't swallowed as an empty completion. See terminal-error.ts.
   let capturedError: AgentMsg | undefined;
 
-  // Step cap (config.maxSteps). Pi exposes no max-turns / shouldStopAfterTurn
-  // hook through its SDK, so we enforce the cap from the event stream: count
+  // Step cap (config.maxSteps). Pi's SDK exposes no max-turns hook (agent-core's
+  // `finishTurn` is not surfaced through createAgentSession), so we enforce the
+  // cap from the event stream: count
   // completed turns and, once the agent has run maxSteps turns AND still
   // intends to continue (the just-finished turn executed tools), stop the loop
   // by aborting. The loop observes the abort signal and emits a normal

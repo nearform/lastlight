@@ -80,6 +80,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { readHypothesisSet, resolveHypothesis } from "./hypotheses.js";
+import { parseJsonl } from "./jsonl.js";
 import { severityOf } from "./survey-verdict.js";
 
 /** A hypothesis line, as far as this gate cares. Everything else is ignored. */
@@ -134,25 +135,16 @@ export interface CheckProbesResult {
 }
 
 /**
- * One JSON object per line, malformed lines COUNTED rather than skipped.
- * Exported because `findings.ts` reads the same `hypotheses/*.jsonl` for the
- * `adjudicate` gate, and two readers of one append-only artifact is two places
- * for "how many lines did we drop?" to disagree.
+ * One JSON value per row, malformed lines COUNTED rather than skipped — see
+ * `jsonl.ts`, which also recovers a pretty-printed row. Exported because
+ * `findings.ts` reads the same `hypotheses/*.jsonl` for the `adjudicate` gate,
+ * and two readers of one append-only artifact is two places for "how many
+ * lines did we drop?" to disagree.
  */
-export function readJsonl<T>(path: string): { rows: T[]; malformed: number } {
-  if (!existsSync(path)) return { rows: [], malformed: 0 };
-  const rows: T[] = [];
-  let malformed = 0;
-  for (const line of readFileSync(path, "utf8").split("\n")) {
-    const text = line.trim();
-    if (!text) continue;
-    try {
-      rows.push(JSON.parse(text) as T);
-    } catch {
-      malformed += 1;
-    }
-  }
-  return { rows, malformed };
+export function readJsonl<T>(path: string): { rows: T[]; recovered: number; malformed: number } {
+  if (!existsSync(path)) return { rows: [], recovered: 0, malformed: 0 };
+  const { rows, recovered, malformed } = parseJsonl(readFileSync(path, "utf8"));
+  return { rows: rows as T[], recovered, malformed };
 }
 
 /**

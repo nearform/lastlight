@@ -246,6 +246,22 @@ export const PROVIDERS: readonly ProviderSpec[] = [
     fastModel: "glm-4.6",
     sampleModel: "glm-4.6",
   },
+  // ── OpenCode Zen — curated gateway, priced at cost, one key for all ──
+  // Its models speak different dialects (Claude on /messages, GPT on
+  // /responses, open models on /chat/completions). `api` here only shapes the
+  // in-process cheap helper, so it is paired with an openai-completions
+  // `fastModel`; the sandbox takes each model's dialect from pi's own
+  // `opencode` catalog, which is where these ids come from.
+  {
+    prefix: "opencode",
+    displayName: "OpenCode Zen (gateway — Claude, GPT, Kimi, GLM, DeepSeek, …)",
+    envKey: "OPENCODE_API_KEY",
+    baseUrl: "https://opencode.ai/zen/v1",
+    api: "openai-completions",
+    host: "opencode.ai",
+    fastModel: "deepseek-v4-flash",
+    sampleModel: "kimi-k2.6",
+  },
   // ── OpenRouter — aggregator (take any pi.dev-listed model via one key) ──
   {
     prefix: "openrouter",

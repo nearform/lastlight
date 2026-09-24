@@ -42,6 +42,10 @@ export const AgenticPi = {
   TOOL_IS_ERROR: "agentic_pi.tool.is_error",
   TURN_INDEX: "agentic_pi.turn.index",
   SANDBOX_BACKEND: "agentic_pi.sandbox.backend",
+  /** The provider's own stop reason behind the normalised finish reason. */
+  RAW_STOP_REASON: "agentic_pi.response.raw_stop_reason",
+  /** The provider-native effort level the response actually used. */
+  PROVIDER_THINKING_LEVEL: "agentic_pi.response.provider_thinking_level",
   /** Content-gated tool span attributes. */
   TOOL_ARGUMENTS: "agentic_pi.tool.arguments",
   TOOL_RESULT: "agentic_pi.tool.result",

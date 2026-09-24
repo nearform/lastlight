@@ -250,13 +250,13 @@ function findParentDeclared(name: string, declared: string[]): string | null {
  * one, and likewise for the iteration forms.
  */
 type DerivedRef =
-  | { kind: "branch"; base: string; branch: string; suffix?: "retry" | "check" }
+  | { kind: "branch"; base: string; branch: string; suffix?: "retry" | "check" | "regate" }
   | { kind: "iter"; base: string; index: number; suffix?: "retry" | "check" }
   | { kind: "fix" | "recheck"; base: string; index: number };
 
 function parseDerived(name: string): DerivedRef | null {
-  let m = name.match(/^(.*)_branch_([A-Za-z0-9-]+)_(retry|check)$/);
-  if (m) return { kind: "branch", base: m[1]!, branch: m[2]!, suffix: m[3] as "retry" | "check" };
+  let m = name.match(/^(.*)_branch_([A-Za-z0-9-]+)_(retry|check|regate)$/);
+  if (m) return { kind: "branch", base: m[1]!, branch: m[2]!, suffix: m[3] as "retry" | "check" | "regate" };
   m = name.match(/^(.*)_branch_([A-Za-z0-9-]+)$/);
   if (m) return { kind: "branch", base: m[1]!, branch: m[2]! };
   m = name.match(/^(.*)_iter_(\d+)_(retry|check)$/);
@@ -278,7 +278,14 @@ function parseDerived(name: string): DerivedRef | null {
  * rather than as one branch of the node directly above it.
  */
 function derivedLabel(ref: DerivedRef): string {
-  const suffix = "suffix" in ref && ref.suffix ? (ref.suffix === "check" ? " · gate" : " · retry") : "";
+  const suffix =
+    "suffix" in ref && ref.suffix
+      ? ref.suffix === "check"
+        ? " · gate"
+        : ref.suffix === "regate"
+          ? " · re-run"
+          : " · retry"
+      : "";
   switch (ref.kind) {
     case "branch":
       return `${ref.branch}${suffix}`;
@@ -750,9 +757,14 @@ export function WorkflowPipeline({
         const owner = gateOwnerOf(c);
         if (owner) {
           const ex = execByPhase.get(c);
-          // A row can have both a `_retry` and a `_check`; keep whichever
-          // actually decided the outcome (a red verdict beats a green one).
-          if (ex && (!gateFor.has(owner) || ex.success !== true)) gateFor.set(owner, ex);
+          // A row can have a `_retry`, a `_regate` and a `_check`. A red row
+          // always wins; otherwise the `_check` does — it is the verdict, and
+          // after a `_regate` the latest `_check` row is the one that counts.
+          // A green re-run row must not mask an unmet gate behind it.
+          const current = gateFor.get(owner);
+          const ref = parseDerived(c);
+          const isCheck = ref !== null && "suffix" in ref && ref.suffix === "check";
+          if (ex && (!current || ex.success !== true || (isCheck && current.success === true))) gateFor.set(owner, ex);
         } else {
           rows.push(c);
         }

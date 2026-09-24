@@ -343,3 +343,22 @@ describe("dropped obligations", () => {
     expect(d.cappedOut).toBeUndefined();
   });
 });
+
+describe("parseJsonlRows — the code-facts copy", () => {
+  // Mirrors packages/code-facts/tests/jsonl.test.ts — this is a copy of that
+  // reader, and ordinals are identity, so the two must accept the same rows.
+  it("reads one value per line, recovering pretty-printed and run-together rows", () => {
+    const pretty = JSON.stringify({ claim: "if (x) { \"}\" }", n: 2 }, null, 2);
+    expect(parseJsonlRows(`{"n":1}\n${pretty}\n42\n{"n":3}{"n":4}\n`)).toEqual([
+      { n: 1 },
+      { claim: "if (x) { \"}\" }", n: 2 },
+      42,
+      { n: 3 },
+      { n: 4 },
+    ]);
+  });
+
+  it("never lets a broken or torn line swallow the rows after it", () => {
+    expect(parseJsonlRows(`{"n": 1, "bad": }\n{"n":2}\n\`\`\`\n{\n  "claim": "cut off`)).toEqual([{ n: 2 }]);
+  });
+});

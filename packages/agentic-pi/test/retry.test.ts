@@ -54,7 +54,23 @@ describe("resolveRetrySettings (precedence: flag > file > default)", () => {
 
   test("default schedule rides out a ~60s window (final wait >= 60s)", () => {
     const r = resolveRetrySettings({}, undefined);
-    const finalDelayMs = r.baseDelayMs! * 2 ** (r.maxRetries! - 1);
+    const scheduled = r.baseDelayMs! * 2 ** (r.maxRetries! - 1);
+    const finalDelayMs = Math.min(scheduled, r.maxAgentDelayMs!);
     assert.ok(finalDelayMs >= 60_000, `final wait ${finalDelayMs}ms should clear a 60s window`);
+  });
+
+  test("Pi's per-wait cap never truncates our schedule", () => {
+    const r = resolveRetrySettings({}, undefined);
+    assert.equal(r.maxAgentDelayMs, r.baseDelayMs! * 2 ** (r.maxRetries! - 1));
+  });
+
+  test("a short schedule keeps Pi's default cap", () => {
+    const r = resolveRetrySettings({ maxRetries: 1, baseDelayMs: 1000 }, undefined);
+    assert.equal(r.maxAgentDelayMs, 60_000);
+  });
+
+  test("operator's maxAgentDelayMs wins", () => {
+    const r = resolveRetrySettings({}, { maxAgentDelayMs: 5000 });
+    assert.equal(r.maxAgentDelayMs, 5000);
   });
 });

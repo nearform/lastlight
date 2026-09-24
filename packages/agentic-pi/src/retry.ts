@@ -12,12 +12,18 @@
  * to ride out a full window, and exposes `--max-retries` / `--retry-base-delay-ms`
  * to tune per run.
  *
+ * Pi 0.87 also caps each agent-level wait at `maxAgentDelayMs` (60s by
+ * default), which would silently truncate the final 64s wait below. Unless the
+ * operator sets a cap, we raise it to the schedule's own final delay so the
+ * schedule above runs as written.
+ *
  * Precedence (highest first): CLI flag → operator's settings.json → these
  * defaults. The operator's `retry` block (and any `provider` sub-settings) is
  * layered through unchanged via SettingsManager.applyOverrides() so we never
  * clobber it.
  */
 
+import { DEFAULT_MAX_AGENT_RETRY_DELAY_MS } from "@earendil-works/pi-ai";
 import type { RetrySettings } from "@earendil-works/pi-coding-agent";
 
 /**
@@ -45,10 +51,14 @@ export function resolveRetrySettings(
   fileRetry: RetrySettings | undefined,
 ): RetrySettings {
   const f = fileRetry ?? {};
+  const maxRetries = flags.maxRetries ?? f.maxRetries ?? DEFAULT_MAX_RETRIES;
+  const baseDelayMs = flags.baseDelayMs ?? f.baseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS;
+  const finalDelayMs = maxRetries > 0 ? baseDelayMs * 2 ** (maxRetries - 1) : 0;
   return {
     ...f,
     enabled: f.enabled ?? true,
-    maxRetries: flags.maxRetries ?? f.maxRetries ?? DEFAULT_MAX_RETRIES,
-    baseDelayMs: flags.baseDelayMs ?? f.baseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS,
+    maxRetries,
+    baseDelayMs,
+    maxAgentDelayMs: f.maxAgentDelayMs ?? Math.max(DEFAULT_MAX_AGENT_RETRY_DELAY_MS, finalDelayMs),
   };
 }
