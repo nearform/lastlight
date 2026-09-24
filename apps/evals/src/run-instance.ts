@@ -705,9 +705,16 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
           if (persistPipelineArtifacts(repoDir, opts.sessionTrialDir) && opts.sessionTrialRel)
             result.pipelineArtifactRel = `${opts.sessionTrialRel}/pr-review`;
         } catch (err) {
-          // Never fail a measured run over its own bookkeeping — but say so,
-          // because a silent miss here is the bug this function exists to fix.
-          console.warn(`could not persist pipeline artifacts: ${err instanceof Error ? err.message : String(err)}`);
+          // Never fail a measured run over its own bookkeeping — but a warning
+          // on a background process IS functionally silent, which is the bug
+          // this function exists to fix wearing a different hat. So the failure
+          // is RECORDED on the result: `pipelineArtifactRel` stays unset (there
+          // is nothing to point at) and `pipelineArtifactError` says why, so
+          // downstream analysis can tell "this run had no artifacts" from
+          // "this run's artifacts could not be written".
+          const reason = err instanceof Error ? err.message : String(err);
+          result.pipelineArtifactError = reason;
+          console.warn(`could not persist pipeline artifacts: ${reason}`);
         }
       }
       const rg = await gradeReview({

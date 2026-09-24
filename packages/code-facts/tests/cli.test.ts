@@ -642,3 +642,38 @@ afterEach(() => {
   // Back to the suite-wide value (vitest.config.ts), which disables the scanner.
   process.env.LASTLIGHT_OPENGREP_BIN = SUITE_OPENGREP_BIN;
 });
+
+describe("runCli's one asynchronous command", () => {
+  /**
+   * `jev-classify` is the only branch that returns a `Promise<number>` — every
+   * other command returns a plain `number` immediately, which is what lets the
+   * existing synchronous callers stay synchronous.
+   *
+   * That widening is a footgun with no type error behind it. Every other test
+   * in this file is written as
+   * `expect(runCli([...], io)).toBe(EXIT_OK)`, and that shape applied to THIS
+   * command compares a pending Promise against a number — it fails for a
+   * reason that has nothing to do with the code under test, and it would pass
+   * for a command that was async and returned the wrong code. So the contract
+   * is pinned directly: this one is thenable, its neighbours are not.
+   *
+   * It runs offline. `classifyHypotheses` resolves to a document that SAYS it
+   * could not run (no key, no dossier) rather than throwing, and the command
+   * always exits 0 — so no key is needed and nothing is spent.
+   */
+  it("returns a thenable from `jev-classify`, and a bare number from its neighbours", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "jev-cli-"));
+    const io = { out: () => {}, err: () => {} };
+
+    const result = runCli(["jev-classify", "--dir", dir, "--out", join(dir, "out.json")], io);
+    expect(typeof result).not.toBe("number");
+    expect(typeof (result as Promise<number>).then).toBe("function");
+    await expect(result).resolves.toBe(EXIT_OK);
+
+    // The control: the same call shape on any other command is a number, which
+    // is why the widened return type is safe for existing callers.
+    expect(typeof runCli(["toolchain"], io)).toBe("number");
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

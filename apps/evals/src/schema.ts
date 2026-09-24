@@ -753,7 +753,21 @@ export interface InstanceResult {
    *
    * Written on every run that produced artifacts, with no flag, because
    * `--keep-workspace` kept them somewhere the operating system deletes. Absent
-   * means the arm ran no pipeline, not that the copy was skipped.
+   * means the arm ran no pipeline, OR that the copy failed — in which case
+   * {@link pipelineArtifactError} says so. Those are different facts and a
+   * reader must not have to guess which one an empty field means.
    */
   pipelineArtifactRel?: string;
+  /**
+   * Why the artifact copy failed, when it did.
+   *
+   * The copy is wrapped so a disk-full or permissions error cannot fail a
+   * measured run over its own bookkeeping. But a `console.warn` on a
+   * background process is functionally silent — the run would record success
+   * and simply have no artifacts, which is precisely the silent loss
+   * `persistPipelineArtifacts` exists to prevent. Recording the reason here is
+   * what keeps "ran no pipeline" and "could not write what it produced"
+   * distinguishable downstream.
+   */
+  pipelineArtifactError?: string;
 }
