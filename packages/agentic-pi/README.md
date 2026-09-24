@@ -238,7 +238,15 @@ wait alone outlasts a 60s window). Tune per run:
 Precedence is **flag → your `retry` block in `~/.pi/agent/settings.json` →
 agentic-pi's default**, so an explicit settings.json `retry` (including
 `retry.provider.*`) is preserved. Programmatic callers pass `maxRetries` /
-`retryBaseDelayMs` to `run()`.
+`retryBaseDelayMs` to `run()`. Pi caps each wait at `retry.maxAgentDelayMs`
+(60s by default); unless you set it, agentic-pi raises that cap to the
+schedule's final wait so the 64s step is not truncated.
+
+**Prompt-cache warming is off.** Pi can keep a provider's prompt cache warm by
+replaying the request during a long tool run (`cacheWarming`, default
+`"streaming"` in Pi). Every replay is a billed request, so agentic-pi vetoes it
+for a one-shot run. To opt in, set `cacheWarming` in `~/.pi/agent/settings.json`
+(the only place Pi reads it from); an explicit value is always honoured.
 
 ### 6. Defaults that match a containerized sandbox
 
@@ -685,6 +693,8 @@ Reads the prompt from stdin. Emits JSONL on stdout. Exits 0 on `agent_end`,
 {"type":"skills_status","status":"configured","discovered":1,"skills":[{"name":"roll-dice","source":"…/SKILL.md","modelInvocable":true}],"mappedPaths":["…"],"noSkills":false,"sessionId":"<uuid>","timestamp":"…"}
 {"type":"agent_start","sessionId":"<uuid>","timestamp":"…"}
 {"type":"turn_start","sessionId":"<uuid>","timestamp":"…"}
+{"type":"message_start","message":{"role":"system","content":"","sections":{"preamble":"…","tools":"…","rules":"…","docs":"…","cwd":"…"},"toolsAdded":[…]},"sessionId":"<uuid>","timestamp":"…"}
+{"type":"message_end","message":{"role":"system",…},"sessionId":"<uuid>","timestamp":"…"}
 {"type":"message_start","message":{…},"sessionId":"<uuid>","timestamp":"…"}
 {"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"…"},"sessionId":"<uuid>","timestamp":"…"}
 {"type":"tool_execution_start","toolCallId":"…","toolName":"github_list_pull_requests","args":{…},"sessionId":"<uuid>","timestamp":"…"}
@@ -694,6 +704,13 @@ Reads the prompt from stdin. Emits JSONL on stdout. Exits 0 on `agent_end`,
 {"type":"agent_end","messages":[…],"willRetry":false,"sessionId":"<uuid>","timestamp":"…"}
 {"type":"usage_snapshot","stats":{"userMessages":1,"assistantMessages":2,"toolCalls":1,"toolResults":1,"tokens":{"input":…,"output":…,"cacheRead":…,"cacheWrite":…,"total":…},"cost":0.000…},"sessionId":"<uuid>","timestamp":"…"}
 ```
+
+The first message pair carries the **system prompt** (`role: "system"`, Pi
+0.86+): the base `content`, its named `sections`, and the tools the model was
+given (`toolsAdded`; a later system message may carry `toolsRemoved` or replace
+a section). Assistant messages carry `stopReason` plus, where the provider
+reports them, `rawStopReason` (the provider's own reason), `responseModel` (what
+actually served the turn) and `providerThinkingLevel`.
 
 `extension_status` is emitted once at startup so downstream logs can confirm
 the GitHub profile (and whether auth succeeded). `skills_status` is emitted once

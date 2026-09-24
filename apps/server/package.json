@@ -67,7 +67,7 @@
     "typecheck": "tsc --noEmit && pnpm run lint:boundaries && pnpm run lint:promises"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.84.3",
+    "@earendil-works/pi-ai": "^0.87.1",
     "@hono/node-server": "^2.1.1",
     "@kubernetes/client-node": "1.4.0",
     "@libsql/client": "^0.17.4",
