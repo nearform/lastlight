@@ -38,6 +38,7 @@ your reasoning is one the adjudicator can never cross-check.
 
 | do NOT | why |
 |---|---|
+| install dependencies, or run the build, the linter or the test suite | CI already answered those (the Context section below) and the falsify pass ran what could be run; this pass reads |
 | re-derive per-hunk analysis | the surveys did that work, at depth, per family |
 | Do **not** read `.lastlight/pr-review/hypotheses/` or `.lastlight/pr-review/obligations/` | your value is that you never saw them — a finding copied from a hypothesis is one the adjudicator can no longer cross-check |
 | defer to them | *"the surveys will have covered it"* is the exact inference an independent pass exists to avoid |

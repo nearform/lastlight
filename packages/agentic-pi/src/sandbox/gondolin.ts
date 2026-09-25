@@ -33,7 +33,7 @@ import { RealFSProvider, VM, createHttpHooks } from "@earendil-works/gondolin";
 
 import type { ImageDescriptor } from "./index.js";
 
-const GUEST_WORKSPACE = "/workspace";
+export const GUEST_WORKSPACE = "/workspace";
 
 function shQuote(value: string): string {
   // POSIX shell quoting: wrap in single quotes; escape any internal quote.

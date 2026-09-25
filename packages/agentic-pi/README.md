@@ -678,6 +678,7 @@ GITHUB_TOKEN=ghp_…
 | `--otel-service-name <n>` | Override `OTEL_SERVICE_NAME` (default: `agentic-pi`). |
 | `--otel-endpoint <url>` | Override `OTEL_EXPORTER_OTLP_ENDPOINT` base URL. |
 | `--providers <json>` | Point providers at a different endpoint — a self-hosted or corporate LLM gateway rather than the vendor. `{"anthropic":{"baseUrl":"https://gw.internal/anthropic"}}` is enough for a provider pi knows (models, auth and request shape are inherited); one it doesn't also needs `"api"` (`openai-completions` \| `anthropic-messages`) and `"apiKeyEnv"`, and its model is registered on the fly with zero cost rates, since a gateway publishes no price list. Env fallback: `AGENTIC_PI_PROVIDERS` — the route into a run executing inside a container. |
+| `--command-policy <json>` | Allow, log or block classes of bash command: `{"install":"block","test":"log"}`. Classes: `install` (npm/pnpm/yarn/bun, pip/uv/poetry, bundle/gem, cargo, go, composer, dotnet, maven/gradle, system package managers), `install-scratch` (an install whose directory — a `cd` before it, `--prefix`/`-C`/`--dir`, or `-g` — is outside the cwd; falls back to `install`'s mode), and `test` (test runners plus `npm test` / `run test|lint|typecheck` scripts). `log` runs the command and emits a `command_policy` event; `block` refuses it, the model gets the reason as the tool result, and the event is emitted too. `"reason"` replaces the default block text. Matching is per segment (split on `&&`, `;`, `\|`, newlines) after stripping `cd`, env assignments, `env`, `timeout`, `time`, `nice`, `sudo`. A pattern guard, not a security boundary. Programmatic: `commandPolicy`. Env fallback: `AGENTIC_PI_COMMAND_POLICY`. Default: unset (everything runs, no events). |
 
 Reads the prompt from stdin. Emits JSONL on stdout. Exits 0 on `agent_end`,
 1 on fatal error.
@@ -726,6 +727,14 @@ stays under the cap (or sets none) keeps the byte-identical default stream above
 
 ```jsonl
 {"type":"max_steps_reached","maxSteps":8,"steps":8,"sessionId":"<uuid>","timestamp":"…"}
+```
+
+When `--command-policy`/`commandPolicy` logs or blocks a bash call, one
+`command_policy` event is emitted per matched class, before the tool runs (or is
+refused). A run with no policy, or one that never matches, emits none.
+
+```jsonl
+{"type":"command_policy","action":"block","class":"install","pattern":"js-install","command":"npm ci && npm test","sessionId":"<uuid>","timestamp":"…"}
 ```
 
 ## Programmatic usage

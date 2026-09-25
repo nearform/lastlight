@@ -14,6 +14,7 @@
 
 import type { RunConfig } from "./args.js";
 import type { ProviderEndpointOverrides } from "./providers.js";
+import { type CommandPolicy, validateCommandPolicy } from "./command-policy.js";
 import type { GitHubAuthEnv } from "./extensions/github/auth.js";
 
 /**
@@ -192,6 +193,15 @@ export interface RunOptions {
    * CLI equivalent: `--gate-timeout <seconds>`.
    */
   gateTimeoutSeconds?: number;
+
+  /**
+   * Allow, log or block classes of bash command (`install`, `install-scratch`,
+   * `test`) — lastlight#403. `log` and `block` emit a `command_policy` event;
+   * `block` refuses the call with a model-facing reason. Validated here, so an
+   * unknown class or mode throws. Unset (default) = every command runs.
+   * CLI equivalent: `--command-policy <json>` / `AGENTIC_PI_COMMAND_POLICY`.
+   */
+  commandPolicy?: CommandPolicy;
 
   // ── OpenTelemetry ───────────────────────────────────────────────
   /**
@@ -403,6 +413,9 @@ export async function run(options: RunOptions): Promise<RunResult> {
     retryBaseDelayMs: options.retryBaseDelayMs,
     maxSteps: options.maxSteps,
     gateTimeoutSeconds: options.gateTimeoutSeconds,
+    commandPolicy: options.commandPolicy
+      ? validateCommandPolicy(options.commandPolicy, "commandPolicy")
+      : undefined,
     otel: options.otel,
     otelIncludeContent: options.otelIncludeContent,
     otelServiceName: options.otelServiceName,

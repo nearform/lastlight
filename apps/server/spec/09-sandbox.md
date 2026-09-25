@@ -630,6 +630,15 @@ code is the verdict and the log tail only diagnoses, short timeouts are for
 quick commands, and a timed-out gate command is reported as timed out, never
 re-run with a larger timeout. Without the flag no gate guidance is added.
 
+**Command policy.** A phase's resolved `command_policy` (see [Workflow
+engine](/spec/06-workflow-engine)) reaches agentic-pi as the `commandPolicy`
+run option in-process, and as JSON in the `AGENTIC_PI_COMMAND_POLICY` env var
+on the container backends (docker / smol / kubernetes), set per agent run in
+the orchestrator's `sandboxEnv`. agentic-pi registers a `tool_call` extension
+that classifies each `bash` call and logs or blocks it; under gondolin the
+scratch-dir test compares against the guest mount (`/workspace`). A phase with
+no policy sets neither, and nothing is registered.
+
 The `onEvent` callback receives agentic-pi's `EmitterRecord` events —
 `session`, `message_end`, `tool_execution_end`, `usage_snapshot`,
 `fatal_error`. The shim (`src/engine/event-shim.ts`) translates them

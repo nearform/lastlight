@@ -12,6 +12,8 @@
  * `../config`, etc. — the dependency-cruiser boundary gate enforces that.
  */
 
+import type { CommandPolicy } from "./command-policy.js";
+
 // ── OpenInference span vocabulary ────────────────────────────────────────────
 //
 // The engine tags its workflow/phase spans as OpenInference `CHAIN` spans so an
@@ -156,6 +158,12 @@ export interface ExecutorConfig {
    * phase that searches third-party documentation).
    */
   unrestrictedEgress?: boolean;
+  /**
+   * The phase's RESOLVED `command_policy` (templated modes already read from
+   * the run context) — which bash command classes agentic-pi allows, logs or
+   * blocks. Overlaid per phase by `phaseConfigFor`; absent = everything runs.
+   */
+  commandPolicy?: CommandPolicy;
   /**
    * Dependency services this phase runs against — the RAW declarations from the target
    * repo's `.lastlight/lastlight.yml`, keyed by service name

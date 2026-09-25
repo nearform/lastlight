@@ -103,6 +103,13 @@ export function sanitizePiEvent(record: Record<string, unknown>, includeContent 
           .join(",");
       }
       break;
+    case "command_policy":
+      for (const key of ["action", "class", "pattern"]) {
+        const value = record[key];
+        if (typeof value === "string") out[`command_policy.${key}`] = value;
+      }
+      if (includeContent && typeof record.command === "string") out["command_policy.command"] = trunc(record.command);
+      break;
     case "usage_snapshot":
       for (const key of ["turns", "costUsd", "inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"]) {
         const value = record[key];

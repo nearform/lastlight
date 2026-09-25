@@ -215,6 +215,7 @@ router routed nine, which is why the dashboard showed no Slack trigger for
   output_var?: string;                  // alias for {{this.field}} in later phases
   unrestricted_egress?: boolean;        // bypass strict allowlist for this phase
   web_search?: boolean;                 // enable agentic-pi web tools
+  command_policy?: CommandPolicy;       // allow|log|block per bash command class (install, install-scratch, test); see "Command policy"
   requires_sandbox?: "docker" | "gondolin" | "none";  // skip phase (non-failing) if active backend differs
   sandbox_image?: "default" | "qa";     // docker only: "qa" runs on lastlight-sandbox-qa (Playwright+Chromium+ffmpeg); skips if unbuilt
   skip_if?: string | string[];          // skip phase (non-failing) when any expression matches the render context
@@ -1168,6 +1169,48 @@ does for a non-loop phase. Reaching `max_iterations` without the condition is
 paths are exempt because they produce no fresh turn to sign off: a deduplicated
 (already-completed) phase on resume, and the `on_soft_failure: complete`
 advance.
+
+### Command policy
+
+An agent phase (and a fan-out branch) may declare which classes of bash command
+its agent may run (issue #403):
+
+```yaml
+command_policy:
+  install: block                                   # allow | log | block
+  install-scratch: { from: probeScratchInstallPolicy }
+  test: { from: probeTestPolicy }
+  reason: "…"                                      # model-facing text for a blocked call
+```
+
+- **Classes.** `install` — a package-manager install in the checkout;
+  `install-scratch` — an install whose directory is outside it (`cd /tmp/probe
+  && npm i x`, `--prefix`, `-g`), falling back to `install`'s mode when unset;
+  `test` — test runners and the project's `test`/`lint`/`typecheck` scripts.
+  An absent class is `allow`. The schema is `.strict()`: an unknown class or
+  mode is a load error.
+- **Modes.** `allow` runs it. `log` runs it and emits a `command_policy` event.
+  `block` refuses it — the model gets `reason` as the tool result and carries on
+  — and emits the same event. Each event becomes a structured `command policy`
+  log line (with the phase), a rendered `system` line in the phase's session
+  transcript, and `command_policy.*` span attributes.
+- **Templated modes.** `{ from: <ctx key>, default?: <mode> }`, resolved by
+  `phaseConfigFor` against the run context. A present value that is not a mode
+  throws (default or not); an absent key uses `default`, or throws without one.
+- **Fan-out.** A branch's `command_policy` replaces the phase's whole — no
+  per-class merge, like `model` and `skills`.
+- **Enforcement** is agentic-pi's (a pi `tool_call` handler over a pattern
+  table), on every sandbox backend — see [Sandbox](/spec/09-sandbox). A pattern
+  guard, not a security boundary: `sh -c "$(…)"` or a script under another name
+  gets past it.
+
+`pr-review.yaml` sets `survey` and `adjudicate` to `install: block, test:
+block`. `review` blocks `test` always and `install` only when
+`review.analysis.enabled` (context key `reviewInstallPolicy`; with the pipeline
+off the `pr-review` skill's install-to-probe affordance stands). `falsify`
+blocks `install` in every mode and reads `test` / `install-scratch` from
+`probeTestPolicy` / `probeScratchInstallPolicy`: `log` under `probes: full`
+(`prepare` installed the tree), `block` under `probes: static`.
 
 ## Invariants
 

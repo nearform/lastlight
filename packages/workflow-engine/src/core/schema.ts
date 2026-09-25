@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { TemplatedNumberSchema } from "./templated-number.js";
+import { CommandPolicySchema } from "./command-policy.js";
 
 // ── Output rules ──────────────────────────────────────────────────────
 
@@ -156,6 +157,11 @@ const FanoutBranchSchema = z
     /** Model / reasoning-effort override. Falls back to the phase's. */
     model: z.string().optional(),
     variant: z.string().optional(),
+    /**
+     * Command-policy override for this branch. REPLACES the phase's
+     * `command_policy` whole (no per-class merge), like `model` and `skills`.
+     */
+    command_policy: CommandPolicySchema.optional(),
     /**
      * Post-branch condition, run in the SAME workspace after every branch has
      * joined. Observational, exactly like a `generic_loop.until_bash` on a loop
@@ -362,6 +368,23 @@ const PhaseDefinitionSchema = z
      * is also covered by the open-mode tunnel.
      */
     web_search: z.boolean().optional(),
+    /**
+     * Which classes of bash command this agent phase may run (issue #403):
+     * `install` (a package-manager install in the checkout), `install-scratch`
+     * (an install outside it — `/tmp/probe`, a global — falling back to
+     * `install`'s mode), and `test` (test runners and the project's
+     * `test`/`lint`/`typecheck` scripts). Each is `allow` (the default),
+     * `log` (run it and emit a `command_policy` event) or `block` (refuse it,
+     * emit the event, and hand the model `reason`). A mode may be read from
+     * the run context — `test: { from: probeTestPolicy }` — see
+     * `core/command-policy.ts`.
+     *
+     * Enforced by agentic-pi on the bash tool, on every sandbox backend. A
+     * pattern guard, not a security boundary: `sh -c "$(…)"` or a script
+     * under another name gets past it; the sandbox and egress policy stay the
+     * boundary. Ignored on non-agent phases.
+     */
+    command_policy: CommandPolicySchema.optional(),
     /**
      * Capability gate: the sandbox backend this phase needs to run on.
      *

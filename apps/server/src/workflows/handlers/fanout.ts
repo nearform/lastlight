@@ -897,7 +897,7 @@ export class FanoutHandler implements PhaseTypeHandler {
   /** The phase-level config — what opens the shared session. */
   private phaseConfig(phase: PhaseDefinition): ExecutorConfig {
     const { model, variant } = this.resolveModelVariant(phase.model, phase.variant, phase.name);
-    const base = phaseConfigFor(this.run.config, phase, this.run.assets);
+    const base = phaseConfigFor(this.run.config, phase, this.run.assets, this.run.ctx, this.run.ledger.logger);
     return {
       ...base,
       ...(model ? { model } : {}),
@@ -924,7 +924,7 @@ export class FanoutHandler implements PhaseTypeHandler {
       label,
       phase.name,
     );
-    const base = phaseConfigFor(this.run.config, this.branchPhase(phase, branch, label), this.run.assets);
+    const base = phaseConfigFor(this.run.config, this.branchPhase(phase, branch, label), this.run.assets, this.run.ctx, this.run.ledger.logger);
     return {
       ...base,
       ...(model ? { model } : {}),
@@ -958,6 +958,8 @@ export class FanoutHandler implements PhaseTypeHandler {
       unrestricted_egress: phase.unrestricted_egress,
       web_search: phase.web_search,
       sandbox_image: phase.sandbox_image,
+      // Whole replacement, like `model` / `skills` — no per-class merge.
+      command_policy: branch.command_policy ?? phase.command_policy,
     } as PhaseDefinition;
   }
 

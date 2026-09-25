@@ -69,4 +69,15 @@ describe("PI event telemetry sanitization", () => {
     });
     expect(sanitizePiEvent({ type: "fatal_error", stack: "hidden" })["error.stack"]).toBeUndefined();
   });
+
+  it("tags a command_policy decision, and carries the command only with content on (#403)", () => {
+    const record = { type: "command_policy", action: "block", class: "test", pattern: "js-test", command: "npm test" };
+    expect(sanitizePiEvent(record)).toMatchObject({
+      "command_policy.action": "block",
+      "command_policy.class": "test",
+      "command_policy.pattern": "js-test",
+    });
+    expect(sanitizePiEvent(record)["command_policy.command"]).toBeUndefined();
+    expect(sanitizePiEvent(record, true)["command_policy.command"]).toBe("npm test");
+  });
 });

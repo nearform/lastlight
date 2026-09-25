@@ -22,6 +22,7 @@ import {
 import { SANDBOX_IMAGE_QA } from "../../sandbox/index.js";
 import { defaultAllowlist, mergeAllowlist } from "../../sandbox/egress-allowlist.js";
 import { providerEndpointOverrides } from "../../config/provider-registry.js";
+import { COMMAND_POLICY_ENV } from "agentic-pi/dist/command-policy.js";
 import {
   AGENTIC_PROFILE_FOR,
   agentContextFor,
@@ -395,6 +396,18 @@ export async function runAgentIn(
         phaseName: config.telemetry?.phaseName,
         model,
       });
+      if (record.type === "command_policy") {
+        // One line per logged or blocked install/test call, keyed by phase, so
+        // a policy can be priced from the logs before it is enforced (#403).
+        log.info("command policy", {
+          taskId: ctx.taskId,
+          phase: config.telemetry?.phaseName,
+          action: record.action,
+          class: record.class,
+          pattern: record.pattern,
+          command: record.command,
+        });
+      }
       if (!notifiedSessionId && ctx.onSessionId && record.type === "session" && typeof record.id === "string") {
         notifiedSessionId = true;
         ctx.onSessionId(record.id);
@@ -423,7 +436,12 @@ export async function runAgentIn(
           thinking,
           profile,
           authFile,
-          sandboxEnv: agentGitIdentityEnv(getRuntimeConfig()?.botLogin ?? `${getBotName()}[bot]`, ctx.env.GIT_TOKEN),
+          sandboxEnv: {
+            ...agentGitIdentityEnv(getRuntimeConfig()?.botLogin ?? `${getBotName()}[bot]`, ctx.env.GIT_TOKEN),
+            // The container backends reach agentic-pi only through its env;
+            // the in-process adapter takes `commandPolicy` below instead.
+            ...(config.commandPolicy ? { [COMMAND_POLICY_ENV]: JSON.stringify(config.commandPolicy) } : {}),
+          },
           agentCwd: prov.agentCwd,
           skillDirs,
           webSearch: config.webSearch === true,
@@ -432,6 +450,7 @@ export async function runAgentIn(
           providers: providerEndpointOverrides(),
           timeoutSeconds: ctx.agentTimeoutSeconds ?? getSandboxTimeouts().agentTimeoutSeconds,
           gateTimeoutSeconds: gateTimeoutFor(config),
+          commandPolicy: config.commandPolicy,
         },
         onEvent,
       );

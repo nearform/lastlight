@@ -43,6 +43,8 @@ import { registerProviderOverrides, resolveModel } from "./models.js";
 import { resolveRetrySettings } from "./retry.js";
 import { cacheWarmingVeto } from "./cache-warming.js";
 import { applyGateTimeout } from "./gate-timeout.js";
+import { commandPolicyGate } from "./command-policy-gate.js";
+import { GUEST_WORKSPACE } from "./sandbox/gondolin.js";
 import { buildSandbox, type ImageDescriptor, type SandboxResult } from "./sandbox/index.js";
 import { ensureImage, ImageLoaderError } from "./sandbox/images/loader.js";
 import { createTelemetry, resolveTelemetryConfig } from "./telemetry/index.js";
@@ -268,11 +270,20 @@ export async function runOnce(
   });
 
   const warmingVeto = cacheWarmingVeto(settingsManager.getGlobalSettings().cacheWarming);
+  // Tool calls only happen inside session.prompt(), after the emitter below
+  // exists, so the gate can emit through a late-bound reference.
+  let emitPolicyEvent: ((e: EmitterRecord) => void) | undefined;
+  const policyGate = commandPolicyGate(
+    config.commandPolicy,
+    // Under gondolin the model's commands see the guest mount, not the host path.
+    sandbox.backend === "gondolin" ? GUEST_WORKSPACE : config.cwd,
+    (e) => emitPolicyEvent?.(e),
+  );
   const resourceLoader = new DefaultResourceLoader({
     cwd: config.cwd,
     agentDir,
     additionalExtensionPaths: fileSearch.packageDir ? [fileSearch.packageDir] : [],
-    extensionFactories: warmingVeto ? [warmingVeto] : [],
+    extensionFactories: [warmingVeto, policyGate].filter((f) => f !== undefined),
     // Operator-mapped skill folders (e.g. --skill ~/.claude/skills). Additive
     // even when noSkills is true (Pi semantics): --skill X --no-skills loads
     // exactly X and nothing from default discovery.
@@ -348,6 +359,7 @@ export async function runOnce(
   );
 
   emitter.sessionHeader();
+  emitPolicyEvent = (e) => emitter.event(e);
   emitter.event({
     type: "sandbox_status",
     backend: sandbox.backend,

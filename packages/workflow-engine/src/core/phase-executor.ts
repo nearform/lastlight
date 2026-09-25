@@ -10,6 +10,7 @@ import type { AgentWorkflowDefinition, PhaseDefinition } from "./schema.js";
 import { phaseSkillNames } from "./schema.js";
 import { renderTemplate, type TemplateContext } from "./templates.js";
 import { resolveTemplatedNumber } from "./templated-number.js";
+import { resolveCommandPolicy } from "./command-policy.js";
 import { evalUntilExpression } from "./loop-eval.js";
 import { parseReviewerVerdict } from "./verdict.js";
 import { PhaseRef } from "./phase-ref.js";
@@ -155,10 +156,17 @@ export function buildPhasePrompt(
 
 /**
  * Overlay per-phase executor config fields (`unrestricted_egress`,
- * `web_search`, `sandbox_image`, resolved skill paths) onto the run-level
- * config.
+ * `web_search`, `sandbox_image`, `command_policy`, resolved skill paths) onto
+ * the run-level config.
  */
-export function phaseConfigFor(config: ExecutorConfig, phase: PhaseDefinition, assets: AssetLoader): ExecutorConfig {
+export function phaseConfigFor(
+  config: ExecutorConfig,
+  phase: PhaseDefinition,
+  assets: AssetLoader,
+  /** Resolves a templated `command_policy` mode; required only when one is templated. */
+  ctx?: TemplateContext,
+  log: LoggerPort = noopLogger,
+): ExecutorConfig {
   const skills = phaseSkillNames(phase);
   const skillPaths = skills.length ? assets.resolveSkillPaths(skills) : undefined;
 
@@ -166,11 +174,15 @@ export function phaseConfigFor(config: ExecutorConfig, phase: PhaseDefinition, a
     phase.unrestricted_egress === undefined &&
     phase.web_search === undefined &&
     phase.sandbox_image === undefined &&
+    phase.command_policy === undefined &&
     !skillPaths
   ) {
     return config;
   }
   const next: ExecutorConfig = { ...config };
+  if (phase.command_policy !== undefined) {
+    next.commandPolicy = resolveCommandPolicy(phase.command_policy, ctx, `${phase.name}.command_policy`, log);
+  }
   if (phase.unrestricted_egress !== undefined) {
     next.unrestrictedEgress = phase.unrestricted_egress;
   }
@@ -594,7 +606,7 @@ export class PhaseExecutor {
       taskId,
       triggerId,
       prompt,
-      phaseConfigFor(config, phase, this.ports.assets),
+      phaseConfigFor(config, phase, this.ports.assets, this.run.ctx, this.ports.logger),
       this.ledgerDeps,
       model,
       workflowId,
@@ -792,7 +804,7 @@ export class PhaseExecutor {
       taskId,
       triggerId,
       spec,
-      phaseConfigFor(config, phase, this.ports.assets),
+      phaseConfigFor(config, phase, this.ports.assets, this.run.ctx, this.ports.logger),
       this.ledgerDeps,
       workflowId,
       githubAccess,
@@ -901,7 +913,7 @@ export class PhaseExecutor {
       validateShellCommand(command);
       const res = await this.ports.agent.runCommand(
         { kind: "bash", command },
-        { ...phaseConfigFor(config, phase, this.ports.assets), telemetry: { workflowName: definition.name, phaseName: label, triggerId, workflowRunId: workflowId } },
+        { ...phaseConfigFor(config, phase, this.ports.assets, this.run.ctx, this.ports.logger), telemetry: { workflowName: definition.name, phaseName: label, triggerId, workflowRunId: workflowId } },
         {
           taskId,
           githubAccess,

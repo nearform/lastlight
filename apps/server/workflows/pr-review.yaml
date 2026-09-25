@@ -224,6 +224,16 @@ phases:
     type: fanout
     skills: [survey-pass]
     model: "{{models.review-survey}}"
+    # No survey pass executes code (issue #403): measured, the `spec` branch ran
+    # the suite whatever the model. Every branch inherits this; a branch may
+    # replace it whole with its own `command_policy`.
+    command_policy:
+      install: block
+      test: block
+      reason: >-
+        No survey pass executes code. Cite CI from the Context section; where only
+        running the code could settle a field of the evidence record, record it
+        `unknown` — whether falsify probes the row is computed from that record.
     skip_if:
       - "analysisEnabled != true"
       - "scratch.reviewTriage.depth == 'light'"
@@ -313,6 +323,22 @@ phases:
     # needs a wall-clock bound rather than a count. Like every other budget
     # here it names a context key, never a literal (#385).
     timeout_seconds: { from: falsifyTimeoutSeconds }
+    # The one phase that runs code, and even here installing the repo is
+    # `prepare`'s job, never the model's. Whether a TEST can run depends on
+    # whether `prepare` installed the tree, so those two modes are read from
+    # the run context: `probes: full` → `log` (a targeted test is the point;
+    # a reach for the whole suite shows up in the logs), `probes: static` →
+    # `block` (nothing is installed, so it cannot work). A scratch-dir install
+    # (`npm install fastify@5` in /tmp/probe) follows the same switch.
+    command_policy:
+      install: block
+      install-scratch: { from: probeScratchInstallPolicy }
+      test: { from: probeTestPolicy }
+      reason: >-
+        Installing the repository's dependencies is the prepare phase's job, and the
+        whole suite is never a probe. Run the one targeted check this hypothesis needs
+        (a single test file, `node -e`, an AST or facts query), or record the
+        hypothesis as unprobed.
     generic_loop:
       on_soft_failure: { retries: 1, then: complete }
       max_iterations: { from: probeRounds, default: 2 }
@@ -341,6 +367,20 @@ phases:
     skills: [pr-review, code-review]
     model: "{{models.review}}"
     variant: "{{variants.review}}"
+    # Review re-created CI by hand (`npm ci` then `npm run lint:check && npm
+    # test`) although `{{ciSection}}` already carries the result (issue #403),
+    # so the suite is blocked everywhere. An INSTALL is blocked only when the
+    # evidence pipeline is on: then `prepare`/`falsify` own execution and this
+    # pass is an abbreviated read. With it off this is the whole review, and the
+    # `pr-review` skill's install-to-probe affordance is a measured fix (it is
+    # why the reviewer could open `node_modules/@slack` at all), so it stays.
+    command_policy:
+      install: { from: reviewInstallPolicy, default: allow }
+      test: block
+      reason: >-
+        This phase does not run the build, the linter or the test suite: CI already
+        answered those, in the Context section. Cite it, or report the claim for the
+        adjudicator to weigh.
 
   # #399 idea 2. One TypeSafe `systemOne` call PER HYPOTHESIS (not per
   # finding — hypotheses vastly outnumber findings, and per-hypothesis is the
@@ -446,6 +486,13 @@ phases:
     # than to `models.review`.
     model: "{{#if models.review-adjudicate}}{{models.review-adjudicate}}{{/if}}{{#if !models.review-adjudicate}}{{models.review}}{{/if}}"
     variant: "{{variants.review}}"
+    command_policy:
+      install: block
+      test: block
+      reason: >-
+        This phase does not execute code. Weigh the probe transcripts falsify already
+        wrote and the CI result in the Context section; an unsettled claim is demoted,
+        not re-run.
     skip_if:
       - "analysisEnabled != true"
       - "scratch.reviewTriage.depth == 'light'"

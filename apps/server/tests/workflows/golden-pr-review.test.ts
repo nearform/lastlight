@@ -618,6 +618,11 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
       analysisEnabled: "true",
       probesEnabled: "true",
       dossierEnabled: "true",
+      // falsify's and review's `command_policy` read these (issue #403);
+      // `renderContext` seeds them alongside the flags above.
+      probeTestPolicy: "block",
+      probeScratchInstallPolicy: "block",
+      reviewInstallPolicy: "block",
       ...TRIAGE_ON,
     });
 
@@ -759,9 +764,12 @@ describe("golden — the `review` phase's two-mode brief", () => {
   } as unknown as TemplateContext;
 
   it("adds only the scheduling keys and the f4 prompt to the review phase", () => {
-    const { depends_on, trigger_rule, ...rest } = review as Record<string, unknown>;
+    const { depends_on, trigger_rule, command_policy, ...rest } = review as Record<string, unknown>;
     expect(depends_on).toEqual(["falsify"]);
     expect(trigger_rule).toBe("all_done");
+    // The suite is blocked in both modes; an install only when the pipeline is
+    // on (issue #403) — pinned in pr-review-command-policy.test.ts.
+    expect(command_policy).toMatchObject({ install: { from: "reviewInstallPolicy", default: "allow" }, test: "block" });
     // No `skip_if:` — the phase RUNS in both modes (post-review depends on it
     // with all_success; a skipped node is not `succeeded`). The mode switch is
     // inside the prompt, never in the DAG.

@@ -6,10 +6,13 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	description="The PR review workflow — reads a pull request and posts one precision-first formal review with line-anchored inline comments, without modifying code or building."
 >
 	<p>
-		PR review reads the PR diff in full context and reasons about it
-		statically — this is a <strong>pure code review</strong>: it does not
-		install, build, or run the code (CI validates that the change actually
-		works). It runs in two phases: an agent phase judges the diff and records
+		PR review reads the PR diff in full context and reasons about it — this
+		is a <strong>code review, not a second CI</strong>: it never re-runs the
+		build, the linter or the test suite, because CI already answered those.
+		The harness enforces that per phase with a <strong>command
+		policy</strong> that blocks test runs (and, when the evidence pipeline is
+		on, installs) in the reviewing phases; only a small, targeted probe may
+		execute code. It runs in two phases: an agent phase judges the diff and records
 		its findings, then a deterministic phase posts <strong>one formal
 		review</strong> with each finding as an <strong>inline comment anchored to
 		its diff line</strong> (with an applyable suggestion where a concrete fix

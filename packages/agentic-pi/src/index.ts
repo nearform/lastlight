@@ -38,6 +38,9 @@ export type { RunConfig } from "./args.js";
 
 export { parseProviderOverrides, PROVIDER_OVERRIDES_ENV } from "./providers.js";
 export type { ProviderEndpointOverride, ProviderEndpointOverrides } from "./providers.js";
+export { COMMAND_POLICY_ENV, classifyCommand, parseCommandPolicy } from "./command-policy.js";
+export type { CommandClass, CommandPolicy, CommandPolicyMode } from "./command-policy.js";
+export type { CommandPolicyEvent } from "./command-policy-gate.js";
 
 export {
   Emitter,

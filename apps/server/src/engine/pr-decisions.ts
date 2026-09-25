@@ -1737,6 +1737,15 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      */
     analysisEnabled: "true",
     /**
+     * The `review` phase's install mode (issue #403), read as
+     * `install: { from: reviewInstallPolicy, default: allow }`. With the
+     * pipeline on, `prepare` and `falsify` own execution and `review` is an
+     * abbreviated read, so an install there is blocked. Absent when the
+     * pipeline is off — the YAML default then keeps the `pr-review` skill's
+     * install-to-probe affordance for the one review pass there is.
+     */
+    reviewInstallPolicy: "block",
+    /**
      * Phase budgets for `pr-review.yaml`'s deterministic `facts` / `seed` /
      * `reconcile` steps, read as `timeout_seconds: { from: … }` (issue #385).
      * Beside `analysisEnabled` because those three phases run exactly when it
@@ -1921,6 +1930,22 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
               : "false",
           probeTypecheck: review.analysis.probeTypecheck ? "true" : "false",
           probeCoverage: review.analysis.probeCoverage ? "true" : "false",
+          /**
+           * `falsify`'s command policy (issue #403), read by the YAML as
+           * `test: { from: probeTestPolicy }` and `install-scratch: { from:
+           * probeScratchInstallPolicy }`. Both follow the INSTALL decision,
+           * because that is what decides whether a test can run at all: under
+           * `static` nothing is installed, so a test run is a wasted turn and
+           * is blocked; under `full` `prepare` installed the tree, so a
+           * targeted test is exactly what a probe is for — logged, never
+           * blocked, so a reach for the whole suite shows up in the logs. A
+           * scratch-dir install (`npm install fastify@5` in `/tmp/probe`) is a
+           * real probe question under `full` and follows the same rule.
+           * Repo-root installs stay blocked in every mode: installing is
+           * `prepare`'s job, never the model's.
+           */
+          probeTestPolicy: review.analysis.probes === "full" ? "log" : "block",
+          probeScratchInstallPolicy: review.analysis.probes === "full" ? "log" : "block",
           prepareTimeoutSeconds: String(review.analysis.prepareTimeoutSeconds),
           coverageTimeoutSeconds: String(review.analysis.coverageTimeoutSeconds),
           probeRounds: String(review.analysis.probeRounds),

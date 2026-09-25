@@ -88,6 +88,16 @@ src/
                           is Pi's (detached spawn + killProcessTree); this only
                           schedules it. Unset = no-op, so callers that want any
                           bound must pass the flag — lastlight always does.
+  command-policy.ts       --command-policy / commandPolicy / AGENTIC_PI_COMMAND_POLICY
+                          (lastlight#403): the install / install-scratch / test
+                          pattern table, segment normalisation (split on &&;|,
+                          strip cd/env/timeout/sudo…), scratch-dir detection,
+                          and the allow|log|block decision. Dependency-free so
+                          core can import the env name + parser.
+  command-policy-gate.ts  The pi `tool_call` extension that enforces it on the
+                          bash tool (host built-in and gondolin alike) and emits
+                          a `command_policy` event per logged/blocked match.
+                          Registers nothing without a policy.
   runner.ts               Drives Pi: createAgentSession → subscribe → prompt → agent_end.
                           Sink-agnostic — takes an EmitterSink + onWarn callback as deps.
   extensions/github/

@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { spawnSync } from "child_process";
 import type { run as agenticRunType, RunResult, ThinkingLevel } from "agentic-pi";
+import type { CommandPolicy } from "lastlight-workflow-engine";
 import type { OtelConfig, SandboxBackend } from "../config/config.js";
 import type { ServiceSet } from "lastlight-shared/sandbox-services";
 import { resolveKubernetesConfig } from "../config/config.js";
@@ -202,6 +203,12 @@ export interface RunAgentOpts {
    * `gateTimeoutSeconds` for the in-process adapter.
    */
   gateTimeoutSeconds: number;
+  /**
+   * The phase's resolved `command_policy` (issue #403). The in-process adapter
+   * passes it to `run()`; the container backends receive the same JSON as
+   * `AGENTIC_PI_COMMAND_POLICY` in {@link sandboxEnv}, set by the orchestrator.
+   */
+  commandPolicy?: CommandPolicy;
 }
 
 export interface RunCommandOpts {
@@ -664,6 +671,7 @@ class InProcessSandbox implements Sandbox {
       // The run's effective gate budget — agentic-pi adds its gate guidance to
       // the bash tool only when this is set, so core always sets it.
       gateTimeoutSeconds: opts.gateTimeoutSeconds,
+      commandPolicy: opts.commandPolicy,
       onEvent,
       onWarn: (msg) => logger("agentic").warn(msg),
     });

@@ -13,6 +13,8 @@ You turn that pile into one ranked, tiered review.
 
 Read the hypothesis **records** — claims, quotes, transcripts. Never an earlier pass's reasoning.
 
+**You do not execute code.** Do not install dependencies or run the build, the linter or the test suite: CI's result is in the Context section and falsify already ran what could be run. An unsettled claim is demoted, not re-run.
+
 <!-- Why records, not reasoning: agents shown the reasoning that produced a false
 report fail to reject it 96% of the time. And before this phase existed the
 hypothesis files were written and never read — measured runs ended in APPROVE

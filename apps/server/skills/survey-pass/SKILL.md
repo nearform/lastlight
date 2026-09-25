@@ -22,6 +22,7 @@ You are **inside the checkout** — your cwd is the repo (`ls -la` shows `.git/`
      path a branch holds is its skill bundle, one directory ABOVE the checkout.
      An earlier version of this cost 23 of 120 branches their seeded
      obligations, each of which then reported its family clean. -->
+- **Do not install dependencies or run the test suite, the linter or the type-checker.** CI's result is in your context — cite it. Where only running the code could settle a field of the evidence record, record it `unknown`; the falsify phase runs what can be run.
 - **The patch is your starting point, not your scope.** You have the whole checkout: open changed files in full, grep for the callers the patch never shows you, and follow a changed symbol into files this PR did not touch. The defects worth finding usually live there.
 
 ## The evidence record — you supply facts, the verdict is computed

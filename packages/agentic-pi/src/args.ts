@@ -6,6 +6,7 @@
  * shape — see the plan doc for why.
  */
 
+import { COMMAND_POLICY_ENV, type CommandPolicy, parseCommandPolicy } from "./command-policy.js";
 import type { GitHubAuthEnv } from "./extensions/github/auth.js";
 import {
   parseProviderOverrides,
@@ -172,6 +173,14 @@ export interface RunConfig {
    */
   gateTimeoutSeconds?: number;
   /**
+   * Per-class bash policy — `{ install?, "install-scratch"?, test?: allow|log|block, reason? }`
+   * (lastlight#403). Set via `--command-policy <json>`, or the
+   * `AGENTIC_PI_COMMAND_POLICY` env var for a run inside a container. A `log`
+   * or `block` decision emits a `command_policy` event; `block` refuses the
+   * call with a model-facing reason. Unset = every command runs, no events.
+   */
+  commandPolicy?: CommandPolicy;
+  /**
    * OpenTelemetry traces + metrics export. Tri-state:
    *   - `true`  (`--otel`)    → enabled.
    *   - `false` (`--no-otel`) → force-disabled (wins over env).
@@ -272,6 +281,12 @@ Flags:
                               test suites). Adds bash guidance to use it and judge
                               by exit code; raises a smaller model timeout on a
                               recognised gate command. Default: unset (no guidance).
+  --command-policy <json>    Allow, log or block bash command classes, as
+                              {"install":"block","test":"log"}. Classes: install,
+                              install-scratch (an install outside the cwd; falls
+                              back to install), test. "reason" overrides the text a
+                              blocked call returns. Env fallback:
+                              AGENTIC_PI_COMMAND_POLICY. Default: unset (all allowed).
   --otel                     Enable OpenTelemetry traces + metrics export.
                               Off by default. Requires an OTLP endpoint via
                               OTEL_EXPORTER_OTLP_ENDPOINT (or --otel-endpoint).
@@ -512,6 +527,9 @@ export function parseArgs(argv: string[]): RunConfig {
       case "--providers":
         config.providers = parseProviderOverrides(next(), "--providers");
         break;
+      case "--command-policy":
+        config.commandPolicy = parseCommandPolicy(next(), "--command-policy");
+        break;
       case "-h":
       case "--help":
         printHelp();
@@ -528,6 +546,11 @@ export function parseArgs(argv: string[]): RunConfig {
   const providersEnv = process.env[PROVIDER_OVERRIDES_ENV];
   if (!config.providers && providersEnv) {
     config.providers = parseProviderOverrides(providersEnv, PROVIDER_OVERRIDES_ENV);
+  }
+
+  const policyEnv = process.env[COMMAND_POLICY_ENV];
+  if (!config.commandPolicy && policyEnv) {
+    config.commandPolicy = parseCommandPolicy(policyEnv, COMMAND_POLICY_ENV);
   }
 
   if (!config.model) {

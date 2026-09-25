@@ -106,6 +106,56 @@ describe("Sandbox orchestrator (FakeSandbox)", () => {
     ).toBe(true);
   });
 
+  it("carries the phase's command_policy to agentic-pi and mirrors each decision into the session (#403)", async () => {
+    const policy = { install: "block", test: "log", reason: "cite CI" } as const;
+    const [session, ...rest] = successEvents("sess-policy");
+    const fake = new FakeSandbox({
+      events: [
+        session,
+        { type: "command_policy", action: "block", class: "install", pattern: "js-install", command: "npm ci", sessionId: "sess-policy" },
+        ...rest,
+      ],
+    });
+    await executeAgent(
+      "do the thing",
+      { sandbox: "none", stateDir, sessionsDir, commandPolicy: policy, telemetry: { phaseName: "review" } },
+      { sandboxFactory: fake.asFactory() },
+    );
+
+    // In-process: the run option. Container backends: the same JSON, as env.
+    expect(fake.receivedAgentOpts?.commandPolicy).toEqual(policy);
+    expect(JSON.parse(fake.receivedAgentOpts!.sandboxEnv.AGENTIC_PI_COMMAND_POLICY)).toEqual(policy);
+
+    const projectsDir = join(sessionsDir, "projects");
+    const transcript = (): string => {
+      if (!existsSync(projectsDir)) return "";
+      return readdirSync(projectsDir)
+        .flatMap((slug) => readdirSync(join(projectsDir, slug)).map((f) => join(projectsDir, slug, f)))
+        .filter((f) => f.endsWith(".jsonl"))
+        .map((f) => readFileSync(f, "utf8"))
+        .join("");
+    };
+    expect(await waitFor(() => transcript().includes('"subtype":"command_policy"'))).toBe(true);
+    const line = transcript()
+      .split("\n")
+      .find((l) => l.includes('"subtype":"command_policy"'))!;
+    expect(JSON.parse(line)).toMatchObject({
+      role: "system",
+      action: "block",
+      class: "install",
+      pattern: "js-install",
+      command: "npm ci",
+      content: "⛔ Blocked install command (js-install): npm ci",
+    });
+  });
+
+  it("sets no policy env when the phase declares none", async () => {
+    const fake = new FakeSandbox({ events: successEvents() });
+    await executeAgent("x", { sandbox: "none", stateDir, sessionsDir }, { sandboxFactory: fake.asFactory() });
+    expect(fake.receivedAgentOpts?.commandPolicy).toBeUndefined();
+    expect(fake.receivedAgentOpts?.sandboxEnv).not.toHaveProperty("AGENTIC_PI_COMMAND_POLICY");
+  });
+
   it("converges errors onto the single fallback path", async () => {
     const fake = new FakeSandbox({ throwOnRunAgent: new Error("kaboom in the sandbox") });
 

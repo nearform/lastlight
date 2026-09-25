@@ -250,6 +250,8 @@ export class AgenticShim {
         return this.translateAutoRetryStart(r, ts, sessionId);
       case "auto_retry_end":
         return this.translateAutoRetryEnd(r, ts, sessionId);
+      case "command_policy":
+        return this.translateCommandPolicy(r, ts, sessionId);
       case "fatal_error":
         return this.translateFatal(r, ts, sessionId);
       default:
@@ -362,6 +364,35 @@ export class AgenticShim {
         role: "system",
         subtype: "auto_retry_end",
         content,
+        timestamp: ts,
+        sessionId,
+      },
+    ];
+  }
+
+  /**
+   * A bash call the phase's `command_policy` logged or blocked (issue #403),
+   * as a role-based `system` line — the {@link translateAutoRetryStart} shape,
+   * so the dashboard renders it in the phase's session timeline. The blocked
+   * call's error tool result follows it on its own.
+   */
+  private translateCommandPolicy(
+    r: EmitterRecord,
+    ts: string,
+    sessionId: string,
+  ): object[] {
+    if (typeof r.class !== "string") return [];
+    const blocked = r.action === "block";
+    const command = typeof r.command === "string" ? r.command : "";
+    return [
+      {
+        role: "system",
+        subtype: "command_policy",
+        content: `${blocked ? "⛔ Blocked" : "📝 Logged"} ${r.class} command (${String(r.pattern)}): ${shortReason(command)}`,
+        action: r.action,
+        class: r.class,
+        pattern: r.pattern,
+        command,
         timestamp: ts,
         sessionId,
       },

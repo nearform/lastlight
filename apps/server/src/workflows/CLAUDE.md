@@ -427,6 +427,21 @@ third-party docs goes through the same firewall path. See the
 "Environment" section of the top-level `CLAUDE.md` for the required
 provider env vars.
 
+## Per-phase command policy (`command_policy`)
+
+An agent phase or fan-out branch can allow / log / block the `install`,
+`install-scratch` and `test` bash command classes (issue #403). The schema and
+the templated-mode resolver are `packages/workflow-engine/src/core/command-policy.ts`;
+`phaseConfigFor` resolves it onto `ExecutorConfig.commandPolicy` (so it needs
+the run `ctx` — every call site passes it); the orchestrator forwards it as the
+`commandPolicy` run option and the `AGENTIC_PI_COMMAND_POLICY` sandbox env; the
+enforcement and pattern table live in `packages/agentic-pi/src/command-policy.ts`.
+A branch policy replaces the phase's whole (`fanout.ts` `branchPhase`). A
+`{ from: key }` mode with no `default` throws when the key is absent — the
+pr-review keys (`probeTestPolicy`, `probeScratchInstallPolicy`,
+`reviewInstallPolicy`) are seeded in `pr-decisions.ts` `specContext`, so a test
+that hand-builds a pr-review context must seed them too.
+
 ## One scheduler (every workflow is a DAG)
 
 There is a single scheduler — no separate linear/DAG paths. `runWorkflow`

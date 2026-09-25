@@ -57,6 +57,8 @@ const RUN_ID = "run-fanout";
 class CountingSandbox extends FakeSandbox {
   readonly agentPrompts: string[] = [];
   readonly agentSkillKeys: string[] = [];
+  /** Each run's `commandPolicy`, keyed by the prompt's template (one per branch). */
+  readonly agentPolicies = new Map<string, unknown>();
   readonly commands: string[] = [];
   /** Peak simultaneous `runAgent` calls — the concurrency actually achieved. */
   peakInFlight = 0;
@@ -106,6 +108,7 @@ class CountingSandbox extends FakeSandbox {
     // distinctness is what stops two concurrent branches staging into the same
     // `.lastlight-skills/<key>/` directory.
     this.agentSkillKeys.push(opts.skillDirs?.join(",") ?? "");
+    this.agentPolicies.set(/prompts\/\w+\.md/.exec(prompt)?.[0] ?? prompt, opts.commandPolicy);
     try {
       const delay = Object.entries(this.opts.delayOn ?? {}).find(([k]) => prompt.includes(k))?.[1];
       if (delay) await new Promise((r) => setTimeout(r, delay));
@@ -320,6 +323,21 @@ describe("fanout — one workspace, N turns", () => {
     // …and `security`'s extra skill really reached it.
     expect(sandbox.agentSkillKeys.some((k) => k.includes("security-review"))).toBe(true);
     expect(sandbox.agentSkillKeys.filter((k) => k.includes("security-review"))).toHaveLength(1);
+  });
+
+  it("hands every branch the phase's command_policy, and a branch's own replaces it whole (#403)", async () => {
+    const sandbox = new CountingSandbox();
+    const phase = fanoutPhase({
+      command_policy: { install: "block", test: "block" },
+      branches: [
+        { name: "contract", prompt: "prompts/a.md" },
+        { name: "enforcement", prompt: "prompts/b.md", command_policy: { test: "log" } },
+      ],
+    });
+    await runFanout(phase, sandbox);
+    expect(sandbox.agentPolicies.get("prompts/a.md")).toEqual({ install: "block", test: "block" });
+    // Whole replacement: `install` is NOT inherited from the phase.
+    expect(sandbox.agentPolicies.get("prompts/b.md")).toEqual({ test: "log" });
   });
 
   it("runs each branch's until_bash gate AFTER the join, once each", async () => {

@@ -368,6 +368,26 @@ describe("parseArgs", () => {
     assert.throws(() => parseArgs(["--model", "openai/gpt-4", "--providers", "{"]), /must be JSON/);
   });
 
+  test("--command-policy parses the map; the env var reaches a containerised run; the flag wins", () => {
+    assert.equal(parseArgs(["--model", "openai/gpt-4"]).commandPolicy, undefined);
+    assert.deepEqual(
+      parseArgs(["--model", "openai/gpt-4", "--command-policy", '{"install":"block","test":"log"}']).commandPolicy,
+      { install: "block", test: "log" },
+    );
+    const previous = process.env.AGENTIC_PI_COMMAND_POLICY;
+    process.env.AGENTIC_PI_COMMAND_POLICY = '{"test":"block"}';
+    try {
+      assert.deepEqual(parseArgs(["--model", "openai/gpt-4"]).commandPolicy, { test: "block" });
+      const flagWins = parseArgs(["--model", "openai/gpt-4", "--command-policy", '{"test":"log"}']);
+      assert.deepEqual(flagWins.commandPolicy, { test: "log" });
+      process.env.AGENTIC_PI_COMMAND_POLICY = '{"tests":"block"}';
+      assert.throws(() => parseArgs(["--model", "openai/gpt-4"]), /AGENTIC_PI_COMMAND_POLICY: unknown command class 'tests'/);
+    } finally {
+      if (previous === undefined) delete process.env.AGENTIC_PI_COMMAND_POLICY;
+      else process.env.AGENTIC_PI_COMMAND_POLICY = previous;
+    }
+  });
+
   test("unknown flag throws", () => {
     assert.throws(() => parseArgs(["--model", "openai/gpt-4", "--bogus"]), /unknown flag/);
   });
