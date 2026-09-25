@@ -155,6 +155,27 @@ something under an existing `node_modules/.bin`, a checked-in script, a compiler
 the image itself ships. If it is not already there, it does not exist for you:
 do not install it.
 
+**"On disk" means inside the checkout** — the repo's own `node_modules/.bin`, a
+checked-in script — plus the harness's own `lastlight-facts`
+(`LASTLIGHT_FACTS_BIN` / `PATH`). Nothing under `$HOME`, a global prefix, a
+package-manager cache or another project counts, whatever happens to be
+installed there. Never search outside the checkout for a dependency (`find /`,
+`find ~`, `ls ~/.nvm`), and never change `PATH` to point outside the workspace.
+If the dependency is not in the checkout, the hypothesis is `unprobed` with
+`"reason": "dependency not installed"`, and it survives to adjudication.
+
+<!-- MEASURED (issue #404, martian oc-survey-glmf arm, probes: static,
+     --sandbox none): once installs were blocked, falsify went looking for the
+     missing dependency on the host — `find / -type d -name dayjs 2>/dev/null`,
+     `find ~/.nvm/versions/node -maxdepth 6 -type d -name dayjs`, listing
+     `~/.nvm/versions/node/<v>/lib/node_modules/lastlight/`, then
+     `export PATH=".../lastlight/node_modules/.bin:$PATH"`; plus `~/.npm`,
+     `~/.cache/yarn`, `/usr/lib/node_modules`, `/usr/local/lib/node_modules`,
+     `/opt`. 24 of 27 out-of-workspace commands. A `dayjs` found in an unrelated
+     global install is not the version the PR pins, so a verdict built on it is
+     evidence about some other tree — and the same case probes differently on
+     every machine. The `host` command-policy class backs this up. -->
+
 **4. Deterministic re-query.** Re-run `lastlight-facts` scoped to the claim
 (`lastlight-facts` if it is on `PATH`, else `/opt/lastlight/bin/lastlight-facts`) —
 `facts` for a symbol's reference count and which of them are inside the diff,
@@ -221,6 +242,7 @@ A probe against the repo's own source is the normal case, not the fallback. An a
 | **Do NOT edit any `hypotheses/*.jsonl` file** | append-only, owned by the passes that wrote them; your verdicts go in their own file |
 | **Do NOT commit anything** | probe files are scratch |
 | **Do NOT fix the bug** | you are measuring, not repairing |
+| **Do NOT reach outside the checkout** — no `find /` or `find ~`, no reading `~/.nvm`, `~/.npm`, `~/.cache` or a global `node_modules`, no `PATH` pointing outside the workspace | only the checkout and `lastlight-facts` are on disk; a dependency that is not in the checkout is `unprobed`, `"reason": "dependency not installed"` |
 
 Probe files live under `.lastlight/pr-review/probes/` so they are never part of the diff. **Never modify a tracked file to make a probe run** — copy what you need into the probe file instead.
 

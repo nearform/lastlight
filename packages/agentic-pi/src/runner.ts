@@ -278,6 +278,10 @@ export async function runOnce(
     // Under gondolin the model's commands see the guest mount, not the host path.
     sandbox.backend === "gondolin" ? GUEST_WORKSPACE : config.cwd,
     (e) => emitPolicyEvent?.(e),
+    // `host` measures against the cwd's parent by default (the workspace root
+    // on docker/none). gondolin mounts only the cwd, so nothing above the
+    // guest mount is workspace.
+    sandbox.backend === "gondolin" ? { hostRoot: GUEST_WORKSPACE } : {},
   );
   const resourceLoader = new DefaultResourceLoader({
     cwd: config.cwd,

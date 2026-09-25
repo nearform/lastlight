@@ -173,8 +173,8 @@ export interface RunConfig {
    */
   gateTimeoutSeconds?: number;
   /**
-   * Per-class bash policy — `{ install?, "install-scratch"?, test?: allow|log|block, reason? }`
-   * (lastlight#403). Set via `--command-policy <json>`, or the
+   * Per-class bash policy — `{ install?, "install-scratch"?, test?, host?: allow|log|block, reason? }`
+   * (lastlight#403, #404). Set via `--command-policy <json>`, or the
    * `AGENTIC_PI_COMMAND_POLICY` env var for a run inside a container. A `log`
    * or `block` decision emits a `command_policy` event; `block` refuses the
    * call with a model-facing reason. Unset = every command runs, no events.
@@ -284,7 +284,10 @@ Flags:
   --command-policy <json>    Allow, log or block bash command classes, as
                               {"install":"block","test":"log"}. Classes: install,
                               install-scratch (an install outside the cwd; falls
-                              back to install), test. "reason" overrides the text a
+                              back to install), test, host (a command reaching
+                              outside the workspace: a scan rooted at / or ~, a
+                              global install or package cache, PATH pointing
+                              outside; /tmp is not host). "reason" overrides the text a
                               blocked call returns. Env fallback:
                               AGENTIC_PI_COMMAND_POLICY. Default: unset (all allowed).
   --otel                     Enable OpenTelemetry traces + metrics export.

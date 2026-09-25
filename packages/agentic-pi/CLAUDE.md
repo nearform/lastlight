@@ -89,8 +89,9 @@ src/
                           schedules it. Unset = no-op, so callers that want any
                           bound must pass the flag — lastlight always does.
   command-policy.ts       --command-policy / commandPolicy / AGENTIC_PI_COMMAND_POLICY
-                          (lastlight#403): the install / install-scratch / test
-                          pattern table, segment normalisation (split on &&;|,
+                          (lastlight#403, #404): the install / install-scratch /
+                          test pattern table, the `host` (outside-the-workspace)
+                          rules, segment normalisation (split on &&;|,
                           strip cd/env/timeout/sudo…), scratch-dir detection,
                           and the allow|log|block decision. Dependency-free so
                           core can import the env name + parser.

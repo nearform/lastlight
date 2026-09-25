@@ -196,7 +196,7 @@ export interface RunOptions {
 
   /**
    * Allow, log or block classes of bash command (`install`, `install-scratch`,
-   * `test`) — lastlight#403. `log` and `block` emit a `command_policy` event;
+   * `test`, `host`) — lastlight#403, #404. `log` and `block` emit a `command_policy` event;
    * `block` refuses the call with a model-facing reason. Validated here, so an
    * unknown class or mode throws. Unset (default) = every command runs.
    * CLI equivalent: `--command-policy <json>` / `AGENTIC_PI_COMMAND_POLICY`.

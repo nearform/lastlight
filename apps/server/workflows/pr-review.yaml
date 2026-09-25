@@ -227,13 +227,18 @@ phases:
     # No survey pass executes code (issue #403): measured, the `spec` branch ran
     # the suite whatever the model. Every branch inherits this; a branch may
     # replace it whole with its own `command_policy`.
+    # `host` (issue #404): measured, two branches scanned the whole disk
+    # (`find / -name SKILL.md`) to recover a lost skill path.
     command_policy:
       install: block
       test: block
+      host: block
       reason: >-
         No survey pass executes code. Cite CI from the Context section; where only
         running the code could settle a field of the evidence record, record it
         `unknown` — whether falsify probes the row is computed from that record.
+        Nothing outside the checkout counts: never search the machine for a missing
+        dependency or file — stop, and let the hypothesis go to falsify as unprobed.
     skip_if:
       - "analysisEnabled != true"
       - "scratch.reviewTriage.depth == 'light'"
@@ -330,10 +335,16 @@ phases:
     # a reach for the whole suite shows up in the logs), `probes: static` →
     # `block` (nothing is installed, so it cannot work). A scratch-dir install
     # (`npm install fastify@5` in /tmp/probe) follows the same switch.
+    #
+    # `host` (issue #404) is `log` here for one eval arm, then `block` once the
+    # log shows nothing legitimate is caught: measured, 24 of 27 out-of-workspace
+    # commands came from falsify hunting a dependency on the host (`find /`,
+    # `~/.nvm`, a global `lastlight` put on PATH).
     command_policy:
       install: block
       install-scratch: { from: probeScratchInstallPolicy }
       test: { from: probeTestPolicy }
+      host: log
       reason: >-
         Installing the repository's dependencies is the prepare phase's job, and the
         whole suite is never a probe. Run the one targeted check this hypothesis needs
@@ -377,10 +388,12 @@ phases:
     command_policy:
       install: { from: reviewInstallPolicy, default: allow }
       test: block
+      host: block
       reason: >-
         This phase does not run the build, the linter or the test suite: CI already
         answered those, in the Context section. Cite it, or report the claim for the
-        adjudicator to weigh.
+        adjudicator to weigh. Nothing outside the checkout counts: never search the
+        machine for a missing dependency — stop, and leave the claim unprobed.
 
   # #399 idea 2. One TypeSafe `systemOne` call PER HYPOTHESIS (not per
   # finding — hypotheses vastly outnumber findings, and per-hypothesis is the
@@ -489,10 +502,12 @@ phases:
     command_policy:
       install: block
       test: block
+      host: block
       reason: >-
         This phase does not execute code. Weigh the probe transcripts falsify already
         wrote and the CI result in the Context section; an unsettled claim is demoted,
-        not re-run.
+        not re-run. Nothing outside the checkout counts: never search the machine for
+        a missing dependency — the hypothesis stays unprobed.
     skip_if:
       - "analysisEnabled != true"
       - "scratch.reviewTriage.depth == 'light'"
