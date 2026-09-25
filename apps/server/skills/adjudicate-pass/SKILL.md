@@ -37,7 +37,7 @@ not build it, they cannot see the hypothesis files, and the words *adjudicate*,
 tier* mean nothing to them. **Every one of those is machinery, and machinery is
 never the subject of a review.**
 
-So `summary`, and every finding's `title` and `body`, are written as though by a
+So every finding's `title` and `body` (and the `summary`'s re-review ledger — the only part of `summary` that is posted; the rest of the posted summary is written after the comment limits apply) are written as though by a
 colleague who read the diff — about *their* change, in the vocabulary of *their*
 codebase. Say what is wrong and what it costs; never how this review was
 produced, how many passes ran, or what any of them concluded.
@@ -78,23 +78,33 @@ nowhere on disk. You never submit the review yourself: you rewrite
 
 ## Severity vocabulary
 
-Your prompt ranks on `severity` and spends the inline budget in that order, but
-the tiers are defined here. Every finding you keep is one of exactly two:
+The posting budgets are spent in `severity` order, and there are three values:
 
 - **Critical** — data loss, a breaking change, silent data-dropping, or a
   security issue that crosses a trust boundary. Blocks merge.
-- **Important** — missing tests, performance problems, type errors, avoidable
-  duplication, excessive complexity, compiler-silencing assertions. Should fix.
+- **Important** — a consequence that reaches beyond the code holding it (data,
+  a caller, a boundary), or one a probe actually executed. Should fix.
+- **Minor** — a local consequence nobody executed. Posted last, cut first.
 
-There is no third value. `Suggestion` and `Nit` are tiers a *reviewer* drops
-before posting; a claim that thin reaches you as something to file at `internal`
-tier, not as a severity.
+**On a finding that cites hypotheses you do not choose the severity.** It is
+derived from the cited hypotheses' evidence records and probe verdicts and
+stamped after you finish; anything you write there is kept only as an audit
+field. You write `severity` only on a finding that cites no hypothesis — and
+there, only `Critical` or `Important`.
 
 **`Critical` needs a trust boundary, not a category** — your prompt carries that
-predicate, the demotion rule and the measurement behind it. Apply it there. What
-this section settles is only the vocabulary: an unrecognised severity (`High`,
-`Major`, `Blocker`) ranks as `Important` by fallback and produces a review that
-looks ordinary while ordering wrongly.
+predicate. What this section settles is only the vocabulary: an unrecognised
+severity (`High`, `Major`, `Blocker`) ranks as `Important` by fallback and
+produces a review that looks ordinary while ordering wrongly.
+
+<!-- Issue #405: the adjudicator's own severity measured flat — almost every
+claim `Important` — so the caps cut in document order. The derivation lives in
+`packages/code-facts/src/finding-severity.ts`. -->
+
+A finding's **`impact`** — what a user or maintainer would hit — is also yours
+to state, and the classes are in your prompt. A preference, missing tests, dead
+code or an unfollowed convention is recorded, never posted, however well the
+mechanism was confirmed.
 
 ## The prior review is yours to reconcile
 

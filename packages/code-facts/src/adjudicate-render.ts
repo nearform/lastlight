@@ -68,8 +68,9 @@ import { join, resolve } from "node:path";
 import { buildFindingsLedger, type FindingsLedger } from "./findings.js";
 import { readHypothesisSet, type HypothesisRecord } from "./hypotheses.js";
 import { readJevClassifyDocument, type JevResult } from "./jev-classify-io.js";
-import { readProbeAnswers, type ProbeAnswer } from "./probes.js";
-import { severityOf } from "./survey-verdict.js";
+import { hypothesisSeverity } from "./finding-severity.js";
+import { isReadOnlyCommand, probeStrength, readProbeAnswers, type ProbeAnswer, type ProbeStrength } from "./probes.js";
+import { isBehaviouralClaim } from "./survey-verdict.js";
 
 export interface DossierOptions {
   /** The `.lastlight/pr-review` directory. */
@@ -160,6 +161,12 @@ export interface DossierQuote {
 export interface DossierEntry {
   record: HypothesisRecord;
   probe: ProbeAnswer | null;
+  /**
+   * What the probe actually counts for, read off the record (`probeStrength`)
+   * rather than off the verdict's label — a `reproduced` that is only a grep
+   * against a behavioural claim counts as `corroborated` (issue #405).
+   */
+  strength: ProbeStrength;
   /** The transcript's text, capped; `null` when there is none to show. */
   transcript: string | null;
   /** True when {@link transcript} was cut and the reader must be told. */
@@ -261,6 +268,7 @@ export function buildEntries(options: DossierOptions): DossierEntries {
     return {
       record,
       probe,
+      strength: probeStrength(probe, row),
       transcript,
       transcriptTruncated: truncated,
       path,
@@ -382,7 +390,10 @@ function renderEntry(entry: DossierEntry, jev?: JevResult | null): string[] {
   const { record, probe } = entry;
   const row = record.row;
   const out: string[] = [];
-  const severity = severityOf(row) ?? "(no severity)";
+  // The POSTING severity, derived from the evidence record and what the probe
+  // counts for (`finding-severity.ts`) — the value reconcile will stamp on any
+  // finding built from this hypothesis, whatever the adjudicator writes.
+  const severity = hypothesisSeverity(row, entry.strength) ?? "(no severity)";
   const obligation = record.obligation ?? record.declaredObligation ?? "(no obligation cited)";
   out.push(`### ${record.id} · ${obligation} · ${severity}`);
   out.push("");
@@ -470,6 +481,27 @@ function renderEntry(entry: DossierEntry, jev?: JevResult | null): string[] {
   } else {
     const cmd = probe.command ? `\`${probe.command}\`` : "no command recorded";
     out.push(`**Probe.** \`${probe.verdict}\` · ${cmd}`);
+    // Issue #405: what the verdict COUNTS for, said beside it. A read is weaker
+    // evidence than an execution, and a label that overstates it is corrected
+    // here rather than silently believed.
+    if (probe.verdict === "corroborated" && entry.strength === "corroborated") {
+      out.push("", "A READ (search, file view or facts query) that supports the claim — weaker than `reproduced`: it shows the code reads the way the claim says, not that the consequence happens.");
+    } else if (probe.verdict === "reproduced" && entry.strength === "corroborated") {
+      out.push("", "Labelled `reproduced`, but every command only READS code and this hypothesis claims a behaviour — it counts as `corroborated`, not as a reproduction.");
+    } else if (
+      probe.verdict === "reproduced" &&
+      entry.strength === "executed" &&
+      isReadOnlyCommand(probe.command ?? "") &&
+      !isBehaviouralClaim(row)
+    ) {
+      out.push("", "A read against a STRUCTURAL claim — the kind of claim a search settles.");
+    }
+    if (probe.borrowedFrom) {
+      out.push(
+        "",
+        `This transcript was written for \`${probe.borrowedFrom}\`. It counts for ${record.id} only if it shows ${record.id}'s own scenario — read it for that, not for ${probe.borrowedFrom}'s.`,
+      );
+    }
     if (probe.transcript && !probe.transcriptPath)
       out.push("", `Transcript \`${probe.transcript}\` is NOT ON DISK. A verdict with nothing to show for it is an argument, not evidence.`);
     else if (entry.transcript !== null) {
@@ -579,6 +611,11 @@ export function renderAdjudicationDossier(options: DossierOptions): string {
     "Quotes have already been checked against the tree. `quote VERIFIED` means the excerpt is in the file it names,",
     "at the line given; `quote NOT FOUND` means it is not, and no amount of re-reading the file will change that.",
     "You do not need to verify a quote this document has verified.",
+    "",
+    "The severity on each hypothesis heading is DERIVED from its evidence record and what its probe counts for, and",
+    "it is the severity any finding built from it will carry — it is stamped after you finish, over whatever you write.",
+    "Probe verdicts, strongest first: `reproduced` (the scenario was executed) · `corroborated` (a read — search, file",
+    "view, facts query — that supports the claim without executing it) · `refuted` · `unprobed`.",
     "",
   ];
 

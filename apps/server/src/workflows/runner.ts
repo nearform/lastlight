@@ -668,7 +668,7 @@ export async function runWorkflow(
     observability: db && workflowId ? runScopedObservability(db, workflowId) : telemetryObservability,
     verdictReader: fileVerdictReader,
     handlers: new Map([
-      ["post-review", makePostReviewHandler({ ctx, config: runConfig, taskId, store: db, workflowId }, phaseReporter)],
+      ["post-review", makePostReviewHandler({ ctx, config: runConfig, modelFor, taskId, store: db, workflowId }, phaseReporter)],
       [
         "fanout",
         makeFanoutHandler(

@@ -559,6 +559,10 @@ export interface ReviewPipelineStats {
     succeeded: number;
     reproduced: number;
     refuted: number;
+    /** Issue #405 — a READ (grep, file view, facts query) that supports a
+     * claim without executing it. Weaker than `reproduced`; optional so a
+     * scorecard written before the verdict existed still reads. */
+    corroborated?: number;
   };
   /** The facts envelope's own verdict on whether analysis could run at all.
    * `"none"` is a recorded fact, not a failed phase (§D12). */

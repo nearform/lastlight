@@ -1691,7 +1691,8 @@ describe("renderContext — the spec axis", () => {
     // global — an overlay pinning `maxBodyComments: null` had no wire to the
     // boundary at all (found by the reviewer on the pipeline's own PR).
     const ctx = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOn);
-    expect(ctx.maxInlineComments).toBe("10");
+    // The shipped inline default is 5 (issue #405, down from 10).
+    expect(ctx.maxInlineComments).toBe("5");
     // The shipped default is 5; the STRING "null" is the documented
     // "unlimited body overflow" value and must survive the projection.
     expect(ctx.maxBodyComments).toBe("5");

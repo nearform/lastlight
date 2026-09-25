@@ -28,6 +28,8 @@ import {
   renderFindingsCheck,
   renderFindingsLedger,
 } from "./findings.js";
+import { renderStampSeverity, stampDerivedSeverity } from "./finding-severity.js";
+import { normalizeFamilyIds } from "./hypotheses.js";
 import { prepareTree } from "./prepare.js";
 import { checkProbes, renderProbeCheck } from "./probes.js";
 import { runExtractor, runWrapped, writeDocument } from "./run.js";
@@ -51,7 +53,7 @@ import { renderFamilyBlock } from "./seed-render.js";
 import { loadManifest, resolveFactsBin, toolchainStamp } from "./toolchain.js";
 import { compilerInfo } from "./project.js";
 import { packageRoot } from "./toolchain.js";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { LoggerPort } from "./log.js";
 
@@ -73,7 +75,11 @@ Commands:
   seed        turn an \`all\` envelope into mechanism-complete obligations
   prepare     install deps so a probe can be RUN (WP4's affordance, not CI)
   discharge   a SURVEY's exit gate — every obligation of one family carries a
-              QUOTE / ABSENT / PARTIAL / PROBE discharge in its .jsonl
+              QUOTE / ABSENT / PARTIAL / PROBE discharge in its .jsonl. First
+              writes each row's canonical id into its \`id\` (the survey's own
+              label kept as \`declared_id\`). \`--ungraded\` for a family whose
+              obligations are not on disk (\`spec\`): the id rewrite plus a
+              non-empty-file check
   probes      the \`falsify\` loop's exit gate — every hypothesis that needed a
               probe has a verdict, and every claim of execution has a transcript
               that OPENS with the command it ran
@@ -107,10 +113,13 @@ transcript's FIRST LINE and nothing else):
   --dir <dir>         the .lastlight/pr-review directory
                       (default: .lastlight/pr-review)
   --repo <dir>        what a transcript path is relative to (default: cwd)
-  A \`reproduced\`/\`refuted\` verdict must name a \`command\` and a transcript that
-  exists and opens with that command — \`"command": "code inspection"\` over a
-  page of prose is \`unexecuted\`, not evidence. \`unprobed\` needs neither and
-  always closes the gate.
+  A \`reproduced\`/\`corroborated\`/\`refuted\` verdict must name a \`command\` and a
+  transcript that exists and opens with that command — \`"command": "code
+  inspection"\` over a page of prose is \`unexecuted\`, not evidence. A
+  \`reproduced\` whose every command only READS code (grep/rg/cat/…, a facts
+  query) against a claim whose evidence records a consequence at head is
+  \`read-not-reproduction\`: record it \`corroborated\`, or run something.
+  \`unprobed\` needs nothing and always closes the gate.
   Exit 0 = the loop may stop. Non-zero = something still owes a verdict, which
   a pass can always discharge honestly by recording \`unprobed\`.
 
@@ -122,7 +131,10 @@ transcript's FIRST LINE and nothing else):
                       tier "internal", un-delete every drop with no transcript,
                       rewrite findings.json and exit 0. Idempotent, and it never
                       deletes: an unjustified deletion becomes a recorded
-                      non-deletion. Run it on the LAST iteration.
+                      non-deletion. Run it on the LAST iteration. It then
+                      DERIVES every hypothesis-derived finding's severity from
+                      the evidence record and probe strength, keeping the
+                      written value as \`declaredSeverity\`.
   --ledger            print the CHECKLIST instead of grading: every declared id
                       by family, which already carry a disposition, and which do
                       not. For the ADJUDICATOR to run, so it discharges an
@@ -278,6 +290,7 @@ const BOOLEAN_FLAGS = new Set([
   // Both `findings --ledger` and `discharge --ledger` take no value. Declaring
   // it keeps `--ledger` from swallowing the next token as one.
   "ledger",
+  "ungraded",
 ]);
 
 export function parseArgv(argv: string[]): Parsed {
@@ -427,17 +440,31 @@ export function runCli(
       io.err("--family <f> is required (the survey branch's family)");
       return EXIT_UNAVAILABLE;
     }
-    const result = checkDischarge({
-      dir: stringFlag(flags.dir) ?? ".lastlight/pr-review",
-      family,
-      log,
-    });
+    const dir = stringFlag(flags.dir) ?? ".lastlight/pr-review";
+    // The GATE (not `--ledger`, which a survey runs mid-branch) is the moment a
+    // branch is finished: write the canonical ids into the file before anything
+    // downstream reads it. See `normalizeFamilyIds`.
+    if (flags.ledger !== true) normalizeFamilyIds(dir, family);
+
+    // `--ungraded`: a family whose obligations are not on disk to grade — `spec`,
+    // built harness-side from the PR body and linked issues and delivered in
+    // the prompt, never written to obligations.json (where `discharge` would
+    // otherwise refuse it as an unknown family). It gets the same id rewrite
+    // above and exactly the floor it always had: the file is non-empty.
+    if (flags.ungraded === true && flags.ledger !== true) {
+      const path = join(dir, "hypotheses", `${family}.jsonl`);
+      const ok = existsSync(path) && statSync(path).size > 0;
+      io.out(`discharge[${family}]: ungraded — obligations are not on disk; ${ok ? "file present" : `${path} is missing or empty`}`);
+      return ok ? EXIT_OK : EXIT_DEGRADED;
+    }
+    const result = checkDischarge({ dir, family, log });
 
     // `--ledger` is the CHECKLIST mode and its caller is the SURVEY ITSELF
     // rather than the harness, so it **always exits 0** — the gate's non-zero
     // "iterate again" would read inside an agent's own bash tool as a tool
     // failure. Same reading of the same files, two audiences, two exit
-    // contracts. It writes nothing; neither does the gate.
+    // contracts. It writes nothing; the gate mode writes only the canonical ids
+    // (`normalizeFamilyIds`, above), never a verdict.
     if (flags.ledger === true) {
       io.out(renderDischargeLedger(result));
       return EXIT_OK;
@@ -490,6 +517,13 @@ export function runCli(
       log,
     });
     io.out(renderFindingsCheck(result));
+    // Issue #405: the floor is also where a finding's severity is DERIVED —
+    // after `adjudicate`, so the adjudicator's own value cannot stand on a
+    // hypothesis-derived finding. Never fails the floor: an unreadable
+    // document is reported and left as it is.
+    if (flags.repair === true) {
+      io.out(renderStampSeverity(stampDerivedSeverity({ dir, repo: stringFlag(flags.repo), log })));
+    }
     return result.satisfied ? EXIT_OK : EXIT_DEGRADED;
   }
 

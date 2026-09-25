@@ -208,7 +208,11 @@ describe("post-review action (runPostReview)", () => {
     writeFileSync(join(dir, `${family}.jsonl`), rows.map((r) => JSON.stringify(r)).join("\n"));
   }
 
-  function makeExecutor(taskId: string, ctxOverrides: Partial<TemplateContext> = {}) {
+  function makeExecutor(
+    taskId: string,
+    ctxOverrides: Partial<TemplateContext> = {},
+    scope: Pick<PostReviewRunScope, "modelFor" | "chat"> = {},
+  ) {
     const ctx: TemplateContext = {
       owner: "acme",
       repo: "widget",
@@ -228,6 +232,7 @@ describe("post-review action (runPostReview)", () => {
       ctx,
       config: { githubApiBaseUrl: baseUrl, sandboxDir: join(stateDir, "sandboxes"), stateDir } as unknown as PostReviewRunScope["config"],
       taskId,
+      ...scope,
     };
     const rep = makeReporter();
     const handler = new GitHubPostReviewHandler(run, rep.reporter);
@@ -666,6 +671,62 @@ describe("post-review action (runPostReview)", () => {
           ["on-diff C", "overflow"],
           ["on-diff D", "overflow"],
         ]);
+      });
+
+      it("writes the summary AFTER the caps: nothing the boundary withheld reaches the posted body", async () => {
+        // Issue #405: the adjudicator's summary was written before the caps and
+        // named findings the boundary then withheld — posting them anyway.
+        withReviewConfig({
+          trigger: "on-request",
+          analysis: { ...defaultReviewConfig().analysis, enabled: true, maxInlineComments: 2, maxBodyComments: 0 },
+        });
+        const taskId = "widget-42-summary-after-caps";
+        seedFindings(taskId, "widget", {
+          summary: "Two blockers. Also flagged below: on-diff C, on-diff D and off-diff E.",
+          event: "REQUEST_CHANGES",
+          findings: findings(),
+        });
+        const seen: string[] = [];
+        const { executor } = makeExecutor(taskId, {}, {
+          modelFor: (t) => (t === "review-summary" ? "fake/summary" : undefined),
+          chat: async (model, messages) => {
+            seen.push(model, ...messages.map((m) => m.content));
+            return "Requesting changes for the two blocking defects.";
+          },
+        });
+        expect((await executor.execute(NODE, {})).status).toBe("succeeded");
+        const posted = reviews[0]!.body as { comments: { line: number }[]; body: string };
+
+        expect(posted.comments.map((c) => c.line)).toEqual([7, 8]);
+        expect(posted.body).toBe("Requesting changes for the two blocking defects.");
+        // The model was asked with the posted set only — the withheld three
+        // were never in its input, so it cannot have named them.
+        expect(seen[0]).toBe("fake/summary");
+        const prompt = seen.join("\n");
+        for (const t of ["on-diff C", "on-diff D", "off-diff E"]) expect(prompt, t).not.toContain(t);
+      });
+
+      it("falls back to a summary rendered in code when no summary model answers", async () => {
+        withReviewConfig({
+          trigger: "on-request",
+          analysis: { ...defaultReviewConfig().analysis, enabled: true, maxInlineComments: 2, maxBodyComments: 0 },
+        });
+        const taskId = "widget-42-summary-fallback";
+        seedFindings(taskId, "widget", {
+          summary: "Also flagged below: on-diff C.",
+          event: "REQUEST_CHANGES",
+          findings: findings(),
+        });
+        const { executor } = makeExecutor(taskId, {}, {
+          modelFor: () => "fake/summary",
+          chat: async () => {
+            throw new Error("provider down");
+          },
+        });
+        expect((await executor.execute(NODE, {})).status).toBe("succeeded");
+        const posted = reviews[0]!.body as { body: string };
+        expect(posted.body).not.toContain("on-diff C");
+        expect(posted.body).not.toContain("Also flagged");
       });
 
       it("the shipped default (maxBodyComments: 5) bounds the body — the top five post, the excess is recorded `body-budget`", async () => {

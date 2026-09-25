@@ -11,10 +11,12 @@ import { GitHubClient } from "../../engine/github/github.js";
 import {
   anchorFindings,
   buildReview,
+  withSummary,
   buildBodyOnlyReview,
   commentableOf,
   parseDiffFiles,
   unknownSeverity,
+  unknownImpact,
   internalJargon,
   worstAxis,
   type AttentionBoundary,
@@ -30,6 +32,8 @@ import {
   type HeadReview,
 } from "../../engine/pr-decisions.js";
 import { logger } from "../../logging/logger.js";
+import { chat, type ChatFunction } from "../../engine/llm.js";
+import { writePostedSummary } from "../../engine/github/review-summary.js";
 
 const log = logger("post-review");
 import type { ExecutorConfig } from "lastlight-workflow-engine";
@@ -48,6 +52,12 @@ import type {
 export interface PostReviewRunScope {
   ctx: TemplateContext;
   config: ExecutorConfig;
+  /** The run's model chain (`models[taskType] || models.default`) — the post-cap
+   * summary resolves `review-summary` through it, so an eval arm's `models:`
+   * block governs it exactly as it governs every phase. */
+  modelFor?: (taskType: string) => string | undefined;
+  /** The one-shot chat call the post-cap summary makes; tests inject a fake. */
+  chat?: ChatFunction;
   /** Single workspace shared by every phase + loop iteration of the run. */
   taskId: string;
   store?: WorkflowStateStore;
@@ -590,6 +600,20 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       );
     }
 
+    // Issue #405: an `impact` outside the vocabulary cannot demote anything —
+    // the finding posts on its tier as if no impact were stated. Said out loud,
+    // because a prompt drifting to its own spelling would otherwise quietly
+    // switch the impact rule off.
+    const oddImpact = (Array.isArray(doc.findings) ? doc.findings : []).filter(unknownImpact);
+    if (oddImpact.length > 0) {
+      log.warn("findings carry an impact class the boundary does not know — ignored", {
+        repo: `${owner}/${repo}`,
+        prNumber,
+        count: oddImpact.length,
+        impacts: [...new Set(oddImpact.map((f) => f.impact))],
+      });
+    }
+
     // Warn, never rewrite: the review still posts as written. What this makes
     // is the leak COUNTABLE — "the prompt says not to" is not evidence that it
     // did not, and nothing else a run records would show that our own
@@ -615,7 +639,30 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     const clean = boundary
       ? readCleanDischarges(join(hostRepoDir, ".lastlight", "pr-review"))
       : undefined;
-    const review = buildReview(doc, commentable, boundary, clean);
+    let review = buildReview(doc, commentable, boundary, clean);
+    // Issue #405: under a boundary the summary is written AFTER the caps, from
+    // the posted findings only — the adjudicator's summary was written before
+    // them and routinely named findings the boundary then withheld, which
+    // posted them anyway. See `review-summary.ts`.
+    let postedSummary: string | undefined;
+    if (boundary && review.tiered) {
+      const summary = await writePostedSummary({
+        event: review.event,
+        tiered: review.tiered,
+        adjudicatorSummary: doc.summary,
+        prTitle: typeof ctx.prTitle === "string" && ctx.prTitle ? ctx.prTitle : undefined,
+        model: this.run.modelFor?.("review-summary"),
+        chat: this.run.chat ?? chat,
+      });
+      postedSummary = summary.text;
+      review = withSummary(review, summary.text);
+      log.info("Review summary written from the posted findings", {
+        repo: `${owner}/${repo}`,
+        prNumber,
+        source: summary.source,
+        ...(summary.reason ? { reason: summary.reason } : {}),
+      });
+    }
     if (boundary && review.tiered) {
       const antiFindings = review.tiered.internal.filter(
         (r) => r.reason === "clean-discharge",
@@ -681,7 +728,10 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       // body so the review still lands.
       // The tiering, when there was one: the retry must not republish what the
       // boundary recorded-and-withheld just because GitHub rejected an anchor.
-      const bodyOnly = buildBodyOnlyReview(doc, review.tiered);
+      const bodyOnly = buildBodyOnlyReview(
+        postedSummary === undefined ? doc : { ...doc, summary: postedSummary },
+        review.tiered,
+      );
       try {
         await github.createPullRequestReview(owner, repo, prNumber, {
           body: bodyOnly.body,

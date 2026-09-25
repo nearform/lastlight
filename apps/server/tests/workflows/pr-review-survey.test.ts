@@ -157,12 +157,14 @@ describe("AC3 — five survey branches, five disjoint families", () => {
       // depending on where this runs and a bare name is not on PATH everywhere.
       expect(gate).toContain("LASTLIGHT_FACTS_BIN");
     }
-    // `spec` keeps `test -s`: its obligations are built harness-side and never
-    // reach `obligations.json`, so a discharge gate there grades nothing. If
-    // that ever changes, this expectation is the reminder to wire it.
-    expect(surveyBranch("spec").until_bash?.trim()).toBe(
-      "test -s .lastlight/pr-review/hypotheses/spec.jsonl",
-    );
+    // `spec`'s obligations are built harness-side and never reach
+    // `obligations.json`, so there is nothing to grade: it runs `discharge
+    // --ungraded` — the canonical-id rewrite every branch gets (issue #405) and
+    // the non-empty-file floor it always had. If spec obligations ever reach
+    // obligations.json, drop `--ungraded` and this expectation with it.
+    const spec = surveyBranch("spec").until_bash ?? "";
+    expect(spec).toContain("discharge --dir .lastlight/pr-review --family spec --ungraded");
+    expect(spec).toContain("LASTLIGHT_FACTS_BIN");
   });
 
   it("stages ONE skill, the same one on every branch", () => {

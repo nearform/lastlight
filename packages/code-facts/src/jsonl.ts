@@ -30,6 +30,13 @@ export interface JsonlParse {
   recovered: number;
   /** Lines that could not be read as JSON at all. */
   malformed: number;
+  /**
+   * Where each of {@link rows} sits in the text, index-aligned: `[start, end)`
+   * of the JSON value itself, surrounding whitespace excluded. What lets a
+   * writer replace one row's text and leave every other byte — malformed lines
+   * included — exactly where it was (`normalizeFamilyIds`).
+   */
+  spans: { start: number; end: number }[];
 }
 
 /**
@@ -56,6 +63,7 @@ function closingIndex(text: string, start: number): number {
 
 export function parseJsonl(text: string): JsonlParse {
   const rows: unknown[] = [];
+  const spans: { start: number; end: number }[] = [];
   let recovered = 0;
   let malformed = 0;
   let pos = 0;
@@ -70,6 +78,11 @@ export function parseJsonl(text: string): JsonlParse {
     }
     try {
       rows.push(JSON.parse(line) as unknown);
+      const rawLine = text.slice(pos, lineEnd);
+      spans.push({
+        start: pos + (rawLine.length - rawLine.trimStart().length),
+        end: lineEnd - (rawLine.length - rawLine.trimEnd().length),
+      });
       pos = nextLine;
       continue;
     } catch {
@@ -82,6 +95,7 @@ export function parseJsonl(text: string): JsonlParse {
     if (end !== -1) {
       try {
         rows.push(JSON.parse(text.slice(start, end)) as unknown);
+        spans.push({ start, end });
         recovered += 1;
         // Whatever follows the close on its line is read as a line of its own.
         pos = end;
@@ -93,5 +107,5 @@ export function parseJsonl(text: string): JsonlParse {
     malformed += 1;
     pos = nextLine;
   }
-  return { rows, recovered, malformed };
+  return { rows, recovered, malformed, spans };
 }

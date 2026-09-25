@@ -170,11 +170,7 @@ export function deriveVerdict(e: SurveyEvidence): SurveyVerdict {
   const bypass = str(e.bypass);
   // Read the pass's own words before its label: a consequence that only bites
   // after an edit is a `code_change` whatever the label says.
-  const declaredTrigger = str(e.trigger);
-  const trigger =
-    typeof e.consequence === "string" && EDIT_CONDITIONAL.test(e.consequence)
-      ? "code_change"
-      : declaredTrigger;
+  const trigger = effectiveTrigger(e);
 
   const discharge: Discharge =
     site === "" || site === "none"
@@ -202,6 +198,48 @@ export function deriveVerdict(e: SurveyEvidence): SurveyVerdict {
       : "Important";
 
   return { discharge, needsProbe, severity };
+}
+
+/**
+ * The trigger a row's evidence really records, after the edit-conditional
+ * normalisation {@link deriveVerdict} applies: a consequence phrased as "if X
+ * is changed…" is a `code_change` whatever label the pass wrote. Exported so
+ * every reader of "is this live at head?" goes through the same rule.
+ */
+export function effectiveTrigger(e: SurveyEvidence): string {
+  return typeof e.consequence === "string" && EDIT_CONDITIONAL.test(e.consequence)
+    ? "code_change"
+    : str(e.trigger);
+}
+
+/**
+ * Is this row a BEHAVIOURAL claim — does it assert that running the code at
+ * head does something wrong?
+ *
+ * Derived, never asked for, and from the same record as the verdict: a row is
+ * behavioural when it states a `consequence` (something goes wrong, and what
+ * it does then) that is not deferred to a future edit. A row with no
+ * consequence is a discharge; a row whose consequence needs somebody to edit
+ * the source first is a maintenance hazard. Both are STRUCTURAL — "nothing else
+ * calls this", "the signature did not change", "the two constants agree" — and
+ * a grep, a file read or a facts query genuinely settles those.
+ *
+ * Why it exists (issue #405): on one measured case 4 of 13 `reproduced`
+ * verdicts were a grep ("grep confirms … is the only direct construction")
+ * recorded against claims about what the code DOES. A search confirms the code
+ * reads the way the claim says; it does not show the consequence happening.
+ * The `probes` gate uses this to refuse `reproduced` on a behavioural claim
+ * whose only command is a read. An `unknown` trigger stays behavioural: an
+ * unsettled trigger is exactly the question execution answers.
+ *
+ * `false` for a row with no evidence record at all — a row nobody can classify
+ * is not flagged, so the gate never fails on a field that was never asked for.
+ */
+export function isBehaviouralClaim(row: { evidence?: unknown }): boolean {
+  const e = row.evidence as SurveyEvidence | undefined;
+  if (!hasEvidence(e)) return false;
+  const ev = e as SurveyEvidence;
+  return stated(ev.consequence) && effectiveTrigger(ev) !== "code_change";
 }
 
 /**

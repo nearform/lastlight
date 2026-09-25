@@ -597,13 +597,20 @@ export interface ReviewAnalysisConfig {
    * becomes unreadable. Everything past this rank goes to the review BODY —
    * still posted, still visible, just not an inline comment. Nothing is dropped.
    *
-   * Ten, on the evidence in *"Does AI Code Review Lead to Code Changes?"*
-   * (22k+ real review comments): concise, hunk-level, actionable findings are
-   * substantially likelier to lead to a change, and the wall the paper warns
-   * about is TWENTY — twenty inline comments is not twice the signal of ten,
-   * it is a muted bot. Ten is a ceiling, not a budget that bites: measured
-   * inline volume is 1–5 per PR, so this has never bound, and anything past it
-   * goes to the body rather than away.
+   * **Five (issue #405), down from ten.** Ten came from *"Does AI Code Review
+   * Lead to Code Changes?"* (22k+ real review comments — the wall it warns
+   * about is twenty) and was a ceiling that never bound while inline volume
+   * measured 1–5 per PR. The all-open Martian arm then posted 5–13 findings a
+   * case at precision 0.15–0.40 against two gold, so the ceiling became the
+   * only thing between a reader and every confirmed mechanism. It can bite
+   * now because the rank it spends is no longer flat: a hypothesis-derived
+   * finding's severity is DERIVED from its evidence record and probe strength
+   * (`lastlight-code-facts` `finding-severity.ts`, stamped by `reconcile`), so
+   * the cut keeps boundary-crossing and executed claims ahead of local,
+   * read-only ones instead of cutting in document order — and a tie within a
+   * band is broken on the same evidence (`review-poster.ts` `tieBreakOf`:
+   * boundary, then execution, then merged hypotheses). The overflow still
+   * goes to the body (then the body budget), never away.
    */
   maxInlineComments: number;
   /**
@@ -887,7 +894,10 @@ export function defaultReviewPolicy(): ReviewPolicy {
       probeTypecheck: false,
       probeCoverage: false,
       probeRounds: 2,
-      maxInlineComments: 10,
+      // Five, down from ten (issue #405): the rank it spends is now a derived
+      // severity that varies, so a lower ceiling keeps the strongest claims
+      // rather than cutting at random. See the field's doc.
+      maxInlineComments: 5,
       // A bounded body overflow. Cap 0 measured better under the production
       // Sonnet adjudicator (precision 0.263→0.492 / F1 0.362→0.479) but that
       // win is adjudicator-shape-conditional — under Haiku-everywhere the body
