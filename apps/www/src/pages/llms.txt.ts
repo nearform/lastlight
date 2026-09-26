@@ -3,9 +3,9 @@ import { docsNav } from '../data/docs-nav';
 
 const SITE_PAGES: Array<{ path: string; label: string; description?: string }> = [
   { path: '/', label: 'Home', description: 'Overview of what Last Light is and what it does' },
-  { path: '/how-it-works', label: 'How it works', description: 'Architecture, agent roles, and the workflow engine' },
   { path: '/run-it', label: 'Run it', description: 'Quick path to get Last Light running against your own repos' },
   { path: '/faq', label: 'FAQ', description: 'Common questions about cost, safety, and supported runtimes' },
+  { path: '/releases', label: 'Releases', description: 'Every release, newest first, from the GitHub Release notes' },
 ];
 
 const EXTERNAL: Array<{ url: string; label: string; description?: string }> = [

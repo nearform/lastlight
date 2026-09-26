@@ -1,0 +1,329 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="autonomous-mode"
+	description="Autonomous mode — Last Light's label-driven pipeline that takes an issue from triage to a finished pull request with nobody typing a command, watched and steered from the dashboard's Board."
+>
+	<p>
+		In autonomous mode, an issue moves through Last Light on its own. Once triage
+		marks it ready, the harness picks it up, builds it, and parks the pull request
+		where a human will see it. Nobody has to type <code>@last-light build</code>.
+		Labels on the issue record how far it has got. The dashboard's
+		<strong>Board</strong> shows every issue in the pipeline as a card that you
+		can drag, retry, or approve.
+	</p>
+
+	<p>
+		The pipeline ships switched off, and it starts cautious even once you switch
+		it on. Two approval gates are on by default, and a human merges every pull
+		request. You loosen those settings yourself, one at a time, until the pipeline
+		runs as hands-off as you want.
+	</p>
+
+	<figure class="docs-figure">
+		<img
+			src="/screenshots/board.png"
+			alt="The Board tab of the Last Light dashboard: four columns — Ready for agent, Agent building, Ready for human and Agent blocked. Two issues from nearform/lastlight-test-repo sit in Ready for human, each with a green SUCCEEDED band, a link to the open pull request that closes it, and its labels."
+			loading="lazy"
+			width="2766"
+			height="1624"
+		/>
+		<figcaption>
+			The Board. Each column is a label in the pipeline. Both issues have been
+			through a successful build, and each now has an open pull request that
+			closes it, waiting for a human.
+		</figcaption>
+	</figure>
+
+	<h2>How an issue moves through it</h2>
+
+	<p>
+		The pipeline has one stage, <code>build</code>, and four labels. Each label
+		becomes a column on the Board:
+	</p>
+
+	<pre><code>ready-for-agent ──▶ agent-building ──▶ ready-for-human   (succeeded)
+                                   └─▶ agent-blocked     (failed, cancelled, out of budget)</code></pre>
+
+	<ol>
+		<li>
+			<strong>Triage marks it ready.</strong> The
+			<a href="/docs/workflows/issue-triage">issue-triage</a> workflow adds
+			<code>ready-for-agent</code> to issues that are fully specified. A
+			maintainer can also add the label by hand.
+		</li>
+		<li>
+			<strong>The label starts a build.</strong> The <code>issues.labeled</code>
+			webhook dispatches a <a href="/docs/workflows/build">build</a> run. A
+			backstop cron (<code>pick-up-ready-issues</code>, every 20 minutes) catches
+			any issue whose label event was never delivered.
+		</li>
+		<li>
+			<strong>The label moves at dispatch, before the run starts.</strong> The
+			harness swaps <code>ready-for-agent</code> for <code>agent-building</code>
+			first. The issue then acts as its own lock: a redelivered webhook or the
+			next sweep tick no longer sees an entry to pick up.
+		</li>
+		<li>
+			<strong>The run ends on a terminal label.</strong> A success moves the
+			issue to <code>ready-for-human</code>, and the pull request that closes it
+			appears as a link on the card. A failure or a cancel moves it to
+			<code>agent-blocked</code>, with the reason shown on the card.
+		</li>
+	</ol>
+
+	<h2>Turning it on</h2>
+
+	<p>
+		Autonomy is configured by the operator in the overlay's
+		<code>config.yaml</code>. The whole pipeline is already in the shipped
+		defaults, so opting a repository in takes one line:
+	</p>
+
+	<pre><code># instance/config.yaml
+autonomy:
+  repos:
+    - acme/web
+    - acme/api</code></pre>
+
+	<p>
+		Names must match exactly, with no globs. Matching is plain string equality,
+		so <code>acme/*</code> is a repo name that will never exist. The restriction
+		is deliberate: if a pattern could enable a whole org, any new repo would get
+		an agent and a budget the moment somebody created it, before anyone had
+		reviewed it.
+	</p>
+
+	<div class="docs-callout note">
+		<div class="docs-callout-body">
+			<strong>A repository can't opt itself in.</strong> Autonomy spends the
+			operator's model budget, so there is no <code>autonomy</code> key in
+			<a href="/docs/repo-config">per-repo config</a>. If a repo could list
+			itself, anyone who could commit a file could spend the operator's money. A
+			repo <em>can</em> opt out: <code>disabled.workflows: [build]</code> in its
+			<code>.lastlight/lastlight.yml</code> turns the pipeline off for the whole
+			repo. The hold label (<code>lastlight-ignore</code>) turns it off for a
+			single issue.
+		</div>
+	</div>
+
+	<p>These are the full defaults you are layering over:</p>
+
+	<pre><code>autonomy:
+  repos: []                      # ships inert: no repo, no pipeline
+  stages:
+    build:
+      enter: ready-for-agent       # the label that starts the stage
+      running: agent-building      # applied at dispatch
+      on_success: ready-for-human  # a human reviews, and merges, the PR
+      on_failure: agent-blocked    # the run stopped; a human reads why
+      workflow: build
+      gates:
+        post_architect: true       # pause after the plan
+        post_reviewer: true        # pause after the independent review
+      on_merge: none               # none | auto | auto-low-impact
+  budget:
+    maxConcurrentBuilds: 2         # across every repo, at any instant
+    maxBuildsPerRepoPerDay: 3      # per repo, per UTC day
+    dailyUsd: 25                   # deployment-wide model spend per day
+    repoDailyUsd: 10               # one repo's share of it</code></pre>
+
+	<p>
+		Overlay config merges into these defaults key by key. You only set the keys
+		you want to change. Labels are renamed in the same way; the Board takes its
+		column titles from whatever labels you configure.
+	</p>
+
+	<h2>Gates and merging: from supervised to hands-off</h2>
+
+	<p>
+		By default an autonomous build stops twice for a human, then stops a third
+		time at the merge button.
+	</p>
+
+	<ul>
+		<li>
+			<strong><code>post_architect</code></strong> pauses once the architect has
+			written its plan, before any code is written.
+		</li>
+		<li>
+			<strong><code>post_reviewer</code></strong> pauses once the independent
+			reviewer has finished, before the pull request is finalised.
+		</li>
+		<li>
+			<strong><code>on_merge: none</code></strong> leaves the pull request on
+			<code>ready-for-human</code> for a human to merge.
+		</li>
+	</ul>
+
+	<p>
+		You can resolve a gate from the card on the Board, from the dashboard's run
+		view, by commenting <code>@last-light approve</code> on the issue, or from
+		Slack. The run then resumes exactly where it paused.
+	</p>
+
+	<p>
+		Stage gates can only <em>add</em> gates. Only <code>true</code> values take
+		effect, so a stage can switch on a gate the workflow left off, but it can
+		never switch off one that your <code>APPROVAL_GATES</code> setting enabled.
+		The result is that an autonomous build pauses at <code>post_architect</code>,
+		while an <code>@last-light build</code> on the same repo does not, unless your
+		environment enables that gate for every build.
+	</p>
+
+	<p>
+		<code>on_merge</code> decides what happens to the pull request:
+	</p>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Value</th><th>Behaviour</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>none</code></td>
+				<td>The default. The pull request waits on <code>ready-for-human</code> and a human merges it.</td>
+			</tr>
+			<tr>
+				<td><code>auto</code></td>
+				<td>The build agent turns on GitHub <strong>auto-merge</strong> for the pull request it opened. CI and your branch protection still decide whether and when it lands. The agent never merges the pull request itself.</td>
+			</tr>
+			<tr>
+				<td><code>auto-low-impact</code></td>
+				<td><strong>Not implemented yet.</strong> There is no impact signal for a feature pull request today. The value is accepted and recorded, and it behaves like <code>none</code>.</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<p>For a fully hands-off pipeline, from triage label to merged pull request:</p>
+
+	<pre><code># instance/config.yaml
+autonomy:
+  repos:
+    - acme/web
+  stages:
+    build:
+      gates:
+        post_architect: false
+        post_reviewer: false
+      on_merge: auto</code></pre>
+
+	<p>
+		Setting a gate to <code>false</code> only removes the stage's own gate. If
+		<code>APPROVAL_GATES</code> in your environment names <code>post_architect</code>
+		or <code>post_reviewer</code>, those gates still pause every build, autonomous
+		or not.
+	</p>
+
+	<div class="docs-callout warn">
+		<div class="docs-callout-body">
+			<strong>Branch protection becomes the last human decision.</strong> With
+			both gates off and <code>on_merge: auto</code>, nothing stops for a person.
+			Once a pull request passes the checks you require, it merges. Only do this
+			on a repo where required status checks, and ideally a required review,
+			would stop a change you don't want. Start with one repo and a low
+			<code>budget</code>.
+		</div>
+	</div>
+
+	<h2>Safety limits</h2>
+
+	<p>
+		Every autonomous dispatch passes through one <strong>build dispatch
+		gate</strong>, whichever way it arrived: the label webhook, the backstop
+		sweep, the Board, or the API. The gate checks, in this order:
+	</p>
+
+	<ol>
+		<li><strong>The hold label.</strong> An issue carrying <code>lastlight-ignore</code> is skipped.</li>
+		<li><strong>The allow-list.</strong> A repo not on <code>autonomy.repos</code> is skipped.</li>
+		<li>
+			<strong>Already built.</strong> If the bot re-applied the entry label to
+			an issue it has already built, the gate skips it. This is what stops a
+			label loop. If a <em>human</em> re-applied the label, it counts as an
+			explicit retry and the build runs again.
+		</li>
+		<li><strong>Already running.</strong> An issue with a build queued, running or paused is skipped. Two agents can't share one build workspace.</li>
+		<li>
+			<strong>The budget</strong>, in this order:
+			<ul>
+				<li><code>maxConcurrentBuilds</code>: autonomous builds in flight across the deployment. A build paused at a gate doesn't count.</li>
+				<li><code>maxBuildsPerRepoPerDay</code>: builds started today, whatever their outcome. A failed build still cost money.</li>
+				<li><code>dailyUsd</code> and <code>repoDailyUsd</code>: model spend today, for the deployment and for the repo.</li>
+			</ul>
+		</li>
+	</ol>
+
+	<p>
+		Every comparison is <code>&gt;=</code>, so a configured <code>0</code> refuses
+		everything. That is how you stop the pipeline without un-configuring it. The
+		day-based limits reset at midnight UTC, the same day boundary the dashboard's
+		stats use.
+	</p>
+
+	<p>
+		How loudly a refusal is reported depends on how long it will last. A
+		concurrency skip clears within minutes, so it only writes a log line. A
+		repo's daily quota writes an <code>autonomy.skip</code> row in the activity
+		log. An exhausted spend budget also moves the issue to
+		<code>agent-blocked</code> and posts <em>one</em> comment on the issue. The
+		comment names the limit, when it resets, and how to re-arm. No limit is
+		enforced mid-run: all checks happen before a build starts.
+	</p>
+
+	<h2>The Board</h2>
+
+	<p>
+		The dashboard's <strong>Board</strong> tab is the pipeline's control
+		surface. It has four columns per stage, one for each label, in pipeline
+		order. Its universe is the autonomy allow-list, so a deployment with
+		<code>autonomy.repos: []</code> shows an empty board and makes no GitHub
+		reads at all.
+	</p>
+
+	<ul>
+		<li>
+			<strong>Cards are issues.</strong> Each card shows the issue's latest run,
+			the phase that run is <em>actually</em> in, any pending approval, the
+			failure reason if it failed, a short excerpt of the issue, and the pull
+			requests that close it.
+		</li>
+		<li>
+			<strong>Dragging a card moves work.</strong> Dropping a card on a stage's
+			entry or running column starts a build through the same dispatch gate, as
+			you, the logged-in human. Dropping it on a terminal column only moves the
+			label. If the gate refuses, for example because the budget is spent or a
+			build is already running, the card shows the reason.
+		</li>
+		<li>
+			<strong>The card menu lists what's possible right now.</strong> Actions
+			include approve or reject a pending gate, cancel a run, <em>retry</em>
+			(resume the failed run from the phase that failed), <em>Rebuild</em>, and
+			<em>Unblock &amp; rebuild</em> (start again from the entry column). The
+			server works out which actions are enabled and why, so the Board never
+			offers anything the gate would refuse.
+		</li>
+		<li>
+			<strong>Filters.</strong> <em>Needs you</em> narrows the cards to the ones
+			paused at an approval gate. <em>Unstaged</em> opens a drawer of open
+			issues that carry no stage label yet, so you can drag them in.
+		</li>
+		<li>
+			<strong>It updates live.</strong> A server-sent change signal refetches
+			the board whenever a label moves or a run changes phase. GitHub reads are
+			batched and cached, so an open Board costs about sixty GitHub requests an
+			hour for twenty repos, however many people are watching.
+		</li>
+	</ul>
+
+	<h2>Further reading</h2>
+
+	<ul>
+		<li><a href="/docs/workflows/build">The build workflow</a>: the architect, executor and reviewer cycle each autonomous dispatch runs.</li>
+		<li><a href="/docs/workflows/issue-triage">Issue triage</a>: where <code>ready-for-agent</code> usually comes from.</li>
+		<li><a href="/docs/configuration">Configuration</a>: the overlay, <code>APPROVAL_GATES</code>, and the rest of the config tree.</li>
+		<li><a href="/docs/repo-config">Per-repo config</a>: how a repo opts out with <code>disabled.workflows</code>.</li>
+		<li><a href="/spec/05-router#the-build-dispatch-gate">Spec: the build dispatch gate</a> and <a href="/spec/03-integrations#the-pipeline-board">the pipeline board</a>, the full design with every branch explained.</li>
+	</ul>
+</DocsLayout>

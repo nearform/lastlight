@@ -265,8 +265,15 @@ Run on a clean `main`, up to date with origin.
    agentic-pi ships separately from `agentic-pi-npm.yml`, step 3's second tag).
    `:latest` moves only for a real, non-prerelease Release.
 
+   **The notes are the public changelog.** lastlight.dev/releases is built from
+   the GitHub Release bodies (`apps/www/scripts/sync-releases.mjs`), so write
+   them for users — keep the `## Highlights` / `## Packages` shape, and cite
+   issues/PRs as bare `#123` (the sync links them). Editing a Release body later
+   updates the page on the next www deploy.
+
    The same Release also fires the two Cloudflare site deploys —
-   `deploy-www.yml` (→ lastlight.dev, re-rendering `apps/server/spec`) and
+   `deploy-www.yml` (→ lastlight.dev, re-rendering `apps/server/spec` and
+   re-pulling the release notes into `/releases`) and
    `deploy-evals.yml` (→ evals.lastlight.dev, the SPA + the vendored
    `sample-results/`). Both are now release-gated (not push-to-main); use their
    `workflow_dispatch` button for an out-of-band deploy between releases, and

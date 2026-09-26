@@ -12,7 +12,7 @@ It is the third surface of the project's documentation:
 
 | Surface | Audience | Question it answers |
 |---|---|---|
-| [`lastlight.dev`](https://lastlight.dev) / `/how-it-works` | Anyone evaluating the project | *Should I use this?* |
+| [`lastlight.dev`](https://lastlight.dev) / `/docs/inspiration` | Anyone evaluating the project | *Should I use this?* |
 | `/docs` on the website | Operators running their own deploy | *How do I run this?* |
 | This `/spec` directory | Engineers building or rebuilding the system | *How would I rebuild this from scratch?* |
 

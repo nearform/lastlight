@@ -1,0 +1,126 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="inspiration"
+	description="Where Last Light came from — the claw-code / oh-my-codex and Sandcastle ideas it adapted — and the principles the harness is built around."
+>
+	<p>
+		Last Light began as an experiment: could the patterns that let an agent
+		system rebuild a codebase overnight be turned into something that keeps a
+		team's GitHub repositories healthy, running on a server rather than on one
+		developer's laptop? This page covers where those patterns came from and
+		the principles that survived building it.
+	</p>
+
+	<h2>Where this came from</h2>
+
+	<p>
+		The starting point was the
+		<a href="https://x.com/realsigridjin/status/2039472968624185713" target="_blank" rel="noopener">claw-code article</a>
+		by Sigrid Jin, which describes how the <strong>oh-my-codex (OmX)</strong>
+		system rebuilt an entire codebase while its developer slept. The line that
+		stuck:
+	</p>
+
+	<blockquote>&ldquo;The code is a byproduct. The thing worth studying is the system that produced it.&rdquo;</blockquote>
+
+	<p>
+		OmX combines
+		<a href="https://github.com/Yeachan-Heo/oh-my-codex" target="_blank" rel="noopener">oh-my-codex</a>
+		for workflow orchestration,
+		<a href="https://github.com/Yeachan-Heo/clawhip" target="_blank" rel="noopener">clawhip</a>
+		for event routing, and oh-my-openagent for multi-agent coordination. Last
+		Light kept three of its ideas — <strong>role-based agents</strong>,
+		<strong>closed development loops</strong> and
+		<strong>GitHub as the coordination layer</strong> — and rebuilt them as a
+		TypeScript harness that runs as a server, reacts to webhooks, Slack and
+		cron, and describes every behaviour as a YAML workflow.
+	</p>
+
+	<p>
+		The execution model came from
+		<a href="https://github.com/mattpocock/sandcastle" target="_blank" rel="noopener">Sandcastle</a>
+		by Matt Pocock, which showed that a coding-agent CLI can be driven
+		headlessly inside an isolated sandbox, with the harness owning
+		orchestration and the agent owning the work. In Last Light every agent
+		phase is a fresh
+		<a href="https://github.com/nearform/lastlight/tree/main/packages/agentic-pi" target="_blank" rel="noopener">agentic-pi</a>
+		session in its own sandbox, with a GitHub token scoped to what that
+		workflow is allowed to do.
+	</p>
+
+	<h2>The principles</h2>
+
+	<h3>1. Separate the roles, and separate the sessions</h3>
+	<p>
+		A build moves through distinct phases — guardrails, architect, executor,
+		reviewer, PR — and each one is a new agent session with its own prompt.
+		Nothing carries over in memory: phases hand off through files on the
+		branch (the plan, the executor's summary, the reviewer's verdict), so what
+		one phase knows is exactly what the previous one wrote down. The role
+		boundaries themselves live in the prompts; what is enforced by the
+		harness is the token each workflow gets (its
+		<a href="/docs/workflows/overview">permission profile</a>) and, where a
+		workflow declares one, a per-phase command policy.
+	</p>
+
+	<h3>2. No agent verifies its own work</h3>
+	<p>
+		The agent that writes the code never reviews it. The reviewer is a
+		separate session that sees the diff, the plan and the executor's claims
+		about the change — not the executor's reasoning — and returns
+		<code>APPROVED</code> or <code>REQUEST_CHANGES</code>. Requested changes
+		go to a fix session, then back to review, for at most two cycles. It is
+		the same reason people do code review, made structural.
+	</p>
+
+	<h3>3. GitHub is the coordination layer</h3>
+	<p>
+		Work is tracked where the team already looks. A build always targets a
+		GitHub issue, even when it was asked for from Slack; progress, approvals
+		and results land on that issue and its pull request. State lives there
+		too: the <a href="/docs/autonomous-mode">autonomous pipeline</a> is a set
+		of labels, and <a href="/docs/pr-state">a pull request's state</a> is
+		re-derived from GitHub on every dispatch rather than kept in a table of
+		its own.
+	</p>
+
+	<h3>4. Evidence over assertion</h3>
+	<p>
+		&ldquo;Should work&rdquo; is not a result. Plans and reviews cite
+		<code>file:line</code>. The build's guardrails gate is decided by the test
+		command's exit code, not by an agent saying the tests passed. The
+		<a href="/docs/workflows/verify">verify</a> workflow reports
+		<code>CONFIRMED</code> or <code>REFUTED</code> with captured output, and
+		the weekly digest's numbers are computed, not written by a model.
+	</p>
+
+	<h3>5. Deterministic where it can be</h3>
+	<p>
+		A model is used where judgement is needed, and nowhere else. The router
+		matches events and explicit commands in code, and only asks a classifier
+		what free text means — a comment, a Slack message, whether a new issue is
+		a question. Gates, budgets and dedup checks are code; cron sweeps only
+		<em>find</em> work, and the same dispatch gate decides whether it runs. That is what makes the system
+		predictable enough to leave running unattended — and measurable, with
+		<a href="/evals/introduction">evals</a> built from your own repositories.
+	</p>
+
+	<h2>Where to go next</h2>
+
+	<ul>
+		<li><a href="/docs/quickstart">Quick start with Claude</a> — get an instance running.</li>
+		<li><a href="/docs/introduction">Introduction</a> — what Last Light does out of the box.</li>
+		<li><a href="/docs/workflows/build">The build workflow</a> — the architect, executor and reviewer loop in detail, including how phases hand off.</li>
+		<li><a href="/spec/">The specification</a> — the implementation-grade reference for every part of the harness.</li>
+	</ul>
+
+	<div class="docs-next">
+		<span></span>
+		<a href="/docs/quickstart" class="next">
+			<span class="label">Next →</span>
+			<span class="title">Quick start with Claude</span>
+		</a>
+	</div>
+</DocsLayout>

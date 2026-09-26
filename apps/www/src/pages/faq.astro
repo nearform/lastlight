@@ -107,6 +107,7 @@ const description = "Frequently asked questions about Last Light — the self-ho
 					<p>A workflow phase can declare <code>approval_gate: post_architect</code> (or any other gate name). If that gate is enabled via the <code>APPROVAL_GATES</code> env var, the runner pauses after that phase, persists the run state, writes a row to the <code>workflow_approvals</code> table, and waits for a human decision.</p>
 					<p>You resolve gates three ways: commenting <code>@last-light approve</code> or <code>@last-light reject</code> on the triggering GitHub issue; running <code>/approve</code> / <code>/reject</code> from Slack; or clicking the button on the dashboard. The run resumes exactly where it stopped — no phases re-execute.</p>
 					<p>Because gates are opt-in per environment, you can ship workflows with gates pre-declared and enable them only in production.</p>
+					<p>Builds started by the <a href="/docs/autonomous-mode">autonomous pipeline</a> are the exception: they pause at <code>post_architect</code> and <code>post_reviewer</code> by default, whatever <code>APPROVAL_GATES</code> says, because each autonomy stage adds its own gates. You can switch those off per stage.</p>
 				</div>
 			</details>
 

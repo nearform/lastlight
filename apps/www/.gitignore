@@ -3,6 +3,8 @@ dist/
 # generated: spec pages synced from apps/server/spec by scripts/sync-spec.mjs
 # (run on prepare/predev/prebuild). Not committed — regenerated at build/deploy.
 src/content/spec/
+# generated: GitHub Releases pulled by scripts/sync-releases.mjs (predev/prebuild).
+src/content/releases/
 # generated types
 .astro/
 # wrangler local cache

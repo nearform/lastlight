@@ -1,0 +1,210 @@
+---
+// Last Light — Releases / changelog
+//
+// Rendered from the `releases` collection, which scripts/sync-releases.mjs
+// fills from the GitHub Releases API before every dev/build. The Release body
+// on GitHub is the single source: edit it there, and the next deploy picks it
+// up (deploy-www.yml fires on every published Release).
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { getCollection, render } from 'astro:content';
+
+const title = "Releases — Last Light";
+const description = "Every Last Light release, newest first: what shipped, the packages it published, and a link to the full diff.";
+
+const entries = (await getCollection('releases')).sort(
+	(a, b) => b.data.date.getTime() - a.data.date.getTime(),
+);
+const releases = await Promise.all(
+	entries.map(async (entry) => ({ ...entry.data, Content: (await render(entry)).Content })),
+);
+const fmt = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+// "v0.34.0 — PR review on open models" → "PR review on open models"; the tag
+// is already rendered on its own, so a title that only repeats it is dropped.
+const headline = (r: { tag: string; title: string }) => {
+	const rest = r.title.startsWith(r.tag) ? r.title.slice(r.tag.length).replace(/^\s*[—–:-]\s*/, '') : r.title;
+	return rest.trim();
+};
+---
+
+<BaseLayout title={title} description={description}>
+
+	<section class="page-header">
+		<h1>Release <span class="accent">notes</span></h1>
+		<p class="subtitle">
+			Every release of Last Light, newest first. Each release publishes the npm
+			packages (<code>lastlight</code>, <code>lastlight-core</code> and friends) and
+			the <code>ghcr.io/nearform/lastlight-*</code> images that
+			<code>lastlight server update</code> pulls. This page is built from the
+			<a href="https://github.com/nearform/lastlight/releases" target="_blank" rel="noopener">GitHub Releases</a>
+			and is updated whenever a new release is published.
+		</p>
+	</section>
+
+	<section class="releases">
+		{releases.length === 0 ? (
+			<p class="releases-empty">
+				No releases were synced into this build. See them on
+				<a href="https://github.com/nearform/lastlight/releases" target="_blank" rel="noopener">GitHub</a>.
+			</p>
+		) : (
+			releases.map((r, i) => (
+				<article class="release" id={r.tag}>
+					<header class="release-header">
+						<h2>
+							<a href={`#${r.tag}`} class="release-tag">{r.tag}</a>
+							{headline(r) && <span class="release-headline">{headline(r)}</span>}
+						</h2>
+						<p class="release-meta">
+							<time datetime={r.date.toISOString()}>{fmt.format(r.date)}</time>
+							{i === 0 && !r.prerelease && <span class="release-badge latest">Latest</span>}
+							{r.prerelease && <span class="release-badge">Pre-release</span>}
+							<a href={r.url} target="_blank" rel="noopener">View on GitHub</a>
+						</p>
+					</header>
+					<div class="release-body">
+						<r.Content />
+					</div>
+				</article>
+			))
+		)}
+	</section>
+
+</BaseLayout>
+
+<style>
+	.accent { color: var(--gold); }
+
+	.page-header {
+		max-width: 900px;
+		margin: 0 auto;
+		padding: 4rem 2rem 1rem;
+	}
+
+	.page-header h1 {
+		font-size: clamp(1.8rem, 4vw, 2.5rem);
+		margin-bottom: 1rem;
+		letter-spacing: -0.02em;
+	}
+
+	.page-header .subtitle {
+		font-size: 1.05rem;
+		color: var(--text-muted);
+		line-height: 1.65;
+	}
+
+	.releases {
+		max-width: 900px;
+		margin: 0 auto;
+		padding: 1rem 2rem 4rem;
+	}
+
+	.releases-empty {
+		color: var(--text-muted);
+	}
+
+	.release {
+		padding: 1.75rem 0;
+		border-top: 1px solid var(--border);
+		scroll-margin-top: calc(var(--site-header-h) + 1rem);
+	}
+
+	.release-header h2 {
+		font-size: 1.25rem;
+		line-height: 1.4;
+		margin: 0 0 0.35rem;
+		letter-spacing: -0.01em;
+	}
+
+	.release-tag {
+		font-family: var(--mono);
+		color: var(--teal);
+		text-decoration: none;
+		margin-right: 0.6rem;
+	}
+
+	.release-tag:hover {
+		text-decoration: underline;
+	}
+
+	.release-headline {
+		color: var(--text-bright);
+	}
+
+	.release-meta {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.75rem;
+		font-size: 0.82rem;
+		color: var(--text-muted);
+		margin: 0 0 1rem;
+	}
+
+	.release-meta a {
+		color: var(--text-muted);
+	}
+
+	.release-meta a:hover {
+		color: var(--teal);
+	}
+
+	.release-badge {
+		font-size: 0.7rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		padding: 0.1rem 0.5rem;
+		border-radius: 999px;
+		border: 1px solid var(--border);
+	}
+
+	.release-badge.latest {
+		color: var(--teal);
+		border-color: var(--teal);
+	}
+
+	/* The body is markdown rendered from the GitHub Release — style its
+	   elements through :global since they are not in this template. */
+	.release-body :global(h2),
+	.release-body :global(h3) {
+		font-size: 0.8rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-muted);
+		margin: 1.25rem 0 0.5rem;
+	}
+
+	.release-body :global(p),
+	.release-body :global(li) {
+		font-size: 0.92rem;
+		line-height: 1.65;
+		color: var(--text);
+	}
+
+	.release-body :global(ul),
+	.release-body :global(ol) {
+		padding-left: 1.25rem;
+		margin: 0.4rem 0 0.75rem;
+	}
+
+	.release-body :global(li + li) {
+		margin-top: 0.3rem;
+	}
+
+	.release-body :global(a) {
+		color: var(--teal);
+	}
+
+	.release-body :global(code) {
+		font-family: var(--mono);
+		font-size: 0.85em;
+	}
+
+	.release-body :global(pre) {
+		overflow-x: auto;
+		padding: 0.75rem 1rem;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		background: var(--bg-card);
+	}
+</style>

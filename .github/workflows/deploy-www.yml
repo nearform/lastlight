@@ -41,9 +41,14 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # sync-spec (prebuild) copies apps/server/spec → the site's content dir,
-      # then astro builds ./dist.
+      # and sync-releases pulls the GitHub Releases in as the /releases
+      # changelog; then astro builds ./dist. RELEASES_REQUIRED makes a failed
+      # releases fetch fail the deploy rather than ship an empty changelog.
       - name: Build site
         run: pnpm --filter lastlight-www build
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASES_REQUIRED: "1"
 
       - name: Deploy to Cloudflare
         run: pnpm exec wrangler deploy

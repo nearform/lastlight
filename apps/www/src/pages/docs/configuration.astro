@@ -498,6 +498,18 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 		</tbody>
 	</table>
 
+	<h2 id="autonomy">Autonomous mode — <code>autonomy</code></h2>
+
+	<p>
+		The <code>autonomy</code> block drives the label-driven pipeline: an issue
+		labelled <code>ready-for-agent</code> on a repo listed in
+		<code>autonomy.repos</code> dispatches a gated build with no command typed.
+		It ships inert (<code>repos: []</code>) and is operator-only — there is no
+		per-repo key. The stages, their approval gates, <code>on_merge</code> and
+		the <code>budget</code> ceilings are all documented on
+		<a href="/docs/autonomous-mode">Autonomous mode</a>.
+	</p>
+
 	<h2 id="workflow-policy">Workflow policy — <code>fix</code>, <code>gate</code>, <code>dependencies</code>, <code>review</code></h2>
 
 	<p>

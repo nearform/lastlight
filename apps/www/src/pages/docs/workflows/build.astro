@@ -136,12 +136,39 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		issue.
 	</p>
 
+	<h2>How phases hand off</h2>
+	<p>
+		Every phase is a fresh agent session, so nothing is carried over in
+		memory. Phases coordinate through the branch — the code and tests they
+		commit — and a folder of plain-text build documents keyed by the issue:
+	</p>
+	<pre><code>.lastlight/issue-42/
+  guardrails-report.md   ← install/typecheck/lint results, the gate command and how long it took
+  architect-plan.md      ← problem statement with file:line evidence, files to change, test strategy
+  status.md              ← current phase, guardrails and reviewer status, loop counters
+  executor-summary.md    ← files changed, actual test/lint output, deviations from the plan
+  reviewer-verdict.md    ← the verdict, the issues found, and what was run</code></pre>
+	<ul>
+		<li><strong>Guardrails → Architect.</strong> The report tells the architect which verification commands really exist, so the plan can rely on them. The gate script itself lives in <code>.git/lastlight-gate.sh</code> and is never committed.</li>
+		<li><strong>Architect → Executor.</strong> The executor treats the plan as its ground truth instead of re-deriving intent from the issue body.</li>
+		<li><strong>Executor → Reviewer.</strong> The reviewer reads the diff against the base branch, the plan and the executor's summary: the code and the claims about it, never the executor's reasoning.</li>
+		<li><strong>Reviewer → fix loop.</strong> The reviewer's final message starts with <code>VERDICT: APPROVED</code> or <code>VERDICT: REQUEST_CHANGES</code>, which the runner parses (falling back to <code>reviewer-verdict.md</code>). Requested changes go to a fix session that addresses only the reported issues.</li>
+	</ul>
+	<p>
+		By default these documents are committed on the build branch. Set
+		<code>buildAssets.location: server</code> to keep them out of the target
+		repository entirely: they are stored on the Last Light server, staged into
+		each phase and collected afterwards, and the links in comments point at
+		the dashboard instead of GitHub. See
+		<a href="/docs/configuration">Configuration</a>.
+	</p>
+
 	<h2>Triggers</h2>
 	<ul>
 		<li><strong>GitHub comment:</strong> <code>@last-light build this</code> on an issue (classifier detects BUILD intent)</li>
 		<li><strong>Slack:</strong> <code>build cliftonc/repo#42</code></li>
 		<li><strong>CLI:</strong> <code>npm run cli -- build owner/repo#N</code></li>
-		<li><strong>Issue label:</strong> applying <code>ready-for-agent</code> to an issue, in a repo the operator has opted into <code>autonomy.repos</code>. This is the software-factory pipeline: the label is the source of truth for where an issue has got to, and the harness advances it to <code>agent-building</code> at dispatch. The allow-list ships empty, so labelling does nothing until a deployment opts a repository in — and a labelled build runs behind the stage's approval gates (<code>post_architect</code>, <code>post_reviewer</code>) even where a <code>@last-light build</code> on the same repo would not. The harness moves the label on again when the run ends — to <code>ready-for-human</code> on success, to <code>agent-blocked</code> on a failure or a cancel — and a backstop cron (<code>pick-up-ready-issues</code>, every 20 min) picks up any issue whose label event was never delivered. Autonomous dispatches are bounded by <code>autonomy.budget</code>: a harness-wide concurrency ceiling, a per-repo builds-per-day quota, and daily spend limits, all checked before a run starts and all recorded when they refuse.</li>
+		<li><strong>Issue label:</strong> applying <code>ready-for-agent</code> to an issue, in a repo the operator has opted into <code>autonomy.repos</code>. This is the software-factory pipeline: the label is the source of truth for where an issue has got to, and the harness advances it to <code>agent-building</code> at dispatch. The allow-list ships empty, so labelling does nothing until a deployment opts a repository in — and a labelled build runs behind the stage's approval gates (<code>post_architect</code>, <code>post_reviewer</code>) even where a <code>@last-light build</code> on the same repo would not. The harness moves the label on again when the run ends — to <code>ready-for-human</code> on success, to <code>agent-blocked</code> on a failure or a cancel — and a backstop cron (<code>pick-up-ready-issues</code>, every 20 min) picks up any issue whose label event was never delivered. Autonomous dispatches are bounded by <code>autonomy.budget</code>: a harness-wide concurrency ceiling, a per-repo builds-per-day quota, and daily spend limits, all checked before a run starts and all recorded when they refuse. See <a href="/docs/autonomous-mode">Autonomous mode</a>.</li>
 		<li><strong>Merging:</strong> by default the PR parks for a human. A stage configured <code>on_merge: auto</code> has the agent enable GitHub auto-merge on the PR it opened — CI and branch protection still gate the landing, and the agent never merges directly. That applies to pipeline runs only: a human-triggered build always parks the PR. (<code>auto-low-impact</code> is accepted but not yet implemented, and behaves as the default.)</li>
 	</ul>
 

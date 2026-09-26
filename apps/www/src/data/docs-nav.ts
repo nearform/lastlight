@@ -10,6 +10,12 @@ export interface DocsNavSection {
 
 export const docsNav: DocsNavSection[] = [
 	{
+		title: 'Inspiration',
+		items: [
+			{ slug: 'inspiration', label: 'Where it came from' },
+		],
+	},
+	{
 		title: 'Getting Started',
 		items: [
 			{ slug: 'quickstart', label: 'Quick start with Claude' },
@@ -25,6 +31,7 @@ export const docsNav: DocsNavSection[] = [
 		title: 'Concepts',
 		items: [
 			{ slug: 'pr-state', label: 'The PR state model' },
+			{ slug: 'autonomous-mode', label: 'Autonomous mode' },
 		],
 	},
 	{

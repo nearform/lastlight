@@ -24,9 +24,10 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	<h2>Multi-phase workflows</h2>
 
 	<p>
-		These run multiple agent sessions in sequence, often with loops and
-		approval gates. Each phase runs in an isolated Docker sandbox with a
-		shared workspace so files persist between phases.
+		These run a pipeline of phases, often with loops, approval gates or
+		parallel fan-out. Each agent phase is a fresh session in the sandbox
+		(a gondolin micro-VM by default; Docker, smolvm or Kubernetes if
+		configured), with a shared workspace so files persist between phases.
 	</p>
 
 	<div class="workflow-card-grid">
@@ -38,7 +39,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 				<span class="workflow-card-name">Build</span>
 			</div>
 			<p>Full Architect → Executor → Reviewer cycle. Plans, implements, reviews, and opens a PR.</p>
-			<span class="workflow-card-meta">6 phases &middot; approval gates &middot; review loop</span>
+			<span class="workflow-card-meta">7 phases &middot; approval gates &middot; review loop</span>
 		</a>
 
 		<a href="/docs/workflows/explore" class="workflow-card">
@@ -51,11 +52,22 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 			<p>Socratic Q&A loop that shapes half-formed ideas into detailed specs through conversation.</p>
 			<span class="workflow-card-meta">5 phases &middot; reply-gated loop &middot; spec output</span>
 		</a>
+
+		<a href="/docs/workflows/pr-review" class="workflow-card">
+			<div class="workflow-card-header">
+				<span class="workflow-card-icon">
+					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
+				</span>
+				<span class="workflow-card-name">PR review</span>
+			</div>
+			<p>Gathers deterministic facts about the change, surveys it for defects, tests the claims it can, adjudicates what is worth saying, then posts line-anchored inline comments. Never modifies code.</p>
+			<span class="workflow-card-meta">12 phases &middot; webhook + cron</span>
+		</a>
 	</div>
 
-	<h2>Single-phase workflows</h2>
+	<h2>Focused workflows</h2>
 
-	<p>Each runs one focused agent session — fast, cheap, and targeted.</p>
+	<p>One job each, in one to four phases — fast, cheap, and targeted.</p>
 
 	<div class="workflow-card-grid">
 		<a href="/docs/workflows/issue-triage" class="workflow-card">
@@ -88,7 +100,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 				<span class="workflow-card-name">Answer</span>
 			</div>
 			<p>Researches docs + web and posts a single sourced answer when an issue or message is a question.</p>
-			<span class="workflow-card-meta">1 phase &middot; webhook + slack</span>
+			<span class="workflow-card-meta">2 phases &middot; webhook + slack</span>
 		</a>
 
 		<a href="/docs/workflows/pr-comment" class="workflow-card">
@@ -100,17 +112,6 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 			</div>
 			<p>Answers a maintainer's question about an open PR with concrete, code-cited evidence.</p>
 			<span class="workflow-card-meta">1 phase &middot; webhook</span>
-		</a>
-
-		<a href="/docs/workflows/pr-review" class="workflow-card">
-			<div class="workflow-card-header">
-				<span class="workflow-card-icon">
-					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
-				</span>
-				<span class="workflow-card-name">PR review</span>
-			</div>
-			<p>Reads a PR diff and posts line-anchored inline review comments. Read-only — no code modifications.</p>
-			<span class="workflow-card-meta">2 phases &middot; webhook + cron</span>
 		</a>
 
 		<a href="/docs/workflows/pr-fix" class="workflow-card">
@@ -187,7 +188,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 				<span class="workflow-card-name">Verify</span>
 			</div>
 			<p>Tests a behaviour claim in the sandbox and reports CONFIRMED / REFUTED / INCONCLUSIVE with evidence.</p>
-			<span class="workflow-card-meta">1 phase &middot; webhook + slack + cli</span>
+			<span class="workflow-card-meta">4 phases &middot; webhook + slack + cli</span>
 		</a>
 
 		<a href="/docs/workflows/qa-test" class="workflow-card">
@@ -198,7 +199,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 				<span class="workflow-card-name">QA test</span>
 			</div>
 			<p>Drives a CLI or locally-served app through a flow and reports step-level pass/fail with evidence.</p>
-			<span class="workflow-card-meta">1 phase &middot; webhook + slack + cli</span>
+			<span class="workflow-card-meta">4 phases &middot; webhook + slack + cli</span>
 		</a>
 
 		<a href="/docs/workflows/demo" class="workflow-card">
@@ -284,7 +285,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	<h2>Permission profiles</h2>
 
 	<p>
-		Each workflow runs in a Docker sandbox with a scoped GitHub token. The
+		Each workflow runs in the sandbox with a scoped GitHub token. The
 		permission profile determines what the agent can do:
 	</p>
 

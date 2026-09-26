@@ -8,14 +8,15 @@
   },
   "scripts": {
     "prepare": "node scripts/sync-spec.mjs",
-    "predev": "node scripts/sync-spec.mjs",
+    "predev": "node scripts/sync-spec.mjs && node scripts/sync-releases.mjs",
     "dev": "astro dev",
-    "prebuild": "node scripts/sync-spec.mjs",
+    "prebuild": "node scripts/sync-spec.mjs && node scripts/sync-releases.mjs",
     "build": "astro build && node scripts/generate-md.mjs",
     "preview": "astro preview",
     "astro": "astro",
     "deploy": "npm run build && wrangler deploy",
-    "sync-spec": "node scripts/sync-spec.mjs"
+    "sync-spec": "node scripts/sync-spec.mjs",
+    "sync-releases": "node scripts/sync-releases.mjs"
   },
   "dependencies": {
     "@astrojs/sitemap": "^3.7.2",

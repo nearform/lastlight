@@ -14,7 +14,7 @@ const description = "A self-hosted, MIT-licensed AI software factory for your Gi
 	<!-- Hero -->
 	<header class="hero">
 		<div class="hero-content">
-			<img src="/logo.png" alt="Last Light logo" class="hero-logo" />
+			<img src="/logo.png" width="1210" height="880" alt="Last Light logo" class="hero-logo" />
 			<p class="hero-name">Last Light</p>
 			<div class="hero-badges">
 				<span class="hero-badge">Self-hosted</span>
@@ -68,7 +68,7 @@ const description = "A self-hosted, MIT-licensed AI software factory for your Gi
 					<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
 				</div>
 				<h3>Build on Request</h3>
-				<p>@mention the bot on an issue and it runs the full Guardrails → Architect → Executor → Reviewer line with fix-feedback loops, then opens a PR. <a href="/how-it-works">See how it works.</a></p>
+				<p>@mention the bot on an issue and it runs the full Guardrails → Architect → Executor → Reviewer line with fix-feedback loops, then opens a PR. <a href="/docs/workflows/build">See how it works.</a></p>
 			</div>
 			<div class="feature-card">
 				<div class="feature-icon">
@@ -119,6 +119,13 @@ const description = "A self-hosted, MIT-licensed AI software factory for your Gi
 				<h3>Dependency Automation</h3>
 				<p>Dependency-update PRs get assessed for impact, broken CI gets the smallest fix pushed, and the trivially safe ones get auto-merge enabled. The risky ones wait for you.</p>
 			</div>
+			<div class="feature-card">
+				<div class="feature-icon">
+					<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/></svg>
+				</div>
+				<h3>Autonomous Mode</h3>
+				<p>Label an issue <code>ready-for-agent</code> and it builds itself: triage → build → review → a PR parked for a human, with nobody typing a command. Track and steer it on a live board. Gated and budget-capped by default, and fully hands-off if you allow it. <a href="/docs/autonomous-mode">Read more.</a></p>
+			</div>
 		</div>
 	</section>
 
@@ -135,9 +142,21 @@ const description = "A self-hosted, MIT-licensed AI software factory for your Gi
 			dark is the site's default theme, so the common case needs no swap.
 		-->
 		<div class="dashboard-tour" id="dashboard-tour">
+			<!-- Dark capture only, so no data-shot: the theme swap skips it rather
+			     than requesting a board-light.png that does not exist. -->
+			<figure class="tour-card tour-card-wide">
+				<button type="button" class="tour-card-trigger" data-lightbox-index="0" aria-label="View Board screenshot full size">
+					<img src="/screenshots/board.png" width="2766" height="1624" alt="Last Light Board tab: the autonomous pipeline as four columns (Ready for agent, Agent building, Ready for human, Agent blocked) with issue cards showing their build status, linked pull requests and labels" loading="lazy" />
+				</button>
+				<figcaption>
+					<strong>Board</strong>
+					<span>The <a href="/docs/autonomous-mode">autonomous pipeline</a>, one column per stage label. Each card shows the phase its build is in, any gate waiting on you, and the PR that closes it. Drag a card onto a build column to start a build, or approve, retry or unblock it from the card.</span>
+				</figcaption>
+			</figure>
+
 			<figure class="tour-card">
-				<button type="button" class="tour-card-trigger" data-lightbox-index="0" aria-label="View Home screenshot full size">
-					<img src="/screenshots/home.png" data-shot="home" alt="Last Light dashboard home tab: live activity, execution stats, recent workflows, resource usage charts" loading="lazy" />
+				<button type="button" class="tour-card-trigger" data-lightbox-index="1" aria-label="View Home screenshot full size">
+					<img src="/screenshots/home.png" width="2570" height="1850" data-shot="home" alt="Last Light dashboard home tab: live activity, execution stats, recent workflows, resource usage charts" loading="lazy" />
 				</button>
 				<figcaption>
 					<strong>Home</strong>
@@ -146,8 +165,8 @@ const description = "A self-hosted, MIT-licensed AI software factory for your Gi
 			</figure>
 
 			<figure class="tour-card">
-				<button type="button" class="tour-card-trigger" data-lightbox-index="1" aria-label="View Workflow Runs screenshot full size">
-					<img src="/screenshots/workflow.png" data-shot="workflow" alt="Last Light workflow run showing a DAG pipeline with Context, Guardrails, Architect, an approval gate, Executor, Reviewer, PR and complete phases" loading="lazy" />
+				<button type="button" class="tour-card-trigger" data-lightbox-index="2" aria-label="View Workflow Runs screenshot full size">
+					<img src="/screenshots/workflow.png" width="2570" height="1850" data-shot="workflow" alt="Last Light workflow run showing a DAG pipeline with Context, Guardrails, Architect, an approval gate, Executor, Reviewer, PR and complete phases" loading="lazy" />
 				</button>
 				<figcaption>
 					<strong>Workflow Runs</strong>
@@ -156,8 +175,8 @@ const description = "A self-hosted, MIT-licensed AI software factory for your Gi
 			</figure>
 
 			<figure class="tour-card">
-				<button type="button" class="tour-card-trigger" data-lightbox-index="2" aria-label="View Sandbox Sessions screenshot full size">
-					<img src="/screenshots/session.png" data-shot="session" alt="Last Light Sandbox Sessions tab showing agent conversation timeline with assistant, tool, and user messages" loading="lazy" />
+				<button type="button" class="tour-card-trigger" data-lightbox-index="3" aria-label="View Sandbox Sessions screenshot full size">
+					<img src="/screenshots/session.png" width="2570" height="1850" data-shot="session" alt="Last Light Sandbox Sessions tab showing agent conversation timeline with assistant, tool, and user messages" loading="lazy" />
 				</button>
 				<figcaption>
 					<strong>Sandbox Sessions</strong>
@@ -166,8 +185,8 @@ const description = "A self-hosted, MIT-licensed AI software factory for your Gi
 			</figure>
 
 			<figure class="tour-card">
-				<button type="button" class="tour-card-trigger" data-lightbox-index="3" aria-label="View Chat Sessions screenshot full size">
-					<img src="/screenshots/chat.png" data-shot="chat" alt="Last Light Chat Sessions tab showing a Slack thread's full message history" loading="lazy" />
+				<button type="button" class="tour-card-trigger" data-lightbox-index="4" aria-label="View Chat Sessions screenshot full size">
+					<img src="/screenshots/chat.png" width="2570" height="1850" data-shot="chat" alt="Last Light Chat Sessions tab showing a Slack thread's full message history" loading="lazy" />
 				</button>
 				<figcaption>
 					<strong>Chat Sessions</strong>
@@ -176,8 +195,8 @@ const description = "A self-hosted, MIT-licensed AI software factory for your Gi
 			</figure>
 
 			<figure class="tour-card">
-				<button type="button" class="tour-card-trigger" data-lightbox-index="4" aria-label="View Feedback screenshot full size">
-					<img src="/screenshots/feedback.png" data-shot="feedback" alt="Last Light Feedback tab showing average score, score over time, a by-workflow breakdown and recent thumbs-up and thumbs-down signals" loading="lazy" />
+				<button type="button" class="tour-card-trigger" data-lightbox-index="5" aria-label="View Feedback screenshot full size">
+					<img src="/screenshots/feedback.png" width="2570" height="1850" data-shot="feedback" alt="Last Light Feedback tab showing average score, score over time, a by-workflow breakdown and recent thumbs-up and thumbs-down signals" loading="lazy" />
 				</button>
 				<figcaption>
 					<strong>Feedback</strong>
@@ -186,8 +205,8 @@ const description = "A self-hosted, MIT-licensed AI software factory for your Gi
 			</figure>
 
 			<figure class="tour-card">
-				<button type="button" class="tour-card-trigger" data-lightbox-index="5" aria-label="View per-repo Config screenshot full size">
-					<img src="/screenshots/repo-config.png" data-shot="repo-config" alt="Last Light per-repository config tab showing effective configuration with a source badge on every key and the operator's policy bounds" loading="lazy" />
+				<button type="button" class="tour-card-trigger" data-lightbox-index="6" aria-label="View per-repo Config screenshot full size">
+					<img src="/screenshots/repo-config.png" width="2570" height="1850" data-shot="repo-config" alt="Last Light per-repository config tab showing effective configuration with a source badge on every key and the operator's policy bounds" loading="lazy" />
 				</button>
 				<figcaption>
 					<strong>Repos → Config</strong>
@@ -246,7 +265,7 @@ const description = "A self-hosted, MIT-licensed AI software factory for your Gi
 				</div>
 			</div>
 		</div>
-		<p class="section-note">Build requests move down a role-based <strong>Architect→Executor→Reviewer</strong> production line. <a href="/how-it-works">Read how it works</a> for the full picture. Already have an <code>AGENTS.md</code> or <code>CLAUDE.md</code> in your repo? Last Light reads those automatically, so your coding conventions, testing requirements, and architectural guardrails carry over.</p>
+		<p class="section-note">Build requests move down a role-based <strong>Architect→Executor→Reviewer</strong> production line. <a href="/docs/workflows/build">Read how a build works</a> for the full picture. Already have an <code>AGENTS.md</code> or <code>CLAUDE.md</code> in your repo? Last Light reads those automatically, so your coding conventions, testing requirements, and architectural guardrails carry over.</p>
 	</section>
 
 	<!-- Evals -->
@@ -1103,6 +1122,10 @@ SLACK_DELIVERY_CHANNEL=C01XYZ        # channel for health reports</code></pre>
 		transition: border-color 0.25s, transform 0.25s;
 		display: flex;
 		flex-direction: column;
+	}
+
+	.tour-card-wide {
+		grid-column: 1 / -1;
 	}
 
 	.tour-card:hover {
