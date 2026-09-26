@@ -27,7 +27,7 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { parseJsonl } from "lastlight-code-facts";
+import { buildSeverityIndex, parseJsonl } from "lastlight-code-facts";
 
 import { flattenToolchain } from "./paths.js";
 import type { ReviewFamilyStats, ReviewPipelineStats } from "./schema.js";
@@ -119,7 +119,8 @@ export interface PipelineFinding {
   /**
    * WHY the boundary put it there — the machine token from `disposition.json`
    * (`adjudicated`, `clean-discharge`, `prose-disposition`, `below-floor`,
-   * `off-diff`, `below-threshold`, `overflow`, `body-budget`), `null` on an
+   * `off-diff`, `below-threshold`, `overflow`, `body-budget`, `computed`,
+   * `no-impact` — issue #405's impact rule), `null` on an
    * inline row that was never demoted.
    *
    * Carried for the same reason `severity` is: without it nothing can say
@@ -145,6 +146,15 @@ export interface PipelineFinding {
    * alone and report it as the rank.
    */
   severity?: string;
+  /**
+   * Issue #405 — the severity DERIVED from the cited hypotheses' evidence
+   * records and probe strength, by the same `lastlight-code-facts` function
+   * the pipeline's `reconcile` phase stamps (`buildSeverityIndex`). Absent for
+   * a finding that cites no resolvable hypothesis. On an artifact written after
+   * #405 it equals `severity`; on an older one it is what `severity` WOULD have
+   * been, which is what makes a $0 replay of the posting caps possible.
+   */
+  derivedSeverity?: string;
   confidence?: number;
   /** Ids of the survey hypotheses this finding was built from. May be empty —
    * see {@link ReviewPipelineStats.unprovenanced}. */
@@ -481,7 +491,11 @@ export function readPipelineArtifacts(
   // them" are different facts, and one measured case (`1587-r3`, keeper run 1)
   // wrote no `disposition.json` at all while posting nine findings.
   const tiersKnown = (dispositionDoc?.findings?.length ?? 0) > 0;
+  // ONE derivation, shared with the pipeline — never a copy here (the
+  // micro-survey eval already learned what a private copy measures).
+  const severityIndex = rawFindings.length ? buildSeverityIndex({ dir }) : null;
   for (const f of rawFindings) {
+    const derivedSeverity = severityIndex?.ofFinding(f) ?? null;
     const ids = f.hypotheses ?? [];
     if (!ids.length) unprovenanced++;
     const tier = tierOf.get(findingKey(f));
@@ -503,6 +517,7 @@ export function readPipelineArtifacts(
       // boundary never saw must not read the same.
       ...(tier !== undefined ? { reason: reasonOf.get(findingKey(f)) ?? null } : {}),
       severity: f.severity,
+      ...(derivedSeverity ? { derivedSeverity } : {}),
       confidence: f.confidence,
       hypotheses: ids,
       // Every supporting hypothesis must RESOLVE and be clean. An id that names

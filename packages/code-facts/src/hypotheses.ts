@@ -71,7 +71,7 @@
  * `null`, which is a different thing from "no citation" and is why
  * {@link HypothesisRecord.declaredObligation} is kept alongside it.
  */
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import { type JsonlParse, parseJsonl } from "./jsonl.js";
@@ -217,7 +217,7 @@ export function hypothesisId(family: string, ordinal: number): string {
 
 /** Read a JSONL file into rows — see `jsonl.ts` for what counts as a row. */
 function readJsonlRows(path: string): JsonlParse {
-  if (!existsSync(path)) return { rows: [], recovered: 0, malformed: 0 };
+  if (!existsSync(path)) return { rows: [], recovered: 0, malformed: 0, spans: [] };
   return parseJsonl(readFileSync(path, "utf8"));
 }
 
@@ -265,7 +265,10 @@ export function readHypothesisSet(
     recovered += parsed.recovered;
     (parsed.rows as HypothesisRow[]).forEach((row, index) => {
       const ordinal = index + 1;
-      const declaredId = asString(row.id);
+      // `declared_id` is where `normalizeFamilyIds` keeps the survey's own
+      // label once it has written the canonical id into `id`; the label stays
+      // a usable alias exactly as it was before the rewrite.
+      const declaredId = asString((row as { declared_id?: unknown }).declared_id) ?? asString(row.id);
       if (declaredId) declared += 1;
       const declaredObligation = asString(row.obligation);
       const obligation =
@@ -371,4 +374,72 @@ export function resolveHypothesis(set: HypothesisSet, cited: string): Hypothesis
   const claimedBy = set.ambiguous.get(cited);
   if (claimedBy) return { kind: "ambiguous", claimedBy };
   return { kind: "unknown" };
+}
+
+export interface NormalizeIdsResult {
+  family: string;
+  /** Parsed rows in the family's file. */
+  rows: number;
+  /** Of those, how many had their `id` rewritten to the canonical one. */
+  rewritten: number;
+}
+
+/**
+ * Write each row's CANONICAL id into its `id` field, in place, keeping the
+ * survey's own label as `declared_id`. Run by the survey branch's exit gate
+ * (`lastlight-facts discharge`, and `normalize-ids` for `spec`), so it happens
+ * the moment a branch finishes and before falsify or adjudicate read the file.
+ *
+ * **Why.** Canonical ids are positional (see the module header), but the file
+ * still carried whatever the survey wrote, and the two drift: surveys label an
+ * "unseeded" placeholder row `<family>-000` and number the rest from `-001`, so
+ * every label is one below its canonical id. The dossier and the gates print
+ * canonical ids; a model that reads the raw file sees the labels. Measured on
+ * the Martian cal.com arm (2026-09-25): the adjudicator, checking its own
+ * correct output with a hand-written script over `hypotheses/*.jsonl`, "fixed"
+ * its citations to the labels — which collide with canonical ids, so the
+ * conservation gate failed on duplicates and uncovered rows and a second full
+ * adjudicate pass ran in 4 of 9 case-runs. With one id scheme on disk there is
+ * nothing to mis-correct.
+ *
+ * **Byte-preserving.** Only the text of a row whose `id` differs is replaced;
+ * malformed lines, blank lines and every other row stay exactly as written, and
+ * a row stays a row, so no ordinal — and therefore no canonical id — moves.
+ * Idempotent. Never throws: a file it cannot read or write is left as it was.
+ */
+export function normalizeFamilyIds(dir: string, family: string): NormalizeIdsResult {
+  const path = join(dir, "hypotheses", `${family}.jsonl`);
+  const result: NormalizeIdsResult = { family, rows: 0, rewritten: 0 };
+  let text: string;
+  try {
+    if (!existsSync(path)) return result;
+    text = readFileSync(path, "utf8");
+  } catch {
+    return result;
+  }
+  const parsed = parseJsonl(text);
+  result.rows = parsed.rows.length;
+  const edits: { start: number; end: number; text: string }[] = [];
+  parsed.rows.forEach((value, index) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    const row = value as Record<string, unknown>;
+    const canonical = hypothesisId(family, index + 1);
+    if (row.id === canonical) return;
+    const { id, declared_id, ...rest } = row;
+    const label = asString(declared_id) ?? asString(id);
+    const next = label ? { id: canonical, declared_id: label, ...rest } : { id: canonical, ...rest };
+    edits.push({ ...parsed.spans[index]!, text: JSON.stringify(next) });
+  });
+  if (!edits.length) return result;
+  let out = text;
+  for (const edit of edits.reverse()) out = out.slice(0, edit.start) + edit.text + out.slice(edit.end);
+  try {
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, out, "utf8");
+    renameSync(tmp, path);
+  } catch {
+    return result;
+  }
+  result.rewritten = edits.length;
+  return result;
 }

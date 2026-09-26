@@ -636,7 +636,9 @@ run option in-process, and as JSON in the `AGENTIC_PI_COMMAND_POLICY` env var
 on the container backends (docker / smol / kubernetes), set per agent run in
 the orchestrator's `sandboxEnv`. agentic-pi registers a `tool_call` extension
 that classifies each `bash` call and logs or blocks it; under gondolin the
-scratch-dir test compares against the guest mount (`/workspace`). A phase with
+scratch-dir test compares against the guest mount (`/workspace`), and so does
+the `host` class (the guest mount is the whole workspace there; elsewhere it is
+the cwd's parent, where the skill bundle is staged). A phase with
 no policy sets neither, and nothing is registered.
 
 The `onEvent` callback receives agentic-pi's `EmitterRecord` events —

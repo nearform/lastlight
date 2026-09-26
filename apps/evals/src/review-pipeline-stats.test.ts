@@ -523,3 +523,38 @@ describe("severity", () => {
     expect(r.findings[1].severity).toBeUndefined();
   });
 });
+
+describe("derivedSeverity — the pipeline's own derivation, read by the eval (issue #405)", () => {
+  const evidence = {
+    subject: "s",
+    control_site: "none",
+    authority: "unknown",
+    order_ok: "unknown",
+    cannot_distinguish: "x from y",
+    bypass: "none found",
+    in_changed_hunk: true,
+    consequence: "the caller gets the wrong total",
+    trigger: "input",
+    crosses_boundary: false,
+    capability_gained: null,
+  };
+
+  it("carries the severity code-facts derives, beside the one the document wrote", () => {
+    const root = workspace({
+      hypotheses: { state: [{ evidence }, { evidence: { ...evidence, crosses_boundary: true } }] },
+      findings: {
+        findings: [
+          { title: "local", severity: "Important", hypotheses: ["state-001"] },
+          { title: "crossing", severity: "Important", hypotheses: ["state-002"] },
+          { title: "own", severity: "Important" },
+        ],
+      },
+    });
+    const { findings } = readPipelineStats(root)!;
+    expect(findings.map((f) => [f.title, f.severity, f.derivedSeverity])).toEqual([
+      ["local", "Important", "Minor"],
+      ["crossing", "Important", "Important"],
+      ["own", "Important", undefined],
+    ]);
+  });
+});

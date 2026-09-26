@@ -430,7 +430,8 @@ provider env vars.
 ## Per-phase command policy (`command_policy`)
 
 An agent phase or fan-out branch can allow / log / block the `install`,
-`install-scratch` and `test` bash command classes (issue #403). The schema and
+`install-scratch`, `test` and `host` (reaching outside the workspace, #404)
+bash command classes (issue #403). The schema and
 the templated-mode resolver are `packages/workflow-engine/src/core/command-policy.ts`;
 `phaseConfigFor` resolves it onto `ExecutorConfig.commandPolicy` (so it needs
 the run `ctx` — every call site passes it); the orchestrator forwards it as the

@@ -18,7 +18,7 @@
  * `providers.ts` is.
  */
 
-import { isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 
 /**
  * The env var the policy travels on to a run inside a container, where the
@@ -27,7 +27,13 @@ import { isAbsolute, relative, resolve } from "node:path";
  */
 export const COMMAND_POLICY_ENV = "AGENTIC_PI_COMMAND_POLICY";
 
-export const COMMAND_CLASSES = ["install", "install-scratch", "test"] as const;
+/**
+ * `host` (lastlight#404) is the one class about WHERE a command looks rather
+ * than what it runs: a bash call reaching outside the agent's workspace — a
+ * scan rooted at `/` or `~`, a read of a global install or package-manager
+ * cache, a `PATH` pointing outside, a `require` of an outside absolute path.
+ */
+export const COMMAND_CLASSES = ["install", "install-scratch", "test", "host"] as const;
 export type CommandClass = (typeof COMMAND_CLASSES)[number];
 
 export const COMMAND_POLICY_MODES = ["allow", "log", "block"] as const;
@@ -309,26 +315,219 @@ function resolveDir(from: string, arg: string | undefined): string | undefined {
   return resolve(from, arg);
 }
 
+// ── host: reaching outside the workspace (lastlight#404) ─────────────
+//
+// Measured on the martian `oc-survey-glmf` arm, once #403 stopped installs: an
+// agent that cannot import a dependency goes looking for one on the machine —
+// `find / -type d -name dayjs`, `ls ~/.nvm/versions/node/<v>/lib/node_modules/`,
+// `export PATH=".../lastlight/node_modules/.bin:$PATH"`, `find / -name SKILL.md`.
+// A dependency found there is not the version the PR pins, and whole-disk scans
+// are the unbudgeted CPU #403 exists to stop.
+
+/**
+ * Scratch space is never `host`: probes legitimately write to `/tmp`, and
+ * `install-scratch` already governs installs into it. `/var/folders` is where
+ * macOS puts `os.tmpdir()`.
+ */
+const SCRATCH_ROOTS = ["/tmp", "/private/tmp", "/var/tmp", "/var/folders", "/private/var/folders"];
+
+/** System bin dirs a `PATH=` may name without borrowing anyone's installs. */
+const SYSTEM_BIN = new Set(["/bin", "/usr/bin", "/sbin", "/usr/sbin"]);
+
+// Lookahead for "end of this path component".
+const END = String.raw`(?=[/\s'":)]|$)`;
+/**
+ * Known host locations where installed packages live: version-manager trees,
+ * package-manager caches, global prefixes. A reference to one in any argument
+ * is `host`, whatever the command. `/opt/lastlight` is exempt — the harness's
+ * own install, where the images put `lastlight-facts`.
+ */
+const HOST_LOCATION = new RegExp(
+  String.raw`(?:^|[\s=:'"(])(?:` +
+    String.raw`(?:~|\$HOME|\$\{HOME\}|/(?:home|Users)/[^/\s'"]+|/root)/\.(?:nvm|npm|cache|yarn|pnpm-store|volta|bun|local/share/pnpm)${END}` +
+    `|/usr/(?:local/)?lib/node_modules${END}` +
+    `|/opt(?!/lastlight(?:/|$))${END}` +
+    ")",
+);
+
+/** Commands that walk or list a tree — `host` when rooted outside the workspace. */
+const SCAN_COMMANDS = new Set(["find", "ls", "du", "tree", "grep", "egrep", "fgrep", "rgrep", "rg"]);
+
+// Flags whose NEXT word is a value, not an operand.
+const GREP_VALUE_SHORT = "efmABCdD";
+const GREP_VALUE_LONG =
+  /^--(?:regexp|file|include|exclude|exclude-dir|max-count|context|after-context|before-context|devices|directories)$/;
+const RG_VALUE_SHORT = "efgtTmABCjMdE";
+const RG_VALUE_LONG =
+  /^--(?:regexp|file|glob|iglob|type|type-not|type-add|max-count|context|after-context|before-context|threads|max-depth|max-filesize|sort|sortr|color|colors|encoding|replace)$/;
+
+/** Drop shell redirections (`2>/dev/null`, `> out`, `2>&1`) — they are not operands. */
+function dropRedirections(words: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    if (/^(?:\d*|&)(?:>>?|<<?)&?$/.test(w)) {
+      i++;
+      continue;
+    }
+    if (/^(?:\d*|&)(?:>>?|<<?)/.test(w)) continue;
+    out.push(w);
+  }
+  return out;
+}
+
+/** The path operands of a scan command (default `.`), or `[]` for a non-recursive grep. */
+function scanRoots(head: string, args: string[]): string[] {
+  if (head === "find") {
+    let i = 0;
+    while (args[i] && /^-(?:[HLP]|O\d|D)$/.test(args[i]!)) i += args[i] === "-D" ? 2 : 1;
+    const roots: string[] = [];
+    // Roots end at the first expression token: `-name`, `(`, `\(`, `!`.
+    for (; i < args.length && !/^(?:-|\(|!|\\\()/.test(args[i]!); i++) roots.push(args[i]!);
+    return roots.length ? roots : ["."];
+  }
+  if (head === "ls" || head === "du" || head === "tree") {
+    const roots = args.filter((a) => !a.startsWith("-"));
+    return roots.length ? roots : ["."];
+  }
+  // grep family and rg: the first operand is the pattern unless -e/-f gave it.
+  const rg = head === "rg";
+  const valueShort = rg ? RG_VALUE_SHORT : GREP_VALUE_SHORT;
+  const valueLong = rg ? RG_VALUE_LONG : GREP_VALUE_LONG;
+  let recursive = rg || head === "rgrep";
+  let patternGiven = false;
+  const operands: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--") {
+      operands.push(...args.slice(i + 1));
+      break;
+    }
+    if (a.startsWith("--")) {
+      if (/^--(?:recursive|dereference-recursive)$/.test(a)) recursive = true;
+      if (/^--(?:regexp|file)(?:=|$)/.test(a) || (rg && a === "--files")) patternGiven = true;
+      if (valueLong.test(a)) i++;
+      continue;
+    }
+    if (a.startsWith("-") && a.length > 1) {
+      const cluster = a.slice(1);
+      if (!rg && /[rR]/.test(cluster)) recursive = true;
+      if (/[ef]/.test(cluster)) patternGiven = true;
+      if (valueShort.includes(cluster[cluster.length - 1]!)) i++;
+      continue;
+    }
+    operands.push(a);
+  }
+  if (!recursive) return [];
+  const paths = patternGiven ? operands : operands.slice(1);
+  return paths.length ? paths : ["."];
+}
+
+/**
+ * Resolve a path operand for the host test: `~`, `$HOME` and `${HOME}` are the
+ * home dir; any other expansion is unknowable (`undefined`, left alone).
+ */
+function resolvePath(from: string, arg: string): string | undefined {
+  if (/^(?:~|\$HOME|\$\{HOME\})(?=\/|$)/.test(arg)) return HOME;
+  if (arg.includes("$") || arg.includes("`")) return undefined;
+  return resolveDir(from, arg);
+}
+
+/** Scratch space, plus the harness's own install in the images (`lastlight-facts`). */
+const EXEMPT_ROOTS = [...SCRATCH_ROOTS, "/opt/lastlight"];
+
+function isExempt(p: string): boolean {
+  return !p.startsWith(HOME) && EXEMPT_ROOTS.some((r) => p === r || p.startsWith(`${r}/`));
+}
+
+/** True when a resolved path is outside the host root and not exempt. */
+function reachesHost(p: string | undefined, hostRoot: string): boolean {
+  return p !== undefined && !isExempt(p) && isOutside(p, hostRoot);
+}
+
+const REQUIRE_SPEC = /(?:\brequire(?:\.resolve)?\s*\(\s*|\bimport\s*\(\s*|\bfrom\s+|\bimport\s+)(['"`])([^'"`]+)\1/g;
+
+/**
+ * The `host` rule a segment matches, if any. `rawWords` still carries the
+ * leading env assignments (`PATH=… cmd`) that {@link stripPrefixes} removes.
+ */
+function hostPattern(
+  rawWords: string[],
+  words: string[],
+  segment: string,
+  dir: string,
+  hostRoot: string,
+): string | undefined {
+  // PATH / NODE_PATH naming a directory outside the workspace — a prefix
+  // assignment, an `export`, or an `env` argument alike.
+  for (const w of rawWords) {
+    const m = /^(?:PATH|NODE_PATH)=(.*)$/.exec(w);
+    if (!m) continue;
+    for (const entry of unquote(m[1]!).split(":")) {
+      if (!entry || /^\$(?:\{?(?:PATH|NODE_PATH)\}?)$/.test(entry) || SYSTEM_BIN.has(entry)) continue;
+      if (reachesHost(resolvePath(dir, entry), hostRoot)) return "host-path";
+    }
+  }
+  const head = words[0]!;
+  const args = dropRedirections(words.slice(1));
+  // The head is exempt: running a binary by absolute path
+  // (`/opt/lastlight/bin/lastlight-facts`) is not a read of that location.
+  if (args.some((a) => HOST_LOCATION.test(a))) return "host-location";
+  if (SCAN_COMMANDS.has(head)) {
+    for (const root of scanRoots(head, args)) {
+      if (reachesHost(resolvePath(dir, root), hostRoot)) return "host-scan";
+    }
+  }
+  if (/^(?:node|nodejs|tsx|bun|deno)$/.test(head.replace(/^.*\//, ""))) {
+    for (const m of segment.matchAll(REQUIRE_SPEC)) {
+      const spec = m[2]!.replace(/^file:\/\//, "");
+      if (!/^(?:\/|~|\.\.?\/|\$HOME\b|\$\{HOME\})/.test(spec)) continue; // a bare package name
+      if (reachesHost(resolvePath(dir, spec), hostRoot)) return "host-require";
+    }
+  }
+  return undefined;
+}
+
+export interface ClassifyOptions {
+  /**
+   * What the `host` class measures "outside the workspace" against. Default:
+   * the cwd's parent — on docker and `none` that is the workspace root, where
+   * the skill bundle (`.lastlight-skills/`) and `AGENTS.md` are staged beside
+   * the checkout, so they stay reachable. Under gondolin only the checkout is
+   * mounted (the bundle is staged inside it), so the runner passes the guest
+   * mount itself.
+   */
+  hostRoot?: string;
+}
+
 /**
  * Every class a bash command matches, segment by segment. An install whose
  * effective directory — the `cd` chain before it, or a `--prefix`/`-C`/`--dir`
  * flag, or a global install — lies outside `cwd` is `install-scratch`: the
  * `npm install fastify@5` in `/tmp/probe` a probe may legitimately need,
- * which a repo-root `npm ci` is not.
+ * which a repo-root `npm ci` is not. A segment that reaches outside
+ * {@link ClassifyOptions.hostRoot} — scratch dirs excepted — is `host`.
  */
-export function classifyCommand(command: string, cwd: string): CommandMatch[] {
+export function classifyCommand(command: string, cwd: string, options: ClassifyOptions = {}): CommandMatch[] {
   const root = resolve(cwd);
+  const hostRoot = resolve(options.hostRoot ?? dirname(root));
   let dir = root;
   const matches: CommandMatch[] = [];
+  const add = (cls: CommandClass, pattern: string, segment: string) => {
+    if (!matches.some((m) => m.cls === cls && m.segment === segment)) matches.push({ cls, pattern, segment });
+  };
   for (const raw of splitSegments(command)) {
-    const words = stripPrefixes(raw.split(/\s+/).filter(Boolean)).map(unquote);
+    const rawWords = raw.split(/\s+/).filter(Boolean);
+    const words = stripPrefixes(rawWords).map(unquote);
     if (words.length === 0) continue;
+    const segment = words.join(" ");
+    const host = hostPattern(rawWords, words, segment, dir, hostRoot);
     if (words[0] === "cd" || words[0] === "pushd") {
+      if (host) add("host", host, segment);
       const args = words.slice(1).filter((a) => !a.startsWith("-") || a === "-");
       dir = resolveDir(dir, args[0]) ?? dir;
       continue;
     }
-    const segment = words.join(" ");
     for (const r of COMMAND_RULES) {
       if (!r.re.test(segment)) continue;
       let cls: CommandClass = r.cls;
@@ -343,18 +542,23 @@ export function classifyCommand(command: string, cwd: string): CommandMatch[] {
         }
         if (isOutside(target, root)) cls = "install-scratch";
       }
-      if (!matches.some((m) => m.cls === cls && m.segment === segment)) {
-        matches.push({ cls, pattern: r.id, segment });
-      }
+      add(cls, r.id, segment);
     }
+    if (host) add("host", host, segment);
   }
   return matches;
 }
 
-/** What a blocked call returns when the caller configured no `reason`. */
+/** What a blocked install/test call returns when the caller configured no `reason`. */
 export const DEFAULT_BLOCK_REASON =
   "This run does not install dependencies or run test suites. Use existing CI results, or state what " +
   "you would need to run and why.";
+
+/** What a blocked `host` call returns when the caller configured no `reason`. */
+export const DEFAULT_HOST_BLOCK_REASON =
+  "This run stays inside its workspace: do not search or read the rest of the machine (/, ~, global " +
+  "installs, package-manager caches) or point PATH outside it. If what you need is not in the workspace, " +
+  "treat it as unavailable and say so; do not keep searching.";
 
 export interface CommandPolicyDecision {
   action: "allow" | "log" | "block";
@@ -365,15 +569,24 @@ export interface CommandPolicyDecision {
 }
 
 /** Decide one bash call: blocked if ANY matched class blocks, logged if any logs. */
-export function decideCommand(policy: CommandPolicy, command: string, cwd: string): CommandPolicyDecision {
-  const matches = classifyCommand(command, cwd).filter((m) => modeFor(policy, m.cls) !== "allow");
+export function decideCommand(
+  policy: CommandPolicy,
+  command: string,
+  cwd: string,
+  options: ClassifyOptions = {},
+): CommandPolicyDecision {
+  const matches = classifyCommand(command, cwd, options).filter((m) => modeFor(policy, m.cls) !== "allow");
   if (matches.length === 0) return { action: "allow", matches };
   const blocked = matches.filter((m) => modeFor(policy, m.cls) === "block");
   if (blocked.length === 0) return { action: "log", matches };
-  const classes = [...new Set(blocked.map((m) => m.cls))].join(", ");
+  const classes = [...new Set(blocked.map((m) => m.cls))];
+  const defaults = [
+    ...(classes.some((c) => c !== "host") ? [DEFAULT_BLOCK_REASON] : []),
+    ...(classes.includes("host") ? [DEFAULT_HOST_BLOCK_REASON] : []),
+  ].join(" ");
   return {
     action: "block",
     matches,
-    reason: `Blocked by this phase's command policy (${classes}). ${policy.reason ?? DEFAULT_BLOCK_REASON}`,
+    reason: `Blocked by this phase's command policy (${classes.join(", ")}). ${policy.reason ?? defaults}`,
   };
 }

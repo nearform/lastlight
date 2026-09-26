@@ -56,6 +56,8 @@ export const CommandPolicySchema = z
     install: TemplatedModeSchema.optional(),
     "install-scratch": TemplatedModeSchema.optional(),
     test: TemplatedModeSchema.optional(),
+    /** A command reaching outside the workspace (issue #404). */
+    host: TemplatedModeSchema.optional(),
     /** Replaces the model-facing text a blocked call returns. */
     reason: z.string().min(1).optional(),
   })
@@ -68,10 +70,11 @@ export type CommandPolicy = {
   install?: CommandPolicyMode;
   "install-scratch"?: CommandPolicyMode;
   test?: CommandPolicyMode;
+  host?: CommandPolicyMode;
   reason?: string;
 };
 
-const CLASSES = ["install", "install-scratch", "test"] as const;
+const CLASSES = ["install", "install-scratch", "test", "host"] as const;
 
 function isMode(v: unknown): v is CommandPolicyMode {
   return typeof v === "string" && (COMMAND_POLICY_MODES as readonly string[]).includes(v);

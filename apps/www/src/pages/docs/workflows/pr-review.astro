@@ -11,8 +11,10 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		build, the linter or the test suite, because CI already answered those.
 		The harness enforces that per phase with a <strong>command
 		policy</strong> that blocks test runs (and, when the evidence pipeline is
-		on, installs) in the reviewing phases; only a small, targeted probe may
-		execute code. It runs in two phases: an agent phase judges the diff and records
+		on, installs) in the reviewing phases, and keeps every phase inside the
+		checkout — no scanning the machine or borrowing a globally installed
+		package, so a probe only ever tests the versions the PR pins. Only a
+		small, targeted probe may execute code. It runs in two phases: an agent phase judges the diff and records
 		its findings, then a deterministic phase posts <strong>one formal
 		review</strong> with each finding as an <strong>inline comment anchored to
 		its diff line</strong> (with an applyable suggestion where a concrete fix

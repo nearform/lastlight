@@ -96,6 +96,94 @@ export interface ReviewFinding {
   claim?: string | null;
   category?: "defect" | "correctness-risk" | "maintainability" | "nit" | "verification" | null;
   fix?: string | null;
+  /**
+   * Issue #405 — the consequence a user or maintainer would actually HIT, as a
+   * typed class the adjudicator writes. See {@link IMPACT_CLASSES}: a finding
+   * whose impact is a preference, missing tests, dead code or an unfollowed
+   * convention is recorded at `internal` with reason `no-impact`, whatever its
+   * tier or category. Absent or unrecognised ⇒ no effect.
+   */
+  impact?: string | null;
+  /** The severity the adjudicator wrote before reconcile stamped the derived
+   * one over it (`lastlight-code-facts` `finding-severity.ts`). Audit only. */
+  declaredSeverity?: string | null;
+  /** Stamped by reconcile from the evidence and probe record — the facts
+   * {@link tieBreakOf} orders a severity tie on. Absent on a finding that cites
+   * no hypothesis (reconcile strips any the model wrote). */
+  rankEvidence?: {
+    crossesBoundary?: boolean;
+    probe?: "executed" | "corroborated" | "none";
+    hypotheses?: number;
+  } | null;
+}
+
+/**
+ * Issue #405 — the impact vocabulary, and which classes earn a posting tier.
+ *
+ * **A reproduced mechanism is not a defect.** On the all-open Martian arm the
+ * probes were mostly honest and the surveys read the code accurately, so almost
+ * every claim was "confirmed" — including "the timestamp is formatted for
+ * en-US" (true, run in three locales), "this writes outside the repository
+ * layer" (true, a layering preference) and "the handler bypasses the
+ * feature-flag factory" (true, not what gold flags). Adjudicate dropped nothing
+ * and precision sat at 0.15–0.40.
+ *
+ * So the adjudicator states WHAT a user or maintainer would hit, as one of
+ * these, and the tier follows by arithmetic — the same shape as `category`, a
+ * disposition the model writes rather than a classifier run afterwards. The
+ * demotion is to `internal` (recorded, never posted), never a deletion, so it
+ * is compatible with "no probe verdict ⇒ nothing may be dropped".
+ */
+export const IMPACT_CLASSES = {
+  /** A wrong value, response or state reaches a user or a caller. */
+  "wrong-result": "post",
+  /** A crash, a rejected request, a hang — something stops working. */
+  failure: "post",
+  /** A trust boundary is crossed or a capability leaks. */
+  security: "post",
+  /** Data lost, corrupted or silently dropped. */
+  data: "post",
+  /** A cost a user pays: latency, memory, an unbounded loop. */
+  performance: "post",
+  /** A concrete edit the maintainer WILL make breaks something (duplicated
+   * values that must agree, a contract enforced in one place of two). */
+  maintenance: "post",
+  /** Style, layering, locale or presentation preference. */
+  preference: "internal",
+  /** "There are no tests for this" with no defect beside it. */
+  "no-tests": "internal",
+  /** Unused code, an unreachable branch. */
+  "dead-code": "internal",
+  /** A convention the repository does not actually follow. */
+  convention: "internal",
+} as const;
+export type ImpactClass = keyof typeof IMPACT_CLASSES;
+
+/**
+ * Does this finding's stated impact demote it to `internal`? Unknown or absent
+ * impact never does — the rule can only fire on what was written.
+ *
+ * **Never on a `defect`.** A defect is code that misbehaves NOW, and its impact
+ * class can describe how that shows rather than a reason to withhold it: a
+ * guard comparing two dayjs objects with `===` "can never fire" — `dead-code`
+ * — because it is broken, and that was a gold finding this rule demoted
+ * (Martian cal-com-8330, 2026-09-26). Across two 9-run arms the rule demoted 24
+ * findings: 19 `nit`/`maintainability`/`verification` (no tests, en-US dates —
+ * its purpose, no gold), 4 `correctness-risk` "currently unreachable" hazards
+ * (no gold), and 1 `defect` — the gold one. `category` is also the measured
+ * axis (AUC 0.897, see {@link ReviewFinding.category}); `impact` is not yet.
+ */
+export function impactDemotes(f: ReviewFinding): boolean {
+  if (f.category === "defect") return false;
+  const raw = typeof f.impact === "string" ? f.impact.trim().toLowerCase() : "";
+  return (IMPACT_CLASSES as Record<string, string>)[raw] === "internal";
+}
+
+/** A stated impact nobody defined — `post-review.ts` logs it, since this
+ * module does no I/O. Absence is not unknown. */
+export function unknownImpact(f: ReviewFinding): boolean {
+  const raw = typeof f.impact === "string" ? f.impact.trim().toLowerCase() : "";
+  return raw !== "" && !(raw in IMPACT_CLASSES);
 }
 
 /** A finding that has an anchor. Narrowed by {@link splitFindings}. */
@@ -654,7 +742,16 @@ export type InternalReason =
    * typed-attribute arm, and folded into `adjudicated` it would be
    * unanswerable from `disposition.json`.
    */
-  | "computed";
+  | "computed"
+  /**
+   * Issue #405: the adjudicator stated an `impact` that is a preference,
+   * missing tests, dead code or an unfollowed convention
+   * ({@link IMPACT_CLASSES}). The finding's own `impact` field is the recorded
+   * reason. Its own token for the same reason `computed` has one — "how much
+   * did the impact rule withhold, and was any of it gold?" is the question the
+   * next measurement asks.
+   */
+  | "no-impact";
 
 /** One recorded-not-posted finding, carrying the reason it was withheld. */
 export interface InternalFinding {
@@ -715,7 +812,8 @@ const SEVERITY_WEIGHT: Record<string, number> = {
 };
 
 /**
- * Rank for the inline budget: severity, and deliberately NOT confidence.
+ * Rank for the inline budget: severity (plus {@link tieBreakOf} within a band),
+ * and deliberately NOT confidence.
  *
  * **`confidence` used to be a factor here and it was ranking backwards.**
  * Measured 2026-09-21 over 516 pipeline findings from 20 preserved case-runs,
@@ -773,7 +871,41 @@ const SEVERITY_WEIGHT: Record<string, number> = {
  * The floor never fired on an honestly-labelled row.
  */
 function rankOf(f: ReviewFinding): number {
-  return SEVERITY_WEIGHT[(f.severity || "important").toLowerCase()] ?? 2;
+  return (SEVERITY_WEIGHT[(f.severity || "important").toLowerCase()] ?? 2) + tieBreakOf(f);
+}
+
+/**
+ * The order WITHIN a severity band, in [0, 0.9] so it can never lift a finding
+ * across a band (issue #405). Three bands and a stable sort meant a tie fell
+ * to the order the adjudicator wrote findings in — a judgement the derived
+ * severity exists to take away from it. Scored from {@link ReviewFinding.rankEvidence},
+ * which reconcile stamps from the same evidence and probe record the band is:
+ *
+ *   consequence crosses a boundary (data, a caller, trust)   +0.4
+ *   the scenario was executed by a probe                     +0.3
+ *     … or only corroborated by reading code                 +0.1
+ *   independent hypotheses merged, beyond the first          +0.05 each, max +0.2
+ *
+ * Boundary weighs most because it is the impact axis (what a user would hit);
+ * execution next because it is the evidence axis; the merge count least and
+ * capped, because the six survey branches overlap by design and a claim they
+ * all echo is not six times as true. A finding with no stamp — the review
+ * pass's own, or a run whose reconcile did not stamp — scores 0 and so ranks
+ * after every hypothesis-backed finding of its band.
+ *
+ * The weights are a considered ordering, NOT a measurement: re-check them with
+ * `apps/evals/scripts/finding-calibration.ts` once runs carry the stamp.
+ */
+export function tieBreakOf(f: ReviewFinding): number {
+  const e = f.rankEvidence;
+  if (!e || typeof e !== "object") return 0;
+  let score = 0;
+  if (e.crossesBoundary === true) score += 0.4;
+  if (e.probe === "executed") score += 0.3;
+  else if (e.probe === "corroborated") score += 0.1;
+  const merged = typeof e.hypotheses === "number" && Number.isFinite(e.hypotheses) ? Math.floor(e.hypotheses) - 1 : 0;
+  score += Math.min(Math.max(merged, 0), 4) * 0.05;
+  return score;
 }
 
 /**
@@ -1052,6 +1184,13 @@ export function tierFindings(
     // gets answered.
     const derived = raw.tier ? undefined : computeTier(raw);
     const f = derived ? { ...raw, tier: derived } : raw;
+    // Issue #405 — the impact rule, FIRST and whatever the tier says: a stated
+    // impact of preference / no-tests / dead-code / convention is a demotion,
+    // and a demotion is always safe to obey. Recorded, never dropped.
+    if (impactDemotes(f)) {
+      internal.push({ finding: f, reason: "no-impact" });
+      continue;
+    }
     // An explicit `internal` is obeyed unconditionally and FIRST. The
     // conservation floor writes unaccounted-for hypotheses at this tier with no
     // `confidence` at all, and a confidence-only rule would have posted every
@@ -1123,11 +1262,10 @@ export function tierFindings(
   // body the cap just closed). Ranked by the same severity rank the inline
   // budget spends — {@link rankOf} — and
   // the sort is over a COPY: the survivors keep their document order, so the
-  // grouped rendering and the disposition rows read as before. Ties across
-  // the cut fall to document order (stable sort), the same tie-break the
-  // inline budget uses — and after {@link rankOf} dropped its confidence
-  // factor there are only three distinct ranks, so document order now decides
-  // far more of this cut than it used to. `null`/absent = unlimited.
+  // grouped rendering and the disposition rows read as before. Within a band
+  // {@link tieBreakOf} orders the cut; only a full tie (same band, same
+  // stamped evidence) falls to document order (stable sort), the same as the
+  // inline budget. `null`/absent = unlimited.
   const cap = boundary.maxBodyComments;
   if (cap === null || cap === undefined || body.length <= Math.max(0, cap)) {
     return { inline, body, internal };
@@ -1343,6 +1481,18 @@ export function buildReview(
     internalCount: tiered.internal.length,
     tiered,
   };
+}
+
+/**
+ * The same review with its summary replaced — the body re-composed exactly as
+ * {@link buildReview} composes it. For the post-cap summary
+ * (`review-summary.ts`): the summary can only be written once the tiering
+ * exists, so the review is built first and re-bodied here. A review built
+ * without a boundary has no tiering and is returned unchanged.
+ */
+export function withSummary(review: BuiltReview, summary: string): BuiltReview {
+  if (!review.tiered) return review;
+  return { ...review, body: summary + renderDemotedGrouped(review.tiered.body) };
 }
 
 /**

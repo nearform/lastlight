@@ -702,15 +702,22 @@ describe("the discharge ledger", () => {
     ).toBe(EXIT_OK);
   });
 
-  it("writes NOTHING — the ledger is a read, and so is the gate", () => {
+  it("the ledger writes NOTHING; the gate writes only the canonical id", () => {
     const fx = workspace({
       obligations: doc(),
       hypotheses: { contract: [{ obligation: "O-001", discharge: "QUOTE" }] },
     });
     const before = JSON.stringify(fx.snapshot());
     runCli(["discharge", "--dir", fx.dir, "--family", "contract", "--ledger"], capture().io);
-    runCli(["discharge", "--dir", fx.dir, "--family", "contract"], capture().io);
     expect(JSON.stringify(fx.snapshot())).toBe(before);
+    // Issue #405: the gate writes each row's canonical id into `id` (the one
+    // write it makes — see `normalizeFamilyIds`) and nothing else.
+    runCli(["discharge", "--dir", fx.dir, "--family", "contract"], capture().io);
+    const rows = readFileSync(join(fx.dir, "hypotheses", "contract.jsonl"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(rows).toEqual([{ id: "contract-001", obligation: "O-001", discharge: "QUOTE" }]);
     // Not even for a family that has no file: a gate that created one would
     // manufacture the "looked" it exists to measure.
     runCli(["discharge", "--dir", fx.dir, "--family", "enforcement"], capture().io);

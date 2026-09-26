@@ -29,6 +29,7 @@ with zero posted findings against several real defects. -->
 |---|---|
 | re-rank | evidence strength |
 | re-tier (incl. demote to `body`) | attention cost |
+| demote to `internal` | an `impact` nobody would hit — see *A confirmed mechanism is not a defect* |
 | merge | one defect surfacing twice |
 | **delete** | **a probe transcript that refutes it — nothing else** |
 
@@ -62,7 +63,7 @@ Work from that list. Do not reconstruct it by reading the six `.jsonl` files and
 | file | what it is |
 |---|---|
 | `.lastlight/pr-review/hypotheses/*.jsonl` | every hypothesis, one JSON object per line, six independent passes |
-| `.lastlight/pr-review/probes/verdicts.jsonl` | the oracle's verdicts — `reproduced` / `refuted` / `unprobed` |
+| `.lastlight/pr-review/probes/verdicts.jsonl` | the oracle's verdicts — `reproduced` / `corroborated` / `refuted` / `unprobed` |
 | `.lastlight/pr-review/probes/*.txt` | the transcripts. **Judge the transcript, not the verdict's summary of it** |
 | `.lastlight/pr-review/findings.json` | what the review pass wrote. Findings too, and NOT hypothesis-derived |
 
@@ -111,17 +112,68 @@ The same defect surfacing from `contract` and `enforcement` is the pipeline work
 
 A merge can only strengthen: take the strongest claim direction and the highest tier any constituent would earn alone. Collapsing several defect-shaped rows into one "verified correct" row is not merging — it is deleting without a transcript.
 
-### 2. Rank
+### 2. Rank — on evidence, not on a severity you choose
 
-`reproduced` Critical → bare Critical → `reproduced` Important → and so on. Ranking is how the scarce inline budget gets spent well.
+**Severity is not yours to write on a finding that cites hypotheses.** It is computed from each cited hypothesis's evidence record and what its probe counts for, and stamped over whatever you write once you finish. A merged finding takes the strongest of its hypotheses.{{#if dossierEnabled}} The severity on each dossier heading is that computed value.{{/if}}
 
-**`Critical` needs a trust boundary, not a category — and the surveys do not apply that bar, so you do.** Keep a security claim at `Critical` only if it names the boundary the input crosses **and** a capability its supplier does not already have. Otherwise **demote to `Important`** — never drop. A local tool parsing a file the invoking user wrote is robustness, not a boundary: the supplier already holds every capability the finding would grant.
+Order your findings by the evidence behind them:
 
-Demotion is a ranking act. The claim keeps its tier, body and hypothesis ids; only its slot changes.
+| verdict | what it counts for |
+|---|---|
+| `reproduced` | the scenario was **executed** and the defect showed up. The strongest evidence there is |
+| `corroborated` | a **read** — a search, a file view, a facts query — that agrees with the claim. Weaker than `reproduced`: it shows the code reads the way the claim says, not that the consequence happens |
+| `unprobed` | nobody could run anything. Not disproved |
+| `refuted` | an executed check that would have shown the defect did not |
 
-<!-- On this pipeline's first production run, all three Criticals it posted
-arrived from the surveys as Important and were promoted here on category
-membership alone. -->
+A transcript that belongs to **another** hypothesis counts only if it shows **this** hypothesis's scenario. Read it for that.
+
+**On a finding that cites no hypothesis, your severity stands — and `Critical` needs a trust boundary, not a category.** Keep it `Critical` only if it names the boundary the input crosses **and** a capability its supplier does not already have; otherwise `Important`. A local tool parsing a file the invoking user wrote is robustness, not a boundary.
+
+<!-- Issue #405: on the all-open Martian arm almost every surviving claim carried
+`Important`, so the posting caps cut in document order. The rank is now derived
+(code-facts `finding-severity.ts`, stamped by `reconcile`). On this pipeline's
+first production run all three posted Criticals arrived from the surveys as
+Important and were promoted here on category membership alone — the reason the
+trust-boundary bar exists, and now mechanised for hypothesis-derived findings.
+Measured on one case: 4 of 13 `reproduced` verdicts were greps and 3 cited
+another hypothesis's script, which is why the verdicts are split. -->
+
+### 2a. A confirmed mechanism is not a defect
+
+A probe answers *"does the code behave the way the claim describes?"* — and because the surveys read the code accurately, the answer is nearly always yes. That certifies the **mechanism**. It does not make the mechanism **wrong**.
+
+So every finding states its **`impact`**: what a user or a maintainer would actually hit.
+
+| `impact` | means | where it goes |
+|---|---|---|
+| `wrong-result` | a wrong value, response or state reaches a user or a caller | posted |
+| `failure` | a crash, a rejected request, a hang | posted |
+| `security` | a trust boundary crossed, a capability leaked | posted |
+| `data` | data lost, corrupted or silently dropped | posted |
+| `performance` | a cost a user pays — latency, memory, an unbounded loop | posted |
+| `maintenance` | a concrete edit the maintainer **will** make breaks something (two values that must agree, a contract enforced in one place of two) | posted |
+| `preference` | style, layering, locale or presentation preference | **`internal`** |
+| `no-tests` | "there are no tests for this", with no defect beside it | **`internal`** |
+| `dead-code` | unused code, an unreachable branch — not a broken guard or comparison that *makes* a branch unreachable; that is a `defect` | **`internal`** |
+| `convention` | a convention this repository does not actually follow | **`internal`** |
+
+The last four are recorded, never posted — **however reproduced they are** — except on a finding whose `category` is `defect`: a defect is never demoted by its impact. The `impact` you write is the recorded reason. This is demotion, not deletion, so it holds on a run with no probe verdicts too.
+
+<!-- Martian cal-com-8330 (2026-09-26): a guard comparing two dayjs objects
+with `===` "can never fire" was written `category: defect, impact: dead-code`
+and demoted — it was gold. The poster now never demotes a defect on impact
+(`impactDemotes`); this line is so the model classes it right as well. -->
+
+Pick the class for the consequence, never for the topic. A locale-dependent format that breaks a parser downstream is `wrong-result`; the same format merely rendering in en-US for everyone is `preference`.
+
+<!-- Issue #405, Martian TypeScript arm (cal.com, 3 PRs x 3 repeats): gold found
+2/2 on every case, 5-13 comments posted a case, precision 0.15-0.40, and
+adjudicate dropped nothing. Posted false positives carried `reproduced` verdicts
+that were true and harmless: "last updated timestamp hardcoded to en-US" (run in
+three locales), "deleteCache writes outside the repository layer" (a layering
+preference), "handler bypasses the feature-flag factory" (not a defect). -->
+
+
 
 ### 3. Tier
 
@@ -166,9 +218,9 @@ ordered" at confidence 1.00 about the exact mechanism that was broken. -->
 
 Deleting requires naming the refuting transcript by path, and that path must exist.
 
-### 5. An `unprobed` hypothesis reaches the review
+### 5. An `unprobed` hypothesis reaches the review — and so does a `corroborated` one
 
-It was not disproved; nobody could run anything. Tier it accordingly — do not drop it.
+Neither was disproved. Tier it accordingly — do not drop it.
 
 <!-- Dropping unprobed claims was built once, measured, and reverted. -->
 
@@ -194,13 +246,14 @@ You own the `event`, so establish the prior state with the `github_*` review and
 
 {{#if dossierEnabled}}## Say what is wrong, what kind of wrong, and what to change
 
-You write **no `tier`** and **no `confidence`**. Three typed attributes per finding; the harness derives the tier.
+You write **no `tier`** and **no `confidence`**. Four typed attributes per finding; the harness derives the tier.
 
 | field | what it is |
 |---|---|
 | `claim` | one sentence naming what is **wrong** — never what the code does. Cannot write one? It is a verification report: say so in `category`, leave this empty |
 | `category` | `defect` · `correctness-risk` · `maintainability` · `nit` · `verification` |
 | `fix` | one sentence naming what to **change**. Empty when there is nothing to do |
+| `impact` | what a user or maintainer would hit — one class from *A confirmed mechanism is not a defect*. Required on every finding that is not `verification` |
 
 | category | test |
 |---|---|
@@ -227,7 +280,7 @@ and makes the routing arithmetic. -->
 | band | when |
 |---|---|
 | **0.90+** | a `reproduced` transcript, or the defect visible end-to-end in quoted code (the write AND the missing check, both quoted) |
-| **0.60–0.85** | the mechanism is concrete and one end is quoted |
+| **0.60–0.85** | the mechanism is concrete and one end is quoted, or a `corroborated` read agrees with it |
 | **0.30–0.55** | plausible, but inferred rather than shown |
 | **below 0.30** | speculative; thin `unprobed` claims live here |
 
@@ -251,7 +304,8 @@ Rewrite `.lastlight/pr-review/findings.json` **in full**. You own this file now.
 
 | field | audience |
 |---|---|
-| `summary`, `title`, `body` | **POSTED VERBATIM** to a maintainer who has never heard of this pipeline |
+| `title`, `body` | **POSTED VERBATIM** to a maintainer who has never heard of this pipeline |
+| `summary` | **not posted.** The posted summary is written after the comment limits decide which findings post, from those findings only. On a re-review, put the prior-review ledger here (it is carried over verbatim); otherwise one line is enough |
 | `family`, `obligation`, `hypotheses`, `mechanism`, `evidence`{{#if !dossierEnabled}}, `confidence`{{/if}} | machine-read, never rendered — bookkeeping goes here |
 
 In the posted fields: write about their change, in their vocabulary. Never name a phase, a hypothesis, an obligation, a discharge or a tier.
@@ -259,6 +313,12 @@ In the posted fields: write about their change, in their vocabulary. Never name 
 <!-- "This adjudication keeps those findings reconciled as not applicable and adds
 the hypothesis ledger" is a real posted summary, and the failure this rule
 exists to prevent. -->
+
+<!-- Issue #405: the summary used to be posted, and it was written before the
+caps — a review capped at 5 inline + 5 body posted a summary listing four
+numbered defects and an "Also flagged below:" line naming five more, one of
+them withheld. `review-summary.ts` now writes the posted summary from the
+posted set; only the leading ledger of this field survives. -->
 
 {{#if dossierEnabled}}```jsonc
 {
@@ -269,7 +329,7 @@ exists to prevent. -->
     {
       "path": "<path/to/file.ext>",
       "existingCode": "the verbatim excerpt, copied not paraphrased",
-      "severity": "Critical|Important",
+      "severity": "Critical|Important",   // read ONLY on a finding with no `hypotheses`; computed otherwise
       "title": "…",
       "body": "…concrete impact — what breaks, for which input or caller…",
       "suggestion": "…optional…",
@@ -278,6 +338,7 @@ exists to prevent. -->
       "claim": "<one sentence: what is WRONG>",
       "category": "defect",
       "fix": "<one sentence: what to CHANGE>",
+      "impact": "wrong-result",
 
       "family": "contract",
       "obligation": "O-014",
@@ -303,12 +364,13 @@ exists to prevent. -->
     {
       "path": "<path/to/file.ext>",
       "existingCode": "the verbatim excerpt, copied not paraphrased",
-      "severity": "Critical|Important",
+      "severity": "Critical|Important",   // read ONLY on a finding with no `hypotheses`; computed otherwise
       "title": "…",
       "body": "…concrete impact — what breaks, for which input or caller…",
       "suggestion": "…optional…",
 
       "tier": "inline|body|internal",   // REQUIRED on every finding. See below.
+      "impact": "wrong-result",         // REQUIRED on every finding that reports a defect
       "family": "contract",
       "obligation": "O-014",
       "confidence": 0.82,

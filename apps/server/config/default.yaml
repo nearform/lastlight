@@ -39,6 +39,7 @@ models:
   #   diagnose: anthropic/claude-haiku-4-5-20251001     # the CI-failure classifier
   #   pr-fix-retry: anthropic/claude-opus-4-8           # used above fix.escalateModelAfterAttempt
   #   review-adjudicate: anthropic/claude-sonnet-4-6      # the adjudication pass
+  #   review-summary: openai/gpt-5.4-mini                # post-review's summary, written after the caps
   #   review-falsify: anthropic/claude-haiku-4-5-20251001 # the probe oracle
   # A per-task entry wins over `default`. `classifier`/`screener` are the cheap
   # one-shot helpers (src/engine/llm.ts); when unset they fall back to the first
@@ -716,12 +717,16 @@ review:
     # for being noisy: this is an attention boundary, not the v2 suppressor that
     # was built, measured and reverted.
     #
-    # Ten, from "Does AI Code Review Lead to Code Changes?" (22k+ real review
-    # comments): concise, hunk-level, actionable findings are substantially
-    # likelier to cause a change, and the wall the paper warns about is TWENTY.
-    # A ceiling rather than a budget that bites — measured inline volume is 1–5
-    # per PR, so this has never bound, and the overflow goes to the body.
-    maxInlineComments: 10
+    # Five, down from ten (issue #405). Ten came from "Does AI Code Review Lead
+    # to Code Changes?" (22k+ real review comments; the wall it warns about is
+    # twenty) and never bound while inline volume was 1–5 per PR. The all-open
+    # Martian arm then posted 5–13 a case at precision 0.15–0.40 against two
+    # gold. It can bite now because what it ranks on varies: a hypothesis-
+    # derived finding's severity is DERIVED from its evidence record and probe
+    # strength (code-facts finding-severity.ts, stamped by `reconcile`), so the
+    # cut keeps boundary-crossing and executed claims over local, read-only
+    # ones. The overflow still goes to the body, then to the body budget.
+    maxInlineComments: 5
     # The BODY budget — how many findings the review body's "Additional
     # findings" list may carry. N (the default is 5) keeps the top N ranked by
     # severity and records the rest in disposition.json at
@@ -740,7 +745,9 @@ review:
     # slightly better precision). 5 is the recall-preserving compromise pending
     # a real boundary tune — so an eval overlay measuring a particular shape
     # should still pin this key (`null` for the open funnel) explicitly rather
-    # than inherit it.
+    # than inherit it. A deployment overlay should NOT pin `null`: that is the
+    # open funnel issue #405 measured posting every claim, and the body budget
+    # is only a ranking cut once severity varies (see maxInlineComments).
     maxBodyComments: 5
     # REMOVED 2026-09-21: `thresholds` (the per-family confidence bars) and
     # `internalFloor`. Both gated on a finding's self-reported `confidence`,

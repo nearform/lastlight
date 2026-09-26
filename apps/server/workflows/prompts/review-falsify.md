@@ -50,15 +50,32 @@ A verification layer bolted onto a conservative generator raises precision and
 that generation was deliberately re-tuned to over-produce against it. That
 safety evaporates the moment you start refuting things by argument.
 
-There are only three verdicts:
+There are four verdicts, strongest evidence first:
 
 | verdict | means | needs |
 |---|---|---|
-| `reproduced` | you ran something and the defect showed up | a transcript. The strongest evidence in the pipeline |
+| `reproduced` | you **executed** the scenario the claim names and the defect showed up | a transcript. The strongest evidence in the pipeline |
+| `corroborated` | a **read** — a grep, a file view, a facts query — agrees with a claim about what the code DOES, without executing it | a transcript. Weaker than `reproduced`, and read downstream as weaker |
 | `refuted` | you ran something that WOULD have shown the defect and it did not | a transcript. **Only a transcript may refute** |
 | `unprobed` | nothing you could run would settle it | a `reason` naming WHICH constraint: no runner, no dependencies, no toolchain, or not the kind of claim execution decides |
 
-An `unprobed` hypothesis **survives** to adjudication.
+An `unprobed` or `corroborated` hypothesis **survives** to adjudication.
+
+### Structural or behavioural — which one the claim is decides what `reproduced` needs
+
+- A **structural** claim is about the shape of the code: *"nothing else calls this"*, *"the signature did not change"*, *"the two constants agree"*. A grep, a file read or a facts query **settles** it, and `reproduced` is right when it shows the claim.
+- A **behavioural** claim says running the code does something wrong: a wrong result, a failure, data lost. A grep or a file read shows the code *reads* the way the claim says — which the survey already knew. That is `corroborated`. `reproduced` needs an **execution that exercised this scenario**: the copied function run on the input the claim names, a differential run, the real entry point.
+- **A script you wrote for another hypothesis** may be cited only when its transcript shows the scenario **this** hypothesis names. Otherwise run this one's own, or record what you have.
+
+**The gate checks the mechanical part.** A hypothesis is behavioural when its `evidence` records a `consequence` that happens at head; a `reproduced` verdict on one whose `command` only reads code (`grep`, `rg`, `cat`, `sed -n`, a facts query, …) fails `lastlight-facts probes`.
+
+<!-- Issue #405, measured on one Martian case (13 `reproduced`): 5 were real
+execution, 1 a differential git probe, 4 were greps ("grep confirms … is the
+only direct construction") and 3 cited a script another hypothesis had written.
+Across nine probed cases: 52 reproduced, 16 unprobed, 4 refuted, and no defect
+claim ever refuted — `reproduced` had stopped separating anything. -->
+
+
 
 **Silence is never a refutation.** If you did not run it, it is `unprobed`, not
 `refuted`. Marking a claim `refuted` with no transcript is the single most
@@ -87,8 +104,9 @@ Concretely:
   There is no pressure here to manufacture a verdict — the only wrong answer is
   a claim of execution that did not happen.
 - **The gate reads your transcript's first line.** `lastlight-facts probes`
-  now fails the phase on any `reproduced` or `refuted` whose verdict names no
-  `command`, or whose transcript does not open with that command. A file full of
+  now fails the phase on any `reproduced`, `corroborated` or `refuted` whose
+  verdict names no `command`, or whose transcript does not open with that
+  command. A file full of
   careful reasoning will not close this loop; one line of `$ node probe.mjs`
   followed by its output will.
 
@@ -154,6 +172,27 @@ tracked file to make the copy run.
 something under an existing `node_modules/.bin`, a checked-in script, a compiler
 the image itself ships. If it is not already there, it does not exist for you:
 do not install it.
+
+**"On disk" means inside the checkout** — the repo's own `node_modules/.bin`, a
+checked-in script — plus the harness's own `lastlight-facts`
+(`LASTLIGHT_FACTS_BIN` / `PATH`). Nothing under `$HOME`, a global prefix, a
+package-manager cache or another project counts, whatever happens to be
+installed there. Never search outside the checkout for a dependency (`find /`,
+`find ~`, `ls ~/.nvm`), and never change `PATH` to point outside the workspace.
+If the dependency is not in the checkout, the hypothesis is `unprobed` with
+`"reason": "dependency not installed"`, and it survives to adjudication.
+
+<!-- MEASURED (issue #404, martian oc-survey-glmf arm, probes: static,
+     --sandbox none): once installs were blocked, falsify went looking for the
+     missing dependency on the host — `find / -type d -name dayjs 2>/dev/null`,
+     `find ~/.nvm/versions/node -maxdepth 6 -type d -name dayjs`, listing
+     `~/.nvm/versions/node/<v>/lib/node_modules/lastlight/`, then
+     `export PATH=".../lastlight/node_modules/.bin:$PATH"`; plus `~/.npm`,
+     `~/.cache/yarn`, `/usr/lib/node_modules`, `/usr/local/lib/node_modules`,
+     `/opt`. 24 of 27 out-of-workspace commands. A `dayjs` found in an unrelated
+     global install is not the version the PR pins, so a verdict built on it is
+     evidence about some other tree — and the same case probes differently on
+     every machine. The `host` command-policy class backs this up. -->
 
 **4. Deterministic re-query.** Re-run `lastlight-facts` scoped to the claim
 (`lastlight-facts` if it is on `PATH`, else `/opt/lastlight/bin/lastlight-facts`) —
@@ -221,6 +260,7 @@ A probe against the repo's own source is the normal case, not the fallback. An a
 | **Do NOT edit any `hypotheses/*.jsonl` file** | append-only, owned by the passes that wrote them; your verdicts go in their own file |
 | **Do NOT commit anything** | probe files are scratch |
 | **Do NOT fix the bug** | you are measuring, not repairing |
+| **Do NOT reach outside the checkout** — no `find /` or `find ~`, no reading `~/.nvm`, `~/.npm`, `~/.cache` or a global `node_modules`, no `PATH` pointing outside the workspace | only the checkout and `lastlight-facts` are on disk; a dependency that is not in the checkout is `unprobed`, `"reason": "dependency not installed"` |
 
 Probe files live under `.lastlight/pr-review/probes/` so they are never part of the diff. **Never modify a tracked file to make a probe run** — copy what you need into the probe file instead.
 
@@ -248,7 +288,7 @@ description of it.
 `.lastlight/pr-review/probes/verdicts.jsonl`:
 
 ```
-{ "hypothesis": "contract-001", "verdict": "reproduced|refuted|unprobed",
+{ "hypothesis": "contract-001", "verdict": "reproduced|corroborated|refuted|unprobed",
   "transcript": ".lastlight/pr-review/probes/contract-001.txt" | null,
   "command": "the command you ran" | null,
   "differential": true|false,
@@ -262,7 +302,7 @@ collides with another's. A verdict naming a colliding id answers neither.
 
 Every hypothesis you were asked to probe needs a line here, including the ones
 you could not run — that is what makes *"probed and found nothing"* and *"never
-looked"* different rows instead of the same silence. A `reproduced` or `refuted`
-line **must** carry a `transcript` path that exists **and a `command` that its
-first line echoes**; an `unprobed` line needs neither and always closes the
-gate.
+looked"* different rows instead of the same silence. A `reproduced`,
+`corroborated` or `refuted` line **must** carry a `transcript` path that exists
+**and a `command` that its first line echoes**; an `unprobed` line needs neither
+and always closes the gate.

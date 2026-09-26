@@ -444,8 +444,8 @@ parsed one of them. Measured on the real corpus — keycloak `37429` reads
 | `all` | one envelope, every payload — what a workflow phase writes. With `--stage-diff` it also writes the **staged diff** (`.lastlight/pr-review/diff/`), an index plus one patch per changed file. See below |
 | `prepare` | **not an extractor** — installs dependencies so a probe can be RUN, and writes `probes/env.json`. See below |
 | `discharge` | each `survey` branch's exit gate — every obligation the family owns carries a `QUOTE` / `ABSENT` / `PARTIAL` / `PROBE` discharge in `hypotheses/<family>.jsonl`. Degrades to the `test -s` floor on an unreadable `obligations.json` **or** on `contract: "minimal"`. See below |
-| `probes` | the `falsify` loop's exit gate — every hypothesis that needed a probe has a verdict, and every claim of execution has a transcript |
-| `findings` | the `adjudicate` loop's exit gate — the **conservation check**. See below |
+| `probes` | the `falsify` loop's exit gate — every hypothesis that needed a probe has a verdict, and every claim of evidence (`reproduced` / `corroborated` / `refuted`) has a transcript. Since issue #405 it also refuses `reproduced` on a **behavioural** claim (`isBehaviouralClaim` — a stated consequence live at head, derived from the evidence record) whose every command only reads code (`isReadOnlyCommand`, quote-aware) — that is `corroborated` — and reports transcripts borrowed from another hypothesis (`borrowedFrom`) without failing on them. `probeStrength()` is the one reader of what a verdict counts for |
+| `findings` | the `adjudicate` loop's exit gate — the **conservation check**. See below. `--repair` (the `reconcile` phase) also stamps each hypothesis-derived finding's **derived severity** (`finding-severity.ts`: evidence record + probe strength; the model's value kept as `declaredSeverity`) plus its **`rankEvidence`** (crosses a boundary / strongest probe / merged-hypothesis count, over non-refuted constituents), which the poster breaks severity ties on — the one derivation the evals read too (`buildSeverityIndex`) |
 | `toolchain` | the manifest and what actually resolved |
 
 Three fixes must not regress. Two are carried forward from v3 and live in
@@ -762,7 +762,17 @@ Four decisions that are decisions:
   truncated checklist reproduces the omission it exists to prevent — and the
   outstanding list wraps.
 
-It is **pure**: it reads two artifacts and writes nothing. There is no
+The **gate command** does one write before grading, and it is not a
+verdict: `normalizeFamilyIds` (`hypotheses.ts`) writes each row's canonical id
+into its `id`, keeping the survey's own label as `declared_id`, so the raw file
+and every reader agree on one id scheme (issue #405 — surveys label a
+placeholder row `-000`, which put every label one below its canonical id and
+sent an adjudicator's hand-written self-check "correcting" its citations into
+collisions). Byte-preserving and idempotent; `--ledger` never writes.
+`--ungraded` (the `spec` branch, whose obligations are not on disk) is that
+rewrite plus the non-empty-file floor.
+
+The check itself is **pure**: it reads two artifacts and writes nothing. There is no
 `--repair` analogue here and there must not be — a machine that manufactured
 discharges would be inventing the exact evidence the pipeline exists to demand,
 and a survey's §D12 floor is the loop's own `max_iterations`. What it

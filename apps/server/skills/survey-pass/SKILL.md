@@ -23,6 +23,12 @@ You are **inside the checkout** — your cwd is the repo (`ls -la` shows `.git/`
      An earlier version of this cost 23 of 120 branches their seeded
      obligations, each of which then reported its family clean. -->
 - **Do not install dependencies or run the test suite, the linter or the type-checker.** CI's result is in your context — cite it. Where only running the code could settle a field of the evidence record, record it `unknown`; the falsify phase runs what can be run.
+- **Stay inside the checkout.** "On disk" means this checkout plus the harness's own `lastlight-facts`; nothing under `$HOME`, a global prefix, a package-manager cache or another project counts. Never search outside it (`find /`, `find ~`, `ls ~/.nvm`) — not for a dependency, not for a skill file (yours are at the paths you were handed) — and never point `PATH` outside the workspace. A dependency that is not in the checkout is `unknown` evidence; falsify records the hypothesis `unprobed`, `"reason": "dependency not installed"`.
+  <!-- MEASURED (issue #404, martian oc-survey-glmf arm): survey_branch_spec
+       and survey_branch_enforcement each ran
+       `find / -path /proc -prune -o -name SKILL.md` — the lost-skill-path
+       failure, recovered by walking the whole disk. The `host` command-policy
+       class blocks it; this line is why the model should not try. -->
 - **The patch is your starting point, not your scope.** You have the whole checkout: open changed files in full, grep for the callers the patch never shows you, and follow a changed symbol into files this PR did not touch. The defects worth finding usually live there.
 
 ## The evidence record — you supply facts, the verdict is computed

@@ -372,8 +372,11 @@ const PhaseDefinitionSchema = z
      * Which classes of bash command this agent phase may run (issue #403):
      * `install` (a package-manager install in the checkout), `install-scratch`
      * (an install outside it — `/tmp/probe`, a global — falling back to
-     * `install`'s mode), and `test` (test runners and the project's
-     * `test`/`lint`/`typecheck` scripts). Each is `allow` (the default),
+     * `install`'s mode), `test` (test runners and the project's
+     * `test`/`lint`/`typecheck` scripts), and `host` (issue #404: a command
+     * reaching outside the workspace — a scan rooted at `/` or `~`, a global
+     * install or package-manager cache, `PATH` pointing outside; `/tmp` is
+     * not host). Each is `allow` (the default),
      * `log` (run it and emit a `command_policy` event) or `block` (refuse it,
      * emit the event, and hand the model `reason`). A mode may be read from
      * the run context — `test: { from: probeTestPolicy }` — see

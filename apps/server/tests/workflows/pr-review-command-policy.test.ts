@@ -75,13 +75,14 @@ const modes = (p: ReturnType<typeof effective>) => ({
   install: p?.install,
   "install-scratch": p?.["install-scratch"],
   test: p?.test,
+  host: p?.host,
 });
 
 describe("pr-review command policy (#403)", () => {
   it("survey and adjudicate never install and never run the suite", () => {
     for (const name of ["survey", "adjudicate"]) {
       const p = effective(name, { enabled: true, probes: "full" });
-      expect(modes(p), name).toEqual({ install: "block", "install-scratch": undefined, test: "block" });
+      expect(modes(p), name).toEqual({ install: "block", "install-scratch": undefined, test: "block", host: "block" });
       expect(p?.reason, name).toBeTruthy();
     }
   });
@@ -98,12 +99,14 @@ describe("pr-review command policy (#403)", () => {
       install: "block",
       "install-scratch": "block",
       test: "block",
+      host: "log",
     });
     // full: `prepare` installed the tree; a targeted test is the point of the phase.
     expect(modes(effective("falsify", { enabled: true, probes: "full" }))).toEqual({
       install: "block",
       "install-scratch": "log",
       test: "log",
+      host: "log",
     });
   });
 
@@ -117,6 +120,14 @@ describe("pr-review command policy (#403)", () => {
     expect(modes(effective("review", { enabled: true, probes: "off" }))).toMatchObject({ install: "block", test: "block" });
     // Pipeline off: the one review pass keeps the pr-review skill's install-to-probe affordance.
     expect(modes(effective("review", { enabled: false }))).toMatchObject({ install: "allow", test: "block" });
+  });
+
+  it("host (#404): blocked in every phase that reads, logged in falsify, in every mode", () => {
+    for (const over of [{ enabled: true, probes: "full" }, { enabled: true, probes: "static" }] as const) {
+      for (const name of ["survey", "review", "adjudicate"]) expect(effective(name, over)?.host, name).toBe("block");
+      expect(effective("falsify", over)?.host).toBe("log");
+    }
+    expect(effective("review", { enabled: false })?.host).toBe("block");
   });
 
   it("the probe-mode keys are seeded only when probes are on", () => {
@@ -149,6 +160,8 @@ describe("command_policy schema", () => {
     expect(AgentWorkflowSchema.safeParse(wf({ install: "block", test: { from: "k", default: "log" } })).success).toBe(
       true,
     );
+    expect(AgentWorkflowSchema.safeParse(wf({ host: "block" })).success).toBe(true);
+    expect(AgentWorkflowSchema.safeParse(wf({ host: "deny" })).success).toBe(false);
   });
 
   it("a fan-out branch may carry its own policy", () => {
@@ -160,6 +173,9 @@ describe("command_policy schema", () => {
     const spec = { test: { from: "k", default: "block" as const } };
     expect(resolveCommandPolicy(spec, {} as TemplateContext, "p")).toEqual({ test: "block" });
     expect(resolveCommandPolicy(spec, { k: "log" } as TemplateContext, "p")).toEqual({ test: "log" });
+    expect(resolveCommandPolicy({ host: { from: "h" } }, { h: "block" } as TemplateContext, "p")).toEqual({
+      host: "block",
+    });
     expect(() => resolveCommandPolicy(spec, { k: "blok" } as TemplateContext, "p")).toThrow(/p\.test: .*got "blok"/);
   });
 });

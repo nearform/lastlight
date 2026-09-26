@@ -227,7 +227,10 @@ export function renderTemplate(template: string, ctx: TemplateContext): string {
     const branchHref = `https://github.com/${ctx.owner}/${ctx.repo}/blob/${encodeURIComponent(ctx.branch)}/${ctx.issueDir}/${file}`;
     if (!ctx.externalizeArtifacts) return branchHref;
     if (!ctx.publicUrl) return branchHref;
-    const issueKey = ctx.issueDir.replace(/^\.lastlight\//, "");
+    // Whole-workspace backends relocate the docs to ../.lastlight/<key> (so
+    // `git add -A` skips them); the store key is the bare <key> either way,
+    // matching resume.ts.
+    const issueKey = ctx.issueDir.replace(/^(?:\.\.\/)?\.lastlight\//, "");
     const base = String(ctx.publicUrl).replace(/\/+$/, "");
     const q =
       `repo=${encodeURIComponent(`${ctx.owner}/${ctx.repo}`)}` +

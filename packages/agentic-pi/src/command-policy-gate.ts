@@ -10,7 +10,7 @@
  */
 
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
-import { type CommandPolicy, decideCommand } from "./command-policy.js";
+import { type ClassifyOptions, type CommandPolicy, decideCommand } from "./command-policy.js";
 
 /** Long enough to read the command; short enough that a heredoc can't bloat the stream. */
 const COMMAND_LIMIT = 2000;
@@ -34,6 +34,8 @@ export function commandPolicyGate(
   policy: CommandPolicy | undefined,
   cwd: string,
   emit: (event: CommandPolicyEvent) => void,
+  /** Where the `host` class draws the workspace boundary — see {@link ClassifyOptions}. */
+  options: ClassifyOptions = {},
 ): ExtensionFactory | undefined {
   if (!policy || !Object.keys(policy).some((k) => k !== "reason" && policy[k as keyof CommandPolicy] !== "allow")) {
     return undefined;
@@ -43,7 +45,7 @@ export function commandPolicyGate(
       if (event.toolName !== "bash") return undefined;
       const command = (event.input as { command?: unknown }).command;
       if (typeof command !== "string") return undefined;
-      const decision = decideCommand(policy, command, cwd);
+      const decision = decideCommand(policy, command, cwd, options);
       if (decision.action === "allow") return undefined;
       const action = decision.action;
       const shown = command.length > COMMAND_LIMIT ? `${command.slice(0, COMMAND_LIMIT - 1)}…` : command;

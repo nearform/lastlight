@@ -740,6 +740,35 @@ export const ReviewFindingSchema = z.looseObject({
   category: z.enum(["defect", "correctness-risk", "maintainability", "nit", "verification"]).nullish(),
   fix: z.string().nullish(),
   /**
+   * Issue #405 — WHAT a user or maintainer would hit, as a typed class the
+   * adjudicator writes: `wrong-result`, `failure`, `security`, `data`,
+   * `performance` or `maintenance` keep a posting tier; `preference`,
+   * `no-tests`, `dead-code` and `convention` record the finding at `internal`
+   * (the poster's `computeTier`/`tierFindings` own that mapping — this package
+   * only carries the field). A plain string, not an enum, on purpose: an
+   * unrecognised value must not make the whole document unreadable to the
+   * conservation gate, which is what an enum would do.
+   */
+  impact: z.string().nullish(),
+  /**
+   * What the adjudicator wrote in `severity` before reconcile stamped the
+   * DERIVED one over it (`finding-severity.ts`). Audit data: a disagreement
+   * between the two is evidence about the prompt, never overwritten twice.
+   */
+  declaredSeverity: z.string().nullish(),
+  /**
+   * What the poster breaks a severity tie on, stamped by reconcile from the
+   * evidence and probe record (`finding-severity.ts` `RankEvidence`). Absent
+   * on a finding that cites no hypothesis.
+   */
+  rankEvidence: z
+    .object({
+      crossesBoundary: z.boolean(),
+      probe: z.enum(["executed", "corroborated", "none"]),
+      hypotheses: z.number().int().nonnegative(),
+    })
+    .nullish(),
+  /**
    * The hypothesis ids this finding discharges. **Optional on purpose**: a
    * finding with none is the shipped reviewer's own, which was never
    * hypothesis-derived, and requiring the field would delete the reviewer we

@@ -563,8 +563,10 @@ review:
     coverageTimeoutSeconds: 900
     probeRounds: 2
     falsifyTimeoutSeconds: 600 # the oracle's whole-phase ceiling, all rounds
-    maxInlineComments: 10      # the attention boundary — findings past this go
-                               # to the review body, never dropped
+    maxInlineComments: 5       # the attention boundary — findings past this go
+                               # to the review body, never dropped. Ranked by a
+                               # severity DERIVED from the evidence, not written
+                               # by the model
     maxBodyComments: 5         # body-tier budget. N = top N by severity
                                # (default 5); 0 = no overflow at all;
                                # null = unlimited
@@ -759,6 +761,27 @@ dependencies:
 	</p>
 
 	<p>
+		Under either shape, two things are no longer the adjudicator's call. Every
+		finding states its <em>impact</em> — what a user or maintainer would
+		actually hit — and a finding whose only consequence is a style, layering,
+		locale or presentation preference, missing tests, dead code, or a
+		convention the repository does not follow is recorded but never posted,
+		however well its mechanism was confirmed. And a finding's
+		<em>severity</em>, which is what the two posting budgets rank on, is
+		derived in code from the evidence behind it (does the consequence reach
+		beyond the code that holds it, and did a probe actually execute it) rather
+		than written by the model — so the budgets keep the strongest claims
+		instead of cutting in document order. Within a severity, ties are
+		broken on the same evidence: a boundary-crossing consequence first, then
+		an executed probe (ahead of one that only read code), then how many
+		independent hypotheses the finding merges. The review's opening summary is written
+		only after those budgets have cut, from the findings that actually post, so
+		it never mentions one that was held back (pin
+		<code>models.review-summary</code> to choose the model; unset, it uses
+		<code>models.default</code>).
+	</p>
+
+	<p>
 		<code>probes</code> is a <strong>second switch</strong> under the same
 		block, and it has three values because it used to conflate two decisions.
 		It turns on the <em>oracle</em> — a pass that settles a claim by running
@@ -776,7 +799,10 @@ dependencies:
 		plain <code>node</code>, a tool that is already on disk, and a re-query of
 		Last Light's own deterministic analysis scoped to the claim. Anything it
 		genuinely cannot run is recorded as unprobed with the reason and still
-		reaches the review. That is not a degraded mode: the best published
+		reaches the review. A search or a file read that merely agrees with a
+		claim about what the code <em>does</em> is recorded as corroborated —
+		weaker evidence than a reproduction, and checked mechanically so a grep
+		cannot pass for one. That is not a degraded mode: the best published
 		false-positive-elimination results come from pipelines that never compile
 		the project at all.
 	</p>

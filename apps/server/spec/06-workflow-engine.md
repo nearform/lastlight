@@ -215,7 +215,7 @@ router routed nine, which is why the dashboard showed no Slack trigger for
   output_var?: string;                  // alias for {{this.field}} in later phases
   unrestricted_egress?: boolean;        // bypass strict allowlist for this phase
   web_search?: boolean;                 // enable agentic-pi web tools
-  command_policy?: CommandPolicy;       // allow|log|block per bash command class (install, install-scratch, test); see "Command policy"
+  command_policy?: CommandPolicy;       // allow|log|block per bash command class (install, install-scratch, test, host); see "Command policy"
   requires_sandbox?: "docker" | "gondolin" | "none";  // skip phase (non-failing) if active backend differs
   sandbox_image?: "default" | "qa";     // docker only: "qa" runs on lastlight-sandbox-qa (Playwright+Chromium+ffmpeg); skips if unbuilt
   skip_if?: string | string[];          // skip phase (non-failing) when any expression matches the render context
@@ -1173,20 +1173,29 @@ advance.
 ### Command policy
 
 An agent phase (and a fan-out branch) may declare which classes of bash command
-its agent may run (issue #403):
+its agent may run (issues #403, #404):
 
 ```yaml
 command_policy:
   install: block                                   # allow | log | block
   install-scratch: { from: probeScratchInstallPolicy }
   test: { from: probeTestPolicy }
+  host: log
   reason: "…"                                      # model-facing text for a blocked call
 ```
 
 - **Classes.** `install` — a package-manager install in the checkout;
   `install-scratch` — an install whose directory is outside it (`cd /tmp/probe
   && npm i x`, `--prefix`, `-g`), falling back to `install`'s mode when unset;
-  `test` — test runners and the project's `test`/`lint`/`typecheck` scripts.
+  `test` — test runners and the project's `test`/`lint`/`typecheck` scripts;
+  `host` — a command reaching outside the workspace: `find`/`ls`/`du`/`tree`/
+  `grep -r`/`rg` rooted at `/`, `~` or an absolute path outside the workspace
+  root, a read of a known package location (`~/.nvm`, `~/.npm`, `~/.cache`,
+  `~/.yarn`, `~/.pnpm-store`, a global `node_modules`, `/opt`), `PATH=` /
+  `NODE_PATH=` naming an outside directory, or `node -e` requiring an outside
+  absolute path. The workspace root is the cwd's parent (so the sibling skill
+  bundle and `AGENTS.md` stay reachable) — the guest mount under gondolin.
+  Scratch dirs (`/tmp`, `/var/folders`) and `/opt/lastlight` are never `host`.
   An absent class is `allow`. The schema is `.strict()`: an unknown class or
   mode is a load error.
 - **Modes.** `allow` runs it. `log` runs it and emits a `command_policy` event.
@@ -1205,7 +1214,9 @@ command_policy:
   gets past it.
 
 `pr-review.yaml` sets `survey` and `adjudicate` to `install: block, test:
-block`. `review` blocks `test` always and `install` only when
+block, host: block`, and `review` and `falsify` set `host` to `block` and
+`log` respectively (falsify moves to `block` once an eval arm's log shows
+nothing legitimate is caught). `review` blocks `test` always and `install` only when
 `review.analysis.enabled` (context key `reviewInstallPolicy`; with the pipeline
 off the `pr-review` skill's install-to-probe affordance stands). `falsify`
 blocks `install` in every mode and reads `test` / `install-scratch` from

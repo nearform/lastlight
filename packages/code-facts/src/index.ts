@@ -243,7 +243,8 @@ export {
 } from "./prepare.js";
 export type { ExecFn, ExecResult, PackageManagerId, PrepareOptions } from "./prepare.js";
 
-export { hypothesisId, readHypothesisSet, resolveHypothesis } from "./hypotheses.js";
+export { hypothesisId, normalizeFamilyIds, readHypothesisSet, resolveHypothesis } from "./hypotheses.js";
+export type { NormalizeIdsResult } from "./hypotheses.js";
 /** The one JSONL reader — recovers pretty-printed rows; evals reads through it too. */
 export { parseJsonl } from "./jsonl.js";
 export type { JsonlParse } from "./jsonl.js";
@@ -253,8 +254,27 @@ export type {
   HypothesisRow,
   HypothesisSet,
 } from "./hypotheses.js";
-export { checkProbes, readJsonl, readProbeAnswers, renderProbeCheck, requiresProbe } from "./probes.js";
-export type { CheckProbesOptions, CheckProbesResult, ProbeAnswer, ProbeGapKind } from "./probes.js";
+export {
+  checkProbes,
+  isReadOnlyCommand,
+  PROBE_VERDICTS,
+  probeStrength,
+  readJsonl,
+  readProbeAnswers,
+  renderProbeCheck,
+  requiresProbe,
+  transcriptRecordsCommand,
+} from "./probes.js";
+export type { CheckProbesOptions, CheckProbesResult, ProbeAnswer, ProbeGapKind, ProbeStrength, ProbeVerdict } from "./probes.js";
+/** Issue #405 — a posted finding's severity, derived from evidence + probe strength. ONE derivation for the pipeline (reconcile) and the evals. */
+export {
+  buildSeverityIndex,
+  hypothesisSeverity,
+  renderStampSeverity,
+  stampDerivedSeverity,
+  strongestSeverity,
+} from "./finding-severity.js";
+export type { RankEvidence, SeverityIndex, StampSeverityResult } from "./finding-severity.js";
 
 export { buildEntries, locateExcerpt, pathOfRow, renderAdjudicationDossier } from "./adjudicate-render.js";
 export type { DossierEntries, DossierEntry, DossierOptions, DossierQuote, ExcerptLocation } from "./adjudicate-render.js";
@@ -296,4 +316,4 @@ export type { LoggerPort } from "./log.js";
 
 export * from "./schema.js";
 
-export { deriveVerdict, hasEvidence, severityOf, needsProbeOf, isReassurance, probeReasonOf, type ProbeReason, type SurveyEvidence, type SurveyVerdict, type Discharge, type Severity } from "./survey-verdict.js";
+export { deriveVerdict, effectiveTrigger, hasEvidence, isBehaviouralClaim, severityOf, needsProbeOf, isReassurance, probeReasonOf, type ProbeReason, type SurveyEvidence, type SurveyVerdict, type Discharge, type Severity } from "./survey-verdict.js";

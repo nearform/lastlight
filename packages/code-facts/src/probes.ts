@@ -75,13 +75,155 @@
  * (as of that run) most cases with a differential probe in them. `command` is
  * still split and BOTH halves are still required to appear in the transcript
  * — this loosens *where* the second half may appear, not *whether* it must.
+ *
+ * ── `corroborated`, and the one judgement the gate CAN make (issue #405) ────
+ *
+ * Measured on a Martian cal.com case (run `2026-09-25_052603`, 13
+ * `reproduced`): 5 were real execution, 1 a differential git probe — and 4 were
+ * a grep ("grep confirms … is the only direct construction") and 3 cited a
+ * script another hypothesis had written. Across nine probed cases falsify
+ * returned 52 `reproduced` and never refuted a defect claim, so `reproduced`
+ * had stopped separating anything: a search confirms the code READS the way a
+ * claim says, which the surveys already established by reading it.
+ *
+ * So there is a fourth verdict. `corroborated` is a read — grep, a file view,
+ * a facts query — that supports the claim without executing it. It is held to
+ * the same bar as the two execution verdicts (a transcript that records the
+ * command), because it too claims evidence; it is simply weaker evidence, and
+ * everything downstream (the dossier, the adjudicator, the derived severity in
+ * `finding-severity.ts`) reads it as such.
+ *
+ * And the gate refuses one shape outright: `reproduced` on a BEHAVIOURAL claim
+ * ({@link isBehaviouralClaim} — a stated consequence, live at head) whose
+ * every command is a read ({@link isReadOnlyCommand}). That is mechanical — it
+ * reads the evidence record and the command string, never the transcript's
+ * meaning — so it is satisfiable in one honest edit: relabel it `corroborated`,
+ * or run something. A read against a STRUCTURAL claim ("nothing else calls
+ * this") stays a legitimate `reproduced`: that is exactly what a search
+ * settles.
+ *
+ * What it cannot check is a BORROWED transcript — a script written for another
+ * hypothesis, cited as this one's reproduction. Whether that transcript shows
+ * this hypothesis's scenario is a reading, not a string match, so it is
+ * reported (`borrowedFrom`, a note here, a line in the dossier) and left to the
+ * adjudicator rather than enforced.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
-import { readHypothesisSet, resolveHypothesis } from "./hypotheses.js";
+import { type HypothesisSet, readHypothesisSet, resolveHypothesis } from "./hypotheses.js";
 import { parseJsonl } from "./jsonl.js";
-import { severityOf } from "./survey-verdict.js";
+import { isBehaviouralClaim, severityOf } from "./survey-verdict.js";
+
+/**
+ * The verdict vocabulary, strongest evidence first. `reproduced` and `refuted`
+ * claim EXECUTION; `corroborated` claims a read that supports the claim;
+ * `unprobed` claims nothing and is always free.
+ */
+export const PROBE_VERDICTS = ["reproduced", "corroborated", "refuted", "unprobed"] as const;
+export type ProbeVerdict = (typeof PROBE_VERDICTS)[number];
+
+/**
+ * Commands that READ code rather than run it. Matched on a segment's program
+ * name (its basename, so `/usr/bin/grep` counts), never on its arguments.
+ *
+ * `lastlight-facts` is here on purpose: a facts query is a fresh, independent
+ * artefact and settles structural claims — the falsify ladder's tier 4 — but it
+ * does not execute the behaviour a behavioural claim describes. `git show` /
+ * `git diff` are deliberately NOT: a differential probe compares two versions,
+ * which is the ladder's tier 1 and measured as honest evidence.
+ */
+const READ_ONLY_PROGRAMS = new Set([
+  "grep", "egrep", "fgrep", "rg", "ag", "ack",
+  "cat", "bat", "head", "tail", "less", "more", "nl",
+  "sed", "awk", "wc", "ls", "find", "sort", "uniq", "cut", "tr",
+  "lastlight-facts",
+]);
+/** `git <sub>` spellings that only read the tree. */
+const READ_ONLY_GIT = new Set(["grep", "ls-files"]);
+/** Segment heads that neither read nor execute the code under review. */
+const NEUTRAL_PROGRAMS = new Set(["cd", "echo", "printf", "true", ":", "set", "export"]);
+
+type SegmentKind = "read" | "neutral" | "other";
+
+function segmentKind(segment: string): SegmentKind {
+  // Leading `VAR=value` assignments are environment, not the program.
+  const words = segment.trim().split(/\s+/).filter(Boolean);
+  while (words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0]!)) words.shift();
+  if (!words.length) return "neutral";
+  const program = basename(words[0]!.replace(/^[({]+/, ""));
+  if (NEUTRAL_PROGRAMS.has(program)) return "neutral";
+  if (program === "git") return READ_ONLY_GIT.has(words[1] ?? "") ? "read" : "other";
+  if (program === "lastlight" && words[1] === "facts") return "read";
+  if (program === "xargs") return segmentKind(words.slice(1).join(" ")) === "read" ? "read" : "other";
+  return READ_ONLY_PROGRAMS.has(program) ? "read" : "other";
+}
+
+/**
+ * Is every command in this string a READ — grep, a file view, a facts query —
+ * with nothing that executes code?
+ *
+ * Splits a differential `BASE: … HEAD: …` pair and every pipeline / `&&` /
+ * `||` / `;` segment, and answers `true` only when at least one segment reads
+ * and none runs anything else. `grep -rn x src | wc -l` is a read;
+ * `node probe.mjs | grep FAIL` is not, because `node` ran. Deliberately
+ * forgiving in the other direction: anything it does not recognise counts as
+ * execution, so the gate can only ever refuse the shapes named above.
+ */
+/**
+ * Split a shell line on its UNQUOTED `|`, `||`, `&&`, `;` and newlines. Quote-
+ * aware because a grep alternation is the common case: measured,
+ * `grep -rn "CalendarCache.init\|new CalendarCacheRepository" …` split naively
+ * yields a "program" called `new` and reads as execution.
+ */
+function shellSegments(line: string): string[] {
+  const out: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (quote) {
+      if (ch === "\\" && quote === '"' && i + 1 < line.length) {
+        current += ch + line[++i];
+        continue;
+      }
+      if (ch === quote) quote = null;
+      current += ch;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < line.length) {
+      current += ch + line[++i];
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === "|" || ch === ";" || ch === "\n" || (ch === "&" && line[i + 1] === "&")) {
+      out.push(current);
+      current = "";
+      if ((ch === "|" && line[i + 1] === "|") || ch === "&") i++;
+      continue;
+    }
+    current += ch;
+  }
+  out.push(current);
+  return out;
+}
+
+export function isReadOnlyCommand(command: string): boolean {
+  const parts = differentialParts(command.replace(/^\s*[$>#]\s+/, ""));
+  let reads = 0;
+  for (const part of parts) {
+    for (const segment of shellSegments(part)) {
+      const kind = segmentKind(segment);
+      if (kind === "other") return false;
+      if (kind === "read") reads += 1;
+    }
+  }
+  return reads > 0;
+}
 
 /** A hypothesis line, as far as this gate cares. Everything else is ignored. */
 interface HypothesisLine {
@@ -99,10 +241,13 @@ interface VerdictLine {
 
 export interface ProbeGapKind {
   /** `no-verdict` — asked for, never answered. `no-transcript` — answered with
-   * a claim of execution and nothing to show. `unexecuted` — answered with a
+   * a claim of evidence and nothing to show. `unexecuted` — answered with a
    * transcript that records no command having been run: no `command` field, or
-   * one the transcript's first line does not echo. */
-  kind: "no-verdict" | "no-transcript" | "unexecuted";
+   * one the transcript's first line does not echo. `read-not-reproduction` — a
+   * `reproduced` verdict on a behavioural claim whose every command is a read
+   * (grep, a file view, a facts query): that is `corroborated`, not a
+   * reproduction (issue #405). */
+  kind: "no-verdict" | "no-transcript" | "unexecuted" | "read-not-reproduction";
   hypothesis: string;
   detail: string;
 }
@@ -125,6 +270,13 @@ export interface CheckProbesResult {
    * reading nine files by hand to find that out.
    */
   executed: number;
+  /**
+   * Verdicts (on any hypothesis, required or not) whose transcript belongs to a
+   * DIFFERENT hypothesis — see {@link ProbeAnswer.borrowedFrom}. Reported, not
+   * gated: whether the borrowed run shows this hypothesis's scenario is a
+   * reading of the transcript, which this gate does not make.
+   */
+  borrowed: number;
   gaps: ProbeGapKind[];
   /** Lines that were not JSON at all, counted rather than silently skipped. */
   malformed: number;
@@ -253,6 +405,33 @@ export interface ProbeAnswer {
   transcript: string | null;
   /** Where that transcript actually is on disk, or `null` if nowhere. */
   transcriptPath: string | null;
+  /**
+   * The canonical id of ANOTHER hypothesis this verdict's evidence was written
+   * for, or `null`. Read off the transcript's file name and any
+   * `probes/<name>.<ext>` script the command runs: `probes/spec-002.txt` cited
+   * by `enforcement-004` is `spec-002`'s run. Measured on one case: 3 of 13
+   * `reproduced` verdicts cited another hypothesis's script. It counts for this
+   * hypothesis only if its transcript shows THIS hypothesis's scenario — a
+   * reading the adjudicator makes, so it is surfaced rather than gated.
+   */
+  borrowedFrom: string | null;
+}
+
+/**
+ * Which other hypothesis, if any, a verdict's transcript or probe script was
+ * written for. Every candidate stem goes through {@link resolveHypothesis}, so
+ * a file named after a model-minted alias still resolves, and a stem naming
+ * nothing (`probe.txt`, `run-all.mjs`) is ignored.
+ */
+function borrowedFromOf(set: HypothesisSet, ownId: string, transcript: string | null, command: string | null): string | null {
+  const stems: string[] = [];
+  if (transcript) stems.push(basename(transcript).replace(/\.[^.]+$/, ""));
+  for (const m of (command ?? "").matchAll(/probes\/([A-Za-z0-9_-]+)\.[A-Za-z0-9]+/g)) stems.push(m[1]!);
+  for (const stem of stems) {
+    const resolution = resolveHypothesis(set, stem);
+    if (resolution.kind === "resolved" && resolution.id !== ownId) return resolution.id;
+  }
+  return null;
 }
 
 /**
@@ -291,14 +470,72 @@ export function readProbeAnswers(
   const answers = new Map<string, ProbeAnswer>();
   for (const [id, row] of latest) {
     const transcript = typeof row.transcript === "string" ? row.transcript : null;
+    const command = typeof row.command === "string" && row.command.trim() ? row.command.trim() : null;
     answers.set(id, {
-      verdict: typeof row.verdict === "string" ? row.verdict : "(missing)",
-      command: typeof row.command === "string" && row.command.trim() ? row.command.trim() : null,
+      // Case-normalised: `Reproduced` is the same claim, and a gate that read
+      // it as an unknown verdict would silently excuse it from every check.
+      verdict: typeof row.verdict === "string" ? row.verdict.trim().toLowerCase() : "(missing)",
+      command,
       transcript,
       transcriptPath: transcript === null ? null : resolveTranscript(options, transcript),
+      borrowedFrom: borrowedFromOf(set, id, transcript, command),
     });
   }
   return { answers, malformed };
+}
+
+/**
+ * Does the answer's transcript record the command it claims — first part on
+ * the first non-blank line, every later differential part somewhere in the
+ * head? The one check behind "a claim of evidence has a transcript to show".
+ */
+export function transcriptRecordsCommand(answer: ProbeAnswer): { ok: boolean; firstLine: string | null; readable: boolean } {
+  if (!answer.transcriptPath || !answer.command) return { ok: false, firstLine: null, readable: answer.transcriptPath !== null };
+  const head = transcriptHead(answer.transcriptPath);
+  const firstLine = head === null ? null : firstNonBlankLine(head);
+  // A differential `command` ("BASE: cmd1 HEAD: cmd2") is two invocations,
+  // not one — only the first can be held to "on line one"; the second is
+  // checked against the transcript as a whole, wherever its own echo landed.
+  const [firstPart, ...restParts] = differentialParts(answer.command);
+  const firstOk = firstLine !== null && normaliseCommand(firstLine).includes(normaliseCommand(firstPart!));
+  const restOk = head !== null && restParts.every((part) => normaliseCommand(head).includes(normaliseCommand(part)));
+  return { ok: firstOk && restOk, firstLine, readable: head !== null };
+}
+
+/**
+ * How strong the evidence behind one hypothesis's verdict actually is, read
+ * off the record rather than off the label.
+ *
+ *   `executed`     `reproduced`, with a transcript that records its command,
+ *                  and not a read passed off as a reproduction.
+ *   `corroborated` `corroborated` with its transcript — OR a `reproduced`
+ *                  whose every command is a read against a behavioural claim,
+ *                  which the gate refuses and this demotes if one survives the
+ *                  loop's last iteration anyway.
+ *   `refuted`      `refuted`, with a transcript that records its command.
+ *   `none`         `unprobed`, no answer, or a claim of evidence with nothing
+ *                  on disk to back it.
+ *
+ * The single reader both the dossier and the derived finding severity
+ * (`finding-severity.ts`) use, so "what does this verdict count for?" is
+ * decided once.
+ */
+export type ProbeStrength = "executed" | "corroborated" | "refuted" | "none";
+
+export function probeStrength(answer: ProbeAnswer | null | undefined, row: { evidence?: unknown }): ProbeStrength {
+  if (!answer) return "none";
+  const recorded = transcriptRecordsCommand(answer).ok;
+  switch (answer.verdict) {
+    case "reproduced":
+      if (!recorded) return "none";
+      return isBehaviouralClaim(row) && isReadOnlyCommand(answer.command ?? "") ? "corroborated" : "executed";
+    case "corroborated":
+      return recorded ? "corroborated" : "none";
+    case "refuted":
+      return recorded ? "refuted" : "none";
+    default:
+      return "none";
+  }
 }
 
 export function checkProbes(options: CheckProbesOptions): CheckProbesResult {
@@ -324,6 +561,7 @@ export function checkProbes(options: CheckProbesOptions): CheckProbesResult {
   const byVerdict: Record<string, number> = {};
   const answered = answers;
   for (const row of answered.values()) byVerdict[row.verdict] = (byVerdict[row.verdict] ?? 0) + 1;
+  const borrowed = [...answered.values()].filter((a) => a.borrowedFrom !== null && a.verdict !== "unprobed").length;
   const gaps: ProbeGapKind[] = [];
   let claimedExecution = 0;
   let executed = 0;
@@ -336,8 +574,12 @@ export function checkProbes(options: CheckProbesOptions): CheckProbesResult {
     const verdict = row.verdict === "(missing)" ? "" : row.verdict;
     // `unprobed` (and anything else) stops here, and deliberately: the honest
     // answer has to stay costless or the gate teaches dishonesty.
-    if (verdict !== "reproduced" && verdict !== "refuted") continue;
-    claimedExecution += 1;
+    if (verdict !== "reproduced" && verdict !== "refuted" && verdict !== "corroborated") continue;
+    // `corroborated` claims evidence too — a read that supports the claim — so
+    // it is held to the same transcript bar. It does not claim EXECUTION, so it
+    // is not counted in the executed/claimed ratio below.
+    const claimsExecution = verdict !== "corroborated";
+    if (claimsExecution) claimedExecution += 1;
     // THE rule, mechanised. A refutation with nothing to show for it is an
     // argument wearing a verdict's clothes, and it is the one move that costs
     // recall outright.
@@ -363,15 +605,8 @@ export function checkProbes(options: CheckProbesOptions): CheckProbesResult {
       });
       continue;
     }
-    const head = transcriptHead(resolved);
-    const firstLine = head === null ? null : firstNonBlankLine(head);
-    // A differential `command` ("BASE: cmd1 HEAD: cmd2") is two invocations,
-    // not one — only the first can be held to "on line one"; the second is
-    // checked against the transcript as a whole, wherever its own echo landed.
-    const [firstPart, ...restParts] = differentialParts(command);
-    const firstOk = firstLine !== null && normaliseCommand(firstLine).includes(normaliseCommand(firstPart));
-    const restOk = head !== null && restParts.every((part) => normaliseCommand(head).includes(normaliseCommand(part)));
-    if (!firstOk || !restOk) {
+    const { ok, firstLine } = transcriptRecordsCommand(row);
+    if (!ok) {
       gaps.push({
         kind: "unexecuted",
         hypothesis: id,
@@ -382,7 +617,47 @@ export function checkProbes(options: CheckProbesOptions): CheckProbesResult {
       });
       continue;
     }
-    executed += 1;
+    // Issue #405, the mechanical half. A grep that confirms the code reads the
+    // way a behavioural claim says has not shown the consequence happen — that
+    // is `corroborated`. Structural claims are untouched: a search is exactly
+    // what settles "nothing else calls this".
+    const record = set.byId.get(id);
+    if (
+      verdict === "reproduced" &&
+      record &&
+      isBehaviouralClaim(record.row as { evidence?: unknown }) &&
+      isReadOnlyCommand(command)
+    ) {
+      gaps.push({
+        kind: "read-not-reproduction",
+        hypothesis: id,
+        detail:
+          `verdict "reproduced" rests on \`${command}\`, which only READS code, and this hypothesis claims a behaviour ` +
+          `(its evidence records a consequence at head) — a search shows the code reads the way the claim says, not that ` +
+          `the consequence happens. Record it "corroborated", or run something that exercises the scenario`,
+      });
+      continue;
+    }
+    if (claimsExecution) executed += 1;
+  }
+  // The same read-not-reproduction rule on hypotheses nobody REQUIRED a probe
+  // for: a volunteered `reproduced` is still read downstream as an execution
+  // (the dossier, the derived severity), so it is held to the same line. Only
+  // this rule — the transcript bar stays scoped to required ids, as it always
+  // was, so a volunteered verdict cannot make the gate harder to close than
+  // relabelling it.
+  for (const [id, row] of answered) {
+    if (required.has(id) || row.verdict !== "reproduced" || !row.command) continue;
+    const record = set.byId.get(id);
+    if (!record || !isBehaviouralClaim(record.row as { evidence?: unknown }) || !isReadOnlyCommand(row.command)) continue;
+    if (!transcriptRecordsCommand(row).ok) continue;
+    gaps.push({
+      kind: "read-not-reproduction",
+      hypothesis: id,
+      detail:
+        `verdict "reproduced" rests on \`${row.command}\`, which only READS code, and this hypothesis claims a behaviour — ` +
+        `record it "corroborated", or run something that exercises the scenario`,
+    });
   }
 
   if (families.length === 0) {
@@ -406,6 +681,11 @@ export function checkProbes(options: CheckProbesOptions): CheckProbesResult {
           : ""),
     );
   }
+  if (borrowed > 0) {
+    notes.push(
+      `${borrowed} verdict(s) cite a transcript or script written for ANOTHER hypothesis — each counts only if that run shows this hypothesis's own scenario`,
+    );
+  }
 
   return {
     required: [...required].sort(),
@@ -413,6 +693,7 @@ export function checkProbes(options: CheckProbesOptions): CheckProbesResult {
     byVerdict,
     claimedExecution,
     executed,
+    borrowed,
     gaps,
     malformed,
     satisfied: gaps.length === 0,
