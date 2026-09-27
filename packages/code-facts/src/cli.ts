@@ -130,7 +130,7 @@ passes; it reads no quote and judges no claim):
                       first candidate file that has one, else the \`pr\` unit.
                       Absent or malformed ⇒ no spec obligation, named in degraded[]
   --out <file>        where units.json goes      (default: <dir>/units.json)
-  --max-chars <n>     per-request budget in characters (default 40000). Over it:
+  --max-chars <n>     per-request budget in characters (default 100000). Over it:
                       trim neighbours, then drop them, then split the unit into
                       overlapping passes — each step marks the unit \`truncated\`
                       and names itself in degraded[]

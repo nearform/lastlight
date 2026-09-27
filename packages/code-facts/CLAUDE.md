@@ -1253,7 +1253,7 @@ lastlight-facts units-ingest --dir .lastlight/pr-review          # → hypothese
   <path>`. The reply's `line` must be a tag; `requestLineTags` reads them back
   OUT of the request, so the ingest judges a reply against exactly what the
   model saw, and a row's quote text is the shown line — it always resolves.
-- **The shrink cascade** holds each request to `--max-chars` (40 000): trim
+- **The shrink cascade** holds each request to `--max-chars` (100 000): trim
   callers/callees/imports/candidates, then drop them, then — a module unit —
   spread its regions in order over as few units as fit at full context, then
   split any one region or symbol still too long into overlapping passes (each

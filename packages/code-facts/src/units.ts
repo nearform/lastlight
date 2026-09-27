@@ -83,11 +83,15 @@ import {
 export { UNITS_PROMPT_VERSION, UNITS_SHARED_PREFIX } from "./units-render.js";
 
 /**
- * The per-request budget, in characters (~4 per token). Sized so an ordinary
- * method plus its neighbours and a handful of obligations fits whole; the
- * cascade exists for the tail, not the median.
+ * The per-request budget, in characters (~4 per token). The cascade exists for
+ * the tail, not the median: a median unit request is ~7k chars. It was 40 000,
+ * an unmeasured first guess — about 10k tokens against 200k+ context windows —
+ * and the only unit it ever cut on the skillspro replays was `profilesRoute`
+ * (~680 lines), whose neighbours were trimmed while the audit found missing
+ * context to be the largest single cause of an uncredited gold. 100 000 (~25k
+ * tokens) leaves room for richer neighbours without letting one unit dominate.
  */
-export const DEFAULT_MAX_REQUEST_CHARS = 40_000;
+export const DEFAULT_MAX_REQUEST_CHARS = 100_000;
 
 /**
  * Units per document. Each unit is one model call, so this is a spend bound.
