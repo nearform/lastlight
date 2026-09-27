@@ -137,6 +137,23 @@ const isPlainObject = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v);
 
 /**
+ * `JSON.parse`, plus ONE repair: a `"line"` number written with leading zeros.
+ * The request tags lines `L0142`, and models copy the tag's padding into the
+ * answer (`"line": 0142`) — invalid JSON, which lost a whole unit's reply in the
+ * first replay smoke (1680-r1, Haiku 4.5). Only the `line` key is repaired, and
+ * only on a span that failed to parse as written. The core handler mirrors this.
+ */
+export function parseReplyJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch (err) {
+    const repaired = text.replace(/("line"\s*:\s*)0+(\d)/g, "$1$2");
+    if (repaired === text) throw err;
+    return JSON.parse(repaired) as unknown;
+  }
+}
+
+/**
  * Every balanced top-level `{…}` span of `text` that parses as a JSON object,
  * in order of appearance. An unclosed `{` is skipped and scanning CONTINUES one
  * character later (it never ends the scan); a balanced span that is not JSON
@@ -153,7 +170,7 @@ function balancedObjects(text: string): Record<string, unknown>[] {
     const end = closingBrace(text, start);
     if (end !== -1) {
       try {
-        const value = JSON.parse(text.slice(start, end)) as unknown;
+        const value = parseReplyJson(text.slice(start, end));
         if (isPlainObject(value)) {
           out.push(value);
           pos = end;
@@ -190,7 +207,7 @@ export function locateUnitObject(
   if (direct) {
     let whole = false;
     try {
-      const parsed = JSON.parse(raw.trim()) as unknown;
+      const parsed = parseReplyJson(raw.trim());
       whole = isPlainObject(parsed) && parsed.unitId === unitId;
     } catch {
       whole = false;

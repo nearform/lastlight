@@ -365,6 +365,20 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 }
 
 /**
+ * `JSON.parse` plus one repair — a `"line"` number with leading zeros, copied
+ * from the request's `L0142` tag. Mirrors code-facts' `parseReplyJson`.
+ */
+function parseReplyJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch (err) {
+    const repaired = text.replace(/("line"\s*:\s*)0+(\d)/g, "$1$2");
+    if (repaired === text) throw err;
+    return JSON.parse(repaired) as unknown;
+  }
+}
+
+/**
  * Every balanced top-level `{…}` span in `text` that parses as a JSON object,
  * in order. An UNCLOSED `{` (a stray brace in prose, a truncated reply) is
  * skipped and the scan CONTINUES from the next character — never abandoned —
@@ -379,7 +393,7 @@ function objectSpans(text: string): Record<string, unknown>[] {
     const end = objectEnd(text, start);
     if (end !== -1) {
       try {
-        const value = JSON.parse(text.slice(start, end)) as unknown;
+        const value = parseReplyJson(text.slice(start, end));
         if (isPlainObject(value)) {
           out.push(value);
           pos = end;

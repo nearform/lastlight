@@ -690,6 +690,7 @@ const CASES: [string, string, string, string | null][] = [
   ["unitId is a number, not the string", '{"unitId":1,"answers":[],"defects":[]}', "1", null],
   ["none", "I could not produce an answer.", "u-001", null],
   ["empty", "", "u-001", null],
+  ["line copied with the tag's zero padding", '{"unitId":"u-001","answers":[],"defects":[{"family":"state","claim":"c","line": 0142,"evidence":{}}]}', "u-001", "u-001"],
 ];
 
 /** [name, value, unitId, usable]. */
