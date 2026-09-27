@@ -39,6 +39,7 @@ import {
 } from "lastlight-shared/sandbox-services";
 import { AgenticShim } from "../event-shim.js";
 import { QuotaExceededError } from "../../sandbox/k8s/quota.js";
+import type { ResourceUsage } from "../../sandbox/resource-usage.js";
 import { projectSlugForCwd } from "../../session-log.js";
 import type { Span } from "@opentelemetry/api";
 import { recordError, recordExecutionMetrics, setSpanAttributes } from "../../telemetry/index.js";
@@ -612,11 +613,34 @@ export async function runSandboxedAgent(
   // Taken before provisioning, so a single-turn phase's recorded duration keeps
   // including its own provision — see {@link AgentTurnOpts.startTime}.
   const startTime = Date.now();
-  return withSandbox(ctx, (sandbox, prov) =>
-    withWorkspaceArtifacts(sandbox, prov, ctx, () =>
-      runAgentIn(sandbox, prov, prompt, ctx, { span, startTime }),
+  return withSandbox(ctx, async (sandbox, prov) =>
+    withSandboxUsage(
+      sandbox,
+      await withWorkspaceArtifacts(sandbox, prov, ctx, () =>
+        runAgentIn(sandbox, prov, prompt, ctx, { span, startTime }),
+      ),
     ),
   ).catch(quotaAsResult(startTime));
+}
+
+/**
+ * Read the sandbox's cgroup usage before {@link withSandbox} disposes it. Never
+ * throws: a failed read leaves the fields absent ("not measured"), and the
+ * phase's own outcome stands.
+ */
+export async function readSandboxUsage(sandbox: Sandbox): Promise<ResourceUsage | undefined> {
+  try {
+    return await sandbox.usage?.();
+  } catch (err) {
+    log.warn("sandbox usage read failed", { backend: sandbox.backend, err });
+    return undefined;
+  }
+}
+
+/** Fold a single-phase sandbox's usage into that phase's result. */
+async function withSandboxUsage(sandbox: Sandbox, result: ExecutionResult): Promise<ExecutionResult> {
+  const usage = await readSandboxUsage(sandbox);
+  return usage ? { ...result, ...usage } : result;
 }
 
 // ── Deterministic command path (type: bash / type: script) ───────────
@@ -696,7 +720,9 @@ export async function runSandboxedCommand(
 
   const startTime = Date.now();
   try {
-    return await withSandbox(ctx, (sandbox, prov) => runCommandIn(sandbox, prov, spec, ctx, cmdOpts));
+    return await withSandbox(ctx, async (sandbox, prov) =>
+      withSandboxUsage(sandbox, await runCommandIn(sandbox, prov, spec, ctx, cmdOpts)),
+    );
   } catch (err: unknown) {
     // A k8s ResourceQuota rejection on a bash/script phase is backpressure too:
     // surface it as an error_quota RESULT so the runner requeues (spec/09-sandbox.md (Concurrency)).
@@ -826,6 +852,12 @@ export interface SandboxSession {
     config: ExecutorConfig,
     opts?: CommandRunOpts & { onSessionId?: (id: string) => void },
   ): Promise<ExecutionResult>;
+  /**
+   * The shared sandbox's cumulative CPU / memory so far. On docker every turn
+   * is a `docker exec` into ONE container, so this is the session's total and
+   * belongs to no single turn. Undefined when the backend can't measure it.
+   */
+  usage(): Promise<ResourceUsage | undefined>;
 }
 
 /**
@@ -871,6 +903,7 @@ export async function withSandboxSession<T>(
               writeSession: opts?.writeSession,
             },
           ),
+        usage: () => readSandboxUsage(sandbox),
       };
       return fn(session);
     }),

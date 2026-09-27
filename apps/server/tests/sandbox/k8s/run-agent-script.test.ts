@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildRunAgentScript } from "#src/sandbox/k8s/run-agent-script.js";
+import { CGROUP_USAGE_SCRIPT } from "#src/sandbox/resource-usage.js";
 
 /** Minimal valid input — every flag off, no skills. Individual tests spread
  *  over this to flip one thing at a time. */
@@ -24,6 +25,14 @@ describe("buildRunAgentScript", () => {
   it("always runs agentic-pi with the model bound to $1, sandbox none, no-session", () => {
     const script = buildRunAgentScript(base);
     expect(script).toContain('agentic-pi run --model "$1" --sandbox none --no-session');
+  });
+
+  it("reports the pod's cgroup usage after the agent (and any upload), before exiting with its code", () => {
+    const script = buildRunAgentScript({ ...base, artifactUpload: true });
+    const usageAt = script.indexOf(CGROUP_USAGE_SCRIPT);
+    expect(usageAt).toBeGreaterThan(script.indexOf("rc=$?"));
+    expect(usageAt).toBeGreaterThan(script.indexOf("sandbox-artifacts"));
+    expect(script.endsWith("exit $rc")).toBe(true);
   });
 
   describe("--gate-timeout (#385)", () => {

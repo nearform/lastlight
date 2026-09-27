@@ -19,6 +19,7 @@
  *   fan-out branch b          → survey_branch_b
  *   fan-out branch b's retry  → survey_branch_b_retry
  *   fan-out branch b's check  → survey_branch_b_check
+ *   fan-out shared sandbox    → survey_sandbox
  *
  * `n` is the 1-based cycle; `fix_k` and `recheck_k` pair within a cycle. The
  * `_retry` suffix is the one-shot re-run of a generic-loop iteration whose first
@@ -52,7 +53,8 @@ export type PhaseKind =
   | "branch"
   | "branchRetry"
   | "branchCheck"
-  | "branchRegate";
+  | "branchRegate"
+  | "sandbox";
 
 export class PhaseRef {
   constructor(
@@ -117,6 +119,16 @@ export class PhaseRef {
     return new PhaseRef(base, "branchRegate", undefined, name);
   }
 
+  /**
+   * The resource-usage row of a fan-out's ONE shared sandbox. On docker every
+   * branch is a `docker exec` into the same container, so its CPU and memory
+   * belong to no single branch — this row carries the container's total rather
+   * than a split that would imply precision the cgroup does not have.
+   */
+  static sandbox(base: string): PhaseRef {
+    return new PhaseRef(base, "sandbox");
+  }
+
   format(): string {
     switch (this.kind) {
       case "phase":
@@ -139,6 +151,8 @@ export class PhaseRef {
         return `${this.base}_branch_${this.branch}_check`;
       case "branchRegate":
         return `${this.base}_branch_${this.branch}_regate`;
+      case "sandbox":
+        return `${this.base}_sandbox`;
     }
   }
 
@@ -146,7 +160,7 @@ export class PhaseRef {
    * Parse a label back into a PhaseRef. Recognizes only the generated
    * `_fix_N` / `_recheck_N` / `_iter_N` / `_iter_N_retry` / `_iter_N_check`
    * and `_branch_<name>` / `_branch_<name>_retry` / `_branch_<name>_check` /
-   * `_branch_<name>_regate`
+   * `_branch_<name>_regate` and `_sandbox`
    * suffixes; anything else (including a
    * bare declared name or the dropped legacy `_N` form) parses as a plain
    * `phase` whose base is the whole string.
@@ -174,6 +188,8 @@ export class PhaseRef {
     if (m) return new PhaseRef(m[1], "recheck", Number(m[2]));
     m = label.match(/^(.*)_iter_(\d+)$/);
     if (m) return new PhaseRef(m[1], "iter", Number(m[2]));
+    m = label.match(/^(.*)_sandbox$/);
+    if (m) return new PhaseRef(m[1], "sandbox");
     return new PhaseRef(label, "phase");
   }
 }

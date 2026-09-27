@@ -27,6 +27,7 @@
  */
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   doublePrecision,
   index,
@@ -81,6 +82,12 @@ export const executions = pgTable(
     outputText: text("output_text"),
     extensionStatus: jsonb("extension_status").$type<ExtensionStatusMap>(),
     skillsStatus: jsonb("skills_status").$type<SkillsStatus>(),
+    // Sandbox resource usage, read from the sandbox's own cgroup at teardown.
+    // NULL on in-process backends and on fan-out branch rows (their shared
+    // container is recorded on the fan-out's `_sandbox` row).
+    cpuSeconds: doublePrecision("cpu_seconds"),
+    peakMemoryBytes: bigint("peak_memory_bytes", { mode: "number" }),
+    memoryLimitBytes: bigint("memory_limit_bytes", { mode: "number" }),
   },
   (t) => [
     index("idx_executions_trigger").on(t.triggerType, t.triggerId),

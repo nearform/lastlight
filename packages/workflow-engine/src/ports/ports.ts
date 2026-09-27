@@ -184,6 +184,9 @@ export interface ExecutionFinish {
   outputTokens?: number;
   apiDurationMs?: number;
   stopReason?: string;
+  cpuSeconds?: number;
+  peakMemoryBytes?: number;
+  memoryLimitBytes?: number;
   /**
    * Handed over as OBJECTS, not JSON text: the embedder's columns are real
    * JSON columns, so it owns the serialization. Stringifying here would

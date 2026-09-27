@@ -35,6 +35,7 @@ import { withAgentSession } from "../../engine/agent-executor.js";
 import type { SandboxSession } from "../../engine/executors/orchestrator.js";
 import type { SandboxBackend } from "../../config/config.js";
 import type { SandboxFactory } from "../../sandbox/sandbox.js";
+import type { ResourceUsage } from "../../sandbox/resource-usage.js";
 import { safeSpanAttributes, withSpan } from "../../telemetry/index.js";
 import { OI, SpanKind, splitProviderModel } from "../../telemetry/openinference.js";
 import { logger } from "../../logging/logger.js";
@@ -406,6 +407,7 @@ export class FanoutHandler implements PhaseTypeHandler {
     const policy = phase.on_branch_soft_failure ?? DEFAULT_BRANCH_SOFT_POLICY;
 
     let outcomes: BranchOutcome[];
+    const sessionStartedAt = Date.now();
     try {
       outcomes = await withAgentSession(
         this.phaseConfig(phase),
@@ -429,6 +431,8 @@ export class FanoutHandler implements PhaseTypeHandler {
               await this.runGates(session, phase, failing);
             }
           }
+          // Inside the callback: the session disposes the sandbox on return.
+          await this.recordSandboxUsage(phase, sessionStartedAt, await session.usage());
           return ran;
         },
       );
@@ -804,6 +808,45 @@ export class FanoutHandler implements PhaseTypeHandler {
       }
     }
     return { met, ran: error === undefined, timedOut, output };
+  }
+
+  /**
+   * Record the shared sandbox's CPU / memory on its own `<phase>_sandbox` row.
+   *
+   * On docker every branch is a `docker exec` into ONE container, so the cgroup
+   * total belongs to no single branch. It goes on one row, once, rather than
+   * split across the branch rows — an even split would imply a precision the
+   * cgroup does not have. The row carries no tokens or cost, like a `_check`.
+   */
+  private async recordSandboxUsage(
+    phase: PhaseDefinition,
+    startedAt: number,
+    usage: ResourceUsage | undefined,
+  ): Promise<void> {
+    const { workflowName, triggerId, githubAccess, workflowId, store: db } = this.run;
+    if (!db || !usage) return;
+    const executionId = randomUUID();
+    try {
+      await db.executions.recordStart({
+        id: executionId,
+        triggerType: "webhook",
+        triggerId,
+        skill: `${workflowName}:${PhaseRef.sandbox(phase.name).format()}`,
+        owner: githubAccess.owner,
+        repo: githubAccess.repo,
+        startedAt: new Date(startedAt).toISOString(),
+        workflowRunId: workflowId,
+      });
+      await db.executions.recordFinish(executionId, {
+        success: true,
+        turns: 0,
+        durationMs: Date.now() - startedAt,
+        stopReason: "success",
+        ...usage,
+      });
+    } catch (err) {
+      log.warn("Failed to record fan-out sandbox usage row", { phase: phase.name, err });
+    }
   }
 
   // ── Reporting ──────────────────────────────────────────────────────────────

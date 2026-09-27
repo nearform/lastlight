@@ -296,6 +296,16 @@ export interface ExecutionResult {
   apiDurationMs?: number;
   /** Mapped stop reason ("success" / "error_*" / etc.). */
   stopReason?: string;
+  /**
+   * CPU time the sandbox consumed (cgroup `cpu.stat` usage_usec), in seconds.
+   * Absent for in-process backends and for a fan-out branch, whose shared
+   * container is recorded once on the fan-out's `_sandbox` row instead.
+   */
+  cpuSeconds?: number;
+  /** The sandbox's memory high-water mark (cgroup `memory.peak`), in bytes. */
+  peakMemoryBytes?: number;
+  /** The sandbox's memory limit (cgroup `memory.max`); absent when unlimited. */
+  memoryLimitBytes?: number;
   /** Which agentic-pi extensions were active for this run, keyed by name. */
   extensions?: ExtensionStatusMap;
   /** Skill-loading status captured from agentic-pi's `skills_status` event. */

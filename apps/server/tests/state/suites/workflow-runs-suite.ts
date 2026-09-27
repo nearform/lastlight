@@ -1250,8 +1250,9 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
       /** Record one finished execution attributed to a workflow run. */
       async function addExecution(
         runId: string,
-        tokens: { input?: number; output?: number; cacheRead?: number },
+        tokens: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number },
         costUsd: number,
+        cpuSeconds?: number,
       ) {
         const id = randomUUID();
         await db.executions.recordStart({
@@ -1271,17 +1272,29 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
           inputTokens: tokens.input,
           outputTokens: tokens.output,
           cacheReadInputTokens: tokens.cacheRead,
+          cacheCreationInputTokens: tokens.cacheWrite,
+          cpuSeconds,
         });
       }
 
-      it("sums cost and input+output+cacheRead tokens per run", async () => {
+      it("sums cost and input+output+cacheRead+cacheWrite tokens per run", async () => {
         const runId = await makeRun();
-        await addExecution(runId, { input: 100, output: 20, cacheRead: 5 }, 0.01);
+        await addExecution(runId, { input: 100, output: 20, cacheRead: 5, cacheWrite: 7 }, 0.01);
         await addExecution(runId, { input: 200, output: 30, cacheRead: 0 }, 0.02);
 
         const run = (await db.runs.list()).runs.find((r) => r.id === runId)!;
-        expect(run.totalTokens).toBe(355); // (100+20+5) + (200+30+0)
+        expect(run.totalTokens).toBe(362); // (100+20+5+7) + (200+30+0)
         expect(run.totalCostUsd).toBeCloseTo(0.03, 6);
+      });
+
+      it("sums sandbox CPU seconds per run, counting unmeasured rows as nothing", async () => {
+        const runId = await makeRun();
+        await addExecution(runId, {}, 0, 12.5);
+        await addExecution(runId, {}, 0, 30);
+        await addExecution(runId, {}, 0);
+
+        const run = (await db.runs.list()).runs.find((r) => r.id === runId)!;
+        expect(run.totalCpuSeconds).toBeCloseTo(42.5, 6);
       });
 
       it("reports zero totals for a run with no executions", async () => {

@@ -72,13 +72,30 @@ CREATE TABLE IF NOT EXISTS executions (
   workflow_run_id TEXT,                 -- → workflow_runs.id
   output_text TEXT,                     -- large final assistant text for loop iterations
   triggered_by TEXT,                    -- actor login/handle (joins users.login)
-  trigger_actor_type TEXT               -- github | slack | cli | cron | admin | system
+  trigger_actor_type TEXT,              -- github | slack | cli | cron | admin | system
+  cpu_seconds REAL,                     -- sandbox cgroup CPU time; NULL = not measured
+  peak_memory_bytes INTEGER,            -- sandbox cgroup memory.peak (bigint on Postgres)
+  memory_limit_bytes INTEGER            -- sandbox cgroup memory.max; NULL = unlimited
 );
 
 CREATE INDEX idx_executions_trigger      ON executions(trigger_type, trigger_id);
 CREATE INDEX idx_executions_skill        ON executions(skill, started_at);
 CREATE INDEX idx_executions_workflow_run ON executions(workflow_run_id, skill);
 ```
+
+**Token and resource totals.** Every roll-up — `dailyStats` / `hourlyStats`
+(the dashboard's Stats panel) and the per-run `totalTokens` on the run list —
+counts tokens as `input + output + cache_read + cache_creation`. Cache writes
+are counted because providers disagree on where the uncached prompt prefix
+lands: Anthropic reports it as `cache_creation_input_tokens`, OpenAI-compatible
+providers (OpenCode Zen's GLM / Kimi / DeepSeek) as `input_tokens`. Leaving the
+write bucket out made an Anthropic run look almost input-free and an
+open-model run input-heavy for the same work. `cpu_seconds` rolls up as a SUM
+(per bucket and per run, `totalCpuSeconds`); `peak_memory_bytes` as a **MAX**
+per bucket — the useful sizing number is the biggest single sandbox, never a
+sum. Both are NULL for backends that can't measure (see
+[Sandbox → Resource usage](/spec/09-sandbox#resource-usage)); a NULL
+contributes nothing, never a zero.
 
 `output_text` is *only* populated when a loop iteration's
 `scratch.<key>.lastOutputExecutionId` points at this row. The full
