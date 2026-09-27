@@ -37,7 +37,7 @@
 import type { Obligation } from "./seed.js";
 
 /** Bump whenever the rendering below changes, so cached readings are not reused across it. */
-export const UNITS_PROMPT_VERSION = "units-v3";
+export const UNITS_PROMPT_VERSION = "units-v4";
 
 /** One family's question, compact. `closes` is what `control_site` means for it. */
 export const FAMILY_QUESTIONS: Record<string, { question: string; closes: string }> = {
@@ -239,7 +239,32 @@ const NOT_FINDINGS = [
   "NOT FINDINGS (category rules, never a confidence bar): a pre-existing issue this change merely sits next to",
   "(unless the change is what makes it wrong); anything a compiler or linter catches (unless the code silences it);",
   "a restatement of the intended change; a point deliberately silenced; generated files; \"X is never validated\"",
-  "with no consumer that then misbehaves. Doubt is not on this list — record it, and let the evidence say unknown.",
+  "with no consumer that then misbehaves. For an OBLIGATION, doubt is not on this list — answer it, and let the",
+  "evidence say unknown.",
+];
+
+/**
+ * What an unprompted defect must meet. The first replay over the 8 skillspro
+ * cases (units-v3, which told the model to over-produce) wrote 764 defects
+ * against 482 obligation answers; 320 of those defects were `code_change`
+ * ("breaks if someone later edits X") and 157 were spec nitpicks about tests
+ * and comments. Of the 11 rows the judge credited with a gold, none was
+ * `code_change` and none was a spec defect — every one was reachable at head
+ * through input or state, in or caused by a changed line, with a concrete
+ * outcome, provable from the shown code. The bar is those four facts. It
+ * governs `defects` only: obligations are always answered, doubt included.
+ */
+const DEFECT_BAR = [
+  "DEFECT BAR — a defect entry meets ALL of these, or it is left out:",
+  "  1. A changed (+) or removed (-|) line causes it, or is what makes it reachable.",
+  "  2. It happens at head through real input or state (trigger \"input\" or \"state\"). \"Only if someone later edits",
+  "     the code\" (code_change) is not a defect.",
+  "  3. You can name the wrong outcome concretely: which value, state, response or side effect comes out wrong, for whom.",
+  "  4. The lines that prove it are shown here. If proving it needs a definition, caller or type you cannot see, it is",
+  "     not a defect — do not speculate about unseen code.",
+  "  At most 3 defects per unit, the most consequential first. A defect always has a consequence; a check that holds",
+  "  belongs in an obligation's answer, never in defects. A spec-family defect is only a changed comment or doc whose",
+  "  claim the code at head contradicts — never a test's own assertions or wording.",
 ];
 
 /**
@@ -282,8 +307,8 @@ function renderSharedPrefix(): string {
     "neighbours a deterministic analysis found for it. You cannot open files or run anything — answer from what is",
     "shown, and write `unknown` where only something not shown could settle a field. Two jobs:",
     "  1. Answer every obligation the unit lists under OBLIGATIONS, each exactly once.",
-    "  2. Record every other defect you can see in the unit, under the family whose question it answers.",
-    "Over-produce: later phases can delete a risk you wrote down and can never recover one you did not.",
+    "  2. Report the defects this change introduces that a user or caller would actually hit — only those that",
+    "     meet the DEFECT BAR below. Most units have none or one; [] is a normal, honest answer.",
     "Reply with ONE JSON object and nothing else.",
   );
   L.push("");
@@ -298,6 +323,8 @@ function renderSharedPrefix(): string {
   L.push(...familyLines(ALWAYS_ASKED));
   L.push("");
   L.push(...NOT_FINDINGS);
+  L.push("");
+  L.push(...DEFECT_BAR);
   L.push("");
   L.push("EVIDENCE RECORD — every entry carries all twelve fields, facts not verdicts:");
   L.push(...EVIDENCE_FIELDS);
@@ -315,7 +342,7 @@ function renderSharedPrefix(): string {
   L.push('  - "unitId" is the id the unit states below.');
   L.push('  - "answers" holds one entry per obligation the unit lists, each id EXACTLY ONCE, under the family it is listed');
   L.push("    with; [] when it lists none.");
-  L.push('  - "defects" holds everything else you found; [] only if you found nothing. Its family is one the unit is asked.');
+  L.push('  - "defects" holds at most 3 entries that meet the DEFECT BAR; [] when none does. Its family is one the unit is asked.');
   L.push('  - "line" is the integer of a tag shown in this request (42 for L0042): the line the claim is about.');
   L.push('  - "file" is the FILE header that tag sits under: required when the unit shows more than one file, else optional.');
   L.push("  - control_site may name any site shown here, a caller included, as path:line.");
@@ -427,7 +454,7 @@ export function renderUnitSpecific(m: RequestModel): string {
 
   L.push(`OBLIGATIONS (${ids.length})`);
   if (ids.length === 0) {
-    L.push("  none were attached to this unit — job 2 is the whole task");
+    L.push("  none were attached to this unit — job 2 is the whole task, and [] is a fine answer to it");
   } else {
     L.push(
       "  Each names BOTH ends of a possible defect: where something is introduced and where it would have to be",

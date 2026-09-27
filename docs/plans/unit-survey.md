@@ -92,7 +92,7 @@ obligation, never a crash. The file is read loosely: fields core adds pass.
   "version": 1,
   "generatedAt": "…",
   "baseSha": "…", "headSha": "…",
-  "promptVersion": "units-v3",       // bump when request rendering changes
+  "promptVersion": "units-v4",       // bump when request rendering changes
   "sharedPrefix": "…",                // the unit-independent head EVERY request starts with, byte for byte
   "sharedPrefixSha256": "…",          // sha256 of `sharedPrefix`
   "coverage": "full" | "degraded" | "none",
