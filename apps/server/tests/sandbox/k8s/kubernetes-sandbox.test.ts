@@ -440,6 +440,26 @@ describe("KubernetesSandbox", () => {
       expect(await sbx.usage()).toBeUndefined();
     });
 
+    it("splits a marker glued onto output that had no trailing newline", async () => {
+      // Reproduced under sh: `printf done; <usage script>` yields `done{"type":…}`.
+      const { apis } = fakeApis({ logLines: ["first", `done${marker(3_000_000, 700)}`] });
+      const sbx = new KubernetesSandbox(factoryOpts, cfg(apis));
+      await sbx.provision();
+      const res = await sbx.runCommand("t1", "true", { cwd: "/w", timeoutSeconds: 30 } as any);
+      expect(res.stdout).toBe("first\ndone\n");
+      expect(await sbx.usage()).toEqual({ cpuSeconds: 3, peakMemoryBytes: 700 });
+    });
+
+    it("drops an unreadable closing marker (cgroup v1) instead of leaking it into the output", async () => {
+      const empty = JSON.stringify({ type: "lastlight_sandbox_usage", usage_usec: "", memory_peak: "", memory_max: "" });
+      const { apis } = fakeApis({ logLines: ["out", empty] });
+      const sbx = new KubernetesSandbox(factoryOpts, cfg(apis));
+      await sbx.provision();
+      const res = await sbx.runCommand("t1", "true", { cwd: "/w", timeoutSeconds: 30 } as any);
+      expect(res.stdout).toBe("out\n");
+      expect(await sbx.usage()).toBeUndefined();
+    });
+
     it("keeps the marker out of the agent's event stream", async () => {
       const { apis } = fakeApis({ logLines: ['{"type":"agent_end"}', marker(1_000_000, 100)] });
       const sbx = new KubernetesSandbox(factoryOpts, cfg(apis));

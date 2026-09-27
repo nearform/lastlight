@@ -754,10 +754,13 @@ tool it spawned; exact, no sampling), `memory.peak` (kernel ≥ 5.19) and
   a command's stdout. One pod per turn, so the readings fold: CPU adds, memory
   peak and limit take the max.
 
-  **Only the stream's LAST line counts**, and only an exact full-line match of
-  the marker. The workload shares that stdout, so a marker-shaped line followed
-  by anything else was printed by the workload: it is released to the run
-  untouched, never parsed. That stops a workload swallowing its own output or
+  **Only the stream's LAST line counts**, and only an exact match of the
+  marker at the END of that line — output without a trailing newline shares the
+  marker's line (`done{"type":…}`), and the part before it is released as
+  output. The workload shares that stdout, so a marker followed by anything
+  else was printed by the workload: it is released to the run untouched, never
+  parsed. A closing marker with empty fields (cgroup v1, no reading) is still
+  the script's own and is dropped, not released. That stops a workload swallowing its own output or
   casually forging a reading. It is not a security boundary — a process that
   outlives the workload and writes after the script's line can still replace
   it; only a channel outside the pod (the kubelet's stats) closes that, and the

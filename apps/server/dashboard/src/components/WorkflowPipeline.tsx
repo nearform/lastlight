@@ -252,9 +252,7 @@ function findParentDeclared(name: string, declared: string[]): string | null {
 type DerivedRef =
   | { kind: "branch"; base: string; branch: string; suffix?: "retry" | "check" | "regate" }
   | { kind: "iter"; base: string; index: number; suffix?: "retry" | "check" }
-  | { kind: "fix" | "recheck"; base: string; index: number }
-  // A fan-out's shared-sandbox usage row: CPU / memory, not work. No card.
-  | { kind: "sandbox"; base: string };
+  | { kind: "fix" | "recheck"; base: string; index: number };
 
 function parseDerived(name: string): DerivedRef | null {
   let m = name.match(/^(.*)_branch_([A-Za-z0-9-]+)_(retry|check|regate)$/);
@@ -269,8 +267,6 @@ function parseDerived(name: string): DerivedRef | null {
   if (m) return { kind: "fix", base: m[1]!, index: Number(m[2]) };
   m = name.match(/^(.*)_recheck_(\d+)$/);
   if (m) return { kind: "recheck", base: m[1]!, index: Number(m[2]) };
-  m = name.match(/^(.*)_sandbox$/);
-  if (m) return { kind: "sandbox", base: m[1]! };
   return null;
 }
 
@@ -299,19 +295,17 @@ function derivedLabel(ref: DerivedRef): string {
       return `fix ${ref.index}`;
     case "recheck":
       return `recheck ${ref.index}`;
-    case "sandbox":
-      return "sandbox";
   }
 }
 
 /**
- * A fan-out's `<phase>_sandbox` row: the shared sandbox's CPU / memory,
- * recorded once for all branches. Not work, so it neither draws a card nor
- * colours the fan-out — its numbers reach the run totals and the Stats panel.
+ * The server's own mark for a row that is bookkeeping, not work: a fan-out's
+ * shared-sandbox CPU / memory reading (`<phase>_sandbox`). Keyed on the stop
+ * reason the server writes, NOT the name — a real phase that happens to end in
+ * `_sandbox` must still draw. Mirrors RESOURCE_USAGE_STOP_REASON
+ * (`src/sandbox/resource-usage.ts`); no import edge to core.
  */
-function isUsageRow(name: string): boolean {
-  return parseDerived(name)?.kind === "sandbox";
-}
+const RESOURCE_USAGE_STOP_REASON = "resource_usage";
 
 /**
  * The node a `_retry` / `_check` row is a verdict ABOUT, if it is one.
@@ -440,8 +434,10 @@ export function WorkflowPipeline({
     const childrenByParent = new Map<string, string[]>();
     const orphans: string[] = [];
     for (const name of dynamicNames) {
-      // Dropped here, once, so nothing downstream draws, colours or times it.
-      if (isUsageRow(name)) continue;
+      // A usage row neither draws a card nor colours the fan-out — its numbers
+      // reach the run totals and the Stats panel. Dropped here, once, so
+      // nothing downstream draws, colours or times it.
+      if (execByPhase.get(name)?.stopReason === RESOURCE_USAGE_STOP_REASON) continue;
       const parent = findParentDeclared(name, declaredNames);
       if (parent) {
         const arr = childrenByParent.get(parent) ?? [];

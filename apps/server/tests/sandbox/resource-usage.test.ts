@@ -5,6 +5,7 @@ import {
   combineUsage,
   isUsageLine,
   parseUsageLine,
+  splitUsageTail,
 } from "#src/sandbox/resource-usage.js";
 
 const line = (usec: string, peak: string, max: string) =>
@@ -39,6 +40,15 @@ describe("isUsageLine", () => {
     expect(isUsageLine(`{"log":${line("1", "2", "max")}}`)).toBe(false);
     expect(isUsageLine(line("1", "2", "max").replace("}", ',"x":"1"}'))).toBe(false);
     expect(isUsageLine(line("12abc", "", ""))).toBe(false);
+  });
+});
+
+describe("splitUsageTail", () => {
+  it("separates output that shares the marker's line, and ignores a line that doesn't end with one", () => {
+    const m = line("1000000", "2", "max");
+    expect(splitUsageTail(`done${m}`)).toEqual({ before: "done", marker: m });
+    expect(splitUsageTail(m)).toEqual({ before: "", marker: m });
+    expect(splitUsageTail(`${m} trailing`)).toBeUndefined();
   });
 });
 

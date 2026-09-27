@@ -32,10 +32,11 @@ const MARKER_TYPE = "lastlight_sandbox_usage";
  */
 export const RESOURCE_USAGE_STOP_REASON = "resource_usage";
 
-/** Exactly the line {@link CGROUP_USAGE_SCRIPT} prints — nothing before, after or between. */
-const MARKER_RE = new RegExp(
-  `^\\{"type":"${MARKER_TYPE}","usage_usec":"\\d*","memory_peak":"\\d*","memory_max":"(?:\\d*|max)"\\}$`,
-);
+/** Exactly what {@link CGROUP_USAGE_SCRIPT} prints — nothing added between the fields. */
+const MARKER_BODY =
+  `\\{"type":"${MARKER_TYPE}","usage_usec":"\\d*","memory_peak":"\\d*","memory_max":"(?:\\d*|max)"\\}`;
+const MARKER_RE = new RegExp(`^${MARKER_BODY}$`);
+const MARKER_TAIL_RE = new RegExp(`${MARKER_BODY}$`);
 
 /**
  * POSIX sh. Values are quoted as JSON strings and validated by
@@ -58,6 +59,20 @@ export const CGROUP_USAGE_SCRIPT = [
  */
 export function isUsageLine(line: string): boolean {
   return MARKER_RE.test(line.trimEnd());
+}
+
+/**
+ * Split a line that ENDS with the marker into the output before it and the
+ * marker itself. The pod script prints the marker straight after the
+ * workload, so when the workload's last output has no trailing newline the two
+ * share a line (`done{"type":…}`); matching only a whole line would pass the
+ * marker into the output and lose the reading. Undefined when the line does
+ * not end with an exact marker.
+ */
+export function splitUsageTail(line: string): { before: string; marker: string } | undefined {
+  const trimmed = line.trimEnd();
+  const m = MARKER_TAIL_RE.exec(trimmed);
+  return m ? { before: trimmed.slice(0, m.index), marker: m[0] } : undefined;
 }
 
 function bytesOrUndefined(v: unknown): number | undefined {

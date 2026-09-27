@@ -326,6 +326,8 @@ export interface WorkflowRun {
   totalTokens?: number;
   /** Sandbox CPU seconds summed over the run's executions (list rows only). */
   totalCpuSeconds?: number;
+  /** The run's largest single sandbox memory peak (list rows only). */
+  peakMemoryBytes?: number;
 }
 
 /**

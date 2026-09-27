@@ -110,6 +110,8 @@ export interface WorkflowRun {
   totalCostUsd?: number;
   totalTokens?: number;
   totalCpuSeconds?: number;
+  /** The largest single sandbox memory peak in the run — a MAX, never a sum. */
+  peakMemoryBytes?: number;
 }
 
 /** A non-agent phase marker folded into an atomic lifecycle op. */
@@ -133,7 +135,12 @@ type RunRowLike = Pick<
   RunRow,
   "id" | "workflowName" | "triggerId" | "currentPhase" | "phaseHistory" | "status" | "startedAt" | "updatedAt"
 > &
-  Partial<RunRow> & { totalCostUsd?: number; totalTokens?: number; totalCpuSeconds?: number };
+  Partial<RunRow> & {
+    totalCostUsd?: number;
+    totalTokens?: number;
+    totalCpuSeconds?: number;
+    peakMemoryBytes?: number;
+  };
 
 /**
  * Aggregate root for a workflow run's lifecycle. Owns the `workflow_runs`
@@ -727,7 +734,7 @@ export class WorkflowRunStore {
 
     // A per-run token/cost roll-up, LEFT JOINed (indexed by
     // `idx_executions_workflow_run`). `agg` only exposes `workflow_run_id` +
-    // the three sums, so nothing here collides with `workflow_runs`.
+    // the four roll-ups, so nothing here collides with `workflow_runs`.
     const agg = this.client
       .select({
         workflowRunId: executions.workflowRunId,
@@ -737,6 +744,7 @@ export class WorkflowRunStore {
                       + COALESCE(${executions.cacheReadInputTokens}, 0)
                       + COALESCE(${executions.cacheCreationInputTokens}, 0))`.as("total_tokens"),
         totalCpuSeconds: sql<number>`SUM(COALESCE(${executions.cpuSeconds}, 0))`.as("total_cpu_seconds"),
+        peakMemoryBytes: sql<number>`MAX(COALESCE(${executions.peakMemoryBytes}, 0))`.as("max_peak_memory_bytes"),
       })
       .from(executions)
       .where(isNotNull(executions.workflowRunId))
@@ -769,6 +777,7 @@ export class WorkflowRunStore {
         totalCostUsd: sql<number>`COALESCE(${agg.totalCostUsd}, 0)`,
         totalTokens: sql<number>`COALESCE(${agg.totalTokens}, 0)`,
         totalCpuSeconds: sql<number>`COALESCE(${agg.totalCpuSeconds}, 0)`,
+        peakMemoryBytes: sql<number>`COALESCE(${agg.peakMemoryBytes}, 0)`,
       })
       .from(workflowRuns)
       .leftJoin(agg, eq(agg.workflowRunId, workflowRuns.id))

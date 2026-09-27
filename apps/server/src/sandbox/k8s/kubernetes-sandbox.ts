@@ -19,7 +19,7 @@ import { buildPodManifest, WORKSPACE_DIR } from "./pod.js";
 import { buildServiceContainers } from "./service-containers.js";
 import { ServiceSet } from "lastlight-shared/sandbox-services";
 import { buildRunAgentScript } from "./run-agent-script.js";
-import { CGROUP_USAGE_SCRIPT, combineUsage, isUsageLine, parseUsageLine, type ResourceUsage } from "../resource-usage.js";
+import { CGROUP_USAGE_SCRIPT, combineUsage, parseUsageLine, splitUsageTail, type ResourceUsage } from "../resource-usage.js";
 import { podNameFor } from "./naming.js";
 import { RunId } from "./run-id.js";
 import { streamPodLog } from "./log-stream.js";
@@ -486,19 +486,27 @@ export class KubernetesSandbox implements Sandbox, AgentContextSink {
     // (A process that outlives the workload and writes after our line can
     // still replace it; only a channel outside the pod — the kubelet's stats
     // — closes that, and the damage is a wrong metric, never execution.)
+    //
+    // The marker is matched at the END of a line, not as a whole line: the
+    // script prints it straight after the workload, and output without a
+    // trailing newline shares its line (`done{"type":…}`). The part before it
+    // is the workload's and is released as output.
     let held: string | undefined;
     await streamPodLog(this.apis.log, this.ns, podLabel.value, "agent", (line) => {
       if (held !== undefined) {
         onLine(held);
         held = undefined;
       }
-      if (isUsageLine(line)) held = line;
+      if (splitUsageTail(line)) held = line;
       else onLine(line);
     });
-    if (held !== undefined) {
-      const usage = parseUsageLine(held);
+    const tail = held === undefined ? undefined : splitUsageTail(held);
+    if (tail) {
+      if (tail.before) onLine(tail.before);
+      const usage = parseUsageLine(tail.marker);
       if (usage) this.usageTotal = combineUsage(this.usageTotal, usage);
-      else onLine(held);
+      // An unreadable reading (cgroup v1 prints empty fields) is still ours —
+      // it ended the stream — so it is dropped, never released as output.
     }
     return handles;
   }

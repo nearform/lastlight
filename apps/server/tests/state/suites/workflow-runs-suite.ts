@@ -1253,6 +1253,7 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
         tokens: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number },
         costUsd: number,
         cpuSeconds?: number,
+        peakMemoryBytes?: number,
       ) {
         const id = randomUUID();
         await db.executions.recordStart({
@@ -1274,6 +1275,7 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
           cacheReadInputTokens: tokens.cacheRead,
           cacheCreationInputTokens: tokens.cacheWrite,
           cpuSeconds,
+          peakMemoryBytes,
         });
       }
 
@@ -1289,12 +1291,14 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
 
       it("sums sandbox CPU seconds per run, counting unmeasured rows as nothing", async () => {
         const runId = await makeRun();
-        await addExecution(runId, {}, 0, 12.5);
-        await addExecution(runId, {}, 0, 30);
+        await addExecution(runId, {}, 0, 12.5, 5_000_000_000);
+        await addExecution(runId, {}, 0, 30, 1_000_000_000);
         await addExecution(runId, {}, 0);
 
         const run = (await db.runs.list()).runs.find((r) => r.id === runId)!;
         expect(run.totalCpuSeconds).toBeCloseTo(42.5, 6);
+        // The run's memory is its largest sandbox, never a sum.
+        expect(run.peakMemoryBytes).toBe(5_000_000_000);
       });
 
       it("reports zero totals for a run with no executions", async () => {

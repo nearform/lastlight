@@ -571,7 +571,14 @@ function RecentWorkflowsSection({
                     )}
                     <span className="flex-1" />
                     {run.totalCpuSeconds ? (
-                      <span className="text-info font-mono shrink-0 tabular-nums" title="sandbox CPU time">
+                      <span
+                        className="text-info font-mono shrink-0 tabular-nums"
+                        title={
+                          run.peakMemoryBytes
+                            ? `sandbox CPU time · largest sandbox peak ${formatBytes(run.peakMemoryBytes)}`
+                            : "sandbox CPU time"
+                        }
+                      >
                         {formatCpuSeconds(run.totalCpuSeconds)} cpu
                       </span>
                     ) : null}
@@ -613,7 +620,9 @@ function StatsChartsSection() {
           executions: acc.executions + d.executions,
           tokens: acc.tokens + d.totalTokens,
           cost: acc.cost + d.costUsd,
-          cpuSeconds: acc.cpuSeconds + d.cpuSeconds,
+          // `?? 0`: the type says required, but an older server behind a
+          // cached bundle omits it, and one NaN poisons the card and the axis.
+          cpuSeconds: acc.cpuSeconds + (d.cpuSeconds ?? 0),
         }),
         { executions: 0, tokens: 0, cost: 0, cpuSeconds: 0 },
       )
@@ -641,8 +650,8 @@ function StatsChartsSection() {
     outputTokens: d.outputTokens,
     cacheTokens: d.cacheReadTokens,
     cost: d.costUsd,
-    cpuSeconds: d.cpuSeconds,
-    peakMemoryBytes: d.peakMemoryBytes,
+    cpuSeconds: d.cpuSeconds ?? 0,
+    peakMemoryBytes: d.peakMemoryBytes ?? 0,
   })) ?? [];
 
   const hasData = chartData.some((d) => d.executions > 0);
