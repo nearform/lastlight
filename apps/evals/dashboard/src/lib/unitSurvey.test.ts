@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest";
 
 import { summariseUnitSurveyReport } from "../../../src/unit-survey-index.js";
 import type { ReplayReport } from "../types";
-import { caseRow, entryModelCells, fmtChars, NA } from "./unitSurvey";
+import { unitSurveyActive } from "./api";
+import { caseRow, entryModelCells, fmtChars, NA, unitSurveyProgress } from "./unitSurvey";
 
 /**
  * The page's cells, read off the harness's synthetic replay fixture (one judged
@@ -87,5 +88,30 @@ describe("fmtChars", () => {
     expect(fmtChars(512)).toBe("512");
     expect(fmtChars(4_698_112)).toBe("4.70M");
     expect(fmtChars(undefined)).toBe(NA);
+  });
+});
+
+describe("unitSurveyProgress + live polling", () => {
+  const NOW = Date.parse("2026-09-27T12:00:00.000Z");
+  const ago = (ms: number) => new Date(NOW - ms).toISOString();
+  const entry = (over: Partial<ReplayReport>) =>
+    summariseUnitSurveyReport("x", { ...report(), startedAt: ago(600_000), ...over }, "now")!;
+
+  it("a running report shows cases done / planned, elapsed to now, and is partial", () => {
+    const planned = report().cases.map((c) => ({ arm: c.arm, instanceId: c.instanceId, fixture: "/f" }));
+    const e = entry({ status: "running", heartbeat: ago(5_000), finishedAt: null, planned, cases: report().cases.slice(0, 1) });
+    expect(unitSurveyProgress(e, NOW)).toMatchObject({ status: "running", partial: true, cases: "1/3 cases", elapsed: "10m", chip: "running · 1/3" });
+    expect(unitSurveyActive({ generatedAt: "now", reports: [e] }, NOW)).toBe(true);
+  });
+
+  it("a killed run is stale, not running — and stops the fast poll", () => {
+    const e = entry({ status: "running", heartbeat: ago(120_000), finishedAt: null, planned: [], cases: [] });
+    expect(unitSurveyProgress(e, NOW)).toMatchObject({ status: "stale", partial: true });
+    expect(unitSurveyActive({ generatedAt: "now", reports: [e] }, NOW)).toBe(false);
+  });
+
+  it("an old report with no status reads as done, not partial", () => {
+    const p = unitSurveyProgress(summariseUnitSurveyReport("x", report(), "now")!, NOW);
+    expect(p).toMatchObject({ status: "done", partial: false, cases: "3 cases" });
   });
 });

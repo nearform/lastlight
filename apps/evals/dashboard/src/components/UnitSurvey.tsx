@@ -2,11 +2,11 @@ import clsx from "clsx";
 import { Fragment } from "react";
 
 import { oneSidedGold, unitSurveyCaveats, type OneSidedGold } from "../../../src/unit-survey-index.js";
-import type { ReplayCase, UnitSurveyEntry } from "../types";
+import type { ReplayCase, ReplayReport, UnitSurveyEntry } from "../types";
 import { useUnitSurveyReport } from "../lib/api";
 import { fmtDate, modelDisplay } from "../lib/format";
 import { UNIT_SURVEY_TIER_KEY, useNavigate } from "../lib/router";
-import { caseRow, coverageText, entryModelCells, fmtChars, NA } from "../lib/unitSurvey";
+import { caseRow, coverageText, entryModelCells, fmtChars, NA, unitSurveyProgress } from "../lib/unitSurvey";
 
 /**
  * The unit-survey replay views — `scripts/unit-survey-replay.ts` rendered.
@@ -42,6 +42,75 @@ function StageChip({ stage }: { stage: UnitSurveyEntry["stage"] }) {
       title={stage === "replay" ? "stage 1 + stage 2 (model replay, judged)" : "stage 1 only — $0 coverage, no model"}
     >
       {stage === "replay" ? "stage 2" : "stage 1"}
+    </span>
+  );
+}
+
+/**
+ * Status + progress: `running · 3/8`, `stale (killed) · 3/8`, `failed · 3/8`,
+ * `done · 8 cases`. `stale` is as loud as `failed` on purpose — a `running`
+ * file whose heartbeat stopped is the ONLY evidence the script died, and the
+ * failure being guarded against is silence read as progress
+ * ({@link unitSurveyProgress} → `unitSurveyStatus`, shared with the index).
+ */
+export function UnitStatusChip({ entry, className = "" }: { entry: UnitSurveyEntry; className?: string }) {
+  const p = unitSurveyProgress(entry, Date.now());
+  const style =
+    p.status === "running"
+      ? "bg-success/15 text-success"
+      : p.status === "done"
+        ? "bg-base-300 text-base-content/60"
+        : "bg-error/15 text-error";
+  const title =
+    p.status === "running"
+      ? `Still running: ${p.cases} done, ${p.elapsed} elapsed, last written ${fmtDate(entry.heartbeat ?? "")}. Every total is PARTIAL and will move.`
+      : p.status === "stale"
+        ? `STALE — killed? The report still says running, but nothing has been written since ${
+            entry.heartbeat ? fmtDate(entry.heartbeat) : "— (no heartbeat recorded)"
+          }. ${p.cases} completed; the rest never will. Totals are partial.`
+        : p.status === "failed"
+          ? `FAILED after ${p.cases}: ${entry.error ?? "no error recorded"}`
+          : `Done: ${p.cases} in ${p.elapsed}.`;
+  return (
+    <span
+      className={clsx(
+        "inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 font-mono text-2xs font-semibold",
+        style,
+        className,
+      )}
+      title={title}
+    >
+      {p.status === "running" && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />}
+      {p.status !== "running" && p.status !== "done" && <span className="h-1.5 w-1.5 rounded-full bg-error" />}
+      {p.chip}
+    </span>
+  );
+}
+
+/** The kind chip that marks a unit-survey report among eval runs (home page). */
+export function UnitSurveyKindChip({ className = "" }: { className?: string }) {
+  return (
+    <span
+      className={clsx(
+        "inline-block whitespace-nowrap rounded-full bg-accent/15 px-2 py-0.5 font-mono text-2xs font-semibold text-accent",
+        className,
+      )}
+      title="Unit-survey replay — the per-unit survey over preserved pr-review fixtures, vs the agent survey"
+    >
+      unit-survey
+    </span>
+  );
+}
+
+/** `partial` beside an aggregate computed from the cases done so far. */
+function PartialTag({ show }: { show: boolean }) {
+  if (!show) return null;
+  return (
+    <span
+      className="ml-1 rounded bg-warning/15 px-1 py-px font-mono text-2xs font-semibold uppercase text-warning"
+      title="Computed from the cases finished so far — the run has not completed."
+    >
+      partial
     </span>
   );
 }
@@ -107,6 +176,7 @@ export function UnitSurveyList({ reports }: { reports: UnitSurveyEntry[] }) {
             <tbody>
               {reports.map((r) => {
                 const m = entryModelCells(r);
+                const p = unitSurveyProgress(r, Date.now());
                 return (
                   <tr
                     key={r.id}
@@ -130,21 +200,30 @@ export function UnitSurveyList({ reports }: { reports: UnitSurveyEntry[] }) {
                       </div>
                     </td>
                     <td className="px-3 py-2.5 font-mono text-xs">
-                      <StageChip stage={r.stage} />
+                      <div className="flex flex-wrap items-center gap-1">
+                        <StageChip stage={r.stage} />
+                        <UnitStatusChip entry={r} />
+                      </div>
                       <div className="mt-1 whitespace-nowrap text-base-content/70">
-                        {r.cases} case{r.cases === 1 ? "" : "s"}
+                        {p.cases} · {p.elapsed}
                         {r.errored > 0 && <span className="text-error"> · {r.errored} errored</span>}
                       </div>
                     </td>
                     <td className="whitespace-nowrap px-3 py-2.5 font-mono text-xs tabular-nums" title={COVERAGE_HINT}>
-                      <div className="text-sm font-semibold text-base-content">{coverageText(r.coverage)}</div>
+                      <div className="text-sm font-semibold text-base-content">
+                        {coverageText(r.coverage)}
+                        <PartialTag show={p.partial} />
+                      </div>
                       <div className="text-2xs text-base-content/50">
                         {r.coverage.gold} gold · {r.units} units · {fmtChars(r.requestChars)} chars
                         {r.truncated > 0 && <span className="text-warning"> · {r.truncated} truncated</span>}
                       </div>
                     </td>
                     <td className="px-3 py-2.5 text-xs" title={CREDITED_HINT}>
-                      <Pair units={m.unitsRecall} agent={m.agentRecall} className="text-sm font-semibold" />
+                      <div className="flex items-center">
+                        <Pair units={m.unitsRecall} agent={m.agentRecall} className="text-sm font-semibold" />
+                        <PartialTag show={p.partial} />
+                      </div>
                       {r.model && (
                         <div className="whitespace-nowrap font-mono text-2xs text-base-content/50">
                           only units {r.model.onlyUnits} · only agent {r.model.onlyAgent} · {r.model.cases} case
@@ -172,15 +251,34 @@ export function UnitSurveyList({ reports }: { reports: UnitSurveyEntry[] }) {
 // ── detail ──────────────────────────────────────────────────────────────────
 
 export function UnitSurveyDetail({ entry }: { entry: UnitSurveyEntry }) {
-  const { data, isLoading, error } = useUnitSurveyReport(entry.report);
+  const p = unitSurveyProgress(entry, Date.now());
+  const { data, isLoading, error } = useUnitSurveyReport(entry.report, p.status === "running");
   const m = entryModelCells(entry);
+  const partial = p.partial ? " (partial)" : "";
   return (
     <div>
       <div className="mb-1 flex flex-wrap items-baseline gap-x-3">
         <h1 className="text-2xl font-semibold text-base-content">{entry.label}</h1>
         <StageChip stage={entry.stage} />
-        <span className="font-mono text-xs text-base-content/40">{fmtDate(entry.generatedAt)}</span>
+        <UnitStatusChip entry={entry} />
+        <span className="font-mono text-xs text-base-content/40">
+          {fmtDate(entry.generatedAt)} · {p.cases} · {p.elapsed}
+        </span>
       </div>
+      {p.status !== "done" && (
+        <p
+          className={clsx(
+            "mb-4 max-w-4xl rounded-lg border px-3 py-2 font-mono text-2xs leading-5",
+            p.status === "running" ? "border-success/40 bg-success/10 text-success" : "border-error/40 bg-error/10 text-error",
+          )}
+        >
+          {p.status === "running"
+            ? `Running — ${p.cases} done, ${p.elapsed} elapsed. Every figure below is PARTIAL: computed from the cases finished so far, and it will move.`
+            : p.status === "stale"
+              ? `STALE — the report says running but nothing has been written since ${entry.heartbeat ? fmtDate(entry.heartbeat) : "— (no heartbeat)"}; the script was killed. ${p.cases} completed and the rest never will — the figures below are partial.`
+              : `FAILED after ${p.cases}: ${entry.error ?? "no error recorded"}. The figures below cover only the cases that finished.`}
+        </p>
+      )}
       <div className="mb-5 flex flex-wrap items-center gap-x-6 gap-y-1 font-mono text-2xs text-base-content/50">
         <span>
           arms <span className="text-base-content/70">{entry.arms.join(", ") || "—"}</span>
@@ -210,10 +308,10 @@ export function UnitSurveyDetail({ entry }: { entry: UnitSurveyEntry }) {
       </div>
 
       <div className="mb-6 grid max-w-4xl grid-cols-2 gap-3 md:grid-cols-4">
-        <Stat label="coverage (stage 1)" title={COVERAGE_HINT} value={coverageText(entry.coverage)} sub={`${entry.coverage.gold} gold`} />
-        <Stat label="credited — units vs agent" title={CREDITED_HINT} value={<Pair units={m.unitsRecall} agent={m.agentRecall} />} />
-        <Stat label="$ — units vs agent" value={<Pair units={m.unitsCost} agent={m.agentCost} />} />
-        <Stat label="wall — units vs agent" value={<Pair units={m.unitsWall} agent={m.agentWall} />} />
+        <Stat label={`coverage (stage 1)${partial}`} title={COVERAGE_HINT} value={coverageText(entry.coverage)} sub={`${entry.coverage.gold} gold`} />
+        <Stat label={`credited — units vs agent${partial}`} title={CREDITED_HINT} value={<Pair units={m.unitsRecall} agent={m.agentRecall} />} />
+        <Stat label={`$ — units vs agent${partial}`} value={<Pair units={m.unitsCost} agent={m.agentCost} />} />
+        <Stat label={`wall — units vs agent${partial}`} value={<Pair units={m.unitsWall} agent={m.agentWall} />} />
       </div>
 
       {error ? (
@@ -226,9 +324,26 @@ export function UnitSurveyDetail({ entry }: { entry: UnitSurveyEntry }) {
         <>
           <Caveats caveats={unitSurveyCaveats(data)} />
           <CaseTable cases={data.cases ?? []} />
+          <Pending report={data} />
         </>
       )}
     </div>
+  );
+}
+
+/** The planned cases with no result yet — what a running (or killed) replay
+ * still owes. Nothing on a finished report or one that predates the plan. */
+function Pending({ report }: { report: ReplayReport }) {
+  const done = new Set((report.cases ?? []).map((c) => `${c.arm}/${c.instanceId}`));
+  const pending = (report.planned ?? []).filter((c) => !done.has(`${c.arm}/${c.instanceId}`));
+  if (!pending.length || report.status === "done") return null;
+  return (
+    <p className="mt-3 font-mono text-2xs text-base-content/50">
+      {report.status === "running" ? "not yet replayed" : "never replayed"} ({pending.length}):{" "}
+      <span className="text-base-content/70">
+        {pending.map((c) => `${c.arm}/${c.instanceId.replace(/^prreview__/, "")}`).join(", ")}
+      </span>
+    </p>
   );
 }
 

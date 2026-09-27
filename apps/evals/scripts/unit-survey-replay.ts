@@ -41,6 +41,11 @@
  * (default the shipped 600) · --judge-model m · --judge-votes N (default 3) ·
  * --no-judge · --label s · --out dir (default eval-results/unit-survey/) ·
  * --keep (leave the temp copies).
+ *
+ * The report is LIVE — written at start (`running` + the planned cases),
+ * rewritten atomically after every case and on a 15 s heartbeat, finalised
+ * `done` / `failed` — so the dashboard (`#/unit-survey`, and the home page)
+ * shows a replay in progress.
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -64,6 +69,9 @@ import { prFilesFromGit } from "../src/seed.js";
 import {
   type ReplayCase,
   type ReplayModelRun,
+  type ReplayPlannedCase,
+  type ReplayReport,
+  type ReplayWriteStatus,
   agentSurveyPhase,
   buildReport,
   compareSides,
@@ -76,6 +84,7 @@ import {
   specFidelity,
   tallyCoverage,
   unitsShape,
+  writeReportAtomic,
 } from "../src/unit-survey-replay.js";
 
 // ── Args ────────────────────────────────────────────────────────────────────
@@ -413,19 +422,52 @@ async function replay(fixture: string, arm: string, inst: Instance): Promise<Rep
 
 // ── Main ────────────────────────────────────────────────────────────────────
 
-const startedAt = new Date().toISOString();
-const cases: ReplayCase[] = [];
+// The plan is fixed up front so the report can say how far through it is.
+const planned: ReplayPlannedCase[] = [];
 for (const root of fixtureRoots) {
   for (const fixture of fixtureDirs(root)) {
     const id = basename(fixture);
     if (only.length && !only.includes(id)) continue;
     const arm = basename(resolve(fixture, ".."));
-    const inst = instances.get(id);
-    process.stdout.write(`${arm}/${id} … `);
-    if (!inst) {
-      console.log("SKIP — not in --instances");
+    if (!instances.has(id)) {
+      console.log(`${arm}/${id} … SKIP — not in --instances`);
       continue;
     }
+    planned.push({ arm, instanceId: id, fixture });
+  }
+}
+
+// The report is written at START and after EVERY case, not once at the end, so
+// the dashboard shows a replay while it runs (a stage-2 case is minutes). The
+// micro-survey's contract (`docs/plans/micro-survey-evals.md` → "The heartbeat
+// must tick independently of repeats"): `status` + `heartbeat`, and a `running`
+// report whose heartbeat has gone stale was killed. Every write is atomic
+// (`writeReportAtomic`) because the dashboard polls while we write.
+const startedAt = new Date().toISOString();
+const stage = noModel ? "coverage" : "replay";
+const cases: ReplayCase[] = [];
+mkdirSync(outDir, { recursive: true });
+const file = join(outDir, `${startedAt.replace(/[:.]/g, "-")}-${label.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+const write = (status: ReplayWriteStatus, error?: string): ReplayReport => {
+  const report = buildReport({ label, startedAt, cli, cases, status, planned, stage, ...(error ? { error } : {}) });
+  writeReportAtomic(file, report);
+  return report;
+};
+write("running");
+console.log(`report (live): ${file}`);
+
+// A case writes only when it FINISHES, and one stage-2 case outlasts the
+// dashboard's 90 s staleness bar — so the heartbeat ticks on its own timer, or
+// a healthy run reads as killed mid-case. `unref` so it never holds the
+// process open.
+const heartbeat = setInterval(() => write("running"), 15_000);
+heartbeat.unref?.();
+
+let report: ReplayReport;
+try {
+  for (const { arm, instanceId: id, fixture } of planned) {
+    const inst = instances.get(id) as Instance;
+    process.stdout.write(`${arm}/${id} … `);
     try {
       const c = await replay(fixture, arm, inst);
       cases.push(c);
@@ -437,13 +479,17 @@ for (const root of fixtureRoots) {
       console.log(`ERROR ${(err as Error).message}`);
       cases.push({ instanceId: id, arm, fixture, error: (err as Error).message } as ReplayCase);
     }
+    write("running");
   }
+  clearInterval(heartbeat);
+  report = write("done");
+} catch (err) {
+  // A per-case error is recorded on the case above; this is the run itself
+  // throwing. Say so in the file rather than leaving it to read as stale.
+  clearInterval(heartbeat);
+  write("failed", (err as Error)?.stack ?? String(err));
+  throw err;
 }
-
-const report = buildReport({ label, startedAt, cli, cases });
-mkdirSync(outDir, { recursive: true });
-const file = join(outDir, `${startedAt.replace(/[:.]/g, "-")}-${label.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
-writeFileSync(file, `${JSON.stringify(report, null, 2)}\n`);
 console.log("");
 console.log(formatReport(report));
 console.log(`\nreport: ${file}`);

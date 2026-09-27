@@ -6,12 +6,16 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { buildUnitSurveyIndex } from "./report.js";
 import { startServer } from "./serve.js";
+import { MICRO_STALE_HEARTBEAT_MS } from "./micro-survey.js";
 import {
   fmtGoldFraction,
+  isPartialStatus,
   modelTotals,
   oneSidedGold,
   summariseUnitSurveyReport,
   unitSurveyCaveats,
+  unitSurveyElapsedMs,
+  unitSurveyStatus,
   type ReplayReport,
 } from "./unit-survey-index.js";
 
@@ -170,5 +174,72 @@ describe("oneSidedGold + caveats", () => {
     expect(text).toMatch(/no agent survey_branch_\* result lines/);
     // A stage-1 report makes no model-side claims at all.
     expect(unitSurveyCaveats(stage1()).join("\n")).not.toMatch(/judge|code generations/);
+  });
+});
+
+describe("live reports — status, progress, staleness", () => {
+  const NOW = Date.parse("2026-09-27T12:00:00.000Z");
+  const ago = (ms: number) => new Date(NOW - ms).toISOString();
+
+  it("derives running / stale / failed / done, with stale past the micro-survey's 90 s bar", () => {
+    expect(unitSurveyStatus({ status: "running", heartbeat: ago(10_000) }, NOW)).toBe("running");
+    expect(unitSurveyStatus({ status: "running", heartbeat: ago(MICRO_STALE_HEARTBEAT_MS) }, NOW)).toBe("running");
+    expect(unitSurveyStatus({ status: "running", heartbeat: ago(MICRO_STALE_HEARTBEAT_MS + 1) }, NOW)).toBe("stale");
+    // No evidence a writer exists is not progress.
+    expect(unitSurveyStatus({ status: "running" }, NOW)).toBe("stale");
+    expect(unitSurveyStatus({ status: "running", heartbeat: "garbage" }, NOW)).toBe("stale");
+    // A final write is final whatever its heartbeat's age.
+    expect(unitSurveyStatus({ status: "failed", heartbeat: ago(10_000_000) }, NOW)).toBe("failed");
+    expect(unitSurveyStatus({ status: "done", heartbeat: ago(10_000_000) }, NOW)).toBe("done");
+    expect(isPartialStatus("running")).toBe(true);
+    expect(isPartialStatus("stale")).toBe(true);
+    expect(isPartialStatus("done")).toBe(false);
+  });
+
+  it("a report written before live writes (no status, no heartbeat) reads as done, with its whole run as the case count", () => {
+    const e = summariseUnitSurveyReport("x", fixture(), "now")!;
+    expect(fixture().status).toBeUndefined();
+    expect(e).toMatchObject({ status: "done", heartbeat: null, planned: null, error: null });
+    expect(unitSurveyStatus(e, NOW)).toBe("done");
+    expect(unitSurveyElapsedMs(e, NOW)).toBe(Date.parse("2026-09-27T10:11:01.489Z") - Date.parse("2026-09-27T10:10:15.249Z"));
+  });
+
+  it("the index lists a RUNNING report with its progress, and its totals are over the cases done so far", () => {
+    const root = tmp();
+    const dir = join(root, "unit-survey");
+    mkdirSync(dir);
+    const full = fixture();
+    const running: ReplayReport = {
+      ...full,
+      label: "in-flight",
+      startedAt: ago(120_000),
+      finishedAt: null,
+      status: "running",
+      heartbeat: ago(5_000),
+      planned: [...full.cases, { arm: "arm2", instanceId: "prreview__later" }].map((c) => ({ arm: c.arm, instanceId: c.instanceId, fixture: "/f" })),
+      cases: full.cases.slice(0, 1),
+    };
+    writeFileSync(join(dir, "2026-09-27T11-58-00-000Z-in-flight.json"), JSON.stringify(running));
+    writeFileSync(join(dir, FIXTURE_NAME), fixtureText);
+    const idx = buildUnitSurveyIndex(root, "now");
+    const e = idx.reports.find((r) => r.label === "in-flight")!;
+    expect(e).toMatchObject({ status: "running", cases: 1, planned: 4, finishedAt: null });
+    expect(unitSurveyStatus(e, NOW)).toBe("running");
+    expect(unitSurveyElapsedMs(e, NOW)).toBe(120_000);
+    // Partial aggregates: exactly the first case's own figures, not the full report's.
+    const one = summariseUnitSurveyReport("one", { ...full, cases: full.cases.slice(0, 1) }, "now")!;
+    expect(e.coverage).toEqual(one.coverage);
+    expect(e.model).toEqual(one.model);
+    // Killed: the same file two minutes of silence later reads as stale, and
+    // its elapsed time stops at the last heartbeat.
+    const later = NOW + 120_000;
+    expect(unitSurveyStatus(e, later)).toBe("stale");
+    expect(unitSurveyElapsedMs(e, later)).toBe(115_000);
+  });
+
+  it("a failed run carries its error through the index", () => {
+    const e = summariseUnitSurveyReport("f", { ...fixture(), status: "failed", error: "boom" }, "now")!;
+    expect(e).toMatchObject({ status: "failed", error: "boom" });
+    expect(unitSurveyStatus(e, NOW)).toBe("failed");
   });
 });

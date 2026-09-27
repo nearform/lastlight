@@ -121,6 +121,19 @@ string comes from `src/lib/unitSurvey.ts` over the harness's node-free
 unjudged side, a fixture with no recorded agent survey — prints `n/a`, while a
 measured zero still prints `0/4`. Units and agent always render as a pair.
 
+Replays are **live**: the script writes the report at start and after every
+case, with a 15 s heartbeat. Status is `unitSurveyStatus` (in
+`unit-survey-index.ts`, shared with the index — running / done / failed /
+stale, stale = `running` past the micro-survey's 90 s bar; no `status` = an
+old one-shot report = done), rendered by `UnitStatusChip` with cases
+done/planned and elapsed (`unitSurveyProgress`). Every total on a running or
+stale report is over the cases done so far and is tagged **partial**. The index
+and a running report's detail poll at 1.5 s while anything is `running`
+(`unitSurveyActive`), 15 s otherwise. Unit-survey reports also appear in the
+**home page's** "Recent runs", merged by time with the eval runs
+(`src/lib/recentRuns.ts` → `mergeRecent`, tested) behind a `unit-survey` kind
+chip, linking to `#/unit-survey/<id>`; micro-survey reports do not.
+
 ## Testing
 
 `vitest.config.ts`, `environment: "node"` — everything worth testing here is pure

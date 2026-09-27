@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -22,7 +22,9 @@ import {
   specFidelity,
   tallyCoverage,
   unitsShape,
+  writeReportAtomic,
 } from "./unit-survey-replay.js";
+import { buildUnitSurveyIndex } from "./report.js";
 
 vi.mock("./grade.js", () => ({
   gradeInternalRecall: vi.fn(),
@@ -268,6 +270,56 @@ describe("report assembly", () => {
     const r = buildReport({ label: "t", startedAt: "x", cli: "c", cases: [kase("a", true), kase("b", true, null)] });
     expect(r.aggregate.model?.agentAsserted).toBeNull();
     expect(r.aggregate.model?.unitsAsserted).toBe(2);
+  });
+
+  it("a running write has no finishedAt, carries the plan and a heartbeat, and keeps the LAUNCHED stage", () => {
+    const planned = [{ arm: "arm1", instanceId: "a", fixture: "/f/a" }, { arm: "arm1", instanceId: "b", fixture: "/f/b" }];
+    const now = new Date("2026-09-27T12:00:00.000Z");
+    const r = buildReport({ label: "t", startedAt: "x", cli: "c", cases: [], status: "running", planned, stage: "replay", now });
+    expect(r).toMatchObject({ status: "running", finishedAt: null, heartbeat: now.toISOString(), planned, stage: "replay" });
+    const failed = buildReport({ label: "t", startedAt: "x", cli: "c", cases: [], status: "failed", error: "boom", now });
+    expect(failed).toMatchObject({ status: "failed", error: "boom", finishedAt: now.toISOString() });
+    // The one-shot default stays a finished report.
+    expect(buildReport({ label: "t", startedAt: "x", cli: "c", cases: [] }).status).toBe("done");
+  });
+
+  it("incremental writes are atomic: every step is a whole, parseable report the index lists, and no temp file is left", () => {
+    const root = mkdtempSync(join(tmpdir(), "unit-survey-live-"));
+    try {
+      const dir = join(root, "unit-survey");
+      mkdirSync(dir);
+      const file = join(dir, "2026-09-27T12-00-00-000Z-live.json");
+      const planned = ["a", "b", "c"].map((id) => ({ arm: "arm1", instanceId: id, fixture: `/f/${id}` }));
+      const cases: ReplayCase[] = [];
+      const steps: { status: "running" | "done"; n: number }[] = [
+        { status: "running", n: 0 },
+        { status: "running", n: 1 },
+        { status: "running", n: 2 },
+        { status: "running", n: 3 },
+        { status: "done", n: 3 },
+      ];
+      let prevIno = -1;
+      for (const step of steps) {
+        while (cases.length < step.n) cases.push(kase(planned[cases.length].instanceId, true));
+        writeReportAtomic(file, buildReport({ label: "live", startedAt: "2026-09-27T12:00:00.000Z", cli: "c", cases, status: step.status, planned, stage: "replay" }));
+        // Only the report is in the directory — the temp file was renamed over it.
+        expect(readdirSync(dir)).toEqual(["2026-09-27T12-00-00-000Z-live.json"]);
+        const onDisk = JSON.parse(readFileSync(file, "utf8")) as ReturnType<typeof buildReport>;
+        expect(onDisk.status).toBe(step.status);
+        expect(onDisk.cases).toHaveLength(step.n);
+        expect(onDisk.planned).toHaveLength(3);
+        // Replaced by rename — the temp file is created while the old report
+        // still holds its inode, so each write lands on a DIFFERENT inode; an
+        // in-place truncate-and-write would keep the same one.
+        const ino = statSync(file).ino;
+        expect(ino).not.toBe(prevIno);
+        prevIno = ino;
+        const [entry] = buildUnitSurveyIndex(root, "now").reports;
+        expect(entry).toMatchObject({ label: "live", status: step.status, cases: step.n, planned: 3 });
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("a coverage-only run is stage `coverage` and carries no model aggregate", () => {

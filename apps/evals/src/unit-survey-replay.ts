@@ -17,8 +17,8 @@
  *     `microGoldRepeat` / `microGoldVote` — exactly what `micro-survey.ts`
  *     scores a replay with. No matcher lives here.
  */
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 import { needsProbeOf, requestLineTags } from "lastlight-code-facts";
 
@@ -495,11 +495,40 @@ export interface ReplayCase {
   error?: string;
 }
 
+/** One case the replay intends to run, recorded up front so a report in flight
+ * can say how far through it is. */
+export interface ReplayPlannedCase {
+  arm: string;
+  instanceId: string;
+  fixture: string;
+}
+
+/**
+ * Where a report's writer is.
+ *
+ * The script writes the report at START (`running`, the planned case list),
+ * rewrites it after every case and on a 15 s heartbeat ticker, and finalises it
+ * `done` — or `failed`, with the error, if the run itself threw. A report with
+ * NO `status` predates live writes and was written once, at the end: it is
+ * `done`. Whether a `running` report's writer is still alive is a read-time
+ * question — `unitSurveyStatus` in `unit-survey-index.ts`.
+ */
+export type ReplayWriteStatus = "running" | "done" | "failed";
+
 export interface ReplayReport {
   version: 1;
   label: string;
   startedAt: string;
-  finishedAt: string;
+  /** `null` while the replay is still running (or died without finalising). */
+  finishedAt: string | null;
+  /** Absent on reports written before live writes — read as `done`. */
+  status?: ReplayWriteStatus;
+  /** Refreshed on every write, including the independent heartbeat ticker. */
+  heartbeat?: string;
+  /** Every case the run set out to replay, in order. Absent on old reports. */
+  planned?: ReplayPlannedCase[];
+  /** Why a `failed` run failed. */
+  error?: string;
   stage: "coverage" | "replay";
   codeFacts: { cli: string; promptVersion: string | null };
   cases: ReplayCase[];
@@ -576,18 +605,46 @@ export function buildReport(opts: {
   startedAt: string;
   cli: string;
   cases: ReplayCase[];
+  /** Default `done` — the one-shot final write. */
+  status?: ReplayWriteStatus;
+  planned?: ReplayPlannedCase[];
+  error?: string;
+  /** The stage the run was LAUNCHED as. Without it the stage is inferred from
+   * the cases, which reads a replay with no finished case yet as `coverage`. */
+  stage?: ReplayReport["stage"];
+  now?: Date;
 }): ReplayReport {
-  const stage = opts.cases.some((c) => c.model) ? "replay" : "coverage";
+  const status = opts.status ?? "done";
+  const now = (opts.now ?? new Date()).toISOString();
+  const stage = opts.stage ?? (opts.cases.some((c) => c.model) ? "replay" : "coverage");
   return {
     version: 1,
     label: opts.label,
     startedAt: opts.startedAt,
-    finishedAt: new Date().toISOString(),
+    finishedAt: status === "running" ? null : now,
+    status,
+    heartbeat: now,
+    ...(opts.planned ? { planned: opts.planned } : {}),
+    ...(opts.error ? { error: opts.error } : {}),
     stage,
     codeFacts: { cli: opts.cli, promptVersion: opts.cases.find((c) => c.shape.promptVersion)?.shape.promptVersion ?? null },
     cases: opts.cases,
     aggregate: aggregateReport(opts.cases),
   };
+}
+
+/**
+ * Write a report so a reader NEVER sees it torn: the JSON goes to a sibling
+ * temp file, then `rename` swaps it in (atomic on one filesystem). The temp name
+ * starts with `.` and ends `.tmp`, so the index's `*.json` scan never lists it.
+ * The report is rewritten every 15 s while the dashboard polls every 1.5 s — a
+ * plain `writeFileSync` truncates first, and a poll in that window would drop
+ * the run from the list.
+ */
+export function writeReportAtomic(file: string, report: ReplayReport): void {
+  const tmp = join(dirname(file), `.${basename(file)}.${process.pid}.tmp`);
+  writeFileSync(tmp, `${JSON.stringify(report, null, 2)}\n`);
+  renameSync(tmp, file);
 }
 
 const pad = (s: string | number, n: number) => String(s).padEnd(n);

@@ -149,7 +149,7 @@ export default function App() {
           </div>
         ) : isLoading && !index ? (
           <Loading />
-        ) : !tiers.length ? (
+        ) : !tiers.length && !unitReports.length ? (
           <Empty />
         ) : run && selectedTier && route.view === "repeats" ? (
           <div>
@@ -189,7 +189,7 @@ export default function App() {
             <Overview tier={selectedTier} />
           </div>
         ) : (
-          <Home tiers={tiers} />
+          <Home tiers={tiers} unitReports={unitReports} />
         )}
 
         <footer className="mt-12 border-t border-base-300 pt-5 font-mono text-2xs text-base-content/40">

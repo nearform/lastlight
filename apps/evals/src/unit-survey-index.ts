@@ -16,10 +16,16 @@
  * Each of those is `null` here and renders "n/a" — a 0 would read as a measured
  * zero recall or a free, instant survey.
  */
-import type { MicroGoldRef, MicroGoldRepeat } from "./micro-survey.js";
-import type { ReplayCase, ReplayModelRun, ReplayReport } from "./unit-survey-replay.js";
+import { MICRO_STALE_HEARTBEAT_MS, type MicroGoldRef, type MicroGoldRepeat } from "./micro-survey.js";
+import type { ReplayCase, ReplayModelRun, ReplayReport, ReplayWriteStatus } from "./unit-survey-replay.js";
 
-export type { ReplayCase, ReplayModelRun, ReplayReport } from "./unit-survey-replay.js";
+export type {
+  ReplayCase,
+  ReplayModelRun,
+  ReplayPlannedCase,
+  ReplayReport,
+  ReplayWriteStatus,
+} from "./unit-survey-replay.js";
 
 /** The directory `scripts/unit-survey-replay.ts` writes into, under
  * `eval-results/`. Loose report files plus a `responses/` subdirectory of kept
@@ -47,6 +53,55 @@ export interface UnitSurveyModelTotals {
   votes: number[];
 }
 
+/**
+ * The four states a report can be in — derived here, not in the dashboard, so
+ * the index, the list, the detail page and the home page cannot disagree.
+ *
+ *  - `done` — the final write landed (`status: "done"`), OR the report has no
+ *    `status` at all: every report written before live writes was written once,
+ *    at the end, and really was finished when it landed.
+ *  - `failed` — the run itself threw and said so (`status: "failed"`, `error`).
+ *  - `running` — `status: "running"` with a heartbeat fresher than the
+ *    micro-survey's staleness bar ({@link MICRO_STALE_HEARTBEAT_MS}, 90 s; the
+ *    script ticks every 15 s).
+ *  - `stale` — `status: "running"` but nobody has written for longer than that:
+ *    the script was killed. **Silence is rendered as silence**, never as a run
+ *    still in progress — including a `running` report with no parsable heartbeat.
+ */
+export type UnitSurveyStatus = "running" | "done" | "failed" | "stale";
+
+export function unitSurveyStatus(
+  r: { status?: ReplayWriteStatus | string | null; heartbeat?: string | null },
+  nowMs: number,
+): UnitSurveyStatus {
+  if (r?.status === "failed") return "failed";
+  if (r?.status !== "running") return "done";
+  const beat = typeof r.heartbeat === "string" ? Date.parse(r.heartbeat) : Number.NaN;
+  if (!Number.isFinite(beat)) return "stale";
+  return nowMs - beat > MICRO_STALE_HEARTBEAT_MS ? "stale" : "running";
+}
+
+/** A report whose totals are over the cases done SO FAR (running, or killed
+ * mid-run) — every aggregate on it must be labelled partial. */
+export const isPartialStatus = (s: UnitSurveyStatus): boolean => s === "running" || s === "stale";
+
+/**
+ * How long the replay has run: to `finishedAt` when it finalised, to its last
+ * heartbeat when it died without finalising (the time after is silence, not
+ * work), and to `nowMs` while it is running. `null` when the start is unknown.
+ */
+export function unitSurveyElapsedMs(
+  e: Pick<UnitSurveyEntry, "generatedAt" | "finishedAt" | "heartbeat" | "status">,
+  nowMs: number,
+): number | null {
+  const start = Date.parse(e.generatedAt);
+  if (!Number.isFinite(start)) return null;
+  const s = unitSurveyStatus(e, nowMs);
+  const endIso = s === "running" ? null : (e.finishedAt ?? e.heartbeat);
+  const end = endIso === null ? nowMs : Date.parse(endIso ?? "");
+  return Number.isFinite(end) ? Math.max(0, end - start) : null;
+}
+
 /** One report as the index lists it. */
 export interface UnitSurveyEntry {
   /** Filename without `.json`; the id in the URL. */
@@ -56,6 +111,16 @@ export interface UnitSurveyEntry {
   /** `startedAt` from the report, else the filename stamp, else the mtime. */
   generatedAt: string;
   finishedAt: string | null;
+  /** The writer's own word — `done` when the report has no `status` (pre-live
+   * reports). Read it only through {@link unitSurveyStatus}: a `running` file
+   * whose writer died stays `running` forever. */
+  status: ReplayWriteStatus;
+  heartbeat: string | null;
+  /** Cases the run set out to replay; `null` on a report that predates the plan
+   * (its `cases` is then the whole run). */
+  planned: number | null;
+  /** Why a `failed` run failed. */
+  error: string | null;
   label: string;
   /** `coverage` = stage 1 only ($0); `replay` = stage 2 ran on some case. */
   stage: "coverage" | "replay";
@@ -165,6 +230,10 @@ export function summariseUnitSurveyReport(id: string, raw: unknown, fallbackIso:
     report: `/data/${UNIT_SURVEY_DIR}/${encodeURIComponent(`${id}.json`)}`,
     generatedAt: (typeof r.startedAt === "string" && r.startedAt) || parseUnitSurveyStamp(id) || fallbackIso,
     finishedAt: typeof r.finishedAt === "string" ? r.finishedAt : null,
+    status: r.status === "running" || r.status === "failed" ? r.status : "done",
+    heartbeat: typeof r.heartbeat === "string" ? r.heartbeat : null,
+    planned: Array.isArray(r.planned) ? r.planned.length : null,
+    error: typeof r.error === "string" ? r.error : null,
     label: r.label,
     stage: model || r.stage === "replay" ? "replay" : "coverage",
     cases: cases.length,

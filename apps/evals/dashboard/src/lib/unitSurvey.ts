@@ -3,7 +3,11 @@ import {
   agentWall,
   assertedOf,
   fmtGoldFraction,
+  isPartialStatus,
   okModel,
+  unitSurveyElapsedMs,
+  unitSurveyStatus,
+  type UnitSurveyStatus,
 } from "../../../src/unit-survey-index.js";
 import type { ReplayCase, UnitSurveyEntry } from "../types";
 import { fmtDuration } from "./format";
@@ -133,4 +137,37 @@ export function caseRow(c: ReplayCase): CaseRow {
     unitsCost: m ? fmtUsd(m.costUsd) : NA,
     agentCost: m ? fmtUsd(agentCost(m)) : NA,
   };
+}
+
+// ── progress / status ───────────────────────────────────────────────────────
+
+export interface UnitSurveyProgress {
+  status: UnitSurveyStatus;
+  /** Totals are over the cases done so far — label every aggregate partial. */
+  partial: boolean;
+  /** `3/8 cases` (or `3 cases` on a report with no recorded plan). */
+  cases: string;
+  /** `12m 4s` — to now while running, to the last heartbeat when it died. */
+  elapsed: string;
+  /** The chip text: `running · 3/8`, `stale (killed) · 3/8`, `failed · 3/8`, `done · 8 cases`. */
+  chip: string;
+}
+
+/** The status + progress a list row, the detail header and the home page show —
+ * derived once here from {@link unitSurveyStatus}. */
+export function unitSurveyProgress(e: UnitSurveyEntry, nowMs: number): UnitSurveyProgress {
+  const status = unitSurveyStatus(e, nowMs);
+  const planned = typeof e.planned === "number" ? e.planned : null;
+  const cases = planned === null ? `${e.cases} case${e.cases === 1 ? "" : "s"}` : `${e.cases}/${planned} cases`;
+  const elapsedMs = unitSurveyElapsedMs(e, nowMs);
+  const counts = planned === null ? String(e.cases) : `${e.cases}/${planned}`;
+  const chip =
+    status === "running"
+      ? `running · ${counts}`
+      : status === "stale"
+        ? `stale (killed) · ${counts}`
+        : status === "failed"
+          ? `failed · ${counts}`
+          : `done · ${cases}`;
+  return { status, partial: isPartialStatus(status), cases, elapsed: fmtWallMs(elapsedMs), chip };
 }

@@ -1,6 +1,7 @@
 import { useQueries, useQuery } from "@tanstack/react-query";
 
 import { microStatus, withMicroEntryDefaults } from "../../../src/micro-survey.js";
+import { unitSurveyStatus } from "../../../src/unit-survey-index.js";
 import type {
   DashboardIndex,
   MicroSurveyIndex,
@@ -108,10 +109,16 @@ export function useMicroReport(url: string | undefined, live = false) {
  * for the same reason as {@link useMicroIndex}: a server or baked site that
  * predates the endpoint has no replays to show, and that is not an error.
  *
- * `scripts/unit-survey-replay.ts` writes its report ONCE, at the end, so there
- * is no live state to follow — a replay in flight is simply not listed yet. The
- * list therefore polls at the slow heartbeat only.
+ * `scripts/unit-survey-replay.ts` writes its report at START and after every
+ * case (plus a 15 s heartbeat), so a replay in flight is listed with progress.
+ * The list polls at the live cadence while any report is genuinely running
+ * ({@link unitSurveyStatus} — the index's own derivation) and at the slow
+ * heartbeat otherwise. App mounts this on every route, so the home page's
+ * merged list refreshes at the same cadence.
  */
+export const unitSurveyActive = (idx?: UnitSurveyIndex, now = Date.now()): boolean =>
+  !!idx?.reports.some((r) => unitSurveyStatus(r, now) === "running");
+
 export function useUnitSurveyIndex() {
   return useQuery({
     queryKey: ["unit-survey-index"],
@@ -122,18 +129,25 @@ export function useUnitSurveyIndex() {
       const idx = (await res.json()) as UnitSurveyIndex;
       return { ...idx, reports: idx.reports ?? [] };
     },
-    refetchInterval: 15000,
+    refetchInterval: (q) => (unitSurveyActive(q.state.data) ? 1500 : 15000),
   });
 }
 
-/** One unit-survey report in full. Written once and never rewritten, so it is
- * cached for good. */
-export function useUnitSurveyReport(url: string | undefined) {
+/**
+ * One unit-survey report in full. A RUNNING report is rewritten after every
+ * case, so it is re-fetched at the live cadence and never served from cache; a
+ * settled one never changes again and is cached for good. `live` is in the key
+ * so running→done forces one last fetch of the final write, with the previous
+ * data held on screen meanwhile (as {@link useMicroReport}).
+ */
+export function useUnitSurveyReport(url: string | undefined, live = false) {
   return useQuery({
-    queryKey: ["unit-survey-report", url],
+    queryKey: ["unit-survey-report", url, live],
     queryFn: () => getJson<ReplayReport>(url as string),
     enabled: !!url,
-    staleTime: Infinity,
+    refetchInterval: live ? 1500 : false,
+    staleTime: live ? 0 : Infinity,
+    placeholderData: (prev) => prev,
   });
 }
 
