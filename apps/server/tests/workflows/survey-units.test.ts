@@ -24,6 +24,7 @@ import {
   findUnitObject,
   isUsableUnitReply,
   makeSurveyUnitsHandler,
+  runUnitSurvey,
   unitCacheDir,
   usableUnitReply,
   type UnitCallResult,
@@ -913,5 +914,33 @@ describe("survey-units — the call: variant, length, cache identity", () => {
     const r = response("u-001");
     expect(r).toMatchObject({ ok: false, attempts: 1 });
     expect(r.error).toContain("stopReason: length");
+  });
+});
+
+describe("runUnitSurvey — the runner the handler wraps, callable on its own", () => {
+  it("with no cache dir it neither reads nor writes a cache: a second run pays again", async () => {
+    const units = [unit("u-001"), unit("u-002")];
+    const responsesDir = join(root, "replay-responses");
+    const fake = new FakeCall();
+    const run = () =>
+      runUnitSurvey({
+        doc: { units },
+        systemPrompt: "SYSTEM",
+        model: MODEL,
+        concurrency: 2,
+        deadlineAt: Date.now() + 60_000,
+        signal: new AbortController().signal,
+        responsesDir,
+        call: fake.fn,
+      });
+    const first = await run();
+    const second = await run();
+    expect(fake.requests).toHaveLength(4);
+    expect(second.outcomes.map((o) => o.record.cached)).toEqual([false, false]);
+    expect(first.calls).toBe(2);
+    expect(first.usage.costUsd).toBeCloseTo(0.02);
+    expect(first.outcomes.map((o) => o.record.unitId)).toEqual(["u-001", "u-002"]);
+    expect(readdirSync(responsesDir).sort()).toEqual(["u-001.json", "u-002.json"]);
+    expect(existsSync(join(root, "unit-survey-cache"))).toBe(false);
   });
 });

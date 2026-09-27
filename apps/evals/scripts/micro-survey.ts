@@ -115,7 +115,7 @@ import {
   microGoldVote,
 } from "../src/micro-survey.js";
 import type { GoldComment } from "../src/schema.js";
-import { checksOf, claimOf, rowsViewOf, seedStatsIn } from "../src/micro-survey-node.js";
+import { checksOf, claimOf, rowsAsJudgeFindings, rowsViewOf, seedStatsIn } from "../src/micro-survey-node.js";
 
 /** The four families whose obligations are seeded to disk by `lastlight-facts seed`.
  * `spec` is the fifth branch but its obligations are built HARNESS-side and
@@ -352,17 +352,6 @@ if (gold.length && !noJudge) {
   }
 }
 
-/**
- * What a row SAYS, for the judge: the claim, plus the consequence it recorded.
- * Both are the row's own words — the consequence is where a pass that writes a
- * mild claim spells out what actually breaks, and leaving it out would grade
- * the headline and ignore the finding.
- */
-function rowStatement(r: Row): string {
-  const consequence = typeof r.evidence?.consequence === "string" ? r.evidence.consequence.trim() : "";
-  return [r.claim ?? "", consequence && `Consequence: ${consequence}`].filter(Boolean).join(" ");
-}
-
 /** The gold overlay for one set of rows. `undefined` when the case has no gold. */
 async function goldOverlayOf(rows: Row[], judge: boolean, votes = judgeVotes): Promise<MicroGoldRepeat | undefined> {
   if (!gold.length) return undefined;
@@ -374,7 +363,7 @@ async function goldOverlayOf(rows: Row[], judge: boolean, votes = judgeVotes): P
     // IS a measured zero, unlike an unjudged repeat.
     return microGoldRepeat({ ...base, rowForGold: rows.length ? null : gold.map(() => null) });
   }
-  const findings = rows.map((r) => ({ description: rowStatement(r), file: r.quotes?.[0]?.path ?? null }));
+  const findings = rowsAsJudgeFindings(rows);
   const passes = await Promise.all(
     Array.from({ length: votes }, () => gradeInternalRecall({ gold, findings, judgeModel: goldJudge as string })),
   );

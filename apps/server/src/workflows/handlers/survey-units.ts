@@ -260,7 +260,7 @@ export interface SurveyUnit {
   truncated?: boolean;
 }
 
-interface UnitsDocument {
+export interface UnitsDocument {
   coverage?: string;
   promptVersion?: string;
   /**
@@ -301,7 +301,7 @@ function sha256(text: string): string {
  * included), so a missing or malformed one is a broken contract, never an
  * empty survey — the caller degrades on it rather than failing the phase.
  */
-function readUnitsDocument(path: string): UnitsDocument {
+export function readUnitsDocument(path: string): UnitsDocument {
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, "utf8"));
@@ -729,9 +729,17 @@ export interface SurveyUnitsRunScope {
 }
 
 /** What one unit came to — its response record, and the calls it spent. */
-interface UnitOutcome {
+export interface UnitOutcome {
   record: UnitResponseRecord;
   calls: number;
+}
+
+/**
+ * Where each call is reported as it completes — the phase transcript
+ * ({@link UnitSurveyTranscript}) in production; nothing in the evals replay.
+ */
+export interface UnitSurveySink {
+  call(toolCallId: string, text: string, args: Record<string, unknown>, usage: UnitCallUsage, result: string, isError: boolean): void;
 }
 
 /** Everything one unit's survey shares with its siblings in a phase. */
@@ -748,12 +756,316 @@ interface UnitCallPlan {
   sharedPrefix: string | undefined;
   deadlineAt: number;
   signal: AbortSignal;
-  cacheDir: string;
+  /** The reply cache; `undefined` = no cache at all (nothing read, evicted or written). */
+  cacheDir: string | undefined;
   call: UnitModelCall;
   promptCacheKey: string;
   /** Requests whose cached reply the last `units-ingest` rejected — evicted, then asked again. */
   evict: Set<string>;
+  transcript?: UnitSurveySink;
 }
+
+/**
+ * The SYSTEM text every call of a survey sends, and how it was decided.
+ *
+ * The shared prefix goes to the SYSTEM prompt — where pi-ai puts Anthropic's
+ * cache breakpoint — only when every request really opens with it and keeps
+ * something after it. Otherwise every request is sent verbatim.
+ */
+export function unitSurveySystemText(
+  systemPrompt: string,
+  doc: Pick<UnitsDocument, "units" | "sharedPrefix">,
+): { systemText: string; systemSha256: string; sharedPrefix: string | undefined; splitPrefix: string | undefined } {
+  const units = doc.units;
+  const sharedPrefix = typeof doc.sharedPrefix === "string" && doc.sharedPrefix.length > 0 ? doc.sharedPrefix : undefined;
+  const splitPrefix =
+    sharedPrefix && units.length > 0 && units.every((u) => u.request.startsWith(sharedPrefix) && u.request.length > sharedPrefix.length)
+      ? sharedPrefix
+      : undefined;
+  const systemText = splitPrefix ? `${systemPrompt}\n\n${splitPrefix}` : systemPrompt;
+  return { systemText, systemSha256: sha256(systemText), sharedPrefix, splitPrefix };
+}
+
+/** Inputs of {@link runUnitSurvey} — everything the phase resolved, nothing it reads from a run. */
+export interface RunUnitSurveyOptions {
+  /** The units document (`units.json`), already read. */
+  doc: Pick<UnitsDocument, "units" | "sharedPrefix">;
+  /** The RENDERED phase prompt (`prompts/survey-unit.md`). */
+  systemPrompt: string;
+  /** The resolved `provider/model` spec. */
+  model: string;
+  /** Thinking level (`variant:`); undefined = the provider default. */
+  variant?: string;
+  concurrency: number;
+  /** Epoch ms the whole survey must finish by — each call's timeout is what is left. */
+  deadlineAt: number;
+  /** Aborted at the deadline or on a cancel; every call in flight stops. */
+  signal: AbortSignal;
+  /** Where `<unitId>.json` response records are written (created if absent; NOT cleared). */
+  responsesDir: string;
+  /** The reply cache directory. Omit for NO cache — nothing read, evicted or written. */
+  cacheDir?: string;
+  /** Requests whose cached reply must be evicted and asked again. */
+  evict?: Set<string>;
+  /** The model call. Defaults to {@link completeUnitCall}. */
+  call?: UnitModelCall;
+  transcript?: UnitSurveySink;
+  /** Called as each unit settles (its response file written or failed), in completion order. */
+  onSettled?: (outcome: UnitOutcome) => void;
+}
+
+/** What {@link runUnitSurvey} came to. `outcomes` is in document order. */
+export interface UnitSurveyRun {
+  outcomes: UnitOutcome[];
+  usage: UnitCallUsage;
+  /** Model calls made (a cache hit is none). */
+  calls: number;
+  systemSha256: string;
+  /** Whether the shared prefix went out as system text. */
+  prefixInSystem: boolean;
+}
+
+/**
+ * The model half of the unit survey, with no run, ledger or transcript of its
+ * own: one bounded call per unit (a cache hit, or up to two calls — see
+ * `surveyUnit`), `concurrency` at a time, one `<unitId>.json` per unit under
+ * `responsesDir`. Every unit settles — a throw anywhere in one unit (a
+ * response file that cannot be written, a bug) becomes THAT unit's failure, so
+ * the pool always drains. The phase handler wraps this; the evals replay calls
+ * it directly, with no cache, so every replay pays and measures.
+ */
+export async function runUnitSurvey(opts: RunUnitSurveyOptions): Promise<UnitSurveyRun> {
+  const { systemText, systemSha256, sharedPrefix, splitPrefix } = unitSurveySystemText(opts.systemPrompt, opts.doc);
+  const plan: UnitCallPlan = {
+    model: opts.model,
+    variant: opts.variant,
+    endpoint: unitEndpointIdentity(opts.model),
+    systemText,
+    systemSha256,
+    splitPrefix,
+    sharedPrefix,
+    deadlineAt: opts.deadlineAt,
+    signal: opts.signal,
+    cacheDir: opts.cacheDir,
+    call: opts.call ?? completeUnitCall,
+    // Stable for everything the phase's calls share — the system text.
+    // Clamped well inside OpenAI's 64-char key.
+    promptCacheKey: `lastlight-units-${systemSha256.slice(0, 24)}`,
+    evict: opts.evict ?? new Set(),
+    ...(opts.transcript ? { transcript: opts.transcript } : {}),
+  };
+  let usage: UnitCallUsage = { ...ZERO_USAGE };
+  let calls = 0;
+  const outcomes = await mapPool(opts.doc.units, Math.max(1, Math.floor(opts.concurrency)), async (unit) => {
+    let o: UnitOutcome;
+    try {
+      o = await surveyUnit(unit, plan);
+    } catch (err) {
+      const error = `the unit's survey threw: ${err instanceof Error ? err.message : String(err)}`;
+      log.error("unit survey threw", { unitId: unit.id, err });
+      o = { record: failedRecord(unit, plan, error, 0), calls: 0 };
+    }
+    try {
+      writeAtomic(join(opts.responsesDir, `${unit.id}.json`), `${JSON.stringify(o.record, null, 2)}\n`);
+    } catch (err) {
+      const error = `could not write the response file: ${err instanceof Error ? err.message : String(err)}`;
+      log.error("unit survey: response file not written", { unitId: unit.id, err });
+      o = { ...o, record: { ...o.record, ok: false, error } };
+    }
+    usage = addUsage(usage, o.record.usage);
+    calls += o.calls;
+    opts.onSettled?.(o);
+    return o;
+  });
+  return { outcomes, usage, calls, systemSha256, prefixInSystem: !!splitPrefix };
+}
+
+/** One unit: a cache hit, or up to two calls. Never throws on a model failure. */
+async function surveyUnit(unit: SurveyUnit, c: UnitCallPlan): Promise<UnitOutcome> {
+  const startedAt = Date.now();
+  const requestSha256 = sha256(unit.request);
+  if (unit.requestSha256 && unit.requestSha256 !== requestSha256) {
+    log.warn("units.json requestSha256 does not match its request — caching on the request as sent", {
+      unitId: unit.id,
+    });
+  }
+  const contractSha = unit.requestSha256 ?? requestSha256;
+  const userText = c.splitPrefix ? unit.request.slice(c.splitPrefix.length) : unit.request;
+  const key = cacheKey({ endpoint: c.endpoint, variant: c.variant, systemSha256: c.systemSha256, userSha256: sha256(userText) });
+  const args = {
+    unitId: unit.id,
+    symbol: unit.symbol,
+    file: unit.file,
+    lines: unit.lines,
+    model: c.model,
+    request: transcriptRequest(unit.request, c.sharedPrefix),
+  };
+
+  // No cache dir ⇒ no cache at all: nothing read, evicted or written (the
+  // evals replay runs this way, so every run pays and measures).
+  if (c.cacheDir === undefined) {
+    /* uncached */
+  } else if (c.evict.has(contractSha) || c.evict.has(requestSha256)) {
+    if (evictCached(c.cacheDir, key)) {
+      log.info("unit survey: evicted a cached reply the last ingest rejected", { unitId: unit.id });
+    }
+  } else {
+    const hit = readCached(c.cacheDir, key, unit.id);
+    if (hit) {
+      const record: UnitResponseRecord = {
+        ...hit,
+        unitId: unit.id,
+        model: c.model,
+        systemPromptSha256: c.systemSha256,
+        requestSha256: contractSha,
+        cached: true,
+        usage: { ...ZERO_USAGE },
+        durationMs: Date.now() - startedAt,
+      };
+      c.transcript?.call(
+        `${unit.id}-cache`,
+        `${unitLabel(unit)} — cache hit (an identical request was answered before); no model call.`,
+        { ...args, cached: true },
+        ZERO_USAGE,
+        `[cached response]\n${hit.raw}`,
+        false,
+      );
+      log.debug("unit survey cache hit", { unitId: unit.id });
+      return { record, calls: 0 };
+    }
+  }
+
+  let usage: UnitCallUsage = { ...ZERO_USAGE };
+  let raw = "";
+  let error: string | null = null;
+  let ok = false;
+  let attempts = 0;
+  // At most TWO calls: the retry is for a reply without a usable object for
+  // the unit (or a call that failed outright). Never after the phase was
+  // aborted, and never after a reply cut at the output cap — the identical
+  // request would stop there again. Transient provider faults are already
+  // retried inside one call by `completeWithRetry`.
+  while (attempts < 2 && !ok) {
+    if (c.signal.aborted) break;
+    attempts += 1;
+    const intro =
+      attempts === 1
+        ? `Surveying ${unitLabel(unit)}.`
+        : `Retrying ${unit.id} once — the first attempt failed: ${error ?? "unknown"}`;
+    const callStarted = Date.now();
+    let callUsage: UnitCallUsage = { ...ZERO_USAGE };
+    let callError: string | undefined;
+    let stopReason: string | undefined;
+    let text = "";
+    try {
+      const res = await c.call({
+        model: c.model,
+        ...(c.variant ? { variant: c.variant } : {}),
+        systemPrompt: c.systemText,
+        request: userText,
+        timeoutMs: Math.max(1000, c.deadlineAt - Date.now()),
+        cacheKey: c.promptCacheKey,
+        signal: c.signal,
+      });
+      text = res.text ?? "";
+      callUsage = { ...ZERO_USAGE, ...res.usage };
+      callError = res.error;
+      stopReason = res.stopReason;
+    } catch (err) {
+      callError = err instanceof Error ? err.message : String(err);
+    }
+    // An abort during the call is recorded as the phase's reason, whatever
+    // shape the provider gave it.
+    if (c.signal.aborted) callError = String(c.signal.reason);
+    usage = addUsage(usage, callUsage);
+    raw = text;
+    ok = callError === undefined && usableUnitReply(text, unit.id);
+    const truncated = !ok && callError === undefined && stopReason === "length";
+    error = ok
+      ? null
+      : (callError ??
+        (truncated
+          ? "the reply stopped at the output-token cap (stopReason: length) before holding a usable object — not retried, the identical request would stop there again"
+          : `the response holds no usable JSON object for unitId "${unit.id}" (it must name the unit and carry \`answers\` and \`defects\` arrays)`));
+
+    c.transcript?.call(
+      `${unit.id}-a${attempts}`,
+      intro,
+      attempts === 1 ? args : { ...args, attempt: attempts },
+      callUsage,
+      callError !== undefined ? callError : text || "(empty response)",
+      !ok,
+    );
+    log.debug("unit survey call", {
+      unitId: unit.id,
+      attempt: attempts,
+      ok,
+      stopReason,
+      durationMs: Date.now() - callStarted,
+      costUsd: callUsage.costUsd,
+    });
+    if (truncated || c.signal.aborted) break;
+  }
+
+  if (attempts === 0) {
+    // Aborted before this unit's first call: it is still RECORDED — in the
+    // transcript and as a response — never silently missing.
+    const reason = String(c.signal.reason ?? PHASE_DEADLINE);
+    c.transcript?.call(`${unit.id}-stopped`, `${unitLabel(unit)} — not surveyed: ${reason}.`, args, ZERO_USAGE, reason, true);
+    log.warn("unit survey unit not started", { unitId: unit.id, reason });
+    return { record: failedRecord(unit, c, reason, 0, Date.now() - startedAt), calls: 0 };
+  }
+
+  const record: UnitResponseRecord = {
+    unitId: unit.id,
+    model: c.model,
+    systemPromptSha256: c.systemSha256,
+    requestSha256: contractSha,
+    ok,
+    cached: false,
+    attempts,
+    raw,
+    error,
+    usage,
+    durationMs: Date.now() - startedAt,
+  };
+  if (ok && c.cacheDir !== undefined) {
+    try {
+      writeAtomic(join(c.cacheDir, `${key}.json`), `${JSON.stringify(record)}\n`);
+    } catch (err) {
+      // A cache that cannot be written costs the next re-review a call; it
+      // must never cost this one its answer.
+      log.warn("could not write the unit survey cache", { unitId: unit.id, err });
+    }
+  } else if (!ok) {
+    log.warn("unit survey unit failed", { unitId: unit.id, attempts, error });
+  }
+  return { record, calls: attempts };
+}
+
+
+function failedRecord(
+  unit: SurveyUnit,
+  c: Pick<UnitCallPlan, "model" | "systemSha256">,
+  error: string,
+  attempts: number,
+  durationMs = 0,
+): UnitResponseRecord {
+  return {
+    unitId: unit.id,
+    model: c.model,
+    systemPromptSha256: c.systemSha256,
+    requestSha256: unit.requestSha256 ?? sha256(unit.request),
+    ok: false,
+    cached: false,
+    attempts,
+    raw: "",
+    error,
+    usage: { ...ZERO_USAGE },
+    durationMs,
+  };
+}
+
 
 /** The reasons a phase's AbortController fires with — also each unfinished unit's recorded error. */
 const PHASE_DEADLINE = "phase deadline";
@@ -928,21 +1240,12 @@ export class SurveyUnitsHandler implements PhaseTypeHandler {
     }
 
     const units = doc.units;
-    // The shared prefix goes to the SYSTEM prompt — where pi-ai puts Anthropic's
-    // cache breakpoint — only when every request really opens with it and keeps
-    // something after it. Otherwise every request is sent verbatim.
-    const sharedPrefix = typeof doc.sharedPrefix === "string" && doc.sharedPrefix.length > 0 ? doc.sharedPrefix : undefined;
-    const splitPrefix =
-      sharedPrefix && units.length > 0 && units.every((u) => u.request.startsWith(sharedPrefix) && u.request.length > sharedPrefix.length)
-        ? sharedPrefix
-        : undefined;
+    const { sharedPrefix, splitPrefix } = unitSurveySystemText(systemPrompt, doc);
     if (sharedPrefix && units.length > 0 && !splitPrefix) {
       log.warn("units.json sharedPrefix is not the head of every request — sending each request verbatim", {
         phase: phase.name,
       });
     }
-    const systemText = splitPrefix ? `${systemPrompt}\n\n${splitPrefix}` : systemPrompt;
-    const systemSha256 = sha256(systemText);
 
     transcript = this.transcript(phase, model, hostRepoDir, `${systemPrompt.trimEnd()}\n\n${manifest(units, doc, !!splitPrefix)}`);
     transcript.open();
@@ -979,49 +1282,28 @@ export class SurveyUnitsHandler implements PhaseTypeHandler {
 
     const t = transcript;
     try {
-      const plan: UnitCallPlan = {
+      const concurrency = this.concurrency();
+      // Every unit settles inside the runner, so the pool always drains before
+      // the transcript is finalized and nothing writes a line after the
+      // `result`. Totals accumulate as units settle, so a degrade below still
+      // reports what was spent.
+      const { outcomes } = await runUnitSurvey({
+        doc,
+        systemPrompt,
         model,
         variant: this.resolveVariant(phase),
-        endpoint: unitEndpointIdentity(model),
-        systemText,
-        systemSha256,
-        splitPrefix,
-        sharedPrefix,
+        concurrency,
         deadlineAt,
         signal: controller.signal,
+        responsesDir: join(prDir, RESPONSES_DIR),
         cacheDir: unitCacheDir(this.run.config.stateDir || resolve("data"), owner, repo),
-        call: this.run.callUnit ?? completeUnitCall,
-        // Stable for everything the phase's calls share — the system text.
-        // Clamped well inside OpenAI's 64-char key.
-        promptCacheKey: `lastlight-units-${systemSha256.slice(0, 24)}`,
         evict,
-      };
-      const responsesDir = join(prDir, RESPONSES_DIR);
-      const concurrency = this.concurrency();
-
-      // Every unit settles — a throw anywhere in one unit (a response file that
-      // cannot be written, a bug) becomes THAT unit's failure, so the pool
-      // always drains before the transcript is finalized and nothing writes a
-      // line after the `result`.
-      const outcomes = await mapPool(units, concurrency, async (unit) => {
-        let o: UnitOutcome;
-        try {
-          o = await this.surveyUnit(unit, plan, t);
-        } catch (err) {
-          const error = `the unit's survey threw: ${err instanceof Error ? err.message : String(err)}`;
-          log.error("unit survey threw", { unitId: unit.id, err });
-          o = { record: this.failedRecord(unit, plan, error, 0), calls: 0 };
-        }
-        try {
-          writeAtomic(join(responsesDir, `${unit.id}.json`), `${JSON.stringify(o.record, null, 2)}\n`);
-        } catch (err) {
-          const error = `could not write the response file: ${err instanceof Error ? err.message : String(err)}`;
-          log.error("unit survey: response file not written", { unitId: unit.id, err });
-          o = { ...o, record: { ...o.record, ok: false, error } };
-        }
-        totals = addUsage(totals, o.record.usage);
-        turns += o.calls;
-        return o;
+        call: this.run.callUnit ?? completeUnitCall,
+        transcript: t,
+        onSettled: (o) => {
+          totals = addUsage(totals, o.record.usage);
+          turns += o.calls;
+        },
       });
 
       const ok = outcomes.filter((o) => o.record.ok).length;
@@ -1067,188 +1349,7 @@ export class SurveyUnitsHandler implements PhaseTypeHandler {
     }
   }
 
-  /** One unit: a cache hit, or up to two calls. Never throws on a model failure. */
-  private async surveyUnit(unit: SurveyUnit, c: UnitCallPlan, transcript: UnitSurveyTranscript): Promise<UnitOutcome> {
-    const startedAt = Date.now();
-    const requestSha256 = sha256(unit.request);
-    if (unit.requestSha256 && unit.requestSha256 !== requestSha256) {
-      log.warn("units.json requestSha256 does not match its request — caching on the request as sent", {
-        unitId: unit.id,
-      });
-    }
-    const contractSha = unit.requestSha256 ?? requestSha256;
-    const userText = c.splitPrefix ? unit.request.slice(c.splitPrefix.length) : unit.request;
-    const key = cacheKey({ endpoint: c.endpoint, variant: c.variant, systemSha256: c.systemSha256, userSha256: sha256(userText) });
-    const args = {
-      unitId: unit.id,
-      symbol: unit.symbol,
-      file: unit.file,
-      lines: unit.lines,
-      model: c.model,
-      request: transcriptRequest(unit.request, c.sharedPrefix),
-    };
-
-    if (c.evict.has(contractSha) || c.evict.has(requestSha256)) {
-      if (evictCached(c.cacheDir, key)) {
-        log.info("unit survey: evicted a cached reply the last ingest rejected", { unitId: unit.id });
-      }
-    } else {
-      const hit = readCached(c.cacheDir, key, unit.id);
-      if (hit) {
-        const record: UnitResponseRecord = {
-          ...hit,
-          unitId: unit.id,
-          model: c.model,
-          systemPromptSha256: c.systemSha256,
-          requestSha256: contractSha,
-          cached: true,
-          usage: { ...ZERO_USAGE },
-          durationMs: Date.now() - startedAt,
-        };
-        transcript.call(
-          `${unit.id}-cache`,
-          `${unitLabel(unit)} — cache hit (an identical request was answered before); no model call.`,
-          { ...args, cached: true },
-          ZERO_USAGE,
-          `[cached response]\n${hit.raw}`,
-          false,
-        );
-        log.debug("unit survey cache hit", { unitId: unit.id });
-        return { record, calls: 0 };
-      }
-    }
-
-    let usage: UnitCallUsage = { ...ZERO_USAGE };
-    let raw = "";
-    let error: string | null = null;
-    let ok = false;
-    let attempts = 0;
-    // At most TWO calls: the retry is for a reply without a usable object for
-    // the unit (or a call that failed outright). Never after the phase was
-    // aborted, and never after a reply cut at the output cap — the identical
-    // request would stop there again. Transient provider faults are already
-    // retried inside one call by `completeWithRetry`.
-    while (attempts < 2 && !ok) {
-      if (c.signal.aborted) break;
-      attempts += 1;
-      const intro =
-        attempts === 1
-          ? `Surveying ${unitLabel(unit)}.`
-          : `Retrying ${unit.id} once — the first attempt failed: ${error ?? "unknown"}`;
-      const callStarted = Date.now();
-      let callUsage: UnitCallUsage = { ...ZERO_USAGE };
-      let callError: string | undefined;
-      let stopReason: string | undefined;
-      let text = "";
-      try {
-        const res = await c.call({
-          model: c.model,
-          ...(c.variant ? { variant: c.variant } : {}),
-          systemPrompt: c.systemText,
-          request: userText,
-          timeoutMs: Math.max(1000, c.deadlineAt - Date.now()),
-          cacheKey: c.promptCacheKey,
-          signal: c.signal,
-        });
-        text = res.text ?? "";
-        callUsage = { ...ZERO_USAGE, ...res.usage };
-        callError = res.error;
-        stopReason = res.stopReason;
-      } catch (err) {
-        callError = err instanceof Error ? err.message : String(err);
-      }
-      // An abort during the call is recorded as the phase's reason, whatever
-      // shape the provider gave it.
-      if (c.signal.aborted) callError = String(c.signal.reason);
-      usage = addUsage(usage, callUsage);
-      raw = text;
-      ok = callError === undefined && usableUnitReply(text, unit.id);
-      const truncated = !ok && callError === undefined && stopReason === "length";
-      error = ok
-        ? null
-        : (callError ??
-          (truncated
-            ? "the reply stopped at the output-token cap (stopReason: length) before holding a usable object — not retried, the identical request would stop there again"
-            : `the response holds no usable JSON object for unitId "${unit.id}" (it must name the unit and carry \`answers\` and \`defects\` arrays)`));
-
-      transcript.call(
-        `${unit.id}-a${attempts}`,
-        intro,
-        attempts === 1 ? args : { ...args, attempt: attempts },
-        callUsage,
-        callError !== undefined ? callError : text || "(empty response)",
-        !ok,
-      );
-      log.debug("unit survey call", {
-        unitId: unit.id,
-        attempt: attempts,
-        ok,
-        stopReason,
-        durationMs: Date.now() - callStarted,
-        costUsd: callUsage.costUsd,
-      });
-      if (truncated || c.signal.aborted) break;
-    }
-
-    if (attempts === 0) {
-      // Aborted before this unit's first call: it is still RECORDED — in the
-      // transcript and as a response — never silently missing.
-      const reason = String(c.signal.reason ?? PHASE_DEADLINE);
-      transcript.call(`${unit.id}-stopped`, `${unitLabel(unit)} — not surveyed: ${reason}.`, args, ZERO_USAGE, reason, true);
-      log.warn("unit survey unit not started", { unitId: unit.id, reason });
-      return { record: this.failedRecord(unit, c, reason, 0, Date.now() - startedAt), calls: 0 };
-    }
-
-    const record: UnitResponseRecord = {
-      unitId: unit.id,
-      model: c.model,
-      systemPromptSha256: c.systemSha256,
-      requestSha256: contractSha,
-      ok,
-      cached: false,
-      attempts,
-      raw,
-      error,
-      usage,
-      durationMs: Date.now() - startedAt,
-    };
-    if (ok) {
-      try {
-        writeAtomic(join(c.cacheDir, `${key}.json`), `${JSON.stringify(record)}\n`);
-      } catch (err) {
-        // A cache that cannot be written costs the next re-review a call; it
-        // must never cost this one its answer.
-        log.warn("could not write the unit survey cache", { unitId: unit.id, err });
-      }
-    } else {
-      log.warn("unit survey unit failed", { unitId: unit.id, attempts, error });
-    }
-    return { record, calls: attempts };
-  }
-
   // ── Helpers ────────────────────────────────────────────────────────────────
-
-  private failedRecord(
-    unit: SurveyUnit,
-    c: Pick<UnitCallPlan, "model" | "systemSha256">,
-    error: string,
-    attempts: number,
-    durationMs = 0,
-  ): UnitResponseRecord {
-    return {
-      unitId: unit.id,
-      model: c.model,
-      systemPromptSha256: c.systemSha256,
-      requestSha256: unit.requestSha256 ?? sha256(unit.request),
-      ok: false,
-      cached: false,
-      attempts,
-      raw: "",
-      error,
-      usage: { ...ZERO_USAGE },
-      durationMs,
-    };
-  }
 
   /**
    * Abort `controller` when the run row turns `cancelled`. The admin cancel

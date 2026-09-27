@@ -44,6 +44,28 @@ export function claimOf(r: SurveyRow): boolean {
   return important && !(hasEvidence(r.evidence) && isReassurance(r.evidence as SurveyEvidence));
 }
 
+/**
+ * What a row SAYS, for the gold judge: the claim, plus the consequence it
+ * recorded. Both are the row's own words — the consequence is where a pass that
+ * writes a mild claim spells out what actually breaks, and leaving it out would
+ * grade the headline and ignore the finding.
+ */
+export function rowStatement(r: Pick<SurveyRow, "claim" | "evidence">): string {
+  const consequence = typeof r.evidence?.consequence === "string" ? r.evidence.consequence.trim() : "";
+  return [r.claim ?? "", consequence && `Consequence: ${consequence}`].filter(Boolean).join(" ");
+}
+
+/**
+ * Survey rows projected into `gradeInternalRecall`'s finding shape — ONE
+ * projection, shared by every eval that judges hypothesis rows against gold
+ * (`micro-survey.ts`, `unit-survey-replay.ts`), so two arms scored by
+ * different scripts are still scored by the same words. Order is preserved:
+ * the judge's indices come back as offsets into the rows.
+ */
+export function rowsAsJudgeFindings(rows: Pick<SurveyRow, "claim" | "evidence" | "quotes">[]): { description: string; file: string | null }[] {
+  return rows.map((r) => ({ description: rowStatement(r), file: r.quotes?.[0]?.path ?? null }));
+}
+
 /** The family's seeded checks, from an `obligations.json`. */
 export function checksOf(obligationsPath: string, family: string): { id: string; question: string }[] {
   if (!existsSync(obligationsPath)) return [];
