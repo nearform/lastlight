@@ -607,6 +607,7 @@ function timeoutContext(): Record<string, unknown> {
     seedTimeoutSeconds: String(review.analysis.seedTimeoutSeconds),
     reconcileTimeoutSeconds: String(review.analysis.reconcileTimeoutSeconds),
     falsifyTimeoutSeconds: String(review.analysis.falsifyTimeoutSeconds),
+    surveyUnitsTimeoutSeconds: String(review.analysis.surveyUnitsTimeoutSeconds),
   };
 }
 

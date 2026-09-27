@@ -230,6 +230,15 @@ export interface ReviewFindingsDoc {
    * inertness is structural rather than a promise about what a prompt says.
    */
   verdict?: SplitVerdict;
+  /**
+   * Set when this document is NOT a review anybody wrote: `lastlight-facts
+   * findings --repair` creates findings.json when the adjudicator never did
+   * (every hypothesis at `internal`, `event: COMMENT`, a summary saying the
+   * change was not assessed). `post-review` then posts that summary and the
+   * reason, never a summary written from the (empty) posted set — which reads
+   * "No issues to raise." and would call an unassessed PR clean.
+   */
+  incomplete?: { phase?: string; reason?: string };
 }
 
 /** An inline review comment in the shape GitHub's create-review API expects. */

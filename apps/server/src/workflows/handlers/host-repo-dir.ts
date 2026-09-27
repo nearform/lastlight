@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { ExecutorConfig } from "lastlight-workflow-engine";
+import type { ExecutorConfig, SandboxBackend } from "lastlight-workflow-engine";
 
 /**
  * Host path of a run's repo checkout — mirrors the `sandbox/index.ts` layout.
@@ -28,3 +28,32 @@ export function resolveHostRepoDir(
   if (existsSync(join(workDir, ".lastlight", "pr-review"))) return workDir;
   return repoDir;
 }
+
+/**
+ * Backends whose workspace the HARNESS can read.
+ *
+ * Every backend but one hands out a `hostAgentCwd` that exists on this machine —
+ * docker and smol as the host end of a bind mount, the two in-process backends
+ * because the agent IS this process. **`kubernetes` does not**: its paths are
+ * in-pod, which is the same caveat `hostWorkspaceDir` already carries there
+ * (`deliverAgentContext` routes around it through a sink for exactly this
+ * reason).
+ *
+ * Three readers:
+ *  - `fanout.ts`: a `context_file` read is not even ATTEMPTED there, and the
+ *    branch is given the path to open itself. Attempting it would ENOENT every
+ *    time and turn "the harness cannot see this workspace" into "the seeding
+ *    step failed", which is a worse lie than the one this key removes.
+ *  - `config.ts` (`loadConfig`): `review.analysis.surveyEngine: units` on a
+ *    backend marked `false` here is REFUSED at startup — `survey-units` reads
+ *    `units.json` and writes the responses from the harness.
+ *  - `survey-units.ts`: the same check again at run time, as a guard that
+ *    degrades (a loud summary, no call) rather than fails.
+ */
+export const HOST_READABLE_WORKSPACE: Record<SandboxBackend, boolean> = {
+  none: true,
+  docker: true,
+  gondolin: true,
+  smol: true,
+  kubernetes: false,
+};

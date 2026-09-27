@@ -22,6 +22,7 @@ import {
   type ProviderOverrides,
 } from "lastlight-shared/providers";
 import { installProviderOverrides } from "./provider-registry.js";
+import { HOST_READABLE_WORKSPACE } from "../workflows/handlers/host-repo-dir.js";
 import type { SandboxBackend, BuildAssetsLocation, OtelConfig } from "lastlight-workflow-engine";
 import { logger } from "../logging/logger.js";
 
@@ -137,6 +138,7 @@ import {
   coerceAdjudicateMode,
   coerceProbeMode,
   coerceSurveyEngine,
+  type SurveyEngine,
   defaultDependenciesConfig,
   defaultFixConfig,
   defaultNotificationsConfig,
@@ -852,6 +854,7 @@ export function withReviewDurations(policy: ReviewPolicy, operator: ReviewConfig
       seedTimeoutSeconds: operator.analysis.seedTimeoutSeconds,
       reconcileTimeoutSeconds: operator.analysis.reconcileTimeoutSeconds,
       falsifyTimeoutSeconds: operator.analysis.falsifyTimeoutSeconds,
+      surveyUnitsTimeoutSeconds: operator.analysis.surveyUnitsTimeoutSeconds,
       jevTimeoutSeconds: operator.analysis.jevTimeoutSeconds,
     },
   };
@@ -1023,6 +1026,7 @@ export function loadConfig(): LastLightConfig {
     env: envLayer,
   });
   const fileCfg = normalizeFileConfig(mergedRaw);
+  assertSurveyEngineSupported(fileCfg.review.analysis.surveyEngine, fileCfg.sandbox.backend);
 
   const stateDir = resolve(stringEnv("STATE_DIR", "./data"));
   const models = fileCfg.models;
@@ -1435,7 +1439,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
       // Which engine runs the survey. Only the literal `"units"` moves a
       // deployment off the agent fan-out — the direction every switch in this
       // block fails — because the unit engine is unmeasured and needs a
-      // host-readable workspace (it fails loud on kubernetes).
+      // host-readable workspace (`loadConfig` refuses it on kubernetes).
       surveyEngine: coerceSurveyEngine(analysisRaw.surveyEngine),
       // No backend clamp, unlike `surveyConcurrency`: unit calls are in-process
       // HTTP requests, not sandboxes, so this bounds rate-limit pressure only.
@@ -1480,6 +1484,10 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
       falsifyTimeoutSeconds: requiredSeconds(
         analysisRaw.falsifyTimeoutSeconds,
         "review.analysis.falsifyTimeoutSeconds",
+      ),
+      surveyUnitsTimeoutSeconds: requiredSeconds(
+        analysisRaw.surveyUnitsTimeoutSeconds,
+        "review.analysis.surveyUnitsTimeoutSeconds",
       ),
       probeRounds: nonNegativeNumber(analysisRaw.probeRounds) ?? reviewDefaults.analysis.probeRounds,
       // WP6b, the attention boundary. `maxInlineComments` allows 0 — a
@@ -1945,6 +1953,26 @@ function stringArray(raw: unknown, path: string): string[] {
 function optionalStringArray(raw: unknown, path: string): string[] {
   if (raw === undefined || raw === null) return [];
   return stringArray(raw, path);
+}
+
+/**
+ * `review.analysis.surveyEngine: units` needs a workspace the HARNESS can read
+ * and write: the in-process `survey-units` phase reads `units.json` from the
+ * host checkout and writes one response per unit back into it for the
+ * sandboxed `units-ingest`. A backend with no host checkout
+ * ({@link HOST_READABLE_WORKSPACE}, i.e. `kubernetes`) would survey nothing on
+ * every review, so the combination is refused at startup, naming both keys —
+ * a boot error an operator sees once beats a degraded survey on every run.
+ * (The repo layer cannot reach this: `review.analysis` is operator-only.)
+ */
+export function assertSurveyEngineSupported(engine: SurveyEngine, backend: SandboxBackend): void {
+  if (engine !== "units" || HOST_READABLE_WORKSPACE[backend]) return;
+  throw new Error(
+    `review.analysis.surveyEngine: units is not supported on the ${backend} sandbox backend — the survey-units ` +
+      "phase reads and writes the workspace from the harness, and this backend has no host checkout. " +
+      `Set review.analysis.surveyEngine: agent, or use a backend with a host-readable workspace ` +
+      `(${(Object.keys(HOST_READABLE_WORKSPACE) as SandboxBackend[]).filter((b) => HOST_READABLE_WORKSPACE[b]).join(", ")}).`,
+  );
 }
 
 function sandboxBackend(raw: unknown, path: string): SandboxBackend {

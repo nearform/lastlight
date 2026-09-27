@@ -304,6 +304,28 @@ describe("loadConfig — review.analysis.surveyEngine", () => {
     expect(analysisFor("review:\n  analysis:\n    surveyUnitConcurrency: 4\n").surveyUnitConcurrency).toBe(4);
     expect(analysisFor("review:\n  analysis:\n    surveyUnitConcurrency: 0\n").surveyUnitConcurrency).toBe(1);
   });
+
+  it("ships a whole-phase deadline for survey-units, from default.yaml (#385: no code default)", () => {
+    expect(analysisFor("review:\n  analysis:\n    enabled: true\n").surveyUnitsTimeoutSeconds).toBe(600);
+    expect(analysisFor("review:\n  analysis:\n    surveyUnitsTimeoutSeconds: 120\n").surveyUnitsTimeoutSeconds).toBe(120);
+  });
+
+  it("REFUSES surveyEngine: units at startup on a backend with no host checkout", () => {
+    // `survey-units` reads units.json and writes the responses from the
+    // harness; on kubernetes that would degrade every review, so boot fails
+    // naming both keys instead.
+    vi.stubEnv("LASTLIGHT_SANDBOX", "");
+    expect(() =>
+      analysisFor("sandbox:\n  backend: kubernetes\nreview:\n  analysis:\n    surveyEngine: units\n"),
+    ).toThrow(/surveyEngine: units is not supported on the kubernetes sandbox backend/);
+    // The env route to the backend is refused the same way.
+    vi.stubEnv("LASTLIGHT_SANDBOX", "kubernetes");
+    expect(() => analysisFor("review:\n  analysis:\n    surveyEngine: units\n")).toThrow(/kubernetes/);
+    // …and neither half alone is refused.
+    expect(analysisFor("review:\n  analysis:\n    surveyEngine: agent\n").surveyEngine).toBe("agent");
+    vi.stubEnv("LASTLIGHT_SANDBOX", "docker");
+    expect(analysisFor("review:\n  analysis:\n    surveyEngine: units\n").surveyEngine).toBe("units");
+  });
 });
 
 /**

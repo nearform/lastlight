@@ -199,6 +199,8 @@ describe("every pr-review phase budget comes from config (#385)", () => {
     expect(phase("facts")?.timeout_seconds).toEqual({ from: "factsTimeoutSeconds" });
     expect(phase("seed")?.timeout_seconds).toEqual({ from: "seedTimeoutSeconds" });
     expect(phase("reconcile")?.timeout_seconds).toEqual({ from: "reconcileTimeoutSeconds" });
+    // The in-process unit survey's WHOLE-PHASE deadline (its AbortController).
+    expect(phase("survey-units")?.timeout_seconds).toEqual({ from: "surveyUnitsTimeoutSeconds" });
   });
 
   it("projects those keys from the resolved review block whenever the pipeline runs", () => {
@@ -207,6 +209,7 @@ describe("every pr-review phase budget comes from config (#385)", () => {
     expect(ctx.factsTimeoutSeconds).toBe(String(review.analysis.factsTimeoutSeconds));
     expect(ctx.seedTimeoutSeconds).toBe(String(review.analysis.seedTimeoutSeconds));
     expect(ctx.reconcileTimeoutSeconds).toBe(String(review.analysis.reconcileTimeoutSeconds));
+    expect(ctx.surveyUnitsTimeoutSeconds).toBe(String(review.analysis.surveyUnitsTimeoutSeconds));
     expect(ctx.triageTimeoutSeconds).toBe(String(review.triage.timeoutSeconds));
   });
 });

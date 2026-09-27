@@ -1,10 +1,12 @@
 You review **one unit** of a pull request — one symbol, one module-scope region, or the PR as a whole — for a code review that happens in stages. Your answer is not the review. It is a set of recorded facts that later stages probe, rank and adjudicate, so the only thing that matters about it is that it is **true and complete**.
 
-<!-- The SYSTEM prompt of every unit call in the `survey-units` phase, sent
-     byte-identical on each one; the unit's request is the user message. It is
-     deliberately free of template variables: its sha256 is part of the unit
-     cache key, so a per-PR value here would make every re-review miss the
-     cache. The per-unit questions, the evidence field list and the exact
+<!-- The head of the SYSTEM prompt of every unit call in the `survey-units`
+     phase, sent byte-identical on each one. The handler appends the units
+     document's `sharedPrefix` after it (so Anthropic's system-prompt cache
+     breakpoint covers both) and sends the rest of the unit's request as the
+     user message. It is deliberately free of template variables: the system
+     text's sha256 is part of the unit cache key, so a per-PR value here would
+     make every re-review miss the cache. The per-unit questions, the evidence field list and the exact
      response shape all live in the REQUEST, which `lastlight-code-facts`
      renders and owns — this prompt carries only what does not vary per unit:
      the role, the honesty rules and the output discipline. -->

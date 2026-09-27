@@ -636,13 +636,20 @@ review:
     # `lastlight-facts units-ingest`, which writes the same
     # `hypotheses/<family>.jsonl` — so falsify/adjudicate/post-review are
     # unchanged. UNMEASURED: stays `agent` until the eval A/B in the plan says
-    # otherwise. `units` reads the workspace from the harness, so it FAILS on
-    # the kubernetes backend. Anything but the literal `units` is `agent`.
+    # otherwise. `units` reads and writes the workspace from the harness, so
+    # config load REFUSES it on the kubernetes backend (no host checkout).
+    # Anything but the literal `units` is `agent`.
     surveyEngine: agent
     # Unit calls in flight at once under `surveyEngine: units`. No backend
     # clamp — they are HTTP requests from the harness, not sandboxes — so lower
     # it only to ease provider rate limits. Spend is the same either way.
     surveyUnitConcurrency: 16
+    # The WHOLE-PHASE deadline on `survey-units`, in seconds — one
+    # AbortController over every unit call. A unit not finished by then is
+    # recorded `ok: false` ("phase deadline") and `units-ingest` records each
+    # obligation it owned as unanswered; the phase itself still succeeds, so a
+    # slow provider degrades the survey rather than failing the review.
+    surveyUnitsTimeoutSeconds: 600
 
     # ── WP4: `prepare` (the affordance) + `falsify` (the oracle) ──────────────
     #

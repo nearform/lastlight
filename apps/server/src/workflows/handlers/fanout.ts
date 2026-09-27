@@ -39,6 +39,7 @@ import { RESOURCE_USAGE_STOP_REASON, type ResourceUsage } from "../../sandbox/re
 import { safeSpanAttributes, withSpan } from "../../telemetry/index.js";
 import { OI, SpanKind, splitProviderModel } from "../../telemetry/openinference.js";
 import { logger } from "../../logging/logger.js";
+import { HOST_READABLE_WORKSPACE } from "./host-repo-dir.js";
 
 const log = logger("fanout");
 
@@ -85,28 +86,8 @@ const DEFAULT_BRANCH_SOFT_POLICY = { retries: 0, then: "complete" as const };
  */
 export const BRANCH_CONTEXT_HEADING = "## Attached: the file this pass was seeded with";
 
-/**
- * Backends whose workspace the HARNESS can read.
- *
- * Every backend but one hands out a `hostAgentCwd` that exists on this machine —
- * docker and smol as the host end of a bind mount, the two in-process backends
- * because the agent IS this process. **`kubernetes` does not**: its paths are
- * in-pod, which is the same caveat `hostWorkspaceDir` already carries there
- * (`deliverAgentContext` routes around it through a sink for exactly this
- * reason).
- *
- * So a `context_file` read is not even ATTEMPTED there, and the branch is given
- * the path to open itself — today's behaviour, unchanged. Attempting it would
- * ENOENT every time and turn "the harness cannot see this workspace" into "the
- * seeding step failed", which is a worse lie than the one this key removes.
- */
-const HOST_READABLE_WORKSPACE: Record<SandboxBackend, boolean> = {
-  none: true,
-  docker: true,
-  gondolin: true,
-  smol: true,
-  kubernetes: false,
-};
+// `HOST_READABLE_WORKSPACE` lives in `host-repo-dir.ts` — config load reads it
+// too, to refuse `surveyEngine: units` on a backend with no host checkout.
 
 /**
  * What a branch is told when the harness cannot read its workspace at all.

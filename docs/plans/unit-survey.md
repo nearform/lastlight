@@ -41,10 +41,49 @@ The split is deliberate:
   drags tsgo + ast-grep natives into the agent image. The handler reads
   `units.json` from the host checkout, which exists on every host-checkout
   backend (none/docker/gondolin/smol). **On kubernetes there is no host
-  checkout: the handler fails loud** (`surveyEngine: units` is unsupported
-  there; say so in the error).
+  checkout, so `loadConfig` refuses `surveyEngine: units` there at startup**
+  (`assertSurveyEngineSupported`, off `HOST_READABLE_WORKSPACE` in
+  `handlers/host-repo-dir.ts`); the handler keeps a run-time guard that
+  degrades (below) rather than fails.
 
 ## File contract (all under `.lastlight/pr-review/`)
+
+### `spec-obligations.json` — written by core before `units` runs
+
+Written by the `units` bash node itself, before it invokes `units`:
+`specContext` (`pr-decisions.ts`) projects the SAME `SpecObligationSet` the
+rendered `{{specObligations}}` block comes from as `specObligationsJson` — one
+line of `JSON.stringify`, present exactly when `specObligations` is (a
+degraded, empty set included) — and the node writes it through a quoted
+heredoc (`cat > … <<'LASTLIGHT_SPEC_EOF'`). The template renderer substitutes
+values verbatim and never re-scans them; the one hazard is the bash guard
+(`validateShellCommand` rejects any `{{` in a rendered command), so `{{` inside
+a string is emitted as `{\u007b` — still JSON, parsing back to the identical
+object. No set ⇒ no file (the node `rm`s a stale one first). Pinned end to end
+by `tests/workflows/units-spec-obligations.test.ts`, which runs the rendered
+node with `sh` against a hostile criterion.
+
+Exactly the JSON of `SpecObligationSet` (`apps/server/src/engine/review-spec.ts`):
+
+```jsonc
+{
+  "obligations": [
+    { "id": "S-1", "criterion": "…", "source": "issue #12" | "the PR body",
+      "candidates": ["src/a.ts", "…"],   // changed FILE paths, best match first, never empty
+      "changedFileCount": 7, "found": false, "question": "…" }
+  ],
+  "dropped": 0, "changedFileCount": 7, "degraded": ["…"]
+}
+```
+
+`units` reads it (`--spec <file>`, default `<dir>/spec-obligations.json`) and
+attaches each obligation to ONE unit: the first candidate file that has any
+unit, and within it the unit holding the most touched lines (ties → the
+earliest); no candidate with a unit ⇒ the `pr` unit. Rendered under
+OBLIGATIONS as `S-n · family spec · asked in <source>` + criterion + candidate
+files + question. Absent ⇒ a `degraded[]` entry (as before); malformed (bad
+JSON, wrong shape, repeated ids) ⇒ a `degraded[]` entry and no spec
+obligation, never a crash. The file is read loosely: fields core adds pass.
 
 ### `units.json` — written by `lastlight-facts units --dir .lastlight/pr-review --repo .`
 
@@ -53,12 +92,15 @@ The split is deliberate:
   "version": 1,
   "generatedAt": "…",
   "baseSha": "…", "headSha": "…",
-  "promptVersion": "units-v2",       // bump when request rendering changes
+  "promptVersion": "units-v3",       // bump when request rendering changes
   "sharedPrefix": "…",                // the unit-independent head EVERY request starts with, byte for byte
   "sharedPrefixSha256": "…",          // sha256 of `sharedPrefix`
   "coverage": "full" | "degraded" | "none",
   "degraded": [{ "extractor": "units", "reason": "…" }],
   "responseSchema": { … },            // JSON Schema of ONE unit response (informational; the request text also states it)
+  "skipped": [{ "file": "…", "reason": "…" }],
+  "specObligations": [{ "id": "S-1", "criterion": "…", "source": "…", "candidates": ["…"], "question": "…" }],
+                                      // as printed; absent when no spec file was read. Ingest resolves S-n against THIS
   "units": [
     {
       "id": "u-001",                  // stable within the document, zero-padded, ordered by file then line
@@ -100,6 +142,18 @@ verbatim is still correct.
 `--never-fail`) when there is nothing to survey, and fail loud (exit 2, a
 document with `degraded[]`) when its inputs are missing.
 
+**The shell fallback is a valid document.** When the process dies without
+writing, the YAML prints
+`{"version":1,"generatedAt":…,"baseSha":null,"headSha":"<sha>","promptVersion":null,"coverage":"none","degraded":[{"extractor":"units","reason":"…"}],"responseSchema":null,"units":[]}`.
+`UnitsDocumentSchema` accepts exactly that — nulls for
+`baseSha`/`promptVersion`/`responseSchema`/`sharedPrefix`/`sharedPrefixSha256`,
+no `skipped` — **only** with `coverage: "none"` and an empty `units`; any
+document with units carries every field. `fallbackUnitsDocument(reason,
+headSha)` builds it and a test pins it against the literal. Ingest reads any
+empty document whose reason does not start with `"nothing to survey"` as
+`unitsState: "not-surveyed"` — nobody looked, the reason propagated into
+every conserved row, exit 3 — never as unreadable and never as clean.
+
 ### `units/responses/<unitId>.json` — written by the core handler
 
 ```jsonc
@@ -108,9 +162,10 @@ document with `degraded[]`) when its inputs are missing.
   "model": "provider/model-id",
   "systemPromptSha256": "…",
   "requestSha256": "…",               // copied from units.json
-  "ok": true,                         // false = no parseable JSON object after the retry, or the call failed
+  "ok": true,                         // false = no usable reply after the retry, the call failed, the reply hit the
+                                      //   output cap, the phase deadline / a run cancel, or the file could not be written
   "cached": false,
-  "attempts": 1,                      // 1 or 2
+  "attempts": 1,                      // 1 or 2; 0 = stopped (deadline / cancel) before the first call
   "raw": "…",                         // the final attempt's full text response
   "error": null | "…",
   "usage": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "costUsd": 0 },
@@ -118,9 +173,59 @@ document with `degraded[]`) when its inputs are missing.
 }
 ```
 
-The handler's only validation is **"`raw` contains one JSON object whose
-`unitId` equals the unit's id"** — enough to decide the single retry. Schema
-validation is `units-ingest`'s job.
+The handler's validation is **the canonical reply rule, owned by code-facts**
+(`src/unit-response.ts`) and mirrored in the handler case for case —
+`tests/unit-reply.test.ts`'s table is copied verbatim into the handler's test:
+
+- `findUnitObject(raw, unitId): Record<string, unknown> | null` — candidates
+  are every balanced top-level `{…}` span of `raw` that parses as a JSON
+  object, then those inside each ``` fence body (string-aware, braces only; an
+  unclosed `{` or a balanced non-JSON span is skipped and scanning CONTINUES);
+  the first whose `unitId` is exactly `unitId` wins; otherwise one level of
+  nesting (a property value, or an object element of an array property value,
+  with that `unitId`); otherwise `null`.
+- `isUsableUnitReply(obj, unitId): boolean` — `unitId` matches AND `answers`
+  and `defects` are arrays.
+
+`ok: true` and a cache write only when both hold (after the one retry). Ingest
+applies the same two before reading any entry, so a reading the handler cached
+is never `invalid` at ingest. Entry/schema validation is `units-ingest`'s job.
+
+The handler (`apps/server/src/workflows/handlers/survey-units.ts`) keeps its
+own copy of the two rules — core cannot import code-facts — and its test
+carries the `CASES` / `USABLE` tables verbatim. Around the rule:
+
+- **The call.** System = the phase prompt + `"\n\n"` + `sharedPrefix` when
+  every request starts with it (and keeps something after it); user = the
+  request minus the prefix. Otherwise the request goes verbatim.
+  `systemPromptSha256` is the hash of the system text actually sent. pi-ai
+  puts Anthropic's `cache_control` on the system block (and on the last user
+  block), so this is what makes the prefix a cross-unit cache hit. The phase's
+  `variant:` (`{{variants.review-survey}}`, then the resolver) is the thinking
+  level. No explicit `maxTokens` (pi-ai sends the model's cap); a reply that
+  stops with `stopReason: "length"` and no usable object is recorded `ok:
+  false` and NOT retried.
+- **The cache** (`<stateDir>/unit-survey-cache/<owner>/<repo>/`) is keyed on
+  the resolved endpoint (provider, api, model id, base URL — after
+  `providers:` overrides), the thinking level, and the hashes of the system
+  and user text sent. A hit is re-checked against the rule. Before clearing
+  `units/responses/`, the handler reads the previous run's `units/ingest.json`
+  and, for each unit it marked `invalid` / `partial`, takes that unit's
+  `requestSha256` from the response record beside it and evicts the entry the
+  same request would hit (best-effort, logged).
+- **The deadline.** `timeout_seconds: { from: surveyUnitsTimeoutSeconds }`
+  (`review.analysis.surveyUnitsTimeoutSeconds`, default 600) arms one
+  `AbortController` whose signal goes into every call; a run cancel (the run
+  row polled every 5 s) aborts it too. A unit not finished is recorded `ok:
+  false`, error `phase deadline` / `run cancelled`.
+- **Degrade, don't fail.** Every path inside the phase — no or unreadable
+  `units.json`, an empty `coverage: "none"` document (the node's shell
+  fallback), no model, every call failing, the deadline — SUCCEEDS with a loud
+  `SURVEY DEGRADED …` summary and a warn log; `units-ingest` records the gap.
+  A red phase would post nothing and re-arm the 30-minute review sweep. Each
+  unit settles on its own (a throw, or a response file that cannot be
+  written, is that unit's failure), so the pool drains before the transcript
+  closes.
 
 ### The model's response body (defined by code-facts, stated in `request`)
 
@@ -141,9 +246,17 @@ two extra row fields: `source: "units"` and `unitId`. Writes
 `units/ingest.json` (per unit: rows written, errors). A unit with no response,
 `ok: false`, or an invalid body is **recorded, never silently dropped**: every
 obligation it owned gets a row that says the survey could not answer it
-(unknown evidence — which `deriveVerdict` already routes to a probe). Then the
-per-family `discharge` checks must pass on the ingested set. Exit 0 on every
-path under `--never-fail`, like the other deterministic phases.
+(unknown evidence — which `deriveVerdict` already routes to a probe). **Those
+rows — and only those — carry `needsProbe: true`**: `requiresProbe` (the
+`falsify` gate) reads the raw field or a Critical severity and never derives,
+and unknown evidence derives to Minor, so without the stamp nothing required
+them to be probed; `requiresProbe` is left alone so the agent-survey baseline
+does not move mid-experiment. A spec answer becomes a
+`hypotheses/spec.jsonl` row in the agent spec survey's shape (`obligation:
+"S-n"`, `bothEnds.introducedAt` = the criterion's source, `path`). Then the
+per-family `discharge` checks must pass on the ingested set (`spec` stays
+`--ungraded`). Exit 0 on every path under `--never-fail`, like the other
+deterministic phases.
 
 ## Transcript
 
@@ -152,8 +265,14 @@ The handler writes ONE virtual session per phase through `AgenticShim`
 (`apps/server/src/engine/chat/chat.ts`): per unit an assistant `message_end`
 carrying a `survey_unit` tool call (`arguments`: unitId, symbol, file, lines,
 model, request) with that call's usage, then a `tool_execution_end` with the raw
-response (or the error, `is_error`). Retries and cache hits get their own pair.
-Closed by a summary message and `finalize` with summed usage. The phase is
+response (or the error, `is_error`). Retries and cache hits get their own pair,
+and so does a unit the deadline or a cancel stopped before its first call
+(`<unitId>-stopped`, `is_error`, the reason as the result). The opening prompt
+is the phase prompt plus a unit manifest that shows `sharedPrefix` ONCE (each
+call's `request` argument carries a one-line marker in its place, whether or not
+the prefix went out as system text). Closed by a summary message — `SURVEY
+DEGRADED …` / `SURVEY STOPPED EARLY …` when it was — and `finalize` with summed
+usage; nothing is written after the `result` line. The phase is
 wrapped in `runLedgeredPhase` so an `executions` row carries the `session_id`,
 cost and tokens — which is what makes it visible to the dashboard, the CLI
 (`lastlight session log`) and stats. Evals split and cost it from the `phase`
@@ -165,6 +284,17 @@ stamp and the `result` line, unchanged.
 pipeline on, the separate `review` pass is skipped and `adjudicate` writes
 `findings.json` from the hypotheses alone. With the pipeline off, `review`
 always runs — it is the whole review.
+
+That makes `adjudicate` the only writer of `findings.json`, so `reconcile`'s
+`findings --repair` **creates** the file when it is missing over a non-empty
+hypothesis set: every hypothesis at `internal`, `event: "COMMENT"`, a summary
+saying adjudication did not complete so nothing was weighed or posted inline,
+and an `incomplete: {phase, reason}` marker. Without it a failed adjudicator
+meant post-review failing "could not read findings", a red run with nothing
+posted, and the 30-minute sweep re-running the pipeline on the same SHA
+forever. Safe in every shape: when `review` ran, a missing file means review
+failed and post-review (`none_failed` on `review`) does not run. An
+unreadable file is never overwritten; no hypotheses ⇒ nothing is invented.
 
 ## Evals (the branch is done when these exist)
 

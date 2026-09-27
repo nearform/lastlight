@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
-import type { Context } from "@earendil-works/pi-ai";
+import type { Context, ThinkingLevel } from "@earendil-works/pi-ai";
 import {
   OPENINFERENCE_CHAIN,
   OPENINFERENCE_SPAN_KIND,
@@ -34,7 +34,7 @@ import { resolveSessionsDir } from "../../engine/executors/shared.js";
 import { OAUTH_ONLY_PROVIDERS, oauthProviderIdForModel, resolveOAuthApiKey } from "../../engine/oauth.js";
 import { logger } from "../../logging/logger.js";
 import { CHAT_PROJECT_SLUG, projectSlugForCwd } from "../../session-log.js";
-import { resolveHostRepoDir } from "./host-repo-dir.js";
+import { HOST_READABLE_WORKSPACE, resolveHostRepoDir } from "./host-repo-dir.js";
 
 const log = logger("survey-units");
 
@@ -59,8 +59,15 @@ const log = logger("survey-units");
  *
  * **Only host-checkout backends.** The handler reads and writes the workspace
  * from the harness. `kubernetes` has no host checkout (its paths are in-pod;
- * see `HOST_READABLE_WORKSPACE` in `fanout.ts`), so it fails LOUD there rather
- * than reporting a survey that never saw the units.
+ * see {@link HOST_READABLE_WORKSPACE}), so `loadConfig` refuses
+ * `surveyEngine: units` there at startup; the run-time check below is a guard
+ * that degrades, never the primary refusal.
+ *
+ * **Degrade, don't fail.** Every path INSIDE the phase — no `units.json`, an
+ * empty or unreadable one, every call failing, the phase deadline, a cancel —
+ * ends in a SUCCEEDED phase with a loud summary and a warn log. A red phase
+ * here would post nothing and re-arm the review sweep, while `units-ingest`
+ * (which runs either way) already records every obligation no unit answered.
  *
  * **Visible like any other phase.** One virtual session transcript through
  * {@link AgenticShim} (one `survey_unit` tool call per model call, so a retry
@@ -75,6 +82,7 @@ const log = logger("survey-units");
 const PR_REVIEW_DIR = join(".lastlight", "pr-review");
 const UNITS_FILE = "units.json";
 const RESPONSES_DIR = join("units", "responses");
+const INGEST_FILE = join("units", "ingest.json");
 
 /** The tool name the transcript records each unit call under. */
 export const SURVEY_UNIT_TOOL = "survey_unit";
@@ -98,6 +106,13 @@ export interface UnitCallResult {
   usage: UnitCallUsage;
   /** Set when the provider answered with an error or an abort rather than text. */
   error?: string;
+  /**
+   * Why generation stopped, as pi-ai reports it (`stop` | `length` | …).
+   * `length` is the one the handler acts on: the reply was cut at the output
+   * cap, and re-sending the identical request would be cut there again, so it
+   * is never retried.
+   */
+  stopReason?: string;
 }
 
 /**
@@ -106,7 +121,11 @@ export interface UnitCallResult {
  */
 export type UnitModelCall = (args: {
   model: string;
+  /** The phase's thinking level (`variant:`), or undefined for the provider default. */
+  variant?: string;
+  /** The SYSTEM text actually sent: the phase prompt, plus the shared prefix when split off. */
   systemPrompt: string;
+  /** The USER message actually sent: the unit's request, minus the prefix when split off. */
   request: string;
   timeoutMs: number;
   /**
@@ -115,9 +134,17 @@ export type UnitModelCall = (args: {
    * a prefix land where that prefix is already cached.
    */
   cacheKey: string;
+  /** Aborted at the phase deadline or on a run cancel; the call must stop. */
+  signal?: AbortSignal;
 }) => Promise<UnitCallResult>;
 
 const ZERO_USAGE: UnitCallUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 };
+
+/** pi-ai's `reasoning` excludes `off` — its default IS no reasoning (chat-runner's rule). */
+function thinkingLevel(variant: string | undefined): ThinkingLevel | undefined {
+  if (!variant || variant === "off") return undefined;
+  return variant as ThinkingLevel;
+}
 
 /**
  * The production {@link UnitModelCall}: pi-ai's `completeSimple`, resolved and
@@ -125,24 +152,38 @@ const ZERO_USAGE: UnitCallUsage = { input: 0, output: 0, cacheRead: 0, cacheWrit
  * a deployment's endpoint override, a named key env var, an OAuth subscription
  * token. Transient provider faults (429 / 5xx / network) are retried with
  * backoff by `completeWithRetry` INSIDE one attempt; the handler's own single
- * retry is for a reply that came back without the unit's JSON object.
+ * retry is for a reply that came back without a usable object for the unit.
  *
- * **Prompt caching.** Every call of a phase sends the byte-identical system
- * prompt, and every `unit.request` opens with code-facts' byte-identical
- * `sharedPrefix` (the unit-independent questions, evidence record and rules),
- * so the shared head is cacheable provider-side. `cacheRetention: "short"` is
+ * No explicit `maxTokens`: pi-ai sends the model's own output cap
+ * (`options.maxTokens ?? model.maxTokens`), the most generous value there is,
+ * and a reply that still hits it comes back `stopReason: "length"`.
+ *
+ * **Prompt caching.** The handler moves code-facts' byte-identical
+ * `sharedPrefix` (the unit-independent questions, evidence record and rules)
+ * OUT of the user message and onto the end of the system prompt, so every call
+ * of a phase opens with the same system text. `cacheRetention: "short"` is
  * pi-ai's default, spelled out so a `PI_CACHE_RETENTION=long` in the harness
  * env cannot silently double the write price of a phase that re-asks within
  * minutes, not hours. What each provider does with it differs:
+ *  - Anthropic caches only at explicit breakpoints. pi-ai folds
+ *    `Context.systemPrompt` into a leading system message and emits it as
+ *    `system: [{ type: "text", text, cache_control: { type: "ephemeral" } }]`
+ *    (plus a second breakpoint on the last user block), so the system text —
+ *    prompt AND shared prefix — is the cross-unit cache hit. It is cached only
+ *    above the model's minimum cacheable length.
  *  - OpenAI-family prefix caching is automatic over any identical prefix
- *    (≥1024 tokens), so system prompt + shared prefix both hit; `cacheKey`
- *    goes out as `prompt_cache_key` to keep concurrent calls on one cache.
- *  - Anthropic caches only at explicit breakpoints, and pi-ai places them on
- *    the system prompt and the END of the last user message. The system prompt
- *    therefore hits across units; the shared prefix inside the request does
- *    not get a breakpoint of its own through `completeSimple`.
+ *    (≥1024 tokens); `cacheKey` goes out as `prompt_cache_key` to keep
+ *    concurrent calls on one cache.
  */
-export const completeUnitCall: UnitModelCall = async ({ model, systemPrompt, request, timeoutMs, cacheKey }) => {
+export const completeUnitCall: UnitModelCall = async ({
+  model,
+  variant,
+  systemPrompt,
+  request,
+  timeoutMs,
+  cacheKey,
+  signal,
+}) => {
   const resolved = resolveModel(model);
   let apiKey: string | undefined;
   const oauthId = oauthProviderIdForModel(model);
@@ -158,10 +199,13 @@ export const completeUnitCall: UnitModelCall = async ({ model, systemPrompt, req
     systemPrompt,
     messages: [{ role: "user", content: request, timestamp: Date.now() }],
   };
+  const reasoning = thinkingLevel(variant);
   const assistant = await completeWithRetry(completeSimple, resolved, context, {
     timeoutMs,
     cacheRetention: "short",
     sessionId: cacheKey,
+    ...(signal ? { signal } : {}),
+    ...(reasoning ? { reasoning } : {}),
     ...(key ? { apiKey: key } : {}),
   });
   const text = assistant.content
@@ -171,6 +215,7 @@ export const completeUnitCall: UnitModelCall = async ({ model, systemPrompt, req
   const failed = assistant.stopReason === "error" || assistant.stopReason === "aborted";
   return {
     text,
+    stopReason: assistant.stopReason,
     usage: {
       input: assistant.usage.input,
       output: assistant.usage.output,
@@ -181,6 +226,23 @@ export const completeUnitCall: UnitModelCall = async ({ model, systemPrompt, req
     ...(failed ? { error: assistant.errorMessage ?? assistant.stopReason } : {}),
   };
 };
+
+/**
+ * What identifies the ENDPOINT a model string resolves to — provider, request
+ * family, model id and base URL, after this deployment's `providers:`
+ * overrides. Part of the reply cache key: the same `{{models.review-survey}}`
+ * spelling pointed at a different gateway is a different model as far as a
+ * cached reading is concerned. An unresolvable spec keys on itself (its call
+ * fails anyway, and a failure is never cached).
+ */
+export function unitEndpointIdentity(model: string): string {
+  try {
+    const m = resolveModel(model);
+    return [m.provider, m.api, m.id, m.baseUrl].join("|");
+  } catch {
+    return `unresolved|${model}`;
+  }
+}
 
 // ── The file contract ────────────────────────────────────────────────────────
 
@@ -209,6 +271,8 @@ interface UnitsDocument {
    */
   sharedPrefix?: string;
   sharedPrefixSha256?: string;
+  /** Why coverage is not `full` — the `units` CLI's own reasons, or the shell fallback's. */
+  degraded?: { extractor?: string; reason?: string }[];
   units: SurveyUnit[];
 }
 
@@ -232,10 +296,10 @@ function sha256(text: string): string {
 }
 
 /**
- * Read and shape-check `units.json`. Throws with a message fit for the phase
- * error: the `units` phase ALWAYS writes a document (its shell fallback
+ * Read and shape-check `units.json`. Throws with a message fit for the loud
+ * summary: the `units` phase ALWAYS writes a document (its shell fallback
  * included), so a missing or malformed one is a broken contract, never an
- * empty survey.
+ * empty survey — the caller degrades on it rather than failing the phase.
  */
 function readUnitsDocument(path: string): UnitsDocument {
   let parsed: unknown;
@@ -266,32 +330,19 @@ function readUnitsDocument(path: string): UnitsDocument {
   return doc as UnitsDocument;
 }
 
-/**
- * Does `raw` hold a JSON object whose `unitId` is `unitId`?
- *
- * The handler's ONLY validation — enough to decide the single retry. Every
- * brace-balanced span is tried (string-aware, so a `}` inside a claim does not
- * cut it short), which accepts a fenced block or a sentence of preamble the
- * model was told not to write. Schema validation is `units-ingest`'s job.
- */
-export function holdsUnitObject(raw: string, unitId: string): boolean {
-  for (let start = raw.indexOf("{"); start !== -1; start = raw.indexOf("{", start + 1)) {
-    const end = closingBrace(raw, start);
-    if (end === -1) continue;
-    try {
-      const v = JSON.parse(raw.slice(start, end)) as unknown;
-      if (v && typeof v === "object" && !Array.isArray(v) && (v as { unitId?: unknown }).unitId === unitId) {
-        return true;
-      }
-    } catch {
-      /* balanced but not JSON — keep scanning */
-    }
-  }
-  return false;
-}
+// ── The ONE reply rule ───────────────────────────────────────────────────────
+//
+// A COPY of the canonical `findUnitObject` / `isUsableUnitReply` in
+// `packages/code-facts/src/unit-response.ts`, which `units-ingest` judges every
+// reply by. Core may not import code-facts (see the module header), and the
+// handler's retry and cache decisions must be the SAME decision ingest makes —
+// a reply this accepts and ingest rejects was cached forever as an answer
+// ingest would never use. Change the two together:
+// `tests/workflows/survey-units.test.ts` carries a VERBATIM copy of the case
+// tables in `packages/code-facts/tests/unit-reply.test.ts`.
 
-/** Index just past the value opening at `start`, or -1 if the text ends first. */
-function closingBrace(text: string, start: number): number {
+/** Index just past the `{…}` opening at `start` (string-aware), or -1 if the text ends first. */
+function objectEnd(text: string, start: number): number {
   let depth = 0;
   let inString = false;
   for (let i = start; i < text.length; i += 1) {
@@ -300,13 +351,96 @@ function closingBrace(text: string, start: number): number {
       if (ch === "\\") i += 1;
       else if (ch === '"') inString = false;
     } else if (ch === '"') inString = true;
-    else if (ch === "{" || ch === "[") depth += 1;
-    else if (ch === "}" || ch === "]") {
+    else if (ch === "{") depth += 1;
+    else if (ch === "}") {
       depth -= 1;
       if (depth === 0) return i + 1;
     }
   }
   return -1;
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+/**
+ * Every balanced top-level `{…}` span in `text` that parses as a JSON object,
+ * in order. An UNCLOSED `{` (a stray brace in prose, a truncated reply) is
+ * skipped and the scan CONTINUES from the next character — never abandoned —
+ * and so is a balanced span that is not JSON.
+ */
+function objectSpans(text: string): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  let pos = 0;
+  while (pos < text.length) {
+    const start = text.indexOf("{", pos);
+    if (start === -1) break;
+    const end = objectEnd(text, start);
+    if (end !== -1) {
+      try {
+        const value = JSON.parse(text.slice(start, end)) as unknown;
+        if (isPlainObject(value)) {
+          out.push(value);
+          pos = end;
+          continue;
+        }
+      } catch {
+        /* balanced but not JSON — try the next brace */
+      }
+    }
+    pos = start + 1;
+  }
+  return out;
+}
+
+/** The bodies of the ``` fences in `text`, in order — scanned on their own too, so a quote in prose cannot hide one. */
+function fencedBodies(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/```[^\n`]*\n([\s\S]*?)```/g)) out.push(m[1]);
+  return out;
+}
+
+/**
+ * The reply object for `unitId` in a model's raw text, or `null` — the
+ * canonical rule, step for step:
+ *
+ *   1. Candidates are every balanced top-level `{…}` span that parses as a JSON
+ *      object — first across the whole of `raw`, then inside each ``` fence
+ *      body — in that order (see `objectSpans`).
+ *   2. The FIRST candidate whose `unitId` is exactly `unitId` is the reply.
+ *   3. Otherwise ONE level of nesting: per candidate, a property value that is
+ *      an object with that `unitId`, or such an object element of a property
+ *      value that is an array (`{"result": {…}}`, `{"units": [{…}]}`).
+ *   4. Otherwise `null`. An object naming ANOTHER unit is never this unit's.
+ */
+export function findUnitObject(raw: string, unitId: string): Record<string, unknown> | null {
+  const candidates = [raw, ...fencedBodies(raw)].flatMap(objectSpans);
+  const direct = candidates.find((c) => c.unitId === unitId);
+  if (direct) return direct;
+  for (const c of candidates) {
+    for (const v of Object.values(c)) {
+      const inner = Array.isArray(v) ? v : [v];
+      const hit = inner.find((e): e is Record<string, unknown> => isPlainObject(e) && e.unitId === unitId);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+/**
+ * Whether a found object is a reply `units-ingest` can use: an object naming
+ * this unit, with `answers` and `defects` both arrays (possibly empty). The
+ * entries are not inspected — a malformed entry is ingest's to record, never a
+ * reason to re-ask.
+ */
+export function isUsableUnitReply(obj: unknown, unitId: string): boolean {
+  return isPlainObject(obj) && obj.unitId === unitId && Array.isArray(obj.answers) && Array.isArray(obj.defects);
+}
+
+/** The handler's one decision about a reply: {@link findUnitObject} then {@link isUsableUnitReply}. */
+export function usableUnitReply(raw: string, unitId: string): boolean {
+  return isUsableUnitReply(findUnitObject(raw, unitId), unitId);
 }
 
 /** Write a file whole or not at all — a concurrent reader never sees half of it. */
@@ -320,32 +454,89 @@ function writeAtomic(path: string, body: string): void {
 // ── The response cache ───────────────────────────────────────────────────────
 
 /**
- * Readings cached by request hash, OUTSIDE the per-run workspace, so a
- * re-review of the same repo reuses every unit whose request did not change —
- * the other half of the perch shape. Keyed on everything that determines the
- * reply: the model, the system prompt, and the request (which already carries
- * the unit's code, its obligations and code-facts' `promptVersion`).
+ * Readings cached OUTSIDE the per-run workspace, so a re-review of the same
+ * repo reuses every unit whose request did not change — the other half of the
+ * perch shape. Keyed on everything that determines the reply: the RESOLVED
+ * endpoint ({@link unitEndpointIdentity} — provider, api, model id, base URL),
+ * the thinking level, and the hashes of the system text and the user message
+ * actually sent (which together carry the prompt, the shared prefix, the
+ * unit's code, its obligations and code-facts' `promptVersion`).
  *
- * Only `ok: true` readings are stored: a failure is never worth replaying.
- * Scoped by `<owner>/<repo>` so one repository's cache cannot answer for
- * another's, even on an identical request.
+ * Only replies that pass the ONE reply rule ({@link usableUnitReply}) are
+ * stored, and a hit is re-checked against it — so an entry written under a
+ * looser rule is ignored rather than replayed. An entry `units-ingest` later
+ * judged `invalid` / `partial` is EVICTED at the start of the next run (see
+ * `previousBadRequests`). Scoped by `<owner>/<repo>` so one repository's cache
+ * cannot answer for another's, even on an identical request.
  */
 export function unitCacheDir(stateDir: string, owner: string, repo: string): string {
   const safe = (s: string) => (s.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "_") || "_");
   return join(stateDir, "unit-survey-cache", safe(owner), safe(repo));
 }
 
-function cacheKey(model: string, systemPromptSha256: string, requestSha256: string): string {
-  return sha256(`${model}\n${systemPromptSha256}\n${requestSha256}`);
+/** Version-tagged, so a change to what the key covers never replays an old entry. */
+function cacheKey(k: { endpoint: string; variant: string | undefined; systemSha256: string; userSha256: string }): string {
+  return sha256(["unit-cache-v2", k.endpoint, k.variant ?? "", k.systemSha256, k.userSha256].join("\n"));
 }
 
-function readCached(dir: string, key: string): UnitResponseRecord | undefined {
+function readCached(dir: string, key: string, unitId: string): UnitResponseRecord | undefined {
   try {
     const rec = JSON.parse(readFileSync(join(dir, `${key}.json`), "utf8")) as UnitResponseRecord;
-    return rec && rec.ok === true && typeof rec.raw === "string" ? rec : undefined;
+    return rec && rec.ok === true && typeof rec.raw === "string" && usableUnitReply(rec.raw, unitId) ? rec : undefined;
   } catch {
     return undefined;
   }
+}
+
+/** Remove one cache entry; true when there was one. Never throws. */
+function evictCached(dir: string, key: string): boolean {
+  try {
+    unlinkSync(join(dir, `${key}.json`));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** `units-ingest` statuses that mean a reply the handler accepted was not an answer. */
+const EVICT_STATUSES = new Set(["invalid", "partial"]);
+
+/**
+ * The requests whose cached reply the LAST run's `units-ingest` rejected, read
+ * from the previous `units/ingest.json` + `units/responses/<id>.json` BEFORE
+ * this run clears them. Ingest's report carries the unit id and status but not
+ * the request, so the response record left beside it supplies the
+ * `requestSha256`; the caller evicts the cache entry that request would hit.
+ *
+ * Best-effort and logged: any unreadable piece means nothing to evict, which
+ * costs at worst one replay of a reply ingest will record as unanswered again.
+ */
+function previousBadRequests(prDir: string, phase: string): Set<string> {
+  const out = new Set<string>();
+  let report: unknown;
+  try {
+    report = JSON.parse(readFileSync(join(prDir, INGEST_FILE), "utf8"));
+  } catch {
+    return out; // no previous ingest — the normal first run
+  }
+  const units = isPlainObject(report) && Array.isArray(report.units) ? report.units : [];
+  for (const u of units) {
+    if (!isPlainObject(u) || typeof u.unitId !== "string" || !EVICT_STATUSES.has(String(u.status))) continue;
+    if (!SAFE_UNIT_ID.test(u.unitId)) continue;
+    try {
+      const rec = JSON.parse(readFileSync(join(prDir, RESPONSES_DIR, `${u.unitId}.json`), "utf8")) as unknown;
+      if (isPlainObject(rec) && typeof rec.requestSha256 === "string") out.add(rec.requestSha256);
+    } catch (err) {
+      log.warn("unit survey: ingest rejected a reply whose response record is unreadable — cannot evict it", {
+        phase,
+        unitId: u.unitId,
+        status: u.status,
+        err,
+      });
+    }
+  }
+  if (out.size) log.info("unit survey: evicting replies the last ingest rejected", { phase, requests: out.size });
+  return out;
 }
 
 // ── The transcript ───────────────────────────────────────────────────────────
@@ -447,26 +638,6 @@ class UnitSurveyTranscript {
     await this.shim.flush();
   }
 
-  /** Early death: close whatever was opened — or open a stub — with the error on it. */
-  async fail(error: string, turns: number, usage: UnitCallUsage, durationMs: number): Promise<string | null> {
-    if (this.opened) this.say(`Survey stopped: ${error}`);
-    return this.shim.finalizeWithFallback(
-      {
-        finalText: "",
-        turns,
-        costUsd: usage.costUsd,
-        inputTokens: usage.input,
-        outputTokens: usage.output,
-        cacheReadInputTokens: usage.cacheRead,
-        cacheCreationInputTokens: usage.cacheWrite,
-        stopReason: "error_survey_units",
-        durationMs,
-      },
-      this.sessionId,
-      this.opened ? undefined : error,
-    );
-  }
-
   private feed(record: Record<string, unknown>): void {
     this.shim.feed(record as unknown as Parameters<AgenticShim["feed"]>[0]);
   }
@@ -500,7 +671,7 @@ function transcriptRequest(request: string, sharedPrefix: string | undefined): s
 }
 
 /** The unit list the transcript opens with, after the system prompt. */
-function manifest(units: SurveyUnit[], doc: UnitsDocument): string {
+function manifest(units: SurveyUnit[], doc: UnitsDocument, prefixInSystem: boolean): string {
   const head = [
     "---",
     "",
@@ -508,7 +679,9 @@ function manifest(units: SurveyUnit[], doc: UnitsDocument): string {
     "",
     `coverage: ${doc.coverage ?? "unknown"} · promptVersion: ${doc.promptVersion ?? "unknown"}`,
     "",
-    "The prompt above is the SYSTEM prompt of every call below; each call's user message is its unit's `request`, verbatim.",
+    prefixInSystem
+      ? "The prompt above, followed by the shared request prefix below, is the SYSTEM prompt of every call; each call's user message is the rest of its unit's `request`."
+      : "The prompt above is the SYSTEM prompt of every call below; each call's user message is its unit's `request`, verbatim.",
     "",
   ];
   if (units.length === 0) return [...head, "(none — `units.json` lists no units)"].join("\n");
@@ -518,7 +691,16 @@ function manifest(units: SurveyUnit[], doc: UnitsDocument): string {
     return `- ${unitLabel(u)}${families}${obligations}${u.truncated ? " · TRUNCATED" : ""}`;
   });
   const shared = doc.sharedPrefix
-    ? ["", "## Shared request prefix", "", "Every request below opens with these bytes; the calls record it as a one-line marker.", "", doc.sharedPrefix]
+    ? [
+        "",
+        "## Shared request prefix",
+        "",
+        prefixInSystem
+          ? "Every request opens with these bytes. They were sent ONCE per call as the end of the system prompt (the cache breakpoint), not in the user message; the calls record them as a one-line marker."
+          : "Every request below opens with these bytes; the calls record it as a one-line marker.",
+        "",
+        doc.sharedPrefix,
+      ]
     : [];
   return [...head, ...rows, ...shared].join("\n");
 }
@@ -542,6 +724,8 @@ export interface SurveyUnitsRunScope {
   ledger: Omit<LedgerDeps, "store">;
   /** Test seam — the model call. Defaults to {@link completeUnitCall}. */
   callUnit?: UnitModelCall;
+  /** Test seam — how often the run row is polled for a cancel. Default 5 s. */
+  cancelPollMs?: number;
 }
 
 /** What one unit came to — its response record, and the calls it spent. */
@@ -549,6 +733,31 @@ interface UnitOutcome {
   record: UnitResponseRecord;
   calls: number;
 }
+
+/** Everything one unit's survey shares with its siblings in a phase. */
+interface UnitCallPlan {
+  model: string;
+  variant: string | undefined;
+  endpoint: string;
+  /** The SYSTEM text sent (prompt, plus the shared prefix when split off) and its hash. */
+  systemText: string;
+  systemSha256: string;
+  /** Present when the shared prefix moved into the system text — sliced off each request. */
+  splitPrefix: string | undefined;
+  /** The document's shared prefix, for the transcript's one-line marker. */
+  sharedPrefix: string | undefined;
+  deadlineAt: number;
+  signal: AbortSignal;
+  cacheDir: string;
+  call: UnitModelCall;
+  promptCacheKey: string;
+  /** Requests whose cached reply the last `units-ingest` rejected — evicted, then asked again. */
+  evict: Set<string>;
+}
+
+/** The reasons a phase's AbortController fires with — also each unfinished unit's recorded error. */
+const PHASE_DEADLINE = "phase deadline";
+const RUN_CANCELLED = "run cancelled";
 
 export class SurveyUnitsHandler implements PhaseTypeHandler {
   constructor(
@@ -596,6 +805,9 @@ export class SurveyUnitsHandler implements PhaseTypeHandler {
         (onSessionId) => this.survey(phase, model, onSessionId),
       );
     } catch (err) {
+      // Only the LEDGER itself can land here — `survey` degrades every failure
+      // of its own. A store that cannot record the phase is not a survey
+      // outcome, so it stays red.
       return this.fail(phase, err instanceof Error ? err.message : String(err));
     }
 
@@ -629,6 +841,9 @@ export class SurveyUnitsHandler implements PhaseTypeHandler {
    * The ledgered body — everything that spends, and the transcript that shows
    * it. Returns an {@link ExecutionResult} whose cost and tokens are the sum of
    * every call, which `runLedgeredPhase` copies onto the `executions` row.
+   *
+   * SUCCEEDS on every path (see the module header): a degraded survey is a
+   * loud summary on a green phase, never a red one.
    */
   private async survey(
     phase: PhaseDefinition,
@@ -645,82 +860,165 @@ export class SurveyUnitsHandler implements PhaseTypeHandler {
     let turns = 0;
     let transcript: UnitSurveyTranscript | undefined;
 
-    const failed = async (error: string, systemPrompt = ""): Promise<ExecutionResult> => {
-      log.error("unit survey failed", { phase: phase.name, error });
-      transcript ??= this.transcript(phase, model ?? "", hostRepoDir, `${systemPrompt}\n\n${error}`.trim());
-      const sessionId = await transcript.fail(error, turns, totals, Date.now() - startedAt);
-      if (sessionId) onSessionId(sessionId);
-      return this.executionResult(false, error, turns, totals, startedAt, sessionId ?? undefined, "error_survey_units");
+    /** Nothing (more) was surveyed: say why, loudly, and SUCCEED. */
+    const degrade = async (reason: string, opening = ""): Promise<ExecutionResult> => {
+      const text =
+        `SURVEY DEGRADED — ${reason}\n` +
+        "No survey reading exists for any unit not answered above. `units-ingest` records every obligation " +
+        "those units owned as unanswered (routed to a probe), so nothing here may be read as \"no findings\".";
+      log.warn("unit survey degraded", { phase: phase.name, reason });
+      if (!transcript) {
+        transcript = this.transcript(phase, model ?? "", hostRepoDir, (opening || reason).trim());
+        transcript.open();
+        onSessionId(transcript.sessionId);
+      }
+      transcript.say(text);
+      await transcript.close({ text, turns, usage: totals, durationMs: Date.now() - startedAt, stopReason: "success" });
+      return this.executionResult(text, turns, totals, startedAt, transcript.sessionId);
     };
 
-    // The backend check comes FIRST: on kubernetes a `units.json` may even be
-    // readable (the artifact upload unpacks `.lastlight/` host-side), but the
-    // responses written here would never reach the pod `units-ingest` runs in.
-    if (this.run.backend === "kubernetes") {
-      return failed(
-        "survey-units: `review.analysis.surveyEngine: units` needs a backend whose workspace the harness can read " +
-          "and write (none, docker, gondolin or smol); the kubernetes backend has no host checkout. " +
-          "Set `surveyEngine: agent` for this deployment.",
+    // A backend with no host checkout is refused at config load
+    // (`assertSurveyEngineSupported`); this is the belt to that. It comes
+    // FIRST and touches nothing on disk: on kubernetes a `units.json` may even
+    // be readable (the artifact upload unpacks `.lastlight/` host-side), but a
+    // response written here would never reach the pod `units-ingest` runs in.
+    if (!HOST_READABLE_WORKSPACE[this.run.backend]) {
+      return degrade(
+        `the ${this.run.backend} backend has no host checkout, so the harness cannot read units.json or write ` +
+          "the responses. `review.analysis.surveyEngine: units` should have been refused at startup — set " +
+          "`surveyEngine: agent` for this deployment.",
       );
     }
-    if (!model) {
-      return failed(
-        `survey-units: no model resolved for phase \`${phase.name}\` — set \`models.review-survey\` (or the phase's \`model:\`)`,
-      );
-    }
-    if (!phase.prompt) return failed(`survey-units: phase \`${phase.name}\` has no \`prompt:\``);
 
-    let systemPrompt: string;
-    let doc: UnitsDocument;
-    let timeoutMs: number;
+    let evict = new Set<string>();
     try {
-      systemPrompt = renderTemplate(this.run.assets.loadPromptTemplate(phase.prompt), this.run.ctx);
-      doc = readUnitsDocument(join(prDir, UNITS_FILE));
-      timeoutMs = this.callTimeoutSeconds(phase) * 1000;
-    } catch (err) {
-      return failed(err instanceof Error ? err.message : String(err));
-    }
-
-    const systemPromptSha256 = sha256(systemPrompt);
-    const units = doc.units;
-    transcript = this.transcript(phase, model, hostRepoDir, `${systemPrompt.trimEnd()}\n\n${manifest(units, doc)}`);
-    transcript.open();
-    onSessionId(transcript.sessionId);
-
-    try {
-      // A reused per-target workspace still holds the LAST head's responses;
-      // any unit id this document no longer lists would be ingested as if it
-      // had been asked. Start from an empty directory.
+      // Read what the LAST run's ingest rejected before its evidence is
+      // cleared, then clear: a reused per-target workspace still holds the
+      // last head's responses, and any unit id this document no longer lists
+      // would be ingested as if it had been asked. Cleared on EVERY path below,
+      // degraded ones included — a stale response is worse than none.
+      evict = previousBadRequests(prDir, phase.name);
       const responsesDir = join(prDir, RESPONSES_DIR);
       rmSync(responsesDir, { recursive: true, force: true });
       mkdirSync(responsesDir, { recursive: true });
+    } catch (err) {
+      return degrade(`could not prepare ${join(prDir, RESPONSES_DIR)}: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
-      if (units.length === 0) {
-        const text =
-          `No units to survey — \`units.json\` lists none (coverage: ${doc.coverage ?? "unknown"}). ` +
-          "No model call was made; `units-ingest` reports what that means for each family.";
-        transcript.say(text);
-        await transcript.close({ text, turns: 0, usage: totals, durationMs: Date.now() - startedAt, stopReason: "success" });
-        log.info("unit survey: nothing to survey", { phase: phase.name, coverage: doc.coverage });
-        return this.executionResult(true, text, 0, totals, startedAt, transcript.sessionId, "success");
-      }
+    if (!model) {
+      return degrade(
+        `no model resolved for phase \`${phase.name}\` — set \`models.review-survey\` (or the phase's \`model:\`)`,
+      );
+    }
+    if (!phase.prompt) return degrade(`phase \`${phase.name}\` has no \`prompt:\``);
 
-      const cacheDir = unitCacheDir(this.run.config.stateDir || resolve("data"), owner, repo);
-      // Stable for everything the phase's calls share: the system prompt and
-      // the requests' common head. Clamped well inside OpenAI's 64-char key.
-      const promptCacheKey = `lastlight-units-${sha256(`${systemPromptSha256}\n${doc.sharedPrefixSha256 ?? ""}`).slice(0, 24)}`;
-      const sharedPrefix = typeof doc.sharedPrefix === "string" && doc.sharedPrefix.length > 0 ? doc.sharedPrefix : undefined;
-      const concurrency = this.concurrency();
-      const call = this.run.callUnit ?? completeUnitCall;
-      const t = transcript;
+    let systemPrompt: string;
+    let doc: UnitsDocument;
+    let deadlineSeconds: number;
+    try {
+      systemPrompt = renderTemplate(this.run.assets.loadPromptTemplate(phase.prompt), this.run.ctx);
+      deadlineSeconds = this.deadlineSeconds(phase);
+    } catch (err) {
+      return degrade(err instanceof Error ? err.message : String(err));
+    }
+    try {
+      doc = readUnitsDocument(join(prDir, UNITS_FILE));
+    } catch (err) {
+      return degrade(err instanceof Error ? err.message : String(err), systemPrompt);
+    }
 
-      const outcomes = await mapPool(units, concurrency, async (unit) => {
-        const o = await this.surveyUnit(
-          unit,
-          { model, systemPrompt, systemPromptSha256, timeoutMs, cacheDir, call, promptCacheKey, sharedPrefix },
-          t,
+    const units = doc.units;
+    // The shared prefix goes to the SYSTEM prompt — where pi-ai puts Anthropic's
+    // cache breakpoint — only when every request really opens with it and keeps
+    // something after it. Otherwise every request is sent verbatim.
+    const sharedPrefix = typeof doc.sharedPrefix === "string" && doc.sharedPrefix.length > 0 ? doc.sharedPrefix : undefined;
+    const splitPrefix =
+      sharedPrefix && units.length > 0 && units.every((u) => u.request.startsWith(sharedPrefix) && u.request.length > sharedPrefix.length)
+        ? sharedPrefix
+        : undefined;
+    if (sharedPrefix && units.length > 0 && !splitPrefix) {
+      log.warn("units.json sharedPrefix is not the head of every request — sending each request verbatim", {
+        phase: phase.name,
+      });
+    }
+    const systemText = splitPrefix ? `${systemPrompt}\n\n${splitPrefix}` : systemPrompt;
+    const systemSha256 = sha256(systemText);
+
+    transcript = this.transcript(phase, model, hostRepoDir, `${systemPrompt.trimEnd()}\n\n${manifest(units, doc, !!splitPrefix)}`);
+    transcript.open();
+    onSessionId(transcript.sessionId);
+
+    if (units.length === 0) {
+      const reasons = (doc.degraded ?? []).map((d) => d.reason).filter((r): r is string => typeof r === "string" && r.length > 0);
+      if (doc.coverage === "none" || reasons.length > 0) {
+        // The shell fallback's shape: `units` could not cut the PR at all. NOT
+        // "there was nothing to survey".
+        return degrade(
+          `No units to survey — \`units.json\` lists none and its coverage is "${doc.coverage ?? "unknown"}"` +
+            (reasons.length ? `: ${reasons.join("; ")}` : "") +
+            ". No model call was made.",
         );
-        writeAtomic(join(responsesDir, `${unit.id}.json`), `${JSON.stringify(o.record, null, 2)}\n`);
+      }
+      const text =
+        `No units to survey — \`units.json\` lists none (coverage: ${doc.coverage ?? "unknown"}). ` +
+        "No model call was made; `units-ingest` reports what that means for each family.";
+      transcript.say(text);
+      await transcript.close({ text, turns: 0, usage: totals, durationMs: Date.now() - startedAt, stopReason: "success" });
+      log.info("unit survey: nothing to survey", { phase: phase.name, coverage: doc.coverage });
+      return this.executionResult(text, 0, totals, startedAt, transcript.sessionId);
+    }
+
+    // One controller over every call of the phase: the deadline, and a run
+    // cancel noticed by polling the run row (the handler scope carries no
+    // signal of its own; the scheduler checks the same row between phases).
+    const controller = new AbortController();
+    const deadlineAt = Date.now() + deadlineSeconds * 1000;
+    const deadline = setTimeout(() => controller.abort(PHASE_DEADLINE), deadlineSeconds * 1000);
+    deadline.unref?.();
+    const stopCancelPoll = this.pollForCancel(controller);
+
+    const t = transcript;
+    try {
+      const plan: UnitCallPlan = {
+        model,
+        variant: this.resolveVariant(phase),
+        endpoint: unitEndpointIdentity(model),
+        systemText,
+        systemSha256,
+        splitPrefix,
+        sharedPrefix,
+        deadlineAt,
+        signal: controller.signal,
+        cacheDir: unitCacheDir(this.run.config.stateDir || resolve("data"), owner, repo),
+        call: this.run.callUnit ?? completeUnitCall,
+        // Stable for everything the phase's calls share — the system text.
+        // Clamped well inside OpenAI's 64-char key.
+        promptCacheKey: `lastlight-units-${systemSha256.slice(0, 24)}`,
+        evict,
+      };
+      const responsesDir = join(prDir, RESPONSES_DIR);
+      const concurrency = this.concurrency();
+
+      // Every unit settles — a throw anywhere in one unit (a response file that
+      // cannot be written, a bug) becomes THAT unit's failure, so the pool
+      // always drains before the transcript is finalized and nothing writes a
+      // line after the `result`.
+      const outcomes = await mapPool(units, concurrency, async (unit) => {
+        let o: UnitOutcome;
+        try {
+          o = await this.surveyUnit(unit, plan, t);
+        } catch (err) {
+          const error = `the unit's survey threw: ${err instanceof Error ? err.message : String(err)}`;
+          log.error("unit survey threw", { unitId: unit.id, err });
+          o = { record: this.failedRecord(unit, plan, error, 0), calls: 0 };
+        }
+        try {
+          writeAtomic(join(responsesDir, `${unit.id}.json`), `${JSON.stringify(o.record, null, 2)}\n`);
+        } catch (err) {
+          const error = `could not write the response file: ${err instanceof Error ? err.message : String(err)}`;
+          log.error("unit survey: response file not written", { unitId: unit.id, err });
+          o = { ...o, record: { ...o.record, ok: false, error } };
+        }
         totals = addUsage(totals, o.record.usage);
         turns += o.calls;
         return o;
@@ -728,27 +1026,25 @@ export class SurveyUnitsHandler implements PhaseTypeHandler {
 
       const ok = outcomes.filter((o) => o.record.ok).length;
       const cached = outcomes.filter((o) => o.record.cached).length;
-      const failedUnits = outcomes.filter((o) => !o.record.ok).map((o) => o.record.unitId);
-      const summary =
+      const failedUnits = outcomes.filter((o) => !o.record.ok);
+      const stopped = controller.signal.aborted ? String(controller.signal.reason) : undefined;
+      const head =
         `Surveyed ${units.length} unit(s): ${ok} ok, ${failedUnits.length} failed, ${cached} from cache — ` +
-        `${turns} model call(s), $${totals.costUsd.toFixed(4)}.` +
-        (failedUnits.length
-          ? `\nFailed (no JSON object for the unit after the retry, or the call errored): ${failedUnits.join(", ")}. ` +
-            "`units-ingest` records every obligation those units owned as unanswered — never dropped."
-          : "");
-      // Every unit failing is not a thin survey, it is a broken one (a bad key,
-      // an unknown model): fail the phase so it is red where someone looks.
-      // `units-ingest` still runs (`all_done`) and records the gap.
-      const success = ok > 0;
+        `${turns} model call(s), $${totals.costUsd.toFixed(4)}.`;
+      const failures = failedUnits.length
+        ? `\nFailed: ${failedUnits.map((o) => `${o.record.unitId} (${o.record.error ?? "unknown"})`).join(", ")}. ` +
+          "`units-ingest` records every obligation those units owned as unanswered — never dropped."
+        : "";
+      const summary =
+        ok === 0
+          ? `SURVEY DEGRADED — EVERY one of ${units.length} unit(s) failed (first error: ${failedUnits[0]?.record.error ?? "unknown"}). ` +
+            "This looks like a bad key, an unknown model or a provider outage, not a thin survey.\n" +
+            head +
+            failures
+          : `${stopped ? `SURVEY STOPPED EARLY (${stopped}). ` : ""}${head}${failures}`;
       transcript.say(summary);
-      await transcript.close({
-        text: summary,
-        turns,
-        usage: totals,
-        durationMs: Date.now() - startedAt,
-        stopReason: success ? "success" : "error_survey_units",
-      });
-      log.info("unit survey finished", {
+      await transcript.close({ text: summary, turns, usage: totals, durationMs: Date.now() - startedAt, stopReason: "success" });
+      const fields = {
         phase: phase.name,
         units: units.length,
         ok,
@@ -757,38 +1053,22 @@ export class SurveyUnitsHandler implements PhaseTypeHandler {
         calls: turns,
         costUsd: totals.costUsd,
         concurrency,
+        stopped,
         durationMs: Date.now() - startedAt,
-      });
-      return this.executionResult(
-        success,
-        summary,
-        turns,
-        totals,
-        startedAt,
-        transcript.sessionId,
-        success ? "success" : "error_survey_units",
-        success ? undefined : `survey-units: every one of ${units.length} unit call(s) failed — ${outcomes[0]?.record.error ?? "unknown error"}`,
-      );
+      };
+      if (ok === 0 || stopped) log.warn("unit survey finished degraded", fields);
+      else log.info("unit survey finished", fields);
+      return this.executionResult(summary, turns, totals, startedAt, transcript.sessionId);
     } catch (err) {
-      return failed(err instanceof Error ? err.message : String(err));
+      return degrade(err instanceof Error ? err.message : String(err));
+    } finally {
+      clearTimeout(deadline);
+      stopCancelPoll();
     }
   }
 
-  /** One unit: a cache hit, or up to two calls. Never throws. */
-  private async surveyUnit(
-    unit: SurveyUnit,
-    c: {
-      model: string;
-      systemPrompt: string;
-      systemPromptSha256: string;
-      timeoutMs: number;
-      cacheDir: string;
-      call: UnitModelCall;
-      promptCacheKey: string;
-      sharedPrefix?: string;
-    },
-    transcript: UnitSurveyTranscript,
-  ): Promise<UnitOutcome> {
+  /** One unit: a cache hit, or up to two calls. Never throws on a model failure. */
+  private async surveyUnit(unit: SurveyUnit, c: UnitCallPlan, transcript: UnitSurveyTranscript): Promise<UnitOutcome> {
     const startedAt = Date.now();
     const requestSha256 = sha256(unit.request);
     if (unit.requestSha256 && unit.requestSha256 !== requestSha256) {
@@ -797,7 +1077,8 @@ export class SurveyUnitsHandler implements PhaseTypeHandler {
       });
     }
     const contractSha = unit.requestSha256 ?? requestSha256;
-    const key = cacheKey(c.model, c.systemPromptSha256, requestSha256);
+    const userText = c.splitPrefix ? unit.request.slice(c.splitPrefix.length) : unit.request;
+    const key = cacheKey({ endpoint: c.endpoint, variant: c.variant, systemSha256: c.systemSha256, userSha256: sha256(userText) });
     const args = {
       unitId: unit.id,
       symbol: unit.symbol,
@@ -807,28 +1088,34 @@ export class SurveyUnitsHandler implements PhaseTypeHandler {
       request: transcriptRequest(unit.request, c.sharedPrefix),
     };
 
-    const hit = readCached(c.cacheDir, key);
-    if (hit) {
-      const record: UnitResponseRecord = {
-        ...hit,
-        unitId: unit.id,
-        model: c.model,
-        systemPromptSha256: c.systemPromptSha256,
-        requestSha256: contractSha,
-        cached: true,
-        usage: { ...ZERO_USAGE },
-        durationMs: Date.now() - startedAt,
-      };
-      transcript.call(
-        `${unit.id}-cache`,
-        `${unitLabel(unit)} — cache hit (an identical request was answered before); no model call.`,
-        { ...args, cached: true },
-        ZERO_USAGE,
-        `[cached response]\n${hit.raw}`,
-        false,
-      );
-      log.debug("unit survey cache hit", { unitId: unit.id });
-      return { record, calls: 0 };
+    if (c.evict.has(contractSha) || c.evict.has(requestSha256)) {
+      if (evictCached(c.cacheDir, key)) {
+        log.info("unit survey: evicted a cached reply the last ingest rejected", { unitId: unit.id });
+      }
+    } else {
+      const hit = readCached(c.cacheDir, key, unit.id);
+      if (hit) {
+        const record: UnitResponseRecord = {
+          ...hit,
+          unitId: unit.id,
+          model: c.model,
+          systemPromptSha256: c.systemSha256,
+          requestSha256: contractSha,
+          cached: true,
+          usage: { ...ZERO_USAGE },
+          durationMs: Date.now() - startedAt,
+        };
+        transcript.call(
+          `${unit.id}-cache`,
+          `${unitLabel(unit)} — cache hit (an identical request was answered before); no model call.`,
+          { ...args, cached: true },
+          ZERO_USAGE,
+          `[cached response]\n${hit.raw}`,
+          false,
+        );
+        log.debug("unit survey cache hit", { unitId: unit.id });
+        return { record, calls: 0 };
+      }
     }
 
     let usage: UnitCallUsage = { ...ZERO_USAGE };
@@ -836,10 +1123,13 @@ export class SurveyUnitsHandler implements PhaseTypeHandler {
     let error: string | null = null;
     let ok = false;
     let attempts = 0;
-    // At most TWO calls: the retry is for a reply without the unit's JSON
-    // object (or a call that failed outright). Transient provider faults are
-    // already retried inside one call by `completeWithRetry`.
+    // At most TWO calls: the retry is for a reply without a usable object for
+    // the unit (or a call that failed outright). Never after the phase was
+    // aborted, and never after a reply cut at the output cap — the identical
+    // request would stop there again. Transient provider faults are already
+    // retried inside one call by `completeWithRetry`.
     while (attempts < 2 && !ok) {
+      if (c.signal.aborted) break;
       attempts += 1;
       const intro =
         attempts === 1
@@ -848,25 +1138,38 @@ export class SurveyUnitsHandler implements PhaseTypeHandler {
       const callStarted = Date.now();
       let callUsage: UnitCallUsage = { ...ZERO_USAGE };
       let callError: string | undefined;
+      let stopReason: string | undefined;
       let text = "";
       try {
         const res = await c.call({
           model: c.model,
-          systemPrompt: c.systemPrompt,
-          request: unit.request,
-          timeoutMs: c.timeoutMs,
+          ...(c.variant ? { variant: c.variant } : {}),
+          systemPrompt: c.systemText,
+          request: userText,
+          timeoutMs: Math.max(1000, c.deadlineAt - Date.now()),
           cacheKey: c.promptCacheKey,
+          signal: c.signal,
         });
         text = res.text ?? "";
         callUsage = { ...ZERO_USAGE, ...res.usage };
         callError = res.error;
+        stopReason = res.stopReason;
       } catch (err) {
         callError = err instanceof Error ? err.message : String(err);
       }
+      // An abort during the call is recorded as the phase's reason, whatever
+      // shape the provider gave it.
+      if (c.signal.aborted) callError = String(c.signal.reason);
       usage = addUsage(usage, callUsage);
       raw = text;
-      ok = callError === undefined && holdsUnitObject(text, unit.id);
-      error = ok ? null : (callError ?? `the response holds no JSON object whose \`unitId\` is "${unit.id}"`);
+      ok = callError === undefined && usableUnitReply(text, unit.id);
+      const truncated = !ok && callError === undefined && stopReason === "length";
+      error = ok
+        ? null
+        : (callError ??
+          (truncated
+            ? "the reply stopped at the output-token cap (stopReason: length) before holding a usable object — not retried, the identical request would stop there again"
+            : `the response holds no usable JSON object for unitId "${unit.id}" (it must name the unit and carry \`answers\` and \`defects\` arrays)`));
 
       transcript.call(
         `${unit.id}-a${attempts}`,
@@ -880,15 +1183,26 @@ export class SurveyUnitsHandler implements PhaseTypeHandler {
         unitId: unit.id,
         attempt: attempts,
         ok,
+        stopReason,
         durationMs: Date.now() - callStarted,
         costUsd: callUsage.costUsd,
       });
+      if (truncated || c.signal.aborted) break;
+    }
+
+    if (attempts === 0) {
+      // Aborted before this unit's first call: it is still RECORDED — in the
+      // transcript and as a response — never silently missing.
+      const reason = String(c.signal.reason ?? PHASE_DEADLINE);
+      transcript.call(`${unit.id}-stopped`, `${unitLabel(unit)} — not surveyed: ${reason}.`, args, ZERO_USAGE, reason, true);
+      log.warn("unit survey unit not started", { unitId: unit.id, reason });
+      return { record: this.failedRecord(unit, c, reason, 0, Date.now() - startedAt), calls: 0 };
     }
 
     const record: UnitResponseRecord = {
       unitId: unit.id,
       model: c.model,
-      systemPromptSha256: c.systemPromptSha256,
+      systemPromptSha256: c.systemSha256,
       requestSha256: contractSha,
       ok,
       cached: false,
@@ -907,12 +1221,55 @@ export class SurveyUnitsHandler implements PhaseTypeHandler {
         log.warn("could not write the unit survey cache", { unitId: unit.id, err });
       }
     } else {
-      log.warn("unit survey unit failed after the retry", { unitId: unit.id, error });
+      log.warn("unit survey unit failed", { unitId: unit.id, attempts, error });
     }
     return { record, calls: attempts };
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
+
+  private failedRecord(
+    unit: SurveyUnit,
+    c: Pick<UnitCallPlan, "model" | "systemSha256">,
+    error: string,
+    attempts: number,
+    durationMs = 0,
+  ): UnitResponseRecord {
+    return {
+      unitId: unit.id,
+      model: c.model,
+      systemPromptSha256: c.systemSha256,
+      requestSha256: unit.requestSha256 ?? sha256(unit.request),
+      ok: false,
+      cached: false,
+      attempts,
+      raw: "",
+      error,
+      usage: { ...ZERO_USAGE },
+      durationMs,
+    };
+  }
+
+  /**
+   * Abort `controller` when the run row turns `cancelled`. The admin cancel
+   * only flips the row (and kills sandbox containers — this phase has none),
+   * so polling it is the only way an in-process phase hears of it. Returns
+   * the stopper. Best-effort: a store error stops nothing.
+   */
+  private pollForCancel(controller: AbortController): () => void {
+    const { store, workflowId } = this.run;
+    if (!store || !workflowId) return () => {};
+    const timer = setInterval(() => {
+      void store.runs
+        .getRun(workflowId)
+        .then((run) => {
+          if (run?.status === "cancelled" && !controller.signal.aborted) controller.abort(RUN_CANCELLED);
+        })
+        .catch((err: unknown) => log.debug("unit survey: cancel poll failed", { err }));
+    }, this.run.cancelPollMs ?? 5000);
+    timer.unref?.();
+    return () => clearInterval(timer);
+  }
 
   private transcript(phase: PhaseDefinition, model: string, hostRepoDir: string, initialPrompt: string): UnitSurveyTranscript {
     // The checkout's own slug, as the phase's bash siblings use on `none`.
@@ -927,18 +1284,16 @@ export class SurveyUnitsHandler implements PhaseTypeHandler {
     });
   }
 
+  /** Always a SUCCESS — every outcome of the survey itself degrades, never fails. */
   private executionResult(
-    success: boolean,
     output: string,
     turns: number,
     usage: UnitCallUsage,
     startedAt: number,
     sessionId: string | undefined,
-    stopReason: string,
-    error?: string,
   ): ExecutionResult {
     return {
-      success,
+      success: true,
       output,
       turns,
       durationMs: Date.now() - startedAt,
@@ -948,8 +1303,7 @@ export class SurveyUnitsHandler implements PhaseTypeHandler {
       outputTokens: usage.output,
       cacheReadInputTokens: usage.cacheRead,
       cacheCreationInputTokens: usage.cacheWrite,
-      stopReason,
-      ...(success ? {} : { error: error ?? output }),
+      stopReason: "success",
     };
   }
 
@@ -959,20 +1313,26 @@ export class SurveyUnitsHandler implements PhaseTypeHandler {
     return rendered || this.run.resolver.modelFor(phase.name) || undefined;
   }
 
+  /** The thinking level, resolved exactly as an agent phase's `variant:` is. */
+  private resolveVariant(phase: PhaseDefinition): string | undefined {
+    const rendered = phase.variant ? renderTemplate(phase.variant, this.run.ctx).trim() : "";
+    return rendered || this.run.resolver.variantFor(phase.name) || undefined;
+  }
+
   /**
-   * Per-CALL budget, in seconds: the phase's own `timeout_seconds`, else the
-   * run's agent limit (`timeouts.agentSeconds`, seeded from `sandbox.*`) — a
-   * config key, never a literal (issue #385). One unit call is far smaller
-   * than an agent session, so the agent limit is a ceiling, not a target.
+   * The WHOLE-PHASE deadline, in seconds: the phase's `timeout_seconds`
+   * (`{ from: surveyUnitsTimeoutSeconds }` in the packaged YAML), else the
+   * run's agent limit (`timeouts.agentSeconds`) — a config key, never a
+   * literal (issue #385).
    */
-  private callTimeoutSeconds(phase: PhaseDefinition): number {
+  private deadlineSeconds(phase: PhaseDefinition): number {
     const seconds = resolveTemplatedNumber(
       phase.timeout_seconds ?? { from: "timeouts.agentSeconds" },
       this.run.ctx,
-      `${phase.name}.timeout_seconds (per unit call)`,
+      `${phase.name}.timeout_seconds (the whole-phase deadline)`,
       this.run.ledger.logger,
     );
-    if (seconds === undefined) throw new Error(`${phase.name}: per-call timeout did not resolve`);
+    if (seconds === undefined) throw new Error(`${phase.name}: the phase deadline did not resolve`);
     return seconds;
   }
 
@@ -1003,7 +1363,9 @@ export class SurveyUnitsHandler implements PhaseTypeHandler {
 
 /**
  * Bounded, order-preserving concurrent map — results land at their input
- * index however the pool interleaves. (`fanout.ts` has the same helper; each
+ * index however the pool interleaves. `fn` must not throw (the caller settles
+ * each unit itself), so every worker runs to the end of the list and the pool
+ * resolves only once every item has. (`fanout.ts` has the same helper; each
  * handler keeps its own so neither imports the other's module.)
  */
 async function mapPool<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {

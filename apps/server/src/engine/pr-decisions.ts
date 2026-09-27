@@ -33,7 +33,12 @@ import { HOLD_LABEL } from "../cron/dependabot-discovery.js";
 import { ATTEMPT_FREE_CLASSES } from "./fix-markers.js";
 import { renderPrNotes } from "./pr-notes.js";
 import { PR_NOTES_FILE_NAME, VERIFY_SCRIPT_NAME } from "./fix-scratch.js";
-import { buildSpecObligations, renderLinkedIssues, renderSpecObligations } from "./review-spec.js";
+import {
+  buildSpecObligations,
+  renderLinkedIssues,
+  renderSpecObligations,
+  type SpecObligationSet,
+} from "./review-spec.js";
 
 /**
  * A skip that must be ESCALATED on the pull request — labelled `requires-human`
@@ -1708,17 +1713,24 @@ function renderPathsSinceLastReview(paths: string[] | null): string {
     : shown.join("\n");
 }
 
+/**
+ * A {@link SpecObligationSet} as ONE line of JSON that no template guard can
+ * trip over — see `specObligationsJson` in {@link specContext}. Exported for the
+ * test that renders it through a real heredoc.
+ */
+export function specObligationsLine(set: SpecObligationSet): string {
+  return JSON.stringify(set).replace(/\{\{/g, "{\\u007b");
+}
+
 function specContext(state: PrState, review?: ReviewConfig): Record<string, unknown> {
   if (!review?.analysis?.enabled) return {};
-  const rendered = renderSpecObligations(
-    buildSpecObligations({
-      prBody: state.body,
-      closes: state.closes,
-      changedFiles: state.changedFiles,
-      max: review.analysis.maxSpecObligations,
-    }),
-    review.analysis.obligationContract,
-  );
+  const specSet = buildSpecObligations({
+    prBody: state.body,
+    closes: state.closes,
+    changedFiles: state.changedFiles,
+    max: review.analysis.maxSpecObligations,
+  });
+  const rendered = renderSpecObligations(specSet, review.analysis.obligationContract);
   return {
     /**
      * The ONE key WP3's phases gate on — `skip_if: "analysisEnabled != true"`.
@@ -1794,6 +1806,12 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      * the context whichever engine it picked.
      */
     surveyUnitConcurrency: String(review.analysis.surveyUnitConcurrency),
+    /**
+     * `survey-units`' WHOLE-PHASE deadline, read as `timeout_seconds: { from:
+     * surveyUnitsTimeoutSeconds }` (issue #385: config is the only source of a
+     * budget). The handler arms one AbortController with it.
+     */
+    surveyUnitsTimeoutSeconds: String(review.analysis.surveyUnitsTimeoutSeconds),
     /**
      * The CONTROL arm — `--contract` on the `seed` phase's `lastlight-facts`
      * invocation, and the argument `renderSpecObligations` above just took.
@@ -2019,5 +2037,23 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
     // renders, because "we could not look" and "we looked and it is fine" must
     // stay distinguishable (locked decision 6).
     ...(rendered ? { specObligations: rendered } : {}),
+    /**
+     * The SAME set, raw, for `lastlight-facts units` — which cuts spec
+     * obligations into units and so needs ids, criteria and candidates, not
+     * prose. The `units` phase writes it to
+     * `.lastlight/pr-review/spec-obligations.json` through a QUOTED heredoc, so
+     * this must stay ONE line (`JSON.stringify` with no indent never emits a raw
+     * newline — string newlines are `\n` escapes) and can therefore never equal
+     * the heredoc's delimiter line. Present under exactly the condition
+     * `specObligations` is, so "nothing to say" writes no file.
+     *
+     * `{` inside a string is escaped as `\u007b` wherever it would sit next to
+     * another `{`: the bash-phase guard (`validateShellCommand`) rejects any
+     * rendered command containing `{{`, and a PR body is text a stranger wrote.
+     * The escape is JSON, so the file parses back to the identical object.
+     * (JSON's own structure never puts two `{` side by side — an object's first
+     * token is a string key — so every `{{` is inside a string.)
+     */
+    ...(rendered ? { specObligationsJson: specObligationsLine(specSet) } : {}),
   };
 }

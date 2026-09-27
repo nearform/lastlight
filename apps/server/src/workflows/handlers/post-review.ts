@@ -639,13 +639,31 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     const clean = boundary
       ? readCleanDischarges(join(hostRepoDir, ".lastlight", "pr-review"))
       : undefined;
+    // An INCOMPLETE document (the conservation floor wrote it because the
+    // adjudicator never did) is not a review. Its own summary — which says the
+    // change was not assessed — is what posts, with the reason, on every
+    // branch below; the posted-findings summary is never written for it,
+    // because with nothing posted that summary is "No issues to raise."
+    const incomplete = incompleteSummary(doc);
+    if (incomplete !== undefined) {
+      log.warn("findings.json is marked incomplete — posting its not-assessed summary, never a clean one", {
+        repo: `${owner}/${repo}`,
+        prNumber,
+        phase: doc.incomplete?.phase,
+        reason: doc.incomplete?.reason,
+      });
+      doc = { ...doc, summary: incomplete };
+    }
     let review = buildReview(doc, commentable, boundary, clean);
     // Issue #405: under a boundary the summary is written AFTER the caps, from
     // the posted findings only — the adjudicator's summary was written before
     // them and routinely named findings the boundary then withheld, which
     // posted them anyway. See `review-summary.ts`.
     let postedSummary: string | undefined;
-    if (boundary && review.tiered) {
+    if (boundary && review.tiered && incomplete !== undefined) {
+      postedSummary = incomplete;
+      review = withSummary(review, incomplete);
+    } else if (boundary && review.tiered) {
       const summary = await writePostedSummary({
         event: review.event,
         tiered: review.tiered,
@@ -1168,4 +1186,18 @@ export function makePostReviewHandler(
   reporter: PhaseReporter,
 ): PhaseTypeHandler {
   return new GitHubPostReviewHandler(run, reporter);
+}
+
+/**
+ * The summary an INCOMPLETE findings document posts: its own summary (the
+ * floor writes one saying the change was not assessed), then the reason, or
+ * `undefined` for a complete document. A missing or empty summary still posts
+ * as not-assessed — never as nothing.
+ */
+export function incompleteSummary(doc: ReviewFindingsDoc): string | undefined {
+  if (!doc.incomplete) return undefined;
+  const own = typeof doc.summary === "string" ? doc.summary.trim() : "";
+  const summary = own || "This review did not complete, so the change was not assessed. This is not a clean review.";
+  const reason = typeof doc.incomplete.reason === "string" ? doc.incomplete.reason.trim() : "";
+  return reason && !summary.includes(reason) ? `${summary}\n\nWhy: ${reason}.` : summary;
 }

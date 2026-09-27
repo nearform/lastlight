@@ -632,6 +632,16 @@ export interface ReviewAnalysisConfig {
    */
   falsifyTimeoutSeconds: number;
   /**
+   * WHOLE-PHASE deadline on `survey-units` (`surveyEngine: units`), in seconds.
+   *
+   * The in-process handler runs every unit call under one `AbortController`
+   * armed for this long; a unit not finished by then is recorded `ok: false`
+   * with the error `phase deadline` (and appears in the transcript), and the
+   * phase still succeeds — `units-ingest` records the gap. Read by the phase as
+   * `timeout_seconds: { from: surveyUnitsTimeoutSeconds }`.
+   */
+  surveyUnitsTimeoutSeconds: number;
+  /**
    * How many rounds `falsify` gets to write and run probes.
    *
    * Two. v3's lesson 3 is the sizing argument: the loop's exit condition is a
@@ -861,6 +871,7 @@ export type ReviewAnalysisDurationKey =
   | "seedTimeoutSeconds"
   | "reconcileTimeoutSeconds"
   | "falsifyTimeoutSeconds"
+  | "surveyUnitsTimeoutSeconds"
   | "jevTimeoutSeconds";
 
 /**

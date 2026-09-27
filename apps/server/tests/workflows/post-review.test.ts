@@ -706,6 +706,48 @@ describe("post-review action (runPostReview)", () => {
         for (const t of ["on-diff C", "on-diff D", "off-diff E"]) expect(prompt, t).not.toContain(t);
       });
 
+      it("an INCOMPLETE findings doc posts its not-assessed summary and the reason — never \"No issues to raise\"", async () => {
+        // `findings --repair` CREATES findings.json when the adjudicator never
+        // wrote one: every hypothesis `internal`, COMMENT, and an `incomplete`
+        // marker. Nothing posts inline, so a summary written from the posted
+        // set would be the clean "No issues to raise." — calling a PR that was
+        // never assessed clean.
+        withReviewConfig({
+          trigger: "on-request",
+          analysis: { ...defaultReviewConfig().analysis, enabled: true },
+        });
+        const taskId = "widget-42-incomplete";
+        const summary =
+          "Adjudication did not complete, so the 2 candidate issues this review's analysis recorded were not weighed " +
+          "and nothing is posted inline. This is not a clean review: the change was not assessed.";
+        seedFindings(taskId, "widget", {
+          summary,
+          event: "COMMENT",
+          incomplete: { phase: "adjudicate", reason: "the adjudicator timed out" },
+          findings: [
+            { path: "src/foo.ts", line: 7, severity: "Critical", title: "never weighed A", body: "b", tier: "internal" },
+            { path: "src/foo.ts", line: 8, severity: "Minor", title: "never weighed B", body: "b", tier: "internal" },
+          ],
+        });
+        let asked = false;
+        const { executor } = makeExecutor(taskId, {}, {
+          modelFor: () => "fake/summary",
+          chat: async () => {
+            asked = true;
+            return "Looks good.";
+          },
+        });
+        expect((await executor.execute(NODE, {})).status).toBe("succeeded");
+        const posted = reviews[0]!.body as { body: string; event: string; comments: unknown[] };
+        expect(posted.body).toContain(summary);
+        expect(posted.body).toContain("the adjudicator timed out");
+        expect(posted.body).not.toContain("No issues to raise");
+        expect(posted.event).toBe("COMMENT");
+        expect(posted.comments ?? []).toEqual([]);
+        // The posted-findings summary model is never asked for an incomplete doc.
+        expect(asked).toBe(false);
+      });
+
       it("falls back to a summary rendered in code when no summary model answers", async () => {
         withReviewConfig({
           trigger: "on-request",

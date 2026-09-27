@@ -358,11 +358,30 @@ phases:
       set -u
       FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
       OUT=.lastlight/pr-review/units.json
+      SPEC=.lastlight/pr-review/spec-obligations.json
       mkdir -p .lastlight/pr-review
       # A reused per-PR workspace still holds the LAST head's document. Remove
       # it first, so a process that dies before writing leaves no stale units
       # for `survey-units` to spend money on.
-      rm -f "$OUT"
+      rm -f "$OUT" "$SPEC"
+
+      # The spec obligations are built HARNESS-side (the PR body and the issues
+      # it closes; `review-spec.ts`), so they reach the sandbox only through
+      # this command: the raw set, as the one line of JSON `specContext`
+      # projects, for `units` to cut into units. QUOTED heredoc — nothing in it
+      # is expanded — and the value is one line, so it can never be the
+      # delimiter line. No set (nothing to say, nothing degraded) writes no
+      # file; the `rm` above already removed a stale one.
+      {{#if specObligationsJson}}
+      cat > "$SPEC" <<'LASTLIGHT_SPEC_EOF'
+      {{specObligationsJson}}
+      LASTLIGHT_SPEC_EOF
+      {{/if}}
+      if [ -s "$SPEC" ]; then
+        echo "units: spec obligations written, $(wc -c < "$SPEC") bytes"
+      else
+        echo "units: no spec obligations for this PR"
+      fi
 
       # The fallback must read downstream as "nothing was cut into units", never
       # as "there was nothing to survey": `coverage: none`, the reason in
@@ -385,15 +404,22 @@ phases:
       echo "units: exit $CODE, $N unit(s), $(wc -c < "$OUT" 2>/dev/null || echo 0) bytes"
       exit 0
 
-  # One call per unit, in the HARNESS process (`handlers/survey-units.ts`):
-  # `prompt:` is the system prompt of every call and the unit's rendered
-  # request is the user message, verbatim. Concurrency is
-  # `review.analysis.surveyUnitConcurrency`; readings are cached by request
-  # hash outside the workspace, so a re-review re-asks only the units whose
-  # request changed. One transcript and one `executions` row for the phase.
+  # One call per unit, in the HARNESS process (`handlers/survey-units.ts`).
+  # The system prompt of every call is `prompt:` plus the document's
+  # byte-identical `sharedPrefix` (so Anthropic's system-prompt cache
+  # breakpoint covers both), and the user message is the rest of the unit's
+  # request; with no usable prefix, the request goes verbatim. Concurrency is
+  # `review.analysis.surveyUnitConcurrency`. Replies are cached outside the
+  # workspace, keyed on the resolved endpoint, thinking level, system text and
+  # request, so a re-review re-asks only the units whose request changed — and
+  # a reply `units-ingest` judged invalid/partial is evicted before the next
+  # run. One transcript and one `executions` row for the phase.
   #
-  # It reads and writes the workspace from the harness, so it FAILS on the
-  # kubernetes backend (no host checkout) — loudly, naming the fix.
+  # It SUCCEEDS on every path inside the phase — no units, no units.json, every
+  # call failing, the deadline — with a loud summary, because a red phase here
+  # posts nothing and re-arms the review sweep, while `units-ingest` already
+  # records every unanswered obligation. The one unsupported setup (kubernetes:
+  # no host checkout) is refused at config load instead.
   - name: survey-units
     label: Survey · one call per unit
     type: survey-units
@@ -401,6 +427,12 @@ phases:
     # The fan-out's model key: this is the same survey, asked differently, and
     # the eval A/B compares the two engines on one model.
     model: "{{models.review-survey}}"
+    # Thinking level, resolved like every agent phase's (`variants.<key>`, then
+    # the resolver's per-phase / catch-all default). Part of the cache key.
+    variant: "{{variants.review-survey}}"
+    # The WHOLE-PHASE deadline (every unit call shares one AbortController);
+    # a unit not finished by then is recorded `ok: false`, "phase deadline".
+    timeout_seconds: { from: surveyUnitsTimeoutSeconds }
     skip_if:
       - "analysisEnabled != true"
       - "unitSurveyEnabled != true"

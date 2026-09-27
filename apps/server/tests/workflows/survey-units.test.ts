@@ -21,15 +21,18 @@ import {
 } from "lastlight-workflow-engine/test-support";
 import {
   SURVEY_UNIT_TOOL,
-  holdsUnitObject,
+  findUnitObject,
+  isUsableUnitReply,
   makeSurveyUnitsHandler,
   unitCacheDir,
+  usableUnitReply,
   type UnitCallResult,
   type UnitModelCall,
   type UnitResponseRecord,
 } from "#src/workflows/handlers/survey-units.js";
 import { SessionReader } from "#src/admin/sessions.js";
 import type { SandboxBackend } from "#src/config/config.js";
+import { installProviderOverrides } from "#src/config/provider-registry.js";
 
 /**
  * The `survey-units` phase (docs/plans/unit-survey.md): one model call per
@@ -92,11 +95,11 @@ const usage = (costUsd: number) => ({ input: 100, output: 20, cacheRead: 50, cac
 
 /** A scriptable fake call: records every request and hands back per-unit replies. */
 class FakeCall {
-  readonly requests: { request: string; systemPrompt: string; model: string; cacheKey: string }[] = [];
+  readonly requests: Parameters<UnitModelCall>[0][] = [];
   inFlight = 0;
   peak = 0;
   constructor(
-    private readonly reply: (id: string, attempt: number) => UnitCallResult | Error = (id) => ({
+    private readonly reply: (id: string, attempt: number) => UnitCallResult | Error | "hang" = (id) => ({
       text: answer(id),
       usage: usage(0.01),
     }),
@@ -111,6 +114,15 @@ class FakeCall {
       const id = /UNIT SURVEY (\S+)/.exec(args.request)?.[1] ?? "?";
       const attempt = this.requests.filter((r) => r.request === args.request).length;
       const out = this.reply(id, attempt);
+      if (out === "hang") {
+        // A call that never answers: it ends only when the phase aborts it,
+        // the way pi-ai hands back `stopReason: "aborted"`.
+        await new Promise<void>((resolve) => {
+          if (args.signal?.aborted) return resolve();
+          args.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return { text: "", usage: usage(0.001), error: "Request was aborted", stopReason: "aborted" };
+      }
       if (out instanceof Error) throw out;
       return out;
     } finally {
@@ -140,7 +152,15 @@ const resolver: PhaseResolver = {
 
 async function runSurvey(
   call: FakeCall,
-  opts: { backend?: SandboxBackend; concurrency?: string; store?: InMemoryStateStore; phase?: PhaseDefinition } = {},
+  opts: {
+    backend?: SandboxBackend;
+    concurrency?: string;
+    store?: InMemoryStateStore;
+    phase?: PhaseDefinition;
+    ctx?: Record<string, unknown>;
+    resolver?: PhaseResolver;
+    cancelPollMs?: number;
+  } = {},
 ) {
   const store = opts.store ?? new InMemoryStateStore(RUN_ID);
   const reporter = new RecordingReporter();
@@ -158,6 +178,7 @@ async function runSurvey(
         repo: "widgets",
         surveyUnitConcurrency: opts.concurrency ?? "16",
         timeouts: { agentSeconds: 600, commandSeconds: 300, untilBashSeconds: 30 },
+        ...opts.ctx,
       } as unknown as TemplateContext,
       config,
       taskId: "task-1",
@@ -165,11 +186,12 @@ async function runSurvey(
       githubAccess: { owner: "acme", repo: "widgets", profile: "review-write" } as GitSandboxAccess,
       backend: opts.backend ?? "none",
       assets,
-      resolver,
+      resolver: opts.resolver ?? resolver,
       store,
       workflowId: RUN_ID,
       ledger: { liveness: noopLiveness, observability: noopObservability },
       callUnit: call.fn,
+      ...(opts.cancelPollMs ? { cancelPollMs: opts.cancelPollMs } : {}),
     },
     reporter,
   );
@@ -332,14 +354,17 @@ describe("survey-units — the single retry", () => {
     expect(response("u-001")).toMatchObject({ ok: false, attempts: 2, error: "overloaded" });
   });
 
-  it("fails the PHASE only when every unit failed — a bad key, an unknown model", async () => {
+  it("every unit failing DEGRADES the phase — green, with a loud summary naming the first error", async () => {
+    // A red phase here posts nothing and re-arms the review sweep, while
+    // `units-ingest` records every unanswered obligation either way.
     writeUnits([unit("u-001"), unit("u-002")]);
     const { outcome, row } = await runSurvey(new FakeCall(() => new Error("401 invalid api key")));
-    expect(outcome.status).toBe("failed");
-    expect(outcome.results[0]?.error).toContain("401 invalid api key");
+    expect(outcome.status).toBe("succeeded");
+    expect(outcome.results[0]?.output).toMatch(/^SURVEY DEGRADED — EVERY one of 2 unit/);
+    expect(outcome.results[0]?.output).toContain("401 invalid api key");
     // …and the responses are still on disk for `units-ingest` to record.
     expect(response("u-001").ok).toBe(false);
-    expect(row?.success).toBe(false);
+    expect(row?.success).toBe(true);
   });
 });
 
@@ -390,50 +415,77 @@ describe("survey-units — the response cache", () => {
   });
 });
 
-describe("survey-units — loud failures", () => {
-  it("a missing units.json FAILS the phase, naming the phase that should have written it", async () => {
+describe("survey-units — degrade, don't fail", () => {
+  it("a missing units.json SUCCEEDS loudly, naming the phase that should have written it", async () => {
     const call = new FakeCall();
-    const { outcome, row, store } = await runSurvey(call);
-    expect(outcome.status).toBe("failed");
-    expect(outcome.results[0]?.error).toMatch(/units\.json/);
-    expect(outcome.results[0]?.error).toMatch(/`units` phase/);
+    const { outcome, row, reporter } = await runSurvey(call);
+    expect(outcome.status).toBe("succeeded");
+    expect(outcome.results[0]?.output).toMatch(/^SURVEY DEGRADED/);
+    expect(outcome.results[0]?.output).toMatch(/units\.json/);
+    expect(outcome.results[0]?.output).toMatch(/`units` phase/);
     expect(call.requests).toHaveLength(0);
-    // Still on the ledger and still visible: a failed row with a transcript.
-    expect(row).toMatchObject({ finished: true, success: false });
+    // Still on the ledger and still visible: a green row with a transcript
+    // whose closing message says what happened.
+    expect(row).toMatchObject({ finished: true, success: true });
     expect(row?.sessionId).toBeTruthy();
-    const errorLine = rawLines(row!.sessionId!).find((l) => l.type === "assistant" && l.isApiErrorMessage);
-    expect(String(errorLine?.error)).toMatch(/units\.json/);
-    // The dashboard pipeline paints the node red.
-    expect(store.phaseHistory(RUN_ID).at(-1)).toMatchObject({ phase: "survey-units", success: false });
+    const { msgs } = await transcript(row!.sessionId!);
+    expect(msgs.some((m) => m.role === "assistant" && String(m.content).includes("SURVEY DEGRADED"))).toBe(true);
+    expect(reporter.persisted.map((p) => p.phase)).toEqual(["survey-units"]);
+    expect(reporter.steps.map((st) => st.status)).toEqual(["running", "done"]);
   });
 
-  it("a malformed units.json (no `units` array) fails the phase", async () => {
+  it("a malformed units.json (no `units` array) degrades, and still clears stale responses", async () => {
+    mkdirSync(join(prDir, "units", "responses"), { recursive: true });
+    writeFileSync(join(prDir, "units", "responses", "u-099.json"), "{}");
     writeFileSync(join(prDir, "units.json"), JSON.stringify({ version: 1 }));
     const { outcome } = await runSurvey(new FakeCall());
-    expect(outcome.status).toBe("failed");
-    expect(outcome.results[0]?.error).toMatch(/no `units` array/);
+    expect(outcome.status).toBe("succeeded");
+    expect(outcome.results[0]?.output).toMatch(/no `units` array/);
+    expect(readdirSync(join(prDir, "units", "responses"))).toEqual([]);
   });
 
-  it("the kubernetes backend fails loud before any call, naming the setting", async () => {
+  it("the kubernetes guard degrades before any call and never touches the workspace", async () => {
+    // Refused at config load (policy-blocks-boot.test.ts); this is the belt.
     writeUnits([unit("u-001")]);
+    mkdirSync(join(prDir, "units", "responses"), { recursive: true });
+    writeFileSync(join(prDir, "units", "responses", "u-001.json"), "{}");
     const call = new FakeCall();
     const { outcome } = await runSurvey(call, { backend: "kubernetes" });
-    expect(outcome.status).toBe("failed");
-    expect(outcome.results[0]?.error).toContain("surveyEngine: units");
-    expect(outcome.results[0]?.error).toContain("kubernetes");
+    expect(outcome.status).toBe("succeeded");
+    expect(outcome.results[0]?.output).toContain("surveyEngine: units");
+    expect(outcome.results[0]?.output).toContain("kubernetes");
     expect(call.requests).toHaveLength(0);
+    expect(readFileSync(join(prDir, "units", "responses", "u-001.json"), "utf8")).toBe("{}");
   });
 
-  it("an EMPTY units list succeeds, spends nothing, and says so", async () => {
-    writeUnits([], { coverage: "none" });
+  it("an EMPTY units list with coverage none is NOT a clean survey — the reasons are in the summary", async () => {
+    // The `units` node's shell fallback: nulls, no sharedPrefix, no skipped.
+    writeUnits([], {
+      coverage: "none",
+      promptVersion: null,
+      baseSha: null,
+      responseSchema: null,
+      degraded: [{ extractor: "units", reason: "the units process exited 137 without writing units.json" }],
+    });
     const call = new FakeCall();
     const { outcome, row } = await runSurvey(call);
     expect(outcome.status).toBe("succeeded");
     expect(call.requests).toHaveLength(0);
     expect(readdirSync(join(prDir, "units", "responses"))).toEqual([]);
+    expect(outcome.results[0]?.output).toMatch(/^SURVEY DEGRADED — No units to survey/);
+    expect(outcome.results[0]?.output).toContain("exited 137");
+    expect(rawLines(row!.sessionId!).find((l) => l.type === "result")).toMatchObject({ subtype: "success", num_turns: 0 });
+  });
+
+  it("an EMPTY units list with full coverage is simply nothing to survey", async () => {
+    writeUnits([], { coverage: "full" });
+    const call = new FakeCall();
+    const { outcome, row } = await runSurvey(call);
+    expect(outcome.status).toBe("succeeded");
+    expect(call.requests).toHaveLength(0);
+    expect(outcome.results[0]?.output).toMatch(/^No units to survey/);
     const { msgs } = await transcript(row!.sessionId!);
     expect(msgs.some((m) => m.role === "assistant" && String(m.content).includes("No units to survey"))).toBe(true);
-    expect(rawLines(row!.sessionId!).find((l) => l.type === "result")).toMatchObject({ subtype: "success", num_turns: 0 });
   });
 
   it("the schema refuses a survey-units phase with no prompt", () => {
@@ -550,7 +602,7 @@ describe("survey-units — transcript and ledger", () => {
     expect(again.requests).toHaveLength(0);
   });
 
-  it("shows a document's sharedPrefix once, but still sends it on every call", async () => {
+  it("moves a document's sharedPrefix into the SYSTEM prompt, and shows it once", async () => {
     const prefix = "SHARED HEAD — questions, evidence record, rules\n";
     const withPrefix = (id: string) => {
       const request = `${prefix}UNIT SURVEY ${id}\nsource…`;
@@ -560,7 +612,15 @@ describe("survey-units — transcript and ledger", () => {
     const call = new FakeCall();
     const { row } = await runSurvey(call);
 
-    expect(call.requests.every((r) => r.request.startsWith(prefix))).toBe(true);
+    // Anthropic caches at the system-prompt breakpoint, so the shared head
+    // rides there on every call and the user message is the unit's own part.
+    const system = `You review one unit.\n\n${prefix}`;
+    expect(call.requests.every((r) => r.systemPrompt === system)).toBe(true);
+    expect(call.requests.map((r) => r.request).sort()).toEqual(["UNIT SURVEY u-001\nsource…", "UNIT SURVEY u-002\nsource…"]);
+    // The record's hash is of the system text actually sent; the request hash
+    // is still the contract's (the whole request).
+    expect(response("u-001").systemPromptSha256).toBe(sha(system));
+    expect(response("u-001").requestSha256).toBe(sha(`${prefix}UNIT SURVEY u-001\nsource…`));
     const { calls } = await transcript(row!.sessionId!);
     for (const c of calls) {
       expect(String(c.function.arguments.request)).not.toContain(prefix);
@@ -571,21 +631,287 @@ describe("survey-units — transcript and ledger", () => {
   });
 });
 
-describe("holdsUnitObject — the handler's only validation", () => {
-  it("finds the unit's object bare, fenced, or after a preamble", () => {
-    expect(holdsUnitObject(answer("u-001"), "u-001")).toBe(true);
-    expect(holdsUnitObject("```json\n" + answer("u-001") + "\n```", "u-001")).toBe(true);
-    expect(holdsUnitObject("Here you go: " + answer("u-001"), "u-001")).toBe(true);
+
+describe("survey-units — the shared prefix split", () => {
+  it("sends every request verbatim when one of them does not open with the prefix", async () => {
+    const prefix = "SHARED HEAD\n";
+    const ok = `${prefix}UNIT SURVEY u-001\nsource…`;
+    writeUnits([unit("u-001", { request: ok, requestSha256: sha(ok) }), unit("u-002")], { sharedPrefix: prefix });
+    const call = new FakeCall();
+    await runSurvey(call);
+    expect(call.requests.every((r) => r.systemPrompt === "You review one unit.")).toBe(true);
+    expect(call.requests.map((r) => r.request).sort()).toEqual([ok, unit("u-002").request].sort());
   });
 
-  it("is not fooled by braces inside strings", () => {
-    const text = `{"unitId":"u-001","answers":[{"claim":"a } closes { here"}],"defects":[]}`;
-    expect(holdsUnitObject(text, "u-001")).toBe(true);
+  it("a cached reply is keyed on the system text: a prefix that changes misses", async () => {
+    const run = async (prefix: string) => {
+      const request = `${prefix}UNIT SURVEY u-001\nsource…`;
+      writeUnits([unit("u-001", { request, requestSha256: sha(request) })], { sharedPrefix: prefix });
+      const call = new FakeCall();
+      await runSurvey(call, { store: new InMemoryStateStore(RUN_ID) });
+      return call.requests.length;
+    };
+    expect(await run("HEAD A\n")).toBe(1);
+    expect(await run("HEAD A\n")).toBe(0);
+    expect(await run("HEAD B\n")).toBe(1);
+  });
+});
+
+/**
+ * THE reply rule. `CASES` and `USABLE` are a VERBATIM copy of the canonical
+ * tables in `packages/code-facts/tests/unit-reply.test.ts`, which pin
+ * `findUnitObject` / `isUsableUnitReply` in `src/unit-response.ts`. The handler
+ * keeps its own copy of the rule (core may not import code-facts); if a case
+ * changes there, change it here — a reply the handler caches and ingest calls
+ * `invalid` is a reading that is never re-asked.
+ */
+const OBJ = '{"unitId":"u-001","answers":[],"defects":[]}';
+
+/** [name, raw, unitId, the expected `unitId` of the object found — or null for none]. */
+const CASES: [string, string, string, string | null][] = [
+  ["plain", OBJ, "u-001", "u-001"],
+  ["plain, surrounding whitespace", `\n  ${OBJ}\n`, "u-001", "u-001"],
+  ["fenced", "```json\n" + OBJ + "\n```", "u-001", "u-001"],
+  ["fenced, no language tag", "```\n" + OBJ + "\n```", "u-001", "u-001"],
+  ["prose around", `Here is my answer:\n${OBJ}\nHope that helps.`, "u-001", "u-001"],
+  ["stray unclosed brace in prose before", `The config uses { braces. ${OBJ}`, "u-001", "u-001"],
+  ["stray brace and quote in prose before", `Note: {"unfinished ${OBJ}`, "u-001", "u-001"],
+  ["balanced non-JSON braces in prose before", `A set {a, b} then ${OBJ}`, "u-001", "u-001"],
+  ["brace inside a JSON string", '{"unitId":"u-001","answers":[],"defects":[],"note":"a } and a {"}', "u-001", "u-001"],
+  ["nested under a key", `{"result":${OBJ}}`, "u-001", "u-001"],
+  ["nested in an array under a key", `{"units":[{"unitId":"u-000"},${OBJ}]}`, "u-001", "u-001"],
+  ["two objects, the second matches", `{"unitId":"u-999","answers":[],"defects":[]}\n${OBJ}`, "u-001", "u-001"],
+  ["a quoted snippet before the fenced answer", 'Example: {"unitId":"u-999"}\n```json\n' + OBJ + "\n```", "u-001", "u-001"],
+  ["top-level match wins over a nested one", `{"unitId":"u-001","answers":[],"defects":[],"echo":{"unitId":"u-001","answers":[1],"defects":[]}}`, "u-001", "u-001"],
+  ["truncated / unclosed", '{"unitId":"u-001","answers":[{"obligation":"O-1"', "u-001", null],
+  ["only another unit's object", '{"unitId":"u-002","answers":[],"defects":[]}', "u-001", null],
+  ["nested two levels deep is not found", `{"a":{"b":${OBJ}}}`, "u-001", null],
+  ["unitId is a number, not the string", '{"unitId":1,"answers":[],"defects":[]}', "1", null],
+  ["none", "I could not produce an answer.", "u-001", null],
+  ["empty", "", "u-001", null],
+];
+
+/** [name, value, unitId, usable]. */
+const USABLE: [string, unknown, string, boolean][] = [
+  ["answers and defects arrays", { unitId: "u-001", answers: [], defects: [] }, "u-001", true],
+  ["entries are not inspected", { unitId: "u-001", answers: [{ nonsense: true }], defects: [42] }, "u-001", true],
+  ["another unit's id", { unitId: "u-002", answers: [], defects: [] }, "u-001", false],
+  ["no defects", { unitId: "u-001", answers: [] }, "u-001", false],
+  ["no answers", { unitId: "u-001", defects: [] }, "u-001", false],
+  ["answers is an object", { unitId: "u-001", answers: {}, defects: [] }, "u-001", false],
+  ["null", null, "u-001", false],
+  ["an array", [{ unitId: "u-001", answers: [], defects: [] }], "u-001", false],
+];
+
+describe("findUnitObject — the canonical case table (verbatim from code-facts)", () => {
+  it.each(CASES)("%s", (_name, raw, unitId, expected) => {
+    const found = findUnitObject(raw, unitId);
+    if (expected === null) expect(found).toBeNull();
+    else expect(found?.unitId).toBe(expected);
   });
 
-  it("rejects prose, truncated JSON, and another unit's object", () => {
-    expect(holdsUnitObject("no json here", "u-001")).toBe(false);
-    expect(holdsUnitObject(`{"unitId":"u-001","answers":[`, "u-001")).toBe(false);
-    expect(holdsUnitObject(answer("u-002"), "u-001")).toBe(false);
+  it("returns the top-level object when a nested copy also matches", () => {
+    const raw = `{"unitId":"u-001","answers":[],"defects":[],"echo":{"unitId":"u-001","answers":[1],"defects":[]}}`;
+    expect(findUnitObject(raw, "u-001")?.answers).toEqual([]);
+  });
+});
+
+describe("isUsableUnitReply — the structural rule (verbatim from code-facts)", () => {
+  it.each(USABLE)("%s", (_name, value, unitId, usable) => {
+    expect(isUsableUnitReply(value, unitId)).toBe(usable);
+  });
+});
+
+describe("usableUnitReply — the handler's one decision, over the briefed cases", () => {
+  const cases: [string, string, boolean][] = [
+    ["plain object", OBJ, true],
+    ["fenced ```json", "```json\n" + OBJ + "\n```", true],
+    ["prose before/after", `Sure:\n${OBJ}\nDone.`, true],
+    ["stray { in leading prose, then the real object", `I checked {the guard, then: ${OBJ}`, true],
+    ["nested under a key", `{"result":${OBJ}}`, true],
+    ["two top-level objects, the second matches", `{"unitId":"u-002","answers":[],"defects":[]} ${OBJ}`, true],
+    ["unclosed / truncated", '{"unitId":"u-001","answers":[', false],
+    ["no object", "Looks fine.", false],
+    ["matching unitId but `answers` not an array", '{"unitId":"u-001","answers":"none","defects":[]}', false],
+  ];
+  it.each(cases)("%s", (_name, raw, usable) => {
+    expect(usableUnitReply(raw, "u-001")).toBe(usable);
+  });
+});
+
+describe("survey-units — the reply rule drives retry and cache", () => {
+  it("a reply ingest would reject (answers not an array) is retried and never cached", async () => {
+    writeUnits([unit("u-001")]);
+    const bad = JSON.stringify({ unitId: "u-001", answers: "none", defects: [] });
+    const call = new FakeCall(() => ({ text: bad, usage: usage(0.01) }));
+    await runSurvey(call);
+    expect(call.requests).toHaveLength(2);
+    expect(response("u-001")).toMatchObject({ ok: false, attempts: 2, raw: bad });
+    expect(existsSync(unitCacheDir(join(root, "state"), "acme", "widgets"))).toBe(false);
+  });
+
+  it("a cache entry that fails the rule (written under a looser one) is ignored, not replayed", async () => {
+    writeUnits([unit("u-001")]);
+    await runSurvey(new FakeCall());
+    const dir = unitCacheDir(join(root, "state"), "acme", "widgets");
+    const [file] = readdirSync(dir);
+    const rec = JSON.parse(readFileSync(join(dir, file), "utf8")) as UnitResponseRecord;
+    writeFileSync(join(dir, file), JSON.stringify({ ...rec, raw: `{"unitId":"u-001"}` }));
+    const again = new FakeCall();
+    await runSurvey(again, { store: new InMemoryStateStore(RUN_ID) });
+    expect(again.requests).toHaveLength(1);
+    expect(response("u-001")).toMatchObject({ ok: true, cached: false });
+  });
+
+  it("evicts a cached reply the LAST run's ingest marked invalid or partial, and asks again", async () => {
+    writeUnits([unit("u-001"), unit("u-002"), unit("u-003")]);
+    await runSurvey(new FakeCall());
+    // What `units-ingest` wrote after that run: u-001 partial, u-002 invalid,
+    // u-003 ok. Its report names units, not requests — the handler reads the
+    // request hash off the response record beside it.
+    writeFileSync(
+      join(prDir, "units", "ingest.json"),
+      JSON.stringify({
+        version: 1,
+        units: [
+          { unitId: "u-001", status: "partial" },
+          { unitId: "u-002", status: "invalid" },
+          { unitId: "u-003", status: "ok" },
+        ],
+      }),
+    );
+    const again = new FakeCall();
+    await runSurvey(again, { store: new InMemoryStateStore(RUN_ID) });
+    expect(again.requests.map((r) => /UNIT SURVEY (\S+)/.exec(r.request)?.[1]).sort()).toEqual(["u-001", "u-002"]);
+    expect(response("u-003")).toMatchObject({ cached: true });
+    expect(response("u-001")).toMatchObject({ cached: false, ok: true });
+  });
+
+  it("an unreadable previous ingest report evicts nothing and costs nothing", async () => {
+    writeUnits([unit("u-001")]);
+    await runSurvey(new FakeCall());
+    writeFileSync(join(prDir, "units", "ingest.json"), "{not json");
+    const again = new FakeCall();
+    const { outcome } = await runSurvey(again, { store: new InMemoryStateStore(RUN_ID) });
+    expect(outcome.status).toBe("succeeded");
+    expect(again.requests).toHaveLength(0);
+  });
+});
+
+describe("survey-units — the phase deadline and cancellation", () => {
+  it("a unit not finished by the deadline is recorded `phase deadline`, in the file and the transcript", async () => {
+    writeUnits([unit("u-001"), unit("u-002"), unit("u-003")]);
+    // Concurrency 1: u-001 answers, u-002 hangs until the deadline aborts it,
+    // u-003 never starts.
+    const call = new FakeCall((id) => (id === "u-002" ? "hang" : { text: answer(id), usage: usage(0.01) }));
+    const { outcome, row } = await runSurvey(call, { concurrency: "1", phase: surveyPhase({ timeout_seconds: 1 }) });
+
+    expect(outcome.status).toBe("succeeded");
+    expect(response("u-001")).toMatchObject({ ok: true });
+    expect(response("u-002")).toMatchObject({ ok: false, attempts: 1, error: "phase deadline" });
+    expect(response("u-003")).toMatchObject({ ok: false, attempts: 0, error: "phase deadline" });
+    // Aborted calls are never retried, and u-003 was never called.
+    expect(call.requests.map((r) => /UNIT SURVEY (\S+)/.exec(r.request)?.[1])).toEqual(["u-001", "u-002"]);
+    expect(call.requests.every((r) => r.signal instanceof AbortSignal)).toBe(true);
+    expect(outcome.results[0]?.output).toMatch(/SURVEY STOPPED EARLY \(phase deadline\)/);
+
+    const { calls, results } = await transcript(row!.sessionId!);
+    expect(calls.map((c) => c.id)).toEqual(["u-001-a1", "u-002-a1", "u-003-stopped"]);
+    expect(results.find((r) => r.tool_call_id === "u-003-stopped")?.content).toBe("phase deadline");
+  });
+
+  it("a run cancelled mid-phase aborts the calls in flight and records the rest", async () => {
+    writeUnits([unit("u-001"), unit("u-002")]);
+    const store = new InMemoryStateStore(RUN_ID);
+    const call = new FakeCall((id) => {
+      if (id === "u-001") void store.runs.finishRun(RUN_ID, "cancelled");
+      return "hang";
+    });
+    const { outcome } = await runSurvey(call, { store, concurrency: "1", cancelPollMs: 20 });
+    expect(outcome.status).toBe("succeeded");
+    expect(response("u-001")).toMatchObject({ ok: false, error: "run cancelled" });
+    expect(response("u-002")).toMatchObject({ ok: false, attempts: 0, error: "run cancelled" });
+    expect(call.requests).toHaveLength(1);
+  });
+});
+
+describe("survey-units — no stray work after the result", () => {
+  it("a response file that cannot be written fails THAT unit; the pool drains before the transcript closes", async () => {
+    writeUnits([unit("u-001"), unit("u-002"), unit("u-003")]);
+    // Make u-001's response path a non-empty DIRECTORY, so the atomic rename
+    // onto it throws — the shape of a disk that fills mid-phase.
+    const call = new FakeCall(
+      (id) => {
+        if (id === "u-001") mkdirSync(join(prDir, "units", "responses", "u-001.json", "blocker"), { recursive: true });
+        return { text: answer(id), usage: usage(0.01) };
+      },
+      15,
+    );
+    const { outcome, row } = await runSurvey(call, { concurrency: "3" });
+    expect(outcome.status).toBe("succeeded");
+    expect(response("u-002").ok).toBe(true);
+    expect(response("u-003").ok).toBe(true);
+    expect(outcome.results[0]?.output).toMatch(/u-001 \(could not write the response file/);
+    const raw = rawLines(row!.sessionId!);
+    // The `result` line is the LAST line: nothing was appended after it.
+    expect(raw.at(-1)?.type).toBe("result");
+    expect(raw.filter((l) => l.type === "result")).toHaveLength(1);
+  });
+});
+
+describe("survey-units — the call: variant, length, cache identity", () => {
+  it("passes the phase's rendered `variant:` as the thinking level", async () => {
+    writeUnits([unit("u-001")]);
+    const call = new FakeCall();
+    await runSurvey(call, {
+      phase: surveyPhase({ variant: "{{variants.review-survey}}" }),
+      ctx: { variants: { "review-survey": "high" } },
+    });
+    expect(call.requests[0].variant).toBe("high");
+  });
+
+  it("falls back to the resolver's variant when the template renders empty", async () => {
+    writeUnits([unit("u-001")]);
+    const call = new FakeCall();
+    await runSurvey(call, {
+      phase: surveyPhase({ variant: "{{variants.review-survey}}" }),
+      resolver: { ...resolver, variantFor: (t) => (t === "survey-units" ? "minimal" : undefined) },
+    });
+    expect(call.requests[0].variant).toBe("minimal");
+  });
+
+  it("a different thinking level misses the cache", async () => {
+    writeUnits([unit("u-001")]);
+    const phase = surveyPhase({ variant: "{{variants.review-survey}}" });
+    await runSurvey(new FakeCall(), { phase, ctx: { variants: { "review-survey": "low" } } });
+    const same = new FakeCall();
+    await runSurvey(same, { phase, ctx: { variants: { "review-survey": "low" } }, store: new InMemoryStateStore(RUN_ID) });
+    expect(same.requests).toHaveLength(0);
+    const other = new FakeCall();
+    await runSurvey(other, { phase, ctx: { variants: { "review-survey": "high" } }, store: new InMemoryStateStore(RUN_ID) });
+    expect(other.requests).toHaveLength(1);
+  });
+
+  it("the same model string pointed at another endpoint misses the cache", async () => {
+    writeUnits([unit("u-001")]);
+    await runSurvey(new FakeCall());
+    try {
+      installProviderOverrides({ anthropic: { baseUrl: "https://llm-gateway.example.com" } });
+      const moved = new FakeCall();
+      await runSurvey(moved, { store: new InMemoryStateStore(RUN_ID) });
+      expect(moved.requests).toHaveLength(1);
+    } finally {
+      installProviderOverrides({});
+    }
+  });
+
+  it("a reply cut at the output cap is NOT retried — the identical request would stop there again", async () => {
+    writeUnits([unit("u-001")]);
+    const call = new FakeCall(() => ({ text: `{"unitId":"u-001","answers":[{"claim":"long`, usage: usage(0.05), stopReason: "length" }));
+    await runSurvey(call);
+    expect(call.requests).toHaveLength(1);
+    const r = response("u-001");
+    expect(r).toMatchObject({ ok: false, attempts: 1 });
+    expect(r.error).toContain("stopReason: length");
   });
 });
