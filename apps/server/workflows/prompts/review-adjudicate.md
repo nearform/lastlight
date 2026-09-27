@@ -300,7 +300,7 @@ For a two-ended mechanism — producer and consumer, the write and the missing c
 
 ### `suggestion` is code, or it is absent
 
-`suggestion` is posted as a GitHub **Apply suggestion** button: accepting it **replaces the lines `existingCode` quotes with `suggestion`, character for character**, and commits the result. So it is the exact replacement code for those lines — same indentation, nothing before or after — and never a description of a change.
+`suggestion` is posted as a GitHub **Apply suggestion** button: accepting it replaces the commented lines with `suggestion`, character for character, and commits the result. When the harness finds `existingCode` in the diff, the commented lines **are** the ones it quotes. When it cannot, the comment falls back to your `line` — and Apply replaces whatever sits there instead. So `suggestion` is the exact replacement code for the lines `existingCode` quotes — same indentation, nothing before or after — never a description of a change, and never written against an excerpt you reconstructed rather than copied.
 
 - The fix is not a drop-in edit of those lines (it touches another file, adds a test, needs a choice between options)? **Omit `suggestion`.** Say what to change in `body`{{#if dossierEnabled}} and `fix`{{/if}}.
 - Instructions ("Add …", "Move …", "Consider …") in `suggestion` get committed into their file as source text and break it.
