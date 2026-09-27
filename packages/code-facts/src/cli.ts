@@ -94,9 +94,9 @@ Commands:
   jev-classify  #399 idea 2 — one TypeSafe System-One call PER HYPOTHESIS
               asking the category axis, written for \`dossier\` to render as an
               ADVISORY annotation. Never decides; never fails the run.
-  units       cut the PR into units (one per changed function/method, one per
-              changed module-scope region, one \`pr\` unit for obligations no
-              unit holds) and render each unit's COMPLETE model request into
+  units       cut the PR into units (one per changed function/method, at most
+              one per file for its module-scope regions, one \`pr\` unit for
+              obligations no unit holds) and render each unit's COMPLETE model request into
               units.json — the input to the in-process unit survey
   units-ingest  validate each units/responses/<unitId>.json and write the
               replies as hypotheses/<family>.jsonl rows (the shape every later

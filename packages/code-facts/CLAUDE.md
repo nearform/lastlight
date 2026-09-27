@@ -446,7 +446,7 @@ parsed one of them. Measured on the real corpus — keycloak `37429` reads
 | `discharge` | each `survey` branch's exit gate — every obligation the family owns carries a `QUOTE` / `ABSENT` / `PARTIAL` / `PROBE` discharge in `hypotheses/<family>.jsonl`. Degrades to the `test -s` floor on an unreadable `obligations.json` **or** on `contract: "minimal"`. See below |
 | `probes` | the `falsify` loop's exit gate — every hypothesis that needed a probe has a verdict, and every claim of evidence (`reproduced` / `corroborated` / `refuted`) has a transcript. Since issue #405 it also refuses `reproduced` on a **behavioural** claim (`isBehaviouralClaim` — a stated consequence live at head, derived from the evidence record) whose every command only reads code (`isReadOnlyCommand`, quote-aware) — that is `corroborated` — and reports transcripts borrowed from another hypothesis (`borrowedFrom`) without failing on them. `probeStrength()` is the one reader of what a verdict counts for |
 | `findings` | the `adjudicate` loop's exit gate — the **conservation check**. See below. `--repair` (the `reconcile` phase) also stamps each hypothesis-derived finding's **derived severity** (`finding-severity.ts`: evidence record + probe strength; the model's value kept as `declaredSeverity`) plus its **`rankEvidence`** (crosses a boundary / strongest probe / merged-hypothesis count, over non-refuted constituents), which the poster breaks severity ties on — the one derivation the evals read too (`buildSeverityIndex`) |
-| `units` | the unit survey's INPUT — one unit per changed function/method, one per changed module-scope region, one `pr` unit for obligations no unit holds, each carrying the COMPLETE model request. See below |
+| `units` | the unit survey's INPUT — one unit per changed function/method, at most one module unit per file (its module-scope regions plus folded small functions), one `pr` unit for obligations no unit holds, each carrying the COMPLETE model request behind a run-constant shared prefix. See below |
 | `units-ingest` | the unit survey's replies → `hypotheses/<family>.jsonl` rows of the existing shape, plus `units/ingest.json`. See below |
 | `toolchain` | the manifest and what actually resolved |
 
@@ -1126,9 +1126,21 @@ lastlight-facts units-ingest --dir .lastlight/pr-review          # → hypothese
 - **A unit is the OUTERMOST function-like declaration** holding a changed or
   removal line (functions, methods, `const f = () => …`, found with ast-grep on
   the head blob); a class is not a unit, its methods are. Changed lines no
-  symbol holds cluster into `module` regions. Lockfiles, binaries, minified
-  bundles and files over `MAX_SCANNED_FILE_BYTES` are listed in `skipped[]`
-  (the last one also in `degraded[]`, since its lines are then in no unit).
+  symbol holds go into **at most one `module` unit per file**: every such
+  region in head order (±3 context lines, regions closer than 3 lines merged),
+  a `⋮` elision row between them. A small changed function (≤
+  `SMALL_SYMBOL_LINES` = 15, no attached obligation) is **folded** into that
+  module unit as one more region, shown whole — only after attachment, and not
+  when it is its file's lone candidate (folding would save nothing). Its
+  callers and callees survive because neighbours are computed from the symbols
+  declared inside a unit's *cores* (the owned extents — a symbol body, a
+  changed-line cluster, a folded function), while the *windows* (cores plus
+  context) decide what is shown and which references are "inside". Measured on
+  this repo's `cef8b22a`: 51 units / 457k chars → 24 / 307k (one test file had
+  gone from 7 module units + 3 one-line helper units to 1). Lockfiles,
+  binaries, minified bundles and files over `MAX_SCANNED_FILE_BYTES` are listed
+  in `skipped[]` (the last one also in `degraded[]`, since its lines are then
+  in no unit).
 - **Obligations attach by anchor**: the unit whose extent holds the symbol's
   `declaredAt` (a contract delta resolves to its symbol first), else its
   `introducedAt` line, else the first unit overlapping the symbol's changed
@@ -1141,15 +1153,29 @@ lastlight-facts units-ingest --dir .lastlight/pr-review          # → hypothese
   OUT of the request, so the ingest judges a reply against exactly what the
   model saw, and a row's quote text is the shown line — it always resolves.
 - **The shrink cascade** holds each request to `--max-chars` (40 000): trim
-  callers/callees/imports/candidates, then drop them, then split a long unit
-  into overlapping passes (each obligation to the pass holding its anchor).
+  callers/callees/imports/candidates, then drop them, then — a module unit —
+  spread its regions in order over as few units as fit at full context, then
+  split any one region or symbol still too long into overlapping passes (each
+  obligation to the piece owning its anchor).
   Every step marks the unit `truncated` and names itself in `degraded[]`.
   `--max-units` (150) is a spend bound: past it the lowest-priority units are
   dropped by name and their obligations move to the `pr` unit.
 - **Deterministic**: units ordered by file then line, `u-NNN` in that order,
   `requestSha256` = sha256 of the request, and no sha or timestamp inside a
   request, so an unchanged unit renders byte-identically across pushes.
-  `UNITS_PROMPT_VERSION` is bumped whenever the rendering changes.
+  `UNITS_PROMPT_VERSION` (now `units-v2`) is bumped whenever the rendering
+  changes.
+- **Shared prefix first — for the provider's prefix cache.** `request` =
+  `UNITS_SHARED_PREFIX` + the unit-specific part. The prefix (~5.9k chars: task,
+  line-tag legend, the ALWAYS-asked families, NOT FINDINGS, evidence record,
+  response shape, generic rules, ending `=== THIS UNIT ===`) carries **no** unit
+  id, count, file or per-unit family subset, so it is byte-identical across
+  every unit of every run; `units.json` records it as `sharedPrefix` +
+  `sharedPrefixSha256`. Anything that varies by unit goes AFTER the separator —
+  including a conditional family (`tests`, asked only with a `tests`
+  obligation). The prefix holds no `L<n>` tag or `FILE` header, so
+  `requestLineTags` reads only the unit's part. `tests/units.test.ts` pins all
+  of it.
 - **The reply carries no `severity`, no `needsProbe`, no discharge code** —
   `UnitResponseBodySchema` is `{unitId, answers[], defects[]}`, each entry
   `{obligation?, family, claim, file?, line, evidence}` with the survey-pass

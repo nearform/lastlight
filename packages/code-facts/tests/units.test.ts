@@ -28,9 +28,9 @@ import type { AllDocument } from "../src/schema.js";
 import { seedObligations, type Obligation } from "../src/seed.js";
 import { deriveVerdict, type SurveyEvidence } from "../src/survey-verdict.js";
 import { extractResponseObject, UnitResponseBodySchema, unitResponseJsonSchema } from "../src/unit-response.js";
-import { buildUnits, type Unit, type UnitsDocument } from "../src/units.js";
+import { buildUnits, SMALL_SYMBOL_LINES, type Unit, type UnitsDocument } from "../src/units.js";
 import { ingestUnits } from "../src/units-ingest.js";
-import { requestLineTags } from "../src/units-render.js";
+import { FAMILY_QUESTIONS, requestLineTags, UNIT_SEPARATOR, UNITS_SHARED_PREFIX } from "../src/units-render.js";
 import { makeFixture, TSCONFIG, type Fixture } from "./helpers.js";
 
 // ── the fixture ──────────────────────────────────────────────────────────────
@@ -497,12 +497,16 @@ describe("units — inputs and the CLI", () => {
     expect(doc.degraded.some((d) => /nothing to survey/.test(d.reason))).toBe(true);
   });
 
-  it("with no obligations.json, still builds every unit and names the missing seed", () => {
+  it("with no obligations.json, still covers every changed line and names the missing seed", () => {
     const dir = workspace(fixture, factsFor(fixture), null, "unseeded");
     const { io: cli } = io();
     expect(runCli(["units", "--dir", dir, "--repo", fixture.dir], cli)).toBe(EXIT_DEGRADED);
     const doc = JSON.parse(readFileSync(join(dir, "units.json"), "utf8")) as UnitsDocument;
-    expect(doc.units.map((u) => u.kind)).toEqual(["module", "symbol", "symbol"]);
+    // With no obligation to hold them apart, both small changed functions fold
+    // into the file's one module unit — which still shows every changed line.
+    expect(doc.units.map((u) => u.kind)).toEqual(["module"]);
+    const tags = requestLineTags(doc.units[0]!.request).get("src/limits.ts")!;
+    for (const line of [3, 6, 8, 20]) expect(tags.get(line)?.changed, `L${line}`).toBe(true);
     expect(doc.units.every((u) => u.obligationIds.length === 0)).toBe(true);
     expect(doc.degraded.some((d) => /obligations\.json/.test(d.reason))).toBe(true);
   });
@@ -799,6 +803,291 @@ describe("units — end to end over real facts and seed", () => {
 
     answerAll(dir, doc, seeded.obligations);
     expect(runCli(["units-ingest", "--dir", dir], cli)).toBe(EXIT_OK);
+    gatesPass(dir);
+  });
+});
+
+// ── one module unit per file, and the shared prefix ─────────────────────────
+
+const fill = (tag: string, n: number): string[] => Array.from({ length: n }, (_, i) => `export const ${tag}_${i} = ${i};`);
+
+/**
+ * Four module-scope changes far apart (an import, a constant, a type, and the
+ * body of a three-line function), plus a 22-line function that stays a symbol.
+ */
+function configSource(head: boolean): string {
+  return [
+    head ? `import { a, b } from "./a";` : `import { a } from "./a";`,
+    "",
+    ...fill("A", 20),
+    head ? "export const LIMIT = 5;" : "export const LIMIT = 4;",
+    ...fill("B", 20),
+    "export function tiny(x: number): number {",
+    head ? "  return helper(x) + 2;" : "  return helper(x) + 1;",
+    "}",
+    ...fill("C", 20),
+    "export function large(x: number): number {",
+    "  let y = x;",
+    ...Array.from({ length: 18 }, (_, i) => (head && i === 9 ? `  y += ${i} * 2;` : `  y += ${i};`)),
+    "  return y;",
+    "}",
+    ...fill("D", 20),
+    head ? `export type Mode = "a" | "b" | "c";` : `export type Mode = "a" | "b";`,
+    "",
+  ].join("\n");
+}
+
+const CONFIG_HEAD = configSource(true);
+const lineOf = (text: string, needle: string): number => text.split("\n").findIndex((l) => l.includes(needle)) + 1;
+const L = {
+  import: 1,
+  limit: lineOf(CONFIG_HEAD, "export const LIMIT"),
+  tiny: lineOf(CONFIG_HEAD, "export function tiny"),
+  tinyBody: lineOf(CONFIG_HEAD, "helper(x) + 2"),
+  large: lineOf(CONFIG_HEAD, "export function large"),
+  largeChanged: lineOf(CONFIG_HEAD, "y += 9 * 2"),
+  mode: lineOf(CONFIG_HEAD, "export type Mode"),
+  gap: lineOf(CONFIG_HEAD, "A_10 ="),
+};
+
+function makeCoalesceFixture(): Fixture {
+  return makeFixture(
+    "units-coalesce",
+    {
+      message: "base",
+      files: {
+        "src/a.ts": "export const a = 1;\nexport const b = 2;\n",
+        "src/config.ts": configSource(false),
+        "src/other.ts": "export function tiny2(): number {\n  return 1;\n}\n",
+        "src/app.ts": `import { tiny } from "./config";\nexport const r = tiny(3);\n`,
+      },
+    },
+    { message: "head", files: { "src/config.ts": CONFIG_HEAD, "src/other.ts": "export function tiny2(): number {\n  return 2;\n}\n" } },
+  );
+}
+
+/** Facts for the coalesce fixture: `tiny` has a caller and a callee, or — `bare` — nothing is known. */
+function coalesceFacts(fixture: Fixture, bare = false): AllDocument {
+  const facts = factsFor(fixture);
+  facts.extractors.facts!.symbols = bare
+    ? []
+    : [
+        symbol("tiny", "function", `src/config.ts:${L.tiny}`, {
+          changedHunks: [`src/config.ts:${L.tinyBody}-${L.tinyBody}`],
+          references: [ref("src/app.ts:2")],
+          callees: ["helper"],
+          referenceCount: 1,
+        }) as never,
+      ];
+  facts.extractors.contracts = { contracts: [] } as never;
+  return facts;
+}
+
+const COALESCE_OBLIGATIONS: Obligation[] = [
+  obligation("O-101", "enforcement", "src/config.ts", L.limit, []),
+  obligation("O-102", "tests", "src/config.ts", L.largeChanged, []),
+];
+
+/** The tags shown in a request's SOURCE section only (not IMPORTS). */
+function sourceTags(request: string): number[] {
+  const tail = request.slice(request.indexOf(UNIT_SEPARATOR));
+  const section = tail.slice(tail.indexOf("\nSOURCE\n"), tail.indexOf("\nIMPORTS") >= 0 ? tail.indexOf("\nIMPORTS") : tail.indexOf("\nCALLERS"));
+  return section
+    .split("\n")
+    .map((l) => TAG.exec(l))
+    .filter((m): m is RegExpExecArray => m !== null)
+    .map((m) => Number(m[1]));
+}
+
+const ELISION = /^\s+⋮/;
+
+describe("units — one module unit per file", () => {
+  let fixture: Fixture;
+  let dir: string;
+  let doc: UnitsDocument;
+  beforeAll(() => {
+    fixture = makeCoalesceFixture();
+    dir = workspace(fixture, coalesceFacts(fixture), COALESCE_OBLIGATIONS, "coalesce");
+    doc = buildUnits({ dir, repo: fixture.dir }).document;
+  });
+  afterAll(() => fixture.cleanup());
+
+  it("coalesces every changed region no symbol holds into ONE module unit, and keeps a long function a symbol", () => {
+    const config = doc.units.filter((u) => u.file === "src/config.ts");
+    expect(config.map((u) => [u.kind, u.symbol])).toEqual([
+      ["module", null],
+      ["symbol", "large"],
+    ]);
+    const module = config[0]!;
+    expect(module.lines).toEqual([L.import, L.mode]);
+    expect(L.large + SMALL_SYMBOL_LINES).toBeLessThan(lineOf(CONFIG_HEAD, "  return y;"));
+  });
+
+  it("shows the regions in head order, one elision row between each, and not the lines in the gaps", () => {
+    const module = unitOf(doc, (u) => u.kind === "module" && u.file === "src/config.ts");
+    const shown = sourceTags(module.request);
+    expect(shown).toEqual([...shown].sort((a, b) => a - b));
+    expect(new Set(shown).size).toBe(shown.length);
+    for (const line of [L.import, L.limit, L.tinyBody, L.mode]) expect(shown).toContain(line);
+    expect(shown).not.toContain(L.gap);
+    const specific = module.request.slice(doc.sharedPrefix.length);
+    // import · LIMIT · tiny · Mode: four regions, three gaps.
+    expect(specific.split("\n").filter((l) => ELISION.test(l))).toHaveLength(3);
+    // Each changed line is marked, with context around it.
+    const tags = requestLineTags(module.request).get("src/config.ts")!;
+    for (const line of [L.limit, L.tinyBody, L.mode]) {
+      expect(tags.get(line)?.changed).toBe(true);
+      expect(tags.has(line - 1) || tags.has(line + 1)).toBe(true);
+    }
+  });
+
+  it("folds a small changed function with no obligation into the module unit, keeping its callers and callees", () => {
+    expect(doc.units.some((u) => u.symbol === "tiny")).toBe(false);
+    const module = unitOf(doc, (u) => u.kind === "module" && u.file === "src/config.ts");
+    const tags = requestLineTags(module.request).get("src/config.ts")!;
+    // Shown whole: declaration to closing brace.
+    for (let l = L.tiny; l <= L.tiny + 2; l++) expect(tags.has(l), `L${l}`).toBe(true);
+    expect(module.request).toContain("src/app.ts:2 (");
+    expect(module.request).toContain("export const r = tiny(3);");
+    expect(module.request).toMatch(/^ {2}- helper$/m);
+  });
+
+  it("does not fold a lone small function in a file with no module unit", () => {
+    expect(doc.units.filter((u) => u.file === "src/other.ts").map((u) => [u.kind, u.symbol])).toEqual([["symbol", "tiny2"]]);
+  });
+
+  it("attaches an obligation to the module region that owns its anchor", () => {
+    expect(unitOf(doc, (u) => u.obligationIds.includes("O-101")).kind).toBe("module");
+    expect(unitOf(doc, (u) => u.obligationIds.includes("O-102")).symbol).toBe("large");
+    expect(doc.units.flatMap((u) => u.obligationIds).sort()).toEqual(["O-101", "O-102"]);
+  });
+
+  it("is deterministic", () => {
+    expect(buildUnits({ dir, repo: fixture.dir }).document.units).toEqual(doc.units);
+  });
+
+  it("spreads the regions over several module units only when the file's changes overrun the budget", () => {
+    // No neighbours to trim or drop, so only a split can make it fit.
+    const bareDir = workspace(fixture, coalesceFacts(fixture, true), COALESCE_OBLIGATIONS, "coalesce-split");
+    const whole = buildUnits({ dir: bareDir, repo: fixture.dir }).document;
+    const one = whole.units.filter((u) => u.kind === "module" && u.file === "src/config.ts");
+    expect(one).toHaveLength(1);
+    const budget = one[0]!.request.length - 1;
+
+    const split = buildUnits({ dir: bareDir, repo: fixture.dir, maxRequestChars: budget }).document;
+    const pieces = split.units.filter((u) => u.kind === "module" && u.file === "src/config.ts");
+    expect(pieces.length).toBeGreaterThan(1);
+    for (const p of pieces) {
+      expect(p.request.length).toBeLessThanOrEqual(budget);
+      expect(p.truncated).toBe(true);
+    }
+    // Every changed line is still in some piece, and the pieces do not overlap.
+    const shown = pieces.map((p) => sourceTags(p.request));
+    expect(shown.flat().sort((a, b) => a - b)).toEqual(sourceTags(one[0]!.request));
+    // Ordered by line, ids in that order.
+    const firsts = pieces.map((p) => p.lines![0]);
+    expect(firsts).toEqual([...firsts].sort((a, b) => a - b));
+    // The obligation travels with the region that owns its anchor, once.
+    const home = pieces.filter((p) => p.obligationIds.includes("O-101"));
+    expect(home).toHaveLength(1);
+    expect(sourceTags(home[0]!.request)).toContain(L.limit);
+    expect(split.units.flatMap((u) => u.obligationIds).sort()).toEqual(["O-101", "O-102"]);
+    expect(split.degraded.some((d) => d.reason.startsWith("src/config.ts:"))).toBe(true);
+  });
+});
+
+describe("units — the shared prefix", () => {
+  let fixture: Fixture;
+  let coalesce: Fixture;
+  let a: UnitsDocument;
+  let b: UnitsDocument;
+  beforeAll(() => {
+    fixture = makeUnitsFixture();
+    coalesce = makeCoalesceFixture();
+    a = buildUnits({ dir: workspace(fixture, factsFor(fixture), OBLIGATIONS, "prefix"), repo: fixture.dir }).document;
+    b = buildUnits({ dir: workspace(coalesce, coalesceFacts(coalesce), COALESCE_OBLIGATIONS, "prefix"), repo: coalesce.dir }).document;
+  });
+  afterAll(() => {
+    fixture.cleanup();
+    coalesce.cleanup();
+  });
+
+  it("every request starts with the document's sharedPrefix, and its sha is recorded", () => {
+    for (const doc of [a, b]) {
+      expect(doc.units.length).toBeGreaterThan(1);
+      expect(doc.sharedPrefixSha256).toBe(createHash("sha256").update(doc.sharedPrefix, "utf8").digest("hex"));
+      for (const unit of doc.units) expect(unit.request.startsWith(doc.sharedPrefix), unit.id).toBe(true);
+    }
+  });
+
+  it("is byte-identical across units, documents and runs — nothing unit-specific is in it", () => {
+    expect(a.sharedPrefix).toBe(b.sharedPrefix);
+    expect(a.sharedPrefix).toBe(UNITS_SHARED_PREFIX);
+    expect(a.sharedPrefix.trimEnd().endsWith(UNIT_SEPARATOR)).toBe(true);
+    for (const unit of [...a.units, ...b.units]) {
+      expect(a.sharedPrefix).not.toContain(unit.id);
+      for (const id of unit.obligationIds) expect(a.sharedPrefix).not.toContain(id);
+      if (unit.file) expect(a.sharedPrefix).not.toContain(unit.file);
+    }
+    // No line tag and no FILE header: the ingest reads tags from the unit part only.
+    expect(requestLineTags(a.sharedPrefix).size).toBe(0);
+    // The always-asked families are in it; the conditional one is not.
+    for (const family of ["contract", "enforcement", "security", "state", "spec"]) {
+      expect(a.sharedPrefix).toContain(FAMILY_QUESTIONS[family]!.question);
+    }
+    expect(a.sharedPrefix).not.toContain(FAMILY_QUESTIONS.tests!.question);
+  });
+
+  it("asks the conditional tests family after the prefix, and only of a unit carrying a tests obligation", () => {
+    const tests = FAMILY_QUESTIONS.tests!.question;
+    for (const unit of b.units) {
+      const specific = unit.request.slice(b.sharedPrefix.length);
+      expect(specific.includes(tests), unit.id).toBe(unit.families.includes("tests"));
+    }
+    expect(b.units.some((u) => u.families.includes("tests"))).toBe(true);
+  });
+});
+
+describe("units-ingest — coalesced module units", () => {
+  let fixture: Fixture;
+  beforeAll(() => {
+    fixture = makeCoalesceFixture();
+  });
+  afterAll(() => fixture.cleanup());
+
+  it("maps lines in every region of a module unit to the shown text, and drops only a line from a gap", () => {
+    const dir = workspace(fixture, coalesceFacts(fixture), COALESCE_OBLIGATIONS, "coalesce-ingest");
+    const doc = buildUnits({ dir, repo: fixture.dir }).document;
+    writeFileSync(join(dir, "units.json"), JSON.stringify(doc));
+    answerAll(dir, doc, COALESCE_OBLIGATIONS);
+
+    const module = unitOf(doc, (u) => u.kind === "module" && u.file === "src/config.ts");
+    const entry = (line: number, claim: string) => ({ family: "state", claim, line, evidence: RISK_EVIDENCE });
+    writeResponse(
+      dir,
+      module,
+      JSON.stringify({
+        unitId: module.id,
+        // The obligation anchored in region 2, answered at a line in region 4.
+        answers: [{ obligation: "O-101", family: "enforcement", claim: "answered far away", line: L.mode, evidence: CLEAN_EVIDENCE }],
+        defects: [entry(L.import, "first region"), entry(L.tinyBody, "folded function"), entry(L.gap, "a line never shown")],
+      }),
+    );
+    const { document } = ingestUnits({ dir });
+    const report = document.units.find((u) => u.unitId === module.id)!;
+    expect(report.status).toBe("ok");
+    expect(report.answered).toEqual(["O-101"]);
+
+    const quoted = (rows: Record<string, unknown>[], claim: string) => rows.find((r) => r.claim === claim)?.quotes;
+    expect(quoted(familyRows(dir, "enforcement"), "answered far away")).toEqual([
+      { path: "src/config.ts", line: L.mode, text: `export type Mode = "a" | "b" | "c";` },
+    ]);
+    const state = familyRows(dir, "state");
+    expect(quoted(state, "first region")).toEqual([{ path: "src/config.ts", line: 1, text: `import { a, b } from "./a";` }]);
+    expect(quoted(state, "folded function")).toEqual([{ path: "src/config.ts", line: L.tinyBody, text: "  return helper(x) + 2;" }]);
+    // A line from an elided gap was never a tag: the row stays, its location goes.
+    expect(quoted(state, "a line never shown")).toEqual([]);
+    expect(report.warnings.some((w) => w.includes(`:${L.gap} `))).toBe(true);
     gatesPass(dir);
   });
 });

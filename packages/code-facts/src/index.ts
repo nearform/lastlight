@@ -328,13 +328,14 @@ export {
   DEFAULT_MAX_REQUEST_CHARS,
   DEFAULT_MAX_UNITS,
   MAX_NEIGHBOURS,
+  SMALL_SYMBOL_LINES,
   UNITS_PROMPT_VERSION,
   UnitKindSchema,
   UnitSchema,
   UnitsDocumentSchema,
 } from "./units.js";
 export type { BuildUnitsOptions, BuildUnitsResult, Unit, UnitKind, UnitsDocument } from "./units.js";
-export { FAMILY_QUESTIONS, lineTag, renderUnitRequest, requestLineTags } from "./units-render.js";
+export { FAMILY_QUESTIONS, lineTag, renderUnitRequest, renderUnitSpecific, requestLineTags, UNIT_SEPARATOR, UNITS_SHARED_PREFIX } from "./units-render.js";
 export type { RequestModel, TaggedLine } from "./units-render.js";
 export {
   extractResponseObject,

@@ -53,7 +53,9 @@ The split is deliberate:
   "version": 1,
   "generatedAt": "…",
   "baseSha": "…", "headSha": "…",
-  "promptVersion": "units-v1",       // bump when request rendering changes
+  "promptVersion": "units-v2",       // bump when request rendering changes
+  "sharedPrefix": "…",                // the unit-independent head EVERY request starts with, byte for byte
+  "sharedPrefixSha256": "…",          // sha256 of `sharedPrefix`
   "coverage": "full" | "degraded" | "none",
   "degraded": [{ "extractor": "units", "reason": "…" }],
   "responseSchema": { … },            // JSON Schema of ONE unit response (informational; the request text also states it)
@@ -67,13 +69,32 @@ The split is deliberate:
       "language": "typescript",
       "families": ["contract", "state"],
       "obligationIds": ["contract-o3", "spec-o1"],
-      "request": "…",                 // the COMPLETE user message sent for this unit, verbatim
+      "request": "…",                 // the COMPLETE user message sent for this unit, verbatim: sharedPrefix + the unit-specific part
       "requestSha256": "…",           // sha256 of `request`
       "truncated": false              // true when the shrink cascade dropped/trimmed context; the reason is in degraded[]
     }
   ]
 }
 ```
+
+What a unit is: one `symbol` unit per changed function/method; **at most one
+`module` unit per file**, carrying every changed region no symbol unit holds, in
+head order, with a `⋮` elision row between regions (split into several module
+units only when the file's regions overrun the budget); small changed functions
+(≤ 15 lines, no attached obligation) folded into that module unit as whole
+regions — their callers and callees still shown; and one `pr` unit for
+obligations no unit holds.
+
+**Cache-friendly order.** Every `request` is `sharedPrefix` — the task, the
+line-tag legend, the always-asked families' questions, NOT FINDINGS, the
+evidence record, the response shape and the generic rules, ending with the
+line `=== THIS UNIT ===` — followed by the unit-specific part (UNIT, SOURCE,
+IMPORTS, CALLERS, CALLEES, OBLIGATIONS, a conditional family such as `tests`,
+and this unit's id / answer list). The prefix carries no unit id, count or
+per-unit family subset, so it is byte-identical across every unit of every run
+(~5.9k chars) and a provider's prompt-prefix cache pays for it once. The
+handler may mark `sharedPrefix` as a cache breakpoint; sending `request`
+verbatim is still correct.
 
 `units` must also succeed (write a document, `coverage: "none"`, exit 0 under
 `--never-fail`) when there is nothing to survey, and fail loud (exit 2, a

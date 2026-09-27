@@ -10,9 +10,17 @@
  *   - one `symbol` unit per changed function or method (the OUTERMOST
  *     function-like declaration containing a changed line — a class is not a
  *     unit, its methods are);
- *   - one `module` unit per cluster of changed lines that no symbol unit holds
- *     (imports, constants, types, top-level statements, non-code files);
+ *   - at most one `module` unit per FILE, carrying every changed region no
+ *     symbol unit holds (imports, constants, types, top-level statements,
+ *     non-code files), in order, with an elision row between regions — split
+ *     into several units only when the budget forces it;
+ *   - small changed functions (≤ `SMALL_SYMBOL_LINES`, no obligation) folded
+ *     into that module unit as whole regions, keeping their callers/callees;
  *   - one `pr` unit for the obligations no unit in the diff could hold.
+ *
+ * Every request is the run-constant `UNITS_SHARED_PREFIX` followed by the
+ * unit-specific part, so a provider's prefix cache pays for the common ~6k
+ * characters once per run rather than once per unit.
  *
  * ── The file set and the text come from GIT ────────────────────────────────
  *
@@ -29,7 +37,8 @@
  * Units are ordered by file, then line; ids are `u-NNN` in that order;
  * `requestSha256` is the sha256 of the exact request. Each request is held to a
  * character budget by a shrink cascade — trim neighbours, drop neighbours,
- * split a long unit into overlapping passes — and every step that fires marks
+ * spread a module unit's regions over several units, split a long unit into
+ * overlapping passes — and every step that fires marks
  * the unit `truncated` and names itself in `degraded[]`.
  */
 import { createHash } from "node:crypto";
@@ -51,6 +60,7 @@ import {
   ALWAYS_ASKED,
   renderUnitRequest,
   UNITS_PROMPT_VERSION,
+  UNITS_SHARED_PREFIX,
   type RequestModel,
   type ShownBlock,
   type ShownCallee,
@@ -59,7 +69,7 @@ import {
   type ShownObligation,
 } from "./units-render.js";
 
-export { UNITS_PROMPT_VERSION } from "./units-render.js";
+export { UNITS_PROMPT_VERSION, UNITS_SHARED_PREFIX } from "./units-render.js";
 
 /**
  * The per-request budget, in characters (~4 per token). Sized so an ordinary
@@ -88,6 +98,15 @@ const MAX_LEADING_COMMENT = 30;
 const MODULE_CONTEXT = 3;
 /** Changed lines closer than this merge into one module region. */
 const MODULE_GAP = 8;
+/** Regions of one unit whose windows sit fewer lines apart than this are shown as one, not elided. */
+const ELIDE_MIN_GAP = 3;
+/**
+ * A changed function this short (declaration to closing line) with no
+ * obligation is folded into its file's module unit rather than being a unit —
+ * on this repo's own commits, one- to ten-line test helpers were a third of
+ * all units, each paying the full request overhead for a handful of lines.
+ */
+export const SMALL_SYMBOL_LINES = 15;
 /** Overlap between passes of a split unit. */
 const PASS_OVERLAP = 10;
 /** A pass is never shorter than this, whatever the budget says. */
@@ -141,6 +160,13 @@ export const UnitsDocumentSchema = z.object({
   baseSha: z.string(),
   headSha: z.string(),
   promptVersion: z.string(),
+  /**
+   * The unit-independent head every `request` starts with, byte for byte —
+   * so a caller can mark it as a cache breakpoint. `request` =
+   * `sharedPrefix` + the unit-specific part.
+   */
+  sharedPrefix: z.string(),
+  sharedPrefixSha256: z.string(),
   coverage: z.enum(["full", "degraded", "none"]),
   degraded: z.array(DegradedEntrySchema),
   responseSchema: z.record(z.string(), z.unknown()),
@@ -348,16 +374,35 @@ interface FileCtx {
 
 // ── drafts ───────────────────────────────────────────────────────────────────
 
+/**
+ * One shown run of lines. `cores` are the extents the unit OWNS inside it —
+ * a symbol's body, a cluster of changed lines, a folded small function — and
+ * decide attachment and which declarations' callers are shown; `window` adds
+ * the context (leading comment, surrounding lines) and decides what is shown.
+ */
+interface Region {
+  window: [number, number];
+  cores: [number, number][];
+}
+
+interface FoldedSymbol {
+  name: string;
+  kind: string;
+  lines: [number, number];
+}
+
 interface Draft {
   kind: UnitKind;
   ctx: FileCtx | null;
   symbol: string | null;
   symbolKind: string | null;
-  /** The unit's own extent (a pass's extent, once split). */
+  /** The unit's own extent: first core line to last (a pass's, once split). */
   lines: [number, number] | null;
-  /** Shown source window: the extent plus leading comment or context. */
-  window: [number, number] | null;
-  part: { index: number; of: number } | null;
+  /** What is shown, in order. One for a symbol; one or more for a module unit; none for the pr unit. */
+  regions: Region[];
+  /** Small changed functions folded into a module unit. */
+  folded: FoldedSymbol[];
+  part: { index: number; of: number; how: "lines" | "regions" } | null;
   obligations: Obligation[];
   truncated: boolean;
   reasons: string[];
@@ -367,6 +412,30 @@ interface Draft {
 
 function contains(range: [number, number] | null, line: number): boolean {
   return range !== null && line >= range[0] && line <= range[1];
+}
+
+function overlaps(a: [number, number], b: [number, number]): boolean {
+  return a[0] <= b[1] && b[0] <= a[1];
+}
+
+/** Does the unit OWN this line — is it inside one of its cores? */
+function holds(draft: Draft, line: number): boolean {
+  return draft.regions.some((r) => r.cores.some((c) => contains(c, line)));
+}
+
+/** Does the unit SHOW this line? */
+function shows(draft: Draft, line: number): boolean {
+  return draft.regions.some((r) => contains(r.window, line));
+}
+
+function extentOf(regions: Region[]): [number, number] | null {
+  const cores = regions.flatMap((r) => r.cores);
+  if (cores.length === 0) return null;
+  return [Math.min(...cores.map((c) => c[0])), Math.max(...cores.map((c) => c[1]))];
+}
+
+function touchedIn(ctx: FileCtx, regions: Region[]): number {
+  return ctx.touched.filter((l) => regions.some((r) => r.cores.some((c) => contains(c, l)))).length;
 }
 
 /** Clusters of lines no further apart than `gap`. */
@@ -380,6 +449,47 @@ function clusters(lines: number[], gap: number): [number, number][] {
   return out;
 }
 
+/**
+ * Order regions and merge any whose windows overlap or sit closer than
+ * `ELIDE_MIN_GAP` lines — a two-line gap is cheaper shown than elided.
+ */
+function mergeRegions(regions: Region[]): Region[] {
+  const sorted = [...regions].sort((a, b) => a.window[0] - b.window[0] || a.window[1] - b.window[1]);
+  const out: Region[] = [];
+  for (const r of sorted) {
+    const last = out[out.length - 1];
+    if (last && r.window[0] - last.window[1] - 1 < ELIDE_MIN_GAP) {
+      last.window = [last.window[0], Math.max(last.window[1], r.window[1])];
+      last.cores = [...last.cores, ...r.cores].sort((a, b) => a[0] - b[0]);
+    } else {
+      out.push({ window: [...r.window], cores: [...r.cores] });
+    }
+  }
+  return out;
+}
+
+function moduleDraft(ctx: FileCtx, regions: Region[], folded: FoldedSymbol[]): Draft {
+  const merged = mergeRegions(regions);
+  return {
+    kind: "module",
+    ctx,
+    symbol: null,
+    symbolKind: null,
+    lines: extentOf(merged),
+    regions: merged,
+    folded: [...folded].sort((a, b) => a.lines[0] - b.lines[0]),
+    part: null,
+    obligations: [],
+    truncated: false,
+    reasons: [],
+    weight: touchedIn(ctx, merged),
+  };
+}
+
+/**
+ * A file's drafts: one symbol draft per changed function, and AT MOST ONE
+ * module draft carrying every changed region no symbol holds, in order.
+ */
 function draftsFor(ctx: FileCtx): Draft[] {
   const drafts: Draft[] = [];
   const held = new Set<number>();
@@ -393,7 +503,8 @@ function draftsFor(ctx: FileCtx): Draft[] {
       symbol: f.name,
       symbolKind: f.kind,
       lines: [f.start, f.end],
-      window: [leadingCommentStart(ctx.lines, f.start), f.end],
+      regions: [{ window: [leadingCommentStart(ctx.lines, f.start), f.end], cores: [[f.start, f.end]] }],
+      folded: [],
       part: null,
       obligations: [],
       truncated: false,
@@ -402,22 +513,49 @@ function draftsFor(ctx: FileCtx): Draft[] {
     });
   }
   const loose = ctx.touched.filter((l) => !held.has(l));
-  for (const [from, to] of clusters(loose, MODULE_GAP)) {
-    drafts.push({
-      kind: "module",
-      ctx,
-      symbol: null,
-      symbolKind: null,
-      lines: [from, to],
+  if (loose.length > 0) {
+    const regions = clusters(loose, MODULE_GAP).map(([from, to]): Region => ({
       window: [Math.max(1, from - MODULE_CONTEXT), Math.min(ctx.lines.length, to + MODULE_CONTEXT)],
-      part: null,
-      obligations: [],
-      truncated: false,
-      reasons: [],
-      weight: loose.filter((l) => l >= from && l <= to).length,
-    });
+      cores: [[from, to]],
+    }));
+    drafts.push(moduleDraft(ctx, regions, []));
   }
   return drafts;
+}
+
+/**
+ * Fold each SMALL symbol unit with no obligation into its file's module unit,
+ * as one more region shown whole. A two-line helper is not worth a model call
+ * of its own, and its callers and callees survive the fold: they are computed
+ * from the symbols declared inside a unit's cores, and a folded function is a
+ * core. A symbol carrying an obligation stays a unit — attachment already
+ * chose it. A lone small symbol in a file with no module unit stays too:
+ * folding it would save nothing.
+ */
+function foldSmallSymbols(drafts: Draft[]): Draft[] {
+  const byFile = new Map<FileCtx, Draft[]>();
+  for (const d of drafts) {
+    if (!d.ctx) continue;
+    const list = byFile.get(d.ctx) ?? [];
+    list.push(d);
+    byFile.set(d.ctx, list);
+  }
+  const removed = new Set<Draft>();
+  const added: Draft[] = [];
+  for (const [ctx, mine] of byFile) {
+    const module = mine.find((d) => d.kind === "module") ?? null;
+    const small = mine.filter(
+      (d) => d.kind === "symbol" && d.obligations.length === 0 && d.lines![1] - d.lines![0] + 1 <= SMALL_SYMBOL_LINES,
+    );
+    if (small.length === 0 || (!module && small.length < 2)) continue;
+    const folded = small.map((d) => ({ name: d.symbol ?? "(anonymous)", kind: d.symbolKind ?? "function", lines: d.lines! }));
+    const next = moduleDraft(ctx, [...(module?.regions ?? []), ...small.flatMap((d) => d.regions)], [...(module?.folded ?? []), ...folded]);
+    next.obligations = module ? [...module.obligations] : [];
+    for (const d of small) removed.add(d);
+    if (module) removed.add(module);
+    added.push(next);
+  }
+  return [...drafts.filter((d) => !removed.has(d)), ...added];
 }
 
 // ── obligation attachment ────────────────────────────────────────────────────
@@ -432,12 +570,14 @@ function refIndex(ref: string, prefix: string): number | null {
   return match ? Number(match[1]) : null;
 }
 
-/** Hunk strings (`path:a-b`) → does any overlap the draft's extent? */
+/** Hunk strings (`path:a-b`) → does any overlap one of the draft's cores? */
 function overlapsHunks(draft: Draft, hunks: string[]): boolean {
-  if (!draft.lines || !draft.ctx) return false;
+  if (!draft.ctx) return false;
   return hunks.some((h) => {
     const m = /^(.*):(\d+)-(\d+)$/.exec(h);
-    return !!m && m[1] === draft.ctx!.path && Number(m[2]) <= draft.lines![1] && Number(m[3]) >= draft.lines![0];
+    if (!m || m[1] !== draft.ctx!.path) return false;
+    const hunk: [number, number] = [Number(m[2]), Number(m[3])];
+    return draft.regions.some((r) => r.cores.some((c) => overlaps(c, hunk)));
   });
 }
 
@@ -475,7 +615,7 @@ function attach(o: Obligation, drafts: Draft[], facts: AllDocument["extractors"]
   anchors.push({ path: o.introducedAt.path, line: o.introducedAt.line });
 
   for (const anchor of anchors) {
-    const inFile = drafts.filter((d) => d.ctx?.path === anchor.path && contains(d.lines, anchor.line));
+    const inFile = drafts.filter((d) => d.ctx?.path === anchor.path && holds(d, anchor.line));
     const hit = inFile.find((d) => d.kind === "symbol") ?? inFile[0];
     if (hit) return hit;
   }
@@ -514,18 +654,17 @@ class HeadReader {
 }
 
 interface Neighbours {
-  callers: { at: string; inSymbol: string | null; inDiff: boolean; isTest: boolean }[];
+  callers: { at: string; of: string; inSymbol: string | null; inDiff: boolean; isTest: boolean }[];
   callees: ShownCallee[];
 }
 
-/** Callers and callees of every facts symbol DECLARED inside the draft's extent. */
+/** Callers and callees of every facts symbol DECLARED inside one of the draft's cores. */
 function neighboursOf(draft: Draft, symbols: SymbolFact[], allFunctions: Map<string, FunctionLike[]>): Neighbours {
-  if (!draft.ctx || !draft.lines) return { callers: [], callees: [] };
+  if (!draft.ctx || draft.regions.length === 0) return { callers: [], callees: [] };
   const path = draft.ctx.path;
-  const window = draft.window ?? draft.lines;
   const mine = symbols.filter((s) => {
     const site = splitSite(s.declaredAt);
-    return site !== null && site.path === path && contains(draft.lines, site.line);
+    return site !== null && site.path === path && holds(draft, site.line);
   });
   const seen = new Set<string>();
   const callers: Neighbours["callers"] = [];
@@ -533,9 +672,9 @@ function neighboursOf(draft: Draft, symbols: SymbolFact[], allFunctions: Map<str
     for (const r of s.references) {
       if (seen.has(r.at)) continue;
       const site = splitSite(r.at);
-      if (site && site.path === path && contains(window, site.line)) continue;
+      if (site && site.path === path && shows(draft, site.line)) continue;
       seen.add(r.at);
-      callers.push(r);
+      callers.push({ at: r.at, of: s.name, inSymbol: r.inSymbol, inDiff: r.inDiff, isTest: r.isTest });
     }
   }
   // Untouched, non-test callers first: they are the ones a file-by-file review
@@ -609,9 +748,9 @@ function modelFor(input: RenderInput): RequestModel {
   let source: ShownBlock[] = [];
   let imports: ShownBlock | null = null;
   let importsOmitted = 0;
-  if (ctx && draft.window) {
-    source = [shownLines(ctx, draft.window[0], draft.window[1])];
-    const outside = ctx.imports.filter((l) => !contains(draft.window, l));
+  if (ctx && draft.regions.length > 0) {
+    source = draft.regions.map((r) => shownLines(ctx, r.window[0], r.window[1]));
+    const outside = ctx.imports.filter((l) => !shows(draft, l));
     const kept = outside.slice(0, importCap);
     importsOmitted = outside.length - kept.length;
     if (kept.length > 0) {
@@ -651,9 +790,11 @@ function modelFor(input: RenderInput): RequestModel {
     }
   }
 
+  // Name the target only when there is more than one to tell apart.
+  const named = new Set(neighbours.callers.map((c) => c.of)).size > 1;
   const callers: ShownCaller[] = neighbours.callers
     .slice(0, neighbourCap)
-    .map((c) => ({ ...c, text: head.lineAt(c.at) }));
+    .map((c) => ({ ...c, of: named ? c.of : null, text: head.lineAt(c.at) }));
   const callees = neighbours.callees.slice(0, neighbourCap);
 
   const notes: string[] = [];
@@ -669,6 +810,7 @@ function modelFor(input: RenderInput): RequestModel {
     lines: draft.lines,
     language: ctx?.language ?? null,
     part: draft.part,
+    folded: draft.folded,
     source,
     imports,
     importsOmitted,
@@ -701,15 +843,17 @@ function fitLevel(input: Omit<RenderInput, "level">, budget: number): { level: 0
 }
 
 /**
- * Split a draft whose source alone overruns the budget into overlapping
- * passes. Only passes holding a touched line survive; each obligation goes to
- * the pass holding its anchor (else the first), so every id is still asked
- * exactly once.
+ * Split a ONE-region draft whose source alone overruns the budget into
+ * overlapping passes. Only passes holding a touched line survive; each
+ * obligation goes to the pass showing its anchor (else the first), so every id
+ * is still asked exactly once.
  */
 function splitDraft(draft: Draft, input: Omit<RenderInput, "level" | "draft">, budget: number): Draft[] {
+  if (draft.regions.length !== 1) return [draft];
   const ctx = draft.ctx!;
-  const [from, to] = draft.window!;
-  const shell = render({ ...input, draft: { ...draft, window: [from, from] }, level: 2 }).length;
+  const region = draft.regions[0]!;
+  const [from, to] = region.window;
+  const shell = render({ ...input, draft: { ...draft, regions: [{ ...region, window: [from, from] }] }, level: 2 }).length;
   const span = to - from + 1;
   const avg = Math.max(1, (render({ ...input, draft, level: 2 }).length - shell) / Math.max(1, span));
   const size = Math.max(MIN_PASS_LINES, Math.floor((budget - shell) / avg));
@@ -726,24 +870,80 @@ function splitDraft(draft: Draft, input: Omit<RenderInput, "level" | "draft">, b
     for (let l = a; l <= b; l++) if (touched.has(l)) return true;
     return false;
   });
-  const passes: Draft[] = kept.map(([a, b]) => ({
-    ...draft,
-    lines: [Math.max(a, draft.lines![0]), Math.min(b, draft.lines![1])] as [number, number],
-    window: [a, b] as [number, number],
-    obligations: [],
-    reasons: [...draft.reasons],
-    truncated: true,
-    weight: [...touched].filter((l) => l >= a && l <= b).length,
-  }));
+  const passes: Draft[] = kept.map(([a, b]) => {
+    const clipped = region.cores
+      .filter((c) => overlaps(c, [a, b]))
+      .map((c): [number, number] => [Math.max(a, c[0]), Math.min(b, c[1])]);
+    const regions: Region[] = [{ window: [a, b], cores: clipped.length > 0 ? clipped : [[a, b]] }];
+    return {
+      ...draft,
+      lines: extentOf(regions),
+      regions,
+      folded: draft.folded.filter((f) => overlaps(f.lines, [a, b])),
+      obligations: [],
+      reasons: [...draft.reasons],
+      truncated: true,
+      weight: [...touched].filter((l) => l >= a && l <= b).length,
+    };
+  });
   if (passes.length === 0) return [draft];
   for (const o of draft.obligations) {
-    const home = passes.find((p) => contains(p.window, anchorLine(o))) ?? passes[0]!;
+    const home = passes.find((p) => shows(p, anchorLine(o))) ?? passes[0]!;
     home.obligations.push(o);
   }
   passes.forEach((p, i) => {
-    p.part = { index: i + 1, of: passes.length };
+    p.part = { index: i + 1, of: passes.length, how: "lines" };
   });
   return passes;
+}
+
+/**
+ * Spread a module unit's regions, in order, over as few units as fit the
+ * budget at FULL context (level 0) — greedy, so the split is deterministic.
+ * Each obligation travels with the region that owns its anchor (else the one
+ * that shows it, else the first). A single region that still does not fit is
+ * left to the caller's pass split.
+ */
+function packRegions(draft: Draft, inputFor: (d: Draft) => Omit<RenderInput, "level">, budget: number): Draft[] {
+  const ctx = draft.ctx!;
+  const homeOf = new Map<Obligation, number>();
+  for (const o of draft.obligations) {
+    const line = anchorLine(o);
+    const byCore = draft.regions.findIndex((r) => r.cores.some((c) => contains(c, line)));
+    const byWindow = draft.regions.findIndex((r) => contains(r.window, line));
+    homeOf.set(o, byCore >= 0 ? byCore : byWindow >= 0 ? byWindow : 0);
+  }
+  const make = (indices: number[]): Draft => {
+    const regions = indices.map((i) => draft.regions[i]!);
+    return {
+      ...draft,
+      lines: extentOf(regions),
+      regions,
+      folded: draft.folded.filter((f) => regions.some((r) => overlaps(f.lines, r.window))),
+      obligations: draft.obligations.filter((o) => indices.includes(homeOf.get(o)!)),
+      part: null,
+      reasons: [...draft.reasons],
+      truncated: true,
+      weight: touchedIn(ctx, regions),
+    };
+  };
+  const groups: number[][] = [];
+  let current: number[] = [];
+  for (let i = 0; i < draft.regions.length; i++) {
+    if (current.length === 0) {
+      current = [i];
+      continue;
+    }
+    const trial = make([...current, i]);
+    const fit = fitLevel(inputFor(trial), budget);
+    if (fit.fits && fit.level === 0) current.push(i);
+    else {
+      groups.push(current);
+      current = [i];
+    }
+  }
+  if (current.length > 0) groups.push(current);
+  return groups.map(make);
 }
 
 // ── the entry point ──────────────────────────────────────────────────────────
@@ -770,6 +970,8 @@ export function emptyUnitsDocument(reason: string, shas: { baseSha?: string; hea
     baseSha: shas.baseSha ?? "unknown",
     headSha: shas.headSha ?? "unknown",
     promptVersion: UNITS_PROMPT_VERSION,
+    sharedPrefix: UNITS_SHARED_PREFIX,
+    sharedPrefixSha256: sha256(UNITS_SHARED_PREFIX),
     coverage: "none",
     degraded: [{ extractor: "units", reason }],
     responseSchema: unitResponseJsonSchema(),
@@ -916,6 +1118,8 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
     if (home) home.obligations.push(o);
     else unattributed.push(o);
   }
+  // After attachment: only a small symbol no obligation chose is folded.
+  drafts = foldSmallSymbols(drafts);
 
   // The spend bound. Lowest priority first out; their obligations are not lost.
   if (drafts.length > maxUnits) {
@@ -936,28 +1140,50 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
   }
 
   const neighboursByDraft = new Map<Draft, Neighbours>();
-  for (const d of drafts) neighboursByDraft.set(d, neighboursOf(d, symbols, allFunctions));
+  const neighboursFor = (d: Draft): Neighbours => {
+    let n = neighboursByDraft.get(d);
+    if (!n) {
+      n = neighboursOf(d, symbols, allFunctions);
+      neighboursByDraft.set(d, n);
+    }
+    return n;
+  };
 
   // Placeholder id of the final width, so a size decision made now holds later.
   const PLACEHOLDER = "u-000";
+  const inputFor = (d: Draft) => ({ unitId: PLACEHOLDER, draft: d, neighbours: neighboursFor(d), head, overview: [] as string[] });
   const finalDrafts: Draft[] = [];
   for (const d of drafts) {
-    const base = { unitId: PLACEHOLDER, neighbours: neighboursByDraft.get(d)!, head, overview: [] as string[] };
-    const fit = fitLevel({ ...base, draft: d }, budget);
-    if (fit.fits) {
+    if (fitLevel(inputFor(d), budget).fits) {
       finalDrafts.push(d);
       continue;
     }
-    const passes = splitDraft(d, base, budget);
-    for (const p of passes) {
-      neighboursByDraft.set(p, base.neighbours);
-      finalDrafts.push(p);
+    // A module unit first spreads its regions over several units; any one
+    // region still too long — or a symbol — is split into overlapping passes.
+    const groups = d.kind === "module" && d.regions.length > 1 ? packRegions(d, inputFor, budget) : [d];
+    const pieces: Draft[] = [];
+    for (const g of groups) {
+      if (groups.length > 1 && fitLevel(inputFor(g), budget).fits) {
+        pieces.push(g);
+        continue;
+      }
+      const passes = splitDraft(g, inputFor(g), budget);
+      // A pass shows a slice of its parent's code, so it keeps the parent's neighbours.
+      for (const p of passes) if (p !== g) neighboursByDraft.set(p, neighboursFor(g));
+      pieces.push(...passes);
     }
-    if (passes.length > 1) {
+    if (pieces.length > 1) {
+      pieces.forEach((p, i) => {
+        p.part = { index: i + 1, of: pieces.length, how: p.part?.how ?? "regions" };
+      });
+      const how = [groups.length > 1 ? `${groups.length} units by region` : null, pieces.length > groups.length ? "overlapping passes" : null]
+        .filter(Boolean)
+        .join(", then ");
       note(
-        `${d.ctx!.path}:${d.lines![0]}-${d.lines![1]} (${d.symbol ?? "module region"}) is too long for one request of ${budget} chars — split into ${passes.length} overlapping passes`,
+        `${d.ctx!.path}:${d.lines![0]}-${d.lines![1]} (${d.symbol ?? "module-scope changes"}) is too long for one request of ${budget} chars — split into ${pieces.length} units (${how})`,
       );
     }
+    finalDrafts.push(...pieces);
   }
 
   finalDrafts.sort(
@@ -972,7 +1198,8 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
           symbol: null,
           symbolKind: null,
           lines: null,
-          window: null,
+          regions: [],
+          folded: [],
           part: null,
           obligations: [...unattributed].sort((a, b) => a.id.localeCompare(b.id)),
           truncated: false,
@@ -1000,7 +1227,7 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
 
   const units: Unit[] = all.map((d, i) => {
     const id = ids[i]!;
-    const neighbours = neighboursByDraft.get(d) ?? { callers: [], callees: [] };
+    const neighbours = d.kind === "pr" ? { callers: [], callees: [] } : neighboursFor(d);
     const input = { unitId: id, draft: d, neighbours, head, overview: d.kind === "pr" ? overview() : [] };
     const fit = fitLevel(input, budget);
     const request = render({ ...input, level: fit.level });
@@ -1042,6 +1269,8 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
     baseSha,
     headSha,
     promptVersion: UNITS_PROMPT_VERSION,
+    sharedPrefix: UNITS_SHARED_PREFIX,
+    sharedPrefixSha256: sha256(UNITS_SHARED_PREFIX),
     coverage: units.length === 0 ? "none" : degraded.length > 0 ? "degraded" : "full",
     degraded,
     responseSchema: unitResponseJsonSchema(),

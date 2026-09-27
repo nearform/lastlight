@@ -24,11 +24,20 @@
  * Nothing time- or run-dependent is printed — no sha, no timestamp — so an
  * unchanged unit renders byte-identically across re-pushes and its
  * `requestSha256` is a usable cache key.
+ *
+ * ── Shared prefix first, then the unit ─────────────────────────────────────
+ *
+ * A request is {@link UNITS_SHARED_PREFIX} (task, line-tag legend, the
+ * always-asked families, the evidence record, the generic response rules —
+ * unit-independent, byte-identical for every unit) followed by the
+ * unit-specific part after {@link UNIT_SEPARATOR}. Providers cache the longest
+ * shared prompt prefix, so anything that varies by unit — its id, its counts, a
+ * conditional family such as `tests` — belongs after the separator.
  */
 import type { Obligation } from "./seed.js";
 
 /** Bump whenever the rendering below changes, so cached readings are not reused across it. */
-export const UNITS_PROMPT_VERSION = "units-v1";
+export const UNITS_PROMPT_VERSION = "units-v2";
 
 /** One family's question, compact. `closes` is what `control_site` means for it. */
 export const FAMILY_QUESTIONS: Record<string, { question: string; closes: string }> = {
@@ -86,6 +95,8 @@ export interface ShownBlock {
 
 export interface ShownCaller {
   at: string;
+  /** The symbol this is a reference TO — set only when the unit declares more than one symbol with callers. */
+  of: string | null;
   inSymbol: string | null;
   inDiff: boolean;
   isTest: boolean;
@@ -114,8 +125,14 @@ export interface RequestModel {
   symbolKind: string | null;
   lines: [number, number] | null;
   language: string | null;
-  /** `{ index, of }` when a long unit was split into overlapping passes. */
-  part: { index: number; of: number } | null;
+  /**
+   * Set when a unit was split to fit the budget: `lines` = overlapping passes
+   * over one long extent; `regions` = a file's module-scope regions spread
+   * across several units.
+   */
+  part: { index: number; of: number; how: "lines" | "regions" } | null;
+  /** Small changed functions folded into a module unit, each shown whole. */
+  folded: { name: string; kind: string; lines: [number, number] }[];
   source: ShownBlock[];
   imports: ShownBlock | null;
   importsOmitted: number;
@@ -192,40 +209,126 @@ const NOT_FINDINGS = [
 ];
 
 /**
- * Render the request. Pure: same model in, same bytes out.
+ * The line that ends the shared prefix. Everything above it is identical for
+ * every unit of every run; everything below it is this unit's.
  */
-export function renderUnitRequest(m: RequestModel): string {
-  const L: string[] = [];
-  const multiFile = m.kind === "pr";
-  const ids = m.obligations.map((s) => s.obligation.id);
+export const UNIT_SEPARATOR = "=== THIS UNIT ===";
 
-  L.push(`UNIT SURVEY ${m.unitId} · ${UNITS_PROMPT_VERSION}`);
+function familyLines(families: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const family of families) {
+    const q = FAMILY_QUESTIONS[family];
+    if (!q) continue;
+    out.push(`  ${family}: ${q.question}`);
+    out.push(`    closes it: ${q.closes}.`);
+  }
+  return out;
+}
+
+/**
+ * The unit-independent head of every request: the task, how source is shown,
+ * the always-asked families, the evidence record, the response shape and the
+ * generic rules — ending with {@link UNIT_SEPARATOR}.
+ *
+ * ── Why it is a PREFIX, byte for byte ──────────────────────────────────────
+ *
+ * Providers cache the longest shared PREFIX of a prompt. About 6k characters
+ * of every request are the same for every unit, so they come first and carry
+ * nothing unit-specific — no unit id, no count, no per-unit family subset (a
+ * conditional family is asked after the separator). A run's N calls then pay
+ * for this text once. It depends on nothing but the prompt version, so it is
+ * identical across runs too.
+ */
+function renderSharedPrefix(): string {
+  const L: string[] = [];
+  L.push(`UNIT SURVEY · ${UNITS_PROMPT_VERSION}`);
   L.push("");
   L.push(
-    "You are reviewing ONE unit of a pull request: the code below and the neighbours a deterministic analysis",
-    "found for it. You cannot open files or run anything — answer from what is shown, and write `unknown` where",
-    "only something not shown could settle a field. Two jobs:",
-    "  1. Answer every obligation under OBLIGATIONS, each exactly once.",
-    "  2. Record every other defect you can see in this unit, under the family whose question it answers.",
+    "You are reviewing ONE unit of a pull request: the code shown after the line \"" + UNIT_SEPARATOR + "\" and the",
+    "neighbours a deterministic analysis found for it. You cannot open files or run anything — answer from what is",
+    "shown, and write `unknown` where only something not shown could settle a field. Two jobs:",
+    "  1. Answer every obligation the unit lists under OBLIGATIONS, each exactly once.",
+    "  2. Record every other defect you can see in the unit, under the family whose question it answers.",
     "Over-produce: later phases can delete a risk you wrote down and can never recover one you did not.",
     "Reply with ONE JSON object and nothing else.",
   );
   L.push("");
+  L.push(
+    "HOW SOURCE IS SHOWN",
+    "  Each block of source sits under a `FILE <path>` header. Every shown line is tagged `L<number>`; `+` after the",
+    "  tag marks a line this PR added or changed; `-|` rows were REMOVED by this PR at that point and carry no tag.",
+    "  A `⋮` row between two runs of lines of the same file marks lines that are not shown.",
+  );
+  L.push("");
+  L.push("QUESTIONS — every unit is surveyed for these families (a unit may add one after its own section)");
+  L.push(...familyLines(ALWAYS_ASKED));
+  L.push("");
+  L.push(...NOT_FINDINGS);
+  L.push("");
+  L.push("EVIDENCE RECORD — every entry carries all twelve fields, facts not verdicts:");
+  L.push(...EVIDENCE_FIELDS);
+  L.push(
+    '  "unknown" is a real answer; never round it to a clean value. A clean answer (the control holds) is recorded',
+    "  with consequence: null — it is still an entry.",
+  );
+  L.push("");
+  L.push("RESPONSE — exactly this shape, one JSON object:");
+  L.push(
+    '  {"unitId":"<the unit\'s id>","answers":[{"obligation":"<id>","family":"<its family>","claim":"…","file":"…","line":<tag>,"evidence":{…}}],"defects":[{"family":"…","claim":"…","file":"…","line":<tag>,"evidence":{…}}]}',
+  );
+  L.push("");
+  L.push("RULES");
+  L.push('  - "unitId" is the id the unit states below.');
+  L.push('  - "answers" holds one entry per obligation the unit lists, each id EXACTLY ONCE, under the family it is listed');
+  L.push("    with; [] when it lists none.");
+  L.push('  - "defects" holds everything else you found; [] only if you found nothing. Its family is one the unit is asked.');
+  L.push('  - "line" is the integer of a tag shown in this request (42 for L0042): the line the claim is about.');
+  L.push('  - "file" is the FILE header that tag sits under: required when the unit shows more than one file, else optional.');
+  L.push("  - control_site may name any site shown here, a caller included, as path:line.");
+  L.push("  - No severity, no needsProbe, no discharge code: they are computed from the evidence record.");
+  L.push("  - No prose outside the JSON object.");
+  L.push("");
+  L.push(UNIT_SEPARATOR);
+  return `${L.join("\n")}\n`;
+}
 
-  L.push("UNIT");
+/** The shared prefix — see {@link renderSharedPrefix}. Every request starts with exactly these bytes. */
+export const UNITS_SHARED_PREFIX: string = renderSharedPrefix();
+
+/**
+ * Render the unit-specific part: everything after the shared prefix. Pure:
+ * same model in, same bytes out.
+ */
+export function renderUnitSpecific(m: RequestModel): string {
+  const L: string[] = [];
+  const multiFile = m.kind === "pr";
+  const ids = m.obligations.map((s) => s.obligation.id);
+
+  L.push(`UNIT ${m.unitId}`);
   if (m.kind === "pr") {
     L.push("  kind: pr — the obligations no single symbol or region of the diff could hold, plus the PR's overview");
   } else {
     const what =
       m.kind === "symbol"
         ? `symbol ${m.symbol ?? "(anonymous)"}${m.symbolKind ? ` (${m.symbolKind})` : ""}`
-        : "module-scope region (changed lines outside any function)";
-    const range = m.lines ? ` · lines ${m.lines[0]}-${m.lines[1]} at head` : "";
+        : `module-scope changes (changed lines outside any function unit), in ${m.source.length} region(s)`;
+    const range =
+      m.kind === "module"
+        ? ` · shown at head: ${m.source.map((b) => `${b.lines[0]?.line ?? 0}-${b.lines[b.lines.length - 1]?.line ?? 0}`).join(", ")}`
+        : m.lines
+          ? ` · lines ${m.lines[0]}-${m.lines[1]} at head`
+          : "";
     L.push(`  kind: ${m.kind} · ${what} · file: ${m.file ?? "(none)"}${range} · language: ${m.language ?? "unknown"}`);
+  }
+  if (m.folded.length > 0) {
+    L.push("  it also holds these small changed functions, each shown whole:");
+    for (const f of m.folded) L.push(`    - ${f.name} (${f.kind}) · lines ${f.lines[0]}-${f.lines[1]}`);
   }
   if (m.part) {
     L.push(
-      `  pass ${m.part.index} of ${m.part.of}: this unit was too long for one request, so it is split into overlapping passes; the others cover the rest of it`,
+      m.part.how === "lines"
+        ? `  pass ${m.part.index} of ${m.part.of}: this unit was too long for one request, so it is split into overlapping passes; the others cover the rest of it`
+        : `  part ${m.part.index} of ${m.part.of}: this file's module-scope changes were too long for one request, so its regions are split across units; the others cover the rest`,
     );
   }
   if (m.shrinkNote) L.push(`  ${m.shrinkNote}`);
@@ -238,12 +341,19 @@ export function renderUnitRequest(m: RequestModel): string {
   }
 
   if (m.source.length > 0) {
-    L.push(
-      multiFile ? "EXCERPTS — the site each obligation below was introduced at" : "SOURCE",
-      "Every shown line is tagged `L<number>`; `+` after the tag marks a line this PR added or changed; `-|` rows",
-      "were REMOVED by this PR at that point and carry no tag.",
-    );
-    for (const block of m.source) L.push(...renderBlock(block));
+    L.push(multiFile ? "EXCERPTS — the site each obligation below was introduced at" : "SOURCE");
+    let previous: ShownBlock | null = null;
+    for (const block of m.source) {
+      if (previous && previous.file === block.file) {
+        const last = previous.lines[previous.lines.length - 1]?.line ?? 0;
+        const next = block.lines[0]?.line ?? 0;
+        L.push(`${" ".repeat(5)}⋮ ${next - last - 1} line(s) not shown`);
+        L.push(...renderBlock(block).slice(1));
+      } else {
+        L.push(...renderBlock(block));
+      }
+      previous = block;
+    }
     L.push("");
   }
 
@@ -260,7 +370,12 @@ export function renderUnitRequest(m: RequestModel): string {
     L.push("CALLERS — reference sites of the symbols this unit declares (outside the unit)");
     if (m.callers.length === 0 && m.callersOmitted === 0) L.push("  none recorded by the analysis");
     for (const c of m.callers) {
-      const where = [c.inSymbol ? `in ${c.inSymbol}` : null, c.inDiff ? "changed in this PR" : "NOT touched by this PR", c.isTest ? "test" : null]
+      const where = [
+        c.of ? `of ${c.of}` : null,
+        c.inSymbol ? `in ${c.inSymbol}` : null,
+        c.inDiff ? "changed in this PR" : "NOT touched by this PR",
+        c.isTest ? "test" : null,
+      ]
         .filter(Boolean)
         .join("; ");
       L.push(`  - ${c.at} (${where})${c.text === null ? "" : ` · ${clip(c.text.trim())}`}`);
@@ -281,56 +396,44 @@ export function renderUnitRequest(m: RequestModel): string {
   } else {
     L.push(
       "  Each names BOTH ends of a possible defect: where something is introduced and where it would have to be",
-      "  enforced. Nothing has been verified. Answer the question with the evidence record below.",
+      "  enforced. Nothing has been verified. Answer the question with the evidence record above.",
     );
     for (const s of m.obligations) L.push(...renderObligation(s));
   }
   L.push("");
 
-  L.push("QUESTIONS — the families this unit is surveyed for");
-  for (const family of m.asked) {
-    const q = FAMILY_QUESTIONS[family];
-    if (!q) continue;
-    L.push(`  ${family}: ${q.question}`);
-    L.push(`    closes it: ${q.closes}.`);
+  const extra = m.asked.filter((f) => !(ALWAYS_ASKED as readonly string[]).includes(f));
+  if (extra.length > 0) {
+    L.push("ALSO ASKED of this unit");
+    L.push(...familyLines(extra));
+    L.push("");
   }
-  L.push("");
-  L.push(...NOT_FINDINGS);
-  L.push("");
 
-  L.push("EVIDENCE RECORD — every entry carries all twelve fields, facts not verdicts:");
-  L.push(...EVIDENCE_FIELDS);
-  L.push(
-    '  "unknown" is a real answer; never round it to a clean value. A clean answer (the control holds) is recorded',
-    "  with consequence: null — it is still an entry.",
-  );
-  L.push("");
-
-  const exampleAnswer = ids.length > 0
-    ? `{"obligation":"${ids[0]}","family":"${m.obligations[0]!.obligation.family}","claim":"…",${multiFile ? '"file":"…",' : ""}"line":<tag>,"evidence":{…}}`
-    : "";
-  L.push("RESPONSE — exactly this shape, one JSON object:");
+  const exampleAnswer =
+    ids.length > 0
+      ? `{"obligation":"${ids[0]}","family":"${m.obligations[0]!.obligation.family}","claim":"…",${multiFile ? '"file":"…",' : ""}"line":<tag>,"evidence":{…}}`
+      : "";
+  L.push("RESPONSE FOR THIS UNIT");
   L.push(
     `  {"unitId":"${m.unitId}","answers":[${exampleAnswer}],"defects":[{"family":"…","claim":"…",${multiFile ? '"file":"…",' : ""}"line":<tag>,"evidence":{…}}]}`,
   );
-  L.push("");
-  L.push("RULES");
   L.push(`  - "unitId" is "${m.unitId}".`);
   if (ids.length > 0) {
     L.push(`  - "answers" holds one entry per obligation, each id EXACTLY ONCE: ${ids.join(", ")}.`);
-    L.push("    An answer's family is the one its obligation is listed with.");
   } else {
     L.push('  - "answers" is [] — no obligation was attached.');
   }
-  L.push(`  - "defects" holds everything else you found; [] only if you found nothing. family is one of: ${m.asked.join(", ")}.`);
-  L.push(
-    '  - "line" is the integer of a tag shown in this request (42 for L0042): the line the claim is about.' +
-      (multiFile ? ' "file" is the FILE header that tag sits under.' : ""),
-  );
-  L.push("  - control_site may name any site shown here, a caller included, as path:line.");
-  L.push("  - No severity, no needsProbe, no discharge code: they are computed from the evidence record.");
-  L.push("  - No prose outside the JSON object.");
+  L.push(`  - a defect's family is one of: ${m.asked.join(", ")}.`);
+  if (multiFile) L.push('  - this unit shows several files: every entry carries "file".');
   return `${L.join("\n")}\n`;
+}
+
+/**
+ * Render the whole request: {@link UNITS_SHARED_PREFIX} followed by the
+ * unit-specific part. Pure: same model in, same bytes out.
+ */
+export function renderUnitRequest(m: RequestModel): string {
+  return UNITS_SHARED_PREFIX + renderUnitSpecific(m);
 }
 
 /** A tagged line as the request showed it. */
