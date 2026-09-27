@@ -1216,7 +1216,17 @@ lastlight-facts units-ingest --dir .lastlight/pr-review          # → hypothese
   tier-3 envelope still gets a unit for every changed line, just no neighbours.
 - **A unit is the OUTERMOST function-like declaration** holding a changed or
   removal line (functions, methods, `const f = () => …`, found with ast-grep on
-  the head blob); a class is not a unit, its methods are. Changed lines no
+  the head blob); a class is not a unit, its methods are. **Python, Go and
+  Java** get the same through their descriptors: `scanDeclarations` on the
+  head blob, keeping `function` / `method` / `constructor` /
+  `interface-method` sites (a Python function nested in another is part of
+  its parent; a decorator block is part of its function), named as `facts`
+  names them (`Service.run`, Go's receiver-qualified `Service.Run`). Imports
+  come from the descriptor's `importKinds` (`scanImportLines` — Go's whole
+  `import ( … )` block, Python's parenthesised `from x import (…)`); TS/JS
+  descriptors declare none, so that path is unchanged. A file whose grammar
+  did not load or did not parse is surveyed as module regions, and a
+  `degraded[]` entry names it (and the grammar's reason). Changed lines no
   symbol holds go into **at most one `module` unit per file**: every such
   region in head order (±3 context lines, regions closer than 3 lines merged),
   a `⋮` elision row between them. A small changed function (≤

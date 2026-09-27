@@ -53,12 +53,14 @@ import { z } from "zod";
 
 import { EXIT_DEGRADED, EXIT_OK, EXIT_UNAVAILABLE, FactsError, reasonOf, type ExitCode } from "./errors.js";
 import { changedPaths, isGitRepo, showFile, tryGit, unifiedDiff, type ChangedPath } from "./git.js";
-import { asSyntaxNode, type SyntaxNode } from "./langs/descriptor.js";
+import { asSyntaxNode, grammarAvailable, type SyntaxNode } from "./langs/descriptor.js";
+import { descriptorForPath, TSJS_FAMILY } from "./langs/register.js";
 import { noopLogger, type LoggerPort } from "./log.js";
 import { astGrepLangFor, languageIdOf, looksMinified, MAX_SCANNED_FILE_BYTES } from "./project.js";
 import { AllDocumentSchema, DegradedEntrySchema, type AllDocument, type DegradedEntry, type SymbolFact } from "./schema.js";
 import type { Obligation, ObligationsDocument } from "./seed.js";
 import { splitPatches } from "./stage-diff.js";
+import { scanDeclarations, scanImportLines } from "./syntactic.js";
 import { unitResponseJsonSchema } from "./unit-response.js";
 import {
   ALWAYS_ASKED,
@@ -384,14 +386,47 @@ function qualifierOf(node: SyntaxNode): string | null {
 }
 
 /**
- * Every OUTERMOST function-like declaration in a TS/JS source: functions,
- * methods, and `const f = () => …`. `null` when the file has no parser or the
- * parser refused it — the caller surveys its lines as module regions instead,
- * and says so.
+ * The declaration kinds a non-TS/JS descriptor reports that are a UNIT: they
+ * have a body a changed line can sit in. `interface-method` is Java's (a
+ * `default` method has a body) and Go's `method_elem` — a one-line signature,
+ * which the small-symbol fold absorbs. Classes, types and fields are not
+ * units; their changed lines are module regions, as in TS/JS.
+ */
+const DESCRIPTOR_FUNCTION_KINDS = new Set(["function", "method", "constructor", "interface-method"]);
+
+/** Keep only the declarations no other one contains — a class is not a unit, and a nested function is part of its parent. */
+function outermostOf(found: FunctionLike[]): FunctionLike[] {
+  found.sort((a, b) => a.start - b.start || b.end - a.end || a.name.localeCompare(b.name));
+  const outermost: FunctionLike[] = [];
+  for (const f of found) {
+    const container = outermost.find((o) => o.start <= f.start && o.end >= f.end);
+    if (!container) outermost.push(f);
+  }
+  return outermost;
+}
+
+/**
+ * Every OUTERMOST function-like declaration in a source: for TS/JS,
+ * functions, methods, and `const f = () => …`; for any other language a
+ * descriptor claims (Python, Go, Java), the functions / methods /
+ * constructors `scanDeclarations` finds — a Python function nested in
+ * another is part of its parent, as in TS/JS. `null` when the file has no
+ * parser, its grammar did not load, or the parser refused it — the caller
+ * surveys its lines as module regions instead, and says so.
  */
 export function functionLikes(path: string, source: string): FunctionLike[] | null {
   const lang = astGrepLangFor(path);
-  if (!lang) return null;
+  if (!lang) {
+    const descriptor = descriptorForPath(path);
+    if (!descriptor || descriptor.family === TSJS_FAMILY) return null;
+    const sites = scanDeclarations(path, source);
+    if (sites === null) return null;
+    return outermostOf(
+      sites
+        .filter((site) => DESCRIPTOR_FUNCTION_KINDS.has(site.kind))
+        .map((site) => ({ name: site.name, kind: site.kind, nameLine: site.line, start: site.startLine, end: site.endLine })),
+    );
+  }
   let root: SyntaxNode;
   try {
     root = asSyntaxNode(parse(lang, source).root());
@@ -432,23 +467,23 @@ export function functionLikes(path: string, source: string): FunctionLike[] | nu
     if (!value || !name || name.kind() !== "identifier" || !FUNCTION_VALUE_KINDS.has(value.kind())) continue;
     add(node, "function", name);
   }
-  found.sort((a, b) => a.start - b.start || b.end - a.end || a.name.localeCompare(b.name));
-  const outermost: FunctionLike[] = [];
-  for (const f of found) {
-    const container = outermost.find((o) => o.start <= f.start && o.end >= f.end);
-    if (!container) outermost.push(f);
-  }
-  return outermost;
+  return outermostOf(found);
 }
 
 const IMPORT_LINE = /^\s*(import\b|export\s+(\*|\{[^}]*\})\s+from\b|from\s+\S+\s+import\b|use\s+[\w:]|require\b|#include\b|using\s+[\w.]+;|package\s+[\w.]+)/;
 
 /**
- * The file's import lines, as 1-based line numbers. TS/JS through the parser
- * (a multi-line `import { … } from` is several lines); anything else by a
+ * The file's import lines, as 1-based line numbers. Through a parser where
+ * there is one — the descriptor's `importKinds` for Python / Go / Java (Go's
+ * multi-line `import ( … )` block, Python's parenthesised `from x import (…)`),
+ * ast-grep's `import_statement` for TS/JS (a multi-line `import { … } from` is
+ * several lines); anything else, or a grammar that did not load, by a
  * per-line pattern over the head of the file.
  */
 function importLines(path: string, source: string, lines: string[]): number[] {
+  // `null` for TS/JS (their descriptors declare no importKinds), so that path is untouched.
+  const scanned = scanImportLines(path, source);
+  if (scanned !== null) return scanned;
   const lang = astGrepLangFor(path);
   if (lang) {
     try {
@@ -1277,8 +1312,14 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
       continue;
     }
     const fns = functionLikes(path, text);
-    if (fns === null && astGrepLangFor(path)) {
-      note(`${path} did not parse — its changed lines are surveyed as module regions, with no symbol unit`);
+    const descriptor = fns === null ? descriptorForPath(path) : null;
+    if (descriptor) {
+      const grammar = grammarAvailable(descriptor);
+      note(
+        grammar === null
+          ? `${path} did not parse — its changed lines are surveyed as module regions, with no symbol unit`
+          : `${path} did not parse (${grammar}) — its changed lines are surveyed as module regions, with no symbol unit`,
+      );
     }
     allFunctions.set(path, fns ?? []);
     contexts.push({

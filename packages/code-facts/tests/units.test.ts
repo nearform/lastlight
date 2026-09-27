@@ -32,6 +32,7 @@ import { UnitResponseBodySchema, unitResponseJsonSchema } from "../src/unit-resp
 import { buildUnits, fallbackUnitsDocument, SMALL_SYMBOL_LINES, UnitsDocumentSchema, type Unit, type UnitsDocument } from "../src/units.js";
 import { ingestUnits } from "../src/units-ingest.js";
 import { FAMILY_QUESTIONS, requestLineTags, UNIT_SEPARATOR, UNITS_SHARED_PREFIX } from "../src/units-render.js";
+import { forceGrammarUnavailable } from "../src/langs/dynamic.js";
 import { makeFixture, TSCONFIG, type Fixture } from "./helpers.js";
 
 // ── the fixture ──────────────────────────────────────────────────────────────
@@ -1352,5 +1353,285 @@ describe("units — spec obligations from spec-obligations.json", () => {
     runCli(["units", "--dir", dir, "--repo", fixture.dir, "--spec", join(dir, "elsewhere.json")], { out: (s) => out.push(s), err: () => {} });
     const doc = JSON.parse(readFileSync(join(dir, "units.json"), "utf8")) as UnitsDocument;
     expect(doc.degraded.some((d) => d.reason.includes("elsewhere.json") && d.reason.includes("--spec"))).toBe(true);
+  });
+});
+
+// ── Python, Go and Java: symbol units through the language descriptors ──────
+
+const PY_SERVICE = (head: boolean): string =>
+  [
+    "import logging",
+    ...(head ? ["import json"] : []),
+    "",
+    "from svc.helpers import clamp",
+    "",
+    "",
+    "def fmt(value):",
+    head ? "    return json.dumps(value)" : "    return str(value)",
+    "",
+    "",
+    "class Service:",
+    "    def __init__(self, limit):",
+    "        self.limit = limit",
+    "",
+    "    def run(self, items):",
+    '        """Process every item under the limit."""',
+    "        out = []",
+    "        count = 0",
+    "        for item in items:",
+    "            if item is None:",
+    "                continue",
+    head ? "            value = clamp(item, self.limit + 1)" : "            value = clamp(item, self.limit)",
+    "            if value > self.limit:",
+    '                logging.warning("over")',
+    "            out.append(fmt(value))",
+    "        total = len(out)",
+    "        if total == 0:",
+    "            return None",
+    '        logging.info("done %d", total)',
+    "        return out",
+    "",
+  ].join("\n");
+
+const GO_SERVICE = (head: boolean): string =>
+  [
+    "package pkg",
+    "",
+    "import (",
+    '\t"fmt"',
+    ...(head ? ['\t"strings"'] : []),
+    ")",
+    "",
+    "type Service struct{ limit int }",
+    "",
+    "func label(n int) string {",
+    head ? "\treturn strings.TrimSpace(fmt.Sprint(n))" : "\treturn fmt.Sprint(n)",
+    "}",
+    "",
+    "func (s *Service) Run(items []int) []string {",
+    "\tout := []string{}",
+    "\tfor _, item := range items {",
+    "\t\tif item < 0 {",
+    "\t\t\tcontinue",
+    "\t\t}",
+    head ? "\t\tif item > s.limit+1 {" : "\t\tif item > s.limit {",
+    "\t\t\titem = s.limit",
+    "\t\t}",
+    "\t\tout = append(out, label(item))",
+    "\t}",
+    "\tif len(out) == 0 {",
+    "\t\treturn nil",
+    "\t}",
+    "\treturn out",
+    "}",
+    "",
+  ].join("\n");
+
+const JAVA_BILLING = (head: boolean): string =>
+  [
+    "package app;",
+    "",
+    "import java.util.List;",
+    "",
+    "public class Billing {",
+    "  public int charge(List<Integer> amounts) {",
+    "    int total = 0;",
+    "    for (Integer amount : amounts) {",
+    "      if (amount == null) {",
+    "        continue;",
+    "      }",
+    head ? "      if (amount > 1000) {" : "      if (amount > 100) {",
+    "        amount = 100;",
+    "      }",
+    "      total += amount;",
+    "    }",
+    "    if (total < 0) {",
+    "      total = 0;",
+    "    }",
+    "    return total;",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+
+function makePolyglotFixture(): Fixture {
+  const common = {
+    "svc/__init__.py": "",
+    "svc/helpers.py": "def clamp(value, limit):\n    return min(value, limit)\n",
+    "app/main.py": "from svc.service import Service\n\n\ndef main():\n    svc = Service(10)\n    return svc.run([1, 2])\n",
+    "go.mod": "module example.com/poly\n\ngo 1.22\n",
+    "cmd/main.go": 'package main\n\nimport "example.com/poly/pkg"\n\nfunc main() {\n\ts := &pkg.Service{}\n\t_ = s.Run([]int{1})\n}\n',
+    "src/main/java/app/Checkout.java":
+      "package app;\n\nimport java.util.List;\n\npublic class Checkout {\n  public int pay(Billing billing, List<Integer> amounts) {\n    return billing.charge(amounts);\n  }\n}\n",
+  };
+  return makeFixture(
+    "units-polyglot",
+    {
+      message: "base",
+      files: {
+        ...common,
+        "svc/service.py": PY_SERVICE(false),
+        "pkg/svc.go": GO_SERVICE(false),
+        "src/main/java/app/Billing.java": JAVA_BILLING(false),
+      },
+    },
+    {
+      message: "head",
+      files: {
+        "svc/service.py": PY_SERVICE(true),
+        "pkg/svc.go": GO_SERVICE(true),
+        "src/main/java/app/Billing.java": JAVA_BILLING(true),
+      },
+    },
+  );
+}
+
+/** The `- <site>` rows of one section of a request (`CALLERS`, `CALLEES`), up to the blank line. */
+function sectionRows(request: string, heading: string): string[] {
+  const lines = request.slice(request.indexOf(UNIT_SEPARATOR)).split("\n");
+  const at = lines.findIndex((l) => l.startsWith(heading));
+  if (at < 0) return [];
+  const rows: string[] = [];
+  for (const line of lines.slice(at + 1)) {
+    if (line.trim() === "") break;
+    const m = /^\s+- (\S+)/.exec(line);
+    if (m) rows.push(m[1]!);
+  }
+  return rows;
+}
+
+/** The tagged line numbers of a request's `IMPORTS of <file>` block. */
+function importTags(request: string, file: string): number[] {
+  const lines = request.slice(request.indexOf(UNIT_SEPARATOR)).split("\n");
+  const at = lines.indexOf(`IMPORTS of ${file}`);
+  if (at < 0) return [];
+  const out: number[] = [];
+  for (const line of lines.slice(at + 2)) {
+    const m = TAG.exec(line);
+    if (!m) break;
+    out.push(Number(m[1]));
+  }
+  return out;
+}
+
+describe("units — Python, Go and Java get symbol units", () => {
+  let fixture: Fixture;
+  let dir: string;
+  let facts: AllDocument;
+  let seeded: ReturnType<typeof seedObligations>;
+  let doc: UnitsDocument;
+
+  beforeAll(() => {
+    fixture = makePolyglotFixture();
+    dir = join(fixture.dir, ".lastlight", "pr-review");
+    mkdirSync(dir, { recursive: true });
+    facts = runExtractor({
+      extractor: "all",
+      repo: fixture.dir,
+      base: fixture.base,
+      head: fixture.head,
+      env: { PATH: "" },
+    }).document as unknown as AllDocument;
+    writeFileSync(join(dir, "facts.json"), JSON.stringify(facts));
+    seeded = seedObligations(facts);
+    writeFileSync(join(dir, "obligations.json"), JSON.stringify(seeded));
+    const cli = { out: () => {}, err: () => {} };
+    runCli(["units", "--dir", dir, "--repo", fixture.dir], cli);
+    doc = JSON.parse(readFileSync(join(dir, "units.json"), "utf8")) as UnitsDocument;
+  });
+  afterAll(() => fixture.cleanup());
+
+  it("a changed method is a symbol unit, named as facts names it, in the file's own language", () => {
+    const shape = doc.units
+      .filter((u) => u.kind === "symbol")
+      .map((u) => [u.file, u.symbol, u.language, u.lines]);
+    // `label` and `fmt` are small, but seed attached obligations to them, so they stay units.
+    expect(shape).toEqual([
+      ["pkg/svc.go", "label", "go", [10, 12]],
+      ["pkg/svc.go", "Service.Run", "go", [14, 29]],
+      ["src/main/java/app/Billing.java", "Billing.charge", "java", [6, 21]],
+      ["svc/service.py", "fmt", "python", [7, 8]],
+      ["svc/service.py", "Service.run", "python", [15, 30]],
+    ]);
+    // The header's language is the file's, not a fallback.
+    for (const u of doc.units.filter((x) => x.kind !== "pr")) {
+      expect(u.request).toContain(`· language: ${u.language}`);
+    }
+  });
+
+  it("shows callers from another file and callees from facts.json", () => {
+    const py = unitOf(doc, (u) => u.symbol === "Service.run");
+    expect(sectionRows(py.request, "CALLERS")).toContain("app/main.py:6");
+    expect(sectionRows(py.request, "CALLEES")).toEqual(expect.arrayContaining(["clamp", "fmt"]));
+    expect(py.request).toContain("fmt (declared at svc/service.py:7)");
+
+    const go = unitOf(doc, (u) => u.symbol === "Service.Run");
+    expect(sectionRows(go.request, "CALLERS")).toContain("cmd/main.go:7");
+    expect(sectionRows(go.request, "CALLEES")).toContain("label");
+
+    const java = unitOf(doc, (u) => u.symbol === "Billing.charge");
+    expect(sectionRows(java.request, "CALLERS")).toContain("src/main/java/app/Checkout.java:7");
+  });
+
+  it("folds a small changed function with no obligation into its file's module unit, keeping its neighbours", () => {
+    const bare = join(fixture.dir, ".lastlight", "pr-review-bare");
+    rmSync(bare, { recursive: true, force: true });
+    mkdirSync(bare, { recursive: true });
+    writeFileSync(join(bare, "facts.json"), JSON.stringify(facts));
+    writeFileSync(join(bare, "obligations.json"), JSON.stringify(obligationsDoc([])));
+    const folded = buildUnits({ dir: bare, repo: fixture.dir }).document;
+    const py = unitOf(folded, (u) => u.kind === "module" && u.file === "svc/service.py");
+    expect(py.request).toMatch(/- fmt \(function\) · lines 7-8/);
+    // `fmt`'s caller inside the changed method is outside this unit, so it is a caller here.
+    expect(sectionRows(py.request, "CALLERS")).toContain("svc/service.py:25");
+
+    const go = unitOf(folded, (u) => u.kind === "module" && u.file === "pkg/svc.go");
+    expect(go.request).toMatch(/- label \(function\) · lines 10-12/);
+    expect(sectionRows(go.request, "CALLERS")).toContain("pkg/svc.go:23");
+    // No small-symbol unit survives for either.
+    expect(folded.units.filter((u) => u.symbol === "fmt" || u.symbol === "label")).toEqual([]);
+    // The big methods are still units.
+    expect(folded.units.filter((u) => u.kind === "symbol").map((u) => u.symbol)).toEqual(["Service.Run", "Billing.charge", "Service.run"]);
+  });
+
+  it("renders imports through the descriptor — Go's whole `import ( … )` block", () => {
+    const go = unitOf(doc, (u) => u.symbol === "Service.Run");
+    expect(importTags(go.request, "pkg/svc.go")).toEqual([3, 4, 5, 6]);
+    const py = unitOf(doc, (u) => u.symbol === "Service.run");
+    expect(importTags(py.request, "svc/service.py")).toEqual([1, 2, 4]);
+    const java = unitOf(doc, (u) => u.symbol === "Billing.charge");
+    expect(importTags(java.request, "src/main/java/app/Billing.java")).toEqual([3]);
+  });
+
+  it("every seeded obligation lands in exactly one unit, and an answered survey passes every gate", () => {
+    expect(doc.units.flatMap((u) => u.obligationIds).sort()).toEqual(seeded.obligations.map((o) => o.id).sort());
+    const d2 = join(fixture.dir, ".lastlight", "pr-review-ingest");
+    rmSync(d2, { recursive: true, force: true });
+    mkdirSync(d2, { recursive: true });
+    for (const f of ["facts.json", "obligations.json", "units.json"]) writeFileSync(join(d2, f), readFileSync(join(dir, f)));
+    answerAll(d2, doc, seeded.obligations);
+    expect(runCli(["units-ingest", "--dir", d2], { out: () => {}, err: () => {} })).toBe(EXIT_OK);
+    gatesPass(d2);
+  });
+
+  it("a grammar that does not load falls back to module regions, with a degraded note naming the file", () => {
+    forceGrammarUnavailable("python", "injected: no prebuild for this platform");
+    try {
+      const result = buildUnits({ dir, repo: fixture.dir });
+      const pyUnits = result.document.units.filter((u) => u.file === "svc/service.py");
+      expect(pyUnits.map((u) => u.kind)).toEqual(["module"]);
+      // Every touched line is still in it: the import, fmt's body, run's changed line.
+      const shown = requestLineTags(pyUnits[0]!.request).get("svc/service.py")!;
+      const changed = [...shown].filter(([, t]) => t.changed).map(([line]) => line);
+      expect(changed).toEqual(expect.arrayContaining([2, 8, 22]));
+      const notes = result.document.degraded.filter((d) => d.reason.includes("svc/service.py"));
+      expect(notes.length).toBe(1);
+      expect(notes[0]!.reason).toContain("injected");
+      expect(result.exitCode).toBe(EXIT_DEGRADED);
+      // The other languages are untouched.
+      expect(result.document.units.some((u) => u.symbol === "Service.Run")).toBe(true);
+    } finally {
+      forceGrammarUnavailable("python", null);
+    }
   });
 });
