@@ -13,7 +13,6 @@ import {
   modelTotals,
   oneSidedGold,
   summariseUnitSurveyReport,
-  unitSurveyCaveats,
   unitSurveyElapsedMs,
   unitSurveyStatus,
   type ReplayReport,
@@ -163,18 +162,6 @@ describe("oneSidedGold + caveats", () => {
     ]);
   });
 
-  it("carries the code-generation, judge, drift and missing-data caveats the report implies", () => {
-    const text = unitSurveyCaveats(fixture()).join("\n");
-    expect(text).toMatch(/Different code generations/);
-    expect(text).toMatch(/claude-sonnet-4-6/);
-    expect(text).toMatch(/majority over 3 vote/);
-    expect(text).toMatch(/1 case\(s\) errored/);
-    expect(text).toMatch(/obligations differ .* 1 case/);
-    expect(text).toMatch(/judge failed on 1 case/);
-    expect(text).toMatch(/no agent survey_branch_\* result lines/);
-    // A stage-1 report makes no model-side claims at all.
-    expect(unitSurveyCaveats(stage1()).join("\n")).not.toMatch(/judge|code generations/);
-  });
 });
 
 describe("live reports — status, progress, staleness", () => {

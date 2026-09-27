@@ -1,7 +1,7 @@
 import clsx from "clsx";
 import { Fragment } from "react";
 
-import { oneSidedGold, unitSurveyCaveats, type OneSidedGold } from "../../../src/unit-survey-index.js";
+import { oneSidedGold, type OneSidedGold } from "../../../src/unit-survey-index.js";
 import type { ReplayCase, ReplayReport, UnitSurveyEntry } from "../types";
 import { useUnitSurveyReport } from "../lib/api";
 import { fmtDate, modelDisplay } from "../lib/format";
@@ -23,8 +23,7 @@ import { caseRow, coverageText, entryModelCells, fmtChars, NA, unitSurveyProgres
  *     agent's comparator says nothing, so every stage-2 cell is a pair.
  *  2. **n/a is not 0.** A stage-1 report has no model side; an unjudged side
  *     has no credited gold; a fixture that recorded no survey branch has no
- *     agent wall or $. Those render `n/a` (see `lib/unitSurvey.ts`), and the
- *     report's caveats are rendered in full, not behind a tooltip.
+ *     agent wall or $. Those render `n/a` (see `lib/unitSurvey.ts`).
  */
 
 const COVERAGE_HINT =
@@ -322,7 +321,6 @@ export function UnitSurveyDetail({ entry }: { entry: UnitSurveyEntry }) {
         <p className="mt-5 font-mono text-xs text-base-content/40">loading cases…</p>
       ) : (
         <>
-          <Caveats caveats={unitSurveyCaveats(data)} />
           <CaseTable cases={data.cases ?? []} />
           <Pending report={data} />
         </>
@@ -353,20 +351,6 @@ function Stat({ label, value, sub, title }: { label: string; value: React.ReactN
       <div className="font-mono text-2xs uppercase tracking-wide text-base-content/50">{label}</div>
       <div className="font-mono text-sm font-semibold text-base-content">{value}</div>
       {sub && <div className="font-mono text-2xs text-base-content/40">{sub}</div>}
-    </div>
-  );
-}
-
-function Caveats({ caveats }: { caveats: string[] }) {
-  if (!caveats.length) return null;
-  return (
-    <div className="mb-6 max-w-4xl rounded-lg border border-warning/40 bg-warning/10 px-3 py-2">
-      <div className="mb-1 font-mono text-2xs font-semibold uppercase tracking-wide text-warning">caveats</div>
-      <ul className="list-disc space-y-1 pl-4 font-mono text-2xs leading-5 text-warning/90">
-        {caveats.map((c, i) => (
-          <li key={i}>{c}</li>
-        ))}
-      </ul>
     </div>
   );
 }

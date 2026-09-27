@@ -111,8 +111,8 @@ implying the questions are recoverable.
 ## The unit-survey page (`#/unit-survey`)
 
 `src/components/UnitSurvey.tsx` renders `/api/unit-survey` (list) and one
-report fetched from `/data/unit-survey/<id>.json` (detail: per-case table, the
-gold only one side's judge credited, and the report's caveats). It mirrors the
+report fetched from `/data/unit-survey/<id>.json` (detail: per-case table and the
+gold only one side's judge credited). It mirrors the
 micro-survey page — its own endpoint, its own reserved first hash segment
 (`UNIT_SURVEY_TIER_KEY`), and a nav chip only when there are reports. Every cell
 string comes from `src/lib/unitSurvey.ts` over the harness's node-free
