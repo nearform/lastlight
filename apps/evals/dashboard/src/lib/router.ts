@@ -24,6 +24,16 @@ export type RunViewName = "repeats";
  */
 export const MICRO_TIER_KEY = "micro-survey";
 
+/**
+ * The reserved first segment for the unit-survey replay views —
+ * `#/unit-survey` for the list, `#/unit-survey/<report-id>` for one report.
+ * Safe in the tier-key slot for the same reason as {@link MICRO_TIER_KEY}: it is
+ * the literal `eval-results/unit-survey/` directory, which holds loose report
+ * files plus a `responses/` dir with no `scorecard.json` anywhere, so
+ * `buildIndex` never emits a tier with this key.
+ */
+export const UNIT_SURVEY_TIER_KEY = "unit-survey";
+
 export interface Route {
   tierKey?: string;
   runId?: string;

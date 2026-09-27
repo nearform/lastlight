@@ -108,6 +108,19 @@ obligation's *question* is nowhere on disk. The per-family dropped count is
 `minted − obligations` (`families[]`), and the panel says so rather than
 implying the questions are recoverable.
 
+## The unit-survey page (`#/unit-survey`)
+
+`src/components/UnitSurvey.tsx` renders `/api/unit-survey` (list) and one
+report fetched from `/data/unit-survey/<id>.json` (detail: per-case table, the
+gold only one side's judge credited, and the report's caveats). It mirrors the
+micro-survey page — its own endpoint, its own reserved first hash segment
+(`UNIT_SURVEY_TIER_KEY`), and a nav chip only when there are reports. Every cell
+string comes from `src/lib/unitSurvey.ts` over the harness's node-free
+`../src/unit-survey-index.ts`, and the one rule it pins
+(`src/lib/unitSurvey.test.ts`): a side with no data — a stage-1 report, an
+unjudged side, a fixture with no recorded agent survey — prints `n/a`, while a
+measured zero still prints `0/4`. Units and agent always render as a pair.
+
 ## Testing
 
 `vitest.config.ts`, `environment: "node"` — everything worth testing here is pure

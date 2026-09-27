@@ -1,0 +1,174 @@
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
+
+import { buildUnitSurveyIndex } from "./report.js";
+import { startServer } from "./serve.js";
+import {
+  fmtGoldFraction,
+  modelTotals,
+  oneSidedGold,
+  summariseUnitSurveyReport,
+  unitSurveyCaveats,
+  type ReplayReport,
+} from "./unit-survey-index.js";
+
+/**
+ * A synthetic report in the exact shape `scripts/unit-survey-replay.ts`
+ * writes — derived from a real stage-2 smoke report with the gold text and
+ * paths replaced (gold text is never committed). Three cases: a fully judged
+ * one, one whose units side went UNJUDGED and whose fixture recorded no agent
+ * survey branch, and one that errored in stage 1.
+ */
+const FIXTURE_NAME = "2026-09-27T10-10-15-249Z-fixture-stage2.json";
+const fixtureText = readFileSync(new URL(`./__fixtures__/unit-survey/${FIXTURE_NAME}`, import.meta.url), "utf8");
+const fixture = (): ReplayReport => JSON.parse(fixtureText) as ReplayReport;
+
+/** The same report as a stage-1 (`--no-model`) run would have written it. */
+const stage1 = (): ReplayReport => {
+  const r = fixture();
+  r.label = "fixture-stage1";
+  r.startedAt = "2026-09-27T09:00:00.000Z";
+  r.stage = "coverage";
+  for (const c of r.cases) delete c.model;
+  delete r.aggregate.model;
+  return r;
+};
+
+const dirs: string[] = [];
+const tmp = () => {
+  const d = mkdtempSync(join(tmpdir(), "unit-survey-index-test-"));
+  dirs.push(d);
+  return d;
+};
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+/** A results root laid out the way a replay that is still running leaves it. */
+function liveResultsRoot(): string {
+  const root = tmp();
+  const dir = join(root, "unit-survey");
+  mkdirSync(join(dir, "responses", "arm1-prreview__demo-1", "responses"), { recursive: true });
+  writeFileSync(join(dir, FIXTURE_NAME), fixtureText);
+  writeFileSync(join(dir, "2026-09-27T09-00-00-000Z-fixture-stage1.json"), JSON.stringify(stage1()));
+  // Torn mid-write by the running replay.
+  writeFileSync(join(dir, "2026-09-27T11-00-00-000Z-in-flight.json"), fixtureText.slice(0, 400));
+  // Valid JSON, not a report.
+  writeFileSync(join(dir, "notes.json"), JSON.stringify({ hello: "world" }));
+  writeFileSync(join(dir, "scalar.json"), "42");
+  writeFileSync(join(dir, "README.md"), "not json");
+  // The kept raw replies — JSON files one level down, and a DIRECTORY whose
+  // name ends in .json. Neither is a report.
+  writeFileSync(join(dir, "responses", "arm1-prreview__demo-1", "responses", "u-001.json"), fixtureText);
+  mkdirSync(join(dir, "responses.json"));
+  return root;
+}
+
+describe("buildUnitSurveyIndex", () => {
+  it("is an empty list when nothing has been replayed here", () => {
+    expect(buildUnitSurveyIndex(tmp(), "now").reports).toEqual([]);
+    expect(buildUnitSurveyIndex(join(tmp(), "nope"), "now").reports).toEqual([]);
+  });
+
+  it("lists only the report files, newest first — skipping torn, non-report and responses/ entries", () => {
+    const idx = buildUnitSurveyIndex(liveResultsRoot(), "now");
+    expect(idx.reports.map((r) => r.label)).toEqual(["fixture-stage2", "fixture-stage1"]);
+    expect(idx.reports[0].report).toBe(`/data/unit-survey/${encodeURIComponent(FIXTURE_NAME)}`);
+  });
+
+  it("is what GET /api/unit-survey serves, and the report body is reachable under /data", async () => {
+    const root = liveResultsRoot();
+    const server = await startServer({ resultsRoot: root, dashboardRoot: join(root, "no-dashboard"), port: 0 });
+    try {
+      const idx = (await (await fetch(`${server.url}/api/unit-survey`)).json()) as { reports: { label: string; report: string }[] };
+      expect(idx.reports.map((r) => r.label)).toEqual(["fixture-stage2", "fixture-stage1"]);
+      const body = (await (await fetch(`${server.url}${idx.reports[0].report}`)).json()) as ReplayReport;
+      expect(body.cases).toHaveLength(3);
+    } finally {
+      await server.close();
+    }
+  });
+});
+
+describe("summariseUnitSurveyReport", () => {
+  it("rejects anything that is not a replay report", () => {
+    expect(summariseUnitSurveyReport("x", null, "now")).toBeNull();
+    expect(summariseUnitSurveyReport("x", 42, "now")).toBeNull();
+    expect(summariseUnitSurveyReport("x", { label: "no cases" }, "now")).toBeNull();
+  });
+
+  it("a stage-1 report has NO model side — not a zero one", () => {
+    const e = summariseUnitSurveyReport("2026-09-27T09-00-00-000Z-s1", stage1(), "now")!;
+    expect(e.stage).toBe("coverage");
+    expect(e.model).toBeNull();
+    expect(e.cases).toBe(3);
+    expect(e.errored).toBe(1);
+    // The errored case is out of every total.
+    expect(e.coverage).toEqual({ covered: 6, locatable: 6, gold: 8, unlocatable: 2 });
+    expect(e.units).toBe(14);
+    expect(e.arms).toEqual(["arm1", "arm2"]);
+  });
+
+  it("stage 2: an unjudged side and an unrecorded agent survey total to null, never to 0", () => {
+    const e = summariseUnitSurveyReport("id", fixture(), "now")!;
+    expect(e.stage).toBe("replay");
+    const m = e.model!;
+    expect(m.cases).toBe(2);
+    expect(m.gold).toBe(8);
+    // demo-2's units side has asserted: null (judge failed) → the total is unknown.
+    expect(m.unitsAsserted).toBeNull();
+    expect(m.agentAsserted).toBe(0);
+    // demo-2's fixture recorded no survey branch: its `costUsd: 0` is a sum over
+    // nothing, and the report's own aggregate would have counted it as $0.
+    expect(m.agentCostUsd).toBeNull();
+    expect(m.agentWallMs).toBeNull();
+    expect(m.unitsCostUsd).toBeCloseTo(0.2162377, 6);
+    expect(m.judgeModels).toEqual(["anthropic/claude-sonnet-4-6"]);
+    expect(m.votes).toEqual([3]);
+  });
+
+  it("with every side measured, the totals are the case sums", () => {
+    const r = fixture();
+    r.cases = r.cases.slice(0, 1);
+    const m = modelTotals(r.cases)!;
+    expect(m.unitsAsserted).toBe(1);
+    expect(m.agentAsserted).toBe(0);
+    expect(m.agentCostUsd).toBeCloseTo(1.3563679, 6);
+    expect(m.agentWallMs).toBe(179957);
+    expect(fmtGoldFraction(m.unitsAsserted, m.gold)).toBe("1/4 (25%)");
+    expect(fmtGoldFraction(null, m.gold)).toBe("n/a");
+    expect(fmtGoldFraction(0, m.gold)).toBe("0/4 (0%)");
+  });
+});
+
+describe("oneSidedGold + caveats", () => {
+  it("names the gold only one side credited, with the crediting rows and votes", () => {
+    const [demo1] = fixture().cases;
+    expect(oneSidedGold(demo1)).toEqual([
+      {
+        index: 0,
+        gold: expect.objectContaining({ summary: "synthetic gold 1" }),
+        side: "units",
+        rows: ["state-003"],
+        creditVotes: 3,
+        votes: 3,
+      },
+    ]);
+  });
+
+  it("carries the code-generation, judge, drift and missing-data caveats the report implies", () => {
+    const text = unitSurveyCaveats(fixture()).join("\n");
+    expect(text).toMatch(/Different code generations/);
+    expect(text).toMatch(/claude-sonnet-4-6/);
+    expect(text).toMatch(/majority over 3 vote/);
+    expect(text).toMatch(/1 case\(s\) errored/);
+    expect(text).toMatch(/obligations differ .* 1 case/);
+    expect(text).toMatch(/judge failed on 1 case/);
+    expect(text).toMatch(/no agent survey_branch_\* result lines/);
+    // A stage-1 report makes no model-side claims at all.
+    expect(unitSurveyCaveats(stage1()).join("\n")).not.toMatch(/judge|code generations/);
+  });
+});

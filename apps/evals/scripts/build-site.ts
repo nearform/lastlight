@@ -24,7 +24,7 @@ import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { buildIndex, buildMicroIndex } from "../src/report.js";
+import { buildIndex, buildMicroIndex, buildUnitSurveyIndex } from "../src/report.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dashboardDist = join(root, "dashboard", "dist");
@@ -61,10 +61,14 @@ writeFileSync(join(out, "api", "index"), JSON.stringify(index));
 const micro = buildMicroIndex(resultsRoot, new Date().toISOString());
 writeFileSync(join(out, "api", "micro"), JSON.stringify(micro));
 
+// 5) The /api/unit-survey companion — unit-survey replays, same reasoning.
+const unitSurvey = buildUnitSurveyIndex(resultsRoot, new Date().toISOString());
+writeFileSync(join(out, "api", "unit-survey"), JSON.stringify(unitSurvey));
+
 const tiers = index.tiers.length;
 const runs = index.tiers.reduce((n, t) => n + t.runs.length, 0);
 const src = liveHasRuns ? "eval-results/" : "sample-results/ (vendored)";
 console.log(
   `Built static site → dist-site/  (${tiers} tier-combos, ${runs} runs, ` +
-    `${micro.reports.length} micro-survey reports from ${src})`,
+    `${micro.reports.length} micro-survey + ${unitSurvey.reports.length} unit-survey reports from ${src})`,
 );

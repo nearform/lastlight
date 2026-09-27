@@ -1,0 +1,628 @@
+{
+  "version": 1,
+  "label": "fixture-stage2",
+  "startedAt": "2026-09-27T10:10:15.249Z",
+  "finishedAt": "2026-09-27T10:11:01.489Z",
+  "stage": "replay",
+  "codeFacts": {
+    "cli": "/work/lastlight/packages/code-facts/dist/cli.js",
+    "promptVersion": "units-v3"
+  },
+  "cases": [
+    {
+      "instanceId": "prreview__demo-1",
+      "arm": "arm1",
+      "fixture": "/fixtures/arm1/prreview__demo-1",
+      "gold": [
+        {
+          "file": "src/routes/profiles.ts",
+          "line": 367,
+          "severity": "high",
+          "summary": "synthetic gold 1"
+        },
+        {
+          "file": "scripts/strip.ts",
+          "line": 58,
+          "severity": "high",
+          "summary": "synthetic gold 2"
+        },
+        {
+          "file": "scripts/strip.ts",
+          "line": 57,
+          "severity": "high",
+          "summary": "synthetic gold 3"
+        },
+        {
+          "severity": "medium",
+          "summary": "synthetic gold 4"
+        }
+      ],
+      "seed": {
+        "contract": "minimal",
+        "maxObligations": 40,
+        "mint": "all-in-diff,registrations",
+        "source": {
+          "contract": "obligations.json",
+          "maxObligations": "seed transcript",
+          "mint": "obligations.json"
+        }
+      },
+      "obligations": {
+        "fixture": {
+          "contract": 8,
+          "enforcement": 0,
+          "security": 1,
+          "state": 1,
+          "tests": 0,
+          "spec": 0
+        },
+        "replay": {
+          "contract": 8,
+          "enforcement": 0,
+          "security": 1,
+          "state": 1,
+          "tests": 0,
+          "spec": 0
+        }
+      },
+      "spec": {
+        "status": "degraded-only",
+        "note": "closes none (of 0 linked issue(s) in instances.json); 5 changed file(s) from git; max 40 (default config)",
+        "obligations": 0,
+        "degraded": [
+          "this PR is not linked to an issue and its body states no acceptance criteria"
+        ],
+        "fidelity": {
+          "rebuilt": 0,
+          "inTranscript": 1,
+          "transcriptIds": null,
+          "match": true
+        }
+      },
+      "shape": {
+        "units": 7,
+        "byKind": {
+          "module": 4,
+          "symbol": 3
+        },
+        "requestChars": 101752,
+        "sharedPrefixChars": 5946,
+        "unitSpecificChars": 60130,
+        "maxRequestChars": 38820,
+        "truncated": 0,
+        "coverage": "full",
+        "promptVersion": "units-v3",
+        "degraded": [],
+        "specObligations": 0
+      },
+      "coverage": [
+        {
+          "verdict": "covered",
+          "units": [
+            "u-005"
+          ],
+          "changed": true
+        },
+        {
+          "verdict": "covered",
+          "units": [
+            "u-006"
+          ],
+          "changed": true
+        },
+        {
+          "verdict": "covered",
+          "units": [
+            "u-006"
+          ],
+          "changed": true
+        },
+        {
+          "verdict": "unlocatable",
+          "units": []
+        }
+      ],
+      "coverageTally": {
+        "gold": 4,
+        "locatable": 3,
+        "covered": 3,
+        "coveredChanged": 3,
+        "fileOnly": 0,
+        "uncovered": 0,
+        "unlocatable": 1
+      },
+      "neutralTally": {
+        "gold": 3,
+        "locatable": 3,
+        "covered": 3,
+        "coveredChanged": 3,
+        "fileOnly": 0,
+        "uncovered": 0,
+        "unlocatable": 0
+      },
+      "deterministicMs": {
+        "facts": 3220,
+        "seed": 110,
+        "units": 438
+      },
+      "model": {
+        "model": "anthropic/claude-haiku-4-5-20251001",
+        "variant": null,
+        "concurrency": 16,
+        "wallMs": 36106,
+        "costUsd": 0.10811885000000002,
+        "calls": 10,
+        "unitsOk": 6,
+        "unitsFailed": 1,
+        "ingest": {
+          "ok": 6,
+          "failed": 1
+        },
+        "rowsByFamily": {
+          "contract": 8,
+          "enforcement": 2,
+          "security": 3,
+          "spec": 5,
+          "state": 5
+        },
+        "unitsScore": {
+          "cells": [
+            {
+              "verdict": "asserted",
+              "rows": [
+                "state-003"
+              ],
+              "probed": true
+            },
+            {
+              "verdict": "reached",
+              "rows": [
+                "contract-002",
+                "contract-003",
+                "contract-004",
+                "contract-005",
+                "contract-006",
+                "state-004"
+              ],
+              "probed": true
+            },
+            {
+              "verdict": "reached",
+              "rows": [
+                "contract-002",
+                "contract-003",
+                "contract-004",
+                "contract-005",
+                "contract-006",
+                "state-004"
+              ],
+              "probed": true
+            },
+            {
+              "verdict": "missed",
+              "rows": [],
+              "probed": false
+            }
+          ],
+          "claimed": 13,
+          "claimedAsserting": 1,
+          "asserted": 1,
+          "reached": 2,
+          "probesOnGold": 10,
+          "probesOffGold": 12,
+          "votes": 3,
+          "creditVotes": [
+            3,
+            0,
+            0,
+            0
+          ]
+        },
+        "agentScore": {
+          "cells": [
+            {
+              "verdict": "reached",
+              "rows": [
+                "spec-002",
+                "state-001"
+              ],
+              "probed": false
+            },
+            {
+              "verdict": "reached",
+              "rows": [
+                "contract-002",
+                "contract-004",
+                "contract-005",
+                "contract-006",
+                "contract-007"
+              ],
+              "probed": false
+            },
+            {
+              "verdict": "reached",
+              "rows": [
+                "contract-002",
+                "contract-004",
+                "contract-005",
+                "contract-006",
+                "contract-007"
+              ],
+              "probed": false
+            },
+            {
+              "verdict": "missed",
+              "rows": [],
+              "probed": false
+            }
+          ],
+          "claimed": 0,
+          "claimedAsserting": 0,
+          "asserted": 0,
+          "reached": 3,
+          "probesOnGold": 0,
+          "probesOffGold": 1,
+          "votes": 3,
+          "creditVotes": [
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "agentRows": 19,
+        "agentSurvey": {
+          "wallMs": 179957,
+          "costUsd": 1.3563679,
+          "branches": [
+            {
+              "phase": "survey_branch_contract",
+              "durationMs": 86166,
+              "costUsd": 0.12988670000000002
+            },
+            {
+              "phase": "survey_branch_enforcement",
+              "durationMs": 164207,
+              "costUsd": 0.29309985000000005
+            },
+            {
+              "phase": "survey_branch_security",
+              "durationMs": 139056,
+              "costUsd": 0.31571345000000006
+            },
+            {
+              "phase": "survey_branch_spec",
+              "durationMs": 179985,
+              "costUsd": 0.33487340000000004
+            },
+            {
+              "phase": "survey_branch_state",
+              "durationMs": 165484,
+              "costUsd": 0.28279449999999995
+            }
+          ],
+          "source": "agent-sessions/**/*.jsonl \u2014 5 session(s) whose result line is stamped phase survey_branch_*; wall = first line \u2192 last result timestamp"
+        },
+        "sides": {
+          "units": [
+            0
+          ],
+          "agent": [],
+          "onlyUnits": [
+            0
+          ],
+          "onlyAgent": [],
+          "both": []
+        },
+        "judgeModel": "anthropic/claude-sonnet-4-6"
+      }
+    },
+    {
+      "instanceId": "prreview__demo-2",
+      "arm": "arm2",
+      "fixture": "/fixtures/arm2/prreview__demo-2",
+      "gold": [
+        {
+          "file": "src/routes/profiles.ts",
+          "line": 367,
+          "severity": "high",
+          "summary": "synthetic gold 1"
+        },
+        {
+          "file": "scripts/strip.ts",
+          "line": 58,
+          "severity": "high",
+          "summary": "synthetic gold 2"
+        },
+        {
+          "file": "scripts/strip.ts",
+          "line": 57,
+          "severity": "high",
+          "summary": "synthetic gold 3"
+        },
+        {
+          "severity": "medium",
+          "summary": "synthetic gold 4"
+        }
+      ],
+      "seed": {
+        "contract": "minimal",
+        "maxObligations": 40,
+        "mint": "all-in-diff,registrations",
+        "source": {
+          "contract": "obligations.json",
+          "maxObligations": "seed transcript",
+          "mint": "obligations.json"
+        }
+      },
+      "obligations": {
+        "fixture": {
+          "contract": 8,
+          "enforcement": 0,
+          "security": 1,
+          "state": 1,
+          "tests": 0,
+          "spec": 0
+        },
+        "replay": {
+          "contract": 7,
+          "enforcement": 0,
+          "security": 1,
+          "state": 1,
+          "tests": 0,
+          "spec": 0
+        }
+      },
+      "spec": {
+        "status": "degraded-only",
+        "note": "closes none (of 0 linked issue(s) in instances.json); 5 changed file(s) from git; max 40 (default config)",
+        "obligations": 0,
+        "degraded": [
+          "this PR is not linked to an issue and its body states no acceptance criteria"
+        ],
+        "fidelity": {
+          "rebuilt": 0,
+          "inTranscript": 1,
+          "transcriptIds": null,
+          "match": true
+        }
+      },
+      "shape": {
+        "units": 7,
+        "byKind": {
+          "module": 4,
+          "symbol": 3
+        },
+        "requestChars": 101752,
+        "sharedPrefixChars": 5946,
+        "unitSpecificChars": 60130,
+        "maxRequestChars": 38820,
+        "truncated": 0,
+        "coverage": "full",
+        "promptVersion": "units-v3",
+        "degraded": [],
+        "specObligations": 0
+      },
+      "coverage": [
+        {
+          "verdict": "covered",
+          "units": [
+            "u-005"
+          ],
+          "changed": true
+        },
+        {
+          "verdict": "covered",
+          "units": [
+            "u-006"
+          ],
+          "changed": true
+        },
+        {
+          "verdict": "covered",
+          "units": [
+            "u-006"
+          ],
+          "changed": true
+        },
+        {
+          "verdict": "unlocatable",
+          "units": []
+        }
+      ],
+      "coverageTally": {
+        "gold": 4,
+        "locatable": 3,
+        "covered": 3,
+        "coveredChanged": 3,
+        "fileOnly": 0,
+        "uncovered": 0,
+        "unlocatable": 1
+      },
+      "neutralTally": {
+        "gold": 3,
+        "locatable": 3,
+        "covered": 3,
+        "coveredChanged": 3,
+        "fileOnly": 0,
+        "uncovered": 0,
+        "unlocatable": 0
+      },
+      "deterministicMs": {
+        "facts": 3220,
+        "seed": 110,
+        "units": 438
+      },
+      "model": {
+        "model": "anthropic/claude-haiku-4-5-20251001",
+        "variant": null,
+        "concurrency": 16,
+        "wallMs": 36106,
+        "costUsd": 0.10811885000000002,
+        "calls": 10,
+        "unitsOk": 6,
+        "unitsFailed": 1,
+        "ingest": {
+          "ok": 6,
+          "failed": 1
+        },
+        "rowsByFamily": {
+          "contract": 8,
+          "enforcement": 2,
+          "security": 3,
+          "spec": 5,
+          "state": 5
+        },
+        "unitsScore": {
+          "cells": [
+            {
+              "verdict": "reached",
+              "rows": [
+                "state-003"
+              ],
+              "probed": true
+            },
+            {
+              "verdict": "reached",
+              "rows": [
+                "contract-002",
+                "contract-003",
+                "contract-004",
+                "contract-005",
+                "contract-006",
+                "state-004"
+              ],
+              "probed": true
+            },
+            {
+              "verdict": "reached",
+              "rows": [
+                "contract-002",
+                "contract-003",
+                "contract-004",
+                "contract-005",
+                "contract-006",
+                "state-004"
+              ],
+              "probed": true
+            },
+            {
+              "verdict": "missed",
+              "rows": [],
+              "probed": false
+            }
+          ],
+          "claimed": 13,
+          "claimedAsserting": 1,
+          "asserted": null,
+          "reached": 2,
+          "probesOnGold": 10,
+          "probesOffGold": 12,
+          "judgeError": "judge timed out"
+        },
+        "agentScore": {
+          "cells": [
+            {
+              "verdict": "reached",
+              "rows": [
+                "spec-002",
+                "state-001"
+              ],
+              "probed": false
+            },
+            {
+              "verdict": "reached",
+              "rows": [
+                "contract-002",
+                "contract-004",
+                "contract-005",
+                "contract-006",
+                "contract-007"
+              ],
+              "probed": false
+            },
+            {
+              "verdict": "reached",
+              "rows": [
+                "contract-002",
+                "contract-004",
+                "contract-005",
+                "contract-006",
+                "contract-007"
+              ],
+              "probed": false
+            },
+            {
+              "verdict": "missed",
+              "rows": [],
+              "probed": false
+            }
+          ],
+          "claimed": 0,
+          "claimedAsserting": 0,
+          "asserted": 0,
+          "reached": 3,
+          "probesOnGold": 0,
+          "probesOffGold": 1,
+          "votes": 3,
+          "creditVotes": [
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "agentRows": 19,
+        "agentSurvey": {
+          "wallMs": null,
+          "costUsd": 0,
+          "branches": [],
+          "source": "agent-sessions/**/*.jsonl \u2014 0 session(s)"
+        },
+        "sides": {
+          "units": [],
+          "agent": [],
+          "onlyUnits": [],
+          "onlyAgent": [],
+          "both": []
+        },
+        "judgeModel": "anthropic/claude-sonnet-4-6"
+      }
+    },
+    {
+      "instanceId": "prreview__demo-3",
+      "arm": "arm2",
+      "fixture": "/fixtures/arm2/prreview__demo-3",
+      "error": "facts failed: no baseSha"
+    }
+  ],
+  "aggregate": {
+    "cases": 2,
+    "coverage": {
+      "gold": 4,
+      "locatable": 3,
+      "covered": 3,
+      "coveredChanged": 3,
+      "fileOnly": 0,
+      "uncovered": 0,
+      "unlocatable": 1
+    },
+    "units": 7,
+    "requestChars": 101752,
+    "truncated": 0,
+    "model": {
+      "cases": 1,
+      "gold": 4,
+      "unitsAsserted": 1,
+      "agentAsserted": 0,
+      "onlyUnits": 1,
+      "onlyAgent": 0,
+      "unitsRows": 23,
+      "agentRows": 19,
+      "unitsCostUsd": 0.10811885000000002,
+      "agentCostUsd": 1.3563679,
+      "unitsWallMs": 36106,
+      "agentWallMs": 179957
+    }
+  }
+}

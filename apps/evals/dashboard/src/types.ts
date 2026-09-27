@@ -35,6 +35,15 @@ import type {
   MicroSurveyResult,
   MicroSurveyStats,
 } from "../../src/micro-survey.js";
+// `/api/unit-survey` + the unit-survey replay report files — same rule: the
+// node-free index module is the one definition.
+import type {
+  ReplayCase,
+  ReplayModelRun,
+  ReplayReport,
+  UnitSurveyEntry,
+  UnitSurveyIndex,
+} from "../../src/unit-survey-index.js";
 
 export type {
   InstanceResult,
@@ -50,6 +59,11 @@ export type {
   MicroSurveyReport,
   MicroSurveyResult,
   MicroSurveyStats,
+  ReplayCase,
+  ReplayModelRun,
+  ReplayReport,
+  UnitSurveyEntry,
+  UnitSurveyIndex,
 };
 
 /** The judge's inspectable working for one pr-review grade — the harness declares

@@ -9,6 +9,8 @@
  *                                live in-flight writes show up by polling).
  *   GET /api/micro             → the micro-survey index (the same scan, over the
  *                                loose reports in eval-results/micro-survey/).
+ *   GET /api/unit-survey       → the unit-survey replay index (the same scan,
+ *                                over eval-results/unit-survey/*.json).
  *   GET /data/<tier>/<run>/…   → the raw run artifacts (scorecard.json, …),
  *                                served straight from `eval-results/`.
  *   GET /*                     → the built dashboard SPA (with an index.html
@@ -22,7 +24,7 @@ import { createServer, type Server } from "node:http";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve, sep } from "node:path";
 
-import { buildIndex, buildMicroIndex } from "./report.js";
+import { buildIndex, buildMicroIndex, buildUnitSurveyIndex } from "./report.js";
 
 export interface ServeOptions {
   /** `eval-results/` root to index + serve raw artifacts from. */
@@ -123,6 +125,17 @@ export function startServer(opts: ServeOptions): Promise<RunningServer> {
     //    for the same reason as the index above.
     if (path === "/api/micro") {
       const body = JSON.stringify(buildMicroIndex(resultsRoot, new Date().toISOString()));
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-cache" });
+      res.end(body);
+      return;
+    }
+
+    // 2b) The unit-survey replay index — the same kind of loose-report scan,
+    //     over `eval-results/unit-survey/` (`scripts/unit-survey-replay.ts`).
+    //     Its own endpoint for the same reason as `/api/micro`: a replay is not
+    //     a run. The report bodies are fetched from `/data/unit-survey/…`.
+    if (path === "/api/unit-survey") {
+      const body = JSON.stringify(buildUnitSurveyIndex(resultsRoot, new Date().toISOString()));
       res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-cache" });
       res.end(body);
       return;

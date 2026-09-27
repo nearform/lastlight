@@ -1,7 +1,14 @@
 import { useQueries, useQuery } from "@tanstack/react-query";
 
 import { microStatus, withMicroEntryDefaults } from "../../../src/micro-survey.js";
-import type { DashboardIndex, MicroSurveyIndex, MicroSurveyReport, Scorecard } from "../types";
+import type {
+  DashboardIndex,
+  MicroSurveyIndex,
+  MicroSurveyReport,
+  ReplayReport,
+  Scorecard,
+  UnitSurveyIndex,
+} from "../types";
 import {
   buildFamilyDrilldown,
   type FamilyDrilldown,
@@ -93,6 +100,40 @@ export function useMicroReport(url: string | undefined, live = false) {
     refetchInterval: live ? 1500 : false,
     staleTime: live ? 0 : Infinity,
     placeholderData: (prev) => prev,
+  });
+}
+
+/**
+ * The unit-survey replay index (`/api/unit-survey`). A 404 is an EMPTY list,
+ * for the same reason as {@link useMicroIndex}: a server or baked site that
+ * predates the endpoint has no replays to show, and that is not an error.
+ *
+ * `scripts/unit-survey-replay.ts` writes its report ONCE, at the end, so there
+ * is no live state to follow — a replay in flight is simply not listed yet. The
+ * list therefore polls at the slow heartbeat only.
+ */
+export function useUnitSurveyIndex() {
+  return useQuery({
+    queryKey: ["unit-survey-index"],
+    queryFn: async (): Promise<UnitSurveyIndex> => {
+      const res = await fetch("/api/unit-survey", { headers: { accept: "application/json" } });
+      if (res.status === 404) return { generatedAt: new Date().toISOString(), reports: [] };
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText} — /api/unit-survey`);
+      const idx = (await res.json()) as UnitSurveyIndex;
+      return { ...idx, reports: idx.reports ?? [] };
+    },
+    refetchInterval: 15000,
+  });
+}
+
+/** One unit-survey report in full. Written once and never rewritten, so it is
+ * cached for good. */
+export function useUnitSurveyReport(url: string | undefined) {
+  return useQuery({
+    queryKey: ["unit-survey-report", url],
+    queryFn: () => getJson<ReplayReport>(url as string),
+    enabled: !!url,
+    staleTime: Infinity,
   });
 }
 

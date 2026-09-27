@@ -21,6 +21,12 @@ import {
   type MicroSurveyIndex,
 } from "./micro-survey.js";
 import {
+  summariseUnitSurveyReport,
+  UNIT_SURVEY_DIR,
+  type UnitSurveyEntry,
+  type UnitSurveyIndex,
+} from "./unit-survey-index.js";
+import {
   boundaryMetrics,
   DETECTION_FLOOR_MICRO_RECALL,
   familyFunnels,
@@ -915,6 +921,41 @@ export function buildMicroIndex(resultsRoot: string, generatedAt: string): Micro
       /* raced with a delete; the filename stamp is the usual source anyway */
     }
     const entry = summariseMicroReport(ent.name.replace(/\.json$/, ""), raw, mtime);
+    if (entry) reports.push(entry);
+  }
+  reports.sort((a, b) => (a.generatedAt < b.generatedAt ? 1 : a.generatedAt > b.generatedAt ? -1 : 0));
+  return { generatedAt, reports };
+}
+
+/**
+ * Build the unit-survey index from `eval-results/unit-survey/` on disk, newest
+ * first — the same scan as {@link buildMicroIndex}, over the reports
+ * `scripts/unit-survey-replay.ts` writes. Three things it must survive, all of
+ * which a live replay produces: a report torn mid-write (skipped — the next
+ * poll sees it whole), a stray non-report JSON file (skipped by the
+ * summariser), and the `responses/` subdirectory of kept raw unit replies (a
+ * directory, never a report — only regular `*.json` FILES are read).
+ */
+export function buildUnitSurveyIndex(resultsRoot: string, generatedAt: string): UnitSurveyIndex {
+  const dir = join(resultsRoot, UNIT_SURVEY_DIR);
+  if (!existsSync(dir)) return { generatedAt, reports: [] };
+  const reports: UnitSurveyEntry[] = [];
+  for (const ent of readdirSync(dir, { withFileTypes: true })) {
+    if (!ent.isFile() || !ent.name.endsWith(".json")) continue;
+    const file = join(dir, ent.name);
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFileSync(file, "utf8"));
+    } catch {
+      continue; // half-written or malformed — skip rather than abort the index
+    }
+    let mtime = generatedAt;
+    try {
+      mtime = statSync(file).mtime.toISOString();
+    } catch {
+      /* raced with a delete */
+    }
+    const entry = summariseUnitSurveyReport(ent.name.replace(/\.json$/, ""), raw, mtime);
     if (entry) reports.push(entry);
   }
   reports.sort((a, b) => (a.generatedAt < b.generatedAt ? 1 : a.generatedAt > b.generatedAt ? -1 : 0));
