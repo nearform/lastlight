@@ -5,6 +5,7 @@ import { nullsToUndefined, tablesOf, type StateClient, type StateTables } from "
 import { changes, dayBucket, hourBucket, likeEscape, rows, run, sumTrue } from "./dialect.js";
 import type { TriggerActorType } from "./user-store.js";
 import { normalizeRepoRef, qualifiedRepoSql } from "./repo-ref.js";
+import { RESOURCE_USAGE_STOP_REASON } from "../sandbox/resource-usage.js";
 
 export interface ExecutionRecord {
   id: string;
@@ -53,6 +54,12 @@ export interface ExecutionRecord {
   apiDurationMs?: number;
   /** Result subtype, e.g. "success" or "error_max_turns". */
   stopReason?: string;
+  /** Sandbox CPU time in seconds (cgroup `cpu.stat`). Absent in-process. */
+  cpuSeconds?: number;
+  /** Sandbox memory high-water mark in bytes (cgroup `memory.peak`). */
+  peakMemoryBytes?: number;
+  /** Sandbox memory limit in bytes (cgroup `memory.max`); absent when unlimited. */
+  memoryLimitBytes?: number;
   /**
    * Which agentic-pi extensions (file-search / github / web-search) were active
    * for this execution. A real JSON column, so this travels as an OBJECT in
@@ -139,6 +146,9 @@ const executionColumns = ({ executions }: StateTables) => ({
   outputTokens: executions.outputTokens,
   apiDurationMs: executions.apiDurationMs,
   stopReason: executions.stopReason,
+  cpuSeconds: executions.cpuSeconds,
+  peakMemoryBytes: executions.peakMemoryBytes,
+  memoryLimitBytes: executions.memoryLimitBytes,
   extensionStatus: executions.extensionStatus,
   skillsStatus: executions.skillsStatus,
   workflowRunId: executions.workflowRunId,
@@ -203,6 +213,9 @@ const executionColumnsSql = ({ executions }: StateTables): SQL => sql`
   ${executions.outputTokens}             AS "outputTokens",
   ${executions.apiDurationMs}            AS "apiDurationMs",
   ${executions.stopReason}               AS "stopReason",
+  ${executions.cpuSeconds}               AS "cpuSeconds",
+  ${executions.peakMemoryBytes}          AS "peakMemoryBytes",
+  ${executions.memoryLimitBytes}         AS "memoryLimitBytes",
   ${executions.extensionStatus}          AS "extensionStatus",
   ${executions.skillsStatus}             AS "skillsStatus",
   ${executions.workflowRunId}            AS "workflowRunId"
@@ -258,6 +271,9 @@ function mapExecutionRow(r: Record<string, unknown>): ExecutionRecord {
     outputTokens: nul<number>(r.outputTokens),
     apiDurationMs: nul<number>(r.apiDurationMs),
     stopReason: nul<string>(r.stopReason),
+    cpuSeconds: nul<number>(r.cpuSeconds),
+    peakMemoryBytes: nul<number>(r.peakMemoryBytes),
+    memoryLimitBytes: nul<number>(r.memoryLimitBytes),
     extensionStatus: parseStatusJson<ExtensionStatusMap>(r.extensionStatus),
     skillsStatus: parseStatusJson<SkillsStatus>(r.skillsStatus),
     workflowRunId: nul<string>(r.workflowRunId),
@@ -308,13 +324,30 @@ export interface ExecutionOutcomeCounts {
  * came back red — is stored `success = true` and therefore lands in
  * `succeeded`. It really executed and really cost tokens; only its per-row
  * rendering is muted (`execMark`, `packages/cli/src/cli-format.ts`).
+ *
+ * A fan-out's `<phase>_sandbox` row is the one row that is not work at all —
+ * see {@link isWork} — so it lands in no outcome.
  */
-export const executionOutcomeColumns = ({ executions }: StateTables): SQL => sql`
-        ${sumTrue(executions.success)} AS "succeeded",
+export const executionOutcomeColumns = (t: StateTables): SQL => {
+  const { executions } = t;
+  return sql`
+        ${sumTrue(sql`${executions.success} AND ${isWork(t)}`)} AS "succeeded",
         ${sumTrue(sql`${executions.success} = ${false} AND ${executions.stopReason} = 'skipped'`)} AS "skipped",
         ${sumTrue(sql`${executions.success} = ${false} AND ${executions.stopReason} = 'error_quota'`)} AS "deferred",
         ${sumTrue(sql`${executions.success} = ${false}
                   AND (${executions.stopReason} IS NULL OR ${executions.stopReason} NOT IN ('skipped', 'error_quota'))`)} AS "failed"`;
+};
+
+/**
+ * False only for a fan-out's `<phase>_sandbox` row, which records the shared
+ * sandbox's CPU / memory and is not an execution of anything. It is kept out of
+ * every execution and outcome count — it once rendered as a green, successful
+ * run of work even when the fan-out failed — while its `cpu_seconds` still
+ * sums, because that CPU was really spent. COALESCE, not `IS DISTINCT FROM`:
+ * SQLite has no such operator, and a NULL `stop_reason` is ordinary work.
+ */
+export const isWork = ({ executions }: StateTables): SQL =>
+  sql`COALESCE(${executions.stopReason}, '') <> ${RESOURCE_USAGE_STOP_REASON}`;
 
 /** Zero-fill for a bucket with no executions in it. */
 const NO_OUTCOMES: ExecutionOutcomeCounts = { succeeded: 0, skipped: 0, deferred: 0, failed: 0 };
@@ -343,7 +376,18 @@ type BucketStats = ExecutionOutcomeCounts & {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
+  /**
+   * Prompt tokens written to the provider cache. Anthropic reports the uncached
+   * prompt prefix here rather than in `inputTokens`; OpenAI-compatible
+   * providers have no write bucket and report it as input. Counting it in
+   * `totalTokens` keeps the totals comparable across both.
+   */
+  cacheWriteTokens: number;
   costUsd: number;
+  /** Sandbox CPU seconds summed over the bucket's executions. */
+  cpuSeconds: number;
+  /** The largest single sandbox memory peak in the bucket — a MAX, never a sum. */
+  peakMemoryBytes: number;
 };
 
 export class ExecutionStore {
@@ -462,6 +506,9 @@ export class ExecutionStore {
       outputTokens?: number;
       apiDurationMs?: number;
       stopReason?: string;
+      cpuSeconds?: number;
+      peakMemoryBytes?: number;
+      memoryLimitBytes?: number;
       /** Extensions active this run. An OBJECT — the column is real JSON. */
       extensionStatus?: ExtensionStatusMap;
       /** Skills available this run. An OBJECT — the column is real JSON. */
@@ -492,6 +539,9 @@ export class ExecutionStore {
         ...(result.outputTokens !== undefined ? { outputTokens: result.outputTokens } : {}),
         ...(result.apiDurationMs !== undefined ? { apiDurationMs: result.apiDurationMs } : {}),
         ...(result.stopReason !== undefined ? { stopReason: result.stopReason } : {}),
+        ...(result.cpuSeconds !== undefined ? { cpuSeconds: result.cpuSeconds } : {}),
+        ...(result.peakMemoryBytes !== undefined ? { peakMemoryBytes: result.peakMemoryBytes } : {}),
+        ...(result.memoryLimitBytes !== undefined ? { memoryLimitBytes: result.memoryLimitBytes } : {}),
         ...(result.extensionStatus !== undefined
           ? { extensionStatus: result.extensionStatus }
           : {}),
@@ -1152,11 +1202,13 @@ export class ExecutionStore {
     today.setHours(0, 0, 0, 0);
     const todayIso = today.toISOString();
 
-    const [totalRow] = await this.client.select({ c: count() }).from(executions);
+    // Fan-out `_sandbox` usage rows are not executions of anything — see isWork.
+    const work = isWork(this.t);
+    const [totalRow] = await this.client.select({ c: count() }).from(executions).where(work);
     const [todayRow] = await this.client
       .select({ c: count() })
       .from(executions)
-      .where(gte(executions.startedAt, todayIso));
+      .where(and(gte(executions.startedAt, todayIso), work));
     const [runningRow] = await this.client
       .select({ c: count() })
       .from(executions)
@@ -1167,7 +1219,7 @@ export class ExecutionStore {
       sql`
       SELECT ${executions.skill} AS "skill", COUNT(*) AS "count",
         ${executionOutcomeColumns(this.t)}
-      FROM ${executions} GROUP BY ${executions.skill}
+      FROM ${executions} WHERE ${work} GROUP BY ${executions.skill}
     `,
     );
 
@@ -1186,7 +1238,7 @@ export class ExecutionStore {
       this.client,
       sql`
       SELECT ${executions.triggerType} AS "triggerType", COUNT(*) AS "count"
-      FROM ${executions} GROUP BY ${executions.triggerType}
+      FROM ${executions} WHERE ${work} GROUP BY ${executions.triggerType}
     `,
     );
 
@@ -1261,13 +1313,16 @@ export class ExecutionStore {
       sql`
       SELECT
         ${bucket} AS "date",
-        COUNT(*) AS "executions",
+        ${sumTrue(isWork(this.t))} AS "executions",
         ${executionOutcomeColumns(this.t)},
-        COALESCE(SUM(${executions.inputTokens}), 0) + COALESCE(SUM(${executions.outputTokens}), 0) + COALESCE(SUM(${executions.cacheReadInputTokens}), 0) AS "totalTokens",
+        COALESCE(SUM(${executions.inputTokens}), 0) + COALESCE(SUM(${executions.outputTokens}), 0) + COALESCE(SUM(${executions.cacheReadInputTokens}), 0) + COALESCE(SUM(${executions.cacheCreationInputTokens}), 0) AS "totalTokens",
         COALESCE(SUM(${executions.inputTokens}), 0) AS "inputTokens",
         COALESCE(SUM(${executions.outputTokens}), 0) AS "outputTokens",
         COALESCE(SUM(${executions.cacheReadInputTokens}), 0) AS "cacheReadTokens",
-        COALESCE(SUM(${executions.costUsd}), 0) AS "costUsd"
+        COALESCE(SUM(${executions.cacheCreationInputTokens}), 0) AS "cacheWriteTokens",
+        COALESCE(SUM(${executions.costUsd}), 0) AS "costUsd",
+        COALESCE(SUM(${executions.cpuSeconds}), 0) AS "cpuSeconds",
+        COALESCE(MAX(${executions.peakMemoryBytes}), 0) AS "peakMemoryBytes"
       FROM ${executions}
       WHERE ${bucket} >= ${dateKeys[0]}
       GROUP BY ${bucket}
@@ -1283,7 +1338,10 @@ export class ExecutionStore {
       inputTokens: 0,
       outputTokens: 0,
       cacheReadTokens: 0,
+      cacheWriteTokens: 0,
       costUsd: 0,
+      cpuSeconds: 0,
+      peakMemoryBytes: 0,
     });
   }
 
@@ -1312,13 +1370,16 @@ export class ExecutionStore {
       sql`
       SELECT
         ${bucket} AS "date",
-        COUNT(*) AS "executions",
+        ${sumTrue(isWork(this.t))} AS "executions",
         ${executionOutcomeColumns(this.t)},
-        COALESCE(SUM(${executions.inputTokens}), 0) + COALESCE(SUM(${executions.outputTokens}), 0) + COALESCE(SUM(${executions.cacheReadInputTokens}), 0) AS "totalTokens",
+        COALESCE(SUM(${executions.inputTokens}), 0) + COALESCE(SUM(${executions.outputTokens}), 0) + COALESCE(SUM(${executions.cacheReadInputTokens}), 0) + COALESCE(SUM(${executions.cacheCreationInputTokens}), 0) AS "totalTokens",
         COALESCE(SUM(${executions.inputTokens}), 0) AS "inputTokens",
         COALESCE(SUM(${executions.outputTokens}), 0) AS "outputTokens",
         COALESCE(SUM(${executions.cacheReadInputTokens}), 0) AS "cacheReadTokens",
-        COALESCE(SUM(${executions.costUsd}), 0) AS "costUsd"
+        COALESCE(SUM(${executions.cacheCreationInputTokens}), 0) AS "cacheWriteTokens",
+        COALESCE(SUM(${executions.costUsd}), 0) AS "costUsd",
+        COALESCE(SUM(${executions.cpuSeconds}), 0) AS "cpuSeconds",
+        COALESCE(MAX(${executions.peakMemoryBytes}), 0) AS "peakMemoryBytes"
       FROM ${executions}
       WHERE ${bucket} >= ${hourKeys[0]}
       GROUP BY ${bucket}
@@ -1334,7 +1395,10 @@ export class ExecutionStore {
       inputTokens: 0,
       outputTokens: 0,
       cacheReadTokens: 0,
+      cacheWriteTokens: 0,
       costUsd: 0,
+      cpuSeconds: 0,
+      peakMemoryBytes: 0,
     });
   }
 

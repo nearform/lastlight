@@ -324,6 +324,10 @@ export interface WorkflowRun {
   /** Roll-up totals across the run's executions — present on the runs list. */
   totalCostUsd?: number;
   totalTokens?: number;
+  /** Sandbox CPU seconds summed over the run's executions (list rows only). */
+  totalCpuSeconds?: number;
+  /** The run's largest single sandbox memory peak (list rows only). */
+  peakMemoryBytes?: number;
 }
 
 /**
@@ -497,6 +501,10 @@ export interface WorkflowRunExecution {
   outputTokens?: number;
   apiDurationMs?: number;
   stopReason?: string;
+  /** Sandbox CPU time in seconds (cgroup). Absent when the backend can't measure it. */
+  cpuSeconds?: number;
+  peakMemoryBytes?: number;
+  memoryLimitBytes?: number;
   /**
    * agentic-pi extensions active for this phase, keyed by name
    * ("file-search" | "github" | "web-search").
@@ -579,7 +587,12 @@ export interface DailyStat extends OutcomeCounts {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
+  cacheWriteTokens: number;
   costUsd: number;
+  /** Sandbox CPU seconds summed over the bucket. */
+  cpuSeconds: number;
+  /** The largest single sandbox memory peak in the bucket (a MAX, not a sum). */
+  peakMemoryBytes: number;
 }
 
 // ── Feedback signals (issue #255) ──────────────────────────────────────────

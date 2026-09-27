@@ -1,4 +1,5 @@
 import { PROMPT_FILE } from "./pod.js";
+import { CGROUP_USAGE_SCRIPT } from "../resource-usage.js";
 
 /**
  * Which optional `agentic-pi run` flags to emit, and whether the best-effort
@@ -86,7 +87,9 @@ function agentRunFlags(input: RunAgentScriptInput): string {
  *    (`|| true` — a hiccup here must never turn a successful agent run into
  *    a reported failure) to the harness's `/internal/sandbox-artifacts`
  *    route, bearer-authed with `$LASTLIGHT_ARTIFACT_TOKEN` (env, not argv).
- * 3. `exit $rc` — restores the agent's own result regardless of step 2.
+ * 3. The pod's cgroup CPU / memory reading as one marker line on stdout
+ *    (`resource-usage.ts`) — the harness strips it off the log stream.
+ * 4. `exit $rc` — restores the agent's own result regardless of steps 2–3.
  */
 export function buildRunAgentScript(input: RunAgentScriptInput): string {
   if (
@@ -111,5 +114,5 @@ export function buildRunAgentScript(input: RunAgentScriptInput): string {
       `fi`
     : "";
 
-  return `${runAgent}${uploadBlock}\nexit $rc`;
+  return `${runAgent}${uploadBlock}\n${CGROUP_USAGE_SCRIPT}\nexit $rc`;
 }

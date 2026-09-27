@@ -78,6 +78,43 @@ describe("Sandbox orchestrator (FakeSandbox)", () => {
     expect(seen).toEqual(["sess-fake"]);
   });
 
+  describe("sandbox resource usage", () => {
+    const usage = { cpuSeconds: 42.5, peakMemoryBytes: 734_003_200, memoryLimitBytes: 8_589_934_592 };
+
+    it("folds the sandbox's usage into an agent phase's result, read before dispose", async () => {
+      const fake = new FakeSandbox({ events: successEvents(), usage });
+      const result = await executeAgent(
+        "do the thing",
+        { sandbox: "none", stateDir, sessionsDir },
+        { sandboxFactory: fake.asFactory() },
+      );
+      expect(result).toMatchObject(usage);
+      expect(fake.usageReadBeforeDispose).toBe(true);
+    });
+
+    it("folds it into a command phase's result too", async () => {
+      const fake = new FakeSandbox({ usage });
+      const result = await executeCommand(
+        { kind: "bash", command: "echo hi" },
+        { sandbox: "none", stateDir, sessionsDir },
+        { sandboxFactory: fake.asFactory() },
+      );
+      expect(result).toMatchObject(usage);
+      expect(fake.usageReadBeforeDispose).toBe(true);
+    });
+
+    it("leaves the fields absent when the backend can't measure", async () => {
+      const fake = new FakeSandbox({ events: successEvents() });
+      const result = await executeAgent(
+        "do the thing",
+        { sandbox: "none", stateDir, sessionsDir },
+        { sandboxFactory: fake.asFactory() },
+      );
+      expect(result.cpuSeconds).toBeUndefined();
+      expect(result.peakMemoryBytes).toBeUndefined();
+    });
+  });
+
   it("emits a session jsonl envelope for the dashboard", async () => {
     const fake = new FakeSandbox({ events: successEvents("sess-jsonl") });
     await executeAgent(

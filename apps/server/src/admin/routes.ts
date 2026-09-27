@@ -1817,6 +1817,9 @@ export function createAdminRoutes(
       outputTokens: r.outputTokens,
       apiDurationMs: r.apiDurationMs,
       stopReason: r.stopReason,
+      cpuSeconds: r.cpuSeconds,
+      peakMemoryBytes: r.peakMemoryBytes,
+      memoryLimitBytes: r.memoryLimitBytes,
       // Already parsed objects on the way out of the store — passed through as
       // they are. Re-parsing them would throw, and the old helper's `catch`
       // swallowed that into `undefined`, silently emptying the panel.

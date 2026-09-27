@@ -65,6 +65,12 @@ describe("PhaseRef — the fan-out branch labels", () => {
     expect(PhaseRef.parse("survey_branch_spec_regate")).toMatchObject({ kind: "branchRegate", branch: "spec" });
   });
 
+  it("round-trips a fan-out's `_sandbox` row, and a branch called `sandbox` stays a branch", () => {
+    expect(PhaseRef.sandbox("pr_review_survey").format()).toBe("pr_review_survey_sandbox");
+    expect(PhaseRef.parse("pr_review_survey_sandbox")).toMatchObject({ kind: "sandbox", base: "pr_review_survey" });
+    expect(PhaseRef.parse("survey_branch_sandbox")).toMatchObject({ kind: "branch", branch: "sandbox" });
+  });
+
   it("leaves the loop forms alone — the two namespaces do not collide", () => {
     expect(PhaseRef.parse("survey_iter_1")).toMatchObject({ kind: "iter", index: 1 });
     expect(PhaseRef.parse("survey_branch_a_iter_1")).toMatchObject({ kind: "iter", index: 1 });

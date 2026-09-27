@@ -11,6 +11,7 @@ import {
 import { GhLink } from "./GhLink";
 import { repoUrl, issueUrl } from "../lib/githubLinks";
 import { isNoOpSummary, phaseSummary } from "../lib/phase-outcome";
+import { formatBytes, formatCpuSeconds } from "../lib/resource-format";
 
 /**
  * In-SPA navigation to the artifact editor for a specific doc — the Repos tab's
@@ -342,6 +343,16 @@ export function PhaseDetailPanel({
                   <Field label="Input Tokens">{fmtTokens(execution.inputTokens)}</Field>
                   <Field label="Cache Read">{fmtTokens(execution.cacheReadInputTokens)}</Field>
                   <Field label="Cache Create">{fmtTokens(execution.cacheCreationInputTokens)}</Field>
+                  <Field label="CPU Time">
+                    {execution.cpuSeconds != null ? formatCpuSeconds(execution.cpuSeconds) : "—"}
+                  </Field>
+                  <Field label="Peak Memory">
+                    {execution.peakMemoryBytes != null
+                      ? `${formatBytes(execution.peakMemoryBytes)}${
+                          execution.memoryLimitBytes ? ` / ${formatBytes(execution.memoryLimitBytes)}` : ""
+                        }`
+                      : "—"}
+                  </Field>
                 </div>
               </div>
 

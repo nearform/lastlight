@@ -19,6 +19,7 @@ import {
   noopObservability,
 } from "lastlight-workflow-engine/test-support";
 import { FakeSandbox } from "#src/sandbox/sandbox.js";
+import { RESOURCE_USAGE_STOP_REASON, type ResourceUsage } from "#src/sandbox/resource-usage.js";
 import type {
   PrePopulateSpec,
   ProvisionResult,
@@ -73,6 +74,8 @@ class CountingSandbox extends FakeSandbox {
       commandExit?: number;
       /** Command substring → results handed out in order (the last one repeats). */
       commandScript?: Record<string, { exitCode: number; stdout?: string; timedOut?: boolean }[]>;
+      /** What the shared sandbox's cgroup reports at the end of the session. */
+      usage?: ResourceUsage;
     } = {},
   ) {
     // A real terminal RunResult: without one the accumulator sees no events,
@@ -92,6 +95,7 @@ class CountingSandbox extends FakeSandbox {
         finalText: "surveyed",
         toolErrors: false,
       } as unknown as RunResult,
+      usage: opts.usage,
     });
   }
 
@@ -411,6 +415,48 @@ describe("fanout — the ledger", () => {
       const key = `pr-review:${PhaseRef.branch("survey", family).format()}`;
       expect(await store.executions.shouldRunPhase(key, "acme/widgets#7", RUN_ID), key).toBe("done");
     }
+  });
+
+  it("records the shared sandbox's usage ONCE, on a `_sandbox` row, and on no branch", async () => {
+    const store = new InMemoryStateStore(RUN_ID);
+    const sandbox = new CountingSandbox({ usage: { cpuSeconds: 90, peakMemoryBytes: 1_500_000_000 } });
+    await runFanout(fanoutPhase(), sandbox, "none", store);
+
+    const rows = store.executionRows(PhaseRef.sandbox("survey").format());
+    expect(rows).toHaveLength(1);
+    // Bookkeeping, not work: the stop reason is what keeps it out of every
+    // execution count and off the pipeline as a card.
+    expect(rows[0]).toMatchObject({
+      success: true,
+      stopReason: RESOURCE_USAGE_STOP_REASON,
+      cpuSeconds: 90,
+      peakMemoryBytes: 1_500_000_000,
+    });
+    expect(sandbox.usageReadBeforeDispose).toBe(true);
+    const branchRows = store.executionRows().filter((r) => r.dedupKey.includes("_branch_"));
+    expect(branchRows.length).toBeGreaterThan(0);
+    expect(branchRows.every((r) => r.cpuSeconds === undefined)).toBe(true);
+  });
+
+  it("still records the reading when the fan-out throws after its sandbox ran", async () => {
+    class ThrowOnBranch extends RecordingReporter {
+      override async onStart(phase: string): Promise<void> {
+        if (phase.includes("_branch_")) throw new Error("reporter down");
+      }
+    }
+    const store = new InMemoryStateStore(RUN_ID);
+    const sandbox = new CountingSandbox({ usage: { cpuSeconds: 12 } });
+    await expect(runFanout(fanoutPhase(), sandbox, "none", store, new ThrowOnBranch())).rejects.toThrow(
+      "reporter down",
+    );
+    expect(store.executionRows(PhaseRef.sandbox("survey").format())).toMatchObject([{ cpuSeconds: 12 }]);
+    expect(sandbox.usageReadBeforeDispose).toBe(true);
+  });
+
+  it("writes no `_sandbox` row when the backend can't measure", async () => {
+    const store = new InMemoryStateStore(RUN_ID);
+    await runFanout(fanoutPhase(), new CountingSandbox(), "none", store);
+    expect(store.executionRows(PhaseRef.sandbox("survey").format())).toEqual([]);
   });
 
   it("skips a branch whose row is already done — a resumed fan-out re-pays for nothing", async () => {

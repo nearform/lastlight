@@ -19,6 +19,7 @@ import { buildPodManifest, WORKSPACE_DIR } from "./pod.js";
 import { buildServiceContainers } from "./service-containers.js";
 import { ServiceSet } from "lastlight-shared/sandbox-services";
 import { buildRunAgentScript } from "./run-agent-script.js";
+import { CGROUP_USAGE_SCRIPT, combineUsage, parseUsageLine, splitUsageTail, type ResourceUsage } from "../resource-usage.js";
 import { podNameFor } from "./naming.js";
 import { RunId } from "./run-id.js";
 import { streamPodLog } from "./log-stream.js";
@@ -160,6 +161,9 @@ export class KubernetesSandbox implements Sandbox, AgentContextSink {
   private provisioned?: Provisioned;
   /** Pod + Secrets for the last run, held for `dispose` to reap. */
   private handles?: RunHandles;
+  /** CPU / memory folded over every pod this sandbox ran — each pod prints its
+   *  own cgroup reading as its last log line (see `resource-usage.ts`). */
+  private usageTotal?: ResourceUsage;
   /** Fetch token for the bundle staged by the last `stageSkills()` call, if
    *  any — `runPod` carries it into the creds Secret + skills-init; `dispose`
    *  evicts it from the registry. */
@@ -380,9 +384,12 @@ export class KubernetesSandbox implements Sandbox, AgentContextSink {
 
   async runCommand(taskId: string, command: string, opts: RunCommandOpts): Promise<RawCommandResult> {
     let stdout = "";
+    // The command runs as `$1` of a wrapper so the pod can print its cgroup
+    // reading after it — bound as a positional arg, never spliced into the
+    // wrapper text — and still exit with the command's own code.
     const handles = await this.runPod({
       taskId,
-      command: ["sh", "-c", command],
+      command: ["sh", "-c", `sh -c "$1"; rc=$?\n${CGROUP_USAGE_SCRIPT}\nexit $rc`, "sh", command],
       env: { ...this.opts.env, ...opts.sandboxEnv },
       cwd: opts.cwd,
       onLine: (line) => {
@@ -470,7 +477,37 @@ export class KubernetesSandbox implements Sandbox, AgentContextSink {
     const created = await this.createPodOrCleanupSecrets(manifest, secrets);
     await this.runSecrets.patchOwnerRefs(created, podLabel.value, secrets);
     await this.waitForContainerStart(podLabel.value);
-    await streamPodLog(this.apis.log, this.ns, podLabel.value, "agent", onLine);
+    // The pod script prints its cgroup reading as the LAST line, after the
+    // agent / command has exited. So a marker-shaped line only counts if
+    // nothing follows it: each one is held back a line, and released to the
+    // run untouched the moment anything comes after — then it was the
+    // workload's, not ours. That keeps a workload from swallowing its own
+    // output by printing the shape, and from casually forging a reading.
+    // (A process that outlives the workload and writes after our line can
+    // still replace it; only a channel outside the pod — the kubelet's stats
+    // — closes that, and the damage is a wrong metric, never execution.)
+    //
+    // The marker is matched at the END of a line, not as a whole line: the
+    // script prints it straight after the workload, and output without a
+    // trailing newline shares its line (`done{"type":…}`). The part before it
+    // is the workload's and is released as output.
+    let held: string | undefined;
+    await streamPodLog(this.apis.log, this.ns, podLabel.value, "agent", (line) => {
+      if (held !== undefined) {
+        onLine(held);
+        held = undefined;
+      }
+      if (splitUsageTail(line)) held = line;
+      else onLine(line);
+    });
+    const tail = held === undefined ? undefined : splitUsageTail(held);
+    if (tail) {
+      if (tail.before) onLine(tail.before);
+      const usage = parseUsageLine(tail.marker);
+      if (usage) this.usageTotal = combineUsage(this.usageTotal, usage);
+      // An unreadable reading (cgroup v1 prints empty fields) is still ours —
+      // it ended the stream — so it is dropped, never released as output.
+    }
     return handles;
   }
 
@@ -547,6 +584,10 @@ export class KubernetesSandbox implements Sandbox, AgentContextSink {
    *  the RWO Multi-Attach rationale. */
   private waitForPodGone(name: string): Promise<void> {
     return waitForPodGone(this.apis.core, this.ns, name);
+  }
+
+  async usage(): Promise<ResourceUsage | undefined> {
+    return this.usageTotal;
   }
 
   async dispose(): Promise<void> {

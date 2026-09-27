@@ -16,6 +16,7 @@
  * dialects.
  */
 import { describe, it, expect, beforeEach } from "vitest";
+import { RESOURCE_USAGE_STOP_REASON } from "#src/sandbox/resource-usage.js";
 import { randomUUID } from "crypto";
 import type { StateDb } from "#src/state/db.js";
 import type { MakeDb, SuiteOpts } from "../store-suite.js";
@@ -253,6 +254,7 @@ export function runExecutionsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
         inputTokens?: number;
         outputTokens?: number;
         cacheReadTokens?: number;
+        cacheWriteTokens?: number;
         costUsd?: number;
       }) {
         await db.executions.recordStart({
@@ -270,6 +272,7 @@ export function runExecutionsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
             inputTokens: opts.inputTokens,
             outputTokens: opts.outputTokens,
             cacheReadInputTokens: opts.cacheReadTokens,
+            cacheCreationInputTokens: opts.cacheWriteTokens,
             costUsd: opts.costUsd,
           });
         }
@@ -318,7 +321,7 @@ export function runExecutionsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
 
       it("sums token and cost data correctly", async () => {
         const day = daysAgo(3);
-        await insertExecution({ id: randomUUID(), startedAt: day.iso, success: true, inputTokens: 100, outputTokens: 50, cacheReadTokens: 20, costUsd: 0.01 });
+        await insertExecution({ id: randomUUID(), startedAt: day.iso, success: true, inputTokens: 100, outputTokens: 50, cacheReadTokens: 20, cacheWriteTokens: 40, costUsd: 0.01 });
         await insertExecution({ id: randomUUID(), startedAt: day.iso, success: true, inputTokens: 200, outputTokens: 80, cacheReadTokens: 0, costUsd: 0.02 });
 
         const rows = await db.executions.dailyStats(30);
@@ -327,8 +330,57 @@ export function runExecutionsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
         expect(d!.inputTokens).toBe(300);
         expect(d!.outputTokens).toBe(130);
         expect(d!.cacheReadTokens).toBe(20);
-        expect(d!.totalTokens).toBe(450);
+        expect(d!.cacheWriteTokens).toBe(40);
+        expect(d!.totalTokens).toBe(490);
         expect(d!.costUsd).toBeCloseTo(0.03);
+      });
+
+      it("sums the same token columns in hourlyStats", async () => {
+        await insertExecution({ id: randomUUID(), startedAt: new Date().toISOString(), success: true, inputTokens: 100, outputTokens: 50, cacheReadTokens: 20, cacheWriteTokens: 40, costUsd: 0.01 });
+
+        const [hour] = await db.executions.hourlyStats(1);
+        expect(hour).toMatchObject({ inputTokens: 100, outputTokens: 50, cacheReadTokens: 20, cacheWriteTokens: 40, totalTokens: 210 });
+      });
+
+      it("sums sandbox CPU and takes the MAX memory peak per bucket", async () => {
+        const day = daysAgo(1);
+        for (const [cpu, peak] of [[30.5, 3_000_000_000], [12, 5_000_000_000]] as const) {
+          const id = randomUUID();
+          await db.executions.recordStart({ id, triggerType: "webhook", triggerId: "t1", skill: "build", repo: "r", issueNumber: 1, startedAt: day.iso });
+          await db.executions.recordFinish(id, { success: true, cpuSeconds: cpu, peakMemoryBytes: peak, memoryLimitBytes: 8_589_934_592 });
+        }
+        // A row from a backend that can't measure contributes nothing.
+        await insertExecution({ id: randomUUID(), startedAt: day.iso, success: true });
+
+        const d = (await db.executions.dailyStats(30)).find((r) => r.date === day.key)!;
+        expect(d.cpuSeconds).toBeCloseTo(42.5);
+        // Above 2^31 on purpose: the column is bigint on Postgres.
+        expect(d.peakMemoryBytes).toBe(5_000_000_000);
+      });
+
+      it("counts a fan-out's usage row in CPU but never as an execution or an outcome", async () => {
+        const day = daysAgo(1);
+        await insertExecution({ id: randomUUID(), startedAt: day.iso, success: true });
+        const usageId = randomUUID();
+        await db.executions.recordStart({ id: usageId, triggerType: "webhook", triggerId: "t1", skill: "pr-review:survey_sandbox", repo: "r", issueNumber: 1, startedAt: day.iso });
+        await db.executions.recordFinish(usageId, { success: true, stopReason: RESOURCE_USAGE_STOP_REASON, cpuSeconds: 90 });
+
+        const d = (await db.executions.dailyStats(30)).find((r) => r.date === day.key)!;
+        expect(d).toMatchObject({ executions: 1, succeeded: 1, failed: 0, cpuSeconds: 90 });
+        const [h] = (await db.executions.hourlyStats(24 * 3)).filter((r) => r.executions > 0 || r.cpuSeconds > 0);
+        expect(h).toMatchObject({ executions: 1, succeeded: 1, cpuSeconds: 90 });
+
+        const stats = await db.executions.executionStats();
+        expect(stats.total_executions).toBe(1);
+        expect(stats.by_skill["pr-review:survey_sandbox"]).toBeUndefined();
+      });
+
+      it("reads the resource columns back on the execution row", async () => {
+        const id = randomUUID();
+        await db.executions.recordStart({ id, triggerType: "webhook", triggerId: "t1", skill: "build", repo: "r", issueNumber: 1, startedAt: new Date().toISOString() });
+        await db.executions.recordFinish(id, { success: true, cpuSeconds: 7.25, peakMemoryBytes: 5_000_000_000, memoryLimitBytes: 8_589_934_592 });
+        const [row] = await db.executions.recentExecutions("build", 1);
+        expect(row).toMatchObject({ cpuSeconds: 7.25, peakMemoryBytes: 5_000_000_000, memoryLimitBytes: 8_589_934_592 });
       });
 
       it("handles NULL token/cost columns gracefully", async () => {

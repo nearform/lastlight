@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "path";
 import { randomUUID } from "crypto";
 import { AGENTIC_PROFILES, type GitAccessProfile } from "../engine/github/profiles.js";
 import { logger } from "../logging/logger.js";
+import { CGROUP_USAGE_SCRIPT, parseUsageLine, type ResourceUsage } from "./resource-usage.js";
 import type { ServiceSet } from "lastlight-shared/sandbox-services";
 import {
   buildServiceRunArgs,
@@ -734,6 +735,32 @@ export class DockerSandbox {
     } catch (err) {
       log.warn("Failed to remove service containers", { taskId, err });
     }
+  }
+
+  /**
+   * The container's cumulative CPU and memory peak, read from its own cgroup
+   * (see `resource-usage.ts`). Must run BEFORE {@link destroy}: `docker rm -f`
+   * takes the cgroup with it. Best-effort — a failed read is "not measured",
+   * logged, never an error for the phase that just finished.
+   */
+  async readUsage(taskId: string): Promise<ResourceUsage | undefined> {
+    const info = this.activeContainers.get(taskId);
+    if (!info) return undefined;
+    try {
+      const { stdout } = await execFileAsync(
+        "docker",
+        ["exec", info.containerName, "sh", "-c", CGROUP_USAGE_SCRIPT],
+        { timeout: 10_000 },
+      );
+      for (const line of stdout.split("\n")) {
+        const usage = parseUsageLine(line.trim());
+        if (usage) return usage;
+      }
+      log.warn("sandbox cgroup usage unreadable", { containerName: info.containerName });
+    } catch (err) {
+      log.warn("failed to read sandbox cgroup usage", { containerName: info.containerName, err });
+    }
+    return undefined;
   }
 
   /**

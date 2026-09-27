@@ -384,10 +384,18 @@ export async function runLedgeredPhase(
           outputTokens: result.outputTokens,
           apiDurationMs: result.apiDurationMs,
           stopReason: result.stopReason,
+          cpuSeconds: result.cpuSeconds,
+          peakMemoryBytes: result.peakMemoryBytes,
+          memoryLimitBytes: result.memoryLimitBytes,
           extensionStatus: result.extensions,
           skillsStatus: result.skills,
         });
-        span?.setAttributes({ success: result.success, stop_reason: result.stopReason ?? "unknown" });
+        span?.setAttributes({
+          success: result.success,
+          stop_reason: result.stopReason ?? "unknown",
+          ...(result.cpuSeconds !== undefined ? { "sandbox.cpu_seconds": result.cpuSeconds } : {}),
+          ...(result.peakMemoryBytes !== undefined ? { "sandbox.peak_memory_bytes": result.peakMemoryBytes } : {}),
+        });
         observability.recordExecutionMetrics("phase", { ...attrs, success: result.success, stop_reason: result.stopReason, durationMs: result.durationMs, costUsd: result.costUsd, inputTokens: result.inputTokens, outputTokens: result.outputTokens });
         return { result, executionId, skipped: false };
       } catch (err) {

@@ -184,3 +184,44 @@ describe("consecutiveFailures", () => {
     expect(await db.executions.consecutiveFailures("cron-health")).toBe(0);
   });
 });
+
+describe("GET /workflow-runs/:id/executions — sandbox resource usage", () => {
+  // The route serialises each row through an explicit field map, so a column the
+  // store reads can still die at the HTTP boundary — which is exactly what
+  // happened to these three, leaving the phase panel's CPU / Peak Memory at "—".
+  it("carries the phase's CPU, memory peak and limit to the dashboard", async () => {
+    await db.runs.createRun({
+      id: "run-1",
+      workflowName: "pr-review",
+      triggerId: "acme/widgets#7",
+      currentPhase: "review",
+      status: "running",
+      startedAt: "2026-08-18T09:00:00.000Z",
+    });
+    await db.executions.recordStart({
+      id: "exec-review",
+      triggerType: "webhook",
+      triggerId: "acme/widgets#7",
+      skill: "pr-review:review",
+      startedAt: "2026-08-18T09:00:01.000Z",
+      workflowRunId: "run-1",
+    });
+    await db.executions.recordFinish("exec-review", {
+      success: true,
+      cpuSeconds: 12.5,
+      peakMemoryBytes: 5_000_000_000,
+      memoryLimitBytes: 8_589_934_592,
+    });
+
+    const app = createAdminRoutes(db, noSessions, noSessions, config);
+    const res = await app.fetch(new Request("http://localhost/workflow-runs/run-1/executions"));
+    expect(res.status).toBe(200);
+    const { executions } = (await res.json()) as { executions: Record<string, unknown>[] };
+    expect(executions.find((e) => e.id === "exec-review")).toMatchObject({
+      phase: "review",
+      cpuSeconds: 12.5,
+      peakMemoryBytes: 5_000_000_000,
+      memoryLimitBytes: 8_589_934_592,
+    });
+  });
+});

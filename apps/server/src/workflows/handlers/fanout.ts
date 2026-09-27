@@ -35,6 +35,7 @@ import { withAgentSession } from "../../engine/agent-executor.js";
 import type { SandboxSession } from "../../engine/executors/orchestrator.js";
 import type { SandboxBackend } from "../../config/config.js";
 import type { SandboxFactory } from "../../sandbox/sandbox.js";
+import { RESOURCE_USAGE_STOP_REASON, type ResourceUsage } from "../../sandbox/resource-usage.js";
 import { safeSpanAttributes, withSpan } from "../../telemetry/index.js";
 import { OI, SpanKind, splitProviderModel } from "../../telemetry/openinference.js";
 import { logger } from "../../logging/logger.js";
@@ -406,6 +407,7 @@ export class FanoutHandler implements PhaseTypeHandler {
     const policy = phase.on_branch_soft_failure ?? DEFAULT_BRANCH_SOFT_POLICY;
 
     let outcomes: BranchOutcome[];
+    const sessionStartedAt = Date.now();
     try {
       outcomes = await withAgentSession(
         this.phaseConfig(phase),
@@ -415,21 +417,29 @@ export class FanoutHandler implements PhaseTypeHandler {
           sandboxFactory: this.run.sandboxFactory,
         },
         async (session) => {
-          const ran = await mapPool(branches, concurrency, (branch) =>
-            this.runBranch(session, phase, branch, outputs, policy),
-          );
-          await this.runGates(session, phase, ran);
-          // `on_branch_gate_failure`: one directed re-run per branch whose gate
-          // ran and said no, concurrently like the first round, then those
-          // branches' gates again. Nothing else is re-run.
-          if ((phase.on_branch_gate_failure?.retries ?? 0) > 0) {
-            const failing = ran.filter((o) => gateRetryWanted(o));
-            if (failing.length > 0) {
-              await mapPool(failing, concurrency, (o) => this.rerunForGate(session, phase, o));
-              await this.runGates(session, phase, failing);
+          try {
+            const ran = await mapPool(branches, concurrency, (branch) =>
+              this.runBranch(session, phase, branch, outputs, policy),
+            );
+            await this.runGates(session, phase, ran);
+            // `on_branch_gate_failure`: one directed re-run per branch whose gate
+            // ran and said no, concurrently like the first round, then those
+            // branches' gates again. Nothing else is re-run.
+            if ((phase.on_branch_gate_failure?.retries ?? 0) > 0) {
+              const failing = ran.filter((o) => gateRetryWanted(o));
+              if (failing.length > 0) {
+                await mapPool(failing, concurrency, (o) => this.rerunForGate(session, phase, o));
+                await this.runGates(session, phase, failing);
+              }
             }
+            return ran;
+          } finally {
+            // In a `finally`, and inside the callback: the session disposes the
+            // sandbox on return, and a fan-out that throws after its branches
+            // ran burned the CPU all the same — that reading is the one a
+            // sizing exercise most needs. Neither call below throws.
+            await this.recordSandboxUsage(phase, sessionStartedAt, await session.usage());
           }
-          return ran;
         },
       );
     } catch (err: unknown) {
@@ -804,6 +814,48 @@ export class FanoutHandler implements PhaseTypeHandler {
       }
     }
     return { met, ran: error === undefined, timedOut, output };
+  }
+
+  /**
+   * Record the shared sandbox's CPU / memory on its own `<phase>_sandbox` row.
+   *
+   * On docker every branch is a `docker exec` into ONE container, so the cgroup
+   * total belongs to no single branch. It goes on one row, once, rather than
+   * split across the branch rows — an even split would imply a precision the
+   * cgroup does not have. It is bookkeeping, not work: its `stopReason` is
+   * {@link RESOURCE_USAGE_STOP_REASON}, which the stats rollups leave out of
+   * every execution and outcome count (its CPU still sums) and the dashboard
+   * draws no card for. `success: true` only says the reading was recorded.
+   */
+  private async recordSandboxUsage(
+    phase: PhaseDefinition,
+    startedAt: number,
+    usage: ResourceUsage | undefined,
+  ): Promise<void> {
+    const { workflowName, triggerId, githubAccess, workflowId, store: db } = this.run;
+    if (!db || !usage) return;
+    const executionId = randomUUID();
+    try {
+      await db.executions.recordStart({
+        id: executionId,
+        triggerType: "webhook",
+        triggerId,
+        skill: `${workflowName}:${PhaseRef.sandbox(phase.name).format()}`,
+        owner: githubAccess.owner,
+        repo: githubAccess.repo,
+        startedAt: new Date(startedAt).toISOString(),
+        workflowRunId: workflowId,
+      });
+      await db.executions.recordFinish(executionId, {
+        success: true,
+        turns: 0,
+        durationMs: Date.now() - startedAt,
+        stopReason: RESOURCE_USAGE_STOP_REASON,
+        ...usage,
+      });
+    } catch (err) {
+      log.warn("Failed to record fan-out sandbox usage row", { phase: phase.name, err });
+    }
   }
 
   // ── Reporting ──────────────────────────────────────────────────────────────

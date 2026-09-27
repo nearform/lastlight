@@ -17,6 +17,7 @@ import { api, type WorkflowRun, type ContainerStats, type ContainerKind, type Ho
 import { useStatsSeries } from "../hooks/useDailyStats";
 import { useTheme } from "../hooks/useTheme";
 import { STATUS } from "../lib/status-colors";
+import { formatBytes, formatCpuSeconds } from "../lib/resource-format";
 import { repoUrl, issueUrl, runRepoPath } from "../lib/githubLinks";
 import { useVisibleRepos, repoScopeParam } from "../hooks/useVisibleRepos";
 import { GhLink } from "./GhLink";
@@ -74,6 +75,8 @@ function outcomeTooltipFormatter(value: unknown, name: unknown): [string, string
 const CHART_DARK = {
   primary: "#7dd3fc",
   secondary: "#c4b5fd",
+  tertiary: "#f9a8d4",
+  cpu: "#5eead4",
   accent: "#fcd34d",
   info: "#67e8f9",
   grid: "#21262d",
@@ -85,6 +88,8 @@ const CHART_DARK = {
 const CHART_LIGHT = {
   primary: "#0b3b63",
   secondary: "#7c3aed",
+  tertiary: "#be185d",
+  cpu: "#0f766e",
   accent: "#b45309",
   info: "#0b3b63",
   grid: "#e2e6ea",
@@ -111,13 +116,6 @@ function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return String(n);
-}
-
-function formatBytes(n: number): string {
-  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GiB`;
-  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(0)} MiB`;
-  if (n >= 1024) return `${(n / 1024).toFixed(0)} KiB`;
-  return `${n} B`;
 }
 
 function shortContainerName(name: string): string {
@@ -383,7 +381,7 @@ function useRecentWorkflows() {
         // not "Recent". Terminal statuses = succeeded, failed, cancelled.
         const res = await api.workflowRuns({
           status: "succeeded,failed,cancelled",
-          limit: 3,
+          limit: 5,
           repos,
         });
         if (!cancelled) setRuns(res.workflowRuns);
@@ -551,34 +549,53 @@ function RecentWorkflowsSection({
                       onSelect(run.id);
                     }
                   }}
-                  className="flex items-center gap-2 px-3 py-2 bg-base-100 rounded text-xs w-full text-left cursor-pointer hover:bg-base-300/60 transition-colors"
+                  className="px-3 py-2 bg-base-100 rounded text-xs w-full text-left cursor-pointer hover:bg-base-300/60 transition-colors space-y-1"
                 >
-                  <StatusBadge status={run.status} />
-                  <span className="font-mono text-strong shrink-0">
-                    {run.workflowName}
-                  </span>
-                  <RunTarget run={run} />
-                  {run.triggeredBy && (
-                    <ActorChip
-                      login={run.triggeredBy}
-                      actorType={run.triggerActorType}
-                      className="shrink-0 max-w-32"
-                    />
-                  )}
-                  {run.totalTokens ? (
-                    <span className="text-faint font-mono shrink-0 tabular-nums" title="tokens">
-                      {formatTokens(run.totalTokens)} tok
+                  <div className="flex items-center gap-2">
+                    <StatusBadge status={run.status} />
+                    <span className="font-mono text-strong shrink-0">
+                      {run.workflowName}
                     </span>
-                  ) : null}
-                  {run.totalCostUsd ? (
-                    <span className="text-success/80 font-mono shrink-0 tabular-nums" title="cost">
-                      {formatCost(run.totalCostUsd)}
-                    </span>
-                  ) : null}
-                  {duration && (
-                    <span className="text-muted shrink-0">{duration}</span>
-                  )}
-                  <span className="text-faint shrink-0">{timeAgo(run.startedAt)}</span>
+                    <RunTarget run={run} />
+                    <span className="text-faint shrink-0">{timeAgo(run.startedAt)}</span>
+                  </div>
+                  {/* Second line: the narrow left column can't hold the
+                      actor and every metric beside the target. */}
+                  <div className="flex items-center gap-3 pl-1">
+                    {run.triggeredBy && (
+                      <ActorChip
+                        login={run.triggeredBy}
+                        actorType={run.triggerActorType}
+                        className="shrink min-w-0 max-w-32"
+                      />
+                    )}
+                    <span className="flex-1" />
+                    {run.totalCpuSeconds ? (
+                      <span
+                        className="text-info font-mono shrink-0 tabular-nums"
+                        title={
+                          run.peakMemoryBytes
+                            ? `sandbox CPU time · largest sandbox peak ${formatBytes(run.peakMemoryBytes)}`
+                            : "sandbox CPU time"
+                        }
+                      >
+                        {formatCpuSeconds(run.totalCpuSeconds)} cpu
+                      </span>
+                    ) : null}
+                    {run.totalTokens ? (
+                      <span className="text-faint font-mono shrink-0 tabular-nums" title="tokens">
+                        {formatTokens(run.totalTokens)} tok
+                      </span>
+                    ) : null}
+                    {run.totalCostUsd ? (
+                      <span className="text-success/80 font-mono shrink-0 tabular-nums" title="cost">
+                        {formatCost(run.totalCostUsd)}
+                      </span>
+                    ) : null}
+                    {duration && (
+                      <span className="text-muted shrink-0">{duration}</span>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -603,8 +620,11 @@ function StatsChartsSection() {
           executions: acc.executions + d.executions,
           tokens: acc.tokens + d.totalTokens,
           cost: acc.cost + d.costUsd,
+          // `?? 0`: the type says required, but an older server behind a
+          // cached bundle omits it, and one NaN poisons the card and the axis.
+          cpuSeconds: acc.cpuSeconds + (d.cpuSeconds ?? 0),
         }),
-        { executions: 0, tokens: 0, cost: 0 },
+        { executions: 0, tokens: 0, cost: 0, cpuSeconds: 0 },
       )
     : null;
 
@@ -623,9 +643,15 @@ function StatsChartsSection() {
     // third and silently understate the volume.
     skipped: d.skipped,
     inputTokens: d.inputTokens,
+    // Stacked on input: Anthropic reports the uncached prompt prefix as a cache
+    // write, OpenAI-compatible providers report it as input. Together they are
+    // "prompt not served from cache" for either kind of provider.
+    cacheWriteTokens: d.cacheWriteTokens,
     outputTokens: d.outputTokens,
     cacheTokens: d.cacheReadTokens,
     cost: d.costUsd,
+    cpuSeconds: d.cpuSeconds ?? 0,
+    peakMemoryBytes: d.peakMemoryBytes ?? 0,
   })) ?? [];
 
   const hasData = chartData.some((d) => d.executions > 0);
@@ -664,6 +690,10 @@ function StatsChartsSection() {
             <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1">
               <div className="stat-title text-xs">Cost</div>
               <div className="stat-value text-xl">{formatCost(summary.cost)}</div>
+            </div>
+            <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1">
+              <div className="stat-title text-xs">CPU</div>
+              <div className="stat-value text-xl">{formatCpuSeconds(summary.cpuSeconds)}</div>
             </div>
           </div>
         )}
@@ -801,8 +831,45 @@ function StatsChartsSection() {
                     cursor={{ fill: "rgba(255,255,255,0.04)" }}
                   />
                   <Bar yAxisId="io" dataKey="inputTokens" stackId="t" fill={CHART.primary} name="input" />
+                  <Bar yAxisId="io" dataKey="cacheWriteTokens" stackId="t" fill={CHART.tertiary} name="cache write" />
                   <Bar yAxisId="io" dataKey="outputTokens" stackId="t" fill={CHART.secondary} name="output" />
-                  <Line yAxisId="cache" type="monotone" dataKey="cacheTokens" stroke={CHART.accent} strokeWidth={2} strokeDasharray="4 2" dot={false} name="cache" />
+                  <Line yAxisId="cache" type="monotone" dataKey="cacheTokens" stroke={CHART.accent} strokeWidth={2} strokeDasharray="4 2" dot={false} name="cache read" />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* Sandbox CPU time — bars on the left axis, the day's largest single
+                sandbox memory peak as a line on the right. */}
+            <div>
+              <p className="text-xs text-muted mb-1 font-medium">Sandbox CPU time per {granularity}</p>
+              <ResponsiveContainer width="100%" height={120}>
+                <ComposedChart data={chartData} margin={{ top: 2, right: 4, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={CHART.grid} />
+                  <XAxis dataKey="date" tick={{ fontSize: 10, fill: CHART.axis }} stroke={CHART.axis} />
+                  <YAxis
+                    yAxisId="cpu"
+                    width={48}
+                    tick={{ fontSize: 10, fill: CHART.axis }}
+                    stroke={CHART.axis}
+                    tickFormatter={(v) => formatCpuSeconds(Number(v))}
+                  />
+                  <YAxis
+                    yAxisId="mem"
+                    orientation="right"
+                    width={48}
+                    tick={{ fontSize: 10, fill: CHART.axis }}
+                    stroke={CHART.axis}
+                    tickFormatter={(v) => formatBytes(Number(v))}
+                  />
+                  <Tooltip
+                    contentStyle={{ fontSize: 11, background: CHART.tooltipBg, border: `1px solid ${CHART.tooltipBorder}` }}
+                    formatter={(v, name) =>
+                      name === "peak memory" ? formatBytes(Number(v ?? 0)) : formatCpuSeconds(Number(v ?? 0))
+                    }
+                    cursor={{ fill: "rgba(255,255,255,0.04)" }}
+                  />
+                  <Bar yAxisId="cpu" dataKey="cpuSeconds" fill={CHART.cpu} name="cpu" />
+                  <Line yAxisId="mem" type="monotone" dataKey="peakMemoryBytes" stroke={CHART.accent} strokeWidth={2} strokeDasharray="4 2" dot={false} name="peak memory" />
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
@@ -848,11 +915,11 @@ export function HomePage({ onSelectWorkflow }: { onSelectWorkflow: (id: string) 
             containerCount={containerCount}
             onSelect={onSelectWorkflow}
           />
+          <RecentWorkflowsSection runs={recentRuns} onSelect={onSelectWorkflow} />
           <ResourceUsageSection stats={stats} host={host} loaded={loaded} />
         </div>
         <div className="lg:col-span-3 space-y-4">
           <StatsChartsSection />
-          <RecentWorkflowsSection runs={recentRuns} onSelect={onSelectWorkflow} />
         </div>
       </div>
     </div>

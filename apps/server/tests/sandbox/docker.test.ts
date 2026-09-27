@@ -37,11 +37,12 @@ vi.mock("#src/logging/logger.js", () => {
   return { logger: () => noopLogger };
 });
 
-import { spawn, execFileSync } from "child_process";
+import { spawn, execFile, execFileSync } from "child_process";
 import { DockerSandbox } from "#src/sandbox/docker.js";
 
 const mockSpawn = vi.mocked(spawn);
 const mockExecFileSync = vi.mocked(execFileSync);
+const mockExecFile = vi.mocked(execFile);
 
 function makeFakeChild() {
   const stdin = { write: vi.fn(), end: vi.fn() };
@@ -201,6 +202,53 @@ describe("DockerSandbox.runAgent — prompt via stdin, not shell arg", () => {
       manager.runAgent("task-001", "test prompt", { ...RUN, profile: "admin" as any }),
     ).rejects.toThrow(/Refusing to pass profile "admin"/);
     expect(mockSpawn).not.toHaveBeenCalled();
+  });
+});
+
+describe("DockerSandbox.readUsage — the container's own cgroup, read before rm -f", () => {
+  const MARKER =
+    '{"type":"lastlight_sandbox_usage","usage_usec":"4500000","memory_peak":"734003200","memory_max":"8589934592"}';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockExecFileSync.mockReturnValue("container-xyz\n");
+  });
+
+  async function created(): Promise<DockerSandbox> {
+    const manager = new DockerSandbox({ imageName: "img", env: {} });
+    await manager.create({
+      taskId: "t-usage",
+      worktreePath: "/tmp/work",
+      workspaceMount: { type: "bind", hostPath: "/tmp/work" },
+    });
+    return manager;
+  }
+
+  it("execs the cgroup snippet in the sandbox container and parses its marker", async () => {
+    const manager = await created();
+    mockExecFile.mockImplementationOnce(((_cmd: string, _args: string[], opts: unknown, cb?: unknown) => {
+      const done = (typeof opts === "function" ? opts : cb) as (e: unknown, r: unknown) => void;
+      done(null, { stdout: `${MARKER}\n`, stderr: "" });
+    }) as never);
+
+    expect(await manager.readUsage("t-usage")).toEqual({
+      cpuSeconds: 4.5,
+      peakMemoryBytes: 734003200,
+      memoryLimitBytes: 8589934592,
+    });
+    const exec = mockExecFile.mock.calls.at(-1)!;
+    expect(exec[0]).toBe("docker");
+    expect((exec[1] as string[]).slice(0, 2)).toEqual(["exec", expect.stringMatching(/^lastlight-sandbox-t-usage-/)]);
+  });
+
+  it("reports nothing — never throws — when the exec fails or the container is gone", async () => {
+    const manager = await created();
+    mockExecFile.mockImplementationOnce(((_cmd: string, _args: string[], opts: unknown, cb?: unknown) => {
+      const done = (typeof opts === "function" ? opts : cb) as (e: unknown, r: unknown) => void;
+      done(new Error("No such container"), null);
+    }) as never);
+    expect(await manager.readUsage("t-usage")).toBeUndefined();
+    expect(await manager.readUsage("never-created")).toBeUndefined();
   });
 });
 

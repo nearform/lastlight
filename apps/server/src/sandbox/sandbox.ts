@@ -14,6 +14,7 @@ import { SmolSandbox as SmolDriver, smolAvailable, SMOL_WORKSPACE_DIR } from "./
 import { ALLOW_ALL_SENTINEL } from "./egress-allowlist.js";
 import { getDockerSandboxOtelEnv, getOtelEnvForSandbox } from "../telemetry/index.js";
 import { KubernetesSandbox } from "./k8s/kubernetes-sandbox.js";
+import type { ResourceUsage } from "./resource-usage.js";
 import type { GitAccessProfile } from "../engine/github/profiles.js";
 import { logger } from "../logging/logger.js";
 import {
@@ -87,6 +88,13 @@ export interface Sandbox {
   runCommand(taskId: string, command: string, opts: RunCommandOpts): Promise<RawCommandResult>;
   /** Tear down the isolation primitive (container/VM destroy; no-op in-process). */
   dispose(): Promise<void> | void;
+  /**
+   * The sandbox's cumulative CPU time and memory peak so far, read from its own
+   * cgroup (see `resource-usage.ts`). Called just BEFORE {@link dispose} — the
+   * cgroup is gone after. Optional: in-process backends have no cgroup of their
+   * own, and undefined means "not measured", never zero.
+   */
+  usage?(): Promise<ResourceUsage | undefined>;
 }
 
 /**
@@ -433,6 +441,10 @@ class DockerSandbox implements Sandbox {
     if (this.sbx) await this.sbx.cleanup();
   }
 
+  async usage(): Promise<ResourceUsage | undefined> {
+    return this.sbx?.sandbox.readUsage(this.opts.taskId);
+  }
+
   /** Git identity + (inside-container) OTEL collector env. */
   private innerAgentEnv(base: Record<string, string>): Record<string, string> {
     const otel = this.opts.otel?.enabled && this.opts.otel.forwardToSandbox ? getDockerSandboxOtelEnv() : {};
@@ -730,6 +742,8 @@ export interface FakeBehavior {
   /** Throw from `provision` — e.g. a k8s ResourceQuota rejection at pod-create
    *  time, which happens during provisioning, outside `runAgent`/`runCommand`. */
   throwOnProvision?: Error | string;
+  /** What `usage()` reports; omitted → undefined, as an in-process backend. */
+  usage?: ResourceUsage;
 }
 
 /**
@@ -759,6 +773,8 @@ export class FakeSandbox implements Sandbox {
   receivedCommand?: string;
   provisionCalls = 0;
   disposed = false;
+  /** Whether `usage()` was read while the sandbox was still live. */
+  usageReadBeforeDispose?: boolean;
 
   constructor(private readonly behavior: FakeBehavior = {}) {}
 
@@ -819,6 +835,11 @@ export class FakeSandbox implements Sandbox {
     this.receivedCommandOpts = opts;
     if (this.behavior.throwOnRunCommand) throw asError(this.behavior.throwOnRunCommand);
     return this.behavior.commandResult ?? { exitCode: 0, stdout: "", stderr: "", timedOut: false };
+  }
+
+  async usage(): Promise<ResourceUsage | undefined> {
+    this.usageReadBeforeDispose = !this.disposed;
+    return this.behavior.usage;
   }
 
   dispose(): void {

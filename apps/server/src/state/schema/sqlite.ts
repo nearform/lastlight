@@ -93,6 +93,12 @@ export const executions = sqliteTable(
     outputText: text("output_text"),
     extensionStatus: text("extension_status", { mode: "json" }).$type<ExtensionStatusMap>(),
     skillsStatus: text("skills_status", { mode: "json" }).$type<SkillsStatus>(),
+    // Sandbox resource usage, read from the sandbox's own cgroup at teardown.
+    // NULL on in-process backends and on fan-out branch rows (their shared
+    // container is recorded on the fan-out's `_sandbox` row).
+    cpuSeconds: real("cpu_seconds"),
+    peakMemoryBytes: integer("peak_memory_bytes"),
+    memoryLimitBytes: integer("memory_limit_bytes"),
   },
   (t) => [
     index("idx_executions_trigger").on(t.triggerType, t.triggerId),

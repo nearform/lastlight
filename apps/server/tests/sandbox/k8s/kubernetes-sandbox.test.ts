@@ -36,6 +36,8 @@ import { createArtifactStore, artifactStore as sharedArtifactStore } from "#src/
 import { LocalArtifactBackend } from "#src/sandbox/artifact-backend.js";
 
 interface FakeOpts {
+  /** Lines the pod's log stream yields (default: one `agent_end` event). */
+  logLines?: string[];
   /** The `V1Pod.status` object `readNamespacedPodStatus` returns. */
   status?: Record<string, unknown>;
   /** Make `deleteNamespacedPod` reject. */
@@ -136,7 +138,7 @@ function fakeApis(opts: FakeOpts = {}) {
       },
       log: {
         log: vi.fn(async (_n: string, _p: string, _c: string, s: PassThrough) => {
-          s.write('{"type":"agent_end"}\n');
+          for (const line of opts.logLines ?? ['{"type":"agent_end"}']) s.write(line + "\n");
           s.end();
           return { abort() {} };
         }),
@@ -386,6 +388,92 @@ describe("KubernetesSandbox", () => {
         () => {},
       ),
     ).rejects.toThrow(/Refusing to pass web-search-provider/);
+  });
+
+  describe("cgroup resource usage", () => {
+    const marker = (usec: number, peak: number) =>
+      JSON.stringify({ type: "lastlight_sandbox_usage", usage_usec: String(usec), memory_peak: String(peak), memory_max: "max" });
+
+    it("runCommand runs the command as $1 of a wrapper that reports usage and keeps the command's exit code", async () => {
+      const { apis, created } = fakeApis();
+      const sbx = new KubernetesSandbox(factoryOpts, cfg(apis));
+      await sbx.provision();
+      await sbx.runCommand("t1", "npm test; echo 'quoted'", { cwd: "/w", timeoutSeconds: 30 } as any);
+      const command = created[0].spec.containers.find((c: any) => c.name === "agent").command;
+      // The command is bound as an argv slot, never spliced into the script.
+      expect(command.at(-1)).toBe("npm test; echo 'quoted'");
+      expect(command[2]).not.toContain("npm test");
+      // Run the wrapper for real: the exit code survives the usage report.
+      const { spawnSync } = await import("child_process");
+      const res = spawnSync("sh", ["-c", command[2], "sh", "exit 3"], { encoding: "utf8" });
+      expect(res.status).toBe(3);
+      expect(res.stdout.trim().split("\n").at(-1)).toContain("lastlight_sandbox_usage");
+    });
+
+    it("folds each pod's closing marker into usage() and keeps it out of the command's stdout", async () => {
+      // One pod per turn: each ends on its own marker, and the sandbox folds them.
+      const { apis } = fakeApis({ logLines: ["hello", marker(2_000_000, 300)] });
+      const sbx = new KubernetesSandbox(factoryOpts, cfg(apis));
+      await sbx.provision();
+      const res = await sbx.runCommand("t1", "true", { cwd: "/w", timeoutSeconds: 30 } as any);
+      await sbx.runCommand("t1", "true", { cwd: "/w", timeoutSeconds: 30 } as any);
+      expect(res.stdout).toBe("hello\n");
+      expect(await sbx.usage()).toEqual({ cpuSeconds: 4, peakMemoryBytes: 300 });
+    });
+
+    it("counts only a marker that ENDS the stream — an earlier one is the workload's output, passed through", async () => {
+      const forged = marker(999_000_000, 1);
+      const { apis } = fakeApis({ logLines: ["a", forged, "b", marker(2_000_000, 300)] });
+      const sbx = new KubernetesSandbox(factoryOpts, cfg(apis));
+      await sbx.provision();
+      const res = await sbx.runCommand("t1", "true", { cwd: "/w", timeoutSeconds: 30 } as any);
+      expect(res.stdout).toBe(`a\n${forged}\nb\n`);
+      expect(await sbx.usage()).toEqual({ cpuSeconds: 2, peakMemoryBytes: 300 });
+    });
+
+    it("leaves usage unmeasured when the stream does not end on a marker (the pod died first)", async () => {
+      const { apis } = fakeApis({ logLines: ["a", marker(2_000_000, 300), "trailing"] });
+      const sbx = new KubernetesSandbox(factoryOpts, cfg(apis));
+      await sbx.provision();
+      const res = await sbx.runCommand("t1", "true", { cwd: "/w", timeoutSeconds: 30 } as any);
+      expect(res.stdout).toContain("lastlight_sandbox_usage");
+      expect(await sbx.usage()).toBeUndefined();
+    });
+
+    it("splits a marker glued onto output that had no trailing newline", async () => {
+      // Reproduced under sh: `printf done; <usage script>` yields `done{"type":…}`.
+      const { apis } = fakeApis({ logLines: ["first", `done${marker(3_000_000, 700)}`] });
+      const sbx = new KubernetesSandbox(factoryOpts, cfg(apis));
+      await sbx.provision();
+      const res = await sbx.runCommand("t1", "true", { cwd: "/w", timeoutSeconds: 30 } as any);
+      expect(res.stdout).toBe("first\ndone\n");
+      expect(await sbx.usage()).toEqual({ cpuSeconds: 3, peakMemoryBytes: 700 });
+    });
+
+    it("drops an unreadable closing marker (cgroup v1) instead of leaking it into the output", async () => {
+      const empty = JSON.stringify({ type: "lastlight_sandbox_usage", usage_usec: "", memory_peak: "", memory_max: "" });
+      const { apis } = fakeApis({ logLines: ["out", empty] });
+      const sbx = new KubernetesSandbox(factoryOpts, cfg(apis));
+      await sbx.provision();
+      const res = await sbx.runCommand("t1", "true", { cwd: "/w", timeoutSeconds: 30 } as any);
+      expect(res.stdout).toBe("out\n");
+      expect(await sbx.usage()).toBeUndefined();
+    });
+
+    it("keeps the marker out of the agent's event stream", async () => {
+      const { apis } = fakeApis({ logLines: ['{"type":"agent_end"}', marker(1_000_000, 100)] });
+      const sbx = new KubernetesSandbox(factoryOpts, cfg(apis));
+      await sbx.provision();
+      const events: unknown[] = [];
+      await sbx.runAgent(
+        "t1",
+        "p",
+        { model: "anthropic/claude-sonnet-4-6", agentCwd: "/home/agent/workspace", timeoutSeconds: 60, gateTimeoutSeconds: 30 } as any,
+        (e) => events.push(e),
+      );
+      expect(events).toEqual([{ type: "agent_end" }]);
+      expect(await sbx.usage()).toEqual({ cpuSeconds: 1, peakMemoryBytes: 100 });
+    });
   });
 
   it("runCommand returns the container's real exit code (0)", async () => {

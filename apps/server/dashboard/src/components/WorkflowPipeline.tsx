@@ -299,6 +299,15 @@ function derivedLabel(ref: DerivedRef): string {
 }
 
 /**
+ * The server's own mark for a row that is bookkeeping, not work: a fan-out's
+ * shared-sandbox CPU / memory reading (`<phase>_sandbox`). Keyed on the stop
+ * reason the server writes, NOT the name — a real phase that happens to end in
+ * `_sandbox` must still draw. Mirrors RESOURCE_USAGE_STOP_REASON
+ * (`src/sandbox/resource-usage.ts`); no import edge to core.
+ */
+const RESOURCE_USAGE_STOP_REASON = "resource_usage";
+
+/**
  * The node a `_retry` / `_check` row is a verdict ABOUT, if it is one.
  *
  * Both shapes of container have them: a fan-out branch
@@ -425,6 +434,10 @@ export function WorkflowPipeline({
     const childrenByParent = new Map<string, string[]>();
     const orphans: string[] = [];
     for (const name of dynamicNames) {
+      // A usage row neither draws a card nor colours the fan-out — its numbers
+      // reach the run totals and the Stats panel. Dropped here, once, so
+      // nothing downstream draws, colours or times it.
+      if (execByPhase.get(name)?.stopReason === RESOURCE_USAGE_STOP_REASON) continue;
       const parent = findParentDeclared(name, declaredNames);
       if (parent) {
         const arr = childrenByParent.get(parent) ?? [];

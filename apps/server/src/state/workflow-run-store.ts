@@ -102,13 +102,16 @@ export interface WorkflowRun {
   /** The `lastlight.workflow.run` span id — the parent a feedback span attaches to. */
   spanId?: string;
   /**
-   * Rolled-up totals across the run's executions (SUM of `cost_usd` and
-   * input+output+cache-read tokens). Populated only by {@link WorkflowRunStore.list}
+   * Rolled-up totals across the run's executions (SUM of `cost_usd`,
+   * input+output+cache-read+cache-write tokens, and sandbox CPU seconds). Populated only by {@link WorkflowRunStore.list}
    * for the dashboard's runs view via a LEFT JOIN on `executions`; absent on
    * single-run reads (`getRun`, which selects the row without the join).
    */
   totalCostUsd?: number;
   totalTokens?: number;
+  totalCpuSeconds?: number;
+  /** The largest single sandbox memory peak in the run — a MAX, never a sum. */
+  peakMemoryBytes?: number;
 }
 
 /** A non-agent phase marker folded into an atomic lifecycle op. */
@@ -132,7 +135,12 @@ type RunRowLike = Pick<
   RunRow,
   "id" | "workflowName" | "triggerId" | "currentPhase" | "phaseHistory" | "status" | "startedAt" | "updatedAt"
 > &
-  Partial<RunRow> & { totalCostUsd?: number; totalTokens?: number };
+  Partial<RunRow> & {
+    totalCostUsd?: number;
+    totalTokens?: number;
+    totalCpuSeconds?: number;
+    peakMemoryBytes?: number;
+  };
 
 /**
  * Aggregate root for a workflow run's lifecycle. Owns the `workflow_runs`
@@ -726,14 +734,17 @@ export class WorkflowRunStore {
 
     // A per-run token/cost roll-up, LEFT JOINed (indexed by
     // `idx_executions_workflow_run`). `agg` only exposes `workflow_run_id` +
-    // the two sums, so nothing here collides with `workflow_runs`.
+    // the four roll-ups, so nothing here collides with `workflow_runs`.
     const agg = this.client
       .select({
         workflowRunId: executions.workflowRunId,
         totalCostUsd: sql<number>`SUM(COALESCE(${executions.costUsd}, 0))`.as("total_cost_usd"),
         totalTokens: sql<number>`SUM(COALESCE(${executions.inputTokens}, 0)
                       + COALESCE(${executions.outputTokens}, 0)
-                      + COALESCE(${executions.cacheReadInputTokens}, 0))`.as("total_tokens"),
+                      + COALESCE(${executions.cacheReadInputTokens}, 0)
+                      + COALESCE(${executions.cacheCreationInputTokens}, 0))`.as("total_tokens"),
+        totalCpuSeconds: sql<number>`SUM(COALESCE(${executions.cpuSeconds}, 0))`.as("total_cpu_seconds"),
+        peakMemoryBytes: sql<number>`MAX(COALESCE(${executions.peakMemoryBytes}, 0))`.as("max_peak_memory_bytes"),
       })
       .from(executions)
       .where(isNotNull(executions.workflowRunId))
@@ -765,6 +776,8 @@ export class WorkflowRunStore {
         triggerActorType: workflowRuns.triggerActorType,
         totalCostUsd: sql<number>`COALESCE(${agg.totalCostUsd}, 0)`,
         totalTokens: sql<number>`COALESCE(${agg.totalTokens}, 0)`,
+        totalCpuSeconds: sql<number>`COALESCE(${agg.totalCpuSeconds}, 0)`,
+        peakMemoryBytes: sql<number>`COALESCE(${agg.peakMemoryBytes}, 0)`,
       })
       .from(workflowRuns)
       .leftJoin(agg, eq(agg.workflowRunId, workflowRuns.id))
@@ -1230,8 +1243,9 @@ export class WorkflowRunStore {
       status: r.status as WorkflowRun["status"],
       triggerActorType: r.triggerActorType as TriggerActorType | undefined,
       restartCount: r.restartCount ?? 0,
-      // `totalCostUsd` / `totalTokens` are present only on `list()` rows (the
-      // executions JOIN) and absent everywhere else — the spread carries both.
+      // `totalCostUsd` / `totalTokens` / `totalCpuSeconds` are present only on
+      // `list()` rows (the executions JOIN) and absent everywhere else — the
+      // spread carries them.
     };
   }
 
