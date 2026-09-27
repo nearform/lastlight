@@ -410,13 +410,34 @@ describe("KubernetesSandbox", () => {
       expect(res.stdout.trim().split("\n").at(-1)).toContain("lastlight_sandbox_usage");
     });
 
-    it("folds each pod's marker into usage() and keeps it out of the command's stdout", async () => {
-      const { apis } = fakeApis({ logLines: ["hello", marker(2_000_000, 300), "world", marker(3_000_000, 500)] });
+    it("folds each pod's closing marker into usage() and keeps it out of the command's stdout", async () => {
+      // One pod per turn: each ends on its own marker, and the sandbox folds them.
+      const { apis } = fakeApis({ logLines: ["hello", marker(2_000_000, 300)] });
       const sbx = new KubernetesSandbox(factoryOpts, cfg(apis));
       await sbx.provision();
       const res = await sbx.runCommand("t1", "true", { cwd: "/w", timeoutSeconds: 30 } as any);
-      expect(res.stdout).toBe("hello\nworld\n");
-      expect(await sbx.usage()).toEqual({ cpuSeconds: 5, peakMemoryBytes: 500 });
+      await sbx.runCommand("t1", "true", { cwd: "/w", timeoutSeconds: 30 } as any);
+      expect(res.stdout).toBe("hello\n");
+      expect(await sbx.usage()).toEqual({ cpuSeconds: 4, peakMemoryBytes: 300 });
+    });
+
+    it("counts only a marker that ENDS the stream — an earlier one is the workload's output, passed through", async () => {
+      const forged = marker(999_000_000, 1);
+      const { apis } = fakeApis({ logLines: ["a", forged, "b", marker(2_000_000, 300)] });
+      const sbx = new KubernetesSandbox(factoryOpts, cfg(apis));
+      await sbx.provision();
+      const res = await sbx.runCommand("t1", "true", { cwd: "/w", timeoutSeconds: 30 } as any);
+      expect(res.stdout).toBe(`a\n${forged}\nb\n`);
+      expect(await sbx.usage()).toEqual({ cpuSeconds: 2, peakMemoryBytes: 300 });
+    });
+
+    it("leaves usage unmeasured when the stream does not end on a marker (the pod died first)", async () => {
+      const { apis } = fakeApis({ logLines: ["a", marker(2_000_000, 300), "trailing"] });
+      const sbx = new KubernetesSandbox(factoryOpts, cfg(apis));
+      await sbx.provision();
+      const res = await sbx.runCommand("t1", "true", { cwd: "/w", timeoutSeconds: 30 } as any);
+      expect(res.stdout).toContain("lastlight_sandbox_usage");
+      expect(await sbx.usage()).toBeUndefined();
     });
 
     it("keeps the marker out of the agent's event stream", async () => {

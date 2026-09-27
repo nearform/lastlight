@@ -30,6 +30,18 @@ describe("parseUsageLine", () => {
   });
 });
 
+describe("isUsageLine", () => {
+  it("matches only the exact line the script prints, never a line that merely contains it", () => {
+    expect(isUsageLine(line("1", "2", "max"))).toBe(true);
+    expect(isUsageLine(line("1", "2", "max") + "\r")).toBe(true);
+    // A workload's own JSON that mentions the type literal is its output, not a reading.
+    expect(isUsageLine(`{"type":"lastlight_sandbox_usage","note":"fixture"}`)).toBe(false);
+    expect(isUsageLine(`{"log":${line("1", "2", "max")}}`)).toBe(false);
+    expect(isUsageLine(line("1", "2", "max").replace("}", ',"x":"1"}'))).toBe(false);
+    expect(isUsageLine(line("12abc", "", ""))).toBe(false);
+  });
+});
+
 describe("combineUsage", () => {
   it("adds CPU and keeps the largest memory peak and limit", () => {
     const a = { cpuSeconds: 10, peakMemoryBytes: 500, memoryLimitBytes: 1000 };

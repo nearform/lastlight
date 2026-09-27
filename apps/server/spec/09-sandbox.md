@@ -754,16 +754,36 @@ tool it spawned; exact, no sampling), `memory.peak` (kernel ≥ 5.19) and
   a command's stdout. One pod per turn, so the readings fold: CPU adds, memory
   peak and limit take the max.
 
+  **Only the stream's LAST line counts**, and only an exact full-line match of
+  the marker. The workload shares that stdout, so a marker-shaped line followed
+  by anything else was printed by the workload: it is released to the run
+  untouched, never parsed. That stops a workload swallowing its own output or
+  casually forging a reading. It is not a security boundary — a process that
+  outlives the workload and writes after the script's line can still replace
+  it; only a channel outside the pod (the kubelet's stats) closes that, and the
+  damage is a wrong metric, never execution. For the same reason a pod that
+  dies before its script ends (OOM-kill, `activeDeadlineSeconds`) reports
+  nothing: "not measured", which on k8s concentrates on the heaviest runs.
+  Docker has neither limit — `docker exec` reads the still-live container.
+
 The orchestrator reads `Sandbox.usage()` inside `withSandbox`, before
 `dispose()`. A failed read is logged and leaves the fields absent — "not
 measured", never zero, and never a failure of the phase that just finished.
+A failed agent phase still records its usage — `runAgentIn` turns a sandbox
+failure into a result, not a throw; only an infrastructure throw out of the
+bracket goes unmeasured.
 `gondolin` / `none` run in-process and have no cgroup of their own: no usage.
 
 **A fan-out shares one sandbox.** On docker every branch is a `docker exec`
 into ONE container, so its cgroup total belongs to no single branch. The
 fan-out records it once, on its own `<phase>_sandbox` row
 (`PhaseRef.sandbox`), and the branch rows carry none — an even split would
-imply a precision the cgroup does not have.
+imply a precision the cgroup does not have. The read sits in a `finally`, so a
+fan-out that throws after its branches ran still records what they burned.
+The row is bookkeeping, not work: its `stop_reason` is `resource_usage`, which
+every execution and outcome count leaves out (its CPU still sums — see
+[State](/spec/10-state#executions)) and the dashboard's pipeline draws no card
+for.
 
 ## Egress firewall
 

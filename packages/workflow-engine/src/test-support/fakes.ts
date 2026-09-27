@@ -119,6 +119,7 @@ export interface FakeExecutionRow {
   output?: string;
   cpuSeconds?: number;
   peakMemoryBytes?: number;
+  memoryLimitBytes?: number;
 }
 
 type LedgerRow = FakeExecutionRow;
@@ -261,6 +262,7 @@ export class InMemoryStateStore implements WorkflowStateStore {
         row.error = result.error;
         row.cpuSeconds = result.cpuSeconds;
         row.peakMemoryBytes = result.peakMemoryBytes;
+        row.memoryLimitBytes = result.memoryLimitBytes;
       }
     },
     recordSessionId: async () => {},

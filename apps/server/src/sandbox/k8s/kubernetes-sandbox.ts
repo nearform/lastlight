@@ -477,16 +477,29 @@ export class KubernetesSandbox implements Sandbox, AgentContextSink {
     const created = await this.createPodOrCleanupSecrets(manifest, secrets);
     await this.runSecrets.patchOwnerRefs(created, podLabel.value, secrets);
     await this.waitForContainerStart(podLabel.value);
+    // The pod script prints its cgroup reading as the LAST line, after the
+    // agent / command has exited. So a marker-shaped line only counts if
+    // nothing follows it: each one is held back a line, and released to the
+    // run untouched the moment anything comes after — then it was the
+    // workload's, not ours. That keeps a workload from swallowing its own
+    // output by printing the shape, and from casually forging a reading.
+    // (A process that outlives the workload and writes after our line can
+    // still replace it; only a channel outside the pod — the kubelet's stats
+    // — closes that, and the damage is a wrong metric, never execution.)
+    let held: string | undefined;
     await streamPodLog(this.apis.log, this.ns, podLabel.value, "agent", (line) => {
-      // The usage marker is ours, not the run's: fold it and keep it out of
-      // the agent's event stream and a command's stdout.
-      if (isUsageLine(line)) {
-        const usage = parseUsageLine(line);
-        if (usage) this.usageTotal = combineUsage(this.usageTotal, usage);
-        return;
+      if (held !== undefined) {
+        onLine(held);
+        held = undefined;
       }
-      onLine(line);
+      if (isUsageLine(line)) held = line;
+      else onLine(line);
     });
+    if (held !== undefined) {
+      const usage = parseUsageLine(held);
+      if (usage) this.usageTotal = combineUsage(this.usageTotal, usage);
+      else onLine(held);
+    }
     return handles;
   }
 

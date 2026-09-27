@@ -25,6 +25,19 @@ export interface ResourceUsage {
 const MARKER_TYPE = "lastlight_sandbox_usage";
 
 /**
+ * The `stop_reason` of a fan-out's `<phase>_sandbox` executions row: it carries
+ * the shared sandbox's CPU / memory and is NOT work, so the stats rollups leave
+ * it out of every execution and outcome count (its CPU still sums) and the
+ * dashboard draws no card for it.
+ */
+export const RESOURCE_USAGE_STOP_REASON = "resource_usage";
+
+/** Exactly the line {@link CGROUP_USAGE_SCRIPT} prints — nothing before, after or between. */
+const MARKER_RE = new RegExp(
+  `^\\{"type":"${MARKER_TYPE}","usage_usec":"\\d*","memory_peak":"\\d*","memory_max":"(?:\\d*|max)"\\}$`,
+);
+
+/**
  * POSIX sh. Values are quoted as JSON strings and validated by
  * {@link parseUsageLine}, so a missing file (cgroup v1, old kernel) prints an
  * empty field rather than malformed JSON.
@@ -36,9 +49,15 @@ export const CGROUP_USAGE_SCRIPT = [
   `printf '{"type":"${MARKER_TYPE}","usage_usec":"%s","memory_peak":"%s","memory_max":"%s"}\\n' "$cpu" "$peak" "$max"`,
 ].join("\n");
 
-/** True when `line` is the marker {@link CGROUP_USAGE_SCRIPT} prints. */
+/**
+ * True when `line` has exactly the marker's shape. A full-line match, not a
+ * substring: a workload printing JSON that merely CONTAINS the type literal
+ * (an agent working on this code, a command echoing test fixtures) is not
+ * mistaken for a reading. Shape alone cannot say who printed it — see
+ * `KubernetesSandbox.runPod` for the last-line rule that decides that.
+ */
 export function isUsageLine(line: string): boolean {
-  return line.startsWith("{") && line.includes(`"type":"${MARKER_TYPE}"`);
+  return MARKER_RE.test(line.trimEnd());
 }
 
 function bytesOrUndefined(v: unknown): number | undefined {
@@ -50,7 +69,7 @@ export function parseUsageLine(line: string): ResourceUsage | undefined {
   if (!isUsageLine(line)) return undefined;
   let rec: Record<string, unknown>;
   try {
-    rec = JSON.parse(line) as Record<string, unknown>;
+    rec = JSON.parse(line.trimEnd()) as Record<string, unknown>;
   } catch {
     return undefined;
   }

@@ -16,6 +16,7 @@
  * dialects.
  */
 import { describe, it, expect, beforeEach } from "vitest";
+import { RESOURCE_USAGE_STOP_REASON } from "#src/sandbox/resource-usage.js";
 import { randomUUID } from "crypto";
 import type { StateDb } from "#src/state/db.js";
 import type { MakeDb, SuiteOpts } from "../store-suite.js";
@@ -355,6 +356,23 @@ export function runExecutionsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
         expect(d.cpuSeconds).toBeCloseTo(42.5);
         // Above 2^31 on purpose: the column is bigint on Postgres.
         expect(d.peakMemoryBytes).toBe(5_000_000_000);
+      });
+
+      it("counts a fan-out's usage row in CPU but never as an execution or an outcome", async () => {
+        const day = daysAgo(1);
+        await insertExecution({ id: randomUUID(), startedAt: day.iso, success: true });
+        const usageId = randomUUID();
+        await db.executions.recordStart({ id: usageId, triggerType: "webhook", triggerId: "t1", skill: "pr-review:survey_sandbox", repo: "r", issueNumber: 1, startedAt: day.iso });
+        await db.executions.recordFinish(usageId, { success: true, stopReason: RESOURCE_USAGE_STOP_REASON, cpuSeconds: 90 });
+
+        const d = (await db.executions.dailyStats(30)).find((r) => r.date === day.key)!;
+        expect(d).toMatchObject({ executions: 1, succeeded: 1, failed: 0, cpuSeconds: 90 });
+        const [h] = (await db.executions.hourlyStats(24 * 3)).filter((r) => r.executions > 0 || r.cpuSeconds > 0);
+        expect(h).toMatchObject({ executions: 1, succeeded: 1, cpuSeconds: 90 });
+
+        const stats = await db.executions.executionStats();
+        expect(stats.total_executions).toBe(1);
+        expect(stats.by_skill["pr-review:survey_sandbox"]).toBeUndefined();
       });
 
       it("reads the resource columns back on the execution row", async () => {

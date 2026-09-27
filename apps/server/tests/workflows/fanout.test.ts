@@ -19,7 +19,7 @@ import {
   noopObservability,
 } from "lastlight-workflow-engine/test-support";
 import { FakeSandbox } from "#src/sandbox/sandbox.js";
-import type { ResourceUsage } from "#src/sandbox/resource-usage.js";
+import { RESOURCE_USAGE_STOP_REASON, type ResourceUsage } from "#src/sandbox/resource-usage.js";
 import type {
   PrePopulateSpec,
   ProvisionResult,
@@ -424,11 +424,33 @@ describe("fanout — the ledger", () => {
 
     const rows = store.executionRows(PhaseRef.sandbox("survey").format());
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ success: true, cpuSeconds: 90, peakMemoryBytes: 1_500_000_000 });
+    // Bookkeeping, not work: the stop reason is what keeps it out of every
+    // execution count and off the pipeline as a card.
+    expect(rows[0]).toMatchObject({
+      success: true,
+      stopReason: RESOURCE_USAGE_STOP_REASON,
+      cpuSeconds: 90,
+      peakMemoryBytes: 1_500_000_000,
+    });
     expect(sandbox.usageReadBeforeDispose).toBe(true);
     const branchRows = store.executionRows().filter((r) => r.dedupKey.includes("_branch_"));
     expect(branchRows.length).toBeGreaterThan(0);
     expect(branchRows.every((r) => r.cpuSeconds === undefined)).toBe(true);
+  });
+
+  it("still records the reading when the fan-out throws after its sandbox ran", async () => {
+    class ThrowOnBranch extends RecordingReporter {
+      override async onStart(phase: string): Promise<void> {
+        if (phase.includes("_branch_")) throw new Error("reporter down");
+      }
+    }
+    const store = new InMemoryStateStore(RUN_ID);
+    const sandbox = new CountingSandbox({ usage: { cpuSeconds: 12 } });
+    await expect(runFanout(fanoutPhase(), sandbox, "none", store, new ThrowOnBranch())).rejects.toThrow(
+      "reporter down",
+    );
+    expect(store.executionRows(PhaseRef.sandbox("survey").format())).toMatchObject([{ cpuSeconds: 12 }]);
+    expect(sandbox.usageReadBeforeDispose).toBe(true);
   });
 
   it("writes no `_sandbox` row when the backend can't measure", async () => {
