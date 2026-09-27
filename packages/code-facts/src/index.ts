@@ -317,3 +317,35 @@ export type { LoggerPort } from "./log.js";
 export * from "./schema.js";
 
 export { deriveVerdict, effectiveTrigger, hasEvidence, isBehaviouralClaim, severityOf, needsProbeOf, isReassurance, probeReasonOf, type ProbeReason, type SurveyEvidence, type SurveyVerdict, type Discharge, type Severity } from "./survey-verdict.js";
+
+/** The unit survey (docs/plans/unit-survey.md) — the assembler, the reply schema, the ingest. */
+export {
+  buildUnits,
+  buildUnitsOrEmpty,
+  emptyUnitsDocument,
+  functionLikes,
+  parsePatchLines,
+  DEFAULT_MAX_REQUEST_CHARS,
+  DEFAULT_MAX_UNITS,
+  MAX_NEIGHBOURS,
+  UNITS_PROMPT_VERSION,
+  UnitKindSchema,
+  UnitSchema,
+  UnitsDocumentSchema,
+} from "./units.js";
+export type { BuildUnitsOptions, BuildUnitsResult, Unit, UnitKind, UnitsDocument } from "./units.js";
+export { FAMILY_QUESTIONS, lineTag, renderUnitRequest, requestLineTags } from "./units-render.js";
+export type { RequestModel, TaggedLine } from "./units-render.js";
+export {
+  extractResponseObject,
+  UNIT_FAMILIES,
+  unitResponseJsonSchema,
+  UnitAnswerSchema,
+  UnitDefectSchema,
+  UnitEvidenceSchema,
+  UnitResponseBodySchema,
+  UnitResponseFileSchema,
+} from "./unit-response.js";
+export type { ExtractedObject, UnitAnswer, UnitDefect, UnitEvidence, UnitFamily, UnitResponseBody, UnitResponseFile } from "./unit-response.js";
+export { ingestUnits, renderIngest } from "./units-ingest.js";
+export type { IngestDocument, IngestUnitsOptions, IngestUnitsResult, UnitIngestReport, UnitIngestStatus } from "./units-ingest.js";

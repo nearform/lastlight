@@ -50,6 +50,8 @@ import {
 import { buildEntries, renderAdjudicationDossier } from "./adjudicate-render.js";
 import { classifyHypotheses, writeJevClassifyDocument, jevClassifyPath } from "./jev-classify.js";
 import { renderFamilyBlock } from "./seed-render.js";
+import { buildUnitsOrEmpty, emptyUnitsDocument } from "./units.js";
+import { ingestUnits, renderIngest } from "./units-ingest.js";
 import { loadManifest, resolveFactsBin, toolchainStamp } from "./toolchain.js";
 import { compilerInfo } from "./project.js";
 import { packageRoot } from "./toolchain.js";
@@ -92,6 +94,14 @@ Commands:
   jev-classify  #399 idea 2 — one TypeSafe System-One call PER HYPOTHESIS
               asking the category axis, written for \`dossier\` to render as an
               ADVISORY annotation. Never decides; never fails the run.
+  units       cut the PR into units (one per changed function/method, one per
+              changed module-scope region, one \`pr\` unit for obligations no
+              unit holds) and render each unit's COMPLETE model request into
+              units.json — the input to the in-process unit survey
+  units-ingest  validate each units/responses/<unitId>.json and write the
+              replies as hypotheses/<family>.jsonl rows (the shape every later
+              phase already reads), plus units/ingest.json. Every obligation
+              gets a row even when its unit failed — with unknown evidence
   toolchain   print the pinned manifest and what actually resolved
 
 \`discharge\` options (WP3 — it replaces \`test -s\`, which one line of any content
@@ -107,6 +117,34 @@ passes; it reads no quote and judges no claim):
   something is outstanding. 2 = there was nothing to grade — no
   hypotheses/<family>.jsonl at all, no readable obligations.json, or a --family
   the document does not name. ANY non-zero means "iterate again".
+
+\`units\` options (it reads the pipeline's own artifacts plus git; no --base/--head):
+  --dir <dir>         the .lastlight/pr-review directory
+                      (default: .lastlight/pr-review)
+  --repo <dir>        the checkout whose git objects are read   (default: cwd)
+  --facts <file>      the \`all\` document            (default: <dir>/facts.json)
+  --obligations <f>   the seeder's document   (default: <dir>/obligations.json).
+                      Absent ⇒ units carry no obligations, named in degraded[]
+  --out <file>        where units.json goes      (default: <dir>/units.json)
+  --max-chars <n>     per-request budget in characters (default 40000). Over it:
+                      trim neighbours, then drop them, then split the unit into
+                      overlapping passes — each step marks the unit \`truncated\`
+                      and names itself in degraded[]
+  --max-units <n>     units per document, i.e. model calls (default 150). Past
+                      it the lowest-priority units are dropped — named in
+                      degraded[], their obligations moved to the \`pr\` unit
+  --never-fail        exit 0 whatever happened; the document says what did
+  Exit 0 = full, or nothing to survey (\`coverage: "none"\`, said why). 3 =
+  degraded. 2 = an input is missing — a \`coverage: "none"\` document is still
+  written, naming it.
+
+\`units-ingest\` options:
+  --dir <dir>         the .lastlight/pr-review directory
+                      (default: .lastlight/pr-review)
+  --never-fail        exit 0 whatever happened; units/ingest.json says what did
+  Exit 0 = every unit answered and every family's \`discharge\` gate passes on
+  the ingested rows. 3 = something was unanswered (its rows still written). 2 =
+  units.json unreadable (rows still written for every obligation).
 
 \`probes\` options (a near-existence gate, not a validator — it reads a
 transcript's FIRST LINE and nothing else):
@@ -474,6 +512,56 @@ export function runCli(
     return dischargeExitCode(result);
   }
 
+  if (command === "units") {
+    // A deterministic phase like `facts` and `seed`, so the same §D12 contract:
+    // a missing input still writes a document that SAYS so, and `--never-fail`
+    // turns every outcome into exit 0.
+    const neverFail = flags["never-fail"] === true;
+    const dir = stringFlag(flags.dir) ?? ".lastlight/pr-review";
+    const out = stringFlag(flags.out) ?? join(dir, "units.json");
+    try {
+      const result = buildUnitsOrEmpty({
+        dir,
+        repo: stringFlag(flags.repo) ?? process.cwd(),
+        factsPath: stringFlag(flags.facts),
+        obligationsPath: stringFlag(flags.obligations),
+        maxRequestChars: numberFlag(flags["max-chars"]),
+        maxUnits: numberFlag(flags["max-units"]),
+        log,
+      });
+      writeDocument(out, result.document);
+      const doc = result.document;
+      io.out(
+        `units: ${doc.units.length} unit(s), coverage ${doc.coverage}, ${doc.units.filter((u) => u.truncated).length} truncated → ${out}` +
+          doc.degraded.map((d) => `\n  degraded: ${d.reason}`).join(""),
+      );
+      return neverFail ? EXIT_OK : result.exitCode;
+    } catch (err) {
+      if (!neverFail) throw err;
+      const reason = `units failed: ${err instanceof Error ? err.message : String(err)}`;
+      try {
+        writeDocument(out, emptyUnitsDocument(reason));
+      } catch {
+        // Nothing left to write with; the log line is the record.
+      }
+      io.err(reason);
+      return EXIT_OK;
+    }
+  }
+
+  if (command === "units-ingest") {
+    const neverFail = flags["never-fail"] === true;
+    try {
+      const result = ingestUnits({ dir: stringFlag(flags.dir) ?? ".lastlight/pr-review", log });
+      io.out(renderIngest(result.document));
+      return neverFail ? EXIT_OK : result.exitCode;
+    } catch (err) {
+      if (!neverFail) throw err;
+      io.err(`units-ingest failed: ${err instanceof Error ? err.message : String(err)}`);
+      return EXIT_OK;
+    }
+  }
+
   if (command === "probes") {
     // The `falsify` loop's `until_bash`. NOT wrapped by `--never-fail`: its
     // non-zero exit is the loop condition, not a failure — the phase around it
@@ -732,7 +820,7 @@ export function runCli(
 
   if (!EXTRACTORS.includes(command as ExtractorName)) {
     io.err(
-      `unknown command "${command}". One of: ${EXTRACTORS.join(", ")}, seed, prepare, discharge, probes, findings, toolchain`,
+      `unknown command "${command}". One of: ${EXTRACTORS.join(", ")}, seed, prepare, discharge, probes, findings, units, units-ingest, toolchain`,
     );
     return EXIT_UNAVAILABLE;
   }

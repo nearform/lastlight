@@ -446,6 +446,8 @@ parsed one of them. Measured on the real corpus — keycloak `37429` reads
 | `discharge` | each `survey` branch's exit gate — every obligation the family owns carries a `QUOTE` / `ABSENT` / `PARTIAL` / `PROBE` discharge in `hypotheses/<family>.jsonl`. Degrades to the `test -s` floor on an unreadable `obligations.json` **or** on `contract: "minimal"`. See below |
 | `probes` | the `falsify` loop's exit gate — every hypothesis that needed a probe has a verdict, and every claim of evidence (`reproduced` / `corroborated` / `refuted`) has a transcript. Since issue #405 it also refuses `reproduced` on a **behavioural** claim (`isBehaviouralClaim` — a stated consequence live at head, derived from the evidence record) whose every command only reads code (`isReadOnlyCommand`, quote-aware) — that is `corroborated` — and reports transcripts borrowed from another hypothesis (`borrowedFrom`) without failing on them. `probeStrength()` is the one reader of what a verdict counts for |
 | `findings` | the `adjudicate` loop's exit gate — the **conservation check**. See below. `--repair` (the `reconcile` phase) also stamps each hypothesis-derived finding's **derived severity** (`finding-severity.ts`: evidence record + probe strength; the model's value kept as `declaredSeverity`) plus its **`rankEvidence`** (crosses a boundary / strongest probe / merged-hypothesis count, over non-refuted constituents), which the poster breaks severity ties on — the one derivation the evals read too (`buildSeverityIndex`) |
+| `units` | the unit survey's INPUT — one unit per changed function/method, one per changed module-scope region, one `pr` unit for obligations no unit holds, each carrying the COMPLETE model request. See below |
+| `units-ingest` | the unit survey's replies → `hypotheses/<family>.jsonl` rows of the existing shape, plus `units/ingest.json`. See below |
 | `toolchain` | the manifest and what actually resolved |
 
 Three fixes must not regress. Two are carried forward from v3 and live in
@@ -1098,6 +1100,84 @@ validate a quote, or check anything about `summary` / `event` / `verdict`. Quote
 *resolution* is checked upstream; quote *semantics* still is not. v3's five-line
 gate earned the investigation's only gold match and v2's full validator is what
 made it expensive.
+
+### `units` / `units-ingest` — the unit survey's deterministic halves
+
+`src/units.ts`, `src/units-render.ts`, `src/unit-response.ts`,
+`src/units-ingest.ts`; the design and the file contract are
+[`docs/plans/unit-survey.md`](../../docs/plans/unit-survey.md). Selected by
+`review.analysis.surveyEngine: units` — **unmeasured, not a default**. The
+pipeline is `units` (bash) → `survey-units` (core, one `completeSimple` call per
+unit) → `units-ingest` (bash), replacing the five-branch agent `survey` fan-out.
+Everything here is deterministic and testable without a model; **core only does
+the model I/O**, and does not depend on this package for it.
+
+```bash
+lastlight-facts units --dir .lastlight/pr-review --repo .        # → units.json
+lastlight-facts units-ingest --dir .lastlight/pr-review          # → hypotheses/*.jsonl, units/ingest.json
+```
+
+- **The text and the changed lines come from git, never the working tree.** One
+  `git diff` over the merge-base range (the same private `diffRange` as
+  everything else) gives changed and removed lines; every shown line is `git
+  show <headSha>:<path>`. `facts.json` supplies the shas and ENRICHMENT only —
+  callers (reference sites, with the calling line's text) and callees — so a
+  tier-3 envelope still gets a unit for every changed line, just no neighbours.
+- **A unit is the OUTERMOST function-like declaration** holding a changed or
+  removal line (functions, methods, `const f = () => …`, found with ast-grep on
+  the head blob); a class is not a unit, its methods are. Changed lines no
+  symbol holds cluster into `module` regions. Lockfiles, binaries, minified
+  bundles and files over `MAX_SCANNED_FILE_BYTES` are listed in `skipped[]`
+  (the last one also in `degraded[]`, since its lines are then in no unit).
+- **Obligations attach by anchor**: the unit whose extent holds the symbol's
+  `declaredAt` (a contract delta resolves to its symbol first), else its
+  `introducedAt` line, else the first unit overlapping the symbol's changed
+  hunks (a class obligation lands on the changed method), else the `pr` unit —
+  which shows an excerpt at each anchor. Every obligation is in exactly one
+  unit, whatever the cascade below does.
+- **Line tags are the contract.** `L0042+|` changed, `L0042 |` unchanged, `-|`
+  removed (untagged — it does not exist at head), each block under `FILE
+  <path>`. The reply's `line` must be a tag; `requestLineTags` reads them back
+  OUT of the request, so the ingest judges a reply against exactly what the
+  model saw, and a row's quote text is the shown line — it always resolves.
+- **The shrink cascade** holds each request to `--max-chars` (40 000): trim
+  callers/callees/imports/candidates, then drop them, then split a long unit
+  into overlapping passes (each obligation to the pass holding its anchor).
+  Every step marks the unit `truncated` and names itself in `degraded[]`.
+  `--max-units` (150) is a spend bound: past it the lowest-priority units are
+  dropped by name and their obligations move to the `pr` unit.
+- **Deterministic**: units ordered by file then line, `u-NNN` in that order,
+  `requestSha256` = sha256 of the request, and no sha or timestamp inside a
+  request, so an unchanged unit renders byte-identically across pushes.
+  `UNITS_PROMPT_VERSION` is bumped whenever the rendering changes.
+- **The reply carries no `severity`, no `needsProbe`, no discharge code** —
+  `UnitResponseBodySchema` is `{unitId, answers[], defects[]}`, each entry
+  `{obligation?, family, claim, file?, line, evidence}` with the survey-pass
+  evidence record typed strictly. The row's `discharge` is
+  `deriveVerdict(evidence).discharge`.
+- **Nothing is silently dropped.** A missing, `ok: false`, stale (its
+  `requestSha256` is not the unit's) or unparseable reply, an invalid entry,
+  or an obligation the reply skipped each still yields a row: `discharge:
+  "PROBE"`, the claim saying the survey could not answer it (keeping whatever
+  the model did write), and evidence with `control_site: "unknown"` — a value
+  no model is offered — which derives to a probe at `Minor`. An invalid line
+  keeps the row and loses only its location. A measured family with no
+  obligation gets one placeholder row saying what happened (no hypothesis, or
+  could not look), so its gate never reads "surveyed nothing". Then every
+  family's `discharge` gate runs over the ingested set and lands in
+  `units/ingest.json`.
+- **The `spec` gap is named on every run.** Spec obligations are built
+  harness-side (`review-spec.ts`) and never written to the workspace, so no
+  unit carries one and the `spec` question is asked only in its
+  falsifiable-documentation half. `degraded[]` says so — which is also why
+  `units` exits 3, not 0, on an ordinary run. Closing it needs core to write
+  the spec obligations to disk.
+- Exit codes: `units` 0 full or nothing to survey (`coverage: "none"`, said
+  why), 3 degraded, 2 missing input (a `coverage: "none"` document is still
+  written); `units-ingest` 0 all answered and every gate passes, 3 otherwise
+  (rows still written), 2 unreadable `units.json` (rows still written for every
+  obligation). `--never-fail` flattens both to 0, like every deterministic
+  phase.
 
 ## `toolchain.json` — the single source of truth
 
