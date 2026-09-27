@@ -8,14 +8,28 @@
  * surfaces"). Adding a language is an import and an array entry, in a diff a
  * reviewer can read.
  *
- * Today the array holds exactly the grammars `@ast-grep/napi` already bundles,
- * so it costs nothing. Whether it ever holds more is the question
- * `scripts/name-match-gate.ts` exists to answer.
+ * The TS/JS entries are the grammars `@ast-grep/napi` bundles. Python, Go and
+ * Java are DYNAMIC grammars (`@ast-grep/lang-*`, loaded through
+ * `registerDynamicLanguage` — see `dynamic.ts`): listing them here costs
+ * nothing, because nothing is loaded until the first parse that needs one, and
+ * a grammar that fails to load is reported per language rather than taking the
+ * run down. They are tier 2 only — name matching, never type-aware.
  */
 import type { LanguageDescriptor } from "./descriptor.js";
+import { GO_DESCRIPTOR } from "./go.js";
+import { JAVA_DESCRIPTOR } from "./java.js";
+import { PYTHON_DESCRIPTOR } from "./python.js";
 import { TSJS_DESCRIPTORS } from "./tsjs.js";
 
-export const LANGUAGE_DESCRIPTORS: LanguageDescriptor[] = [...TSJS_DESCRIPTORS];
+export const LANGUAGE_DESCRIPTORS: LanguageDescriptor[] = [
+  ...TSJS_DESCRIPTORS,
+  PYTHON_DESCRIPTOR,
+  GO_DESCRIPTOR,
+  JAVA_DESCRIPTOR,
+];
+
+/** The name-matching families the TS/JS grammars share — see `LanguageDescriptor.family`. */
+export const TSJS_FAMILY = "tsjs";
 
 /**
  * Extension → descriptor, LONGEST EXTENSION FIRST.

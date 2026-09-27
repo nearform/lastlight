@@ -62,12 +62,13 @@ import { isIgnoredPath, looksMinified, MAX_SCANNED_FILE_BYTES } from "./project.
 export const DEFAULT_MAX_SCANNED_FILES = 6000;
 import {
   asSyntaxNode,
+  grammarAvailable,
   interestingKinds,
   literalKindOf,
   supportedKinds,
 } from "./langs/descriptor.js";
-import type { LanguageDescriptor, SyntaxNode } from "./langs/descriptor.js";
-import { descriptorForPath } from "./langs/register.js";
+import type { DeclarationRule, LanguageDescriptor, SyntaxNode } from "./langs/descriptor.js";
+import { descriptorById, descriptorForPath, TSJS_FAMILY } from "./langs/register.js";
 import type { DegradedEntry, FactsPayload, SymbolFact } from "./schema.js";
 import { indexHunks, type ChangedFileIndex } from "./facts.js";
 import type { LoggerPort } from "./log.js";
@@ -111,6 +112,8 @@ export interface DeclSite {
   valueText: string | null;
   /** Callee texts inside the declaration. Empty unless `callees` was asked for. */
   callees: string[];
+  /** The descriptor id that parsed it — `typescript`, `python`, `go`, … */
+  language: string;
 }
 
 /** A site that MENTIONS a name. */
@@ -120,6 +123,8 @@ export interface RefSite {
   /** The nearest enclosing named declaration — "who mentions it". */
   inSymbol: string | null;
   isTest: boolean;
+  /** The descriptor id that parsed it. Name matching never crosses a `family`. */
+  language: string;
 }
 
 export interface LitSite {
@@ -134,7 +139,18 @@ export interface LitSite {
  * `VariableDeclaration`). A field that means something slightly different
  * depending on the tier is a field a consumer has to special-case.
  */
-const ENCLOSING_KINDS = new Set(["function", "method", "class", "interface", "variable"]);
+const ENCLOSING_KINDS = new Set([
+  "function",
+  "method",
+  "class",
+  "interface",
+  "variable",
+  // Tier 1 never emits these (TS has no `constructor` symbol kind and no
+  // structs), so adding them changes nothing there; Java constructors and Go
+  // structs are where a reference sits in those languages.
+  "constructor",
+  "struct",
+]);
 
 // ── the per-file scan ────────────────────────────────────────────────────────
 
@@ -181,6 +197,12 @@ export function scanSource(
   const constantRules = new Map(descriptor.constantDeclarations.map((rule) => [rule.kind, rule]));
   const referenceKinds = new Set(descriptor.referenceKinds);
   const isTest = descriptor.isTestPath(path);
+  const language = descriptor.id;
+
+  // A dynamic grammar that did not load parses nothing. `false` is the
+  // "count it, do not be silent about it" answer; the grammar's own reason is
+  // reported by the caller (`grammarFailures`).
+  if (grammarAvailable(descriptor) !== null) return false;
 
   let root;
   try {
@@ -237,6 +259,10 @@ export function scanSource(
         continue;
       }
       if (declarationRule.topLevelOnly && stack.length > 0) continue;
+      if (declarationRule.parentKinds) {
+        const parentKind = node.parent()?.kind();
+        if (parentKind === undefined || !declarationRule.parentKinds.includes(parentKind)) continue;
+      }
       const localName = nameNode.text();
       nameNodeOffsets.add(nameNode.range().start.index);
 
@@ -251,6 +277,27 @@ export function scanSource(
           }
         }
       }
+      let symbolKind = declarationRule.symbolKind;
+      // The language-shaped refinements. Every one is absent on the TS/JS
+      // rules, so none of this runs for them.
+      const top = stack[stack.length - 1];
+      const member = top
+        ? declarationRule.memberOf?.find((entry) => entry.kinds.includes(top.rule.kind))
+        : undefined;
+      if (member && top) {
+        symbolKind = member.symbolKind;
+        if (qualified === localName) qualified = `${top.site.localName}.${localName}`;
+      }
+      if (declarationRule.receiver) {
+        const holder = node.field(declarationRule.receiver.field);
+        const type = holder ? firstOfKind(holder, declarationRule.receiver.kind) : null;
+        if (type) qualified = `${type.text()}.${localName}`;
+      }
+      if (declarationRule.refineKind) {
+        const refined = node.field(declarationRule.refineKind.field)?.kind();
+        if (refined !== undefined) symbolKind = declarationRule.refineKind.map[refined] ?? symbolKind;
+      }
+      const startLine = extendedStartLine(node, declarationRule) ?? range.start.line + 1;
 
       const constantRule = constantRules.get(kind);
       let literal: { value: string; kind: ValueKind } | null = null;
@@ -271,13 +318,14 @@ export function scanSource(
         localName,
         path,
         line: nameNode.range().start.line + 1,
-        startLine: range.start.line + 1,
+        startLine,
         endLine: range.end.line + 1,
-        kind: declarationRule.symbolKind,
+        kind: symbolKind,
         exported: descriptor.isExported(localName, node),
         literal,
         valueText,
         callees: [],
+        language,
       };
       stack.push({ rule: declarationRule, site, endIndex: range.end.index, keep });
       if (keep) sink.declaration?.(site);
@@ -285,7 +333,9 @@ export function scanSource(
     }
 
     if (sink.callees && kind === descriptor.callKind) {
-      const callee = node.field("function")?.text();
+      const callee = descriptor.calleeOf
+        ? descriptor.calleeOf(node)
+        : node.field("function")?.text();
       // `a.b.c(...)` → `a.b.c`; anything with a newline or a paren is a computed
       // callee and naming it would be noise. Identical to tier 1's filter.
       if (callee && callee.length <= 80 && !/[\n()]/.test(callee)) {
@@ -311,7 +361,7 @@ export function scanSource(
           break;
         }
       }
-      sink.reference(name, { path, line: range.start.line + 1, inSymbol, isTest: isTest });
+      sink.reference(name, { path, line: range.start.line + 1, inSymbol, isTest, language });
       continue;
     }
 
@@ -325,6 +375,24 @@ export function scanSource(
     });
   }
   return true;
+}
+
+/** The first node of `kind` under `node`, depth-first — Go's receiver type. */
+function firstOfKind(node: SyntaxNode, kind: string): SyntaxNode | null {
+  if (node.kind() === kind) return node;
+  for (const child of node.children()) {
+    const found = firstOfKind(child, kind);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** 1-based start of the `extendToParent` wrapper (a Python decorator block), or `null`. */
+function extendedStartLine(node: SyntaxNode, rule: DeclarationRule): number | null {
+  if (!rule.extendToParent) return null;
+  const parent = node.parent();
+  if (parent === null || !rule.extendToParent.includes(parent.kind())) return null;
+  return parent.range().start.line + 1;
 }
 
 /** An initialiser longer than this is not a literal — see `DeclSite.valueText`. */
@@ -407,7 +475,9 @@ const SPECIFIER_KINDS = [
  */
 export function scanImportSpecifiers(path: string, source: string): string[] | null {
   const descriptor = descriptorForPath(path);
-  if (descriptor === null) return null;
+  // TS/JS only, by construction — see `SPECIFIER_KINDS`. A Python
+  // `import_statement` or a Go `call_expression` is not a module specifier.
+  if (descriptor === null || descriptor.family !== TSJS_FAMILY) return null;
 
   let root: SyntaxNode;
   try {
@@ -459,12 +529,63 @@ export function scanImportSpecifiers(path: string, source: string): string[] | n
  * claims, that the residual denylist does not reject.
  *
  * Deliberately expressed through `descriptorForPath` rather than through the
- * hard-coded TS/JS extension list — it is the same nine extensions today, and
- * it is the seam a new grammar arrives at.
+ * hard-coded TS/JS extension list — it is the seam a new grammar arrives at,
+ * and Python, Go and Java did. `isScannablePath` (the TS/JS list) is now the
+ * narrower of the two; `constants` scopes itself with `families` instead.
  */
 export function isIndexablePath(path: string): boolean {
   if (path.endsWith("/")) return !isIgnoredPath(path);
   return descriptorForPath(path) !== null && !isIgnoredPath(path);
+}
+
+/** The name-matching family of a descriptor id — see `LanguageDescriptor.family`. */
+export function familyOf(language: string): string {
+  return descriptorById(language)?.family ?? language;
+}
+
+/** `isIndexablePath`, narrowed to the given families. Absent = every family. */
+function indexableIn(families: ReadonlySet<string> | undefined): (path: string) => boolean {
+  if (families === undefined) return isIndexablePath;
+  return (path) => {
+    if (!isIndexablePath(path)) return false;
+    if (path.endsWith("/")) return true;
+    const descriptor = descriptorForPath(path);
+    return descriptor !== null && families.has(descriptor.family);
+  };
+}
+
+/**
+ * A dynamic grammar that failed to load, and how many files it cost — the
+ * raw material of the `degraded[]` entry that names it.
+ */
+export interface GrammarFailure {
+  language: string;
+  reason: string;
+  files: number;
+}
+
+function noteGrammarFailure(
+  failures: Map<string, GrammarFailure>,
+  descriptor: LanguageDescriptor,
+): boolean {
+  const reason = grammarAvailable(descriptor);
+  if (reason === null) return false;
+  const entry = failures.get(descriptor.id) ?? { language: descriptor.id, reason, files: 0 };
+  entry.files++;
+  failures.set(descriptor.id, entry);
+  return true;
+}
+
+/** One `degraded[]` entry per grammar that failed — never folded into a generic count. */
+export function grammarDegraded(
+  extractor: string,
+  failures: Iterable<GrammarFailure>,
+  what: string,
+): DegradedEntry[] {
+  return [...failures].map((failure) => ({
+    extractor,
+    reason: `the ${failure.language} grammar could not be loaded — ${failure.reason}. ${failure.files} ${what} file(s) in ${failure.language} were NOT parsed, so nothing about them is known: an empty result for them means UNKNOWN, not clean`,
+  }));
 }
 
 export interface SyntacticIndex {
@@ -486,6 +607,12 @@ export interface SyntacticIndex {
   filesUnread: number;
   /** Files a parser refused. A hole, and never silent. */
   filesUnparsed: number;
+  /**
+   * The subset of `filesUnparsed` whose GRAMMAR never loaded, by language —
+   * named separately because "the parser choked on a file" and "this whole
+   * language was unreadable" are different holes.
+   */
+  grammarFailures: Map<string, GrammarFailure>;
   source: ListingSource;
   sourceReason: string | null;
   /** Files scanned per language id — the per-language census. */
@@ -530,6 +657,18 @@ export interface BuildIndexOptions {
   maxSitesPerName?: number;
   /** Populate `scannedPaths`. Measurement only — see the field. */
   recordScannedPaths?: boolean;
+  /**
+   * Only list files whose descriptor is in one of these FAMILIES. Absent =
+   * every registered language.
+   *
+   * Not a micro-optimisation: the file ceiling (`maxFiles`) is shared by every
+   * file listed, so a TS name index that also listed a repo's Python files would
+   * truncate EARLIER than it did before Python had a grammar — a change to
+   * TS/JS output smuggled in by adding a language. `constants` passes
+   * `{tsjs}`; tier-2 `facts` passes the families its changed declarations are
+   * in.
+   */
+  families?: ReadonlySet<string>;
   log?: LoggerPort;
 }
 
@@ -560,6 +699,7 @@ export function buildSyntacticIndex(options: BuildIndexOptions): SyntacticIndex 
   const literals = new Map<string, LitSite[]>();
   const truncatedNames = new Set<string>();
   const byLanguage = new Map<string, number>();
+  const grammarFailures = new Map<string, GrammarFailure>();
   const scannedPaths = options.recordScannedPaths === true ? new Set<string>() : null;
   // Pre-seeded, so "the scan ran and this value occurs nowhere" is an empty
   // array rather than a missing key — the founding distinction of this package.
@@ -583,6 +723,7 @@ export function buildSyntacticIndex(options: BuildIndexOptions): SyntacticIndex 
     filesSkipped: 0,
     filesUnread: 0,
     filesUnparsed: 0,
+    grammarFailures,
     source: "tree",
     sourceReason: null,
     byLanguage,
@@ -597,7 +738,7 @@ export function buildSyntacticIndex(options: BuildIndexOptions): SyntacticIndex 
   const listing = listFiles({
     dir: options.repo,
     ref: options.ref,
-    accept: isIndexablePath,
+    accept: indexableIn(options.families),
     // `git ls-tree -l` hands us the size, so a 4 MB bundle is rejected without
     // being read at all — let alone charged against a slot real source needs.
     maxBytes: MAX_SCANNED_FILE_BYTES,
@@ -660,7 +801,10 @@ export function buildSyntacticIndex(options: BuildIndexOptions): SyntacticIndex 
     if (!indexNames && wantedValues.length > 0 && !wantedValues.some((v) => source.includes(v))) {
       return;
     }
-    if (!scanSource(descriptor, file.path, source, sink)) unparsed++;
+    if (!scanSource(descriptor, file.path, source, sink)) {
+      unparsed++;
+      noteGrammarFailure(grammarFailures, descriptor);
+    }
   });
 
   log.debug("code-facts syntactic index built", {
@@ -685,6 +829,7 @@ export function buildSyntacticIndex(options: BuildIndexOptions): SyntacticIndex 
     filesSkipped: skipped,
     filesUnread: unread,
     filesUnparsed: unparsed,
+    grammarFailures,
     source: listing.source,
     sourceReason: listing.reason,
     byLanguage,
@@ -692,9 +837,18 @@ export function buildSyntacticIndex(options: BuildIndexOptions): SyntacticIndex 
   };
 }
 
-/** `nameAmbiguity` — distinct declaration sites in the repo binding this name. */
-export function nameAmbiguityOf(index: SyntacticIndex, name: string): number {
-  return index.declarations.get(name)?.length ?? 0;
+/**
+ * `nameAmbiguity` — distinct declaration sites in the repo binding this name.
+ *
+ * With `family`, only sites in that name-matching family count: a Go `Run` is
+ * not a second binding of a Python `run`'s spelling in any sense a reviewer
+ * cares about. Every TS/JS site is in one family, so a TS-only index answers
+ * the same either way.
+ */
+export function nameAmbiguityOf(index: SyntacticIndex, name: string, family?: string): number {
+  const sites = index.declarations.get(name) ?? [];
+  if (family === undefined) return sites.length;
+  return sites.filter((site) => familyOf(site.language) === family).length;
 }
 
 // ── the changed files ────────────────────────────────────────────────────────
@@ -705,12 +859,16 @@ export interface ScanChangedOptions {
   headSha: string | null;
   paths: string[];
   callees?: boolean;
+  /** Only files in these name-matching families. Absent = every language. */
+  families?: ReadonlySet<string>;
 }
 
 export interface ChangedScan {
   declarations: DeclSite[];
   /** Paths a parser produced a tree for — `languages[].parsedFiles`, tier 2. */
   parsed: string[];
+  /** Languages whose grammar never loaded, with how many changed files it cost. */
+  grammarFailures: Map<string, GrammarFailure>;
 }
 
 /**
@@ -726,9 +884,14 @@ export interface ChangedScan {
 export function scanChangedFiles(options: ScanChangedOptions): ChangedScan {
   const declarations: DeclSite[] = [];
   const parsed: string[] = [];
+  const grammarFailures = new Map<string, GrammarFailure>();
   for (const path of options.paths) {
     const descriptor = descriptorForPath(path);
     if (!descriptor) continue;
+    if (options.families && !options.families.has(descriptor.family)) continue;
+    // Counted before the read: a grammar that is not there costs this file
+    // whether or not it could have been read.
+    if (noteGrammarFailure(grammarFailures, descriptor)) continue;
     let source: string | null = options.headSha
       ? showFile(options.repo, options.headSha, path)
       : null;
@@ -746,13 +909,78 @@ export function scanChangedFiles(options: ScanChangedOptions): ChangedScan {
     });
     if (ok) parsed.push(path);
   }
-  return { declarations, parsed };
+  return { declarations, parsed, grammarFailures };
+}
+
+/**
+ * Every named declaration in one source, or `null` when no registered language
+ * claims the path, its grammar did not load, or the parser refused it.
+ *
+ * The per-file entry point for a consumer that wants a file's symbols without
+ * the repo-wide index — the unit survey's "which function holds this changed
+ * line" question, in every language a descriptor exists for.
+ */
+export function scanDeclarations(path: string, source: string): DeclSite[] | null {
+  const descriptor = descriptorForPath(path);
+  if (descriptor === null) return null;
+  const out: DeclSite[] = [];
+  const ok = scanSource(descriptor, path, source, { declaration: (site) => out.push(site) });
+  return ok ? out : null;
+}
+
+/**
+ * The 1-based lines a file's import statements occupy, through the
+ * descriptor's `importKinds`; `null` when the language has none declared, its
+ * grammar did not load, or the parse failed — the caller's cue to fall back to
+ * a line pattern.
+ */
+export function scanImportLines(path: string, source: string): number[] | null {
+  const descriptor = descriptorForPath(path);
+  if (descriptor === null || !descriptor.importKinds || descriptor.importKinds.length === 0) return null;
+  if (grammarAvailable(descriptor) !== null) return null;
+  const kinds = supportedKinds(descriptor, descriptor.importKinds).kinds;
+  if (kinds.length === 0) return null;
+  try {
+    const root = parse(descriptor.astGrepLang, source).root() as unknown as {
+      findAll(rule: unknown): unknown[];
+    };
+    const lines = new Set<number>();
+    for (const found of root.findAll({ rule: { any: kinds.map((kind) => ({ kind })) } })) {
+      const range = (found as SyntaxNode).range();
+      for (let line = range.start.line + 1; line <= range.end.line + 1; line++) lines.add(line);
+    }
+    return [...lines].sort((a, b) => a - b);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Did this run obtain a syntax tree for `path` — read off DISK, like
+ * `languageBreakdown`'s tier-2 TS/JS probe? `false` for an unclaimed path, a
+ * grammar that did not load, an unreadable file or a refused parse.
+ */
+export function parsesOnDisk(repo: string, path: string): boolean {
+  const descriptor = descriptorForPath(path);
+  if (descriptor === null || grammarAvailable(descriptor) !== null) return false;
+  try {
+    parse(descriptor.astGrepLang, readFileSync(join(repo, path), "utf8")).root();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ── `facts`, by name ─────────────────────────────────────────────────────────
 
 export interface ExtractFactsByNameOptions {
   repo: string;
+  /**
+   * Only these changed paths get symbols — the rest are still listed in
+   * `files[]`. Tier 1 uses it to add the non-TS languages of a mixed diff
+   * beside the type-aware TS answer. Absent = every changed path.
+   */
+  only?: ReadonlySet<string>;
   /** The commit the whole index resolves against. */
   headSha: string | null;
   hunks: FileHunks[];
@@ -794,13 +1022,16 @@ export function extractFactsByName(
   const hunkIndex = indexHunks(options.hunks);
   const degraded: DegradedEntry[] = [];
 
-  const live = options.changed.filter((change) => change.status !== "deleted");
+  const live = options.changed.filter(
+    (change) => change.status !== "deleted" && (options.only === undefined || options.only.has(change.path)),
+  );
   const changedScan = scanChangedFiles({
     repo: options.repo,
     headSha: options.headSha,
     paths: live.map((change) => change.path),
     callees: true,
   });
+  degraded.push(...grammarDegraded("facts", changedScan.grammarFailures.values(), "changed"));
 
   // Only the declarations the diff actually TOUCHED get an obligation — the
   // same rule tier 1 applies through `hunksTouching`.
@@ -810,12 +1041,17 @@ export function extractFactsByName(
   });
 
   const names = new Set(touched.map((site) => site.localName));
+  // Only the families the diff declared something in: a TS/JS-only diff lists
+  // exactly the files it listed before any other grammar existed, which is
+  // what keeps its references — and its truncation point — byte-identical.
+  const families = new Set(touched.map((site) => familyOf(site.language)));
   const index = buildSyntacticIndex({
     repo: options.repo,
     ref: options.headSha,
     names,
     maxFiles: options.maxFiles,
     maxSitesPerName: options.maxSitesPerName,
+    families,
     log: options.log,
   });
 
@@ -831,6 +1067,17 @@ export function extractFactsByName(
       reason: `the name index stopped at the ${options.maxFiles ?? DEFAULT_MAX_SCANNED_FILES}-file ceiling (--max-files): ${index.filesEligible} file(s) were eligible and ${index.filesScanned} were read, so every referenceCount below is a LOWER BOUND over a prefix of the repository`,
     });
   }
+  // A grammar failure among the REPOSITORY's files that the changed-file scan
+  // did not already name (it cannot have: those languages declared nothing).
+  degraded.push(
+    ...grammarDegraded(
+      "facts",
+      [...index.grammarFailures.values()].filter(
+        (failure) => !changedScan.grammarFailures.has(failure.language),
+      ),
+      "repository",
+    ),
+  );
   if (index.filesUnread + index.filesUnparsed > 0) {
     degraded.push({
       extractor: "facts",
@@ -844,6 +1091,7 @@ export function extractFactsByName(
   const files: FactsPayload["files"] = [];
   const parsed = new Set(changedScan.parsed);
   for (const change of options.changed) {
+    if (options.only !== undefined && !options.only.has(change.path)) continue;
     const entry = hunkIndex.get(change.path);
     files.push({
       path: change.path,
@@ -858,7 +1106,11 @@ export function extractFactsByName(
   for (const site of touched) {
     const entry = hunkIndex.get(site.path);
     if (!entry) continue;
-    const sites = index.references.get(site.localName) ?? [];
+    const family = familyOf(site.language);
+    // Name matching never crosses a family — see `LanguageDescriptor.family`.
+    const sites = (index.references.get(site.localName) ?? []).filter(
+      (reference) => familyOf(reference.language) === family,
+    );
     const references: SymbolFact["references"] = [];
     let referencesInDiff = 0;
     const testFiles = new Set<string>();
@@ -909,7 +1161,7 @@ export function extractFactsByName(
       referenceCount,
       referencesInDiff,
       resolution: "name-match",
-      nameAmbiguity: nameAmbiguityOf(index, site.localName),
+      nameAmbiguity: nameAmbiguityOf(index, site.localName, family),
     });
   }
 

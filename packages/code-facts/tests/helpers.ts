@@ -353,20 +353,24 @@ export function makeDepsFixture(): Fixture {
   );
 }
 
-/** No TypeScript or JavaScript at all — tier 3. */
+/**
+ * No language ANY engine reads — tier 3. Lua on purpose: Python, Go and Java
+ * have syntactic descriptors now (tier 2), so this fixture has to be written in
+ * something no `LanguageDescriptor` claims to keep meaning "tier 3".
+ */
 export function makeNonTsFixture(): Fixture {
   return makeFixture(
     "nonts",
     {
       message: "base",
       files: {
-        "main.py": `def add(a, b):\n    return a + b\n`,
+        "main.lua": `local function add(a, b)\n  return a + b\nend\n`,
         "README.md": "# fixture\n",
       },
     },
     {
       message: "head",
-      files: { "main.py": `def add(a, b):\n    return a - b\n` },
+      files: { "main.lua": `local function add(a, b)\n  return a - b\nend\n` },
     },
   );
 }

@@ -19,6 +19,7 @@ import {
   makeConstantFixture,
   makeGoFixture,
   makeJavaFixture,
+  makeNonTsFixture,
   makeRubyFixture,
   type Fixture,
 } from "./helpers.js";
@@ -37,31 +38,53 @@ function all(fixture: Fixture): AllDocument {
 }
 
 describe("the envelope names the engine and every language in the diff", () => {
-  it("a Java PR says `engine: none` and NAMES java with zero parsed files", () => {
+  it("a Java PR is tier 2 on ast-grep, and the manifest it cannot read still gets its own row", () => {
     const fixture = makeJavaFixture();
     try {
       const document = all(fixture);
-      expect(document.tier).toBe(3);
-      expect(document.engine).toBe("none");
+      expect(document.tier).toBe(2);
+      expect(document.engine).toBe("ast-grep");
       const java = document.languages.find((l) => l.id === "java");
-      expect(java, "a recognised-but-unanalysed language must APPEAR, not vanish").toBeDefined();
+      expect(java, "a recognised language must APPEAR, not vanish").toBeDefined();
       expect(java?.changedFiles).toBeGreaterThan(0);
-      expect(java?.parsedFiles).toBe(0);
-      expect(java?.engine).toBe("none");
+      expect(java?.parsedFiles).toBe(java?.changedFiles);
+      expect(java?.engine).toBe("ast-grep");
       // The XML manifest is a changed file too, and it gets its own row rather
-      // than being folded into "other".
-      expect(document.languages.map((l) => l.id)).toContain("xml");
+      // than being folded into "other" — no engine reads it.
+      expect(document.languages.find((l) => l.id === "xml")).toMatchObject({
+        parsedFiles: 0,
+        engine: "none",
+      });
+      // Name-matched, never type-aware.
+      const symbols = document.extractors.facts?.symbols ?? [];
+      expect(symbols.length).toBeGreaterThan(0);
+      expect(symbols.every((s) => s.resolution === "name-match")).toBe(true);
     } finally {
       fixture.cleanup();
     }
   });
 
-  it("a Go PR is the shape the brief names", () => {
+  it("a Go PR is tier 2 on ast-grep with parsedFiles equal to changedFiles", () => {
     const fixture = makeGoFixture();
     try {
       const document = all(fixture);
+      expect(document.engine).toBe("ast-grep");
+      const go = document.languages.find((l) => l.id === "go");
+      expect(go).toMatchObject({ engine: "ast-grep" });
+      expect(go?.parsedFiles).toBe(go?.changedFiles);
+      expect(document.coverage).toBe("degraded");
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("a language no engine reads still says `engine: none` with zero parsed files", () => {
+    const fixture = makeNonTsFixture();
+    try {
+      const document = all(fixture);
+      expect(document.tier).toBe(3);
       expect(document.engine).toBe("none");
-      expect(document.languages.find((l) => l.id === "go")).toMatchObject({
+      expect(document.languages.find((l) => l.id === "lua")).toMatchObject({
         parsedFiles: 0,
         engine: "none",
       });

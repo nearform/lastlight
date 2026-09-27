@@ -163,6 +163,7 @@ function isExported(_name: string, node: SyntaxNode): boolean {
 function descriptor(id: string, astGrepLang: Lang, extensions: string[]): LanguageDescriptor {
   return {
     id,
+    family: "tsjs",
     astGrepLang,
     extensions,
     declarations: DECLARATIONS,

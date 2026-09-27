@@ -32,6 +32,7 @@ import {
   DEFAULT_MAX_SCANNED_FILES,
 } from "./syntactic.js";
 import type { ChangedFileIndex } from "./facts.js";
+import { TSJS_FAMILY } from "./langs/register.js";
 import { lineOf, referenceNodes, repoRelativeOf } from "./tsgo-extractors.js";
 import type { EngineSnapshot } from "./tsgo.js";
 
@@ -46,6 +47,16 @@ export const DEFAULT_SIDES: Record<string, string[]> = {
   shared: ["shared/", "src/shared/", "common/", "src/common/", "packages/"],
   test: ["test/", "tests/", "__tests__/", "spec/", "e2e/"],
 };
+
+/**
+ * `constants` is TS/JS-only — both halves: the changed constants it finds and
+ * the literal sweep (set B) it runs. Python, Go and Java have descriptors for
+ * `facts`, but none of their literal sweeps has been measured, and letting a
+ * TS constant's value match a `3600` in a Go file would widen
+ * `hardCodedDuplicates` on every mixed repository without anyone deciding it
+ * should. Widening this is its own change, with its own measurement.
+ */
+export const CONSTANTS_FAMILIES: ReadonlySet<string> = new Set([TSJS_FAMILY]);
 
 export function parseSides(spec: string | undefined): Record<string, string[]> {
   if (!spec) return DEFAULT_SIDES;
@@ -145,6 +156,7 @@ export function findLiteralOccurrences(
     ref: options.ref ?? null,
     values,
     maxFiles: options.maxFiles,
+    families: CONSTANTS_FAMILIES,
   });
   return {
     occurrences: index.literals,
@@ -248,7 +260,12 @@ function declarationsFromAstGrep(
   // of "an immutable binding" and nothing else's. Going through the descriptor
   // is what lets a second language reach this extractor without a second copy
   // of the extractor.
-  const scan = scanChangedFiles({ repo, headSha, paths: [...hunkIndex.keys()] });
+  const scan = scanChangedFiles({
+    repo,
+    headSha,
+    paths: [...hunkIndex.keys()],
+    families: CONSTANTS_FAMILIES,
+  });
   const out: ConstantDeclaration[] = [];
   for (const site of scan.declarations) {
     const entry = hunkIndex.get(site.path);

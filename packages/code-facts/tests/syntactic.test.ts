@@ -198,18 +198,29 @@ describe("langs — the descriptor shape", () => {
     expect(exported.get("closed")).toBe(false);
   });
 
-  it("claims exactly the extensions the rest of the package already analyses", () => {
+  it("claims the TS/JS extensions the rest of the package analyses, plus the name-matched languages", () => {
     // The parity guard. `isIndexablePath` is expressed through the descriptor
-    // registry and `isScannablePath` through the hard-coded extension list; the
-    // day they disagree is the day a file is in one scan and not the other.
+    // registry and `isScannablePath` through the hard-coded extension list; on
+    // the TS/JS family the day they disagree is the day a file is in one scan
+    // and not the other.
     for (const path of [
       "a.ts", "a.tsx", "a.mts", "a.cts", "a.js", "a.jsx", "a.mjs", "a.cjs", "a.es6",
-      "a.py", "a.java", "a.json", "dist/a.js", "src/a.min.js", "src/",
+      "a.json", "dist/a.js", "src/a.min.js", "src/",
     ]) {
       expect(isIndexablePath(path), path).toBe(isScannablePath(path));
     }
+    // The dynamic grammars are indexable (tier-2 `facts`) and are NOT in the
+    // TS/JS scan (`constants` stays TS/JS-only), and the denylist still applies.
+    for (const path of ["a.py", "a.go", "src/main/java/A.java"]) {
+      expect(isIndexablePath(path), path).toBe(true);
+      expect(isScannablePath(path), path).toBe(false);
+    }
+    expect(isIndexablePath("vendor/x/a.go")).toBe(false);
     expect(registeredExtensions()).toContain(".es6");
-    expect(descriptorForPath("a.py")).toBeNull();
+    expect(descriptorForPath("a.py")?.id).toBe("python");
+    expect(descriptorForPath("a.go")?.id).toBe("go");
+    expect(descriptorForPath("A.java")?.id).toBe("java");
+    expect(descriptorForPath("a.rb")).toBeNull();
     expect(LANGUAGE_DESCRIPTORS.length).toBeGreaterThan(0);
   });
 });

@@ -483,6 +483,15 @@ importers:
 
   packages/code-facts:
     dependencies:
+      '@ast-grep/lang-go':
+        specifier: 0.0.6
+        version: 0.0.6
+      '@ast-grep/lang-java':
+        specifier: 0.0.7
+        version: 0.0.7
+      '@ast-grep/lang-python':
+        specifier: 0.0.6
+        version: 0.0.6
       '@ast-grep/napi':
         specifier: ^0.45.2
         version: 0.45.2
@@ -559,6 +568,30 @@ packages:
       zod:
         optional: true
 
+  '@ast-grep/lang-go@0.0.6':
+    resolution: {integrity: sha512-PZap9Rp6t+YKbLjRnFRF5aGBX3/HV9s5Rp7ZPsCM+o3tlTZDo1IqDYnFu+Oeh5Razs2U8K8ccPSJ+GBxalVhWg==}
+    peerDependencies:
+      tree-sitter-cli: 0.25.8
+    peerDependenciesMeta:
+      tree-sitter-cli:
+        optional: true
+
+  '@ast-grep/lang-java@0.0.7':
+    resolution: {integrity: sha512-7muXd2MqUxJ8SrLrXU+JbvU6qSASZ5BZqH/eCDkIIjXge5wMl7kIYxKEgP375W8lnTXQYjM+VgeOkYSU9EexJg==}
+    peerDependencies:
+      tree-sitter-cli: 0.25.8
+    peerDependenciesMeta:
+      tree-sitter-cli:
+        optional: true
+
+  '@ast-grep/lang-python@0.0.6':
+    resolution: {integrity: sha512-eF/bEBspmrxdVuPNihvZDyyJx5qtIpGEMz9l1nNQmrji7NZcUiRNC8WwzYyQCBdy1mj8HZ0Tn4I2q3gp/6Bkiw==}
+    peerDependencies:
+      tree-sitter-cli: 0.25.8
+    peerDependenciesMeta:
+      tree-sitter-cli:
+        optional: true
+
   '@ast-grep/napi-darwin-arm64@0.45.2':
     resolution: {integrity: sha512-29+sfXTJ7xxqgTuWAHA89gDAQIiJyAZ1ZiHoupjKIqyn0mhXrktO1WOghlDzyYs++hITEPOeXftxy48Y0tDGDQ==}
     engines: {node: '>= 10'}
@@ -616,6 +649,9 @@ packages:
   '@ast-grep/napi@0.45.2':
     resolution: {integrity: sha512-hBA5c7JV6OM7zFWoLjUNZhsDpxEIEIeew5S3z1giwK5tPQqobuFfM2OhS45bN3E0+yQtgCX/o8/AEHKbGD3ykg==}
     engines: {node: '>= 10'}
+
+  '@ast-grep/setup-lang@0.0.6':
+    resolution: {integrity: sha512-aSYZNF5nGQMxnwiA3Lcc8zi0AtpGlug47ADgqCgP/2n7p922FbnW7vo1rbW4kKjW72B/3mDdN7uvYidv8JnPnw==}
 
   '@astrojs/check@0.9.10':
     resolution: {integrity: sha512-zgx/UQMozdjOa3bOxjgeCFdtpE3c9rRX6xHwa+2QXvy8z8Akifu2AtubHyv/zzC2znO8dl8fFWL4K+Ba9kS8HQ==}
@@ -7059,6 +7095,18 @@ snapshots:
     optionalDependencies:
       zod: 4.4.3
 
+  '@ast-grep/lang-go@0.0.6':
+    dependencies:
+      '@ast-grep/setup-lang': 0.0.6
+
+  '@ast-grep/lang-java@0.0.7':
+    dependencies:
+      '@ast-grep/setup-lang': 0.0.6
+
+  '@ast-grep/lang-python@0.0.6':
+    dependencies:
+      '@ast-grep/setup-lang': 0.0.6
+
   '@ast-grep/napi-darwin-arm64@0.45.2':
     optional: true
 
@@ -7097,6 +7145,8 @@ snapshots:
       '@ast-grep/napi-win32-arm64-msvc': 0.45.2
       '@ast-grep/napi-win32-ia32-msvc': 0.45.2
       '@ast-grep/napi-win32-x64-msvc': 0.45.2
+
+  '@ast-grep/setup-lang@0.0.6': {}
 
   '@astrojs/check@0.9.10(prettier@3.9.6)(typescript@7.0.2)':
     dependencies:

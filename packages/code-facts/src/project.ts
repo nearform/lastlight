@@ -297,6 +297,16 @@ export interface LanguageBreakdownOptions {
    * then falls back to an actual ast-grep parse when the engine is `ast-grep`.
    */
   parsed?: (path: string) => boolean;
+  /**
+   * The NON-TS/JS languages the syntactic engine reads (Python, Go, Java —
+   * `src/langs/`). Injected for the same reason as `parsed`: this module holds
+   * no reference to the descriptor registry. A path it `claims` is reported
+   * with engine `ast-grep` whatever the run's engine was, and `parsed` must be
+   * an ACTUAL parse — a grammar that failed to load parses nothing, and the row
+   * says so with `parsedFiles: 0`. Absent = those languages are `none`, as they
+   * were before they had grammars.
+   */
+  syntactic?: { claims(path: string): boolean; parsed(path: string): boolean };
 }
 
 /**
@@ -315,7 +325,8 @@ export function languageBreakdown(options: LanguageBreakdownOptions): LanguageSt
   for (const path of options.paths) {
     const id = languageIdOf(path);
     const analysable = hasAnalysableExtension(path);
-    const engine: Engine = analysable ? options.engine : "none";
+    const syntactic = !analysable && (options.syntactic?.claims(path) ?? false);
+    const engine: Engine = analysable ? options.engine : syntactic ? "ast-grep" : "none";
     const entry = byLanguage.get(id) ?? { changed: 0, parsed: 0, engine };
     entry.changed++;
     // A language's own engine is the run's engine only where the run's engine
@@ -323,7 +334,9 @@ export function languageBreakdown(options: LanguageBreakdownOptions): LanguageSt
     // never going to be parsed by tsgo, and saying "tsgo, 0 parsed" would blame
     // the engine for a file it does not handle.
     if (engine !== "none") entry.engine = engine;
-    if (parsedBy(options, path, analysable)) entry.parsed++;
+    if (syntactic ? options.syntactic!.parsed(path) : parsedBy(options, path, analysable)) {
+      entry.parsed++;
+    }
     byLanguage.set(id, entry);
   }
 

@@ -7,14 +7,16 @@
  * identifier occurrence, which are a literal. The remaining 15% is genuinely
  * per-language logic — "is this declaration exported?" is `export_statement` in
  * TS/JS, `public` in Java and a leading underscore convention in Python — so it
- * is a function, and there are only three of them.
+ * is a function, and there are only a few of them.
  *
  * The shape exists so that adding a language is *reviewable*: a new descriptor
- * is a table you can diff against the grammar's `node-types.json`, plus three
- * small predicates. Nothing about it is dynamic — `register.ts` holds a literal
- * array, imported at build time. There is no discovery, no registration API and
- * no lifecycle, because every one of those would be a surface with no second
- * implementor.
+ * is a table you can diff against the grammar's `node-types.json`, plus a few
+ * small predicates. The REGISTRY is not dynamic — `register.ts` holds a literal
+ * array, imported at build time; there is no discovery and no plugin API. Some
+ * GRAMMARS are (`dynamic: true` — Python, Go, Java, loaded through ast-grep's
+ * `registerDynamicLanguage`, see `dynamic.ts`), and every parse of one goes
+ * through `grammarAvailable` first, so a grammar that failed to load is a
+ * named hole rather than a crash.
  *
  * **What a descriptor CANNOT do is resolve a type.** Everything the engine
  * built from one is a NAME MATCH: `run` here and `run` there are the same
@@ -24,6 +26,7 @@
  * generator. See `syntactic.ts`.
  */
 import { parse, type Lang, type SgNode } from "@ast-grep/napi";
+import { grammarStatus } from "./dynamic.js";
 
 /**
  * One node of the parsed tree, at the width this package uses it.
@@ -93,6 +96,46 @@ export interface DeclarationRule {
    * precision down with names that were never comparable.
    */
   topLevelOnly?: boolean;
+  /**
+   * Only count this declaration when its PARENT node is one of these kinds.
+   *
+   * Java's `variable_declarator` is a field under `field_declaration` and a
+   * local under `local_variable_declaration` — the same node kind, and only the
+   * parent says which. `topLevelOnly` cannot express it, because a field is
+   * never top-level: its class is on the stack.
+   */
+  parentKinds?: string[];
+  /**
+   * A different `symbolKind` when the IMMEDIATELY enclosing declaration is one
+   * of `kinds` — and the name is qualified by it.
+   *
+   * Python spells a function and a method with the same node
+   * (`function_definition`); only the class around it makes it a method. Java
+   * spells an interface method with the same `method_declaration` as a class
+   * one. First match wins. Absent on every TS/JS rule, which keeps that output
+   * byte-identical.
+   */
+  memberOf?: Array<{ kinds: string[]; symbolKind: string }>;
+  /**
+   * Qualify the name by a TYPE NAMED IN A FIELD rather than by an enclosing
+   * declaration — Go's `func (s *Service) Run()` is `Service.Run`, and nothing
+   * encloses it. The first `kind` node found (depth-first) inside `field` is the
+   * qualifier.
+   */
+  receiver?: { field: string; kind: string };
+  /**
+   * Refine `symbolKind` by the KIND of a field's node — Go's `type_spec` is a
+   * struct, an interface or an alias depending only on its `type` field. A kind
+   * not in the map keeps the rule's `symbolKind`.
+   */
+  refineKind?: { field: string; map: Record<string, string> };
+  /**
+   * Widen the declaration's START to a parent of one of these kinds. Python's
+   * decorators live on a `decorated_definition` AROUND the
+   * `function_definition`, and a hunk that changes only `@login_required` has
+   * changed that function.
+   */
+  extendToParent?: string[];
 }
 
 /**
@@ -127,7 +170,22 @@ export interface LiteralKinds {
 export interface LanguageDescriptor {
   /** Stable id — used in logs and in the gate's per-language census. */
   id: string;
-  astGrepLang: Lang;
+  /**
+   * The name-matching FAMILY: which other languages' names can plausibly be the
+   * same symbol. `tsjs` for all three TS/JS grammars (a `.js` file really does
+   * import a `.ts` one); every other language is its own family, because a
+   * Python `run` and a Go `Run` are never the same symbol, and letting them
+   * match would add pure noise to a set that is already a hypothesis.
+   */
+  family: string;
+  /**
+   * The ast-grep language: a bundled `Lang`, or the name of a DYNAMIC grammar
+   * (`dynamic.ts`) — then `dynamic` is true and every parse goes through
+   * `grammarAvailable` first.
+   */
+  astGrepLang: Lang | (string & {});
+  /** Loaded through `registerDynamicLanguage` rather than bundled. */
+  dynamic?: boolean;
   /** Lower-case, with the dot. Longest match wins in `descriptorForPath`. */
   extensions: string[];
   declarations: DeclarationRule[];
@@ -141,6 +199,18 @@ export interface LanguageDescriptor {
   literalKinds: LiteralKinds;
   /** The call node, for `callees`. */
   callKind: string;
+  /**
+   * The callee text of a `callKind` node. Absent = its `function` field, which
+   * is right for TS/JS, Python (`call`) and Go (`call_expression`); Java's
+   * `method_invocation` splits the callee into `object` + `name` instead.
+   */
+  calleeOf?(node: SyntaxNode): string | null;
+  /**
+   * The import statement kinds — which LINES of a file are its imports. Only
+   * the unit survey's context builder reads it; the TS module-specifier scan
+   * (`scanImportSpecifiers`) keeps its own table, see there.
+   */
+  importKinds?: string[];
   /**
    * Is this declaration visible outside its file?
    *
@@ -225,6 +295,10 @@ export function supportedKinds(
   const key = `${descriptor.id} ${kinds.join(",")}`;
   const cached = KIND_SUPPORT.get(key);
   if (cached) return cached;
+  // A dynamic grammar that did not load has NO kinds — and `parse` below would
+  // throw "not supported" rather than answer. Not cached: the caller reports
+  // the grammar, not the kinds.
+  if (grammarAvailable(descriptor) !== null) return { kinds: [], rejected: [...kinds] };
 
   const root = parse(descriptor.astGrepLang, "").root() as unknown as {
     findAll(rule: unknown): unknown[];
@@ -249,6 +323,17 @@ export function supportedKinds(
   }
   KIND_SUPPORT.set(key, result);
   return result;
+}
+
+/**
+ * `null` when this descriptor's grammar can parse in this process; otherwise
+ * WHY NOT, in words a `degraded[]` entry can carry. Always `null` for a
+ * bundled grammar.
+ */
+export function grammarAvailable(descriptor: LanguageDescriptor): string | null {
+  if (!descriptor.dynamic) return null;
+  const status = grammarStatus(String(descriptor.astGrepLang));
+  return status.ok ? null : status.reason;
 }
 
 /** `valueKind` for a literal node kind, or `null` when it is not a literal. */

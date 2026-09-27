@@ -55,7 +55,8 @@ import {
 import type { ChangedPath } from "./git.js";
 import { indexHunks } from "./facts.js";
 import type { ChangedFileIndex } from "./facts.js";
-import { extractFactsByName } from "./syntactic.js";
+import { extractFactsByName, parsesOnDisk } from "./syntactic.js";
+import { descriptorForPath } from "./langs/register.js";
 import { extractConstants, parseSides } from "./constants.js";
 import { extractDeps } from "./deps.js";
 import { extractPatterns } from "./patterns.js";
@@ -321,6 +322,18 @@ export function runExtractor(raw: RunOptions): RunResult {
     options.extractor === "all" || options.extractor === name;
 
   const analysable = context.changed.filter((c) => hasAnalysableExtension(c.path));
+  /**
+   * Changed files no compiler reads but a `LanguageDescriptor` claims — Python,
+   * Go, Java (`src/langs/`). Name matching only: they make a run tier 2 when
+   * they are all there is, and ride beside the type-aware answer on tier 1.
+   * Deletions are out for the same reason as everywhere: absent at head.
+   */
+  const nameMatched = context.changed.filter(
+    (c) => c.status !== "deleted" && !hasAnalysableExtension(c.path) && descriptorForPath(c.path) !== null,
+  );
+  const nameMatchedLanguages = [
+    ...new Set(nameMatched.map((c) => descriptorForPath(c.path)!.id)),
+  ].sort();
   const extractors: Record<string, unknown> = {};
   let tier: Tier = 1;
   /**
@@ -334,7 +347,15 @@ export function runExtractor(raw: RunOptions): RunResult {
 
   try {
     if (NEEDS_SNAPSHOT.some(wants)) {
-      if (analysable.length === 0) {
+      if (analysable.length === 0 && nameMatched.length > 0) {
+        // Tier 2 WITHOUT a compiler ever being asked: nothing here has one.
+        tier = 2;
+        engine = "ast-grep";
+        degraded.push({
+          extractor: "project",
+          reason: `no TypeScript or JavaScript file in the diff — tier 2: ${nameMatched.length} changed ${nameMatchedLanguages.join("/")} file(s) are read by ast-grep's syntactic engine (name matching, no type-checker), so \`facts\` is name-matched and \`contracts\` does not apply`,
+        });
+      } else if (analysable.length === 0) {
         tier = 3;
         degraded.push({
           extractor: "project",
@@ -364,6 +385,33 @@ export function runExtractor(raw: RunOptions): RunResult {
         });
         extractors.facts = result.payload;
         degraded.push(...result.degraded);
+        if (nameMatched.length > 0) {
+          // A mixed diff: the TS/JS half is type-aware, and the rest would
+          // otherwise be silently symbol-less on a tier-1 document. Its symbols
+          // carry `resolution: "name-match"` each, so the per-symbol label is
+          // honest even though the document's tier is 1.
+          const byName = extractFactsByName({
+            repo: options.repo,
+            headSha: context.headSha,
+            hunks: context.hunks,
+            changed: context.changed,
+            only: new Set(nameMatched.map((c) => c.path)),
+            maxFiles: options.maxFiles,
+            maxReferences: options.maxReferences,
+            log,
+          });
+          const replaced = new Map(byName.payload.files.map((file) => [file.path, file]));
+          result.payload.files = result.payload.files.map((file) => replaced.get(file.path) ?? file);
+          result.payload.symbols.push(...byName.payload.symbols);
+          result.payload.symbols.sort(
+            (a, b) => a.declaredAt.localeCompare(b.declaredAt) || a.name.localeCompare(b.name),
+          );
+          degraded.push(...byName.degraded);
+          degraded.push({
+            extractor: "facts",
+            reason: `${nameMatched.length} changed ${nameMatchedLanguages.join("/")} file(s) have no type-checker — their symbols were found by NAME MATCHING (\`resolution: "name-match"\`, ranked by \`nameAmbiguity\`) beside the type-aware TypeScript/JavaScript answer; every reference site on those symbols is a hypothesis`,
+          });
+        }
       } else if (tier === 2) {
         // TIER 2 IS A REAL TIER, the way it already was for `constants`. No
         // compiled program, so no type-resolved reference set — but the
@@ -418,10 +466,19 @@ export function runExtractor(raw: RunOptions): RunResult {
     if (wants("constants")) {
       // Tier 2 is a REAL tier here, not a failure: ast-grep still finds the
       // declarations and set B, and the document says set A is missing.
-      if (!head) {
+      // A diff with no TS/JS in it gave `constants` nothing to read at all —
+      // the entry below says that, and a set-A line would describe a
+      // subtraction over files that do not exist.
+      if (!head && !(analysable.length === 0 && nameMatched.length > 0)) {
         degraded.push({
           extractor: "constants",
           reason: `no compiled project (tier ${tier}) — reference sets (A) are missing, so hardCodedDuplicates is every literal occurrence rather than the subtraction B \\ A`,
+        });
+      }
+      if (nameMatched.length > 0) {
+        degraded.push({
+          extractor: "constants",
+          reason: `constants covers TypeScript/JavaScript only — ${nameMatched.length} changed ${nameMatchedLanguages.join("/")} file(s) were not examined for changed constants, and no literal sweep ran over those languages`,
         });
       }
       const result = extractConstants({
@@ -505,6 +562,10 @@ export function runExtractor(raw: RunOptions): RunResult {
             paths: context.changed.filter((c) => c.status !== "deleted").map((c) => c.path),
             engine,
             ...(snapshot ? { parsed: (path: string) => snapshot.lookup(path) !== null } : {}),
+            syntactic: {
+              claims: (path: string) => descriptorForPath(path) !== null,
+              parsed: (path: string) => parsesOnDisk(options.repo, path),
+            },
           })
         : [],
       coverage,

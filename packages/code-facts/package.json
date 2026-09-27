@@ -47,6 +47,9 @@
     "lint:boundaries": "node ../../scripts/lint-import-boundaries.mjs code-facts"
   },
   "dependencies": {
+    "@ast-grep/lang-go": "0.0.6",
+    "@ast-grep/lang-java": "0.0.7",
+    "@ast-grep/lang-python": "0.0.6",
     "@ast-grep/napi": "^0.45.2",
     "@typesafe-ai/sdk": "^0.6.0",
     "typescript": "7.0.2",
