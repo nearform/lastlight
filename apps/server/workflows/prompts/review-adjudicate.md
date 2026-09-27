@@ -298,6 +298,29 @@ Every finding needs **`existingCode`** — the verbatim excerpt, copied characte
 
 For a two-ended mechanism — producer and consumer, the write and the missing check, the two sides of a comparison — anchor at the end a fix would touch and name the other end in the body. The reader starts where the comment sits.
 
+### `suggestion` is code, or it is absent
+
+On an inline comment, `suggestion` is posted as a GitHub **Apply suggestion** button: accepting it replaces the commented lines with `suggestion`, character for character, and commits the result. So it is the exact replacement code for the lines `existingCode` quotes — same indentation, nothing before or after — and never a description of a change.
+
+Where it lands depends on where the harness finds `existingCode`:
+
+- **In the changed code as it is at head** — the commented lines are the ones you quoted. This is the only case a `suggestion` is for.
+- **Only among the lines the PR removed** — there is nothing at head to replace. Omit `suggestion`.
+- **Nowhere** — the comment falls back to your `line`, and Apply replaces whatever sits there instead. Never write a `suggestion` against an excerpt you reconstructed rather than copied.
+- **Off the diff** — the finding moves to the review body, where `suggestion` is not shown at all. Say the fix in `body`.
+
+- The fix is not a drop-in edit of those lines (it touches another file, adds a test, needs a choice between options)? **Omit `suggestion`.** Say what to change in `body`{{#if dossierEnabled}} and `fix`{{/if}}.
+- Instructions ("Add …", "Move …", "Consider …") in `suggestion` get committed into their file as source text and break it.
+- Omitting it costs nothing. Most findings should not have one.
+
+<!-- Measured 2026-09-27 over the 90 suggestion blocks one production deployment
+posted since 08-26: 35 were prose — typically this finding's `fix`,
+expanded — and each one, applied, would have written that sentence into a
+.ts/.yml/.sh file. 8% of suggestions up to v0.29, 41% on v0.30–v0.33, 73% on the
+first open-model runs. The field had no definition here at all ("…optional…")
+once this phase stopped reading the pr-review skill, which is the only place it
+was defined. -->
+
 ## Output
 
 Rewrite `.lastlight/pr-review/findings.json` **in full**. You own this file now.
@@ -305,6 +328,7 @@ Rewrite `.lastlight/pr-review/findings.json` **in full**. You own this file now.
 | field | audience |
 |---|---|
 | `title`, `body` | **POSTED VERBATIM** to a maintainer who has never heard of this pipeline |
+| `suggestion` | **COMMITTED VERBATIM** if they press Apply — replacement code only, see *`suggestion` is code, or it is absent* |
 | `summary` | **not posted.** The posted summary is written after the comment limits decide which findings post, from those findings only. On a re-review, put the prior-review ledger here (it is carried over verbatim); otherwise one line is enough |
 | `family`, `obligation`, `hypotheses`, `mechanism`, `evidence`{{#if !dossierEnabled}}, `confidence`{{/if}} | machine-read, never rendered — bookkeeping goes here |
 
@@ -332,7 +356,7 @@ posted set; only the leading ledger of this field survives. -->
       "severity": "Critical|Important",   // read ONLY on a finding with no `hypotheses`; computed otherwise
       "title": "…",
       "body": "…concrete impact — what breaks, for which input or caller…",
-      "suggestion": "…optional…",
+      "suggestion": "…omit unless you have the exact replacement code for existingCode's lines…",
 
       // REQUIRED on every finding. No `tier` and no `confidence` — see above.
       "claim": "<one sentence: what is WRONG>",
@@ -367,7 +391,7 @@ posted set; only the leading ledger of this field survives. -->
       "severity": "Critical|Important",   // read ONLY on a finding with no `hypotheses`; computed otherwise
       "title": "…",
       "body": "…concrete impact — what breaks, for which input or caller…",
-      "suggestion": "…optional…",
+      "suggestion": "…omit unless you have the exact replacement code for existingCode's lines…",
 
       "tier": "inline|body|internal",   // REQUIRED on every finding. See below.
       "impact": "wrong-result",         // REQUIRED on every finding that reports a defect
