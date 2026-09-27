@@ -399,8 +399,11 @@ async function replay(fixture: string, arm: string, inst: Instance): Promise<Rep
         sides: compareSides(unitsScore, agentScore),
         judgeModel,
       };
-      // Keep the raw replies beside the report — the text is the evidence.
-      const keepDir = join(outDir, "responses", `${arm}-${inst.instance_id}`);
+      // Keep the raw replies beside the report — the text is the evidence —
+      // under THIS run's own directory. Keyed by fixture alone, every run
+      // overwrote the last one's rows, and the v1/v4 rows the first audit
+      // needed were gone by the time it was asked for.
+      const keepDir = join(outDir, "responses", runStem, `${arm}-${inst.instance_id}`);
       mkdirSync(keepDir, { recursive: true });
       cpSync(responsesDir, join(keepDir, "responses"), { recursive: true });
       cpSync(join(prDir, "hypotheses"), join(keepDir, "hypotheses"), { recursive: true });
@@ -448,6 +451,8 @@ const stage = noModel ? "coverage" : "replay";
 const cases: ReplayCase[] = [];
 mkdirSync(outDir, { recursive: true });
 const file = join(outDir, `${startedAt.replace(/[:.]/g, "-")}-${label.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
+/** This run's id — the report's file stem, which also names its kept rows dir. */
+const runStem = basename(file, ".json");
 const write = (status: ReplayWriteStatus, error?: string): ReplayReport => {
   const report = buildReport({ label, startedAt, cli, cases, status, planned, stage, ...(error ? { error } : {}) });
   writeReportAtomic(file, report);
