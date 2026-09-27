@@ -286,8 +286,9 @@ Rules:
   cross-referenced: this skill is `chat: true` and is read in threads where
   `code-review` is not staged. Same rule, same words — change both together.)
 - `suggestion` is optional — include it only when a concrete one-to-few-line fix
-  is obvious. It must be the exact replacement text for the anchored line(s),
-  nothing else; GitHub renders it as an applyable suggestion.
+  is obvious. It must be the exact replacement code for the anchored line(s),
+  nothing else; GitHub renders it as an applyable suggestion, and Apply commits
+  it verbatim. Never a description of the change — that belongs in `body`.
 - `event` is `APPROVE` / `REQUEST_CHANGES` / `COMMENT`, matching what survived
   the gate. A clean PR is an `APPROVE` with an empty `findings` array and a short
   `summary`. Two hard constraints on it:
