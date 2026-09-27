@@ -45,7 +45,7 @@ how you submit.
 | `severity` | string | yes | `Critical` or `Important` only. `Critical` needs a **trust boundary**, not a category: data loss, a breaking change, silent data-dropping, or a security issue where you can name the boundary the input crosses AND a capability its supplier does not already have. A tool parsing a file the invoking user wrote is robustness, not a boundary. Everything else worth posting is `Important`. Severity is what the poster ranks the inline budget on, so an inflated one spends a scarce slot. |
 | `title` | string | yes | Short label for the finding. |
 | `body` | string | yes | Concrete impact — what breaks, for which input or caller. |
-| `suggestion` | string | no | Exact replacement text for the anchored line(s). Rendered as an applyable ```suggestion block. Include only when a concrete one-to-few-line fix is obvious. |
+| `suggestion` | string | no | Exact replacement **code** for the lines `existingCode` quotes — same indentation, nothing before or after. Rendered as an applyable ```suggestion block: pressing Apply commits it verbatim over those lines, so it is never a description of a change ("Add …", "Move …"). Omit it unless the fix is a drop-in edit of exactly those lines as they are at head — another file, a new test or a choice between options belongs in `body`. |
 
 ## Quote the code; do not count the lines
 
