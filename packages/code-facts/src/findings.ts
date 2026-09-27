@@ -507,10 +507,66 @@ export function checkFindings(options: CheckFindingsOptions): CheckFindingsResul
     notes: r.notes,
   });
 
-  // No `--repair`, or nothing to repair, or nothing readable to repair. The
-  // floor deliberately does NOT invent a `findings.json`: a fabricated
-  // `summary` and `event` is a review nobody wrote, and a phase whose loop
-  // simply runs out of iterations does not fail the run anyway. A SATISFIED
+  // A MISSING `findings.json` over a non-empty hypothesis set: the floor
+  // WRITES one. It used to refuse ("a fabricated summary is a review nobody
+  // wrote"), and that was right while `review` always ran — but with the
+  // evidence pipeline on, `review` is skipped by default and `adjudicate` is
+  // the ONLY writer. An adjudicator that fails, times out or never writes the
+  // file then left post-review with nothing to read: the phase fails, the run
+  // goes red with nothing posted, per-head dedup records nothing, and the
+  // thirty-minute sweep re-buys the whole pipeline on the same SHA forever.
+  // What is written is not a review anyone wrote, and it says so: every
+  // hypothesis at `internal` (recorded, never posted — the same row the floor
+  // writes for an uncovered one), `event: COMMENT`, a summary stating that
+  // adjudication did not complete, and an `incomplete` marker a reader can
+  // key on. Safe in every workflow shape: when `review` RAN, a missing file
+  // means review failed, and post-review (`none_failed` on `review`) does not
+  // run at all. No hypotheses ⇒ nothing to conserve and nothing is invented.
+  const findingsPath = join(options.dir, "findings.json");
+  if (options.repair && first.document === null && !existsSync(findingsPath) && first.hypotheses.length > 0) {
+    const count = first.hypotheses.length;
+    const created: Record<string, unknown> = {
+      summary:
+        `Adjudication did not complete, so the ${count} candidate issue${count === 1 ? "" : "s"} this review's analysis ` +
+        "recorded were not weighed and nothing is posted inline. They are kept, unposted, for the record. " +
+        "This is not a clean review: the change was not assessed.",
+      event: "COMMENT",
+      incomplete: {
+        phase: "adjudicate",
+        reason: "findings.json did not exist when the conservation floor ran — the adjudicator failed, timed out, or never wrote it",
+      },
+      findings: first.hypotheses.map((id) =>
+        internalFinding(
+          id,
+          first.rows.get(id),
+          "Never adjudicated — findings.json was never written. Conserved at internal tier by the §D12 floor.",
+        ),
+      ),
+    };
+    FindingsDocumentSchema.parse(created);
+    writeFileSync(findingsPath, `${JSON.stringify(created, null, 2)}\n`, "utf8");
+    log.warn("findings.json was missing; the conservation floor wrote an unadjudicated one", {
+      dir: options.dir,
+      hypotheses: count,
+    });
+    const second = inspect({ ...options, repair: false });
+    return {
+      ...strip(second),
+      repaired: first.hypotheses.map((id) => ({
+        kind: "recorded" as const,
+        hypothesis: id,
+        detail: 'findings.json was missing — written with every hypothesis at tier "internal"',
+      })),
+      notes: [...second.notes, `findings.json was MISSING: written unadjudicated, ${count} hypothes${count === 1 ? "is" : "es"} at internal tier, event COMMENT`],
+      satisfied: true,
+    };
+  }
+
+  // No `--repair`, or nothing to repair, or nothing readable to repair. An
+  // UNREADABLE document is left alone — it is somebody's review, and
+  // overwriting it would destroy what was written; a missing one with no
+  // hypotheses is not invented (there is nothing to conserve, and post-review
+  // then fails loudly on the missing file, as it always has). A SATISFIED
   // document still gets the repair pass when it carries the `internal[]`
   // shorthand: expansion is the reader-compat half of that contract —
   // post-review's disposition record, the pipeline stats and the

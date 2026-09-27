@@ -29,7 +29,11 @@ resolve a version that was never published. Hence a seventh npm package, against
 WP1's original "private: true" — that line was written when delivery was
 image-only, which §D1 reversed. The `lastlight` CLI grew ~22 MB installed as a
 result (measured, on darwin-arm64; §D1 estimated ~15 MB and did not size
-`@ast-grep/napi`'s platform binary).
+`@ast-grep/napi`'s platform binary). The Python/Go/Java grammars add ~14 MB more
+(every platform's prebuilt `parser.so` ships in each package; see "Language
+tiers"). The sandbox images need no change for them: they vendor this package
+through the CLI's `pnpm deploy` bundle, which carries its prod dependencies,
+prebuilds included.
 
 It is a **leaf**: no `workspace:*` dependencies in either direction, like
 `agentic-pi`. That is why `log.ts` re-declares the `LoggerPort` shape instead of
@@ -248,12 +252,22 @@ a second worktree before.
 
 | Tier | Available | Extractors |
 |---|---|---|
-| 1 | TS/JS with a resolvable project | all, `resolution: "type-aware"` |
-| 2 | TS/JS, project load failed | `deps`, `patterns`, `constants` (ast-grep only, **no reference set A**), `coverage`, and `facts` at `resolution: "name-match"` |
-| 3 | any other language | `deps`, `patterns`, `coverage` |
+| 1 | TS/JS with a resolvable project | all, `resolution: "type-aware"` — plus, on a MIXED diff, the Python/Go/Java files' symbols at `resolution: "name-match"` beside them (and a `degraded[]` entry saying so) |
+| 2 | TS/JS whose project load failed, **or a diff whose only source files are Python / Go / Java** | `deps`, `patterns`, `coverage`, `facts` at `resolution: "name-match"`, and `constants` for **TS/JS only** (ast-grep, **no reference set A**) |
+| 3 | any other language (Ruby, Kotlin, Rust, …) | `deps`, `patterns`, `coverage` |
 
 Tier 2 and 3 emit `coverage: "degraded"` and a populated `degraded[]` naming what
-is missing. **Silence is the failure mode we are engineering against.**
+is missing. **Silence is the failure mode we are engineering against.** Python,
+Go and Java are tier 2 and **never tier 1**: there is no type-checker for them
+here, only name matching.
+
+`constants` stays TS/JS-only on purpose (`CONSTANTS_FAMILIES` in
+`constants.ts`): both the changed-constant scan and the literal sweep are scoped
+to the `tsjs` family, so a new grammar cannot widen `hardCodedDuplicates` on a
+mixed repo, and a TS constant's set B is byte-identical to what it was. A diff
+with Python/Go/Java files in it gets a `constants` `degraded[]` entry naming
+them. The Go and Java descriptors carry `const` / `static final` rows ready for
+the day that is measured; Python has none (no immutability syntax).
 
 ## `resolution` — the syntactic engine, and what it is worth
 
@@ -266,10 +280,70 @@ declaration sites in the repo binding that name); tier 1 carries
 building it costs a repo-wide parse a type-resolved run has no use for.
 
 It is fed by `src/langs/`: a `LanguageDescriptor` is a TABLE of tree-sitter node
-kinds (declarations, constants, references, literals, the call kind) plus three
-predicates (`isExported`, `isTestPath`, and nothing else). **Not a plugin
-system** — `register.ts` is a literal array. `tsjs.ts` is the only entry, and it
-exists so the tier-2 path runs through the code a second language would.
+kinds (declarations, constants, references, literals, the call kind, import
+kinds) plus predicates (`isExported`, `isTestPath`, and an optional `calleeOf`).
+**Not a plugin system** — `register.ts` is a literal array: `tsjs.ts` (the three
+grammars `@ast-grep/napi` bundles) plus `python.ts`, `go.ts`, `java.ts`.
+
+- **A declaration rule is still data.** Beyond `kind` / `nameField` /
+  `qualifyBy` / `nameKinds` / `topLevelOnly`, five optional columns cover what the
+  new languages needed, each absent on every TS/JS row so that output is
+  byte-identical: `parentKinds` (Java's `variable_declarator` is a field only
+  under `field_declaration`), `memberOf` (Python's `function_definition` is a
+  `method` only directly inside a `class_definition`; Java's method is an
+  `interface-method` inside an interface), `receiver` (Go's
+  `func (s *Service) Run()` qualifies as `Service.Run` from the receiver's
+  `type_identifier`), `refineKind` (Go's `type_spec` is `struct` / `interface` /
+  `type` by its `type` field) and `extendToParent` (a Python decorator block is
+  part of the function's range, so a hunk that only changes `@login_required`
+  maps to the function).
+- **`family` is the name-matching boundary.** `tsjs` for the three TS/JS
+  grammars, one each for the rest. References and `nameAmbiguity` never cross a
+  family (a Python `run` is not a Go `Run`), and the repo-wide index lists only
+  the families the diff DECLARED something in — so a TS-only diff lists exactly
+  the files it always did, and its `--max-files` truncation point cannot move.
+- **Kinds per language** (from each grammar's `src/node-types.json`): calls are
+  `call` / `call_expression` / `method_invocation` (Java's callee is
+  `object.name`, hence `calleeOf`); `isExported` is no leading underscore and
+  not inside a function (Python, dunders count as public), an upper-case first
+  letter (Go), a `public` modifier or an interface member (Java); `isTestPath`
+  is `test_*.py` / `*_test.py` / `tests/` / `conftest.py`, `_test.go`,
+  `src/test/` or `*Test.java`. `tests/langs-dynamic.test.ts` asserts every kind
+  a table names exists in its grammar (`supportedKinds(...).rejected` empty) —
+  ast-grep refuses a whole rule over one unknown kind, which is a silently
+  empty scan.
+
+**The three new grammars are DYNAMIC** (`src/langs/dynamic.ts`):
+`@ast-grep/lang-python` / `-go` / `-java`, registered through `@ast-grep/napi`'s
+`registerDynamicLanguage` — the same tree-sitter runtime, not a second one. Each
+package is a prebuilt `parser.so` per platform (linux x64/arm64, darwin
+x64/arm64, windows x64) plus a registration record; its `postinstall` only logs
+when the prebuild matches, so installs with lifecycle scripts off work
+(verified on `node:24-slim` arm64 + amd64 and `node:24-alpine` arm64). ~14 MB
+installed together (python 5.9, java 4.9, go 3.0). Three properties of the API
+shaped the module, each measured on napi 0.45.2:
+
+- **A bad `libraryPath` does not throw — it panics the Rust side and ABORTS the
+  process** (`GetLibPath(NotFound)`, uncatchable, no envelope). So every library
+  is preflighted: it must exist, and `process.dlopen` must map it —
+  `Module did not self-register` is the success signal (the loader mapped it; it
+  is simply not a Node addon). Anything else is that language's failure reason.
+- **Registration is once per process**: a second call is silently IGNORED. So
+  there is exactly one call, carrying every grammar that passed preflight, made
+  lazily on the first parse that needs one (a TS-only run never pays for it).
+- **Someone else may have registered first**, making ours the ignored call — so
+  each grammar is then PROBED with a real parse before it counts as loaded.
+
+A grammar that fails is **loud and scoped**: its files count as unparsed, the
+`facts` `degraded[]` gets one entry NAMING the language and the reason,
+`files[].analysed` is `false`, and `languages[].parsedFiles` stays honest (it
+is an actual parse, so it reads 0). `forceGrammarUnavailable` is the test seam;
+it deliberately does not touch the process-global native registration.
+
+Per-file entry points for consumers outside the index: `scanDeclarations(path,
+source)` (every named declaration, or `null` when no grammar claims the path or
+it did not parse) and `scanImportLines(path, source)` (the lines the
+descriptor's `importKinds` occupy).
 
 **`nameAmbiguity` is DATA, never a filter.** This layer generates hypotheses and
 the seeder ranks them; filtering here would delete evidence nothing downstream
@@ -417,8 +491,12 @@ is keeping the install out of the tree `lastlight-facts` is pointed at.
 
 A Go PR that produced nothing now says so in a shape **no clean run can ever
 take**: a language was recognised, thirty-one files of it changed, and nothing
-parsed one of them. Measured on the real corpus — keycloak `37429` reads
-`[properties 45/0, java 2/0, xml 1/0]`.
+parsed one of them. Measured on the real corpus before the Java grammar landed —
+keycloak `37429` read `[properties 45/0, java 2/0, xml 1/0]`; Java now reads
+`2/2` on `ast-grep`, and the rows no engine reads (`properties`, `xml`) keep
+`engine: "none"`. A language with a descriptor gets `engine: "ast-grep"` on its
+row whatever the run's engine was — a `.py` file in a tier-1 TS run is not a
+file tsgo failed to read.
 
 - `id` comes from the extension (`languageIdOf`); a language nobody thought
   about falls back to its bare extension rather than vanishing.
@@ -771,7 +849,7 @@ and every reader agree on one id scheme (issue #405 — surveys label a
 placeholder row `-000`, which put every label one below its canonical id and
 sent an adjudicator's hand-written self-check "correcting" its citations into
 collisions). Byte-preserving and idempotent; `--ledger` never writes.
-`--ungraded` (the `spec` branch, whose obligations are not on disk) is that
+`--ungraded` (the `spec` family, whose obligations are not in `obligations.json`) is that
 rewrite plus the non-empty-file floor.
 
 The check itself is **pure**: it reads two artifacts and writes nothing. There is no
@@ -1016,9 +1094,22 @@ Four decisions in it that are decisions, not implementation detail:
   audits. The note says so, so that pass is never read as *"the adjudication was
   complete"*. A missing or unparseable `findings.json` is the separate failure,
   and it fails — the loop should get another iteration to write one. `--repair`
-  deliberately **does not invent one**: a fabricated `summary`/`event` is a
-  review nobody wrote, and a loop that merely runs out of iterations does not
-  fail the run anyway.
+  **writes one when it is MISSING over a non-empty hypothesis set** (it used
+  to refuse — *"a fabricated summary is a review nobody wrote"* — which was
+  right while `review` always ran). With the pipeline on, `review` is skipped
+  by default and `adjudicate` is the **only** writer, so an adjudicator that
+  fails, times out or never writes the file left post-review failing *"could
+  not read findings"*: red run, nothing posted, per-head dedup blank, and the
+  30-minute sweep re-buying the whole pipeline on the same SHA forever. The
+  written document says what it is — every hypothesis at `internal` (the row
+  the floor writes for an uncovered one), `event: "COMMENT"`, a summary saying
+  adjudication did not complete so nothing was weighed or posted inline, and an
+  `incomplete: {phase: "adjudicate", reason}` marker. It is safe in every
+  workflow shape: when `review` RAN, a missing file means it failed and
+  post-review (`none_failed` on `review`) does not run. **Not** invented: a
+  document when there are no hypotheses (nothing to conserve; post-review then
+  fails loudly as before), and an UNREADABLE file is never overwritten —
+  somebody wrote it.
 - **`FindingsDocumentSchema` is LOOSE at every level** (`schema.ts`). The real
   contract lives in `apps/server/skills/pr-review/references/findings-schema.md`
   and the adjudicator writes a superset — `mechanism`, `bothEnds`, `evidence`.
@@ -1163,8 +1254,8 @@ lastlight-facts units-ingest --dir .lastlight/pr-review          # → hypothese
 - **Deterministic**: units ordered by file then line, `u-NNN` in that order,
   `requestSha256` = sha256 of the request, and no sha or timestamp inside a
   request, so an unchanged unit renders byte-identically across pushes.
-  `UNITS_PROMPT_VERSION` (now `units-v2`) is bumped whenever the rendering
-  changes.
+  `UNITS_PROMPT_VERSION` (now `units-v3`: spec obligations) is bumped whenever
+  the rendering changes.
 - **Shared prefix first — for the provider's prefix cache.** `request` =
   `UNITS_SHARED_PREFIX` + the unit-specific part. The prefix (~5.9k chars: task,
   line-tag legend, the ALWAYS-asked families, NOT FINDINGS, evidence record,
@@ -1192,12 +1283,48 @@ lastlight-facts units-ingest --dir .lastlight/pr-review          # → hypothese
   could not look), so its gate never reads "surveyed nothing". Then every
   family's `discharge` gate runs over the ingested set and lands in
   `units/ingest.json`.
-- **The `spec` gap is named on every run.** Spec obligations are built
-  harness-side (`review-spec.ts`) and never written to the workspace, so no
-  unit carries one and the `spec` question is asked only in its
-  falsifiable-documentation half. `degraded[]` says so — which is also why
-  `units` exits 3, not 0, on an ordinary run. Closing it needs core to write
-  the spec obligations to disk.
+- **Spec obligations come from `spec-obligations.json`** — core's
+  `SpecObligationSet` (`review-spec.ts`), written before `units` runs
+  (`--spec <file>`, default `<dir>/spec-obligations.json`). Each attaches to
+  ONE unit: the first candidate FILE (best match first) that has any unit,
+  and within it the unit holding the most touched lines (ties → earliest);
+  no candidate with a unit ⇒ the `pr` unit. One unit, never several, because
+  every obligation is asked exactly once. They render under OBLIGATIONS as
+  `S-n · family spec · asked in <source>` with the criterion, the candidate
+  files and the question; `units.json` records them as `specObligations`, and
+  ingest resolves `S-n` against THAT list (not the file) — what the model was
+  asked. Answers become `hypotheses/spec.jsonl` rows in the agent spec
+  survey's shape: `obligation: "S-n"`, `bothEnds.introducedAt` = the source
+  (`issue #12` / `the PR body`), and a `path`. An absent file is still a
+  `degraded[]` entry (so `units` exits 3 then); a malformed one — bad JSON,
+  wrong shape, repeated ids — is a `degraded[]` entry and no spec obligation,
+  never a crash. `discharge --family spec` stays `--ungraded`: graded, it
+  would read `obligations.json`, where `spec` is NOT MEASURED, and grade
+  nothing.
+- **The reply rule is ONE rule, shared with core.** `findUnitObject(raw,
+  unitId)` finds the reply (every balanced top-level `{…}` span, string-aware,
+  an unclosed `{` skipped and scanning continued, fence bodies too; the first
+  whose `unitId` matches, else one level of nesting) and
+  `isUsableUnitReply(obj, unitId)` accepts it (`unitId` matches, `answers` and
+  `defects` are arrays). The `survey-units` handler applies the same two
+  before calling a unit `ok` and caching it, and its test copies
+  `tests/unit-reply.test.ts`'s case table verbatim — a reading the handler
+  cached that ingest calls `invalid` would be wrong forever.
+- **An unanswered row declares `needsProbe: true`** — the only row ingest
+  stamps it on (missing / failed / stale / invalid unit, or an obligation a
+  partial reply skipped or garbled, or one no unit carried). `requiresProbe`
+  reads the raw field (or a Critical), never the derivation, and unknown
+  evidence derives to Minor, so without the stamp `falsify` owed no verdict on
+  the rows that most need one. `requiresProbe` itself is untouched — deriving
+  there would move the agent-survey baseline mid-experiment.
+- **The shell fallback document validates.** `pr-review.yaml`'s `fallback()`
+  prints `baseSha`/`promptVersion`/`responseSchema: null` and no `skipped` /
+  `sharedPrefix`; `UnitsDocumentSchema` accepts exactly that for a
+  `coverage: "none"` document with empty `units` (`FallbackUnitsDocumentSchema`,
+  built by `fallbackUnitsDocument(reason, headSha)`), and requires every field
+  otherwise. Ingest reads an empty document as `unitsState: "not-surveyed"`
+  (nobody looked — reason propagated, exit 3) unless its reason starts with
+  `NOTHING_TO_SURVEY` (`"nothing-to-survey"`, a clean answer).
 - Exit codes: `units` 0 full or nothing to survey (`coverage: "none"`, said
   why), 3 degraded, 2 missing input (a `coverage: "none"` document is still
   written); `units-ingest` 0 all answered and every gate passes, 3 otherwise

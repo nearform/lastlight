@@ -18,6 +18,10 @@
  *     into that module unit as whole regions, keeping their callers/callees;
  *   - one `pr` unit for the obligations no unit in the diff could hold.
  *
+ * Spec obligations (core's `spec-obligations.json` — acceptance criteria whose
+ * second end is a list of candidate FILES) ride on the unit with the most
+ * touched lines in their first candidate file that has one; see `attachSpec`.
+ *
  * Every request is the run-constant `UNITS_SHARED_PREFIX` followed by the
  * unit-specific part, so a provider's prefix cache pays for the common ~6k
  * characters once per run rather than once per unit.
@@ -67,6 +71,7 @@ import {
   type ShownCaller,
   type ShownLine,
   type ShownObligation,
+  type SpecUnitObligation,
 } from "./units-render.js";
 
 export { UNITS_PROMPT_VERSION, UNITS_SHARED_PREFIX } from "./units-render.js";
@@ -154,7 +159,41 @@ export const UnitSchema = z.object({
 });
 export type Unit = z.infer<typeof UnitSchema>;
 
-export const UnitsDocumentSchema = z.object({
+/**
+ * One spec obligation as `spec-obligations.json` carries it — `SpecObligation`
+ * from `apps/server/src/engine/review-spec.ts`, read LOOSELY (extra fields
+ * pass through, `changedFileCount` / `found` optional) because core owns the
+ * shape and a field it adds must not make the file "malformed" here.
+ */
+export const SpecObligationSchema = z.looseObject({
+  id: z.string().min(1),
+  criterion: z.string(),
+  source: z.string(),
+  candidates: z.array(z.string()),
+  changedFileCount: z.number().optional(),
+  found: z.literal(false).optional(),
+  question: z.string(),
+});
+
+/** `spec-obligations.json` — core's `SpecObligationSet`, written before `units` runs. */
+export const SpecObligationSetSchema = z.looseObject({
+  obligations: z.array(SpecObligationSchema),
+  dropped: z.number().optional(),
+  changedFileCount: z.number().optional(),
+  degraded: z.array(z.string()).optional(),
+});
+
+/** What `units.json` records of each spec obligation — exactly what the requests printed. */
+const UnitSpecObligationSchema = z.object({
+  id: z.string(),
+  criterion: z.string(),
+  source: z.string(),
+  candidates: z.array(z.string()),
+  question: z.string(),
+});
+
+/** A `units.json` the assembler wrote: every field present. */
+export const FullUnitsDocumentSchema = z.object({
   version: z.literal(1),
   generatedAt: z.string(),
   baseSha: z.string(),
@@ -172,9 +211,87 @@ export const UnitsDocumentSchema = z.object({
   responseSchema: z.record(z.string(), z.unknown()),
   /** Changed files no unit covers, and why — deliberate skips, not failures. */
   skipped: z.array(z.object({ file: z.string(), reason: z.string() })),
+  /**
+   * The spec obligations the requests carry, as printed — so ingest resolves an
+   * `S-n` against exactly what the model was asked, as it reads line tags back
+   * out of `request`. Absent on a document written before spec obligations
+   * reached the workspace; `[]` when the file was read and held none.
+   */
+  specObligations: z.array(UnitSpecObligationSchema).optional(),
   units: z.array(UnitSchema),
 });
-export type UnitsDocument = z.infer<typeof UnitsDocumentSchema>;
+export type UnitsDocument = z.infer<typeof FullUnitsDocumentSchema>;
+
+/**
+ * The document the `units` phase's SHELL writes when the process died without
+ * writing one (`pr-review.yaml`'s `fallback()`): nothing was cut into units,
+ * so every field that describes a rendering is `null` and `skipped` is absent.
+ * Accepted HONESTLY rather than mirrored — the YAML should not have to track a
+ * growing schema to say "the process died" — but ONLY with `coverage: "none"`
+ * and an empty `units`: a document with units must carry everything above.
+ */
+export const FallbackUnitsDocumentSchema = z.object({
+  version: z.literal(1),
+  generatedAt: z.string(),
+  baseSha: z.string().nullable(),
+  headSha: z.string().nullable(),
+  promptVersion: z.string().nullable(),
+  sharedPrefix: z.string().nullable().optional(),
+  sharedPrefixSha256: z.string().nullable().optional(),
+  coverage: z.literal("none"),
+  degraded: z.array(DegradedEntrySchema),
+  responseSchema: z.record(z.string(), z.unknown()).nullable(),
+  skipped: z.array(z.object({ file: z.string(), reason: z.string() })).optional(),
+  specObligations: z.array(UnitSpecObligationSchema).optional(),
+  units: z.array(UnitSchema).max(0),
+});
+export type FallbackUnitsDocument = z.infer<typeof FallbackUnitsDocumentSchema>;
+
+/** Either shape — what a READER of `units.json` must accept. */
+export const UnitsDocumentSchema = z.union([FullUnitsDocumentSchema, FallbackUnitsDocumentSchema]);
+export type AnyUnitsDocument = z.infer<typeof UnitsDocumentSchema>;
+
+/**
+ * Parse a `units.json` value as either shape, reporting the FULL schema's
+ * issues on failure — a union's own error ("no member matched") says nothing a
+ * reader can act on.
+ */
+export function parseUnitsDocument(
+  value: unknown,
+): { success: true; data: AnyUnitsDocument } | { success: false; error: z.ZodError } {
+  const full = FullUnitsDocumentSchema.safeParse(value);
+  if (full.success) return { success: true, data: full.data };
+  const fallback = FallbackUnitsDocumentSchema.safeParse(value);
+  if (fallback.success) return { success: true, data: fallback.data };
+  return { success: false, error: full.error };
+}
+
+/**
+ * The shell fallback's document, built here so its shape is pinned by a test
+ * beside the schema that accepts it. `pr-review.yaml` prints this literally
+ * (it cannot call a process that just died); keep the two in step.
+ */
+export function fallbackUnitsDocument(reason: string, headSha: string | null): FallbackUnitsDocument {
+  return {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    baseSha: null,
+    headSha,
+    promptVersion: null,
+    coverage: "none",
+    degraded: [{ extractor: "units", reason }],
+    responseSchema: null,
+    units: [],
+  };
+}
+
+/**
+ * The prefix of the ONE degraded reason that means "there was genuinely
+ * nothing to survey" — the only empty document that is a clean answer. Every
+ * other empty document (a missing input, a dead process) means nobody looked,
+ * and ingest reads it that way.
+ */
+export const NOTHING_TO_SURVEY = "nothing to survey";
 
 export interface BuildUnitsOptions {
   /** The `.lastlight/pr-review` directory. */
@@ -185,6 +302,12 @@ export interface BuildUnitsOptions {
   factsPath?: string;
   /** Defaults to `<dir>/obligations.json`. Absent ⇒ units carry no obligations, loudly. */
   obligationsPath?: string;
+  /**
+   * Core's `spec-obligations.json`. Defaults to `<dir>/spec-obligations.json`
+   * when that exists; absent ⇒ no unit carries a spec obligation, named in
+   * `degraded[]`. Named explicitly and missing ⇒ the same, naming the path.
+   */
+  specPath?: string;
   maxRequestChars?: number;
   maxUnits?: number;
   log?: LoggerPort;
@@ -404,6 +527,8 @@ interface Draft {
   folded: FoldedSymbol[];
   part: { index: number; of: number; how: "lines" | "regions" } | null;
   obligations: Obligation[];
+  /** Spec obligations — attached AFTER the drafts are final (see `attachSpec`). */
+  spec?: SpecUnitObligation[];
   truncated: boolean;
   reasons: string[];
   /** How many touched lines this unit holds — the priority when over `maxUnits`. */
@@ -626,6 +751,28 @@ function attach(o: Obligation, drafts: Draft[], facts: AllDocument["extractors"]
   return null;
 }
 
+/**
+ * Which unit carries a SPEC obligation. A criterion's second end is a list of
+ * changed FILES (best match first), never a line, so no extent can "hold" it.
+ * The rule: the first candidate file that has any unit; within that file, the
+ * unit holding the most touched lines (ties → the earliest). The biggest
+ * change in the best-matching file is the likeliest implementation site, and
+ * it shows the most of that file's change. ONE unit, never several: every
+ * obligation is asked exactly once, which is what ingest's conservation and
+ * the canonical row ids rely on — the request still prints every candidate,
+ * so a model can say the criterion lives elsewhere. No candidate with a unit
+ * ⇒ `null`, which sends it to the `pr` unit.
+ */
+function attachSpec(o: SpecUnitObligation, drafts: Draft[]): Draft | null {
+  for (const file of o.candidates) {
+    const inFile = drafts.filter((d) => d.ctx?.path === file);
+    if (inFile.length === 0) continue;
+    const touched = (d: Draft): number => d.ctx!.touched.filter((l) => holds(d, l)).length;
+    return inFile.reduce((best, d) => (touched(d) > touched(best) ? d : best));
+  }
+  return null;
+}
+
 /** The line an obligation is anchored at, for picking the pass that holds it. */
 function anchorLine(o: Obligation): number {
   return o.introducedAt.line;
@@ -819,6 +966,7 @@ function modelFor(input: RenderInput): RequestModel {
     callees,
     calleesOmitted: neighbours.callees.length - callees.length,
     obligations: draft.obligations.map((o) => obligationView(o, head, level)),
+    specObligations: draft.spec ?? [],
     overview: input.overview,
     asked: askedFor(draft.obligations),
     shrinkNote: notes.length ? notes.join("; ") : null,
@@ -959,8 +1107,52 @@ function readJson(path: string, what: string): unknown {
 
 const sha256 = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
 
-const SPEC_GAP =
-  "spec obligations are built harness-side (apps/server review-spec.ts) from the PR body and linked issues and are never written to the workspace, so no unit carries one — the spec family is asked only its falsifiable-documentation half";
+const SPEC_GAP_TAIL = "so no unit carries a spec obligation — the spec family is asked only its falsifiable-documentation half";
+
+/**
+ * Read core's `spec-obligations.json`. Never throws: a missing or malformed
+ * file is a `degraded[]` reason and no spec obligation, because the spec axis
+ * is one family of six and must not take the unit survey down with it.
+ */
+function loadSpecObligations(
+  specPath: string | undefined,
+  dir: string,
+): { obligations: SpecUnitObligation[] | null; reason: string | null; set: z.infer<typeof SpecObligationSetSchema> | null } {
+  const path = specPath ?? join(dir, "spec-obligations.json");
+  if (!existsSync(path)) {
+    return {
+      obligations: null,
+      set: null,
+      reason: specPath
+        ? `spec-obligations.json not found at ${path} (named by --spec), ${SPEC_GAP_TAIL}`
+        : `spec-obligations.json not found at ${path} — core did not write the spec obligations, ${SPEC_GAP_TAIL}`,
+    };
+  }
+  let parsed: z.infer<typeof SpecObligationSetSchema>;
+  try {
+    const result = SpecObligationSetSchema.safeParse(JSON.parse(readFileSync(path, "utf8")));
+    if (!result.success) {
+      const issues = result.error.issues.slice(0, 3).map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
+      return { obligations: null, set: null, reason: `spec-obligations.json at ${path} does not validate (${issues}), ${SPEC_GAP_TAIL}` };
+    }
+    parsed = result.data;
+  } catch (err) {
+    return { obligations: null, set: null, reason: `spec-obligations.json at ${path} is not readable JSON (${reasonOf(err)}), ${SPEC_GAP_TAIL}` };
+  }
+  const ids = parsed.obligations.map((o) => o.id);
+  const repeated = ids.filter((id, i) => ids.indexOf(id) !== i);
+  if (repeated.length > 0) {
+    return {
+      obligations: null,
+      set: null,
+      reason: `spec-obligations.json at ${path} repeats obligation id(s) ${[...new Set(repeated)].join(", ")} — an answer could not be told apart, ${SPEC_GAP_TAIL}`,
+    };
+  }
+  const obligations = parsed.obligations
+    .map((o) => ({ id: o.id, criterion: o.criterion, source: o.source, candidates: o.candidates, question: o.question }))
+    .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+  return { obligations, set: parsed, reason: null };
+}
 
 /** A document that says nothing was surveyed and why. Validates like any other. */
 export function emptyUnitsDocument(reason: string, shas: { baseSha?: string; headSha?: string } = {}): UnitsDocument {
@@ -1034,7 +1226,8 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
   } else {
     note(`obligations.json not found at ${obligationsPath} — no unit carries an obligation, so every family is surveyed unseeded`);
   }
-  note(SPEC_GAP);
+  const spec = loadSpecObligations(options.specPath, options.dir);
+  if (spec.reason) note(spec.reason);
 
   // ONE diff, the same merge-base range every other extractor uses.
   const changed = changedPaths(repo, baseSha, headSha).sort((a, b) => a.path.localeCompare(b.path));
@@ -1190,8 +1383,18 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
     (a, b) => a.ctx!.path.localeCompare(b.ctx!.path) || a.lines![0] - b.lines![0] || a.lines![1] - b.lines![1],
   );
 
+  // Spec obligations attach to FINAL units: their anchor is a file, so no
+  // split or fold needs to route them, and a request that grows past the
+  // budget by one criterion still goes through the fit cascade below.
+  const unattributedSpec: SpecUnitObligation[] = [];
+  for (const o of spec.obligations ?? []) {
+    const home = attachSpec(o, finalDrafts);
+    if (home) (home.spec ??= []).push(o);
+    else unattributedSpec.push(o);
+  }
+
   const prDraft: Draft | null =
-    unattributed.length > 0
+    unattributed.length > 0 || unattributedSpec.length > 0
       ? {
           kind: "pr",
           ctx: null,
@@ -1202,6 +1405,7 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
           folded: [],
           part: null,
           obligations: [...unattributed].sort((a, b) => a.id.localeCompare(b.id)),
+          spec: unattributedSpec,
           truncated: false,
           reasons: [],
           weight: 0,
@@ -1221,7 +1425,13 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
     }
     for (const path of deleted) lines.push(`deleted ${path} — no head lines, so no unit`);
     for (const s of skipped) lines.push(`not surveyed ${s.file} — ${s.reason}`);
-    lines.push(`spec obligations: none reach this unit — ${SPEC_GAP}`);
+    if (spec.obligations === null) lines.push(`spec obligations: none — ${spec.reason}`);
+    else if (spec.obligations.length === 0) {
+      lines.push(`spec obligations: none were built — ${spec.set?.degraded?.join("; ") || "the PR states no acceptance criteria"}`);
+    } else {
+      const where = (o: SpecUnitObligation): string => ids[all.findIndex((d) => d.spec?.includes(o) ?? false)] ?? "no unit";
+      lines.push(`spec obligations: ${spec.obligations.length} — ${spec.obligations.map((o) => `${o.id} in ${where(o)}`).join(", ")}`);
+    }
     return lines;
   };
 
@@ -1239,7 +1449,7 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
       truncated = true;
       note(`${id} (${where}): still ${request.length} chars after every shrink step — over the ${budget}-char budget`);
     }
-    const families = [...new Set(d.obligations.map((o) => o.family))].sort();
+    const families = [...new Set([...d.obligations.map((o) => o.family as string), ...(d.spec?.length ? ["spec"] : [])])].sort();
     return {
       id,
       kind: d.kind,
@@ -1248,7 +1458,7 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
       lines: d.lines,
       language: d.ctx?.language ?? null,
       families,
-      obligationIds: d.obligations.map((o) => o.id),
+      obligationIds: [...d.obligations.map((o) => o.id), ...(d.spec ?? []).map((o) => o.id)],
       request,
       requestSha256: sha256(request),
       truncated,
@@ -1258,12 +1468,12 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
   if (units.length === 0) {
     note(
       changed.length === 0
-        ? "nothing to survey: the range changed no file"
-        : `nothing to survey: ${changed.length} changed file(s), none with a head line to show (${deleted.length} deleted, ${skipped.length} skipped)`,
+        ? `${NOTHING_TO_SURVEY}: the range changed no file`
+        : `${NOTHING_TO_SURVEY}: ${changed.length} changed file(s), none with a head line to show (${deleted.length} deleted, ${skipped.length} skipped)`,
     );
   }
 
-  const document: UnitsDocument = UnitsDocumentSchema.parse({
+  const document: UnitsDocument = FullUnitsDocumentSchema.parse({
     version: 1,
     generatedAt: new Date().toISOString(),
     baseSha,
@@ -1275,6 +1485,7 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
     degraded,
     responseSchema: unitResponseJsonSchema(),
     skipped,
+    ...(spec.obligations !== null ? { specObligations: spec.obligations } : {}),
     units,
   });
 

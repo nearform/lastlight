@@ -125,6 +125,10 @@ passes; it reads no quote and judges no claim):
   --facts <file>      the \`all\` document            (default: <dir>/facts.json)
   --obligations <f>   the seeder's document   (default: <dir>/obligations.json).
                       Absent ⇒ units carry no obligations, named in degraded[]
+  --spec <file>       core's spec obligations (default: <dir>/spec-obligations.json).
+                      Each rides on the unit with the most touched lines in its
+                      first candidate file that has one, else the \`pr\` unit.
+                      Absent or malformed ⇒ no spec obligation, named in degraded[]
   --out <file>        where units.json goes      (default: <dir>/units.json)
   --max-chars <n>     per-request budget in characters (default 40000). Over it:
                       trim neighbours, then drop them, then split the unit into
@@ -525,6 +529,7 @@ export function runCli(
         repo: stringFlag(flags.repo) ?? process.cwd(),
         factsPath: stringFlag(flags.facts),
         obligationsPath: stringFlag(flags.obligations),
+        specPath: stringFlag(flags.spec),
         maxRequestChars: numberFlag(flags["max-chars"]),
         maxUnits: numberFlag(flags["max-units"]),
         log,

@@ -6,8 +6,9 @@
  *
  * The request (`units.ts`) states this shape and the ingest validates against
  * it, so both halves are one module's constants. Core only does the model I/O:
- * its one check is "the raw text holds a JSON object whose `unitId` is this
- * unit's" — enough to decide its single retry — and everything past that is
+ * its one check is {@link findUnitObject} + {@link isUsableUnitReply} — the
+ * same two rules ingest applies, mirrored there case for case — enough to
+ * decide its single retry and whether to cache; everything past that is
  * decided here, deterministically and testably without a model.
  *
  * ── What is deliberately NOT in it ─────────────────────────────────────────
@@ -101,7 +102,19 @@ export const UnitResponseFileSchema = z.looseObject({
 });
 export type UnitResponseFile = z.infer<typeof UnitResponseFileSchema>;
 
-/** Where the value opening at `start` closes (the index after it), or -1. String-aware. */
+// ── Finding the reply object: THE canonical rule ────────────────────────────
+//
+// Two sides read a unit reply and they must agree on what counts as one: the
+// core handler (`apps/server/src/workflows/handlers/survey-units.ts`) decides
+// its single retry, and whether to cache, off it; `units-ingest` decides
+// `ok` / `invalid` off it. When they disagreed — the handler tried every `{`,
+// ingest stopped at the first unclosed one — a reply the handler accepted and
+// cached could read `invalid` at ingest forever (a cached reading is never
+// re-asked). So the rule lives HERE, specified by the two doc comments below
+// and pinned by `tests/unit-reply.test.ts`, whose case table the handler's
+// test copies verbatim. Change one side and the tables diverge.
+
+/** Where the object opening at `start` closes (the index after it), or -1. String-aware; braces only. */
 function closingBrace(text: string, start: number): number {
   let depth = 0;
   let inString = false;
@@ -120,72 +133,113 @@ function closingBrace(text: string, start: number): number {
   return -1;
 }
 
-/** Every top-level `{…}` span in `text` that parses as a JSON object, in order. */
-function objectsIn(text: string): Record<string, unknown>[] {
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  v !== null && typeof v === "object" && !Array.isArray(v);
+
+/**
+ * Every balanced top-level `{…}` span of `text` that parses as a JSON object,
+ * in order of appearance. An unclosed `{` is skipped and scanning CONTINUES one
+ * character later (it never ends the scan); a balanced span that is not JSON
+ * (prose in braces) is not a container either — scanning resumes one character
+ * after its `{`, so an object inside it is still found. A span that parses is
+ * consumed whole: objects nested inside it are not top-level.
+ */
+function balancedObjects(text: string): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = [];
   let pos = 0;
   while (pos < text.length) {
     const start = text.indexOf("{", pos);
     if (start === -1) break;
     const end = closingBrace(text, start);
-    if (end === -1) break;
-    try {
-      const value = JSON.parse(text.slice(start, end)) as unknown;
-      if (value && typeof value === "object" && !Array.isArray(value)) {
-        out.push(value as Record<string, unknown>);
-        pos = end;
-        continue;
+    if (end !== -1) {
+      try {
+        const value = JSON.parse(text.slice(start, end)) as unknown;
+        if (isPlainObject(value)) {
+          out.push(value);
+          pos = end;
+          continue;
+        }
+      } catch {
+        // Balanced, not JSON — fall through to the next brace.
       }
-    } catch {
-      // Not JSON from this brace — try the next one.
     }
     pos = start + 1;
   }
   return out;
 }
 
-export interface ExtractedObject {
-  /** The object, or `null` when the text held none. */
-  value: Record<string, unknown> | null;
-  /** How it was found — for the ingest report, so a sloppy reply stays visible. */
-  via: "whole" | "fence" | "scan" | null;
+/** The bodies of the ``` fences in `text`, in order. An unterminated fence has no body. */
+function fenceBodies(text: string): string[] {
+  return [...text.matchAll(/```[^\n`]*\n([\s\S]*?)```/g)].map((m) => m[1] ?? "");
+}
+
+/** Where {@link locateUnitObject} found the object — for the ingest report. */
+export type UnitObjectVia = "whole" | "span" | "nested";
+
+/**
+ * {@link findUnitObject}, plus HOW it was found and every object's `unitId`
+ * seen on the way (for an error that says what the reply named instead).
+ */
+export function locateUnitObject(
+  raw: string,
+  unitId: string,
+): { value: Record<string, unknown> | null; via: UnitObjectVia | null; seenUnitIds: unknown[] } {
+  const top = [raw, ...fenceBodies(raw)].flatMap(balancedObjects);
+  const seenUnitIds = top.map((o) => o.unitId);
+  const direct = top.find((o) => o.unitId === unitId);
+  if (direct) {
+    let whole = false;
+    try {
+      const parsed = JSON.parse(raw.trim()) as unknown;
+      whole = isPlainObject(parsed) && parsed.unitId === unitId;
+    } catch {
+      whole = false;
+    }
+    return { value: direct, via: whole ? "whole" : "span", seenUnitIds };
+  }
+  for (const o of top) {
+    for (const v of Object.values(o)) {
+      const inner = Array.isArray(v) ? v : [v];
+      const hit = inner.find((e) => isPlainObject(e) && e.unitId === unitId);
+      if (hit) return { value: hit as Record<string, unknown>, via: "nested", seenUnitIds };
+    }
+  }
+  return { value: null, via: null, seenUnitIds };
 }
 
 /**
- * The JSON object in a model's reply, tolerating the two things models do
- * anyway: a code fence around it, and prose before or after it.
+ * THE rule for finding a unit's reply object in a model's raw text. Pure.
  *
- * Preference order: the whole text; then each fenced block; then every
- * brace-balanced span. Within each tier an object whose `unitId` equals
- * `unitId` wins over one that does not — a reply that quotes a snippet of JSON
- * from the source before its answer must not have the snippet read as the
- * answer.
+ *   1. Candidates are every balanced top-level `{…}` span that parses as a JSON
+ *      object — first across the whole of `raw`, then inside each ``` fence
+ *      body — in that order. Brace matching is string-aware (a `}` inside a
+ *      JSON string does not close anything) and counts braces only. An
+ *      unclosed `{` (a truncated reply, a stray brace in prose) is skipped and
+ *      the scan continues from the next character; so is a balanced span that
+ *      is not JSON.
+ *   2. The FIRST candidate whose `unitId` is exactly `unitId` (string
+ *      equality, no normalisation) is the reply.
+ *   3. Otherwise, one level of nesting: for each candidate in order, each
+ *      property value that is an object whose `unitId` is `unitId`, or an
+ *      object element with that `unitId` of a property value that is an array.
+ *      The first found is the reply (`{"result":{"unitId":"u-001",…}}`).
+ *   4. Otherwise `null` — including when objects exist but none names this
+ *      unit. An object naming ANOTHER unit is never this unit's reply.
+ *
+ * It does not validate the body; {@link isUsableUnitReply} is the structural
+ * check applied to what this returns, and the schema is ingest's.
  */
-export function extractResponseObject(raw: string, unitId: string): ExtractedObject {
-  const pick = (candidates: Record<string, unknown>[]): Record<string, unknown> | null =>
-    candidates.find((c) => c.unitId === unitId) ?? null;
+export function findUnitObject(raw: string, unitId: string): Record<string, unknown> | null {
+  return locateUnitObject(raw, unitId).value;
+}
 
-  const trimmed = raw.trim();
-  try {
-    const whole = JSON.parse(trimmed) as unknown;
-    if (whole && typeof whole === "object" && !Array.isArray(whole)) {
-      return { value: whole as Record<string, unknown>, via: "whole" };
-    }
-  } catch {
-    // fall through
-  }
-
-  const fenced: Record<string, unknown>[] = [];
-  for (const match of raw.matchAll(/```[a-zA-Z0-9_-]*[ \t]*\n([\s\S]*?)```/g)) {
-    fenced.push(...objectsIn(match[1] ?? ""));
-  }
-  const fromFence = pick(fenced);
-  if (fromFence) return { value: fromFence, via: "fence" };
-
-  const scanned = objectsIn(raw);
-  const fromScan = pick(scanned);
-  if (fromScan) return { value: fromScan, via: "scan" };
-
-  const any = fenced[0] ?? scanned[0] ?? null;
-  return { value: any, via: any ? (fenced[0] ? "fence" : "scan") : null };
+/**
+ * THE structural rule for a usable reply — what the handler checks before it
+ * calls a unit `ok` and caches it, and what ingest requires before reading a
+ * single entry: `obj` is an object, its `unitId` is exactly `unitId`, and both
+ * `answers` and `defects` are arrays (possibly empty). Nothing about the
+ * entries — a malformed entry is ingest's to record, never a reason to re-ask.
+ */
+export function isUsableUnitReply(obj: unknown, unitId: string): obj is Record<string, unknown> & { answers: unknown[]; defects: unknown[] } {
+  return isPlainObject(obj) && obj.unitId === unitId && Array.isArray(obj.answers) && Array.isArray(obj.defects);
 }

@@ -37,7 +37,7 @@
 import type { Obligation } from "./seed.js";
 
 /** Bump whenever the rendering below changes, so cached readings are not reused across it. */
-export const UNITS_PROMPT_VERSION = "units-v2";
+export const UNITS_PROMPT_VERSION = "units-v3";
 
 /** One family's question, compact. `closes` is what `control_site` means for it. */
 export const FAMILY_QUESTIONS: Record<string, { question: string; closes: string }> = {
@@ -64,7 +64,7 @@ export const FAMILY_QUESTIONS: Record<string, { question: string; closes: string
   },
   spec: {
     question:
-      "Does a comment, doc line or example this unit shows make a checkable claim about behaviour that is FALSE at head? (What the PR was asked to do is not available to this unit — only the falsifiable-documentation half is asked here.)",
+      "Does a comment, doc line or example this unit shows make a checkable claim about behaviour that is FALSE at head? What the PR was asked to do reaches a unit only as a spec obligation under OBLIGATIONS (an acceptance criterion, quoted): answer each one listed — quote the line that implements it, or say that none shown does.",
     closes: "the line that actually implements what the text claims",
   },
   tests: {
@@ -108,6 +108,24 @@ export interface ShownCallee {
   declaredAt: string | null;
 }
 
+/**
+ * One SPEC obligation as a unit carries it — an acceptance criterion from the
+ * PR body or a linked issue, built harness-side (`review-spec.ts`) and read
+ * from `spec-obligations.json`. Structurally `SpecObligation` minus the fields
+ * a request does not print.
+ */
+export interface SpecUnitObligation {
+  /** `S-1`, `S-2`, … */
+  id: string;
+  /** End one: what was asked, quoted verbatim. */
+  criterion: string;
+  /** Where it was asked: `issue #12` or `the PR body`. */
+  source: string;
+  /** End two: changed files that could implement it, best match first. */
+  candidates: string[];
+  question: string;
+}
+
 export interface ShownObligation {
   obligation: Obligation;
   /** The other end's candidate sites, with their head text where it was read. */
@@ -141,6 +159,8 @@ export interface RequestModel {
   callees: ShownCallee[];
   calleesOmitted: number;
   obligations: ShownObligation[];
+  /** Spec obligations attached to this unit, listed after the seeded ones. */
+  specObligations: SpecUnitObligation[];
   /** Plain lines for the `pr` unit's overview (changed/deleted/skipped files). */
   overview: string[];
   /** Families whose questions are asked, in order. */
@@ -185,6 +205,20 @@ function renderObligation(shown: ShownObligation): string[] {
   out.push(`  question: ${o.question}`);
   return out;
 }
+
+function renderSpecObligation(o: SpecUnitObligation): string[] {
+  const shown = o.candidates.slice(0, MAX_SPEC_CANDIDATES);
+  const more = o.candidates.length - shown.length;
+  return [
+    `${o.id} · family spec · asked in ${o.source}`,
+    `  criterion: "${clip(o.criterion, 400)}"`,
+    `  candidate files, best match first — NOT yet checked (found: false): ${shown.join(", ")}${more > 0 ? ` (+${more} more)` : ""}`,
+    `  question: ${o.question}`,
+  ];
+}
+
+/** Candidate files printed per spec obligation. */
+const MAX_SPEC_CANDIDATES = 8;
 
 const EVIDENCE_FIELDS = [
   '  subject            string — the symbol, path, behaviour or criterion the entry is about',
@@ -302,7 +336,8 @@ export const UNITS_SHARED_PREFIX: string = renderSharedPrefix();
 export function renderUnitSpecific(m: RequestModel): string {
   const L: string[] = [];
   const multiFile = m.kind === "pr";
-  const ids = m.obligations.map((s) => s.obligation.id);
+  const ids = [...m.obligations.map((s) => s.obligation.id), ...m.specObligations.map((o) => o.id)];
+  const firstFamily = m.obligations[0]?.obligation.family ?? (m.specObligations.length > 0 ? "spec" : null);
 
   L.push(`UNIT ${m.unitId}`);
   if (m.kind === "pr") {
@@ -399,6 +434,7 @@ export function renderUnitSpecific(m: RequestModel): string {
       "  enforced. Nothing has been verified. Answer the question with the evidence record above.",
     );
     for (const s of m.obligations) L.push(...renderObligation(s));
+    for (const o of m.specObligations) L.push(...renderSpecObligation(o));
   }
   L.push("");
 
@@ -411,7 +447,7 @@ export function renderUnitSpecific(m: RequestModel): string {
 
   const exampleAnswer =
     ids.length > 0
-      ? `{"obligation":"${ids[0]}","family":"${m.obligations[0]!.obligation.family}","claim":"…",${multiFile ? '"file":"…",' : ""}"line":<tag>,"evidence":{…}}`
+      ? `{"obligation":"${ids[0]}","family":"${firstFamily}","claim":"…",${multiFile ? '"file":"…",' : ""}"line":<tag>,"evidence":{…}}`
       : "";
   L.push("RESPONSE FOR THIS UNIT");
   L.push(

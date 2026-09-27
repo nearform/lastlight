@@ -21,14 +21,15 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { runCli } from "../src/cli.js";
 import { checkDischarge } from "../src/discharge.js";
+import { checkProbes, requiresProbe } from "../src/probes.js";
 import { EXIT_DEGRADED, EXIT_OK, EXIT_UNAVAILABLE } from "../src/errors.js";
 import { readHypothesisSet } from "../src/hypotheses.js";
 import { runExtractor } from "../src/run.js";
 import type { AllDocument } from "../src/schema.js";
 import { seedObligations, type Obligation } from "../src/seed.js";
 import { deriveVerdict, type SurveyEvidence } from "../src/survey-verdict.js";
-import { extractResponseObject, UnitResponseBodySchema, unitResponseJsonSchema } from "../src/unit-response.js";
-import { buildUnits, SMALL_SYMBOL_LINES, type Unit, type UnitsDocument } from "../src/units.js";
+import { UnitResponseBodySchema, unitResponseJsonSchema } from "../src/unit-response.js";
+import { buildUnits, fallbackUnitsDocument, SMALL_SYMBOL_LINES, UnitsDocumentSchema, type Unit, type UnitsDocument } from "../src/units.js";
 import { ingestUnits } from "../src/units-ingest.js";
 import { FAMILY_QUESTIONS, requestLineTags, UNIT_SEPARATOR, UNITS_SHARED_PREFIX } from "../src/units-render.js";
 import { makeFixture, TSCONFIG, type Fixture } from "./helpers.js";
@@ -311,7 +312,7 @@ describe("units — the assembler", () => {
     expect(doc.headSha).toBe(fixture.head);
     expect(doc.promptVersion).toMatch(/^units-v\d+$/);
     expect(doc.responseSchema).toMatchObject({ type: "object" });
-    // The spec gap is always named — its obligations never reach the workspace.
+    // No spec-obligations.json in this workspace, so the spec gap is named.
     expect(doc.coverage).toBe("degraded");
     expect(doc.degraded.some((d) => d.extractor === "units" && /spec/.test(d.reason))).toBe(true);
   });
@@ -550,7 +551,7 @@ function replyFor(unit: Unit, obligations: Obligation[]) {
     unitId: unit.id,
     answers: unit.obligationIds.map((id) => ({
       obligation: id,
-      family: obligations.find((o) => o.id === id)!.family,
+      family: obligations.find((o) => o.id === id)?.family ?? "spec",
       claim: `answer to ${id}`,
       ...(unit.kind === "pr" ? { file } : {}),
       line,
@@ -655,7 +656,7 @@ describe("units-ingest", () => {
     writeResponse(dir, unit, `Here is my answer.\n\n\`\`\`json\n${JSON.stringify(body, null, 2)}\n\`\`\`\nDone.`);
     const { document } = ingestUnits({ dir });
     const report = document.units.find((u) => u.unitId === unit.id)!;
-    expect(report).toMatchObject({ status: "ok", via: "fence" });
+    expect(report).toMatchObject({ status: "ok", via: "span" });
     const defect = familyRows(dir, "security").find((r) => r.unitId === unit.id)!;
     expect(defect).toMatchObject({ discharge: "ABSENT", quotes: [{ line: 20, text: "    if (value < 0) return;" }] });
     expect(defect).not.toHaveProperty("obligation");
@@ -763,15 +764,6 @@ describe("units-ingest", () => {
     expect(["contract", "enforcement", "security", "state"].flatMap((f) => familyRows(dir, f)).filter((r) => r.obligation)).toHaveLength(4);
     expect(runCli(["units-ingest", "--dir", dir, "--never-fail"], cli)).toBe(EXIT_OK);
     gatesPass(dir);
-  });
-});
-
-describe("extractResponseObject", () => {
-  it("prefers the object whose unitId matches, through fences and prose", () => {
-    const raw = 'Example: {"unitId":"u-999"}\n```json\n{"unitId":"u-001","answers":[],"defects":[]}\n```';
-    expect(extractResponseObject(raw, "u-001")).toMatchObject({ via: "fence", value: { unitId: "u-001" } });
-    expect(extractResponseObject('lead {"unitId":"u-002","a":"}"} tail', "u-002")).toMatchObject({ via: "scan" });
-    expect(extractResponseObject("no json here", "u-001").value).toBeNull();
   });
 });
 
@@ -1089,5 +1081,276 @@ describe("units-ingest — coalesced module units", () => {
     expect(quoted(state, "a line never shown")).toEqual([]);
     expect(report.warnings.some((w) => w.includes(`:${L.gap} `))).toBe(true);
     gatesPass(dir);
+  });
+});
+
+// ── the fix-up slice: reply rule at ingest, probe stamping, fallback document, spec obligations ──
+
+describe("units-ingest — the canonical reply rule", () => {
+  let fixture: Fixture;
+  beforeAll(() => {
+    fixture = makeUnitsFixture();
+  });
+  afterAll(() => fixture.cleanup());
+
+  const setup = (name: string): { dir: string; doc: UnitsDocument } => {
+    const dir = workspace(fixture, factsFor(fixture), OBLIGATIONS, name);
+    const doc = buildUnits({ dir, repo: fixture.dir }).document;
+    writeFileSync(join(dir, "units.json"), JSON.stringify(doc));
+    answerAll(dir, doc, OBLIGATIONS);
+    return { dir, doc };
+  };
+
+  it("reads a reply nested under a key, and one after a stray brace in prose — both of which the handler accepts", () => {
+    const { dir, doc } = setup("rule-1");
+    const nested = unitOf(doc, (u) => u.symbol === "checkUpload");
+    const stray = unitOf(doc, (u) => u.symbol === "Store.put");
+    writeResponse(dir, nested, JSON.stringify({ result: replyFor(nested, OBLIGATIONS) }));
+    writeResponse(dir, stray, `The limit uses { braces, like "this. ${JSON.stringify(replyFor(stray, OBLIGATIONS))}`);
+    const { document } = ingestUnits({ dir });
+    expect(document.units.find((u) => u.unitId === nested.id)).toMatchObject({ status: "ok", via: "nested", answered: ["O-002"] });
+    expect(document.units.find((u) => u.unitId === stray.id)).toMatchObject({ status: "ok", via: "span", answered: ["O-003"] });
+  });
+
+  it("a reply object without a `defects` array is not usable — the same rule the handler retries on", () => {
+    const { dir, doc } = setup("rule-2");
+    const unit = unitOf(doc, (u) => u.symbol === "checkUpload");
+    const { defects: _drop, ...noDefects } = replyFor(unit, OBLIGATIONS);
+    writeResponse(dir, unit, JSON.stringify(noDefects));
+    const report = ingestUnits({ dir }).document.units.find((u) => u.unitId === unit.id)!;
+    expect(report.status).toBe("invalid");
+    expect(report.errors.join(" ")).toMatch(/defects/);
+    // …and its obligation is still conserved.
+    expect(familyRows(dir, "contract").find((r) => r.obligation === "O-002")?.discharge).toBe("PROBE");
+  });
+});
+
+describe("units-ingest — unanswered rows are REQUIRED to be probed", () => {
+  let fixture: Fixture;
+  beforeAll(() => {
+    fixture = makeUnitsFixture();
+  });
+  afterAll(() => fixture.cleanup());
+
+  it("stamps needsProbe on every row for an obligation the model did not answer, and on no other row", () => {
+    const dir = workspace(fixture, factsFor(fixture), OBLIGATIONS, "probe-1");
+    const doc = buildUnits({ dir, repo: fixture.dir }).document;
+    writeFileSync(join(dir, "units.json"), JSON.stringify(doc));
+    answerAll(dir, doc, OBLIGATIONS);
+    // One unit's reply missing (O-002), one reply that skips its obligation
+    // (O-003), and one unprompted defect whose entry is invalid.
+    const missing = unitOf(doc, (u) => u.symbol === "checkUpload");
+    rmSync(join(dir, "units", "responses", `${missing.id}.json`));
+    const partial = unitOf(doc, (u) => u.symbol === "Store.put");
+    writeResponse(dir, partial, JSON.stringify({ ...replyFor(partial, OBLIGATIONS), answers: [], defects: [{ family: "state", claim: "garbled", line: 20, evidence: { nope: 1 } }] }));
+    ingestUnits({ dir });
+
+    const set = readHypothesisSet(dir);
+    const byObligation = (id: string) => set.records.find((r) => (r.row as { obligation?: unknown }).obligation === id)!;
+    const unanswered = [byObligation("O-002"), byObligation("O-003")];
+    for (const record of unanswered) {
+      expect(record.row).toMatchObject({ needsProbe: true, discharge: "PROBE" });
+      expect(requiresProbe(record.row)).toBe(true);
+    }
+    // Answered rows (O-001, O-004 — clean evidence) and the garbled DEFECT are not declared.
+    for (const id of ["O-001", "O-004"]) expect(requiresProbe(byObligation(id).row)).toBe(false);
+    const garbled = set.records.find((r) => String((r.row as { claim?: unknown }).claim).includes("garbled"))!;
+    expect(garbled.row).not.toHaveProperty("needsProbe");
+
+    // The falsify gate now OWES a verdict on exactly the unanswered rows.
+    const probes = checkProbes({ dir, repo: fixture.dir });
+    expect(probes.required.sort()).toEqual(unanswered.map((r) => r.id).sort());
+    expect(probes.satisfied).toBe(false);
+    expect(probes.gaps.map((g) => g.kind)).toEqual(["no-verdict", "no-verdict"]);
+  });
+
+  it("the declaration agrees with the derivation, so the hygiene report stays clean", () => {
+    const dir = workspace(fixture, factsFor(fixture), OBLIGATIONS, "probe-2");
+    writeFileSync(join(dir, "units.json"), JSON.stringify(buildUnits({ dir, repo: fixture.dir }).document));
+    ingestUnits({ dir });
+    const rows = ["contract", "enforcement", "security", "state"].flatMap((f) => familyRows(dir, f)).filter((r) => r.obligation);
+    expect(rows).toHaveLength(4);
+    for (const row of rows) {
+      expect(row.needsProbe).toBe(true);
+      expect(deriveVerdict(row.evidence as SurveyEvidence).needsProbe).toBe(true);
+    }
+  });
+});
+
+describe("units.json — the shell fallback document", () => {
+  /** EXACTLY what `pr-review.yaml`'s `fallback()` prints (its printf, with a date and a sha filled in). */
+  const YAML_FALLBACK =
+    '{"version":1,"generatedAt":"2026-09-27T00:00:00.000Z","baseSha":null,"headSha":"abc","promptVersion":null,"coverage":"none","degraded":[{"extractor":"units","reason":"the units process exited 137 without writing units.json"}],"responseSchema":null,"units":[]}';
+
+  let fixture: Fixture;
+  beforeAll(() => {
+    fixture = makeUnitsFixture();
+  });
+  afterAll(() => fixture.cleanup());
+
+  it("validates, and so does the builder's document, which has exactly the YAML's fields", () => {
+    const literal = JSON.parse(YAML_FALLBACK) as Record<string, unknown>;
+    expect(UnitsDocumentSchema.safeParse(literal).success).toBe(true);
+    const built = fallbackUnitsDocument("the units process exited 137 without writing units.json", "abc");
+    expect(UnitsDocumentSchema.safeParse(built).success).toBe(true);
+    expect(Object.keys(built).sort()).toEqual(Object.keys(literal).sort());
+    expect({ ...built, generatedAt: literal.generatedAt }).toEqual(literal);
+  });
+
+  it("is accepted ONLY empty and coverage:none — a document with units must carry every field", () => {
+    const literal = JSON.parse(YAML_FALLBACK) as Record<string, unknown>;
+    expect(UnitsDocumentSchema.safeParse({ ...literal, coverage: "degraded" }).success).toBe(false);
+    const unit = { id: "u-001", kind: "pr", file: null, symbol: null, lines: null, language: null, families: [], obligationIds: [], request: "r", requestSha256: "s", truncated: false };
+    expect(UnitsDocumentSchema.safeParse({ ...literal, units: [unit] }).success).toBe(false);
+  });
+
+  it("ingest reads it as 'the units phase died' — the reason propagated — never as unreadable, and never as clean", () => {
+    const dir = workspace(fixture, factsFor(fixture), OBLIGATIONS, "fallback");
+    writeFileSync(join(dir, "units.json"), YAML_FALLBACK);
+    const { document, exitCode } = ingestUnits({ dir });
+    expect(document.unitsRead).toBe(true);
+    expect(document.unitsState).toBe("not-surveyed");
+    expect(document.unitsReason).toMatch(/exited 137/);
+    expect(document.notes.join(" ")).not.toMatch(/not readable|does not validate/);
+    expect(document.notes.join(" ")).toMatch(/exited 137/);
+    expect(document.satisfied).toBe(false);
+    expect(exitCode).toBe(EXIT_DEGRADED);
+    // Every obligation is conserved, and its row says why nobody answered it.
+    const rows = ["contract", "enforcement", "security", "state"].flatMap((f) => familyRows(dir, f)).filter((r) => r.obligation);
+    expect(rows).toHaveLength(4);
+    for (const row of rows) expect(String(row.claim)).toMatch(/exited 137/);
+  });
+
+  it("a genuinely empty range still reads as nothing to survey — a clean answer, exit 0", () => {
+    const dir = workspace(fixture, { ...factsFor(fixture), baseSha: fixture.head }, [], "empty-range");
+    writeFileSync(join(dir, "units.json"), JSON.stringify(buildUnits({ dir, repo: fixture.dir }).document));
+    const { document } = ingestUnits({ dir });
+    expect(document.unitsState).toBe("nothing-to-survey");
+  });
+});
+
+describe("units — spec obligations from spec-obligations.json", () => {
+  let fixture: Fixture;
+  beforeAll(() => {
+    fixture = makeUnitsFixture();
+  });
+  afterAll(() => fixture.cleanup());
+
+  /** Core's `SpecObligationSet`, as `review-spec.ts` builds it. */
+  const SPEC = {
+    obligations: [
+      {
+        id: "S-1",
+        criterion: "Uploads over the limit are rejected in strict mode",
+        source: "issue #12",
+        candidates: ["src/limits.ts"],
+        changedFileCount: 2,
+        found: false,
+        question: 'Quote the line — `path:line` plus its text — in one of the candidate files that implements "Uploads over the limit are rejected in strict mode", or state that no changed file does.',
+      },
+      {
+        id: "S-2",
+        criterion: "The lockfile is regenerated",
+        source: "the PR body",
+        candidates: ["pnpm-lock.yaml", "src/app.ts"],
+        changedFileCount: 2,
+        found: false,
+        question: "Quote the line that implements it, or state that no changed file does.",
+      },
+    ],
+    dropped: 0,
+    changedFileCount: 2,
+    degraded: [],
+  };
+
+  const specWorkspace = (name: string, spec: unknown): string => {
+    const dir = workspace(fixture, factsFor(fixture), OBLIGATIONS, name);
+    if (spec !== undefined) writeFileSync(join(dir, "spec-obligations.json"), typeof spec === "string" ? spec : JSON.stringify(spec));
+    return dir;
+  };
+
+  it("attaches each to the unit with the most touched lines in its first candidate file with a unit, else the pr unit", () => {
+    const dir = specWorkspace("spec-attach", SPEC);
+    const doc = buildUnits({ dir, repo: fixture.dir }).document;
+    const holder = (id: string) => doc.units.filter((u) => u.obligationIds.includes(id));
+    // Exactly one unit each.
+    expect(holder("S-1")).toHaveLength(1);
+    expect(holder("S-2")).toHaveLength(1);
+    // S-1: its candidate is src/limits.ts, and of that file's units the one
+    // holding the most changed lines carries it.
+    const limitsUnits = doc.units.filter((u) => u.file === "src/limits.ts");
+    const changed = (u: Unit) => [...(requestLineTags(u.request).get("src/limits.ts")?.values() ?? [])].filter((t) => t.changed).length;
+    const most = Math.max(...limitsUnits.map(changed));
+    expect(holder("S-1")[0]!.file).toBe("src/limits.ts");
+    expect(changed(holder("S-1")[0]!)).toBe(most);
+    // …which is checkUpload (two changed lines), NOT the file's first unit (the
+    // one-line module region) — the rule is "most touched", not "first".
+    expect(holder("S-1")[0]!.symbol).toBe("checkUpload");
+    expect(limitsUnits[0]!.kind).toBe("module");
+    expect(holder("S-1")[0]!.families).toContain("spec");
+    // S-2: the lockfile is skipped and src/app.ts did not change — no unit, so the pr unit.
+    expect(holder("S-2")[0]!.kind).toBe("pr");
+    // Rendered under OBLIGATIONS with criterion, source and question.
+    const request = holder("S-1")[0]!.request.slice(doc.sharedPrefix.length);
+    expect(request).toContain("S-1 · family spec · asked in issue #12");
+    expect(request).toContain('"Uploads over the limit are rejected in strict mode"');
+    expect(request).toContain(SPEC.obligations[0]!.question);
+    // Recorded as printed, and the permanent spec gap is gone.
+    expect(doc.specObligations?.map((o) => o.id)).toEqual(["S-1", "S-2"]);
+    expect(doc.degraded.some((d) => /spec/.test(d.reason))).toBe(false);
+    // The shared prefix is still the same bytes for every unit.
+    for (const u of doc.units) expect(u.request.startsWith(doc.sharedPrefix)).toBe(true);
+  });
+
+  it("ingests answers as hypotheses/spec.jsonl rows in the spec survey's shape, conserving an unanswered one", () => {
+    const dir = specWorkspace("spec-ingest", SPEC);
+    const doc = buildUnits({ dir, repo: fixture.dir }).document;
+    writeFileSync(join(dir, "units.json"), JSON.stringify(doc));
+    answerAll(dir, doc, OBLIGATIONS);
+    const pr = unitOf(doc, (u) => u.kind === "pr");
+    rmSync(join(dir, "units", "responses", `${pr.id}.json`));
+    ingestUnits({ dir });
+
+    const rows = familyRows(dir, "spec");
+    const s1 = rows.find((r) => r.obligation === "S-1")!;
+    expect(s1).toMatchObject({
+      id: "spec-001",
+      family: "spec",
+      obligation: "S-1",
+      discharge: "QUOTE",
+      path: "src/limits.ts",
+      bothEnds: { introducedAt: "issue #12", enforcedAt: "src/limits.ts:8" },
+      source: "units",
+    });
+    expect((s1.quotes as unknown[]).length).toBe(1);
+    expect(s1).not.toHaveProperty("needsProbe");
+    const s2 = rows.find((r) => r.obligation === "S-2")!;
+    expect(s2).toMatchObject({ discharge: "PROBE", needsProbe: true, path: "pnpm-lock.yaml", bothEnds: { introducedAt: "the PR body", enforcedAt: null } });
+    // The ingest phase's spec gate — `discharge --ungraded` — passes on these rows.
+    expect(runCli(["discharge", "--dir", dir, "--family", "spec", "--ungraded"], { out: () => {}, err: () => {} })).toBe(EXIT_OK);
+  });
+
+  it("a malformed or duplicated spec file is a degraded[] entry and no spec obligation — never a crash", () => {
+    for (const [name, spec] of [
+      ["spec-bad-json", "{ nope"],
+      ["spec-bad-shape", { obligations: [{ id: 1, criterion: "x" }] }],
+      ["spec-dup-ids", { obligations: [SPEC.obligations[0], SPEC.obligations[0]] }],
+    ] as const) {
+      const dir = specWorkspace(name, spec);
+      const { document, exitCode } = buildUnits({ dir, repo: fixture.dir });
+      expect(exitCode, name).toBe(EXIT_DEGRADED);
+      expect(document.degraded.some((d) => /spec-obligations\.json/.test(d.reason)), name).toBe(true);
+      expect(document.units.flatMap((u) => u.obligationIds).filter((id) => id.startsWith("S-")), name).toEqual([]);
+      expect(document.specObligations, name).toBeUndefined();
+    }
+  });
+
+  it("without the file the gap is still named; --spec naming a missing file names that path", () => {
+    const dir = specWorkspace("spec-absent", undefined);
+    expect(buildUnits({ dir, repo: fixture.dir }).document.degraded.some((d) => /spec-obligations\.json not found/.test(d.reason))).toBe(true);
+    const out: string[] = [];
+    runCli(["units", "--dir", dir, "--repo", fixture.dir, "--spec", join(dir, "elsewhere.json")], { out: (s) => out.push(s), err: () => {} });
+    const doc = JSON.parse(readFileSync(join(dir, "units.json"), "utf8")) as UnitsDocument;
+    expect(doc.degraded.some((d) => d.reason.includes("elsewhere.json") && d.reason.includes("--spec"))).toBe(true);
   });
 });

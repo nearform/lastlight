@@ -468,15 +468,66 @@ describe("--repair records what the adjudicator did not", () => {
     expect(read().findings).toHaveLength(3); // the two originals + H-002, recorded
   });
 
-  it("does not invent a findings.json it cannot repair", () => {
-    // A fabricated `summary` and `event` is a review nobody wrote. A loop that
-    // runs out of iterations does not fail the run, so there is nothing to
-    // rescue here — and everything to lose by rescuing it.
+  // With the evidence pipeline on, `review` is skipped and `adjudicate` is the
+  // ONLY writer of findings.json. If it never writes one, post-review has
+  // nothing to read, the run goes red with nothing posted, and the 30-minute
+  // sweep re-runs the whole pipeline on the same SHA forever. So a MISSING file
+  // over a hypothesis set is written — unadjudicated, and saying so.
+  it("writes an unadjudicated findings.json when it is MISSING and hypotheses exist", () => {
+    const { dir, read } = workspace({ hypotheses: { contract: [H1], enforcement: [H2] } });
+    const result = checkFindings({ dir, repair: true });
+    expect(result.satisfied).toBe(true);
+    expect(result.repaired.map((r) => [r.kind, r.hypothesis])).toEqual([
+      ["recorded", "contract-001"],
+      ["recorded", "enforcement-001"],
+    ]);
+    const doc = read();
+    // What post-review reads: JSON with an event it knows, no `skip` (which
+    // would post NOTHING and read as "skipped"), and a summary.
+    expect(doc.event).toBe("COMMENT");
+    expect(doc).not.toHaveProperty("skip");
+    expect(String(doc.summary)).toMatch(/Adjudication did not complete/);
+    expect(String(doc.summary)).toMatch(/nothing is posted inline/);
+    expect(doc.incomplete).toMatchObject({ phase: "adjudicate" });
+    // Every hypothesis carried, at internal tier — recorded, never posted.
+    const findings = doc.findings as Record<string, unknown>[];
+    expect(findings.map((f) => [f.tier, f.hypotheses])).toEqual([
+      ["internal", ["contract-001"]],
+      ["internal", ["enforcement-001"]],
+    ]);
+    expect(findings[0]).toMatchObject({ path: "src/config.ts", family: "contract", obligation: "O-014" });
+    // The gate itself — no repair — accepts what the floor wrote.
+    expect(checkFindings({ dir }).satisfied).toBe(true);
+    // Idempotent: a second floor finds nothing to do and rewrites nothing.
+    const before = readFileSync(join(dir, "findings.json"), "utf8");
+    expect(checkFindings({ dir, repair: true }).repaired).toEqual([]);
+    expect(readFileSync(join(dir, "findings.json"), "utf8")).toBe(before);
+  });
+
+  it("the CLI floor writes it too, and exits 0", () => {
     const { dir } = workspace({ hypotheses: { contract: [H1] } });
+    const out: string[] = [];
+    expect(runCli(["findings", "--dir", dir, "--repair"], { out: (s) => out.push(s), err: () => {} })).toBe(EXIT_OK);
+    expect(existsSync(join(dir, "findings.json"))).toBe(true);
+  });
+
+  it("does not invent a findings.json when there are no hypotheses to conserve", () => {
+    // Nothing to conserve, so nothing is written — post-review then fails on
+    // the missing file exactly as it always has, which is correct: no review
+    // and no analysis is not something to post.
+    const { dir } = workspace({});
     const result = checkFindings({ dir, repair: true });
     expect(result.satisfied).toBe(false);
     expect(result.repaired).toEqual([]);
     expect(existsSync(join(dir, "findings.json"))).toBe(false);
+  });
+
+  it("never overwrites an UNREADABLE findings.json — somebody wrote it", () => {
+    const { dir } = workspace({ hypotheses: { contract: [H1] }, findings: "{ half a review" });
+    const result = checkFindings({ dir, repair: true });
+    expect(result.satisfied).toBe(false);
+    expect(result.repaired).toEqual([]);
+    expect(readFileSync(join(dir, "findings.json"), "utf8")).toBe("{ half a review\n");
   });
 
   it("preserves every unknown field — the evidence packet is not the gate's to strip", () => {

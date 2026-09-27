@@ -27,9 +27,20 @@
  * ── What is derived here, not asked ────────────────────────────────────────
  *
  * The row's `discharge` code is `deriveVerdict(evidence).discharge` — QUOTE /
- * PARTIAL / ABSENT — or `PROBE` for a row nobody answered. `severity` and
- * `needsProbe` are not written at all: every reader derives them from
- * `evidence`, exactly as for an agent survey's rows.
+ * PARTIAL / ABSENT — or `PROBE` for a row nobody answered. `severity` is never
+ * written: every reader derives it from `evidence`, exactly as for an agent
+ * survey's rows. `needsProbe` is written on exactly one kind of row — see
+ * {@link unansweredRow} for why that one row declares it.
+ *
+ * ── Spec obligations ───────────────────────────────────────────────────────
+ *
+ * `units.json` records the spec obligations its requests carried
+ * (`specObligations`, from core's `spec-obligations.json`), and an `S-n`
+ * answer becomes a `hypotheses/spec.jsonl` row in the shape the agent `spec`
+ * survey is told to write (`review-spec.ts`'s `rowShape`): `obligation: "S-n"`,
+ * `bothEnds.introducedAt` the criterion's SOURCE (`issue #12` / `the PR body`
+ * — this family's first end is a document), and a `path` naming the changed
+ * file the row is about.
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -42,15 +53,17 @@ import { noopLogger, type LoggerPort } from "./log.js";
 import type { Obligation, ObligationsDocument } from "./seed.js";
 import { deriveVerdict, type SurveyEvidence } from "./survey-verdict.js";
 import {
-  extractResponseObject,
+  isUsableUnitReply,
+  locateUnitObject,
   UNIT_FAMILIES,
   UnitAnswerSchema,
   UnitDefectSchema,
   UnitResponseFileSchema,
   type UnitEvidence,
+  type UnitObjectVia,
 } from "./unit-response.js";
-import { UnitsDocumentSchema, type Unit, type UnitsDocument } from "./units.js";
-import { requestLineTags, type TaggedLine } from "./units-render.js";
+import { NOTHING_TO_SURVEY, parseUnitsDocument, SpecObligationSetSchema, type AnyUnitsDocument, type Unit } from "./units.js";
+import { requestLineTags, type SpecUnitObligation, type TaggedLine } from "./units-render.js";
 
 /**
  * `ok` every obligation answered by a valid entry · `partial` the reply parsed but
@@ -65,8 +78,8 @@ export interface UnitIngestReport {
   file: string | null;
   symbol: string | null;
   status: UnitIngestStatus;
-  /** How the JSON object was found in `raw` — `null` when it was not. */
-  via: "whole" | "fence" | "scan" | null;
+  /** How `findUnitObject` found the reply in `raw` — `null` when it did not. */
+  via: UnitObjectVia | null;
   /** Rows this unit contributed, by canonical id. */
   rows: string[];
   /** Obligations the reply answered with a valid entry. */
@@ -85,6 +98,15 @@ export interface IngestDocument {
   promptVersion: string | null;
   /** False ⇒ units.json could not be read; rows were built from obligations.json alone. */
   unitsRead: boolean;
+  /**
+   * What `units.json` said, in one word: `surveyed` (it holds units) ·
+   * `nothing-to-survey` (empty, and that is a clean answer) · `not-surveyed`
+   * (empty because a phase failed — a dead process, a missing input — so
+   * NOBODY looked) · `unreadable`.
+   */
+  unitsState: "surveyed" | "nothing-to-survey" | "not-surveyed" | "unreadable";
+  /** Why, in `units.json`'s own words (its last `degraded[]` reason), or the read error. */
+  unitsReason: string | null;
   units: UnitIngestReport[];
   rowsByFamily: Record<string, number>;
   discharge: { family: string; satisfied: boolean; notes: string[] }[];
@@ -130,6 +152,42 @@ function unknownEvidence(subject: string): Record<string, unknown> {
     trigger: "unknown",
     crosses_boundary: "unknown",
     capability_gained: null,
+  };
+}
+
+/**
+ * The row for an obligation the model did not answer — its unit's reply was
+ * missing, failed, stale or invalid, or the reply skipped (or garbled) this
+ * obligation — or that no unit carried at all.
+ *
+ * **`needsProbe: true` is stamped here, and this is the ONE row that declares
+ * it.** `requiresProbe` (probes.ts) — the `falsify` gate's reading of which
+ * rows it owes a verdict on — reads the RAW `row.needsProbe`, or a Critical
+ * severity; it never derives. So a row whose evidence derives to "probe it"
+ * but declares nothing is never required to be probed, and an unanswered
+ * obligation derives to Minor, so the Critical override never fires either:
+ * the rows that most need a second look were the ones `falsify` could skip.
+ * Changing `requiresProbe` to derive would move the agent-survey baseline
+ * mid-experiment, so the declaration is made where the fact is known. It
+ * agrees with the derivation (`unknownEvidence` derives `needsProbe` true), so
+ * the declared-vs-derived hygiene report stays clean. An ANSWERED row never
+ * carries it — its probe need is the evidence's, as for an agent row.
+ */
+function unansweredRow(o: Owed, unitId: string | null, why: string): Row {
+  return {
+    family: o.family,
+    obligation: o.id,
+    ...(o.spec ? { path: o.path } : {}),
+    discharge: "PROBE",
+    claim: `the unit survey could not answer ${o.id} (${why}) — unanswered, not clean: ${o.question}`,
+    bothEnds: { introducedAt: o.introducedAt, enforcedAt: null },
+    quotes: [],
+    existingCode: null,
+    failureScenario: null,
+    evidence: unknownEvidence(o.subject),
+    needsProbe: true,
+    source: "units",
+    unitId,
   };
 }
 
@@ -184,7 +242,13 @@ function locate(
   return { path: file, line, text: shown.text };
 }
 
-/** Read `units/responses/<id>.json` into a verdict on the unit plus its parsed body. */
+/**
+ * Read `units/responses/<id>.json` into a verdict on the unit plus its parsed
+ * body. The body is found by `findUnitObject` and accepted by
+ * `isUsableUnitReply` — the SAME two rules the core handler applies before it
+ * calls a unit `ok` and caches it, so a reading the handler kept is a reading
+ * ingest can read.
+ */
 function readResponse(
   dir: string,
   unit: Unit,
@@ -216,19 +280,73 @@ function readResponse(
   if (!parsed.ok) {
     return { status: "failed", body: null, via: null, error: `the call failed: ${parsed.error ?? "no error recorded"}` };
   }
-  const extracted = extractResponseObject(parsed.raw ?? "", unit.id);
-  if (!extracted.value) {
-    return { status: "invalid", body: null, via: null, error: "`raw` holds no JSON object" };
-  }
-  if (extracted.value.unitId !== unit.id) {
+  const found = locateUnitObject(parsed.raw ?? "", unit.id);
+  if (!found.value) {
     return {
       status: "invalid",
       body: null,
-      via: extracted.via,
-      error: `the reply's unitId is ${JSON.stringify(extracted.value.unitId)}, not "${unit.id}"`,
+      via: null,
+      error:
+        found.seenUnitIds.length === 0
+          ? "`raw` holds no JSON object"
+          : `\`raw\` holds ${found.seenUnitIds.length} JSON object(s), none whose unitId is "${unit.id}" (saw ${found.seenUnitIds.slice(0, 5).map((v) => JSON.stringify(v) ?? "none").join(", ")})`,
     };
   }
-  return { status: "ok", body: extracted.value, via: extracted.via, error: null };
+  if (!isUsableUnitReply(found.value, unit.id)) {
+    const missing = ["answers", "defects"].filter((k) => !Array.isArray(found.value![k]));
+    return {
+      status: "invalid",
+      body: null,
+      via: found.via,
+      error: `the reply object is not usable: ${missing.map((k) => `\`${k}\``).join(" and ")} ${missing.length > 1 ? "are" : "is"} not an array`,
+    };
+  }
+  return { status: "ok", body: found.value, via: found.via, error: null };
+}
+
+/**
+ * An obligation a unit owed an answer to, whichever document it came from —
+ * the seeder's `obligations.json` or core's spec obligations — reduced to what
+ * a row needs.
+ */
+interface Owed {
+  id: string;
+  family: string;
+  question: string;
+  /** The evidence record's `subject` when nobody answered. */
+  subject: string;
+  /** `bothEnds.introducedAt`: `path:line` for a seeded obligation, the criterion's source for a spec one. */
+  introducedAt: string;
+  /** Spec only: the changed file the row is about (its best candidate) — the spec row shape's `path`. */
+  path: string | null;
+  spec: boolean;
+}
+
+function owedFromSeed(o: Obligation): Owed {
+  const at = `${o.introducedAt.path}:${o.introducedAt.line}`;
+  return { id: o.id, family: o.family, question: o.question, subject: o.mechanism || at, introducedAt: at, path: null, spec: false };
+}
+
+function owedFromSpec(o: SpecUnitObligation): Owed {
+  return {
+    id: o.id,
+    family: "spec",
+    question: o.question,
+    subject: `acceptance criterion (${o.source}): ${o.criterion}`,
+    introducedAt: o.source,
+    path: o.candidates[0] ?? null,
+    spec: true,
+  };
+}
+
+/** Spec obligations when units.json cannot say which were asked: core's file, read directly. */
+function loadSpecFile(dir: string): SpecUnitObligation[] {
+  try {
+    const parsed = SpecObligationSetSchema.safeParse(JSON.parse(readFileSync(join(dir, "spec-obligations.json"), "utf8")));
+    return parsed.success ? parsed.data.obligations : [];
+  } catch {
+    return [];
+  }
 }
 
 function loadObligations(dir: string): { doc: ObligationsDocument | null; byId: Map<string, Obligation> } {
@@ -258,39 +376,47 @@ export function ingestUnits(options: IngestUnitsOptions): IngestUnitsResult {
   const { dir } = options;
   const notes: string[] = [];
 
-  let unitsDoc: UnitsDocument | null = null;
+  let unitsDoc: AnyUnitsDocument | null = null;
+  let unitsReason: string | null = null;
   const unitsPath = join(dir, "units.json");
   try {
-    const result = UnitsDocumentSchema.safeParse(JSON.parse(readFileSync(unitsPath, "utf8")));
+    const result = parseUnitsDocument(JSON.parse(readFileSync(unitsPath, "utf8")));
     if (result.success) unitsDoc = result.data;
-    else notes.push(`${unitsPath} does not validate (${issuesOf(result.error)})`);
+    else unitsReason = `${unitsPath} does not validate (${issuesOf(result.error)})`;
   } catch (err) {
-    notes.push(`${unitsPath} is not readable (${reasonOf(err)})`);
+    unitsReason = `${unitsPath} is not readable (${reasonOf(err)})`;
+  }
+  if (unitsReason) notes.push(unitsReason);
+  // An EMPTY document is a clean answer only when the assembler said there was
+  // nothing to survey. A missing input or a process the shell caught dying
+  // (the fallback document) also has no units — and means nobody looked.
+  const lastReason = unitsDoc?.degraded.map((d) => d.reason).at(-1) ?? null;
+  const unitsState: IngestDocument["unitsState"] = !unitsDoc
+    ? "unreadable"
+    : unitsDoc.units.length > 0
+      ? "surveyed"
+      : unitsDoc.degraded.some((d) => d.reason.startsWith(NOTHING_TO_SURVEY))
+        ? "nothing-to-survey"
+        : "not-surveyed";
+  if (unitsDoc) unitsReason = lastReason;
+  if (unitsState === "not-surveyed") {
+    notes.push(`units.json holds no unit because the units phase did not survey: ${lastReason ?? "no reason recorded"} — every obligation below is unanswered, NOT clean`);
   }
 
-  const { doc: obligationsDoc, byId: obligationById } = loadObligations(dir);
+  const { doc: obligationsDoc, byId: seedById } = loadObligations(dir);
   if (!obligationsDoc) notes.push("obligations.json is not readable — answers are filed under the family the reply names");
+  // The spec obligations the requests were rendered with; core's file only when
+  // units.json cannot say (so an unreadable document still conserves them).
+  const specList = unitsDoc?.specObligations ?? (unitsDoc && unitsDoc.units.length > 0 ? [] : loadSpecFile(dir));
+  const obligationById = new Map<string, Owed>([
+    ...[...seedById.values()].map((o): [string, Owed] => [o.id, owedFromSeed(o)]),
+    ...specList.map((o): [string, Owed] => [o.id, owedFromSpec(o)]),
+  ]);
 
   const rows: Row[] = [];
   const reports: UnitIngestReport[] = [];
 
-  /** The row for an obligation nobody answered. */
-  const unanswered = (o: Obligation, unitId: string | null, why: string): Row => {
-    const at = `${o.introducedAt.path}:${o.introducedAt.line}`;
-    return {
-      family: o.family,
-      obligation: o.id,
-      discharge: "PROBE",
-      claim: `the unit survey could not answer ${o.id} (${why}) — unanswered, not clean: ${o.question}`,
-      bothEnds: { introducedAt: at, enforcedAt: null },
-      quotes: [],
-      existingCode: null,
-      failureScenario: null,
-      evidence: unknownEvidence(o.mechanism || at),
-      source: "units",
-      unitId,
-    };
-  };
+  const unanswered = (o: Owed, unitId: string | null, why: string): Row => unansweredRow(o, unitId, why);
 
   const units = unitsDoc?.units ?? [];
   const owned = new Set<string>();
@@ -326,12 +452,9 @@ export function ingestUnits(options: IngestUnitsOptions): IngestUnitsResult {
     const answeredIds = new Set<string>();
     if (response.body) {
       const body = response.body;
-      const answers = Array.isArray(body.answers) ? body.answers : [];
-      const defects = Array.isArray(body.defects) ? body.defects : [];
-      if (!Array.isArray(body.answers) && unit.obligationIds.length > 0) {
-        report.errors.push("the reply has no `answers` array");
-      }
-      if (!Array.isArray(body.defects)) warn("the reply has no `defects` array — read as []");
+      // `readResponse` only returns a body `isUsableUnitReply` accepted.
+      const answers = body.answers as unknown[];
+      const defects = body.defects as unknown[];
 
       const fromEntry = (
         raw: unknown,
@@ -341,7 +464,7 @@ export function ingestUnits(options: IngestUnitsOptions): IngestUnitsResult {
         const parsed = schema.safeParse(raw);
         const entry = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
         const obligationId = asAnswer && typeof entry.obligation === "string" ? entry.obligation : null;
-        const obligation = obligationId ? obligationById.get(obligationId) ?? null : null;
+        const obligation = obligationId ? (obligationById.get(obligationId) ?? null) : null;
 
         if (asAnswer && obligationId !== null) {
           if (!unit.obligationIds.includes(obligationId)) {
@@ -405,7 +528,7 @@ export function ingestUnits(options: IngestUnitsOptions): IngestUnitsResult {
           warn(`${obligation.id} is a ${obligation.family} obligation; the reply filed it under ${value.family} — filed under ${obligation.family}`);
         }
         const introducedAt = obligation
-          ? `${obligation.introducedAt.path}:${obligation.introducedAt.line}`
+          ? obligation.introducedAt
           : located
             ? `${located.path}:${located.line}`
             : unit.file && unit.lines
@@ -414,6 +537,7 @@ export function ingestUnits(options: IngestUnitsOptions): IngestUnitsResult {
         rows.push({
           family,
           ...(obligation ? { obligation: obligation.id } : {}),
+          ...(family === "spec" ? { path: located?.path ?? unit.file ?? obligation?.path ?? null } : {}),
           discharge: deriveVerdict(evidence as SurveyEvidence).discharge,
           claim: value.claim,
           bothEnds: { introducedAt, enforcedAt: siteOrNull(evidence.control_site) },
@@ -451,12 +575,16 @@ export function ingestUnits(options: IngestUnitsOptions): IngestUnitsResult {
     spans.set(report, [startRow, rows.length]);
   }
 
-  // An obligation no unit owned — units.json unreadable, or written before the
-  // obligations were — is still conserved.
+  // An obligation no unit owned — units.json unreadable, empty because the
+  // phase died, or written before the obligations were — is still conserved.
   const orphans = [...obligationById.values()].filter((o) => !owned.has(o.id)).sort((a, b) => a.id.localeCompare(b.id));
-  for (const o of orphans) {
-    rows.push(unanswered(o, null, unitsDoc ? "no unit carried it" : "units.json was not readable"));
-  }
+  const orphanWhy =
+    unitsState === "unreadable"
+      ? "units.json was not readable"
+      : unitsState === "not-surveyed"
+        ? `the units phase did not survey: ${lastReason ?? "no reason recorded"}`
+        : "no unit carried it";
+  for (const o of orphans) rows.push(unanswered(o, null, orphanWhy));
   if (orphans.length > 0) notes.push(`${orphans.length} obligation(s) no unit carried got an unanswered row: ${orphans.map((o) => o.id).join(", ")}`);
 
   // A measured family with no obligation needs a row of its own, or its gate
@@ -469,8 +597,10 @@ export function ingestUnits(options: IngestUnitsOptions): IngestUnitsResult {
     if (rows.some((r) => r.family === family)) continue;
     const claim = !unitsDoc
       ? `the unit survey could not look: units.json was not readable, so the ${family} question went unanswered — this is NOT a clean result`
-      : units.length === 0
-        ? `no ${family} hypothesis — units.json holds no unit (${unitsDoc.degraded.map((d) => d.reason).at(-1) ?? "nothing to survey"}), so the ${family} question was asked of nothing`
+      : unitsState === "not-surveyed"
+        ? `the unit survey could not look: the units phase did not survey (${lastReason ?? "no reason recorded"}), so the ${family} question went unanswered — this is NOT a clean result`
+        : units.length === 0
+        ? `no ${family} hypothesis — units.json holds no unit (${lastReason ?? NOTHING_TO_SURVEY}), so the ${family} question was asked of nothing`
         : answeredUnits === 0
           ? `the unit survey could not look: none of ${units.length} unit(s) returned a usable reply, so the ${family} question went unanswered — this is NOT a clean result`
           : `no ${family} hypothesis — ${answeredUnits} of ${units.length} unit(s) answered, and none recorded one`;
@@ -529,13 +659,16 @@ export function ingestUnits(options: IngestUnitsOptions): IngestUnitsResult {
 
   const rowsByFamily = Object.fromEntries(families.map((f) => [f, byFamily.get(f)!.length]));
   const allAnswered = reports.every((r) => r.status === "ok");
-  const satisfied = unitsDoc !== null && allAnswered && discharge.every((d) => d.satisfied);
+  const satisfied =
+    unitsDoc !== null && unitsState !== "not-surveyed" && allAnswered && discharge.every((d) => d.satisfied);
 
   const document: IngestDocument = {
     version: 1,
     generatedAt: new Date().toISOString(),
     promptVersion: unitsDoc?.promptVersion ?? null,
     unitsRead: unitsDoc !== null,
+    unitsState,
+    unitsReason,
     units: reports,
     rowsByFamily,
     discharge,
@@ -564,6 +697,7 @@ export function renderIngest(doc: IngestDocument): string {
     `units-ingest: ${doc.units.length} unit(s) — ${count("ok")} ok, ${count("partial")} partial, ${count("missing")} missing, ${count("failed")} failed, ${count("stale")} stale, ${count("invalid")} invalid`,
     `  rows: ${Object.entries(doc.rowsByFamily).map(([f, n]) => `${f} ${n}`).join(", ") || "none"}`,
   ];
+  if (doc.unitsState !== "surveyed") lines.push(`  units.json: ${doc.unitsState}${doc.unitsReason ? ` — ${doc.unitsReason}` : ""}`);
   for (const d of doc.discharge) lines.push(`  discharge[${d.family}]: ${d.satisfied ? "ok" : "NOT satisfied"}`);
   for (const u of doc.units) {
     if (u.status === "ok" && u.warnings.length === 0) continue;

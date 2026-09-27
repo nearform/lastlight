@@ -72,9 +72,14 @@ export type {
 export {
   buildSyntacticIndex,
   extractFactsByName,
+  familyOf,
+  grammarDegraded,
   isIndexablePath,
   nameAmbiguityOf,
+  parsesOnDisk,
   scanChangedFiles,
+  scanDeclarations,
+  scanImportLines,
   scanImportSpecifiers,
   scanSource,
   unquote,
@@ -87,6 +92,7 @@ export type {
   DeclSite,
   ExtractFactsByNameOptions,
   ExtractFactsByNameResult,
+  GrammarFailure,
   LitSite,
   RefSite,
   ScanSink,
@@ -99,12 +105,21 @@ export {
   asSyntaxNode,
   descriptorById,
   descriptorForPath,
+  forceGrammarUnavailable,
+  grammarAvailable,
+  grammarStatus,
   interestingKinds,
   literalKindOf,
+  preflightLibrary,
   registeredExtensions,
   supportedKinds,
+  DYNAMIC_GRAMMARS,
+  GO_DESCRIPTOR,
+  JAVA_DESCRIPTOR,
   JAVASCRIPT_DESCRIPTOR,
   LANGUAGE_DESCRIPTORS,
+  PYTHON_DESCRIPTOR,
+  TSJS_FAMILY,
   TSJS_DESCRIPTORS,
   TSX_DESCRIPTOR,
   TYPESCRIPT_DESCRIPTOR,
@@ -112,6 +127,8 @@ export {
 export type {
   ConstantRule,
   DeclarationRule,
+  DynamicGrammar,
+  GrammarStatus,
   LanguageDescriptor,
   LiteralKinds,
   SyntaxNode,
@@ -333,12 +350,21 @@ export {
   UnitKindSchema,
   UnitSchema,
   UnitsDocumentSchema,
+  FullUnitsDocumentSchema,
+  FallbackUnitsDocumentSchema,
+  SpecObligationSchema,
+  SpecObligationSetSchema,
+  fallbackUnitsDocument,
+  parseUnitsDocument,
+  NOTHING_TO_SURVEY,
 } from "./units.js";
-export type { BuildUnitsOptions, BuildUnitsResult, Unit, UnitKind, UnitsDocument } from "./units.js";
+export type { AnyUnitsDocument, BuildUnitsOptions, BuildUnitsResult, FallbackUnitsDocument, Unit, UnitKind, UnitsDocument } from "./units.js";
 export { FAMILY_QUESTIONS, lineTag, renderUnitRequest, renderUnitSpecific, requestLineTags, UNIT_SEPARATOR, UNITS_SHARED_PREFIX } from "./units-render.js";
-export type { RequestModel, TaggedLine } from "./units-render.js";
+export type { RequestModel, SpecUnitObligation, TaggedLine } from "./units-render.js";
 export {
-  extractResponseObject,
+  findUnitObject,
+  isUsableUnitReply,
+  locateUnitObject,
   UNIT_FAMILIES,
   unitResponseJsonSchema,
   UnitAnswerSchema,
@@ -347,6 +373,6 @@ export {
   UnitResponseBodySchema,
   UnitResponseFileSchema,
 } from "./unit-response.js";
-export type { ExtractedObject, UnitAnswer, UnitDefect, UnitEvidence, UnitFamily, UnitResponseBody, UnitResponseFile } from "./unit-response.js";
+export type { UnitAnswer, UnitDefect, UnitEvidence, UnitFamily, UnitObjectVia, UnitResponseBody, UnitResponseFile } from "./unit-response.js";
 export { ingestUnits, renderIngest } from "./units-ingest.js";
 export type { IngestDocument, IngestUnitsOptions, IngestUnitsResult, UnitIngestReport, UnitIngestStatus } from "./units-ingest.js";
