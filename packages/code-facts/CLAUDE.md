@@ -1276,11 +1276,12 @@ lastlight-facts units-ingest --dir .lastlight/pr-review          # → hypothese
   (a family sibling `u-NNN-<family>`),
   `requestSha256` = sha256 of the request, and no sha or timestamp inside a
   request, so an unchanged unit renders byte-identically across pushes.
-  `UNITS_PROMPT_VERSION` (now `units-v6`: v5's DEFECT BAR without its count
-  prior, verdict claims with a required consequence when no control holds, and
-  the family split) is bumped whenever the rendering changes.
+  `UNITS_PROMPT_VERSION` (now `units-v7`: breadth — every defect a changed
+  line causes or makes reachable, only the NOT FINDINGS categories kept out,
+  no bar, no count prior — plus v6's verdict claims, required consequence and
+  family split) is bumped whenever the rendering changes.
 - **Shared prefix first — for the provider's prefix cache.** `request` =
-  `UNITS_SHARED_PREFIX` + the unit-specific part. The prefix (~7.9k chars: task,
+  `UNITS_SHARED_PREFIX` + the unit-specific part. The prefix (~7.4k chars: task,
   line-tag legend, the ALWAYS-asked families, NOT FINDINGS, evidence record,
   response shape, generic rules, ending `=== THIS UNIT ===`) carries **no** unit
   id, count, file or per-unit family subset, so it is byte-identical across
@@ -1300,6 +1301,20 @@ lastlight-facts units-ingest --dir .lastlight/pr-review          # → hypothese
   as the model wrote it (conservation holds, nothing derived moves). v5 audit:
   48% of 482 answers restated the question, 89% had a null consequence, 198
   with `control_site: "none"`.
+- **Unprompted `code_change` defects are demoted IN CODE, by the typed
+  field** (units-v7). A defect entry (not an obligation answer) whose
+  `evidence.trigger` is `code_change` is not written to `hypotheses/`; it is
+  recorded in full (label, family, claim, file, line, evidence, `reason:
+  "code_change"`) in the unit's `demoted` list in `units/ingest.json`, with a
+  document-level `demotedCount`. An obligation's answer is **never** demoted —
+  every obligation still gets exactly one row, whatever its trigger — and no
+  prose or regex filter exists. Measured reason (8 skillspro cases × 2 arms,
+  50 gold): v1 ("over-produce") credited 11/50; 320 of its 764 unprompted
+  defects were `code_change` and none was credited, while the input/state/
+  unknown defects carried 8. v4–v6's DEFECT BAR asked the model to hold such
+  defects back and credited gold fell to 6, 3, then 5–6 — breadth drives
+  recall, so the request asks for everything and ingest removes the one
+  typed noise class.
 - **The reply carries no `severity`, no `needsProbe`, no discharge code** —
   `UnitResponseBodySchema` is `{unitId, answers[], defects[]}`, each entry
   `{obligation?, family, claim, file?, line, evidence}` with the survey-pass

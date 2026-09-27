@@ -408,6 +408,9 @@ async function replay(fixture: string, arm: string, inst: Instance): Promise<Rep
       cpSync(responsesDir, join(keepDir, "responses"), { recursive: true });
       cpSync(join(prDir, "hypotheses"), join(keepDir, "hypotheses"), { recursive: true });
       cpSync(join(prDir, "units.json"), join(keepDir, "units.json"));
+      // ingest.json carries what ingest DEMOTED (units-v7: `code_change` defects) —
+      // rows that are in no hypotheses file, so without it they are uncountable.
+      if (existsSync(join(prDir, "units/ingest.json"))) cpSync(join(prDir, "units/ingest.json"), join(keepDir, "ingest.json"));
     } catch (err) {
       modelRun = {
         model, variant: variant ?? null, concurrency, wallMs: 0, costUsd: 0, calls: 0, unitsOk: 0, unitsFailed: 0,

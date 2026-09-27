@@ -1845,3 +1845,101 @@ describe("units-v6 — no count prior, and verdict answers", () => {
     }
   });
 });
+
+// ── units-v7: breadth in the request, code_change defects demoted in code ──
+
+describe("units-v7 — breadth, and code_change defects demoted by the typed field", () => {
+  it("the request carries no defect bar and no count prior", () => {
+    for (const gone of ["DEFECT BAR", "meets the bar", "Most units have none or one", "[] is a normal, honest answer"]) {
+      expect(UNITS_SHARED_PREFIX, gone).not.toContain(gone);
+    }
+    const fixture = makeUnitsFixture();
+    try {
+      const dir = workspace(fixture, factsFor(fixture), OBLIGATIONS, "v7-no-bar");
+      const doc = buildUnits({ dir, repo: fixture.dir, familySplitLines: 1 }).document;
+      expect(doc.units.some((u) => u.family)).toBe(true);
+      for (const u of doc.units) {
+        expect(u.request.startsWith(UNITS_SHARED_PREFIX), u.id).toBe(true);
+        expect(u.request.slice(UNITS_SHARED_PREFIX.length), u.id).not.toContain("DEFECT BAR");
+      }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("demotes an unprompted code_change defect out of hypotheses/, keeps input/state/unknown ones, and never demotes an answer", () => {
+    const fixture = makeUnitsFixture();
+    try {
+      const dir = workspace(fixture, factsFor(fixture), OBLIGATIONS, "v7-demote");
+      const doc = buildUnits({ dir, repo: fixture.dir }).document;
+      writeFileSync(join(dir, "units.json"), JSON.stringify(doc));
+      answerAll(dir, doc, OBLIGATIONS);
+      const unit = unitOf(doc, (u) => u.symbol === "checkUpload");
+      const body = replyFor(unit, OBLIGATIONS);
+      const codeChange = { ...RISK_EVIDENCE, trigger: "code_change" };
+      // The obligation's answer carries code_change too: conservation still owes it a row.
+      body.answers[0] = { ...body.answers[0]!, claim: "answer about a future edit", evidence: codeChange as never };
+      body.defects = [
+        { family: "contract", claim: "future-edit defect", line: 6, evidence: codeChange } as never,
+        { family: "contract", claim: "input defect", line: 6, evidence: RISK_EVIDENCE } as never,
+        { family: "state", claim: "state defect", line: 6, evidence: { ...RISK_EVIDENCE, trigger: "state" } } as never,
+        { family: "contract", claim: "unknown defect", line: 6, evidence: { ...RISK_EVIDENCE, trigger: "unknown" } } as never,
+      ];
+      writeResponse(dir, unit, JSON.stringify(body));
+      const { document, exitCode } = ingestUnits({ dir });
+
+      expect(exitCode).toBe(EXIT_OK);
+      const report = document.units.find((u) => u.unitId === unit.id)!;
+      expect(report.status).toBe("ok");
+      expect(report.demoted).toEqual([
+        { label: "defect #1", family: "contract", claim: "future-edit defect", file: unit.file, line: 6, evidence: codeChange, reason: "code_change" },
+      ]);
+      expect(document.demotedCount).toBe(1);
+      expect(document.units.filter((u) => u.unitId !== unit.id).every((u) => u.demoted.length === 0)).toBe(true);
+      // Every row, every family: the demoted claim is nowhere in hypotheses/.
+      const all = [...ALWAYS_ASKED, "tests"].flatMap((f) => (existsSync(join(dir, "hypotheses", `${f}.jsonl`)) ? familyRows(dir, f) : []));
+      expect(all.some((r) => r.claim === "future-edit defect")).toBe(false);
+      for (const claim of ["input defect", "unknown defect"]) {
+        expect(familyRows(dir, "contract").filter((r) => r.claim === claim), claim).toHaveLength(1);
+      }
+      expect(familyRows(dir, "state").filter((r) => r.claim === "state defect")).toHaveLength(1);
+      // The code_change ANSWER is written, once, as the model wrote it.
+      const answer = familyRows(dir, "contract").filter((r) => r.obligation === body.answers[0]!.obligation);
+      expect(answer).toHaveLength(1);
+      expect(answer[0]).toMatchObject({ claim: "answer about a future edit", unitId: unit.id });
+      expect((answer[0]!.evidence as { trigger: string }).trigger).toBe("code_change");
+      // Conservation across the document, and the gates pass end to end.
+      for (const o of OBLIGATIONS) expect(familyRows(dir, o.family).filter((r) => r.obligation === o.id), o.id).toHaveLength(1);
+      gatesPass(dir);
+      // The record on disk is the one returned.
+      const onDisk = JSON.parse(readFileSync(join(dir, "units", "ingest.json"), "utf8")) as typeof document;
+      expect(onDisk.demotedCount).toBe(1);
+      expect(onDisk.units.find((u) => u.unitId === unit.id)!.demoted[0]!.reason).toBe("code_change");
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("an answer to an obligation the unit was not asked is an unprompted defect, so code_change demotes it", () => {
+    const fixture = makeUnitsFixture();
+    try {
+      const dir = workspace(fixture, factsFor(fixture), OBLIGATIONS, "v7-stray");
+      const doc = buildUnits({ dir, repo: fixture.dir }).document;
+      writeFileSync(join(dir, "units.json"), JSON.stringify(doc));
+      answerAll(dir, doc, OBLIGATIONS);
+      const unit = unitOf(doc, (u) => u.symbol === "checkUpload");
+      const stray = OBLIGATIONS.find((o) => !unit.obligationIds.includes(o.id))!;
+      const body = replyFor(unit, OBLIGATIONS);
+      body.answers.push({ ...body.answers[0]!, obligation: stray.id, claim: "stray future edit", evidence: { ...RISK_EVIDENCE, trigger: "code_change" } as never });
+      writeResponse(dir, unit, JSON.stringify(body));
+      const { document } = ingestUnits({ dir });
+      const report = document.units.find((u) => u.unitId === unit.id)!;
+      expect(report.demoted.map((d) => d.claim)).toEqual(["stray future edit"]);
+      // The stray obligation is still answered exactly once, by its own unit.
+      expect(familyRows(dir, stray.family).filter((r) => r.obligation === stray.id)).toHaveLength(1);
+      gatesPass(dir);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+});

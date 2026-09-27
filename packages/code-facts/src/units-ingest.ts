@@ -41,6 +41,12 @@
  * `bothEnds.introducedAt` the criterion's SOURCE (`issue #12` / `the PR body`
  * — this family's first end is a document), and a `path` naming the changed
  * file the row is about.
+ *
+ * ── Demotion: one typed field, never prose ─────────────────────────────────
+ *
+ * An UNPROMPTED defect whose `evidence.trigger` is `code_change` is not written
+ * to `hypotheses/` — it is recorded in `ingest.json` (see {@link demotionOf}).
+ * An obligation's answer is never demoted, whatever its trigger.
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -97,6 +103,28 @@ export interface UnitIngestReport {
    * still written as the model wrote it (see {@link consequenceGap}).
    */
   consequenceGaps: string[];
+  /**
+   * Unprompted defects NOT written to `hypotheses/` — each entry in full, with
+   * why. Only ever an unprompted defect; see {@link demotionOf}.
+   */
+  demoted: DemotedEntry[];
+}
+
+/** Why an unprompted defect was demoted. One typed-field rule today. */
+export type DemotionReason = "code_change";
+
+/** An unprompted defect kept out of `hypotheses/`, recorded as the model wrote it. */
+export interface DemotedEntry {
+  /** `defect #n`, the same label warnings and `consequenceGaps` use. */
+  label: string;
+  family: string;
+  claim: string;
+  /** The FILE the entry named, else the unit's. */
+  file: string | null;
+  /** The `line` as the reply wrote it — not checked against the request's tags. */
+  line: unknown;
+  evidence: UnitEvidence;
+  reason: DemotionReason;
 }
 
 export interface IngestDocument {
@@ -116,6 +144,8 @@ export interface IngestDocument {
   unitsReason: string | null;
   units: UnitIngestReport[];
   rowsByFamily: Record<string, number>;
+  /** How many unprompted defects were demoted across every unit (each is in its unit's `demoted`). */
+  demotedCount: number;
   discharge: { family: string; satisfied: boolean; notes: string[] }[];
   /** Every unit answered AND every family's discharge gate passed. */
   satisfied: boolean;
@@ -213,6 +243,27 @@ function unansweredRow(o: Owed, unitId: string | null, why: string): Row {
 function consequenceGap(evidence: UnitEvidence): boolean {
   if (evidence.consequence !== null) return false;
   return siteOrNull(evidence.control_site) === null || evidence.authority === "advisory";
+}
+
+/**
+ * Is this parsed UNPROMPTED defect kept out of `hypotheses/`? Only on a typed
+ * field — `evidence.trigger === "code_change"`, the model's own label for "only
+ * if someone later edits the code" — and never on the claim's wording: no
+ * prose or regex test of any kind lives here.
+ *
+ * Measured: the v1 replay (8 skillspro cases × 2 arms, 50 gold) wrote 764
+ * unprompted defects, 320 of them `code_change` — and the judge credited 0 of
+ * those 320 with a gold, while the ~419 input/state/unknown defects carried 8
+ * credits. Asking the model to hold such defects back (v4–v6's DEFECT BAR)
+ * cost breadth and credited gold with them; removing them here, by the field,
+ * costs nothing the replay ever credited. The entry is still recorded in full in
+ * `ingest.json`, so a later audit can re-admit it.
+ *
+ * An OBLIGATION's answer never reaches this: conservation owes every
+ * obligation exactly one row, whatever its trigger.
+ */
+function demotionOf(evidence: UnitEvidence): DemotionReason | null {
+  return evidence.trigger === "code_change" ? "code_change" : null;
 }
 
 function siteOrNull(site: string): string | null {
@@ -460,6 +511,7 @@ export function ingestUnits(options: IngestUnitsOptions): IngestUnitsResult {
       errors: [],
       warnings: [],
       consequenceGaps: [],
+      demoted: [],
     };
     reports.push(report);
     const startRow = rows.length;
@@ -544,6 +596,21 @@ export function ingestUnits(options: IngestUnitsOptions): IngestUnitsResult {
         }
 
         const value = parsed.data as z.infer<typeof LenientDefect> & { obligation?: string };
+        if (!obligation) {
+          const reason = demotionOf(value.evidence);
+          if (reason) {
+            report.demoted.push({
+              label: `defect #${++defectIndex}`,
+              family: value.family,
+              claim: value.claim,
+              file: typeof entry.file === "string" && entry.file.length > 0 ? entry.file : unit.file,
+              line: entry.line ?? null,
+              evidence: value.evidence,
+              reason,
+            });
+            return;
+          }
+        }
         const located = locate(entry, unit, tags, warn);
         const evidence: UnitEvidence = {
           ...value.evidence,
@@ -626,6 +693,10 @@ export function ingestUnits(options: IngestUnitsOptions): IngestUnitsResult {
   // A measured family with no obligation needs a row of its own, or its gate
   // reads "surveyed nothing". The row says what actually happened.
   const answeredUnits = reports.filter((r) => r.status === "ok" || r.status === "partial").length;
+  const demotedIn = (family: string): string => {
+    const n = reports.reduce((sum, r) => sum + r.demoted.filter((d) => d.family === family).length, 0);
+    return n > 0 ? ` (${n} ${family} defect(s) were demoted as code_change — see units/ingest.json)` : "";
+  };
   const placeholderFamilies = obligationsDoc
     ? obligationsDoc.families.filter((f) => f.measured && f.family !== "spec" && f.obligations === 0).map((f) => f.family as string)
     : DEFAULT_SURVEYED;
@@ -639,7 +710,7 @@ export function ingestUnits(options: IngestUnitsOptions): IngestUnitsResult {
         ? `no ${family} hypothesis — units.json holds no unit (${lastReason ?? NOTHING_TO_SURVEY}), so the ${family} question was asked of nothing`
         : answeredUnits === 0
           ? `the unit survey could not look: none of ${units.length} unit(s) returned a usable reply, so the ${family} question went unanswered — this is NOT a clean result`
-          : `no ${family} hypothesis — ${answeredUnits} of ${units.length} unit(s) answered, and none recorded one`;
+          : `no ${family} hypothesis — ${answeredUnits} of ${units.length} unit(s) answered, and none recorded one${demotedIn(family)}`;
     rows.push({
       family,
       claim,
@@ -698,6 +769,11 @@ export function ingestUnits(options: IngestUnitsOptions): IngestUnitsResult {
     notes.push(`${gaps} entr${gaps === 1 ? "y names" : "ies name"} no holding control yet leave consequence null — see each unit's consequenceGaps`);
   }
 
+  const demotedCount = reports.reduce((n, r) => n + r.demoted.length, 0);
+  if (demotedCount > 0) {
+    notes.push(`${demotedCount} unprompted defect(s) with trigger code_change were demoted — not in hypotheses/, recorded in each unit's demoted`);
+  }
+
   const rowsByFamily = Object.fromEntries(families.map((f) => [f, byFamily.get(f)!.length]));
   const allAnswered = reports.every((r) => r.status === "ok");
   const satisfied =
@@ -712,6 +788,7 @@ export function ingestUnits(options: IngestUnitsOptions): IngestUnitsResult {
     unitsReason,
     units: reports,
     rowsByFamily,
+    demotedCount,
     discharge,
     satisfied,
     notes,
@@ -724,6 +801,7 @@ export function ingestUnits(options: IngestUnitsOptions): IngestUnitsResult {
     units: reports.length,
     ok: answeredUnits,
     rows: rows.length,
+    demoted: demotedCount,
     satisfied,
   });
 
@@ -738,6 +816,7 @@ export function renderIngest(doc: IngestDocument): string {
     `units-ingest: ${doc.units.length} unit(s) — ${count("ok")} ok, ${count("partial")} partial, ${count("missing")} missing, ${count("failed")} failed, ${count("stale")} stale, ${count("invalid")} invalid`,
     `  rows: ${Object.entries(doc.rowsByFamily).map(([f, n]) => `${f} ${n}`).join(", ") || "none"}`,
   ];
+  if (doc.demotedCount > 0) lines.push(`  demoted: ${doc.demotedCount} unprompted code_change defect(s), kept out of hypotheses/`);
   if (doc.unitsState !== "surveyed") lines.push(`  units.json: ${doc.unitsState}${doc.unitsReason ? ` — ${doc.unitsReason}` : ""}`);
   for (const d of doc.discharge) lines.push(`  discharge[${d.family}]: ${d.satisfied ? "ok" : "NOT satisfied"}`);
   for (const u of doc.units) {

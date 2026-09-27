@@ -92,7 +92,7 @@ obligation, never a crash. The file is read loosely: fields core adds pass.
   "version": 1,
   "generatedAt": "…",
   "baseSha": "…", "headSha": "…",
-  "promptVersion": "units-v6",       // bump when request rendering changes
+  "promptVersion": "units-v7",       // bump when request rendering changes
   "sharedPrefix": "…",                // the unit-independent head EVERY request starts with, byte for byte
   "sharedPrefixSha256": "…",          // sha256 of `sharedPrefix`
   "coverage": "full" | "degraded" | "none",
@@ -155,7 +155,7 @@ line `=== THIS UNIT ===` — followed by the unit-specific part (UNIT, SOURCE,
 IMPORTS, CALLERS, CALLEES, OBLIGATIONS, a conditional family such as `tests`,
 and this unit's id / answer list). The prefix carries no unit id, count or
 per-unit family subset, so it is byte-identical across every unit of every run
-(~7.9k chars) and a provider's prompt-prefix cache pays for it once. A family
+(~7.4k chars) and a provider's prompt-prefix cache pays for it once. A family
 sibling's "ask only this family" instruction sits after the separator too. The
 handler may mark `sharedPrefix` as a cache breakpoint; sending `request`
 verbatim is still correct.
@@ -263,11 +263,27 @@ compared at path:line before Y", "nothing shown compares X against Y, so Z"),
 never the obligation's question or mechanism restated; when no shown line
 closes the mechanism (`control_site: "none"`) or the control is advisory or
 bypassable, `consequence` must say what goes wrong — `null` only when the claim
-quotes a control that holds. The number of defects follows the code (no "most
-units have none" prior since units-v6): `[]` only when nothing meets the
-DEFECT BAR. v5's audit: 48% of 482 answers restated the obligation, 89% had a
-null consequence (198 of them with `control_site: "none"`), and 71% of units
-returned no defect.
+quotes a control that holds. v5's audit: 48% of 482 answers restated the
+obligation, 89% had a null consequence (198 of them with `control_site:
+"none"`), and 71% of units returned no defect.
+
+**Defects are asked for with breadth, not a bar** (units-v7): every defect the
+model can see in the unit that a changed line causes or makes reachable, with
+only the NOT FINDINGS categories kept out (a pre-existing issue the change
+does not make wrong, compiler/linter catches, restating the intended change, a
+deliberately silenced point, generated files, "X is never validated" with no
+misbehaving consumer, a test's own assertions/wording, inventing what unseen
+code does — such a link is recorded `unknown`, not omitted). No count prior, no
+cap. A defect that exists only after a future edit is labelled `trigger:
+"code_change"`, and `units-ingest` demotes it (below). Measured over 8
+skillspro cases × 2 arms, 50 gold, judge-credited: v1 ("over-produce", no bar)
+credited 11/50 from 1,246 rows — 482 answers (3 credited) and 764 unprompted
+defects, of which 320 were `code_change` (0 credited) and 157 spec nitpicks
+about tests/comments (0 credited), while the ~419 input/state/unknown defects
+carried 8. v4/v5's DEFECT BAR + count prior cut unprompted defects to 154 and
+credited gold to 6, then 3; v6 (no count prior, family split) reached Haiku 5,
+GPT-6 Luna low 6. Breadth drives recall; the known noise is a typed field, so
+it is removed in code.
 
 ### `units-ingest` — `lastlight-facts units-ingest --dir .lastlight/pr-review`
 
@@ -281,7 +297,28 @@ two extra row fields: `source: "units"` and `unitId`. Writes
 `control_site` none/unknown or `authority: "advisory"`, yet leave `consequence`
 null; recorded with a warning, never rewritten or dropped, so conservation
 holds; a split unit's defect filed under another family is kept and warned
-about the same way). A unit with no response,
+about the same way; and `demoted` — see below — with a document-level
+`demotedCount`).
+
+**Demotion (units-v7), on one typed field only.** An UNPROMPTED defect (an
+entry of `defects`, or an answer re-filed as one because it named an
+obligation the unit was not asked or repeated one) whose `evidence.trigger ===
+"code_change"` is NOT written to `hypotheses/<family>.jsonl`. It goes into its
+unit's `demoted` list in `units/ingest.json`, in full:
+
+```jsonc
+{ "label": "defect #1", "family": "state", "claim": "…", "file": "src/a.ts",
+  "line": 42,                          // as the reply wrote it, unchecked
+  "evidence": { … },                   // the validated evidence record
+  "reason": "code_change" }
+```
+
+An obligation's answer is **never** demoted — every obligation still gets
+exactly one row whatever its trigger — and nothing reads the claim's prose; no
+regex or wording filter exists. Demotion is not an error: the unit's status and
+the exit code are unaffected. A measured family with no obligation whose only
+defects were demoted gets the usual zero-obligation placeholder row, which says
+how many were demoted. A unit with no response,
 `ok: false`, or an invalid body is **recorded, never silently dropped**: every
 obligation it owned gets a row that says the survey could not answer it
 (unknown evidence — which `deriveVerdict` already routes to a probe). **Those

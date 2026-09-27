@@ -37,7 +37,7 @@
 import type { Obligation } from "./seed.js";
 
 /** Bump whenever the rendering below changes, so cached readings are not reused across it. */
-export const UNITS_PROMPT_VERSION = "units-v6";
+export const UNITS_PROMPT_VERSION = "units-v7";
 
 /** One family's question, compact. `closes` is what `control_site` means for it. */
 export const FAMILY_QUESTIONS: Record<string, { question: string; closes: string }> = {
@@ -251,49 +251,44 @@ const EVIDENCE_FIELDS = [
   "  capability_gained  something the supplier does NOT already hold without this defect, or null",
 ];
 
+/**
+ * What stays out of `defects` — CATEGORIES, never a confidence bar. Since
+ * units-v7 this is the only thing that keeps an unprompted defect out; see
+ * {@link DEFECTS_BREADTH} for why there is no bar any more.
+ */
 const NOT_FINDINGS = [
-  "NOT FINDINGS (category rules, never a confidence bar): a pre-existing issue this change merely sits next to",
-  "(unless the change is what makes it wrong); anything a compiler or linter catches (unless the code silences it);",
-  "a restatement of the intended change; a point deliberately silenced; generated files; \"X is never validated\"",
-  "with no consumer that then misbehaves. For an OBLIGATION, doubt is not on this list — answer it, and let the",
-  "evidence say unknown.",
+  "NOT FINDINGS (category rules, never a confidence bar): a pre-existing issue the change does not make wrong;",
+  "anything a compiler or linter catches (unless the code silences it); a restatement of the intended change; a point",
+  "deliberately silenced; generated files; \"X is never validated\" with no consumer that then misbehaves; a test's own",
+  "assertions or wording; inventing what unseen code does — a link that depends on code not shown is recorded with",
+  "that field unknown, not left out. Doubt is not on this list, for a defect or an obligation: write it down, and let",
+  "the evidence say unknown.",
 ];
 
 /**
- * What an unprompted defect must meet. The first replay over the 8 skillspro
- * cases (units-v3, which told the model to over-produce) wrote 764 defects
- * against 482 obligation answers; 320 of those defects were `code_change`
- * ("breaks if someone later edits X") and 157 were spec nitpicks about tests
- * and comments. Of the 11 rows the judge credited with a gold, none was
- * `code_change` and none was a spec defect — every one was in or caused by a
- * changed line, with a concrete outcome, grounded in the shown code. v4 turned
- * that into a bar with a cap of 3 per unit and "reachable through input or
- * state, provable from shown code"; it halved rows (1246 → 642) but credited
- * gold fell 11 → 6, and one of the lost credits was a row whose trigger was
- * `unknown` — which v4's wording shut out. v5 keeps the categories that never
- * earned credit out (`code_change`, test-assertion nitpicks, speculation about
- * unseen code), lets reachability be `unknown`, and has no cap. It governs
- * `defects` only: obligations are always answered, doubt included.
+ * units-v7: breadth, and the known noise removed IN CODE rather than by a bar.
  *
- * v6 leaves the bar alone and removes the COUNT prior around it. Audit of the
- * v5 replay (Haiku 4.5, 8 cases × 2 arms, 3/50 gold credited): 71% of units
- * returned `defects: []`, defects per unit sat flat at 0.31–0.41 whatever the
- * unit's size, and 81% of units with 100+ changed lines returned [] — the
- * task's "most units have none or one; [] is a normal, honest answer" set the
- * number, not the code. The task now says the count follows the code.
+ * Measured over 8 skillspro cases × 2 arms (50 gold, judge-credited): v1 —
+ * "over-produce", no bar — credited 11/50 from 1,246 rows (482 obligation
+ * answers carrying 3 credits, 764 unprompted defects). Of those defects 320
+ * had trigger `code_change` (0 credited) and 157 were spec-family nitpicks
+ * about tests and comments (0 credited); the ~419 input/state/unknown defects
+ * carried 8 credits. v4 and v5 added a DEFECT BAR and a count prior:
+ * unprompted defects fell to 154 and credited gold to 6, then 3. v6 kept the
+ * bar but dropped the count prior and split large units by family: Haiku 5,
+ * GPT-6 Luna (low) 6. Breadth of unprompted defects is what drives recall, and
+ * the largest known noise class is identifiable from a TYPED field — so the
+ * model is asked to write everything down and label a hypothetical future
+ * edit honestly as `code_change`, and `units-ingest` demotes exactly those
+ * (out of `hypotheses/`, recorded in `ingest.json`). Test-assertion nitpicks
+ * stay a NOT FINDINGS category. No count prior and no cap.
  */
-const DEFECT_BAR = [
-  "DEFECT BAR — a defect entry meets ALL of these, or it is left out:",
-  "  1. A changed (+) or removed (-|) line causes it, or is what makes it reachable.",
-  "  2. It can happen at head — trigger \"input\" or \"state\", or \"unknown\" when reachability depends on code not",
-  "     shown. \"Only if someone later edits the code\" (code_change) is not a defect.",
-  "  3. You can name the wrong outcome concretely: which value, state, response or side effect comes out wrong, for whom.",
-  "  4. It is grounded in the lines shown: the claim points at a shown line, and the mechanism is visible there. Where one",
-  "     link depends on code you cannot see, keep the defect and record that field as unknown — but never invent what",
-  "     unseen code does.",
-  "  Report every defect that meets the bar, most consequential first — no more, no fewer. A defect always has a consequence; a check that holds",
-  "  belongs in an obligation's answer, never in defects. A spec-family defect is only a changed comment or doc whose",
-  "  claim the code at head contradicts — never a test's own assertions or wording.",
+const DEFECTS_BREADTH = [
+  "DEFECTS — record every defect you can see in this unit that a changed (+) or removed (-|) line causes or makes",
+  "reachable. Later stages probe and adjudicate every entry: they can remove a risk, but they can never recover one that",
+  "was not written down. Only the NOT FINDINGS categories above stay out. A defect that exists only if someone later",
+  "edits the code is recorded with trigger \"code_change\" — label it honestly, never as input or state. A defect always",
+  "has a consequence; a check that holds belongs in an obligation's answer, never in defects.",
 ];
 
 /**
@@ -336,9 +331,8 @@ function renderSharedPrefix(): string {
     "neighbours a deterministic analysis found for it. You cannot open files or run anything — answer from what is",
     "shown, and write `unknown` where only something not shown could settle a field. Two jobs:",
     "  1. Answer every obligation the unit lists under OBLIGATIONS, each exactly once, with YOUR VERDICT on the code.",
-    "  2. Report the defects this change introduces that a user or caller would actually hit — every one that meets",
-    "     the DEFECT BAR below. How many follows the code: a unit that changes several mechanisms can have several;",
-    "     [] only when none meets the bar.",
+    "  2. Record every defect this change causes or makes reachable in the unit — see DEFECTS below. [] only when you",
+    "     see none.",
     "Reply with ONE JSON object and nothing else.",
   );
   L.push("");
@@ -357,7 +351,7 @@ function renderSharedPrefix(): string {
   L.push("");
   L.push(...NOT_FINDINGS);
   L.push("");
-  L.push(...DEFECT_BAR);
+  L.push(...DEFECTS_BREADTH);
   L.push("");
   L.push("EVIDENCE RECORD — every entry carries all twelve fields, facts not verdicts:");
   L.push(...EVIDENCE_FIELDS);
@@ -380,7 +374,8 @@ function renderSharedPrefix(): string {
   L.push("    obligation's question or mechanism restated.");
   L.push('  - control_site "none", or a control that is advisory or bypassable ⇒ "consequence" says what goes wrong as a');
   L.push("    result. consequence: null only when the claim quotes a control that holds.");
-  L.push('  - "defects" holds every entry that meets the DEFECT BAR; [] when none does. Its family is one the unit asks.');
+  L.push('  - "defects" holds every defect you can see (DEFECTS above); [] only when there is none. Its family is one the');
+  L.push("    unit asks.");
   L.push('  - "line" is the integer of a tag shown in this request (42 for L0042): the line the claim is about.');
   L.push('  - "file" is the FILE header that tag sits under: required when the unit shows more than one file, else optional.');
   L.push("  - control_site may name any site shown here, a caller included, as path:line.");
@@ -510,7 +505,7 @@ export function renderUnitSpecific(m: RequestModel): string {
     L.push(
       `  This unit changes more than ${threshold} lines, so it is surveyed once per family. This request asks ONLY the`,
       `  ${family} question${others.length ? ` (sibling units ask ${others.join(", ")} of the same code)` : ""}: ignore the other questions`,
-      `  above, and report every ${family} defect that meets the DEFECT BAR — only ${family} defects.`,
+      `  above, and record every ${family} defect you can see — only ${family} defects.`,
     );
     L.push(...familyLines([family]));
     L.push("");

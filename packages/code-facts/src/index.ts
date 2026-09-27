@@ -375,4 +375,4 @@ export {
 } from "./unit-response.js";
 export type { UnitAnswer, UnitDefect, UnitEvidence, UnitFamily, UnitObjectVia, UnitResponseBody, UnitResponseFile } from "./unit-response.js";
 export { ingestUnits, renderIngest } from "./units-ingest.js";
-export type { IngestDocument, IngestUnitsOptions, IngestUnitsResult, UnitIngestReport, UnitIngestStatus } from "./units-ingest.js";
+export type { DemotedEntry, DemotionReason, IngestDocument, IngestUnitsOptions, IngestUnitsResult, UnitIngestReport, UnitIngestStatus } from "./units-ingest.js";

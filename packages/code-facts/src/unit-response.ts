@@ -69,7 +69,7 @@ const entryShape = {
 export const UnitAnswerSchema = z.object({ obligation: z.string().min(1), ...entryShape });
 export type UnitAnswer = z.infer<typeof UnitAnswerSchema>;
 
-/** An unprompted defect — one that meets the request's DEFECT BAR. */
+/** An unprompted defect — ingest demotes one whose evidence.trigger is `code_change` (units-v7). */
 export const UnitDefectSchema = z.object(entryShape);
 export type UnitDefect = z.infer<typeof UnitDefectSchema>;
 
