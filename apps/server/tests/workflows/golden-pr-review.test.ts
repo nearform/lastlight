@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { getWorkflow, loadPromptTemplate } from "#src/workflows/loader.js";
 import { defaultReviewConfig, defaultSandboxTimeouts } from "#src/config/config.js";
+import { reviewTriageSeed } from "#src/engine/review-triage.js";
 import {
   buildDag,
   getReadyNodes,
@@ -151,7 +152,15 @@ const FAMILIES = ["contract", "enforcement", "security", "state", "spec"] as con
  * observe the DAG resolving — the real run below then proves the mirror is
  * faithful.
  */
-function simulate(phases: PhaseDefinition[], ctx: Record<string, unknown>) {
+function simulate(
+  phases: PhaseDefinition[],
+  ctx: Record<string, unknown>,
+  // The run's scratch — `runner.ts` seeds `scratch.reviewTriage` before the
+  // first phase, and `review`'s guard reads it. `{}` is an unseeded run.
+  scratch: Record<string, unknown> = {},
+  // Phases that end `failed` instead of `succeeded` when they run.
+  failing: ReadonlySet<string> = new Set(),
+) {
   const dag = buildDag(phases, { chainIfNoDeps: true });
   const byName = new Map(phases.map((p) => [p.name, p]));
   const ran: string[] = [];
@@ -170,7 +179,7 @@ function simulate(phases: PhaseDefinition[], ctx: Record<string, unknown>) {
       const def = byName.get(node.name)!;
       const exprs = phaseSkipIfExpressions(def);
       const matched = exprs.length
-        ? evalSkipIf(exprs, { ...ctx, phaseOutputs: {}, scratch: {}, output: "" })
+        ? evalSkipIf(exprs, { ...ctx, phaseOutputs: {}, scratch, output: "" })
         : undefined;
       if (matched) gated.push({ node, reason: `skip_if matched: ${matched}` });
     }
@@ -187,7 +196,7 @@ function simulate(phases: PhaseDefinition[], ctx: Record<string, unknown>) {
     }
     const node = ready[0];
     ran.push(node.name);
-    node.status = "succeeded";
+    node.status = failing.has(node.name) ? "failed" : "succeeded";
   }
 
   return { ran, skipped, dag };
@@ -244,7 +253,7 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
     expect(Object.fromEntries(dag.map((n) => [n.name, n.depends_on]))).toEqual(expected);
   });
 
-  it("gives every phase downstream of a skippable one `all_done`, and post-review `all_success`", () => {
+  it("gives every phase downstream of a skippable one `all_done`, and post-review `none_failed`", () => {
     // A skipped node is not `succeeded`, so the default `all_success` would
     // cascade the seven analysis skips straight through `review` — i.e. the
     // inert configuration would post no review at all. `all_done` is the rule
@@ -257,8 +266,10 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
     for (const name of allDone) {
       expect(byName.get(name)?.trigger_rule, `${name}.trigger_rule`).toBe("all_done");
     }
-    // post-review is deliberately the other way: a FAILED review must not post.
-    expect(byName.get("post-review")?.trigger_rule).toBeUndefined();
+    // post-review is deliberately the other way: a FAILED review must not post
+    // — but a review SKIPPED by its own guard (pipeline on, no independent
+    // pass) must, which the default `all_success` would not allow.
+    expect(byName.get("post-review")?.trigger_rule).toBe("none_failed");
     expect(byName.get("post-review")?.depends_on).toEqual(["review"]);
     // `adjudicate` is the one node that is neither, and #399 is why. It must
     // still refuse a FAILED review, and it must tolerate a SKIPPED `dossier` —
@@ -266,7 +277,9 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
     // is not `succeeded`. With `all_success` here, every deployment left on
     // `review.analysis.adjudicate: legacy` would skip the dossier and silently
     // skip the adjudicator with it, no phase failing anywhere.
-    expect(byName.get("adjudicate")?.trigger_rule).toBe("none_failed_min_one_success");
+    // `none_failed` rather than `none_failed_min_one_success`: with the
+    // independent review off AND the dossier off, both deps skip.
+    expect(byName.get("adjudicate")?.trigger_rule).toBe("none_failed");
     // …but `reconcile` is `all_done`, because a cut-short adjudicator is
     // exactly when the conservation floor has work to do.
     expect(byName.get("reconcile")?.trigger_rule).toBe("all_done");
@@ -320,9 +333,13 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
         TIER_GUARD,
       ]);
     }
-    for (const name of LEGACY_PHASES) {
-      expect(phaseSkipIfExpressions(byName.get(name)!), `${name}.skip_if`).toEqual([]);
-    }
+    // `post-review` has no guard; `review` has exactly one, on the seeded
+    // scratch flag — never `analysisEnabled`, so it can never skip with the
+    // pipeline off.
+    expect(phaseSkipIfExpressions(byName.get("post-review")!)).toEqual([]);
+    expect(phaseSkipIfExpressions(byName.get("review")!)).toEqual([
+      "scratch.reviewTriage.skipReview == true",
+    ]);
   });
 });
 
@@ -529,7 +546,13 @@ function timeoutContext(): Record<string, unknown> {
   };
 }
 
-async function runPrReview(ctx: Record<string, unknown>, agentPort?: FakeAgentPort) {
+async function runPrReview(
+  ctx: Record<string, unknown>,
+  agentPort?: FakeAgentPort,
+  // What `runner.ts`'s `seedReviewTriage` would have put on the run's scratch.
+  // This harness drives the scheduler directly, below the seed.
+  scratch: Record<string, unknown> = {},
+) {
   const def = getWorkflow("pr-review");
   const store = new InMemoryStateStore(RUN_ID);
   const reporter = new RecordingReporter();
@@ -545,7 +568,7 @@ async function runPrReview(ctx: Record<string, unknown>, agentPort?: FakeAgentPo
     taskId: "task-1",
     triggerId: "acme/widgets#7",
     githubAccess: { owner: "acme", repo: "widgets", profile: "review-write" } as GitSandboxAccess,
-    scratch: {},
+    scratch: { ...scratch },
     store,
     workflowId: RUN_ID,
     botName: "last-light",
@@ -710,6 +733,105 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
   });
 });
 
+// ── `review.analysis.independentReview` — the review pass under the pipeline ─
+
+/**
+ * With the pipeline on, `review` runs only when the operator asked for the
+ * independent pass; `adjudicate` otherwise writes findings.json from the
+ * hypotheses alone. The switch reaches the DAG as ONE scratch flag,
+ * `scratch.reviewTriage.skipReview`, which `reviewTriageSeed` sets and the
+ * light harvest clears — so every case below is driven through the seed the
+ * runner really writes, never a hand-built flag.
+ */
+describe("golden — independentReview: `review` under the evidence pipeline", () => {
+  const def = getWorkflow("pr-review");
+  const ON = { analysisEnabled: "true" };
+  const seeded = (ctx: Record<string, unknown>) => ({ reviewTriage: reviewTriageSeed(ctx) });
+
+  it("pipeline ON, independent pass OFF: review skips, the adjudicator writes, the post still runs", () => {
+    // The shipped defaults under the pipeline: no independent pass AND
+    // `adjudicate: legacy` (dossier off) — so BOTH of the adjudicator's deps
+    // skip, which `none_failed_min_one_success` would not have tolerated.
+    const { ran, skipped } = simulate(def.phases, ON, seeded(ON));
+    expect(skipped.find((s) => s.name === "review")?.reason).toBe(
+      "skip_if matched: scratch.reviewTriage.skipReview == true",
+    );
+    expect(ran).not.toContain("review");
+    expect(ran).toEqual(expect.arrayContaining(["facts", "seed", "survey", "adjudicate", "reconcile", "post-review"]));
+    // The floor still precedes the post.
+    expect(ran.indexOf("reconcile")).toBeLessThan(ran.indexOf("post-review"));
+    // No trigger-rule cascade anywhere — every skip is a conditional one.
+    expect(skipped.filter((s) => s.reason === "trigger rule not satisfied")).toEqual([]);
+  });
+
+  it("pipeline ON, independent pass ON: review runs exactly as before", () => {
+    const ctx = { ...ON, independentReviewEnabled: "true" };
+    const { ran } = simulate(def.phases, ctx, seeded(ctx));
+    expect(ran).toEqual(expect.arrayContaining(["review", "adjudicate", "reconcile", "post-review"]));
+  });
+
+  it("pipeline OFF: review always runs, whatever independentReview says", () => {
+    for (const ctx of [{}, { independentReviewEnabled: "true" }]) {
+      const { ran } = simulate(def.phases, ctx, seeded(ctx));
+      expect(ran, JSON.stringify(ctx)).toEqual(LEGACY_PHASES);
+    }
+  });
+
+  it("LIGHT depth: review runs even with the pipeline on and the independent pass off", () => {
+    // What `harvestReviewTriage` writes over the seed on `REVIEW_DEPTH: light`
+    // — the whole namespace replaced, so `skipReview` is gone with the rest.
+    const { ran } = simulate(def.phases, { ...ON, ...TRIAGE_ON }, { reviewTriage: { depth: "light", light: true } });
+    expect(ran).toEqual(["triage", ...LEGACY_PHASES]);
+  });
+
+  it("an UNSEEDED run (no scratch flag) runs the review — the failure direction", () => {
+    const { ran } = simulate(def.phases, ON);
+    expect(ran).toContain("review");
+  });
+
+  it("a FAILED review never posts — pipeline off", () => {
+    const { ran, skipped } = simulate(def.phases, {}, seeded({}), new Set(["review"]));
+    expect(ran).toEqual(["review"]);
+    expect(skipped.find((s) => s.name === "post-review")?.reason).toBe("trigger rule not satisfied");
+  });
+
+  it("a FAILED review never posts — pipeline on, independent pass on — and is never adjudicated", () => {
+    const ctx = { ...ON, independentReviewEnabled: "true" };
+    const { ran, skipped } = simulate(def.phases, ctx, seeded(ctx), new Set(["review"]));
+    const why = (n: string) => skipped.find((s) => s.name === n)?.reason;
+    expect(why("adjudicate")).toBe("trigger rule not satisfied");
+    expect(why("post-review")).toBe("trigger rule not satisfied");
+    // The floor still runs — it is `all_done` on the skipped adjudicator.
+    expect(ran).toContain("reconcile");
+  });
+
+  it("a failed adjudicator or floor still posts with the review skipped — the money property", () => {
+    for (const fail of ["adjudicate", "reconcile"]) {
+      const { ran } = simulate(def.phases, ON, seeded(ON), new Set([fail]));
+      expect(ran, fail).toContain("post-review");
+    }
+  });
+
+  it("through the real scheduler: one fewer agent call, the review posted, the run green", async () => {
+    const ctx = { owner: "acme", repo: "widgets", prNumber: 7, ...ON, probeTestPolicy: "block" };
+    const off = await runPrReview(ctx, undefined, seeded(ctx));
+    const on = await runPrReview(
+      { ...ctx, independentReviewEnabled: "true", reviewInstallPolicy: "block" },
+      undefined,
+      seeded({ ...ctx, independentReviewEnabled: "true" }),
+    );
+
+    expect(off.result.success).toBe(true);
+    expect(off.postReview.calls).toEqual(["post-review"]);
+    expect(off.result.phases.find((p) => p.phase === "review")?.output).toContain(
+      "skip_if matched: scratch.reviewTriage.skipReview == true",
+    );
+    const agentCalls = (r: typeof off) => r.agent.calls.filter((c) => c.kind === "agent").length;
+    expect(agentCalls(off)).toBe(agentCalls(on) - 1);
+    expect(on.postReview.calls).toEqual(["post-review"]);
+  });
+});
+
 // ── The review phase's two-mode brief (§3b lever f4) ─────────────────────────
 
 /**
@@ -764,19 +886,23 @@ describe("golden — the `review` phase's two-mode brief", () => {
   } as unknown as TemplateContext;
 
   it("adds only the scheduling keys and the f4 prompt to the review phase", () => {
-    const { depends_on, trigger_rule, command_policy, ...rest } = review as Record<string, unknown>;
+    const { depends_on, trigger_rule, command_policy, skip_if, ...rest } = review as Record<string, unknown>;
     expect(depends_on).toEqual(["falsify"]);
     expect(trigger_rule).toBe("all_done");
+    // ONE guard, on the seeded scratch flag — never on `analysisEnabled`, so the
+    // phase runs whenever the seed did not ask it to skip (pipeline off, light,
+    // independent review on, or an unseeded run).
+    expect(skip_if).toEqual(["scratch.reviewTriage.skipReview == true"]);
     // The suite is blocked in both modes; an install only when the pipeline is
     // on (issue #403) — pinned in pr-review-command-policy.test.ts.
     expect(command_policy).toMatchObject({ install: { from: "reviewInstallPolicy", default: "allow" }, test: "block" });
-    // No `skip_if:` — the phase RUNS in both modes (post-review depends on it
-    // with all_success; a skipped node is not `succeeded`). The mode switch is
-    // inside the prompt, never in the DAG.
+    // The mode switch between the three arms is inside the prompt, never in
+    // the DAG.
     expect(rest).toEqual(F4_REVIEW_PHASE);
 
-    const { depends_on: pDeps, ...pRest } = postReview as Record<string, unknown>;
+    const { depends_on: pDeps, trigger_rule: pRule, ...pRest } = postReview as Record<string, unknown>;
     expect(pDeps).toEqual(["review"]);
+    expect(pRule).toBe("none_failed");
     expect(pRest).toEqual(PRE_WP3_POST_REVIEW_PHASE);
   });
 

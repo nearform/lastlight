@@ -559,8 +559,15 @@ const PhaseDefinitionSchema = z
       .optional(),
     /** DAG: list of phase names this phase depends on */
     depends_on: z.array(z.string()).optional(),
-    /** DAG: trigger rule for this phase — when to run based on dependency outcomes */
-    trigger_rule: z.enum(["all_success", "one_success", "none_failed_min_one_success", "all_done"]).optional(),
+    /**
+     * DAG: trigger rule for this phase — when to run based on dependency
+     * outcomes. `none_failed` runs when no dependency FAILED, even if every one
+     * of them was skipped; `none_failed_min_one_success` additionally needs one
+     * to have succeeded.
+     */
+    trigger_rule: z
+      .enum(["all_success", "one_success", "none_failed", "none_failed_min_one_success", "all_done"])
+      .optional(),
     /** DAG: variable name to store the output of this phase for use in downstream phases */
     output_var: z.string().optional(),
   })

@@ -1737,6 +1737,16 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      */
     analysisEnabled: "true",
     /**
+     * Whether the separate `review` pass runs alongside the pipeline. Present
+     * only when the operator asked, so the absence rule holds: a missing key
+     * reads as off. No phase gates on it directly — `skip_if` lists are OR-ed
+     * and "skip review" needs "and not light" too — so `runner.ts` folds it into
+     * the `scratch.reviewTriage.skipReview` seed (`reviewTriageSeed`), which the
+     * light harvest clears. Projected here so that seed reads the same run-
+     * scoped authority on every route, the eval harness's included.
+     */
+    ...(review.analysis.independentReview ? { independentReviewEnabled: "true" } : {}),
+    /**
      * The `review` phase's install mode (issue #403), read as
      * `install: { from: reviewInstallPolicy, default: allow }`. With the
      * pipeline on, `prepare` and `falsify` own execution and `review` is an

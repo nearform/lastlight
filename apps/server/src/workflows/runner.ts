@@ -45,6 +45,7 @@ import type {
 import { makePostReviewHandler } from "./handlers/post-review.js";
 import {
   REVIEW_TRIAGE_SCRATCH_KEY,
+  reviewTriageSeed,
   type ReviewTriageScratch,
 } from "../engine/review-triage.js";
 import { makeFanoutHandler } from "./handlers/fanout.js";
@@ -314,7 +315,9 @@ const RUN_SPAN_NAME = "lastlight.workflow.run";
  * `deep` / `baseline` mirror today's two arms: the pipeline has already run, or
  * it has not. `harvestReviewTriage` replaces the whole namespace with
  * `{ depth: "light", light: true }` when the triage phase asks for a single
- * pass, which is what clears the other two.
+ * pass, which is what clears the other two — and `skipReview`, the flag that
+ * skips the `review` phase when the pipeline is on without
+ * `review.analysis.independentReview`. A light review therefore always runs it.
  *
  * Scoped to REVIEW-SHAPED workflows by the structural fact rather than by name:
  * a workflow that declares a `post-review` phase is one that posts a review, so
@@ -337,14 +340,10 @@ async function seedReviewTriage(
 ): Promise<void> {
   const posts = definition.phases.some((p) => p.type === "post-review");
   if (!posts || scratch[REVIEW_TRIAGE_SCRATCH_KEY]) return;
-  // The same projection the phases gate on, read the same way: the render
-  // context carries the literal string "true".
-  const analysisEnabled = ctx.analysisEnabled === "true" || ctx.analysisEnabled === true;
-  const seed: ReviewTriageScratch = {
-    depth: "full",
-    deep: analysisEnabled,
-    baseline: !analysisEnabled,
-  };
+  // The same projections the phases gate on, read the same way: the render
+  // context carries the literal string "true". `skipReview` rides the seed
+  // (see `reviewTriageSeed`) so the light harvest's replacement clears it.
+  const seed: ReviewTriageScratch = reviewTriageSeed(ctx as unknown as Record<string, unknown>);
   scratch[REVIEW_TRIAGE_SCRATCH_KEY] = seed;
   if (!db || !workflowId) return;
   try {

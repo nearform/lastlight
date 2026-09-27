@@ -65,6 +65,38 @@ export interface ReviewTriageScratch {
   deep?: boolean;
   /** Render the original no-pipeline arm. */
   baseline?: boolean;
+  /**
+   * Skip the `review` phase: the pipeline is on and
+   * `review.analysis.independentReview` is off, so `adjudicate` writes
+   * findings.json from the hypotheses alone. Read by `review`'s
+   * `skip_if: "scratch.reviewTriage.skipReview == true"`.
+   *
+   * It lives HERE, not on the render context, because the skip is "pipeline
+   * on AND independent pass off AND not light", `skip_if` lists are OR-ed, and
+   * `light` is only known mid-run. The light harvest replaces the whole
+   * namespace, which drops this flag — so a light review always runs `review`.
+   * Absent reads as false: every failure direction runs the review pass.
+   */
+  skipReview?: boolean;
+}
+
+/**
+ * The dispatch-time seed — `{ depth: "full" }` plus exactly one of `deep` /
+ * `baseline`, and `skipReview` when the pipeline is on without the
+ * independent pass. Pure over the render context's string projections
+ * (`analysisEnabled`, `independentReviewEnabled` from `specContext`), read the
+ * way the phases' own guards read them.
+ */
+export function reviewTriageSeed(ctx: Record<string, unknown>): ReviewTriageScratch {
+  const on = (v: unknown) => v === "true" || v === true;
+  const analysisEnabled = on(ctx.analysisEnabled);
+  const seed: ReviewTriageScratch = {
+    depth: "full",
+    deep: analysisEnabled,
+    baseline: !analysisEnabled,
+  };
+  if (analysisEnabled && !on(ctx.independentReviewEnabled)) seed.skipReview = true;
+  return seed;
 }
 
 /**
@@ -109,6 +141,7 @@ export function readReviewTriage(
     light: raw.light === true,
     deep: raw.deep === true,
     baseline: raw.baseline === true,
+    skipReview: raw.skipReview === true,
   };
 }
 

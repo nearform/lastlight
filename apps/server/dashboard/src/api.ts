@@ -442,7 +442,7 @@ export interface WorkflowFullPhase {
   };
   on_success?: { set_phase?: string };
   depends_on?: string[];
-  trigger_rule?: "all_success" | "one_success" | "none_failed_min_one_success" | "all_done";
+  trigger_rule?: "all_success" | "one_success" | "none_failed" | "none_failed_min_one_success" | "all_done";
   output_var?: string;
 }
 

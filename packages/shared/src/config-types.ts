@@ -347,6 +347,21 @@ export interface ReviewAnalysisConfig {
   /** `false` ⇒ today's two-phase review, byte-for-byte. */
   enabled: boolean;
   /**
+   * Run the separate `review` pass alongside the pipeline.
+   *
+   * **Only meaningful with `enabled`.** With the pipeline on, the surveys have
+   * already done the deep work and `adjudicate` can write `findings.json` from
+   * the hypotheses alone, so the independent pass is OFF by default — one
+   * strong-model session less per review. With the pipeline off, `review` is
+   * the whole review and always runs whatever this says. A `light` triage
+   * depth skips the pipeline, so `review` runs there too.
+   *
+   * Reaches the run as the `skipReview` flag `runner.ts` seeds onto
+   * `scratch.reviewTriage` — a flag the light harvest clears by replacing the
+   * namespace, which is how "skip unless light" is one `skip_if` expression.
+   */
+  independentReview: boolean;
+  /**
    * How many `spec` obligations one PR may carry.
    *
    * A **safety bound**, not a budget — it should never bind on a real PR. The
@@ -865,6 +880,9 @@ export function defaultReviewPolicy(): ReviewPolicy {
     triage: { enabled: true },
     analysis: {
       enabled: false,
+      // Off: with the pipeline on, `adjudicate` writes findings.json from the
+      // hypotheses alone. Inert with the pipeline off. See the field's doc.
+      independentReview: false,
       // A safety bound, not a budget — see config/default.yaml for why this is
       // 40 rather than the 6 it shipped with. It must not bind on a real PR:
       // capping generation truncates discovery, which is the measured ceiling.

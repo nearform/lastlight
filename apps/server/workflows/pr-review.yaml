@@ -69,7 +69,9 @@ phases:
   # Each also carries the TIER guard, `scratch.reviewTriage.depth == 'light'`.
   # Quoted `==` there, the mirror image of the bare-boolean form above: an
   # absent value never matches, so the phase RUNS — again failing toward a full
-  # review. `review` and `post-review` carry no tier guard and always run.
+  # review. `post-review` carries no tier guard and always runs; `review` runs
+  # unless the pipeline replaces it (see its own `skip_if`), and never skips on
+  # `light`.
   - name: prepare
     label: Prepare · probe environment
     type: bash
@@ -369,6 +371,17 @@ phases:
   # and never submits; `post-review` below does that. With the pipeline on the
   # brief collapses to one fast independent pass, since the surveys have
   # already done the deep work.
+  #
+  # And with the pipeline on it does not run at all unless the operator asked
+  # for it (`review.analysis.independentReview`, default off): `adjudicate` then
+  # writes findings.json from the hypotheses alone. With the pipeline OFF this
+  # is the whole review and always runs. The guard is ONE scratch flag because
+  # `skip_if` lists are OR-ed and the condition is an AND — pipeline on,
+  # independent pass off, depth not `light`. `runner.ts` seeds `skipReview`
+  # only for the first two, and the light harvest REPLACES the namespace, which
+  # drops the flag: a light review runs this phase exactly as before. Bare
+  # `== true`, so an absent flag (a run seeded before the key existed, a failed
+  # seed) runs the review — the direction every failure here points.
   - name: review
     label: Review
     # EXPLICIT: declaring `depends_on` anywhere disables the synthesized linear
@@ -378,6 +391,8 @@ phases:
     # deployment that has not enabled the pipeline.
     depends_on: [falsify]
     trigger_rule: all_done
+    skip_if:
+      - "scratch.reviewTriage.skipReview == true"
     prompt: prompts/review.md
     skills: [pr-review, code-review]
     model: "{{models.review}}"
@@ -465,8 +480,8 @@ phases:
       - "scratch.reviewTriage.depth == 'light'"
     # `jev-classify` too, not just `review` — `all_done` already tolerates a
     # skipped dependency (it is what `review` itself already relies on here;
-    # the stricter `none_failed_min_one_success` below is for `adjudicate`,
-    # which must not run if `review` genuinely FAILED). Declaring the
+    # the stricter `none_failed` below is for `adjudicate`, which must not run
+    # if `review` genuinely FAILED). Declaring the
     # dependency is what makes the DAG run `jev-classify` to completion (or
     # skip) before this phase reads the file it writes.
     depends_on: [review, jev-classify]
@@ -515,25 +530,31 @@ phases:
     skip_if:
       - "analysisEnabled != true"
       - "scratch.reviewTriage.depth == 'light'"
-    # `none_failed_min_one_success`, NOT `all_success`, and the difference is
-    # load-bearing in both directions:
+    # `none_failed`, NOT `all_success`, and the difference is load-bearing in
+    # every direction:
     #
-    #   - a FAILED review must still not post, and it does not: a failed dep
-    #     fails this rule exactly as it fails `all_success`;
+    #   - a FAILED review must still not be adjudicated, and it is not: a
+    #     failed dep fails this rule exactly as it fails `all_success`;
     #   - a SKIPPED `dossier` must not take this phase down with it, and under
     #     `all_success` it WOULD. `evaluateTriggerRule` requires every dep to be
     #     literally `succeeded`, and `skip_if` sets `skipped`
     #     (`scheduler.ts` — "Uses the same non-failing skip mechanics"), so on
     #     every deployment left on `review.analysis.adjudicate: legacy` the
     #     dossier skips and `all_success` would silently skip the adjudicator
-    #     with it. The whole pipeline would go quiet with no phase failing.
+    #     with it. The whole pipeline would go quiet with no phase failing;
+    #   - and BOTH deps skipped is the SHIPPED pipeline shape: `review` skips
+    #     unless `independentReview`, and `dossier` skips on `legacy`. It was
+    #     `none_failed_min_one_success`, which needs one success and would skip
+    #     the adjudicator there — leaving `reconcile` to post every hypothesis
+    #     at `internal` tier, i.e. an empty review. Analysis-off and `light`
+    #     are this phase's own `skip_if`, not the trigger rule's job.
     #
     # Declaring the dependency at all is what ORDERS the dossier before this
     # phase. The sequential scheduler happens to run the earliest-declared ready
     # node, so declaration order alone would work today — but a data dependency
     # that survives only until someone reorders the file is not a dependency.
     depends_on: [review, dossier]
-    trigger_rule: none_failed_min_one_success
+    trigger_rule: none_failed
     generic_loop:
       on_soft_failure: { retries: 1, then: complete }
       max_iterations: 2
@@ -572,7 +593,7 @@ phases:
       set -u
       FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
       if ! "$FACTS" findings --dir .lastlight/pr-review --repair; then
-        echo "reconcile: could not repair findings.json; it stands as the review phase wrote it"
+        echo "reconcile: could not repair findings.json; it stands as review/adjudicate wrote it"
       fi
       exit 0
 
@@ -581,7 +602,25 @@ phases:
   # and diff — so the agent never hand-copies metadata. Anchors each finding to
   # a changed line, demotes off-diff findings to the body, and posts one
   # review. Idempotent on resume.
+  #
+  # `none_failed` on `review` alone:
+  #
+  #   - a FAILED `review` never posts — a failed dep fails the rule;
+  #   - a `review` SKIPPED by its own guard (pipeline on, no independent pass)
+  #     posts what `adjudicate` + `reconcile` wrote — the default rule,
+  #     `all_success`, would skip this phase with it and post nothing;
+  #   - a failed `adjudicate` or `reconcile` still posts, as it always has —
+  #     the money property: a red run that posts nothing leaves both per-head
+  #     dedups blank, and the thirty-minute sweep re-buys the whole pipeline
+  #     on the same SHA forever. That is why this does NOT also depend on
+  #     `reconcile`: `none_failed_min_one_success` over both would withhold the
+  #     post whenever `reconcile` itself failed.
+  #
+  # So the floor runs before the post by DECLARATION ORDER — every pipeline
+  # phase is declared earlier and the sequential scheduler takes the earliest
+  # ready node — exactly as it did while `review` always ran.
   - name: post-review
     label: Post inline review
     type: post-review
     depends_on: [review]
+    trigger_rule: none_failed

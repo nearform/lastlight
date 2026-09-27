@@ -1659,6 +1659,25 @@ describe("renderContext — the spec axis", () => {
     expect(ctx.analysisEnabled).toBe("true");
   });
 
+  it("projects `independentReviewEnabled` only when the operator asked for the pass", () => {
+    // Absent by default: the seed then asks `review` to skip under the pipeline.
+    const dflt = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOn);
+    expect(Object.prototype.hasOwnProperty.call(dflt, "independentReviewEnabled")).toBe(false);
+
+    const asked = renderContext(reviewable(), fix, defaultDependenciesConfig(), {
+      ...analysisOn,
+      analysis: { ...analysisOn.analysis, independentReview: true },
+    });
+    expect(asked.independentReviewEnabled).toBe("true");
+
+    // …and never with the pipeline off, where `review` runs regardless.
+    const off = renderContext(reviewable(), fix, defaultDependenciesConfig(), {
+      ...analysisOff,
+      analysis: { ...analysisOff.analysis, independentReview: true },
+    });
+    expect(Object.prototype.hasOwnProperty.call(off, "independentReviewEnabled")).toBe(false);
+  });
+
   it("projects the three keys the `seed` phase's command line is built from", () => {
     // The seeder is a CLI in the sandbox: the phase's command line is the ONLY
     // way an operator's answer reaches it, so a key that is not projected here

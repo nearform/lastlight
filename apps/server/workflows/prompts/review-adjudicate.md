@@ -65,12 +65,12 @@ Work from that list. Do not reconstruct it by reading the six `.jsonl` files and
 | `.lastlight/pr-review/hypotheses/*.jsonl` | every hypothesis, one JSON object per line, six independent passes |
 | `.lastlight/pr-review/probes/verdicts.jsonl` | the oracle's verdicts — `reproduced` / `corroborated` / `refuted` / `unprobed` |
 | `.lastlight/pr-review/probes/*.txt` | the transcripts. **Judge the transcript, not the verdict's summary of it** |
-| `.lastlight/pr-review/findings.json` | what the review pass wrote. Findings too, and NOT hypothesis-derived |
+| `.lastlight/pr-review/findings.json` | what the review pass wrote, when one ran (see below). Findings too, and NOT hypothesis-derived |
 
 No `verdicts.jsonl` ⇒ no probe ran ⇒ **nothing may be dropped on this run at all.** Absence is not evidence.
 {{/if}}{{#if dossierEnabled}}## Your evidence, already assembled
 
-Everything is in the dossier at the end of this prompt, built from `.lastlight/pr-review/` by `lastlight-facts dossier`: every hypothesis with its id, claim and both mechanism ends; every probe's verdict, command and transcript; the conservation ledger with the ids still owing a disposition; and the review pass's findings.
+Everything is in the dossier at the end of this prompt, built from `.lastlight/pr-review/` by `lastlight-facts dossier`: every hypothesis with its id, claim and both mechanism ends; every probe's verdict, command and transcript; the conservation ledger with the ids still owing a disposition; and the review pass's findings, when one ran.
 
 **Do not fetch what is already here.** No `cat` of a `.jsonl`, no `cat` of a transcript, no `findings --ledger`. Your budget is for the judgement.
 
@@ -97,6 +97,14 @@ If the dossier says `DOSSIER NOT AVAILABLE` it could not be built. Then, and onl
 No probe verdict anywhere ⇒ no probe ran ⇒ **nothing may be dropped on this run at all.**
 
 **Ids already marked `[x]` mean you are on a retry.** Keep every finding already there and add a disposition for each outstanding id. Do not start over.
+{{/if}}{{#if scratch.reviewTriage.skipReview}}
+## No review pass ran
+
+This run had no independent review pass. **`findings.json` does not exist until you create it** — unless you are on a retry, in which case keep what your previous attempt wrote. Every finding comes from the hypotheses; there are no review-pass findings to carry through.
+{{/if}}{{#if !scratch.reviewTriage.skipReview}}
+## The review pass's findings
+
+An independent review pass ran before you and wrote `findings.json`. Its findings are input like the hypotheses: carry them through, merge them, re-tier them.
 {{/if}}
 
 ## What to do, in order of importance
@@ -323,7 +331,7 @@ was defined. -->
 
 ## Output
 
-Rewrite `.lastlight/pr-review/findings.json` **in full**. You own this file now.
+Write `.lastlight/pr-review/findings.json` **in full** — create it if it does not exist, rewrite it if it does. You own this file now.
 
 | field | audience |
 |---|---|
@@ -481,7 +489,7 @@ A finding with no tier whose prose carries a disposition label is recorded as `p
 
 Every line must read `[x]`, ending with *"Conservation holds"*.{{/if}} Adding a disposition while the file is open costs nothing; discovering it after you stop costs a whole second pass over the same evidence.
 
-Keeping the review pass's own findings is expected — they carry no `hypotheses` array and the gate does not ask them to. **They still need {{#if dossierEnabled}}the three attributes{{/if}}{{#if !dossierEnabled}}a `tier`{{/if}}**: the gate counts hypotheses, so a carried-through finding is exactly the row it cannot catch.
+When a review pass ran, keeping its own findings is expected — they carry no `hypotheses` array and the gate does not ask them to. **They still need {{#if dossierEnabled}}the three attributes{{/if}}{{#if !dossierEnabled}}a `tier`{{/if}}**: the gate counts hypotheses, so a carried-through finding is exactly the row it cannot catch.
 
 One boundary on how you read that pass: the reviewer saw only the PR description and the diff — never the hypotheses, never the obligations. Its corroboration may raise your confidence; its **silence is not evidence**. Most defects the surveys find live in code the diff touches but does not display, structurally invisible to a diff-level pass.
 

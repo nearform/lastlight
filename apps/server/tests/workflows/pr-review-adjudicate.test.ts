@@ -116,13 +116,13 @@ describe("adjudicate — the sibling placement, which is the load-bearing part",
   });
 
   it("cannot stop a review being posted, however it fails", () => {
-    // The whole point. `post-review` keeps the default `all_success` over
-    // `review` only — so a failed, skipped or cut-short adjudicator is simply
-    // not in the question `post-review` asks.
+    // The whole point. `post-review` asks only about `review` (`none_failed`,
+    // so a review the pipeline replaced still posts) — a failed, skipped or
+    // cut-short adjudicator is simply not in the question it asks.
     const deps = byName.get("post-review")?.depends_on ?? [];
     expect(deps).not.toContain("adjudicate");
     expect(deps).not.toContain("reconcile");
-    expect(byName.get("post-review")?.trigger_rule).toBeUndefined();
+    expect(byName.get("post-review")?.trigger_rule).toBe("none_failed");
   });
 
   it("is declared BEFORE post-review, which is what orders them", () => {
@@ -182,20 +182,28 @@ describe("the dossier phase (#399), and the skip that must not take the adjudica
     // and no error anywhere.
     expect(dossier?.skip_if).toContain("dossierEnabled != true");
     expect(adjudicate!.depends_on).toEqual(["review", "dossier"]);
-    expect(adjudicate!.trigger_rule).toBe("none_failed_min_one_success");
+    expect(adjudicate!.trigger_rule).toBe("none_failed");
 
-    expect(evaluateTriggerRule("none_failed_min_one_success", ["succeeded", "skipped"])).toBe(true);
+    expect(evaluateTriggerRule("none_failed", ["succeeded", "skipped"])).toBe(true);
     expect(evaluateTriggerRule("all_success", ["succeeded", "skipped"])).toBe(false);
+  });
+
+  it("survives BOTH deps skipping — the shipped pipeline shape", () => {
+    // `review` skips unless `review.analysis.independentReview`, and `dossier`
+    // skips on `adjudicate: legacy`: with the pipeline on and both defaults,
+    // neither dep succeeds. `none_failed_min_one_success` would skip the
+    // adjudicator there and leave nobody to write findings.json.
+    expect(evaluateTriggerRule("none_failed", ["skipped", "skipped"])).toBe(true);
+    expect(evaluateTriggerRule("none_failed_min_one_success", ["skipped", "skipped"])).toBe(false);
+    // Analysis-off and `light` are the phase's own `skip_if`, not the rule's.
+    expect(adjudicate!.skip_if).toEqual(["analysisEnabled != true", "scratch.reviewTriage.depth == 'light'"]);
   });
 
   it("still refuses to adjudicate a failed review", () => {
     // The invariant the rule change must not cost. A failed dep fails
-    // `none_failed_min_one_success` exactly as it fails `all_success`.
-    expect(evaluateTriggerRule("none_failed_min_one_success", ["failed", "skipped"])).toBe(false);
-    expect(evaluateTriggerRule("none_failed_min_one_success", ["failed", "succeeded"])).toBe(false);
-    // And with the whole pipeline off, both deps skip and the adjudicator does
-    // too — which is what its own `skip_if` says anyway.
-    expect(evaluateTriggerRule("none_failed_min_one_success", ["skipped", "skipped"])).toBe(false);
+    // `none_failed` exactly as it fails `all_success`.
+    expect(evaluateTriggerRule("none_failed", ["failed", "skipped"])).toBe(false);
+    expect(evaluateTriggerRule("none_failed", ["failed", "succeeded"])).toBe(false);
   });
 
   it("renders exactly one of the two halves, with nothing left unrendered", () => {
@@ -219,6 +227,24 @@ describe("the dossier phase (#399), and the skip that must not take the adjudica
     expect(dossierOn).toMatch(/"category": "defect"/);
 
     for (const rendered of [legacy, dossierOn]) expect(rendered).not.toMatch(/\{\{/);
+  });
+
+  it("renders cleanly with and without a review pass, in both dossier modes", () => {
+    // The template engine has no nesting: a `skipReview` block inside a
+    // dossier block would close the outer one early and leak `{{/if}}`. So the
+    // review-pass conditional sits BETWEEN the dossier halves — pinned here by
+    // rendering all four combinations.
+    for (const dossierEnabled of [undefined, "true"]) {
+      const render = (skipReview: boolean) =>
+        renderTemplate(prompt, {
+          ...(dossierEnabled ? { dossierEnabled } : {}),
+          scratch: { reviewTriage: { depth: "full", deep: true, ...(skipReview ? { skipReview } : {}) } },
+          phaseOutputs: { dossier: "BYTES" },
+        } as unknown as TemplateContext);
+      const [skipped, ran] = [render(true), render(false)];
+      for (const rendered of [skipped, ran]) expect(rendered).not.toMatch(/\{\{/);
+      expect(skipped).not.toEqual(ran);
+    }
   });
 
   it("runs before the adjudicator by an EDGE, not by declaration order", () => {

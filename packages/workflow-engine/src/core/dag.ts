@@ -1,7 +1,12 @@
 import type { PhaseDefinition } from "./schema.js";
 
 export type NodeStatus = "pending" | "running" | "succeeded" | "failed" | "skipped";
-export type TriggerRule = "all_success" | "one_success" | "none_failed_min_one_success" | "all_done";
+export type TriggerRule =
+  | "all_success"
+  | "one_success"
+  | "none_failed"
+  | "none_failed_min_one_success"
+  | "all_done";
 
 export interface DagNode {
   name: string;
@@ -86,6 +91,11 @@ export function evaluateTriggerRule(rule: TriggerRule, depStatuses: NodeStatus[]
       return depStatuses.every((s) => s === "succeeded");
     case "one_success":
       return depStatuses.some((s) => s === "succeeded");
+    // Every dep terminal and none `failed` — an all-skipped set passes. For a
+    // node whose deps may ALL be conditionally skipped on a healthy run and
+    // that must still refuse to run after a genuine failure upstream.
+    case "none_failed":
+      return !depStatuses.some((s) => s === "failed") && depStatuses.every((s) => TERMINAL.includes(s));
     case "none_failed_min_one_success":
       return !depStatuses.some((s) => s === "failed") && depStatuses.some((s) => s === "succeeded");
     case "all_done":

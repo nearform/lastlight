@@ -117,6 +117,17 @@ describe("evaluateTriggerRule", () => {
     expect(evaluateTriggerRule("none_failed_min_one_success", ["skipped", "skipped"])).toBe(false);
   });
 
+  it("none_failed: true when nothing failed, including when everything skipped", () => {
+    expect(evaluateTriggerRule("none_failed", ["succeeded", "skipped"])).toBe(true);
+    expect(evaluateTriggerRule("none_failed", ["skipped", "skipped"])).toBe(true);
+    expect(evaluateTriggerRule("none_failed", ["succeeded"])).toBe(true);
+  });
+
+  it("none_failed: false on any failure, or while a dep is not yet terminal", () => {
+    expect(evaluateTriggerRule("none_failed", ["skipped", "failed"])).toBe(false);
+    expect(evaluateTriggerRule("none_failed", ["succeeded", "running"])).toBe(false);
+  });
+
   it("all_done: true when all deps are in terminal state", () => {
     expect(evaluateTriggerRule("all_done", ["succeeded", "failed", "skipped"])).toBe(true);
   });

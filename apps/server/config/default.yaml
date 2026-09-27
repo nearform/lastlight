@@ -476,6 +476,14 @@ review:
   # envelope and the survey phases say so — it never fails the run.
   analysis:
     enabled: false
+    # Run the separate `review` pass ALONGSIDE the pipeline. Applies only with
+    # `enabled: true` — with the pipeline off, `review` IS the review and always
+    # runs. OFF by default: the surveys have already done the deep work, so
+    # `adjudicate` writes findings.json from the hypotheses alone and the run
+    # saves one strong-model session. A `light` triage depth skips the pipeline
+    # and still runs `review`, whatever this says. `true` restores the pass
+    # that shipped before this key existed (its findings go to `adjudicate`).
+    independentReview: false
     # A SAFETY BOUND, not a budget — it should never bind on a real PR. The
     # extractor still ranks, truncates and records what it dropped, but this
     # number exists only to stop a pathological PR blowing the prompt.

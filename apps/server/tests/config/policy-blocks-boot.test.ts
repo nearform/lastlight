@@ -6,6 +6,7 @@ import {
   loadConfig,
   defaultFixConfig,
   defaultGateConfig,
+  defaultReviewConfig,
   defaultSandboxTimeouts,
   resetRuntimeConfigForTests,
 } from "#src/config/config.js";
@@ -223,6 +224,41 @@ describe("loadConfig — review.analysis.maxBodyComments", () => {
         overlayWith(`review:\n  analysis:\n    maxBodyComments: ${bad}\n`),
       );
       expect(loadConfig().review.analysis.maxBodyComments, bad).toBe(5);
+    }
+  });
+});
+
+/**
+ * `review.analysis.independentReview` — the separate `review` pass under the
+ * pipeline. Off unless the literal `true`: it is a second strong-model session
+ * on the operator's budget.
+ */
+describe("loadConfig — review.analysis.independentReview", () => {
+  beforeEach(() => {
+    for (const k of ["GITHUB_APP_ID", "SLACK_BOT_TOKEN", "LASTLIGHT_MODEL", "LASTLIGHT_MODELS"]) {
+      vi.stubEnv(k, "");
+    }
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetRuntimeConfigForTests();
+  });
+
+  const independentFor = (yaml: string) => {
+    vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlayWith(yaml));
+    return loadConfig().review.analysis.independentReview;
+  };
+
+  it("defaults to false — in the packaged config and the TS policy alike", () => {
+    expect(independentFor("review:\n  analysis:\n    enabled: true\n")).toBe(false);
+    expect(defaultReviewConfig().analysis.independentReview).toBe(false);
+  });
+
+  it("turns on only for the literal `true`", () => {
+    expect(independentFor("review:\n  analysis:\n    independentReview: true\n")).toBe(true);
+    for (const bad of ['"true"', "yes", "1", "null"]) {
+      expect(independentFor(`review:\n  analysis:\n    independentReview: ${bad}\n`), bad).toBe(false);
     }
   });
 });

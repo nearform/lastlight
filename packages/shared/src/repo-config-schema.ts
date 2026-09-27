@@ -1693,6 +1693,9 @@ function shapeReviewAnalysis(raw: unknown, d: ReviewPolicy["analysis"]): ReviewP
   const node = isPlainObject(raw) ? raw : {};
   return {
     enabled: node.enabled === true,
+    // Operator-only projection like `enabled`: `=== true`, so an absent or
+    // garbled value lands on the shipped `false`.
+    independentReview: node.independentReview === true,
     maxSpecObligations: num(node.maxSpecObligations, d.maxSpecObligations),
     maxObligations: num(node.maxObligations, d.maxObligations),
     // Operator-only like the rest of `review.analysis`, so this only ever

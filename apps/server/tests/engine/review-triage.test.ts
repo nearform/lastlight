@@ -19,6 +19,7 @@ import {
   harvestReviewTriage,
   parseTriageMarker,
   readReviewTriage,
+  reviewTriageSeed,
 } from "#src/engine/review-triage.js";
 
 const RUN = "run-1";
@@ -93,7 +94,15 @@ describe("harvestReviewTriage", () => {
       light: true,
       deep: false,
       baseline: false,
+      skipReview: false,
     });
+  });
+
+  it("drops `skipReview` on `light`, so a light review runs the `review` phase", async () => {
+    const { row, db } = harness(reviewTriageSeed({ analysisEnabled: "true" }) as unknown as Record<string, unknown>);
+    expect(readReviewTriage(row)?.skipReview).toBe(true);
+    await harvestReviewTriage(db, RUN, "triage", "REVIEW_DEPTH: light");
+    expect(readReviewTriage(row)?.skipReview).toBe(false);
   });
 
   it("leaves the seed standing on `full`", async () => {
@@ -161,5 +170,35 @@ describe("readReviewTriage", () => {
     expect(readReviewTriage({ scratch: { reviewTriage: "light" } })).toBeNull();
     expect(readReviewTriage({ scratch: { reviewTriage: ["light"] } })).toBeNull();
     expect(readReviewTriage({ scratch: { reviewTriage: { depth: "lightweight" } } })?.depth).toBe("full");
+  });
+});
+
+describe("reviewTriageSeed", () => {
+  it("pipeline off: the baseline arm, and never a review skip", () => {
+    // `independentReviewEnabled` is inert without the pipeline — `review` IS
+    // the review there.
+    for (const ctx of [{}, { independentReviewEnabled: "true" }, { analysisEnabled: "false" }]) {
+      expect(reviewTriageSeed(ctx), JSON.stringify(ctx)).toEqual({ depth: "full", deep: false, baseline: true });
+    }
+  });
+
+  it("pipeline on, independent pass off (the default): the deep arm, and skip `review`", () => {
+    expect(reviewTriageSeed({ analysisEnabled: "true" })).toEqual({
+      depth: "full",
+      deep: true,
+      baseline: false,
+      skipReview: true,
+    });
+  });
+
+  it("pipeline on, independent pass on: the deep arm, and `review` runs", () => {
+    const seed = reviewTriageSeed({ analysisEnabled: "true", independentReviewEnabled: "true" });
+    expect(seed).toEqual({ depth: "full", deep: true, baseline: false });
+    expect(seed.skipReview).toBeUndefined();
+  });
+
+  it("reads the flags the way the phases' guards do — the string `true` or a boolean", () => {
+    expect(reviewTriageSeed({ analysisEnabled: true }).skipReview).toBe(true);
+    expect(reviewTriageSeed({ analysisEnabled: true, independentReviewEnabled: true }).skipReview).toBeUndefined();
   });
 });

@@ -1402,6 +1402,11 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     // overlay must not switch a deployment onto an unmeasured pipeline.
     analysis: {
       enabled: analysisRaw.enabled === true,
+      // `=== true` like `enabled`: the independent `review` pass is a second
+      // strong-model session on the operator's budget, so only the literal
+      // `true` buys it back. Inert with the pipeline off — `review` is then
+      // the whole review and runs regardless.
+      independentReview: analysisRaw.independentReview === true,
       maxSpecObligations:
         nonNegativeNumber(analysisRaw.maxSpecObligations) ?? reviewDefaults.analysis.maxSpecObligations,
       maxObligations: nonNegativeNumber(analysisRaw.maxObligations) ?? reviewDefaults.analysis.maxObligations,
