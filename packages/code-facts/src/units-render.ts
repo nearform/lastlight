@@ -37,7 +37,7 @@
 import type { Obligation } from "./seed.js";
 
 /** Bump whenever the rendering below changes, so cached readings are not reused across it. */
-export const UNITS_PROMPT_VERSION = "units-v5";
+export const UNITS_PROMPT_VERSION = "units-v6";
 
 /** One family's question, compact. `closes` is what `control_site` means for it. */
 export const FAMILY_QUESTIONS: Record<string, { question: string; closes: string }> = {
@@ -163,8 +163,14 @@ export interface RequestModel {
   specObligations: SpecUnitObligation[];
   /** Plain lines for the `pr` unit's overview (changed/deleted/skipped files). */
   overview: string[];
-  /** Families whose questions are asked, in order. */
+  /** Families whose questions are asked, in order. One, for a unit split by family. */
   asked: string[];
+  /**
+   * Set when a large unit is surveyed once PER FAMILY (`units.ts`,
+   * `FAMILY_SPLIT_CHANGED_LINES`): this unit asks only `family`, and its
+   * siblings — same source, same neighbours — ask the rest of `families`.
+   */
+  familySplit: { family: string; families: string[]; threshold: number } | null;
   /** A one-line note printed under UNIT when the shrink cascade removed context. */
   shrinkNote: string | null;
 }
@@ -220,6 +226,15 @@ function renderSpecObligation(o: SpecUnitObligation): string[] {
 /** Candidate files printed per spec obligation. */
 const MAX_SPEC_CANDIDATES = 8;
 
+/**
+ * `consequence` is the field the v5 audit caught empty: of 482 obligation
+ * answers 89% had it null — 198 of them with `control_site: "none"`, i.e. no
+ * closing control found and still "nothing goes wrong" — and 48% of answers'
+ * claims only restated the obligation's question. So v6 makes the claim a
+ * verdict and ties a null consequence to a quoted control that holds;
+ * `units-ingest` flags the checkable half (no control or an advisory one, and
+ * a null consequence) in `ingest.json` without rewriting the answer.
+ */
 const EVIDENCE_FIELDS = [
   '  subject            string — the symbol, path, behaviour or criterion the entry is about',
   '  control_site       "path:line" of the line that CLOSES the mechanism (see QUESTIONS for what closes it per family), or "none"',
@@ -229,7 +244,8 @@ const EVIDENCE_FIELDS = [
   '  cannot_distinguish two different situations the control treats alike, or exactly "nothing"',
   '  bypass             one concrete path reaching the governed operation without the control, or exactly "none found"',
   "  in_changed_hunk    true | false — does this PR touch the subject, the control, or a site using either?",
-  "  consequence        what goes wrong, and what it does then — or null when nothing is wrong",
+  "  consequence        what goes wrong as a result, and for whom. REQUIRED when control_site is \"none\" or the control is",
+  "                     advisory or bypassable; null ONLY when the claim quotes a control that holds",
   '  trigger            "input" | "state" (reachable at head) | "code_change" (only after someone edits the source) | "unknown"',
   "  crosses_boundary   true | false — crosses a trust boundary, loses or drops data, or breaks an existing caller?",
   "  capability_gained  something the supplier does NOT already hold without this defect, or null",
@@ -258,6 +274,13 @@ const NOT_FINDINGS = [
  * earned credit out (`code_change`, test-assertion nitpicks, speculation about
  * unseen code), lets reachability be `unknown`, and has no cap. It governs
  * `defects` only: obligations are always answered, doubt included.
+ *
+ * v6 leaves the bar alone and removes the COUNT prior around it. Audit of the
+ * v5 replay (Haiku 4.5, 8 cases × 2 arms, 3/50 gold credited): 71% of units
+ * returned `defects: []`, defects per unit sat flat at 0.31–0.41 whatever the
+ * unit's size, and 81% of units with 100+ changed lines returned [] — the
+ * task's "most units have none or one; [] is a normal, honest answer" set the
+ * number, not the code. The task now says the count follows the code.
  */
 const DEFECT_BAR = [
   "DEFECT BAR — a defect entry meets ALL of these, or it is left out:",
@@ -312,9 +335,10 @@ function renderSharedPrefix(): string {
     "You are reviewing ONE unit of a pull request: the code shown after the line \"" + UNIT_SEPARATOR + "\" and the",
     "neighbours a deterministic analysis found for it. You cannot open files or run anything — answer from what is",
     "shown, and write `unknown` where only something not shown could settle a field. Two jobs:",
-    "  1. Answer every obligation the unit lists under OBLIGATIONS, each exactly once.",
-    "  2. Report the defects this change introduces that a user or caller would actually hit — only those that",
-    "     meet the DEFECT BAR below. Most units have none or one; [] is a normal, honest answer.",
+    "  1. Answer every obligation the unit lists under OBLIGATIONS, each exactly once, with YOUR VERDICT on the code.",
+    "  2. Report the defects this change introduces that a user or caller would actually hit — every one that meets",
+    "     the DEFECT BAR below. How many follows the code: a unit that changes several mechanisms can have several;",
+    "     [] only when none meets the bar.",
     "Reply with ONE JSON object and nothing else.",
   );
   L.push("");
@@ -325,7 +349,10 @@ function renderSharedPrefix(): string {
     "  A `⋮` row between two runs of lines of the same file marks lines that are not shown.",
   );
   L.push("");
-  L.push("QUESTIONS — every unit is surveyed for these families (a unit may add one after its own section)");
+  L.push(
+    "QUESTIONS — a unit is surveyed for all of these families, unless its own section says it asks only ONE (a large",
+    "unit is surveyed once per family); a unit may also add a family after its own section",
+  );
   L.push(...familyLines(ALWAYS_ASKED));
   L.push("");
   L.push(...NOT_FINDINGS);
@@ -336,7 +363,7 @@ function renderSharedPrefix(): string {
   L.push(...EVIDENCE_FIELDS);
   L.push(
     '  "unknown" is a real answer; never round it to a clean value. A clean answer (the control holds) is recorded',
-    "  with consequence: null — it is still an entry.",
+    "  with consequence: null — it is still an entry. No holding control shown means the consequence is not null.",
   );
   L.push("");
   L.push("RESPONSE — exactly this shape, one JSON object:");
@@ -348,7 +375,12 @@ function renderSharedPrefix(): string {
   L.push('  - "unitId" is the id the unit states below.');
   L.push('  - "answers" holds one entry per obligation the unit lists, each id EXACTLY ONCE, under the family it is listed');
   L.push("    with; [] when it lists none.");
-  L.push('  - "defects" holds every entry that meets the DEFECT BAR; [] when none does. Its family is one the unit is asked.');
+  L.push('  - "claim" is YOUR VERDICT on the code, one sentence — e.g. "`limit` is compared at src/a.ts:42 before the write"');
+  L.push('    or "nothing shown compares `limit` against the upload size, so an oversized upload is stored". Never the');
+  L.push("    obligation's question or mechanism restated.");
+  L.push('  - control_site "none", or a control that is advisory or bypassable ⇒ "consequence" says what goes wrong as a');
+  L.push("    result. consequence: null only when the claim quotes a control that holds.");
+  L.push('  - "defects" holds every entry that meets the DEFECT BAR; [] when none does. Its family is one the unit asks.');
   L.push('  - "line" is the integer of a tag shown in this request (42 for L0042): the line the claim is about.');
   L.push('  - "file" is the FILE header that tag sits under: required when the unit shows more than one file, else optional.');
   L.push("  - control_site may name any site shown here, a caller included, as path:line.");
@@ -460,7 +492,7 @@ export function renderUnitSpecific(m: RequestModel): string {
 
   L.push(`OBLIGATIONS (${ids.length})`);
   if (ids.length === 0) {
-    L.push("  none were attached to this unit — job 2 is the whole task, and [] is a fine answer to it");
+    L.push("  none were attached to this unit — job 2 is the whole task");
   } else {
     L.push(
       "  Each names BOTH ends of a possible defect: where something is introduced and where it would have to be",
@@ -471,7 +503,20 @@ export function renderUnitSpecific(m: RequestModel): string {
   }
   L.push("");
 
-  const extra = m.asked.filter((f) => !(ALWAYS_ASKED as readonly string[]).includes(f));
+  if (m.familySplit) {
+    const { family, families, threshold } = m.familySplit;
+    const others = families.filter((f) => f !== family);
+    L.push(`ASKED OF THIS UNIT — ONLY ${family}`);
+    L.push(
+      `  This unit changes more than ${threshold} lines, so it is surveyed once per family. This request asks ONLY the`,
+      `  ${family} question${others.length ? ` (sibling units ask ${others.join(", ")} of the same code)` : ""}: ignore the other questions`,
+      `  above, and report every ${family} defect that meets the DEFECT BAR — only ${family} defects.`,
+    );
+    L.push(...familyLines([family]));
+    L.push("");
+  }
+
+  const extra = m.familySplit ? [] : m.asked.filter((f) => !(ALWAYS_ASKED as readonly string[]).includes(f));
   if (extra.length > 0) {
     L.push("ALSO ASKED of this unit");
     L.push(...familyLines(extra));
@@ -484,7 +529,7 @@ export function renderUnitSpecific(m: RequestModel): string {
       : "";
   L.push("RESPONSE FOR THIS UNIT");
   L.push(
-    `  {"unitId":"${m.unitId}","answers":[${exampleAnswer}],"defects":[{"family":"…","claim":"…",${multiFile ? '"file":"…",' : ""}"line":<tag>,"evidence":{…}}]}`,
+    `  {"unitId":"${m.unitId}","answers":[${exampleAnswer}],"defects":[{"family":"${m.familySplit?.family ?? "…"}","claim":"…",${multiFile ? '"file":"…",' : ""}"line":<tag>,"evidence":{…}}]}`,
   );
   L.push(`  - "unitId" is "${m.unitId}".`);
   if (ids.length > 0) {
@@ -492,7 +537,14 @@ export function renderUnitSpecific(m: RequestModel): string {
   } else {
     L.push('  - "answers" is [] — no obligation was attached.');
   }
-  L.push(`  - a defect's family is one of: ${m.asked.join(", ")}.`);
+  if (ids.length > 0) {
+    L.push('  - each "claim" is your verdict on the code, not the question restated; no holding control ⇒ a non-null consequence.');
+  }
+  L.push(
+    m.familySplit
+      ? `  - every defect's family is ${m.familySplit.family}.`
+      : `  - a defect's family is one of: ${m.asked.join(", ")}.`,
+  );
   if (multiFile) L.push('  - this unit shows several files: every entry carries "file".');
   return `${L.join("\n")}\n`;
 }

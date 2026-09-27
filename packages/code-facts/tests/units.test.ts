@@ -29,9 +29,17 @@ import type { AllDocument } from "../src/schema.js";
 import { seedObligations, type Obligation } from "../src/seed.js";
 import { deriveVerdict, type SurveyEvidence } from "../src/survey-verdict.js";
 import { UnitResponseBodySchema, unitResponseJsonSchema } from "../src/unit-response.js";
-import { buildUnits, fallbackUnitsDocument, SMALL_SYMBOL_LINES, UnitsDocumentSchema, type Unit, type UnitsDocument } from "../src/units.js";
+import {
+  buildUnits,
+  FAMILY_SPLIT_CHANGED_LINES,
+  fallbackUnitsDocument,
+  SMALL_SYMBOL_LINES,
+  UnitsDocumentSchema,
+  type Unit,
+  type UnitsDocument,
+} from "../src/units.js";
 import { ingestUnits } from "../src/units-ingest.js";
-import { FAMILY_QUESTIONS, requestLineTags, UNIT_SEPARATOR, UNITS_SHARED_PREFIX } from "../src/units-render.js";
+import { ALWAYS_ASKED, FAMILY_QUESTIONS, requestLineTags, UNIT_SEPARATOR, UNITS_SHARED_PREFIX } from "../src/units-render.js";
 import { forceGrammarUnavailable } from "../src/langs/dynamic.js";
 import { makeFixture, TSCONFIG, type Fixture } from "./helpers.js";
 
@@ -1632,6 +1640,208 @@ describe("units — Python, Go and Java get symbol units", () => {
       expect(result.document.units.some((u) => u.symbol === "Service.Run")).toBe(true);
     } finally {
       forceGrammarUnavailable("python", null);
+    }
+  });
+});
+
+// ── units-v6: large units split by family, verdict answers, no count prior ──
+
+/**
+ * The core handler's unit-id alphabet (`SAFE_UNIT_ID` in
+ * `apps/server/src/workflows/handlers/survey-units.ts`) — a unit id is also a
+ * response FILENAME there. Core cannot be imported from here; this copy is the
+ * contract, and a split id outside it would be refused by the handler.
+ */
+const SAFE_UNIT_ID = /^[A-Za-z0-9_-]+$/;
+
+/** Two functions: `big` changes `bigLines` lines, `mid` changes `midLines`. */
+function makeSplitFixture(bigLines: number, midLines: number): Fixture {
+  const fn = (name: string, n: number, head: boolean): string =>
+    [
+      `export function ${name}(x: number): number {`,
+      "  let t = x;",
+      ...Array.from({ length: n }, (_, i) => (head ? `  t += ${i} * 2; // ${name}` : `  t += ${i}; // ${name}`)),
+      "  return t;",
+      "}",
+    ].join("\n");
+  const file = (head: boolean): string => `${fn("big", bigLines, head)}\n\n${fn("mid", midLines, head)}\n`;
+  return makeFixture("units-split", { message: "base", files: { "src/calc.ts": file(false) } }, { message: "head", files: { "src/calc.ts": file(true) } });
+}
+
+describe("units — a large unit is surveyed once per family", () => {
+  let fixture: Fixture;
+  let dir: string;
+  let doc: UnitsDocument;
+  // big: lines 1..(3 + big + 1); its changed lines start at 3.
+  const BIG = FAMILY_SPLIT_CHANGED_LINES + 1;
+  const MID = FAMILY_SPLIT_CHANGED_LINES;
+  const midStart = BIG + 6;
+  const SPLIT_OBLIGATIONS: Obligation[] = [
+    obligation("O-201", "contract", "src/calc.ts", 1, []),
+    obligation("O-202", "state", "src/calc.ts", 4, []),
+    obligation("O-203", "state", "src/calc.ts", 10, []),
+    obligation("O-204", "tests", "src/calc.ts", 5, []),
+    obligation("O-205", "enforcement", "src/calc.ts", midStart + 3, []),
+  ];
+  const splitFacts = (f: Fixture): AllDocument => {
+    const facts = factsFor(f);
+    facts.extractors.facts!.symbols = [];
+    facts.extractors.contracts = { contracts: [] } as never;
+    return facts;
+  };
+
+  beforeAll(() => {
+    fixture = makeSplitFixture(BIG, MID);
+    dir = workspace(fixture, splitFacts(fixture), SPLIT_OBLIGATIONS, "split");
+    doc = buildUnits({ dir, repo: fixture.dir }).document;
+    writeFileSync(join(dir, "units.json"), JSON.stringify(doc));
+  });
+  afterAll(() => fixture.cleanup());
+
+  const siblings = (): Unit[] => doc.units.filter((u) => u.symbol === "big");
+  const specificOf = (u: Unit): string => u.request.slice(doc.sharedPrefix.length);
+
+  it("splits a unit owning more than the threshold, and not one owning exactly the threshold", () => {
+    const big = siblings();
+    expect(big.map((u) => u.family)).toEqual([...ALWAYS_ASKED, "tests"]);
+    const mid = doc.units.filter((u) => u.symbol === "mid");
+    expect(mid).toHaveLength(1);
+    expect(mid[0]).not.toHaveProperty("family");
+    expect(mid[0]).not.toHaveProperty("splitOf");
+    // The same source, tag for tag, in every sibling.
+    const shown = big.map((u) => JSON.stringify([...(requestLineTags(u.request).get("src/calc.ts")?.keys() ?? [])]));
+    expect(new Set(shown).size).toBe(1);
+  });
+
+  it("gives siblings deterministic ids the core handler accepts, beside their parent's number", () => {
+    const big = siblings();
+    for (const u of big) {
+      expect(u.splitOf).toBe("u-001");
+      expect(u.id).toBe(`u-001-${u.family}`);
+    }
+    expect(doc.units.map((u) => u.id)).toEqual([...big.map((u) => u.id), "u-002"]);
+    for (const u of doc.units) expect(SAFE_UNIT_ID.test(u.id), u.id).toBe(true);
+    const again = buildUnits({ dir, repo: fixture.dir }).document;
+    expect(again.units).toEqual(doc.units);
+  });
+
+  it("each sibling asks exactly its one family, and carries only that family's obligations", () => {
+    for (const u of siblings()) {
+      const family = u.family!;
+      const specific = specificOf(u);
+      for (const [other, q] of Object.entries(FAMILY_QUESTIONS)) {
+        expect(specific.includes(q.question), `${u.id} asks ${other}?`).toBe(other === family);
+      }
+      for (const id of u.obligationIds) expect(SPLIT_OBLIGATIONS.find((o) => o.id === id)?.family).toBe(family);
+      expect(u.families.every((f) => f === family)).toBe(true);
+    }
+    expect(siblings().find((u) => u.family === "state")!.obligationIds).toEqual(["O-202", "O-203"]);
+  });
+
+  it("lands every obligation in exactly one unit", () => {
+    expect(doc.units.flatMap((u) => u.obligationIds).sort()).toEqual(SPLIT_OBLIGATIONS.map((o) => o.id).sort());
+    expect(doc.units.find((u) => u.obligationIds.includes("O-205"))!.symbol).toBe("mid");
+  });
+
+  it("keeps the shared prefix byte-identical across split and unsplit units", () => {
+    expect(doc.sharedPrefix).toBe(UNITS_SHARED_PREFIX);
+    for (const u of doc.units) expect(u.request.startsWith(UNITS_SHARED_PREFIX), u.id).toBe(true);
+  });
+
+  it("splits below the default only when told to, and a spec obligation rides with the spec sibling", () => {
+    const small = makeUnitsFixture();
+    try {
+      const specDir = workspace(small, factsFor(small), OBLIGATIONS, "split-spec");
+      writeFileSync(
+        join(specDir, "spec-obligations.json"),
+        JSON.stringify({ obligations: [{ id: "S-1", criterion: "c", source: "issue #1", candidates: ["src/limits.ts"], question: "q?" }] }),
+      );
+      // checkUpload owns two touched lines, the rest one each.
+      const unsplit = buildUnits({ dir: specDir, repo: small.dir, familySplitLines: 2 }).document;
+      expect(unsplit.units.some((u) => u.family)).toBe(false);
+      const split = buildUnits({ dir: specDir, repo: small.dir, familySplitLines: 1 }).document;
+      const check = split.units.filter((u) => u.symbol === "checkUpload");
+      expect(check.map((u) => u.id)).toEqual(ALWAYS_ASKED.map((f) => `u-002-${f}`));
+      expect(check.find((u) => u.obligationIds.includes("S-1"))?.family).toBe("spec");
+      expect(check.find((u) => u.obligationIds.includes("O-002"))?.family).toBe("contract");
+      expect(split.units.flatMap((u) => u.obligationIds).sort()).toEqual([...OBLIGATIONS.map((o) => o.id), "S-1"].sort());
+      // The pr unit keeps its place after the split parent's number.
+      expect(split.units.at(-1)).toMatchObject({ kind: "pr", id: "u-004" });
+    } finally {
+      small.cleanup();
+    }
+  });
+
+  it("ingest maps each sibling's rows to it, conserves every obligation, and every discharge gate passes", () => {
+    answerAll(dir, doc, SPLIT_OBLIGATIONS);
+    const state = siblings().find((u) => u.family === "state")!;
+    const body = replyFor(state, SPLIT_OBLIGATIONS);
+    body.defects = [
+      { family: "state", claim: "second call doubles t", line: 5, evidence: RISK_EVIDENCE } as never,
+      { family: "security", claim: "off-family", line: 5, evidence: RISK_EVIDENCE } as never,
+    ];
+    writeResponse(dir, state, JSON.stringify(body));
+    const { document, exitCode } = ingestUnits({ dir });
+    expect(exitCode).toBe(EXIT_OK);
+    expect(document.units.every((u) => u.status === "ok")).toBe(true);
+    const report = document.units.find((u) => u.unitId === state.id)!;
+    expect(report.answered).toEqual(["O-202", "O-203"]);
+    // The off-family defect is kept, and flagged.
+    expect(familyRows(dir, "security").some((r) => r.unitId === state.id && r.claim === "off-family")).toBe(true);
+    expect(report.warnings.some((w) => w.includes("asked only state"))).toBe(true);
+    for (const o of SPLIT_OBLIGATIONS) {
+      const rows = familyRows(dir, o.family).filter((r) => r.obligation === o.id);
+      expect(rows, o.id).toHaveLength(1);
+      expect(rows[0]!.unitId).toBe(doc.units.find((u) => u.obligationIds.includes(o.id))!.id);
+    }
+    gatesPass(dir);
+  });
+});
+
+describe("units-v6 — no count prior, and verdict answers", () => {
+  it("the request no longer anchors the number of defects", () => {
+    expect(UNITS_SHARED_PREFIX).not.toContain("Most units have none or one");
+    expect(UNITS_SHARED_PREFIX).not.toContain("[] is a normal, honest answer");
+    const fixture = makeUnitsFixture();
+    try {
+      const doc = buildUnits({ dir: workspace(fixture, factsFor(fixture), [], "no-prior"), repo: fixture.dir }).document;
+      for (const u of doc.units) expect(u.request).not.toContain("[] is a fine answer");
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("ingest records an answer with no holding control and a null consequence, without rewriting or dropping it", () => {
+    const fixture = makeUnitsFixture();
+    try {
+      const dir = workspace(fixture, factsFor(fixture), OBLIGATIONS, "gap");
+      const doc = buildUnits({ dir, repo: fixture.dir }).document;
+      writeFileSync(join(dir, "units.json"), JSON.stringify(doc));
+      answerAll(dir, doc, OBLIGATIONS);
+      const unit = unitOf(doc, (u) => u.symbol === "checkUpload");
+      const body = replyFor(unit, OBLIGATIONS);
+      const noControl = { ...RISK_EVIDENCE, consequence: null };
+      body.answers[0] = { ...body.answers[0]!, claim: "nothing shown compares it", evidence: noControl as never };
+      body.defects = [
+        { family: "contract", claim: "advisory only", line: 6, evidence: { ...CLEAN_EVIDENCE, authority: "advisory" } } as never,
+        { family: "contract", claim: "real risk", line: 6, evidence: RISK_EVIDENCE } as never,
+      ];
+      writeResponse(dir, unit, JSON.stringify(body));
+      const { document } = ingestUnits({ dir });
+      const report = document.units.find((u) => u.unitId === unit.id)!;
+      expect(report.status).toBe("ok");
+      expect(report.consequenceGaps).toEqual(["O-002", "defect #1"]);
+      expect(report.warnings.filter((w) => /consequence is null/.test(w))).toHaveLength(2);
+      // Clean answers elsewhere carry no gap.
+      expect(document.units.filter((u) => u.unitId !== unit.id).every((u) => u.consequenceGaps.length === 0)).toBe(true);
+      // Recorded as written: the row is there, claim and evidence untouched.
+      const row = familyRows(dir, "contract").find((r) => r.obligation === "O-002")!;
+      expect(row).toMatchObject({ claim: "nothing shown compares it", failureScenario: null });
+      expect((row.evidence as { consequence: unknown }).consequence).toBeNull();
+      expect(familyRows(dir, "contract").filter((r) => r.unitId === unit.id)).toHaveLength(3);
+      gatesPass(dir);
+    } finally {
+      fixture.cleanup();
     }
   });
 });

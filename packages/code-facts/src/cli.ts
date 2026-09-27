@@ -137,6 +137,10 @@ passes; it reads no quote and judges no claim):
   --max-units <n>     units per document, i.e. model calls (default 150). Past
                       it the lowest-priority units are dropped — named in
                       degraded[], their obligations moved to the \`pr\` unit
+  --family-split-lines <n>
+                      a unit owning more changed lines than this (default 40)
+                      is surveyed once PER FAMILY — one unit per asked family,
+                      each carrying only that family's obligations
   --never-fail        exit 0 whatever happened; the document says what did
   Exit 0 = full, or nothing to survey (\`coverage: "none"\`, said why). 3 =
   degraded. 2 = an input is missing — a \`coverage: "none"\` document is still
@@ -532,6 +536,7 @@ export function runCli(
         specPath: stringFlag(flags.spec),
         maxRequestChars: numberFlag(flags["max-chars"]),
         maxUnits: numberFlag(flags["max-units"]),
+        familySplitLines: numberFlag(flags["family-split-lines"]),
         log,
       });
       writeDocument(out, result.document);

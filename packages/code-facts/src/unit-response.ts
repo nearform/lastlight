@@ -52,7 +52,7 @@ export type UnitEvidence = z.infer<typeof UnitEvidenceSchema>;
 
 const entryShape = {
   family: z.enum(UNIT_FAMILIES),
-  /** One sentence: the residual risk, or what closes it. */
+  /** One sentence: the model's VERDICT on the code — what closes the mechanism, or what does not and so goes wrong. Never the question restated. */
   claim: z.string().min(1),
   /**
    * The file the `line` tag belongs to. Needed only where a request shows more
@@ -69,7 +69,7 @@ const entryShape = {
 export const UnitAnswerSchema = z.object({ obligation: z.string().min(1), ...entryShape });
 export type UnitAnswer = z.infer<typeof UnitAnswerSchema>;
 
-/** A defect nobody asked about — the over-production the survey exists for. */
+/** An unprompted defect — one that meets the request's DEFECT BAR. */
 export const UnitDefectSchema = z.object(entryShape);
 export type UnitDefect = z.infer<typeof UnitDefectSchema>;
 

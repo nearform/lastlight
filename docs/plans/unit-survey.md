@@ -92,7 +92,7 @@ obligation, never a crash. The file is read loosely: fields core adds pass.
   "version": 1,
   "generatedAt": "…",
   "baseSha": "…", "headSha": "…",
-  "promptVersion": "units-v5",       // bump when request rendering changes
+  "promptVersion": "units-v6",       // bump when request rendering changes
   "sharedPrefix": "…",                // the unit-independent head EVERY request starts with, byte for byte
   "sharedPrefixSha256": "…",          // sha256 of `sharedPrefix`
   "coverage": "full" | "degraded" | "none",
@@ -103,7 +103,8 @@ obligation, never a crash. The file is read loosely: fields core adds pass.
                                       // as printed; absent when no spec file was read. Ingest resolves S-n against THIS
   "units": [
     {
-      "id": "u-001",                  // stable within the document, zero-padded, ordered by file then line
+      "id": "u-001",                  // stable within the document, zero-padded, ordered by file then line;
+                                      //   a family sibling is "u-001-contract" (see below)
       "kind": "symbol" | "module" | "pr",
       "file": "src/a.ts" | null,      // null only for kind "pr"
       "symbol": "Service.run" | null,
@@ -113,7 +114,9 @@ obligation, never a crash. The file is read loosely: fields core adds pass.
       "obligationIds": ["contract-o3", "spec-o1"],
       "request": "…",                 // the COMPLETE user message sent for this unit, verbatim: sharedPrefix + the unit-specific part
       "requestSha256": "…",           // sha256 of `request`
-      "truncated": false              // true when the shrink cascade dropped/trimmed context; the reason is in degraded[]
+      "truncated": false,             // true when the shrink cascade dropped/trimmed context; the reason is in degraded[]
+      "family": "state",              // ONLY on a unit split by family: the one family its request asks
+      "splitOf": "u-001"              // ONLY on a unit split by family: the id its unsplit form would have had
     }
   ]
 }
@@ -127,6 +130,24 @@ units only when the file's regions overrun the budget); small changed functions
 regions — their callers and callees still shown; and one `pr` unit for
 obligations no unit holds.
 
+**Large units are surveyed once per family** (units-v6). A symbol or module
+unit that owns more than `FAMILY_SPLIT_CHANGED_LINES` (40) touched lines —
+changed head lines plus removal points inside its cores; `--family-split-lines`
+overrides — becomes one unit per asked family (the five always-asked, plus
+`tests` when it carries a `tests` obligation): the same source, imports and
+neighbours, but a request that asks ONLY that family's question, carries ONLY
+that family's obligations (the spec obligations ride with the `spec` sibling)
+and states that every defect must be of that family. Ids stay deterministic:
+the unsplit units are numbered `u-NNN` in order and a sibling is
+`u-NNN-<family>` (inside the handler's `SAFE_UNIT_ID` alphabet
+`[A-Za-z0-9_-]`), with `family` and `splitOf` recorded on it. Every obligation
+still lands in exactly one unit. The `pr` unit never splits. Why: the audit of
+the v5 replay (Haiku 4.5, 8 skillspro cases × 2 arms, 3/50 gold credited)
+found defects/unit flat at 0.31–0.41 whatever the unit's size, 81% of units
+with 100+ changed lines returning `defects: []`, and several missed gold fully
+visible inside large multi-family units. `--max-units` bounds units BEFORE the
+split, so a document can hold up to six calls per large unit past it.
+
 **Cache-friendly order.** Every `request` is `sharedPrefix` — the task, the
 line-tag legend, the always-asked families' questions, NOT FINDINGS, the
 evidence record, the response shape and the generic rules, ending with the
@@ -134,7 +155,8 @@ line `=== THIS UNIT ===` — followed by the unit-specific part (UNIT, SOURCE,
 IMPORTS, CALLERS, CALLEES, OBLIGATIONS, a conditional family such as `tests`,
 and this unit's id / answer list). The prefix carries no unit id, count or
 per-unit family subset, so it is byte-identical across every unit of every run
-(~5.9k chars) and a provider's prompt-prefix cache pays for it once. The
+(~7.9k chars) and a provider's prompt-prefix cache pays for it once. A family
+sibling's "ask only this family" instruction sits after the separator too. The
 handler may mark `sharedPrefix` as a cache breakpoint; sending `request`
 verbatim is still correct.
 
@@ -236,6 +258,17 @@ line tags, and the `SurveyEvidence` record (`survey-verdict.ts`) — exactly the
 fields the survey-pass skill documents. **No `severity`, no `needsProbe`**:
 both stay derived by `deriveVerdict`. Code-facts owns the exact schema.
 
+An answer's `claim` is the model's own **verdict** about the code ("`X` is
+compared at path:line before Y", "nothing shown compares X against Y, so Z"),
+never the obligation's question or mechanism restated; when no shown line
+closes the mechanism (`control_site: "none"`) or the control is advisory or
+bypassable, `consequence` must say what goes wrong — `null` only when the claim
+quotes a control that holds. The number of defects follows the code (no "most
+units have none" prior since units-v6): `[]` only when nothing meets the
+DEFECT BAR. v5's audit: 48% of 482 answers restated the obligation, 89% had a
+null consequence (198 of them with `control_site: "none"`), and 71% of units
+returned no defect.
+
 ### `units-ingest` — `lastlight-facts units-ingest --dir .lastlight/pr-review`
 
 Reads `units.json` + `units/responses/*.json`, validates each response against
@@ -243,7 +276,12 @@ the schema, and writes `hypotheses/<family>.jsonl` in the **existing** row
 shape (so `discharge`, `requiresProbe`, the dossier, `jev-classify`, the
 `findings` conservation gate and `stampDerivedSeverity` need no change), with
 two extra row fields: `source: "units"` and `unitId`. Writes
-`units/ingest.json` (per unit: rows written, errors). A unit with no response,
+`units/ingest.json` (per unit: rows written, errors, warnings, and
+`consequenceGaps` — the entries whose evidence names no holding control,
+`control_site` none/unknown or `authority: "advisory"`, yet leave `consequence`
+null; recorded with a warning, never rewritten or dropped, so conservation
+holds; a split unit's defect filed under another family is kept and warned
+about the same way). A unit with no response,
 `ok: false`, or an invalid body is **recorded, never silently dropped**: every
 obligation it owned gets a row that says the survey could not answer it
 (unknown evidence — which `deriveVerdict` already routes to a probe). **Those

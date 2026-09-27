@@ -90,6 +90,13 @@ export interface UnitIngestReport {
   errors: string[];
   /** Problems that cost only a location or a label. */
   warnings: string[];
+  /**
+   * Entries (an obligation id, or `defect #n`) whose evidence names no holding
+   * control — `control_site` none/unknown, or an `advisory` authority — yet
+   * whose `consequence` is null. The request forbids that pairing; the row is
+   * still written as the model wrote it (see {@link consequenceGap}).
+   */
+  consequenceGaps: string[];
 }
 
 export interface IngestDocument {
@@ -189,6 +196,23 @@ function unansweredRow(o: Owed, unitId: string | null, why: string): Row {
     source: "units",
     unitId,
   };
+}
+
+/**
+ * Does this evidence say "no control holds" while claiming nothing goes wrong?
+ *
+ * The checkable half of the v6 answer rule: a null `consequence` belongs only
+ * to an answer that quotes a control that holds. The v5 replay audit found 198
+ * of 482 answers with `control_site: "none"` and a null consequence (89% of all
+ * answers had it null) — the verdict "no comparison found" living only in
+ * evidence fields the judge never reads. Ingest RECORDS the gap (a warning and
+ * `consequenceGaps` in `ingest.json`); it never rewrites the model's text or
+ * drops the row, so conservation and the derived verdict are untouched.
+ * (`bypass` is free text, so "bypassable" is left to the prompt.)
+ */
+function consequenceGap(evidence: UnitEvidence): boolean {
+  if (evidence.consequence !== null) return false;
+  return siteOrNull(evidence.control_site) === null || evidence.authority === "advisory";
 }
 
 function siteOrNull(site: string): string | null {
@@ -435,6 +459,7 @@ export function ingestUnits(options: IngestUnitsOptions): IngestUnitsResult {
       unanswered: [],
       errors: [],
       warnings: [],
+      consequenceGaps: [],
     };
     reports.push(report);
     const startRow = rows.length;
@@ -450,6 +475,7 @@ export function ingestUnits(options: IngestUnitsOptions): IngestUnitsResult {
     };
 
     const answeredIds = new Set<string>();
+    let defectIndex = 0;
     if (response.body) {
       const body = response.body;
       // `readResponse` only returns a body `isUsableUnitReply` accepted.
@@ -526,6 +552,16 @@ export function ingestUnits(options: IngestUnitsOptions): IngestUnitsResult {
         const family = obligation?.family ?? value.family;
         if (obligation && value.family !== obligation.family) {
           warn(`${obligation.id} is a ${obligation.family} obligation; the reply filed it under ${value.family} — filed under ${obligation.family}`);
+        }
+        const label = obligation ? obligation.id : `defect #${++defectIndex}`;
+        if (!obligation && unit.family && value.family !== unit.family) {
+          warn(`${label} is filed under ${value.family}, but this unit asked only ${unit.family} — kept under ${value.family}`);
+        }
+        if (consequenceGap(evidence)) {
+          report.consequenceGaps.push(label);
+          warn(
+            `${label}: no holding control (control_site ${JSON.stringify(evidence.control_site)}, authority ${evidence.authority}) but consequence is null — recorded as written`,
+          );
         }
         const introducedAt = obligation
           ? obligation.introducedAt
@@ -656,6 +692,11 @@ export function ingestUnits(options: IngestUnitsOptions): IngestUnitsResult {
     const result = checkDischarge({ dir, family, log });
     return { family, satisfied: result.satisfied, notes: result.notes };
   });
+
+  const gaps = reports.reduce((n, r) => n + r.consequenceGaps.length, 0);
+  if (gaps > 0) {
+    notes.push(`${gaps} entr${gaps === 1 ? "y names" : "ies name"} no holding control yet leave consequence null — see each unit's consequenceGaps`);
+  }
 
   const rowsByFamily = Object.fromEntries(families.map((f) => [f, byFamily.get(f)!.length]));
   const allAnswered = reports.every((r) => r.status === "ok");

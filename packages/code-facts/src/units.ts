@@ -16,7 +16,10 @@
  *     into several units only when the budget forces it;
  *   - small changed functions (≤ `SMALL_SYMBOL_LINES`, no obligation) folded
  *     into that module unit as whole regions, keeping their callers/callees;
- *   - one `pr` unit for the obligations no unit in the diff could hold.
+ *   - one `pr` unit for the obligations no unit in the diff could hold;
+ *   - a unit owning more than `FAMILY_SPLIT_CHANGED_LINES` changed lines is
+ *     surveyed once PER FAMILY — one unit per asked family, each with only
+ *     that family's question and obligations.
  *
  * Spec obligations (core's `spec-obligations.json` — acceptance criteria whose
  * second end is a list of candidate FILES) ride on the unit with the most
@@ -38,7 +41,8 @@
  *
  * ── Deterministic, and loud about what it cut ──────────────────────────────
  *
- * Units are ordered by file, then line; ids are `u-NNN` in that order;
+ * Units are ordered by file, then line; ids are `u-NNN` in that order (a
+ * family sibling `u-NNN-<family>`);
  * `requestSha256` is the sha256 of the exact request. Each request is held to a
  * character budget by a shrink cascade — trim neighbours, drop neighbours,
  * spread a module unit's regions over several units, split a long unit into
@@ -92,6 +96,24 @@ export const DEFAULT_MAX_REQUEST_CHARS = 40_000;
  * `degraded[]` — never silent.
  */
 export const DEFAULT_MAX_UNITS = 150;
+
+/**
+ * A unit OWNING more touched lines than this (changed head lines plus removal
+ * points, inside its cores) is surveyed once PER FAMILY: one unit per asked
+ * family — the same source, imports and neighbours, but a request that asks
+ * only that family's question, carries only that family's obligations (and,
+ * for `spec`, the spec obligations), and takes only that family's defects.
+ * Smaller units stay multi-family.
+ *
+ * Measured, the v5 replay audit (Haiku 4.5, 8 skillspro cases × 2 arms, 3/50
+ * gold credited): defects per unit were flat at 0.31–0.41 whatever the unit's
+ * size, 81% of units with 100+ changed lines returned `defects: []`, and
+ * several missed gold were fully visible inside large multi-family units — one
+ * call asking five questions of a big change answered each shallowly. 40 is
+ * where a unit stops being "one method's worth" of change; the split costs up
+ * to one call per family for those units only (the shared prefix is cached).
+ */
+export const FAMILY_SPLIT_CHANGED_LINES = 40;
 
 /** Callers / callees / obligation candidates shown at full size. */
 export const MAX_NEIGHBOURS = 8;
@@ -158,6 +180,13 @@ export const UnitSchema = z.object({
   request: z.string(),
   requestSha256: z.string(),
   truncated: z.boolean(),
+  /**
+   * Set only on a unit split by family (`FAMILY_SPLIT_CHANGED_LINES`): the ONE
+   * family its request asks. Its id is `<splitOf>-<family>`.
+   */
+  family: z.string().optional(),
+  /** Set only on a unit split by family: the id its unsplit form would have had, shared by its siblings. */
+  splitOf: z.string().optional(),
 });
 export type Unit = z.infer<typeof UnitSchema>;
 
@@ -312,6 +341,8 @@ export interface BuildUnitsOptions {
   specPath?: string;
   maxRequestChars?: number;
   maxUnits?: number;
+  /** Defaults to {@link FAMILY_SPLIT_CHANGED_LINES}. */
+  familySplitLines?: number;
   log?: LoggerPort;
 }
 
@@ -568,6 +599,8 @@ interface Draft {
   reasons: string[];
   /** How many touched lines this unit holds — the priority when over `maxUnits`. */
   weight: number;
+  /** Set on a unit split by family: the one family it asks, and the families its siblings ask. */
+  split?: { family: string; families: string[]; threshold: number };
 }
 
 function contains(range: [number, number] | null, line: number): boolean {
@@ -1003,7 +1036,8 @@ function modelFor(input: RenderInput): RequestModel {
     obligations: draft.obligations.map((o) => obligationView(o, head, level)),
     specObligations: draft.spec ?? [],
     overview: input.overview,
-    asked: askedFor(draft.obligations),
+    asked: draft.split ? [draft.split.family] : askedFor(draft.obligations),
+    familySplit: draft.split ?? null,
     shrinkNote: notes.length ? notes.join("; ") : null,
   };
 }
@@ -1434,6 +1468,30 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
     else unattributedSpec.push(o);
   }
 
+  // A large unit is surveyed once PER FAMILY (see FAMILY_SPLIT_CHANGED_LINES).
+  // After spec attachment, so the spec obligations ride with the `spec`
+  // sibling; after the shrink cascade, so a pass is judged on what it owns.
+  // Every obligation goes to the ONE sibling asking its family.
+  const splitAt = options.familySplitLines ?? FAMILY_SPLIT_CHANGED_LINES;
+  const groups: Draft[][] = finalDrafts.map((d) => {
+    if (!d.ctx || touchedIn(d.ctx, d.regions) <= splitAt) return [d];
+    const families = askedFor(d.obligations);
+    for (const o of d.obligations) if (!families.includes(o.family)) families.push(o.family);
+    const neighbours = neighboursFor(d);
+    return families.map((family): Draft => {
+      const { spec: _spec, ...rest } = d;
+      const child: Draft = {
+        ...rest,
+        obligations: d.obligations.filter((o) => o.family === family),
+        ...(family === "spec" && d.spec ? { spec: d.spec } : {}),
+        reasons: [...d.reasons],
+        split: { family, families, threshold: splitAt },
+      };
+      neighboursByDraft.set(child, neighbours);
+      return child;
+    });
+  });
+
   const prDraft: Draft | null =
     unattributed.length > 0 || unattributedSpec.length > 0
       ? {
@@ -1452,9 +1510,26 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
           weight: 0,
         }
       : null;
-  const all = prDraft ? [...finalDrafts, prDraft] : finalDrafts;
-  const width = Math.max(3, String(all.length).length);
-  const ids = all.map((_, i) => `u-${String(i + 1).padStart(width, "0")}`);
+  // Ids number the UNSPLIT units in order (`u-NNN`); a family sibling is
+  // `u-NNN-<family>` — within the core handler's `[A-Za-z0-9_-]` alphabet, and
+  // sorting beside its parent's number. With no split the ids are unchanged.
+  const width = Math.max(3, String(groups.length + (prDraft ? 1 : 0)).length);
+  const numbered = (i: number): string => `u-${String(i + 1).padStart(width, "0")}`;
+  const all: Draft[] = [];
+  const ids: string[] = [];
+  const splitOf: (string | null)[] = [];
+  groups.forEach((group, i) => {
+    for (const d of group) {
+      all.push(d);
+      ids.push(d.split ? `${numbered(i)}-${d.split.family}` : numbered(i));
+      splitOf.push(d.split ? numbered(i) : null);
+    }
+  });
+  if (prDraft) {
+    all.push(prDraft);
+    ids.push(numbered(groups.length));
+    splitOf.push(null);
+  }
 
   const overview = (): string[] => {
     const lines: string[] = [];
@@ -1503,6 +1578,7 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
       request,
       requestSha256: sha256(request),
       truncated,
+      ...(d.split ? { family: d.split.family, splitOf: splitOf[i]! } : {}),
     };
   });
 
@@ -1534,6 +1610,7 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
     units: units.length,
     obligations: obligations.length,
     unattributed: unattributed.length,
+    splitByFamily: groups.filter((g) => g.some((d) => d.split)).length,
     truncated: units.filter((u) => u.truncated).length,
     coverage: document.coverage,
     seeded: obligationsDoc !== null,

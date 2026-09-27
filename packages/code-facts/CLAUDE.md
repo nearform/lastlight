@@ -1261,13 +1261,26 @@ lastlight-facts units-ingest --dir .lastlight/pr-review          # → hypothese
   Every step marks the unit `truncated` and names itself in `degraded[]`.
   `--max-units` (150) is a spend bound: past it the lowest-priority units are
   dropped by name and their obligations move to the `pr` unit.
-- **Deterministic**: units ordered by file then line, `u-NNN` in that order,
+- **A large unit is surveyed once per family** (units-v6). A symbol or module
+  unit owning more than `FAMILY_SPLIT_CHANGED_LINES` (40) touched lines
+  (`--family-split-lines`) becomes one unit per asked family — same source,
+  imports and neighbours; a request asking ONLY that family, carrying ONLY its
+  obligations (spec obligations ride with the `spec` sibling) and taking only
+  its defects. Ids `u-NNN-<family>` (inside core's `SAFE_UNIT_ID`), with
+  `family` + `splitOf` on the unit; every obligation still lands exactly once;
+  the `pr` unit never splits; `--max-units` counts units before the split.
+  Measured reason: the v5 replay audit (Haiku 4.5, 8 cases × 2 arms, 3/50 gold)
+  had defects/unit flat at 0.31–0.41 whatever the size and 81% of 100+-line
+  units answering `[]`.
+- **Deterministic**: units ordered by file then line, `u-NNN` in that order
+  (a family sibling `u-NNN-<family>`),
   `requestSha256` = sha256 of the request, and no sha or timestamp inside a
   request, so an unchanged unit renders byte-identically across pushes.
-  `UNITS_PROMPT_VERSION` (now `units-v5`: a targeted DEFECT BAR, no cap, replaced "over-produce") is bumped whenever
-  the rendering changes.
+  `UNITS_PROMPT_VERSION` (now `units-v6`: v5's DEFECT BAR without its count
+  prior, verdict claims with a required consequence when no control holds, and
+  the family split) is bumped whenever the rendering changes.
 - **Shared prefix first — for the provider's prefix cache.** `request` =
-  `UNITS_SHARED_PREFIX` + the unit-specific part. The prefix (~5.9k chars: task,
+  `UNITS_SHARED_PREFIX` + the unit-specific part. The prefix (~7.9k chars: task,
   line-tag legend, the ALWAYS-asked families, NOT FINDINGS, evidence record,
   response shape, generic rules, ending `=== THIS UNIT ===`) carries **no** unit
   id, count, file or per-unit family subset, so it is byte-identical across
@@ -1277,6 +1290,16 @@ lastlight-facts units-ingest --dir .lastlight/pr-review          # → hypothese
   obligation). The prefix holds no `L<n>` tag or `FILE` header, so
   `requestLineTags` reads only the unit's part. `tests/units.test.ts` pins all
   of it.
+- **An answer's claim is a verdict, and "no control" owes a consequence.** The
+  request asks for the model's own verdict sentence (never the obligation
+  restated) and a non-null `consequence` whenever `control_site` is `none` or
+  the control is advisory/bypassable. Ingest checks the checkable half: an
+  entry with no holding control (`control_site` none/unknown or `authority:
+  "advisory"`) and a null consequence is listed in the unit's
+  `consequenceGaps` with a warning in `units/ingest.json` — the row is written
+  as the model wrote it (conservation holds, nothing derived moves). v5 audit:
+  48% of 482 answers restated the question, 89% had a null consequence, 198
+  with `control_site: "none"`.
 - **The reply carries no `severity`, no `needsProbe`, no discharge code** —
   `UnitResponseBodySchema` is `{unitId, answers[], defects[]}`, each entry
   `{obligation?, family, claim, file?, line, evidence}` with the survey-pass
