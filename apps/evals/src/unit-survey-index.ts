@@ -193,11 +193,16 @@ export function modelTotals(cases: ReplayCase[]): UnitSurveyModelTotals | null {
   if (!withModel.length) return null;
   const nullableSum = (xs: (number | null)[]): number | null => (xs.some((x) => x === null) ? null : sum(xs as number[]));
   const uniq = <T,>(xs: T[]): T[] => [...new Set(xs)];
+  const scored = withModel.filter(({ c }) => Array.isArray(c.gold) && c.gold.length > 0);
   return {
     cases: withModel.length,
     gold: sum(withModel.map(({ c }) => (Array.isArray(c.gold) ? c.gold.length : 0))),
-    unitsAsserted: nullableSum(withModel.map(({ m }) => assertedOf(m.unitsScore))),
-    agentAsserted: nullableSum(withModel.map(({ m }) => assertedOf(m.agentScore))),
+    // Credited gold sums over the cases that HAVE gold. A no-gold case (1641)
+    // is never judged, so its score is null — that is "nothing to score", not
+    // "this side was not judged", and letting it through nulled every
+    // finished report's total while a running one (no 1641 yet) showed numbers.
+    unitsAsserted: nullableSum(scored.map(({ m }) => assertedOf(m.unitsScore))),
+    agentAsserted: nullableSum(scored.map(({ m }) => assertedOf(m.agentScore))),
     onlyUnits: sum(withModel.map(({ m }) => m.sides?.onlyUnits?.length ?? 0)),
     onlyAgent: sum(withModel.map(({ m }) => m.sides?.onlyAgent?.length ?? 0)),
     unitsCostUsd: sum(withModel.map(({ m }) => (isNum(m.costUsd) ? m.costUsd : 0))),

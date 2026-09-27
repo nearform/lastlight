@@ -145,6 +145,21 @@ describe("summariseUnitSurveyReport", () => {
     expect(fmtGoldFraction(null, m.gold)).toBe("n/a");
     expect(fmtGoldFraction(0, m.gold)).toBe("0/4 (0%)");
   });
+
+  it("a case with no gold (never judged, score null) does not null the credited totals", () => {
+    const r = fixture();
+    const [scored] = r.cases;
+    const noGold = {
+      ...structuredClone(scored),
+      instanceId: "prreview__no-gold",
+      gold: [],
+      model: { ...structuredClone(scored.model!), unitsScore: null, agentScore: null },
+    } as typeof scored;
+    const m = modelTotals([scored, noGold])!;
+    expect(m.unitsAsserted).toBe(1);
+    expect(m.agentAsserted).toBe(0);
+    expect(m.cases).toBe(2);
+  });
 });
 
 describe("oneSidedGold + caveats", () => {
