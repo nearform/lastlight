@@ -49,6 +49,7 @@ import {
   type ReviewTriageScratch,
 } from "../engine/review-triage.js";
 import { makeFanoutHandler } from "./handlers/fanout.js";
+import { makeSurveyUnitsHandler } from "./handlers/survey-units.js";
 import { fileVerdictReader } from "./handlers/verdict-reader.js";
 import { QuotaExceededError } from "../sandbox/k8s/quota.js";
 import type { ProgressReporter } from "../notify/types.js";
@@ -700,6 +701,39 @@ export async function runWorkflow(
             // instead of requeueing it as backpressure.
             observeResult: noteStopReason,
             observeError: flagQuotaThrow,
+          },
+          phaseReporter,
+        ),
+      ],
+      [
+        // The per-unit survey (`review.analysis.surveyEngine: units`). In-process
+        // model calls against the host checkout — no sandbox, so no quota hooks —
+        // but on the same ledger, so it gets an `executions` row like any phase.
+        "survey-units",
+        makeSurveyUnitsHandler(
+          {
+            workflowName: definition.name,
+            ctx,
+            config: runConfig,
+            taskId,
+            triggerId,
+            githubAccess,
+            backend: runConfig.sandbox ?? "gondolin",
+            assets: assets
+              ? {
+                  loadPromptTemplate: (p) => assets.loadPromptTemplate(p),
+                  resolveSkillPaths: (n) => assets.resolveSkillPaths(n),
+                }
+              : defaultAssetLoader,
+            resolver: phaseResolver,
+            store: db,
+            workflowId,
+            ledger: {
+              liveness: dockerLivenessPort,
+              observability:
+                db && workflowId ? runScopedObservability(db, workflowId) : telemetryObservability,
+              logger: logger("survey-units"),
+            },
           },
           phaseReporter,
         ),

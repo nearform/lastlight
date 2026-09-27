@@ -1678,6 +1678,29 @@ describe("renderContext — the spec axis", () => {
     expect(Object.prototype.hasOwnProperty.call(off, "independentReviewEnabled")).toBe(false);
   });
 
+  it("projects `unitSurveyEnabled` only for surveyEngine: units, and the unit concurrency with the pipeline", () => {
+    // The unit chain guards on `unitSurveyEnabled != true` and the fan-out on
+    // `== true`, so ABSENT must mean the agent engine: a quoted
+    // `surveyEngine != 'units'` guard would read absent as "run the units".
+    const dflt = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOn);
+    expect(Object.prototype.hasOwnProperty.call(dflt, "unitSurveyEnabled")).toBe(false);
+    expect(dflt.surveyUnitConcurrency).toBe("16");
+
+    const units = renderContext(reviewable(), fix, defaultDependenciesConfig(), {
+      ...analysisOn,
+      analysis: { ...analysisOn.analysis, surveyEngine: "units" as const, surveyUnitConcurrency: 4 },
+    });
+    expect(units.unitSurveyEnabled).toBe("true");
+    expect(units.surveyUnitConcurrency).toBe("4");
+
+    // Pipeline off: nothing projected, whatever the engine says.
+    const off = renderContext(reviewable(), fix, defaultDependenciesConfig(), {
+      ...analysisOff,
+      analysis: { ...analysisOff.analysis, surveyEngine: "units" as const },
+    });
+    expect(Object.prototype.hasOwnProperty.call(off, "unitSurveyEnabled")).toBe(false);
+  });
+
   it("projects the three keys the `seed` phase's command line is built from", () => {
     // The seeder is a CLI in the sandbox: the phase's command line is the ONLY
     // way an operator's answer reaches it, so a key that is not projected here

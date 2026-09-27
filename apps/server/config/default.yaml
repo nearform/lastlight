@@ -629,6 +629,21 @@ review:
     # spend: six passes cost the same in tokens either way.
     surveyConcurrency: 6
 
+    # Which engine runs the survey (docs/plans/unit-survey.md). `agent` is the
+    # five-branch fan-out above. `units` replaces it with `lastlight-facts
+    # units` (deterministic units: a symbol, a module, the PR), ONE bounded,
+    # non-agentic model call per unit on `models.review-survey`, and
+    # `lastlight-facts units-ingest`, which writes the same
+    # `hypotheses/<family>.jsonl` — so falsify/adjudicate/post-review are
+    # unchanged. UNMEASURED: stays `agent` until the eval A/B in the plan says
+    # otherwise. `units` reads the workspace from the harness, so it FAILS on
+    # the kubernetes backend. Anything but the literal `units` is `agent`.
+    surveyEngine: agent
+    # Unit calls in flight at once under `surveyEngine: units`. No backend
+    # clamp — they are HTTP requests from the harness, not sandboxes — so lower
+    # it only to ease provider rate limits. Spend is the same either way.
+    surveyUnitConcurrency: 16
+
     # ── WP4: `prepare` (the affordance) + `falsify` (the oracle) ──────────────
     #
     # A SECOND switch under an already-gated block, and TRI-STATE — the middle

@@ -241,9 +241,13 @@ phases:
         `unknown` — whether falsify probes the row is computed from that record.
         Nothing outside the checkout counts: never search the machine for a missing
         dependency or file — stop, and let the hypothesis go to falsify as unprobed.
+    # The third guard is the survey ENGINE: under `review.analysis.surveyEngine:
+    # units` the three unit phases below replace this fan-out. Bare `== true`,
+    # so an absent key — every deployment that never set the engine — RUNS it.
     skip_if:
       - "analysisEnabled != true"
       - "scratch.reviewTriage.depth == 'light'"
+      - "unitSurveyEnabled == true"
     depends_on: [seed]
     trigger_rule: all_done
     # A CEILING the run clamps further per backend: gondolin boots a micro-VM
@@ -308,6 +312,138 @@ phases:
           FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
           "$FACTS" discharge --dir .lastlight/pr-review --family spec --ungraded
 
+  # ── The unit survey (docs/plans/unit-survey.md) ─────────────────────────────
+  #
+  # The OTHER survey engine, selected by `review.analysis.surveyEngine: units`
+  # and UNMEASURED — the fan-out above stays the default until the plan's eval
+  # A/B says otherwise. Three phases replace it, and they end in the same
+  # `hypotheses/<family>.jsonl` it writes, so nothing after the survey changes:
+  #
+  #   units         deterministic: cut the PR into units (a symbol, a module
+  #                 region, the PR itself) and render each one's COMPLETE
+  #                 request — code, neighbours, obligations, questions, schema.
+  #   survey-units  in-process: ONE bounded, non-agentic model call per unit,
+  #                 concurrently. No sandbox, no tools, no re-deriving with
+  #                 bash what `facts`/`seed` already computed — which is where
+  #                 the fan-out spends its minutes.
+  #   units-ingest  deterministic: validate every response, write the
+  #                 hypothesis rows. A unit that never answered is RECORDED —
+  #                 each obligation it owned gets a row saying so — never
+  #                 dropped.
+  #
+  # All three carry the pipeline's two guards plus the engine's, and the engine
+  # guard is BARE-BOOLEAN on purpose: `skip_if`'s quoted `!=` reads an absent
+  # key as "no match", so `surveyEngine != 'units'` would run these phases on
+  # every deployment that never set the key. `unitSurveyEnabled` is projected
+  # (as the string "true") only for `units`; absent, `!= true` matches and they
+  # skip. The fan-out reads the same key the other way round.
+  #
+  # `all_done` down the chain, like every deterministic phase here: `units`
+  # always writes a document (the shell fallback included), and `units-ingest`
+  # must run even when the calls failed — that is when it has the most to
+  # record.
+  - name: units
+    label: Units · deterministic
+    type: bash
+    skip_if:
+      - "analysisEnabled != true"
+      - "unitSurveyEnabled != true"
+      - "scratch.reviewTriage.depth == 'light'"
+    depends_on: [seed]
+    trigger_rule: all_done
+    # `facts`' own budget: the same class of analysis over the same tree, and a
+    # context key rather than a literal like every budget here (#385).
+    timeout_seconds: { from: factsTimeoutSeconds }
+    command: |
+      set -u
+      FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+      OUT=.lastlight/pr-review/units.json
+      mkdir -p .lastlight/pr-review
+      # A reused per-PR workspace still holds the LAST head's document. Remove
+      # it first, so a process that dies before writing leaves no stale units
+      # for `survey-units` to spend money on.
+      rm -f "$OUT"
+
+      # The fallback must read downstream as "nothing was cut into units", never
+      # as "there was nothing to survey": `coverage: none`, the reason in
+      # `degraded[]`, and an EMPTY `units` array `survey-units` accepts.
+      fallback() {
+        printf '{"version":1,"generatedAt":"%s","baseSha":null,"headSha":"%s","promptVersion":null,"coverage":"none","degraded":[{"extractor":"units","reason":"%s"}],"responseSchema":null,"units":[]}\n' \
+          "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "$1" > "$OUT"
+      }
+
+      # `--never-fail` covers what the CLI can see; the shell covers a process
+      # that DIES (OOM, a segfault in the native parser). The fallback is
+      # written only when nothing was — a document the CLI wrote on its way to
+      # a non-zero exit carries more than this one can.
+      "$FACTS" units --dir .lastlight/pr-review --repo . --never-fail
+      CODE=$?
+      if [ ! -s "$OUT" ]; then
+        fallback "the units process exited $CODE without writing units.json (OOM, a segfault in the native parser, or a CLI that could not be executed) — NOTHING here may be read as 'no findings'"
+      fi
+      N=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).units.length)' "$OUT" 2>/dev/null || echo "?")
+      echo "units: exit $CODE, $N unit(s), $(wc -c < "$OUT" 2>/dev/null || echo 0) bytes"
+      exit 0
+
+  # One call per unit, in the HARNESS process (`handlers/survey-units.ts`):
+  # `prompt:` is the system prompt of every call and the unit's rendered
+  # request is the user message, verbatim. Concurrency is
+  # `review.analysis.surveyUnitConcurrency`; readings are cached by request
+  # hash outside the workspace, so a re-review re-asks only the units whose
+  # request changed. One transcript and one `executions` row for the phase.
+  #
+  # It reads and writes the workspace from the harness, so it FAILS on the
+  # kubernetes backend (no host checkout) — loudly, naming the fix.
+  - name: survey-units
+    label: Survey · one call per unit
+    type: survey-units
+    prompt: prompts/survey-unit.md
+    # The fan-out's model key: this is the same survey, asked differently, and
+    # the eval A/B compares the two engines on one model.
+    model: "{{models.review-survey}}"
+    skip_if:
+      - "analysisEnabled != true"
+      - "unitSurveyEnabled != true"
+      - "scratch.reviewTriage.depth == 'light'"
+    depends_on: [units]
+    trigger_rule: all_done
+
+  - name: units-ingest
+    label: Units · ingest
+    type: bash
+    skip_if:
+      - "analysisEnabled != true"
+      - "unitSurveyEnabled != true"
+      - "scratch.reviewTriage.depth == 'light'"
+    depends_on: [survey-units]
+    trigger_rule: all_done
+    timeout_seconds: { from: seedTimeoutSeconds }
+    command: |
+      set -u
+      FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+      mkdir -p .lastlight/pr-review/hypotheses
+      if ! "$FACTS" units-ingest --dir .lastlight/pr-review --never-fail; then
+        echo "units-ingest: the ingest process died — hypotheses/ holds whatever it wrote before; falsify and adjudicate read what is there"
+      fi
+
+      # The POST-CHECK the fan-out runs as each branch's `until_bash`: every
+      # seeded obligation carries a discharge, and every row gets the canonical
+      # id rewrite (issue #405). `spec` is graded `--ungraded`, as there.
+      # REPORTED, never failed on: there is no agent to hand a gate failure
+      # back to, and ingest has already written an unanswered row for every
+      # obligation a unit could not answer — a red phase here would only paint
+      # the run red over a gap that is already on the record.
+      for FAMILY in contract enforcement security state spec; do
+        if [ "$FAMILY" = spec ]; then set -- --ungraded; else set --; fi
+        if RESULT="$("$FACTS" discharge --dir .lastlight/pr-review --family "$FAMILY" "$@" 2>&1)"; then
+          echo "discharge $FAMILY: ok"
+        else
+          echo "discharge $FAMILY: NOT satisfied"
+          printf '%s\n' "$RESULT" | head -n 20
+        fi
+      done
+      exit 0
+
   # The only phase that RUNS anything. It reads the hypothesis RECORDS and the
   # code, never an earlier pass's transcript — a checker that can see the
   # reasoning which produced a claim almost never rejects it.
@@ -326,7 +462,15 @@ phases:
       - "analysisEnabled != true"
       - "probesEnabled != true"
       - "scratch.reviewTriage.depth == 'light'"
-    depends_on: [survey]
+    # BOTH survey engines, because exactly one of them runs and the other
+    # SKIPS: the fan-out under `agent`, `units-ingest` (the unit chain's last
+    # phase) under `units`. `all_done` is what lets a skipped engine through —
+    # a skipped dep is terminal, and every dep being terminal is the whole
+    # rule. Not `none_failed`: a FAILED survey never stopped falsify before
+    # this (the fan-out's `then: complete` already folds most failures, and
+    # falsify probes whatever rows exist), and the unit engine must not be
+    # stricter than the engine it is measured against.
+    depends_on: [survey, units-ingest]
     trigger_rule: all_done
     # A WHOLE-PHASE ceiling, across every round. `probeRounds` bounds how many
     # times the loop may go round and not what it may spend, and this is the

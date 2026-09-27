@@ -136,6 +136,7 @@ import {
   DIAGNOSIS_CLASSES,
   coerceAdjudicateMode,
   coerceProbeMode,
+  coerceSurveyEngine,
   defaultDependenciesConfig,
   defaultFixConfig,
   defaultNotificationsConfig,
@@ -1431,6 +1432,18 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
       // effective value and the run logs when the host overrides it.
       surveyConcurrency:
         nonNegativeNumber(analysisRaw.surveyConcurrency) ?? reviewDefaults.analysis.surveyConcurrency,
+      // Which engine runs the survey. Only the literal `"units"` moves a
+      // deployment off the agent fan-out — the direction every switch in this
+      // block fails — because the unit engine is unmeasured and needs a
+      // host-readable workspace (it fails loud on kubernetes).
+      surveyEngine: coerceSurveyEngine(analysisRaw.surveyEngine),
+      // No backend clamp, unlike `surveyConcurrency`: unit calls are in-process
+      // HTTP requests, not sandboxes, so this bounds rate-limit pressure only.
+      // Zero would stall the phase, so it floors at one.
+      surveyUnitConcurrency: Math.max(
+        1,
+        nonNegativeNumber(analysisRaw.surveyUnitConcurrency) ?? reviewDefaults.analysis.surveyUnitConcurrency,
+      ),
       // WP4. `probes` is TRI-STATE (`off` | `static` | `full`) and the other
       // three still read `=== true`, for the same reason `enabled` does: each
       // buys the operator's compute, and two of them — `full` (which installs a

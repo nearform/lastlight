@@ -264,6 +264,49 @@ describe("loadConfig — review.analysis.independentReview", () => {
 });
 
 /**
+ * `review.analysis.surveyEngine` / `surveyUnitConcurrency` — which survey runs
+ * (docs/plans/unit-survey.md). The unit engine is unmeasured, so only the
+ * literal `units` selects it.
+ */
+describe("loadConfig — review.analysis.surveyEngine", () => {
+  beforeEach(() => {
+    for (const k of ["GITHUB_APP_ID", "SLACK_BOT_TOKEN", "LASTLIGHT_MODEL", "LASTLIGHT_MODELS"]) {
+      vi.stubEnv(k, "");
+    }
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetRuntimeConfigForTests();
+  });
+
+  const analysisFor = (yaml: string) => {
+    vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlayWith(yaml));
+    return loadConfig().review.analysis;
+  };
+
+  it("defaults to the agent fan-out at 16 unit calls — in the packaged config and the TS policy alike", () => {
+    const a = analysisFor("review:\n  analysis:\n    enabled: true\n");
+    expect(a.surveyEngine).toBe("agent");
+    expect(a.surveyUnitConcurrency).toBe(16);
+    expect(defaultReviewConfig().analysis.surveyEngine).toBe("agent");
+    expect(defaultReviewConfig().analysis.surveyUnitConcurrency).toBe(16);
+  });
+
+  it("selects units only for the literal `units`", () => {
+    expect(analysisFor("review:\n  analysis:\n    surveyEngine: units\n").surveyEngine).toBe("units");
+    for (const bad of ["Units", "true", "unit", "null", "agent"]) {
+      expect(analysisFor(`review:\n  analysis:\n    surveyEngine: ${bad}\n`).surveyEngine, bad).toBe("agent");
+    }
+  });
+
+  it("takes an operator's concurrency, and never lets it reach zero", () => {
+    expect(analysisFor("review:\n  analysis:\n    surveyUnitConcurrency: 4\n").surveyUnitConcurrency).toBe(4);
+    expect(analysisFor("review:\n  analysis:\n    surveyUnitConcurrency: 0\n").surveyUnitConcurrency).toBe(1);
+  });
+});
+
+/**
  * `review.analysis.probes` — the TRI-STATE gate, and the one compatibility
  * property that matters.
  *

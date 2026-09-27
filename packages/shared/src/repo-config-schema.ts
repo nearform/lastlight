@@ -53,6 +53,7 @@ import {
   isReviewTrigger,
   coerceAdjudicateMode,
   coerceProbeMode,
+  coerceSurveyEngine,
   reviewTriggerRank,
   type DependenciesConfig,
   type DisabledConfig,
@@ -1709,6 +1710,10 @@ function shapeReviewAnalysis(raw: unknown, d: ReviewPolicy["analysis"]): ReviewP
     mint: typeof node.mint === "string" ? node.mint : d.mint,
     surveyPasses: num(node.surveyPasses, d.surveyPasses),
     surveyConcurrency: num(node.surveyConcurrency, d.surveyConcurrency),
+    // Operator-only projection like `adjudicate`: it selects a phase SHAPE, and
+    // only the literal `"units"` moves it off the shipped fan-out.
+    surveyEngine: coerceSurveyEngine(node.surveyEngine),
+    surveyUnitConcurrency: num(node.surveyUnitConcurrency, d.surveyUnitConcurrency),
     // Tri-state (`off` | `static` | `full`), with a bare `true` reading as
     // `static` so an upgrade never silently buys an install. Operator-only
     // like the rest of `review.analysis`, so this only projects the

@@ -1,6 +1,5 @@
 import { execFileSync } from "node:child_process";
 import {
-  existsSync,
   readdirSync,
   readFileSync,
   statSync,
@@ -34,6 +33,7 @@ import {
 import { logger } from "../../logging/logger.js";
 import { chat, type ChatFunction } from "../../engine/llm.js";
 import { writePostedSummary } from "../../engine/github/review-summary.js";
+import { resolveHostRepoDir } from "./host-repo-dir.js";
 
 const log = logger("post-review");
 import type { ExecutorConfig } from "lastlight-workflow-engine";
@@ -863,20 +863,9 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     return summary;
   }
 
-  /** Host path of the run's repo checkout — mirrors sandbox/index.ts layout. */
+  /** Host path of the run's repo checkout — see {@link resolveHostRepoDir}. */
   private resolveHostRepoDir(repo: string): string {
-    const config = this.run.config;
-    const sandboxBase = resolve(
-      config.sandboxDir || join(config.stateDir || "data", "sandboxes"),
-    );
-    const workDir = join(sandboxBase, this.run.taskId);
-    // pr-review pre-clones into a `<repo>/` subdir (a sibling of the workspace
-    // root's AGENTS.md / skill bundle). Fall back to the workspace root if the
-    // repo subdir has no findings (defensive — should not happen for pr-review).
-    const repoDir = join(workDir, repo);
-    if (existsSync(join(repoDir, ".lastlight", "pr-review"))) return repoDir;
-    if (existsSync(join(workDir, ".lastlight", "pr-review"))) return workDir;
-    return repoDir;
+    return resolveHostRepoDir(this.run.config, this.run.taskId, repo);
   }
 
   /**

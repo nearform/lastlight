@@ -557,13 +557,15 @@ describe("falsify — the loop, its gate, and the rule with money on it", () => 
     );
   });
 
-  it("sits between the survey fan-out and the review, on `all_done`", () => {
+  it("sits between the survey (either engine) and the review, on `all_done`", () => {
     // Between, because it consumes what the surveys wrote; `all_done`, because
     // it skips on every deployment without probes and a skipped node is not
     // `succeeded` — with `all_success` the review itself would vanish.
     // WP11c: the six chained survey phases became one `survey` fan-out node,
     // so the edge that used to name the LAST family now names the whole node.
-    expect(falsify!.depends_on).toEqual(["survey"]);
+    // The unit engine's last phase is the other edge: exactly one of the two
+    // runs, and `all_done` lets the skipped one through.
+    expect(falsify!.depends_on).toEqual(["survey", "units-ingest"]);
     expect(falsify!.trigger_rule).toBe("all_done");
     expect(byName.get("review")?.depends_on).toEqual(["falsify"]);
   });

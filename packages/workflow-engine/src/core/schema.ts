@@ -237,6 +237,13 @@ const PhaseDefinitionSchema = z
      * - `fanout`: run N agent sessions CONCURRENTLY inside ONE provisioned
      *   workspace. Requires `branches:`. See {@link FanoutBranchSchema} and the
      *   note below.
+     * - `survey-units`: the per-unit review survey. Runs on the harness (no
+     *   sandbox, no agent): reads `.lastlight/pr-review/units.json` from the
+     *   host checkout and makes ONE bounded model call per unit, with `prompt:`
+     *   as the system prompt and the unit's pre-rendered request as the user
+     *   message. Needs a host-readable workspace, so it fails loud on
+     *   `kubernetes`. Like `post-review` it is app-registered — the engine
+     *   only validates the shape. See `docs/plans/unit-survey.md`.
      *
      * `bash`/`script` phases run in the SAME sandbox/workspace as agent
      * phases (the host workDir persists across phases keyed by taskId), honour
@@ -255,7 +262,7 @@ const PhaseDefinitionSchema = z
      * own `<phase>_branch_<name>` key) is resume, dedup, per-branch cost
      * attribution and the dashboard's longest-prefix grouping.
      */
-    type: z.enum(["context", "agent", "bash", "script", "post-review", "fanout"]).default("agent"),
+    type: z.enum(["context", "agent", "bash", "script", "post-review", "fanout", "survey-units"]).default("agent"),
     /**
      * Shell command for `type: bash`. Rendered through the template engine
      * first (so it may reference `{{phaseOutputs.*}}`, `{{branch}}`, etc.),
@@ -591,7 +598,7 @@ const PhaseDefinitionSchema = z
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: "`command:` is only valid on type `bash`" });
       }
     } else {
-      // context / agent / post-review / fanout
+      // context / agent / post-review / fanout / survey-units
       if (p.command !== undefined) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: "`command:` is only valid on type `bash`" });
       }
@@ -601,6 +608,12 @@ const PhaseDefinitionSchema = z
       if (p.runtime !== undefined) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, message: "`runtime:` is only valid on type `script`" });
       }
+    }
+
+    // The system prompt IS the phase: with no `prompt:` the handler would have
+    // nothing to send but the unit's request, and fail only once it ran.
+    if (type === "survey-units" && !p.prompt) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "phase type `survey-units` requires `prompt:` (the per-unit system prompt)" });
     }
 
     // ── Fan-out ──────────────────────────────────────────────────────────────

@@ -1775,6 +1775,26 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      */
     surveyConcurrency: String(review.analysis.surveyConcurrency),
     /**
+     * The survey ENGINE (`docs/plans/unit-survey.md`) — the gate the three unit
+     * phases (`units`, `survey-units`, `units-ingest`) and the agent `survey`
+     * fan-out both read, in opposite directions.
+     *
+     * A bare-boolean key, not `surveyEngine: "units"`, and the grammar is why:
+     * `skip_if`'s quoted `!=` form reads an ABSENT variable as "no match", so
+     * `surveyEngine != 'units'` would RUN the unit phases on every deployment
+     * that never set the key. `unitSurveyEnabled != true` skips them there
+     * instead, and `unitSurveyEnabled == true` on the fan-out lets it run.
+     * Present only for `units`, so every failure direction is the agent survey.
+     */
+    ...(review.analysis.surveyEngine === "units" ? { unitSurveyEnabled: "true" } : {}),
+    /**
+     * `survey-units`' in-flight ceiling. Read by the handler itself (a
+     * `max_concurrent` key is fan-out-only in the schema). Projected with the
+     * pipeline rather than with the engine so an eval arm's value is visible on
+     * the context whichever engine it picked.
+     */
+    surveyUnitConcurrency: String(review.analysis.surveyUnitConcurrency),
+    /**
      * The CONTROL arm — `--contract` on the `seed` phase's `lastlight-facts`
      * invocation, and the argument `renderSpecObligations` above just took.
      *

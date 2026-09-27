@@ -66,6 +66,11 @@ const DECLARED = [
   // WP11c — the six chained `survey_<family>` phases are ONE `type: fanout`
   // node now. The families did not change; the node count did.
   "survey",
+  // The OTHER survey engine (docs/plans/unit-survey.md): exactly one of
+  // `survey` and this chain of three runs, chosen by `unitSurveyEnabled`.
+  "units",
+  "survey-units",
+  "units-ingest",
   "falsify",
   "review",
   // #399 idea 2. One TypeSafe call per hypothesis, annotating what `dossier`
@@ -115,6 +120,14 @@ const WP4_PHASES = ["prepare", "falsify"];
 // WP3's three. `falsify` is WP4's and carries BOTH gates, so it is asserted
 // under WP4_PHASES rather than here.
 const WP3_PHASES = ["facts", "seed", "survey"];
+
+/**
+ * The unit survey's three — the alternative to `survey`, gated on the survey
+ * ENGINE as well as the pipeline. Off unless `unitSurveyEnabled`, which
+ * `specContext` projects only for `review.analysis.surveyEngine: units`.
+ */
+const UNIT_PHASES = ["units", "survey-units", "units-ingest"];
+const UNIT_GUARD = "unitSurveyEnabled != true";
 
 /**
  * WP6's two. `adjudicate` is the model pass; `reconcile` is its deterministic
@@ -228,7 +241,11 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
       facts: ["prepare"],
       seed: ["facts"],
       survey: ["seed"],
-      falsify: ["survey"],
+      units: ["seed"],
+      "survey-units": ["units"],
+      "units-ingest": ["survey-units"],
+      // BOTH engines' last phase: exactly one of them runs and the other skips.
+      falsify: ["survey", "units-ingest"],
       review: ["falsify"],
       "jev-classify": ["review"],
       // TWO deps, same reasoning as `adjudicate` below: `dossier --json`'s
@@ -242,10 +259,9 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
     const declaredEdges = def.phases.filter((p) => p.depends_on?.length);
     // Every phase but the root declares an edge.
     expect(declaredEdges).toHaveLength(DECLARED.length - 1);
-    // `dossier` AND `adjudicate` each declare TWO edges now — two fan-ins, not
-    // one — so the edge count is the phase count plus one extra per fan-in
-    // beyond the first.
-    expect(declaredEdges.flatMap((p) => p.depends_on ?? [])).toHaveLength(DECLARED.length + 1);
+    // `falsify`, `dossier` AND `adjudicate` each declare TWO edges — three
+    // fan-ins — so the edge count is (phases - 1) plus one per fan-in.
+    expect(declaredEdges.flatMap((p) => p.depends_on ?? [])).toHaveLength(DECLARED.length + 2);
 
     const dag = buildDag(def.phases, { chainIfNoDeps: true });
     // Exactly one root, and it is the first declared phase.
@@ -262,7 +278,18 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
     // `prepare` joined the list when `triage` became its dependency: triage
     // SKIPS on a first review and wherever the deployment turned it off, and a
     // skipped node is not `succeeded`.
-    const allDone = ["prepare", "facts", "seed", "survey", "falsify", "review", "jev-classify", "dossier", "reconcile"];
+    const allDone = [
+      "prepare",
+      "facts",
+      "seed",
+      "survey",
+      ...UNIT_PHASES,
+      "falsify",
+      "review",
+      "jev-classify",
+      "dossier",
+      "reconcile",
+    ];
     for (const name of allDone) {
       expect(byName.get(name)?.trigger_rule, `${name}.trigger_rule`).toBe("all_done");
     }
@@ -296,9 +323,26 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
       "triageEnabled != true",
       "reviewIsRereview != true",
     ]);
-    for (const name of WP3_PHASES) {
+    for (const name of WP3_PHASES.filter((n) => n !== "survey")) {
       expect(phaseSkipIfExpressions(byName.get(name)!), `${name}.skip_if`).toEqual([
         "analysisEnabled != true",
+        TIER_GUARD,
+      ]);
+    }
+    // The fan-out skips when the unit engine replaces it — the BARE `== true`
+    // form, so an absent key (every deployment that never chose) runs it.
+    expect(phaseSkipIfExpressions(byName.get("survey")!), "survey.skip_if").toEqual([
+      "analysisEnabled != true",
+      TIER_GUARD,
+      "unitSurveyEnabled == true",
+    ]);
+    // …and the unit chain the other way round: `!= true`, so absent SKIPS.
+    // Never the quoted `surveyEngine != 'units'`, which reads absent as "no
+    // match" and would run the unit engine everywhere.
+    for (const name of UNIT_PHASES) {
+      expect(phaseSkipIfExpressions(byName.get(name)!), `${name}.skip_if`).toEqual([
+        "analysisEnabled != true",
+        UNIT_GUARD,
         TIER_GUARD,
       ]);
     }
@@ -370,13 +414,14 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
     // and everything downstream still runs, because `facts` takes `all_done`.
     const { ran, skipped } = simulate(def.phases, { analysisEnabled: "true" });
     // `dossier` and `jev-classify` join the skip list for the same reason:
-    // two more independent switches (#399), off until an operator asks.
-    const off = [...WP4_PHASES, ...JEV_PHASES, "dossier"];
+    // two more independent switches (#399), off until an operator asks — and
+    // so does the unit engine, which the fan-out stands in for by default.
+    const off = [...WP4_PHASES, ...UNIT_PHASES, ...JEV_PHASES, "dossier"];
     expect(ran).toEqual(DECLARED.filter((n) => !off.includes(n) && n !== "triage"));
-    expect(skipped.map((s) => s.name)).toEqual(["triage", ...WP4_PHASES, ...JEV_PHASES, "dossier"]);
+    expect(skipped.map((s) => s.name)).toEqual(["triage", "prepare", ...UNIT_PHASES, "falsify", ...JEV_PHASES, "dossier"]);
   });
 
-  it("runs every declared phase in order once every flag is on", () => {
+  it("runs every declared phase in order once every flag is on — but one survey engine", () => {
     const { ran, skipped } = simulate(def.phases, {
       analysisEnabled: "true",
       probesEnabled: "true",
@@ -384,8 +429,10 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
       jevClassifyEnabled: "true",
       ...TRIAGE_ON,
     });
-    expect(ran).toEqual(DECLARED);
-    expect(skipped).toEqual([]);
+    // The two engines are alternatives, so "every flag" is every phase but the
+    // engine not chosen — the unit chain, on the default engine.
+    expect(ran).toEqual(DECLARED.filter((n) => !UNIT_PHASES.includes(n)));
+    expect(skipped.map((s) => s.name)).toEqual(UNIT_PHASES);
   });
 
   it("skips the dossier without taking the adjudicator with it (#399)", () => {
@@ -400,8 +447,8 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
       probesEnabled: "true",
       ...TRIAGE_ON,
     });
-    expect(skipped.map((s) => s.name)).toEqual(["jev-classify", "dossier"]);
-    expect(ran).toEqual(DECLARED.filter((n) => n !== "dossier" && n !== "jev-classify"));
+    expect(skipped.map((s) => s.name)).toEqual([...UNIT_PHASES, "jev-classify", "dossier"]);
+    expect(ran).toEqual(DECLARED.filter((n) => n !== "dossier" && n !== "jev-classify" && !UNIT_PHASES.includes(n)));
     expect(ran).toContain("adjudicate");
   });
 
@@ -430,7 +477,7 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
         jevClassifyEnabled: value,
         ...TRIAGE_ON,
       });
-      expect(ran, `all=${JSON.stringify(value)}`).toEqual(DECLARED);
+      expect(ran, `all=${JSON.stringify(value)}`).toEqual(DECLARED.filter((n) => !UNIT_PHASES.includes(n)));
     }
   });
 
@@ -438,7 +485,7 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
     for (const value of ["false", "", "0", "no", "TRUE-ish"]) {
       const { ran } = simulate(def.phases, { analysisEnabled: "true", probesEnabled: value });
       expect(ran, `probesEnabled=${JSON.stringify(value)}`).toEqual(
-        DECLARED.filter((n) => ![...WP4_PHASES, ...JEV_PHASES, "dossier"].includes(n) && n !== "triage"),
+        DECLARED.filter((n) => ![...WP4_PHASES, ...UNIT_PHASES, ...JEV_PHASES, "dossier"].includes(n) && n !== "triage"),
       );
     }
   });
@@ -503,6 +550,23 @@ class RecordingFanout implements PhaseTypeHandler {
 }
 
 /**
+ * Stands in for the app-registered `survey-units` handler, which makes model
+ * calls from the harness and needs a host checkout — `survey-units.test.ts`
+ * drives the real one. What the scheduler sees is one node that succeeds (or,
+ * when told to, fails) under its own name.
+ */
+class RecordingSurveyUnits implements PhaseTypeHandler {
+  readonly calls: string[] = [];
+  constructor(private readonly fail = false) {}
+  async execute(phase: PhaseDefinition): Promise<PhaseOutcome> {
+    this.calls.push(phase.name);
+    return this.fail
+      ? { results: [{ phase: phase.name, success: false, output: "", error: "every unit call failed" }], status: "failed" }
+      : { results: [{ phase: phase.name, success: true, output: "surveyed" }], status: "succeeded" };
+  }
+}
+
+/**
  * An agent port that hard-fails exactly one phase's prompt and succeeds at
  * everything else. `FakeAgentPort.script()` is a single FIFO queue shared by
  * agent AND command calls, so it cannot target one phase in a run with eight
@@ -552,6 +616,7 @@ async function runPrReview(
   // What `runner.ts`'s `seedReviewTriage` would have put on the run's scratch.
   // This harness drives the scheduler directly, below the seed.
   scratch: Record<string, unknown> = {},
+  surveyUnits: RecordingSurveyUnits = new RecordingSurveyUnits(),
 ) {
   const def = getWorkflow("pr-review");
   const store = new InMemoryStateStore(RUN_ID);
@@ -585,6 +650,7 @@ async function runPrReview(
       handlers: new Map<string, PhaseTypeHandler>([
         ["post-review", postReview],
         ["fanout", fanout],
+        ["survey-units", surveyUnits],
       ]),
     },
     store,
@@ -593,7 +659,7 @@ async function runPrReview(
   };
 
   const result = await runWorkflowCore(runScope, deps);
-  return { result, reporter, agent, store, postReview, fanout };
+  return { result, reporter, agent, store, postReview, fanout, surveyUnits };
 }
 
 describe("golden — the real scheduler, driven with review.analysis off", () => {
@@ -659,6 +725,9 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
       "prepare",
       "facts",
       "seed",
+      // Skipped — the default engine is the fan-out — and a skip is a phase
+      // result under its own name.
+      ...UNIT_PHASES,
       "review",
       // Skipped, not run — `jevClassifyEnabled` is not set in this context —
       // but a skip is still a phase result under its own name, same as
@@ -829,6 +898,88 @@ describe("golden — independentReview: `review` under the evidence pipeline", (
     const agentCalls = (r: typeof off) => r.agent.calls.filter((c) => c.kind === "agent").length;
     expect(agentCalls(off)).toBe(agentCalls(on) - 1);
     expect(on.postReview.calls).toEqual(["post-review"]);
+  });
+});
+
+// ── `review.analysis.surveyEngine` — which survey runs ───────────────────────
+
+/**
+ * The two survey engines are ALTERNATIVES (docs/plans/unit-survey.md): the
+ * agent fan-out (`survey`) by default, or the three-phase unit chain
+ * (`units` → `survey-units` → `units-ingest`) under `surveyEngine: units`,
+ * which reaches the DAG as `unitSurveyEnabled: "true"` (`specContext`).
+ * `falsify` depends on BOTH, so whichever skipped must not take it down.
+ */
+describe("golden — surveyEngine: exactly one survey runs, and falsify follows either", () => {
+  const def = getWorkflow("pr-review");
+  const PIPELINE = { analysisEnabled: "true", probesEnabled: "true" };
+  const UNITS = { ...PIPELINE, unitSurveyEnabled: "true" };
+
+  it("agent (the default — key absent): the unit chain skips, the fan-out and falsify run", () => {
+    const { ran, skipped } = simulate(def.phases, PIPELINE);
+    expect(ran).toContain("survey");
+    expect(ran).toContain("falsify");
+    for (const name of UNIT_PHASES) {
+      expect(skipped.find((s) => s.name === name)?.reason, name).toBe(`skip_if matched: ${UNIT_GUARD}`);
+    }
+    expect(skipped.filter((s) => s.reason === "trigger rule not satisfied")).toEqual([]);
+  });
+
+  it("units: the fan-out skips, the unit chain runs in order, then falsify", () => {
+    const { ran, skipped } = simulate(def.phases, UNITS);
+    expect(skipped.find((s) => s.name === "survey")?.reason).toBe("skip_if matched: unitSurveyEnabled == true");
+    const order = ["seed", ...UNIT_PHASES, "falsify"].map((n) => ran.indexOf(n));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect(ran).not.toContain("survey");
+    // Everything after the survey is unchanged by the engine.
+    expect(ran).toEqual(expect.arrayContaining(["adjudicate", "reconcile", "post-review"]));
+    expect(skipped.filter((s) => s.reason === "trigger rule not satisfied")).toEqual([]);
+  });
+
+  it("units, with the calls FAILING: ingest still records the gap and falsify still runs", () => {
+    // `units-ingest` writes an unanswered row for every obligation a unit
+    // could not answer — so it must run precisely when `survey-units` failed.
+    const { ran } = simulate(def.phases, UNITS, {}, new Set(["survey-units"]));
+    expect(ran).toEqual(expect.arrayContaining(["survey-units", "units-ingest", "falsify", "post-review"]));
+  });
+
+  it("analysis OFF: neither engine runs, whatever the engine key says", () => {
+    const { ran, skipped } = simulate(def.phases, { unitSurveyEnabled: "true" });
+    expect(ran).toEqual(LEGACY_PHASES);
+    for (const name of ["survey", ...UNIT_PHASES]) {
+      expect(skipped.find((s) => s.name === name)?.reason, name).toBe("skip_if matched: analysisEnabled != true");
+    }
+  });
+
+  it("LIGHT depth: the unit chain skips like the rest of the pipeline", () => {
+    const { ran } = simulate(def.phases, { ...UNITS, ...TRIAGE_ON }, { reviewTriage: { depth: "light", light: true } });
+    for (const name of UNIT_PHASES) expect(ran, name).not.toContain(name);
+    expect(ran).toContain("review");
+  });
+
+  it("only the string the projection writes selects units — anything else runs the fan-out", () => {
+    for (const value of ["false", "", "0", "units", "agent"]) {
+      const { ran } = simulate(def.phases, { ...PIPELINE, unitSurveyEnabled: value });
+      expect(ran, JSON.stringify(value)).toContain("survey");
+      expect(ran, JSON.stringify(value)).not.toContain("survey-units");
+    }
+  });
+
+  it("through the real scheduler: the handler runs once, no survey branch is spent, the run is green", async () => {
+    const ctx = { owner: "acme", repo: "widgets", prNumber: 7, ...UNITS, probeTestPolicy: "block", probeScratchInstallPolicy: "block" };
+    const { result, surveyUnits, agent, postReview } = await runPrReview(ctx);
+    expect(result.success).toBe(true);
+    expect(surveyUnits.calls).toEqual(["survey-units"]);
+    const seen = result.phases.map((p) => p.phase);
+    expect(seen).toEqual(expect.arrayContaining(UNIT_PHASES));
+    expect(seen.some((n) => n.startsWith("survey_branch_"))).toBe(false);
+    expect(seen).toContain("falsify_iter_1");
+    // `units` and `units-ingest` are bash phases in the sandbox.
+    const commands = agent.calls.filter((c) => c.kind === "command").map((c) => JSON.stringify(c));
+    expect(commands.some((c) => c.includes("units --dir"))).toBe(true);
+    expect(commands.some((c) => c.includes("units-ingest --dir"))).toBe(true);
+    expect(postReview.calls).toEqual(["post-review"]);
   });
 });
 

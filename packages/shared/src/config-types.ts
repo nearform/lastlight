@@ -301,6 +301,17 @@ export function coerceAdjudicateMode(raw: unknown): AdjudicateMode {
   return raw === "dossier" ? "dossier" : "legacy";
 }
 
+/** `review.analysis.surveyEngine` — see {@link ReviewAnalysisConfig.surveyEngine}. */
+export type SurveyEngine = "agent" | "units";
+
+/**
+ * Read an operator's `surveyEngine` value. **Total**, failing toward the
+ * shipped fan-out: only the literal `"units"` selects the unmeasured engine.
+ */
+export function coerceSurveyEngine(raw: unknown): SurveyEngine {
+  return raw === "units" ? "units" : "agent";
+}
+
 /**
  * How much automation a trigger mode buys, ascending — the scale the repo-layer
  * clamp takes the minimum on.
@@ -509,6 +520,30 @@ export interface ReviewAnalysisConfig {
    * spend: the six passes cost the same in tokens either way.
    */
   surveyConcurrency: number;
+  /**
+   * Which engine runs the survey (`docs/plans/unit-survey.md`).
+   *
+   * - `agent` (the default): the five-branch agent `survey` fan-out.
+   * - `units`: deterministic units from `lastlight-facts units`, ONE bounded,
+   *   non-agentic model call per unit (the in-process `survey-units` phase),
+   *   then `lastlight-facts units-ingest` writes the same
+   *   `hypotheses/<family>.jsonl` the fan-out does — so everything after the
+   *   survey is unchanged.
+   *
+   * Only meaningful with `enabled`. UNMEASURED: nothing here is a default until
+   * the eval A/B in the plan says so. `units` needs a host-readable workspace,
+   * so the phase fails loud on the `kubernetes` backend.
+   *
+   * Reaches the run as `unitSurveyEnabled: "true"` (`specContext`), present only
+   * for `units` — so an absent or garbled value runs the agent survey.
+   */
+  surveyEngine: SurveyEngine;
+  /**
+   * How many unit calls `survey-units` keeps in flight at once. No backend
+   * clamp: the calls are in-process HTTP requests, not sandboxes, so this
+   * bounds provider rate-limit pressure and nothing else.
+   */
+  surveyUnitConcurrency: number;
   /**
    * WP4 — the `prepare` + `falsify` pair: prepare the probe environment, then
    * write probes and run them. **Tri-state**, and the middle value is the point.
@@ -907,6 +942,10 @@ export function defaultReviewPolicy(): ReviewPolicy {
       mint: "all-in-diff,registrations",
       surveyPasses: 6,
       surveyConcurrency: 6,
+      // The agent fan-out stays the survey until the unit engine is measured
+      // against it (docs/plans/unit-survey.md, "Evals").
+      surveyEngine: "agent",
+      surveyUnitConcurrency: 16,
       probes: "off",
       probeLifecycleScripts: false,
       probeTypecheck: false,
