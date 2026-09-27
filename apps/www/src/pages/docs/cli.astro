@@ -298,6 +298,19 @@ lastlight-facts …                                 # the same code, as its own 
 		are never the same answer.
 	</p>
 	<p>
+		TypeScript/JavaScript gets the full, type-aware analysis. Python, Go and
+		Java are analysed syntactically, through ast-grep grammars bundled with the
+		CLI: changed symbols and their references are matched by name rather than
+		resolved by a type-checker, and the document says so
+		(<code>coverage: "degraded"</code>, with the reason in
+		<code>degraded[]</code>). Beside the extractors, the reviewer's pipeline
+		uses further subcommands of the same binary, among them
+		<code>units</code> and <code>units-ingest</code>: they cut a PR into
+		per-symbol units and turn each unit's model reply into hypothesis rows, for
+		the experimental per-unit survey engine
+		(<a href="/docs/configuration"><code>review.analysis.surveyEngine: units</code></a>).
+	</p>
+	<p>
 		<code>opengrep</code> and <code>gitleaks</code> (used by
 		<code>patterns</code>) are release binaries, not npm packages. They are
 		looked up as <code>LASTLIGHT_&lt;TOOL&gt;_BIN</code> → <code>PATH</code> →

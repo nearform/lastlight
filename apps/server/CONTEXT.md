@@ -65,8 +65,9 @@ recently during the `/grilling` of issue #93). It is not exhaustive.
   accumulation; the PhaseExecutor owns what one phase *does*.
 
 - **Trigger rule** — per-edge condition (`all_success`, `one_success`,
-  `none_failed_min_one_success`, `all_done`) deciding whether a node runs given
-  its dependencies' statuses. A node whose rule can't be satisfied is
+  `none_failed`, `none_failed_min_one_success`, `all_done`) deciding whether a
+  node runs given its dependencies' statuses. `none_failed` passes an
+  all-skipped set; `none_failed_min_one_success` also needs one success. A node whose rule can't be satisfied is
   **skipped** (recorded in the executions ledger).
 
 - **Executions ledger** — the `executions` table is the **single source of

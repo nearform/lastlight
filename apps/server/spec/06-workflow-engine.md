@@ -189,7 +189,8 @@ router routed nine, which is why the dashboard showed no Slack trigger for
 {
   name: string;                         // unique within workflow
   label?: string;                       // dashboard display
-  type?: "context" | "agent" | "bash" | "script";  // default "agent"
+  type?: "context" | "agent" | "bash" | "script"   // default "agent"
+        | "fanout" | "post-review" | "survey-units";  // these three run via app-registered handlers
   prompt?: string;                      // path to template, e.g. "prompts/architect.md"
   command?: string;                     // type: bash — deterministic shell command (templated)
   script?: string;                      // type: script — inline source (templated)
@@ -206,7 +207,8 @@ router routed nine, which is why the dashboard showed no Slack trigger for
   depends_on?: string[];                // declaring this ANYWHERE disables chain synthesis for the WHOLE workflow
   trigger_rule?:
     | "all_success" | "one_success"     // DAG firing conditions
-    | "none_failed_min_one_success"
+    | "none_failed"                     // no dep FAILED — an all-skipped set passes
+    | "none_failed_min_one_success"     // no dep failed AND at least one succeeded
     | "all_done";
   branches?: FanoutBranch[];            // type: fanout only — required there, rejected elsewhere
   max_concurrent?: number | { from: string; default: number };  // fanout width, clamped by the backend ceiling
@@ -253,13 +255,15 @@ Defined with Zod; loaded and cached by `loader.ts`.
 
 ## Phase types
 
-Six: `context` (no execution), `agent` (one LLM session), `fanout`
+Seven: `context` (no execution), `agent` (one LLM session), `fanout`
 (N LLM sessions, concurrently, in one workspace), the deterministic
-`bash` / `script` pair (a command, no LLM), and `post-review`
-(in-process PR-review submission, no sandbox).
+`bash` / `script` pair (a command, no LLM), `post-review`
+(in-process PR-review submission, no sandbox), and `survey-units`
+(in-process per-unit review survey: one bounded model call per unit, no
+sandbox, no agent).
 
-The engine owns only the generic kinds. `post-review` and any other
-app-specific type are dispatched through a `Map<string,
+The engine owns only the generic kinds. `post-review`, `survey-units` and any
+other app-specific type are dispatched through a `Map<string,
 PhaseTypeHandler>` injected on `EnginePorts.handlers`
 (`phase-executor.ts`, registered in `runner.ts`) — which is the seam to
 extend when a deployment needs a step the engine should not know about.
@@ -344,6 +348,32 @@ extend when a deployment needs a step the engine should not know about.
   absent `verdict` is today's behaviour exactly, and the handler **discards**
   the field entirely unless `review.analysis.enabled` — so the inertness is
   structural rather than a promise about what a prompt writes.
+
+  A document may also be marked **`incomplete: { phase, reason }`** — the
+  conservation floor (`lastlight-facts findings --repair`, in `reconcile`)
+  writes one when the adjudicator never produced `findings.json` but
+  hypotheses exist. The handler never posts such a document as a clean review:
+  it posts the document's own not-assessed summary plus the reason, on every
+  posting branch.
+- **survey-units** — the per-unit review survey
+  (`src/workflows/handlers/survey-units.ts`), selected by
+  `review.analysis.surveyEngine: units` (**experimental and unmeasured**; the
+  shipped default is the `survey` fan-out). Runs on the harness, with no
+  sandbox and no agent: it reads `.lastlight/pr-review/units.json` (written by
+  the preceding `units` bash phase, `lastlight-facts units`) from the host
+  checkout and makes **one bounded, non-agentic model call per unit** — `prompt:`
+  (required by the schema) as the system prompt, the unit's pre-rendered request
+  as the user message — up to `review.analysis.surveyUnitConcurrency` at once,
+  all under one whole-phase deadline (`timeout_seconds`, from
+  `surveyUnitsTimeoutSeconds`). Each reply is written back to the workspace for
+  `units-ingest`; replies are cached under
+  `<stateDir>/unit-survey-cache/<owner>/<repo>/`. The phase writes one virtual
+  transcript (so it reads like an agent session in the dashboard) and, unlike
+  `post-review`, an `executions` row with its cost. It **succeeds on every path
+  inside the phase** — no units, every call failing, the deadline — because
+  `units-ingest` records each unanswered obligation. Needing a host-readable
+  workspace, it is refused at config load on `kubernetes`. See
+  [Configuration](/spec/02-configuration) and `docs/plans/unit-survey.md`.
 
 ### `fanout` — N agent sessions, one workspace
 
@@ -1274,7 +1304,9 @@ blocks `install` in every mode and reads `test` / `install-scratch` from
 - **A skipped node is not `succeeded`.** So an `all_success`
   `trigger_rule` downstream of a gated phase will not fire. That caveat
   is identical for all three gates; a graph that must proceed past one
-  needs `all_done` or `none_failed_min_one_success`.
+  needs `all_done`, `none_failed` (proceed unless a dep genuinely failed,
+  even when every dep skipped) or `none_failed_min_one_success` (the same,
+  but at least one dep must have succeeded).
 - **A run's config is frozen at dispatch.** `runWorkflow` takes the target
   repo's `.lastlight/` layer as a trailing, *defaulted* parameter (defaulted so
   `runWorkflow.length` stays 9 — the frozen `lastlight/evals` surface pinned by
@@ -1308,7 +1340,7 @@ the database stays app-side, behind a port.
 | Public entry | `src/workflows/simple.ts` |
 | The one scheduler (DAG walk, node status, wrap-up) | `packages/workflow-engine/src/core/scheduler.ts` |
 | Per-phase bodies (context / agent / loops / gates) | `packages/workflow-engine/src/core/phase-executor.ts` |
-| App-registered phase types | `src/workflows/handlers/{post-review,fanout}.ts`, registered in `runner.ts` |
+| App-registered phase types | `src/workflows/handlers/{post-review,fanout,survey-units}.ts`, registered in `runner.ts` |
 | Composition root (real ports: sandbox, state, GitHub) | `src/workflows/runner.ts` |
 | YAML schema (Zod) | `packages/workflow-engine/src/core/schema.ts` |
 | YAML loader + caching | `src/workflows/loader.ts` |

@@ -289,9 +289,13 @@ src/
     handlers/           App-registered phase types, injected on
                         `EnginePorts.handlers` so the runtime-agnostic
                         engine needs no knowledge of GitHub or sandboxes:
-                        `post-review.ts` (in-process review submission) and
+                        `post-review.ts` (in-process review submission),
                         `fanout.ts` (N concurrent agent sessions in ONE
-                        provisioned workspace). NOT to be confused with
+                        provisioned workspace) and `survey-units.ts` (the
+                        per-unit review survey — one bounded model call per
+                        unit from the harness, no sandbox; only under the
+                        experimental `review.analysis.surveyEngine: units`).
+                        NOT to be confused with
                         `src/cron/fanout.ts`, which fans a cron out over
                         repos.
   sandbox/              Isolation backends for agent runs. One container/VM/
@@ -918,6 +922,11 @@ data/
                             keyed by pi-ai sessionId).
       -home-agent-workspace/  Sandbox sessions (cwd inside the container).
   sandboxes/                Cloned repos per task (one dir per taskId).
+  unit-survey-cache/        `survey-units` reply cache (only under
+                            `review.analysis.surveyEngine: units`):
+                            <owner>/<repo>/, keyed on endpoint, thinking level,
+                            system text and request. Pure cache — safe to
+                            delete; a re-review then re-asks every unit.
   build-assets/             Server-mode build handoff docs (only when
                             buildAssets.location=server):
                             <owner>/<repo>/<issueKey>/*.md — never committed

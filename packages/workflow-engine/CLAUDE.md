@@ -28,7 +28,8 @@ core/
                      the generic kinds (context / agent / bash / script / the
                      two loop shapes) and dispatches anything else through
                      `EnginePorts.handlers` — the seam an app registers
-                     `post-review` and `fanout` on, so the engine core needs no
+                     `post-review`, `fanout` and `survey-units` on (the schema
+                     validates their shape only), so the engine core needs no
                      knowledge of GitHub or sandboxes to support them.
   phase-ref.ts       THE authority for generated ledger labels — loop iterations
                      (`_fix_`/`_recheck_`/`_iter_`) and fan-out branches

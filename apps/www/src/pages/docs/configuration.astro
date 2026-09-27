@@ -541,6 +541,9 @@ review:
     timeoutSeconds: 300
   analysis:
     enabled: false             # the review evidence pipeline — off, and inert
+    independentReview: false   # also run the separate `review` pass beside the
+                               # pipeline. Off: adjudicate writes findings.json
+                               # from the hypotheses alone
     maxSpecObligations: 40     # SAFETY BOUND for the `spec` family — should never bind
     maxObligations: 48         # TOTAL backstop over the five facts-derived
                                # families, which are capped PER FAMILY (contract
@@ -563,6 +566,12 @@ review:
                                # is the authority
     surveyConcurrency: 6       # survey families running at once (a ceiling,
                                # clamped per sandbox backend)
+    surveyEngine: agent        # agent | units. units = one model call per unit
+                               # instead of the agent fan-out. EXPERIMENTAL and
+                               # unmeasured; refused on the kubernetes backend
+    surveyUnitConcurrency: 16  # unit calls in flight under `units` (no backend
+                               # clamp — lower it only for provider rate limits)
+    surveyUnitsTimeoutSeconds: 600  # whole-phase deadline on the unit calls
     probes: "off"              # off | static | full. static runs the probe
                                # phases WITHOUT installing anything; full also
                                # installs the PR's dependencies. A bare `true`
@@ -739,6 +748,38 @@ dependencies:
 		variables it governs are absent from the agent's context entirely, and the
 		extra GitHub reads it needs are never issued. Switch it on per deployment,
 		once you want it.
+	</p>
+
+	<p>
+		With the pipeline on, the separate <code>review</code> pass no longer runs
+		by default. The surveys have already done the deep work, so the
+		adjudicator writes the review's findings from their hypotheses alone and
+		the run saves one strong-model session. Set
+		<code>independentReview: true</code> to run that pass beside the pipeline
+		again, as it did before the key existed. It changes nothing with the
+		pipeline off (the <code>review</code> pass is then the whole review), and a
+		re-review that triage marks <code>light</code> always runs it. If the
+		adjudicator fails and leaves no findings behind, a deterministic floor
+		writes them, unposted, and the review says plainly that the change was
+		not assessed — it is never posted as a clean review.
+	</p>
+
+	<p>
+		<code>surveyEngine</code> chooses how the survey step runs, and it is
+		<strong>experimental</strong>: <code>units</code> has not been measured
+		against the default, so <code>agent</code> stays the default until it is.
+		<code>agent</code> is the fan-out of survey agents, one per family.
+		<code>units</code> instead cuts the pull request into small deterministic
+		units — a changed function or method, a file's module-level code, the pull
+		request as a whole — and makes one bounded model call per unit on
+		<code>models.review-survey</code>, with no tools and no sandbox, from the
+		Last Light process itself. The replies land in the same hypothesis files
+		the fan-out writes, so everything after the survey is unchanged. Replies
+		are cached on disk, so a re-review only re-asks the units whose code or
+		context changed. A unit that does not answer in time is recorded as unanswered
+		rather than dropped. Because those calls read the review workspace
+		directly, <code>units</code> is refused at startup on the
+		<code>kubernetes</code> sandbox backend.
 	</p>
 
 	<p>

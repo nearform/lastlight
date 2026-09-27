@@ -240,6 +240,24 @@ Phase kinds the runner recognises:
   host end of the `cwd` a `type: bash` phase runs in — and an unreadable
   path appends a loud NOT AVAILABLE notice rather than nothing. See
   `spec/06-workflow-engine.md` → "`fanout`".
+- **survey-units** (`type: survey-units`) — the per-unit review survey,
+  run only under the experimental, unmeasured
+  `review.analysis.surveyEngine: units` (the `survey` fan-out is the
+  default). Handler: `handlers/survey-units.ts`, registered on
+  `EnginePorts.handlers` in `runner.ts` like `post-review`/`fanout`. Runs
+  **in the harness process — no sandbox, no agent**: reads
+  `.lastlight/pr-review/units.json` (from the preceding `units` bash phase)
+  out of the host checkout and makes ONE bounded, non-agentic model call per
+  unit — `prompt:` (schema-required) as the system prompt, the unit's
+  pre-rendered request as the user message — `surveyUnitConcurrency` at a
+  time under one whole-phase deadline (`timeout_seconds`). Replies go back
+  into the workspace for `units-ingest`, and into a reply cache under
+  `<stateDir>/unit-survey-cache/<owner>/<repo>/`. It writes one virtual
+  transcript through `AgenticShim` and an `executions` row (cost included),
+  and it **succeeds on every path inside the phase** — `units-ingest`
+  records every unanswered obligation. Needs a host-readable workspace
+  (`handlers/host-repo-dir.ts`), so config load refuses the engine on
+  `kubernetes`. See `docs/plans/unit-survey.md`.
 - **loop-phase** — any phase with `loop:` set. Always executes as an
   agent phase internally, but repeated in `reviewer → fix → reviewer`
   pairs up to `max_cycles`. See loop iteration naming below.
@@ -469,8 +487,10 @@ types" above.
   `ctx.taskId`. The sandbox workspace persists between phases (architect writes
   `plan.md`, executor reads it). The old DAG path's per-phase
   `${taskId}-${phaseName}` clones are gone.
-- **Uniform skip semantics.** A node runs iff its trigger rule is satisfied by
-  its deps' statuses; otherwise it is skipped (no downstream agent calls; the
+- **Uniform skip semantics.** A node runs iff its trigger rule (`all_success`
+  default, `one_success`, `none_failed`, `none_failed_min_one_success`,
+  `all_done`) is satisfied by its deps' statuses — `none_failed` is the one
+  that passes when every dep was skipped; otherwise it is skipped (no downstream agent calls; the
   run ends `success: false`). `isTerminated` errors (OOM/cancel) are not
   reported as phase failures, and the failing node's error propagates to the
   run.
