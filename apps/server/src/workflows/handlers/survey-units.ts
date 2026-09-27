@@ -204,6 +204,7 @@ export const completeUnitCall: UnitModelCall = async ({
     timeoutMs,
     cacheRetention: "short",
     sessionId: cacheKey,
+    ...(resolved.api === "anthropic-messages" ? { onPayload: systemOnlyCacheBreakpoint } : {}),
     ...(signal ? { signal } : {}),
     ...(reasoning ? { reasoning } : {}),
     ...(key ? { apiKey: key } : {}),
@@ -226,6 +227,29 @@ export const completeUnitCall: UnitModelCall = async ({
     ...(failed ? { error: assistant.errorMessage ?? assistant.stopReason } : {}),
   };
 };
+
+/**
+ * Keep Anthropic's cache breakpoint on the SYSTEM prompt only.
+ *
+ * pi-ai also marks the last user block `cache_control`, which is right for a
+ * conversation and wrong here: a unit's user message is that unit's own
+ * request, never sent twice, so the breakpoint bought a 1.25x cache WRITE on
+ * every unit's unique input and no read. Measured on 1587-r2 (Haiku 4.5, v7,
+ * 74 calls): 358k tokens written, 26k read — about 55% of the case's $0.81.
+ * The system prompt (role + the shared prefix) is identical on every call and
+ * keeps its breakpoint, which is the part worth caching.
+ */
+export function systemOnlyCacheBreakpoint(payload: unknown): unknown {
+  const p = payload as { messages?: { content?: unknown }[] } | null;
+  if (!p || !Array.isArray(p.messages)) return undefined;
+  for (const m of p.messages) {
+    if (!Array.isArray(m.content)) continue;
+    for (const block of m.content as Record<string, unknown>[]) {
+      if (block && typeof block === "object") delete block.cache_control;
+    }
+  }
+  return p;
+}
 
 /**
  * What identifies the ENDPOINT a model string resolves to — provider, request
@@ -870,7 +894,7 @@ export async function runUnitSurvey(opts: RunUnitSurveyOptions): Promise<UnitSur
   };
   let usage: UnitCallUsage = { ...ZERO_USAGE };
   let calls = 0;
-  const outcomes = await mapPool(opts.doc.units, Math.max(1, Math.floor(opts.concurrency)), async (unit) => {
+  const surveyOne = async (unit: SurveyUnit): Promise<UnitOutcome> => {
     let o: UnitOutcome;
     try {
       o = await surveyUnit(unit, plan);
@@ -890,7 +914,18 @@ export async function runUnitSurvey(opts: RunUnitSurveyOptions): Promise<UnitSur
     calls += o.calls;
     opts.onSettled?.(o);
     return o;
-  });
+  };
+  // WARM the prompt cache: one unit alone first, then the rest in parallel.
+  // Fired together, every call starts before any cache entry exists, so all of
+  // them WRITE the shared system prompt and none reads it (Haiku 4.5, v7:
+  // 358k written / 26k read on a 74-call case). One call's latency buys every
+  // other call a cache read of the ~11k-char system text.
+  const units = opts.doc.units;
+  const limit = Math.max(1, Math.floor(opts.concurrency));
+  const outcomes: UnitOutcome[] =
+    units.length > 1 && limit > 1
+      ? [await surveyOne(units[0]), ...(await mapPool(units.slice(1), limit, surveyOne))]
+      : await mapPool(units, limit, surveyOne);
   return { outcomes, usage, calls, systemSha256, prefixInSystem: !!splitPrefix };
 }
 

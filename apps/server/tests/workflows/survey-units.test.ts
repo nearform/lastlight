@@ -25,6 +25,7 @@ import {
   isUsableUnitReply,
   makeSurveyUnitsHandler,
   runUnitSurvey,
+  systemOnlyCacheBreakpoint,
   unitCacheDir,
   usableUnitReply,
   type UnitCallResult,
@@ -299,10 +300,10 @@ describe("survey-units — concurrency", () => {
   });
 
   it("takes the shipped default when the context carries no usable value", async () => {
-    writeUnits(["u-001", "u-002", "u-003"].map((id) => unit(id)));
+    writeUnits(["u-001", "u-002", "u-003", "u-004"].map((id) => unit(id)));
     const call = new FakeCall(undefined, 20);
     await runSurvey(call, { concurrency: "garbage" });
-    // Default 16 > 3 units: all three at once.
+    // Default 16 > the 3 units left after the cache warm-up: all three at once.
     expect(call.peak).toBe(3);
   });
 });
@@ -915,6 +916,45 @@ describe("survey-units — the call: variant, length, cache identity", () => {
     const r = response("u-001");
     expect(r).toMatchObject({ ok: false, attempts: 1 });
     expect(r.error).toContain("stopReason: length");
+  });
+});
+
+describe("runUnitSurvey — prompt-cache economics", () => {
+  it("runs the first unit ALONE, then fans the rest out, so they read a warm cache", async () => {
+    const units = ["u-001", "u-002", "u-003", "u-004"].map((id) => unit(id));
+    const events: string[] = [];
+    const fake = new FakeCall(undefined, 20);
+    const call: typeof fake.fn = async (args) => {
+      const id = /u-\d+/.exec(args.request)?.[0] ?? "?";
+      events.push(`start ${id}`);
+      const r = await fake.fn(args);
+      events.push(`end ${id}`);
+      return r;
+    };
+    await runUnitSurvey({
+      doc: { units },
+      systemPrompt: "SYSTEM",
+      model: MODEL,
+      concurrency: 4,
+      deadlineAt: Date.now() + 60_000,
+      signal: new AbortController().signal,
+      responsesDir: join(root, "warm-responses"),
+      call,
+    });
+    // The warm-up unit finishes before any other starts…
+    expect(events.slice(0, 2)).toEqual(["start u-001", "end u-001"]);
+    // …and the rest still run concurrently.
+    expect(events.slice(2, 5).every((e) => e.startsWith("start"))).toBe(true);
+  });
+
+  it("strips Anthropic cache_control from the per-unit messages and keeps the system breakpoint", () => {
+    const payload = {
+      system: [{ type: "text", text: "SYSTEM", cache_control: { type: "ephemeral" } }],
+      messages: [{ role: "user", content: [{ type: "text", text: "unit request", cache_control: { type: "ephemeral" } }] }],
+    };
+    const out = systemOnlyCacheBreakpoint(payload) as typeof payload;
+    expect(out.system[0].cache_control).toEqual({ type: "ephemeral" });
+    expect(out.messages[0].content[0]).not.toHaveProperty("cache_control");
   });
 });
 
