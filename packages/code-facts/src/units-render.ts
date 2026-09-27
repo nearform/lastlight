@@ -37,7 +37,7 @@
 import type { Obligation } from "./seed.js";
 
 /** Bump whenever the rendering below changes, so cached readings are not reused across it. */
-export const UNITS_PROMPT_VERSION = "units-v4";
+export const UNITS_PROMPT_VERSION = "units-v5";
 
 /** One family's question, compact. `closes` is what `control_site` means for it. */
 export const FAMILY_QUESTIONS: Record<string, { question: string; closes: string }> = {
@@ -249,20 +249,26 @@ const NOT_FINDINGS = [
  * against 482 obligation answers; 320 of those defects were `code_change`
  * ("breaks if someone later edits X") and 157 were spec nitpicks about tests
  * and comments. Of the 11 rows the judge credited with a gold, none was
- * `code_change` and none was a spec defect — every one was reachable at head
- * through input or state, in or caused by a changed line, with a concrete
- * outcome, provable from the shown code. The bar is those four facts. It
- * governs `defects` only: obligations are always answered, doubt included.
+ * `code_change` and none was a spec defect — every one was in or caused by a
+ * changed line, with a concrete outcome, grounded in the shown code. v4 turned
+ * that into a bar with a cap of 3 per unit and "reachable through input or
+ * state, provable from shown code"; it halved rows (1246 → 642) but credited
+ * gold fell 11 → 6, and one of the lost credits was a row whose trigger was
+ * `unknown` — which v4's wording shut out. v5 keeps the categories that never
+ * earned credit out (`code_change`, test-assertion nitpicks, speculation about
+ * unseen code), lets reachability be `unknown`, and has no cap. It governs
+ * `defects` only: obligations are always answered, doubt included.
  */
 const DEFECT_BAR = [
   "DEFECT BAR — a defect entry meets ALL of these, or it is left out:",
   "  1. A changed (+) or removed (-|) line causes it, or is what makes it reachable.",
-  "  2. It happens at head through real input or state (trigger \"input\" or \"state\"). \"Only if someone later edits",
-  "     the code\" (code_change) is not a defect.",
+  "  2. It can happen at head — trigger \"input\" or \"state\", or \"unknown\" when reachability depends on code not",
+  "     shown. \"Only if someone later edits the code\" (code_change) is not a defect.",
   "  3. You can name the wrong outcome concretely: which value, state, response or side effect comes out wrong, for whom.",
-  "  4. The lines that prove it are shown here. If proving it needs a definition, caller or type you cannot see, it is",
-  "     not a defect — do not speculate about unseen code.",
-  "  At most 3 defects per unit, the most consequential first. A defect always has a consequence; a check that holds",
+  "  4. It is grounded in the lines shown: the claim points at a shown line, and the mechanism is visible there. Where one",
+  "     link depends on code you cannot see, keep the defect and record that field as unknown — but never invent what",
+  "     unseen code does.",
+  "  Report every defect that meets the bar, most consequential first — no more, no fewer. A defect always has a consequence; a check that holds",
   "  belongs in an obligation's answer, never in defects. A spec-family defect is only a changed comment or doc whose",
   "  claim the code at head contradicts — never a test's own assertions or wording.",
 ];
@@ -342,7 +348,7 @@ function renderSharedPrefix(): string {
   L.push('  - "unitId" is the id the unit states below.');
   L.push('  - "answers" holds one entry per obligation the unit lists, each id EXACTLY ONCE, under the family it is listed');
   L.push("    with; [] when it lists none.");
-  L.push('  - "defects" holds at most 3 entries that meet the DEFECT BAR; [] when none does. Its family is one the unit is asked.');
+  L.push('  - "defects" holds every entry that meets the DEFECT BAR; [] when none does. Its family is one the unit is asked.');
   L.push('  - "line" is the integer of a tag shown in this request (42 for L0042): the line the claim is about.');
   L.push('  - "file" is the FILE header that tag sits under: required when the unit shows more than one file, else optional.');
   L.push("  - control_site may name any site shown here, a caller included, as path:line.");

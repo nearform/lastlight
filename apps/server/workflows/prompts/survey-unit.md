@@ -20,14 +20,16 @@ The user message is the whole unit: its source with tagged lines, the neighbours
 1. **Answer every obligation the request lists, each exactly once.** An obligation names both ends of a possible defect — where something is introduced and where it would have to be enforced. Nothing about it has been verified. A clean answer (the control holds) is still an answer: record it with `consequence: null`.
 2. **Report the defects this change introduces that a user or caller would actually hit** — only those that meet the request's DEFECT BAR. Most units have none or one; `[]` is a normal, honest answer.
 
-**Be targeted, not exhaustive.** A defect is something a careful human reviewer of this PR would raise: a changed line makes it happen, it happens at head through real input or state, you can say concretely what comes out wrong and for whom, and the shown code proves it. Hypothetical future edits ("if someone later changes X"), speculation about code you cannot see, style, and a test's own assertions are not defects — leave them out. Every entry you write is weighed by a later stage, so noise costs as much as it would in a real review. For an **obligation** the rule is the opposite: always answer it, and where you are unsure let the evidence say `unknown`.
+**Be targeted, not exhaustive.** A defect is something a careful human reviewer of this PR would raise: a changed line makes it happen, it can happen at head (through input or state — or `unknown` reachability when that depends on code you cannot see), you can say concretely what comes out wrong and for whom, and the mechanism is visible in the lines shown. Report every defect that meets that bar — there is no quota either way. Hypothetical future edits ("if someone later changes X"), inventing what unseen code does, style, and a test's own assertions are not defects — leave them out. Every entry you write is weighed by a later stage, so noise costs as much as it would in a real review. For an **obligation** the rule is the opposite: always answer it, and where you are unsure let the evidence say `unknown`.
 
 <!-- MEASURED, and the reason this is not "over-produce" any more: the first
      replay of the unit survey over the 8 skillspro cases (units-v3, which
      told the model to over-produce) wrote 764 unprompted defects against 482
      obligation answers — 320 of them `code_change`, 157 spec nitpicks about
      tests and comments. None of the 11 rows the judge credited with a gold
-     was either. The request's DEFECT BAR is those four facts. -->
+     was either. v4 added a cap of 3 and required input/state reachability;
+     credited gold fell 11 -> 6, one lost credit being an `unknown`-trigger
+     row. v5 drops the cap and admits `unknown` reachability. -->
 
 ## The evidence record — facts, not verdicts
 

@@ -1264,7 +1264,7 @@ lastlight-facts units-ingest --dir .lastlight/pr-review          # → hypothese
 - **Deterministic**: units ordered by file then line, `u-NNN` in that order,
   `requestSha256` = sha256 of the request, and no sha or timestamp inside a
   request, so an unchanged unit renders byte-identically across pushes.
-  `UNITS_PROMPT_VERSION` (now `units-v4`: a targeted DEFECT BAR replaced "over-produce") is bumped whenever
+  `UNITS_PROMPT_VERSION` (now `units-v5`: a targeted DEFECT BAR, no cap, replaced "over-produce") is bumped whenever
   the rendering changes.
 - **Shared prefix first — for the provider's prefix cache.** `request` =
   `UNITS_SHARED_PREFIX` + the unit-specific part. The prefix (~5.9k chars: task,
