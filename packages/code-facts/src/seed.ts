@@ -149,12 +149,9 @@ export interface CoverageSet {
  * `context_file` half of the fix is not part of this switch), asking the OLD
  * question, with no field to record a discharge code in and nothing to tick off.
  *
- * It is stamped into `obligations.json` because THREE readers have to agree
- * about it and only one of them renders: `seed-render.ts` (what the survey is
- * asked), `discharge.ts` (what the gate demands back) and whoever reads the
- * artifact months later asking which arm produced this run. A render-time flag
- * would let the block and the gate disagree, which is exactly the separability
- * this pipeline keeps paying for.
+ * It is stamped into `obligations.json` so its readers agree about it:
+ * `discharge.ts` (what the gate demands back) and whoever reads the artifact
+ * months later asking which arm produced this run.
  */
 export const OBLIGATION_CONTRACTS = ["full", "minimal"] as const;
 export type ObligationContract = (typeof OBLIGATION_CONTRACTS)[number];

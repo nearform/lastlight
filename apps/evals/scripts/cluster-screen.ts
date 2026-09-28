@@ -85,7 +85,8 @@
  * `--order all` prints one summary line per order × voters combination.
  *
  * Gold comes from a `micro-adjudicate --audit` report (its `goldRows` is the
- * cached gold→row map), so the screen spends nothing.
+ * cached gold→row map), so the screen spends nothing. That script was removed
+ * with the adjudicate phase; the screen still reads the reports it left.
  *
  * Usage:
  *   npx tsx <monorepo>/apps/evals/scripts/cluster-screen.ts \
@@ -102,8 +103,15 @@ import { join } from "node:path";
 
 import { clusterSites, readHypothesisSet, type HypothesisSet, type Site } from "lastlight-code-facts";
 
-import { PHASE_REPLAY_DIR, type PhaseReplayReport } from "../src/phase-replay.js";
+import { PHASE_REPLAY_DIR, type PhaseReplayCase, type PhaseReplayReport } from "../src/phase-replay.js";
 import { resolveFixtures } from "../src/phase-replay-node.js";
+
+/** The shape `micro-adjudicate --audit` (since removed) wrote — read-only here. */
+type AdjudicateAuditReport = Omit<PhaseReplayReport, "kind" | "cases"> & {
+  kind: string;
+  config: PhaseReplayReport["config"] & { rules?: string };
+  cases: (PhaseReplayCase & { adjudicate?: { goldFiled: string[] } })[];
+};
 
 const ORDERS = [
   "severity",
@@ -374,7 +382,9 @@ function parseArgs(argv: string[]): {
 
 function main(): void {
   const { report, windows, byFamily, modes, shuffles } = parseArgs(process.argv.slice(2));
-  const r = JSON.parse(readFileSync(report, "utf8")) as PhaseReplayReport;
+  // A historical `micro-adjudicate --audit` report: the phase-replay shape plus
+  // the admission fields the removed `adjudicate` kind carried.
+  const r = JSON.parse(readFileSync(report, "utf8")) as AdjudicateAuditReport;
   const summary = modes.length > 1;
   console.log(
     `report ${report}  (${r.config.rules})  key: path${byFamily ? "+family" : ""}+line window` +

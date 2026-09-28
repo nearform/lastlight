@@ -821,10 +821,10 @@ describe("Arm seam — model-selection adapters (arm.ts)", () => {
 
         writeFileSync(
           join(overlay, "config.yaml"),
-          "models:\n  default: openai/gpt-5.4-mini\nreview:\n  postsCheck: true\n  analysis:\n    enabled: true\n    surveyPasses: 6\n",
+          "models:\n  default: openai/gpt-5.4-mini\nreview:\n  postsCheck: true\n  analysis:\n    enabled: true\n",
         );
         const arm = modelsArm("m", "f", overlay);
-        expect(arm.review).toEqual({ postsCheck: true, analysis: { enabled: true, surveyPasses: 6 } });
+        expect(arm.review).toEqual({ postsCheck: true, analysis: { enabled: true } });
         // Config arms read the same block from the same file.
         expect(configArm(root, overlay).review).toEqual(arm.review);
       } finally {
@@ -1360,15 +1360,13 @@ describe("PR context — core's own projection, not a copy", () => {
     // stays off, with no per-case special-casing.
     const off = await prContextPatch({ ...args, review: { postsCheck: true } });
     expect(off.analysisEnabled).toBeUndefined();
-    expect(off.prBody).toBeUndefined();
 
     // wp3/config.yaml: the same block plus `analysis.enabled`.
     const on = await prContextPatch({
       ...args,
-      review: { postsCheck: true, analysis: { enabled: true, maxObligations: 40, surveyPasses: 6 } },
+      review: { postsCheck: true, analysis: { enabled: true, maxObligations: 40 } },
     });
     expect(on.analysisEnabled).toBe("true");
-    expect(on.prBody).toBe(args.body);
 
     // No arm policy at all is byte-identical to a policy that names no analysis.
     expect((await prContextPatch(args)).analysisEnabled).toBeUndefined();
@@ -1383,7 +1381,7 @@ describe("PR context — core's own projection, not a copy", () => {
   // obligations vanish and the branch spends a model call saying it cannot work.
   //
   // Both failures were silent in the sense that mattered: the run went green.
-  const withAnalysis = { enabled: true, maxObligations: 40, surveyPasses: 6 };
+  const withAnalysis = { enabled: true, maxObligations: 40 };
   const specBody = "### What & why\n\nCloses #1586.\n\n### Acceptance criteria\n\n- [ ] Silent login must not show the Google popup on a returning session\n";
 
   it("harness-derived changed files give the spec axis its second end", async () => {
@@ -1393,7 +1391,7 @@ describe("PR context — core's own projection, not a copy", () => {
       review: { analysis: withAnalysis },
       changedFiles: ["src/auth/redirect-sign-in.ts", "src/auth/session.ts"],
     });
-    const block = ctx.specObligations as string | undefined;
+    const block = ctx.specObligationsJson as string | undefined;
     expect(block).toBeDefined();
     // The obligation names both ends: the criterion verbatim, and a changed file.
     expect(block).toContain("Silent login must not show the Google popup");
@@ -1404,9 +1402,8 @@ describe("PR context — core's own projection, not a copy", () => {
   it("without them the axis degrades LOUDLY rather than silently passing", async () => {
     const ctx = await prContextPatch({ ...args, body: specBody, review: { analysis: withAnalysis } });
     // Locked decision 6: "could not look" and "looked and it is fine" are
-    // different facts, so the block still renders and says which.
-    expect(ctx.specObligations).toContain("changed-file list could not be read");
-    expect(ctx.specObligations).toContain("That is NOT a pass");
+    // different facts, so the set is still projected and says which.
+    expect(ctx.specObligationsJson).toContain("changed-file list could not be read");
   });
 
   it("a case seeding [] means 'changes nothing', not 'could not read'", async () => {
@@ -1419,8 +1416,8 @@ describe("PR context — core's own projection, not a copy", () => {
     });
     // The seed wins over the harness-derived set, and its degraded message is
     // the other one — a `||` fallback here would silently swap the two.
-    expect(ctx.specObligations).toContain("changes no files");
-    expect(ctx.specObligations).not.toContain("src/auth/session.ts");
+    expect(ctx.specObligationsJson).toContain("changes no files");
+    expect(ctx.specObligationsJson).not.toContain("src/auth/session.ts");
   });
 
   it("the arm wins over a case's own review seed — gold can never flip an arm", async () => {
@@ -1476,7 +1473,7 @@ describe("PR context — core's own projection, not a copy", () => {
         review: { analysis: withAnalysis },
         github: resolveReviewGitHubClient({ githubApiBaseUrl: fake.url }),
       });
-      const block = ctx.specObligations as string | undefined;
+      const block = ctx.specObligationsJson as string | undefined;
       expect(block).toBeDefined();
       expect(block).toContain("nearform.com domain server-side");
       expect(block).toContain("src/auth/session.ts");

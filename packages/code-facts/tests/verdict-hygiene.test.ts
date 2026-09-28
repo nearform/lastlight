@@ -12,7 +12,6 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildEntries } from "../src/adjudicate-render.js";
 import {
   buildSeverityIndex,
   hypothesisSeverity,
@@ -228,16 +227,6 @@ describe("probeStrength — what a verdict counts for", () => {
   it("gives nothing to a claim of evidence the transcript does not record", () => {
     expect(strengthOf(behavioural, "reproduced", "node probe.mjs", "I read the code\n")).toBe("none");
     expect(probeStrength(null, { evidence: behavioural })).toBe("none");
-  });
-
-  it("is what the dossier entries carry", () => {
-    const { dir, root } = workspace({
-      hypotheses: { state: [{ evidence: behavioural }] },
-      verdicts: [{ hypothesis: "state-001", verdict: "reproduced", command: "rg deleteCache", transcript: "probes/state-001.txt" }],
-      transcripts: [["state-001.txt", "rg deleteCache\nsrc/a.ts:1\n"]],
-    });
-    const { entries } = buildEntries({ dir, repo: root });
-    expect(entries[0]!.strength).toBe("corroborated");
   });
 });
 

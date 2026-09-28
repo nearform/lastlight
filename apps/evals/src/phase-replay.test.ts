@@ -22,7 +22,7 @@ const baseCase = (over: Partial<PhaseReplayCase>): PhaseReplayCase => ({
 
 const report = (over: Partial<PhaseReplayReport>): PhaseReplayReport => ({
   version: 1,
-  kind: "adjudicate",
+  kind: "falsify",
   label: "l",
   audit: false,
   startedAt: "2026-09-27T12:00:00.000Z",
@@ -38,25 +38,9 @@ const report = (over: Partial<PhaseReplayReport>): PhaseReplayReport => ({
 
 describe("phaseReplayTotals", () => {
   it("an audit has no cost and no wall clock — n/a, not a free instant run", () => {
-    const t = phaseReplayTotals(
-      report({
-        audit: true,
-        cases: [baseCase({ wallMs: null, costUsd: null, adjudicate: { admitted: 4, filed: 6, filedByRule: { "no-clean-quote": 6 }, goldFiled: [], promotedInline: 0, promotedBody: 0, internal: 0, dropped: 0, gateSatisfied: true, goldPromoted: null, grade: null } })],
-      }),
-    );
+    const t = phaseReplayTotals(report({ audit: true, cases: [baseCase({ wallMs: null, costUsd: null })] }));
     expect(t.costUsd).toBeNull();
     expect(t.wallMedianMs).toBeNull();
-    expect(t.adjudicate).toMatchObject({ admitted: 4, filed: 6, goldFiled: 0, f1: null, goldPromoted: null });
-  });
-
-  it("F1 is a range over graded cases; an errored grade is left out, not scored zero", () => {
-    const outcome = (f1: number | null, error: string | null = null) => ({
-      admitted: 1, filed: 0, filedByRule: {}, goldFiled: [], promotedInline: 1, promotedBody: 0, internal: 0, dropped: 0, gateSatisfied: true, goldPromoted: 1,
-      grade: f1 === null ? null : { precision: f1, recall: f1, f1, matched: 1, posted: 1, gold: 1, error },
-    });
-    const t = phaseReplayTotals(report({ cases: [baseCase({ adjudicate: outcome(0.2) }), baseCase({ adjudicate: outcome(0.6) }), baseCase({ adjudicate: outcome(0, "judge down") })] }));
-    expect(t.adjudicate?.f1).toMatchObject({ min: 0.2, max: 0.6, n: 2 });
-    expect(t.adjudicate?.goldPromoted).toBe(3);
   });
 
   it("gold counts over an unjudged gold map are unknown (null), never zero", () => {
@@ -126,8 +110,10 @@ describe("phaseReplayTotals — site-review", () => {
 describe("summarisePhaseReplay", () => {
   it("lists a phase-replay report and refuses anything else", () => {
     const e = summarisePhaseReplay("id", report({ planned: [{ instanceId: "a", arm: "arm1", fixture: "/f", repeat: 1 }] }), "2026-01-01T00:00:00Z");
-    expect(e).toMatchObject({ id: "id", kind: "adjudicate", planned: 1, report: "/data/phase-replay/id.json", status: "running" });
+    expect(e).toMatchObject({ id: "id", kind: "falsify", planned: 1, report: "/data/phase-replay/id.json", status: "running" });
     expect(summarisePhaseReplay("x", { version: 2 }, "t")).toBeNull();
+    // The removed `adjudicate` replays are no longer listed.
+    expect(summarisePhaseReplay("x", { ...report({}), kind: "adjudicate" }, "t")).toBeNull();
     expect(summarisePhaseReplay("x", { stage: "replay" }, "t")).toBeNull();
   });
 });

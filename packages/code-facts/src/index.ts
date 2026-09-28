@@ -260,7 +260,7 @@ export {
 } from "./prepare.js";
 export type { ExecFn, ExecResult, PackageManagerId, PrepareOptions } from "./prepare.js";
 
-export { hypothesisId, normalizeFamilyIds, readHypothesisSet, resolveHypothesis } from "./hypotheses.js";
+export { hypothesisId, normalizeFamilyIds, pathOfRow, readHypothesisSet, resolveHypothesis } from "./hypotheses.js";
 export type { NormalizeIdsResult } from "./hypotheses.js";
 /** The one JSONL reader — recovers pretty-printed rows; evals reads through it too. */
 export { parseJsonl } from "./jsonl.js";
@@ -296,18 +296,6 @@ export {
   writeProbePlanFiles,
 } from "./probe-plan.js";
 export type { OwedReason, PlannedProbe, PlanSite, ProbePlan, WriteProbePlanResult } from "./probe-plan.js";
-/** Which hypotheses `adjudicate` weighs — typed-field rules, a classifier threshold, a cap. */
-export {
-  ADMISSION_VERSION,
-  admissionPath,
-  admitHypotheses,
-  formatAdmitSpec,
-  parseAdmitSpec,
-  readAdmission,
-  renderAdmissionSummary,
-  writeAdmission,
-} from "./adjudicate-admit.js";
-export type { Admission, AdmitSpec, FieldRuleName, FiledRow, JevRule } from "./adjudicate-admit.js";
 /** Rows grouped into sites by anchor (path + line window, across families), ranked by support. */
 export {
   clusterSites,
@@ -397,26 +385,12 @@ export {
 } from "./finding-severity.js";
 export type { RankEvidence, SeverityIndex, StampSeverityResult } from "./finding-severity.js";
 
-export { buildEntries, locateExcerpt, pathOfRow, renderAdjudicationDossier } from "./adjudicate-render.js";
-export type { DossierEntries, DossierEntry, DossierOptions, DossierQuote, ExcerptLocation } from "./adjudicate-render.js";
-
-export { classifyHypotheses, jevClassifyPath, readJevClassifyDocument, writeJevClassifyDocument } from "./jev-classify.js";
-export type { JevClassifyDocument, JevClassifyOptions, JevResult } from "./jev-classify.js";
-
-export {
-  buildFindingsLedger,
-  checkFindings,
-  renderFindingsCheck,
-  renderFindingsLedger,
-  titleFrom,
-} from "./findings.js";
+export { checkFindings, renderFindingsCheck, titleFrom } from "./findings.js";
 export type {
   CheckFindingsOptions,
   CheckFindingsResult,
   FindingsGap,
   FindingsGapKind,
-  FindingsLedger,
-  LedgerEntry,
   RepairAction,
 } from "./findings.js";
 

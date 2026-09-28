@@ -3,10 +3,10 @@
  * EXISTING `hypotheses/<family>.jsonl` rows.
  *
  * `hypotheses/<family>.jsonl` is the interface every later phase reads —
- * `discharge`, `requiresProbe`, the dossier, `jev-classify`, the `findings`
- * conservation gate, `stampDerivedSeverity` — so a unit-survey row is shaped
- * exactly like an agent-survey row (the shape `seed-render.ts` prescribes),
- * plus two fields: `source: "units"` and `unitId`. Nothing downstream changes.
+ * `discharge`, `requiresProbe`, `site-plan`, the `findings` conservation floor,
+ * `stampDerivedSeverity` — so a unit-survey row is shaped exactly like the
+ * (since removed) agent survey's rows, plus two fields: `source: "units"` and
+ * `unitId`.
  *
  * ── Conservation, again ────────────────────────────────────────────────────
  *

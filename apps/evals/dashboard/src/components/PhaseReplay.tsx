@@ -10,8 +10,8 @@ import { SessionModal, type SessionSource } from "./SessionModal";
 import { HumanGradesBox } from "./Grade";
 
 /**
- * Phase replays — `scripts/micro-falsify.ts`, `scripts/micro-adjudicate.ts`
- * and `scripts/micro-site-review.ts` rendered. One pr-review phase re-run over preserved fixtures, so a prompt,
+ * Phase replays — `scripts/micro-falsify.ts` and `scripts/micro-site-review.ts`
+ * rendered. One pr-review phase re-run over preserved fixtures, so a prompt,
  * model, skill or deterministic filter can be measured in minutes.
  *
  * Two rules, as on the unit-survey page: **n/a is not 0** (an audit ran no
@@ -34,7 +34,7 @@ function KindChip({ kind }: { kind: PhaseReplayEntry["kind"] }) {
     <span
       className={clsx(
         "whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-2xs font-semibold",
-        kind === "adjudicate" ? "bg-accent/15 text-accent" : kind === "site-review" ? "bg-success/15 text-success" : "bg-info/15 text-info",
+        kind === "site-review" ? "bg-success/15 text-success" : "bg-info/15 text-info",
       )}
     >
       {kind}
@@ -66,9 +66,7 @@ function configLine(e: Pick<PhaseReplayEntry, "kind" | "config" | "audit">): str
     e.audit ? "audit (no model)" : `${c.model}${c.thinking ? ` · thinking ${c.thinking}` : ""}`,
     e.kind === "falsify"
       ? `${c.plan && c.plan !== "rows" ? `plan ${c.plan} ±${c.window} · ` : ""}max-probes ${c.maxProbes ?? "none"}`
-      : e.kind === "site-review"
-        ? `leads ${c.leads ?? "?"} · top ${c.topSites ?? "?"} sites ±${c.window ?? "?"} · span ≤${c.maxSpan ?? "∞"} · voters ${c.voters ?? "?"}${c.skipTests === false ? " · tests ranked" : ""}`
-        : `admit ${c.rules ?? "all"}`,
+      : `leads ${c.leads ?? "?"} · top ${c.topSites ?? "?"} sites ±${c.window ?? "?"} · span ≤${c.maxSpan ?? "∞"} · voters ${c.voters ?? "?"}${c.skipTests === false ? " · tests ranked" : ""}`,
   ];
   if (!e.audit) parts.push(`${c.rounds} round${c.rounds === 1 ? "" : "s"}`);
   if (c.promptOverride) parts.push(`prompt ${c.prompt.split("/").pop()}`);
@@ -84,14 +82,12 @@ export function PhaseReplayList({ reports }: { reports: PhaseReplayEntry[] }) {
     <div>
       <h1 className="mb-1 text-2xl font-semibold text-base-content">phase-replay</h1>
       <p className="mb-4 max-w-3xl font-mono text-xs text-base-content/50">
-        {reports.length} report{reports.length === 1 ? "" : "s"} · one pr-review phase (falsify or adjudicate) replayed over
+        {reports.length} report{reports.length === 1 ? "" : "s"} · one pr-review phase (falsify or site-review) replayed over
         preserved fixtures · click a report for its cases
       </p>
       <p className="mb-6 max-w-3xl text-2xs leading-5 text-base-content/50">
         <b className="font-semibold text-base-content/70">falsify</b>: of the rows <code>probe-plan</code> selected, how many
         got a verdict, and whether any row the judge matched to gold was <b>refuted</b> (the one outcome that loses recall).{" "}
-        <b className="font-semibold text-base-content/70">adjudicate</b>: rows <code>admit</code> filed before the model, gold
-        among them, and the judged P/R/F1 of the promoted findings — a range across cases.{" "}
         <b className="font-semibold text-base-content/70">site-review</b>: one investigator per top site; the findings
         written, the gold they state (judged) and their precision, beside the gold-mapped rows the selected sites hold.
       </p>
@@ -188,24 +184,6 @@ function ResultCell({ entry }: { entry: Pick<PhaseReplayEntry, "totals" | "audit
       </div>
     );
   }
-  if (t.adjudicate) {
-    const a = t.adjudicate;
-    return (
-      <div className="space-y-0.5">
-        <div>
-          admitted {a.admitted} · filed {a.filed}
-          <span className={clsx("ml-1", (a.goldFiled ?? 0) > 0 ? "font-semibold text-error" : "text-base-content/60")}>
-            (gold {a.goldFiled ?? "n/a — not judged"})
-          </span>
-        </div>
-        {!entry.audit && (
-          <div className="text-base-content/70">
-            F1 {fmtR(a.f1)} · P {fmtR(a.precision)} · R {fmtR(a.recall)} · promoted {a.promoted}
-          </div>
-        )}
-      </div>
-    );
-  }
   return <span className="text-base-content/40">{NA}</span>;
 }
 
@@ -297,18 +275,11 @@ function CaseTable({ report }: { report: PhaseReplayReport }) {
                 <th className="px-3 py-2">gold stated</th>
                 <th className="px-3 py-2 text-right">P</th>
               </>
-            ) : isF ? (
+            ) : (
               <>
                 <th className="px-3 py-2">plan</th>
                 <th className="px-3 py-2">verdicts</th>
                 <th className="px-3 py-2">gold rows</th>
-              </>
-            ) : (
-              <>
-                <th className="px-3 py-2">admission</th>
-                <th className="px-3 py-2">dispositions</th>
-                <th className="px-3 py-2">gold</th>
-                <th className="px-3 py-2 text-right">P / R / F1</th>
               </>
             )}
             <th className="px-3 py-2 text-right">wall</th>
@@ -334,7 +305,7 @@ function CaseTable({ report }: { report: PhaseReplayReport }) {
                 )}
               </td>
               <td className="px-3 py-2 text-right tabular-nums">{c.rows}</td>
-              {isS ? <SiteReviewCells c={c} audit={report.audit} /> : isF ? <FalsifyCells c={c} audit={report.audit} /> : <AdjudicateCells c={c} audit={report.audit} />}
+              {isS ? <SiteReviewCells c={c} audit={report.audit} /> : <FalsifyCells c={c} audit={report.audit} />}
               <td className="px-3 py-2 text-right tabular-nums">{fmtMs(c.wallMs)}</td>
               <td className="px-3 py-2 text-right tabular-nums">{c.turns ?? NA}</td>
               <td className="px-3 py-2 text-right tabular-nums">{c.outputTokens === null ? NA : fmtTokens(c.outputTokens)}</td>
@@ -448,42 +419,6 @@ function SiteList({ sites, caseLabel, audit }: { sites: FalsifySite[]; caseLabel
         ))}
       </ul>
     </details>
-  );
-}
-
-function AdjudicateCells({ c, audit }: { c: PhaseReplayCase; audit: boolean }) {
-  const a = c.adjudicate;
-  if (!a) return <td className="px-3 py-2 text-base-content/40" colSpan={4}>{NA}</td>;
-  const g = a.grade;
-  return (
-    <>
-      <td className="px-3 py-2 text-2xs">
-        admitted {a.admitted} · filed {a.filed}
-        <div className="text-base-content/40">
-          {Object.entries(a.filedByRule)
-            .map(([k, v]) => `${k} ${v}`)
-            .join(" · ")}
-        </div>
-      </td>
-      <td className="px-3 py-2 text-2xs">
-        {audit ? (
-          NOT_RUN
-        ) : (
-          <>
-            inline {a.promotedInline} · body {a.promotedBody} · internal {a.internal} · dropped {a.dropped}
-            {!a.gateSatisfied && <div className="text-warning">gate unsatisfied — repaired</div>}
-          </>
-        )}
-      </td>
-      <td className="px-3 py-2 text-2xs">
-        <div className="text-base-content/60">{goldCell(c)}</div>
-        {a.goldFiled.length > 0 && <div className="font-semibold text-error">filed by admit: {a.goldFiled.join(", ")}</div>}
-        {a.goldPromoted !== null && <div>promoted {a.goldPromoted}</div>}
-      </td>
-      <td className="px-3 py-2 text-right tabular-nums">
-        {g === null ? NA : g.error ? <span className="text-error" title={g.error}>judge failed</span> : `${g.precision.toFixed(2)} / ${g.recall.toFixed(2)} / ${g.f1.toFixed(2)}`}
-      </td>
-    </>
   );
 }
 

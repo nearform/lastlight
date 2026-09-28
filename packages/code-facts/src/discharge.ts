@@ -13,8 +13,8 @@
  *
  *     until_bash: test -s .lastlight/pr-review/hypotheses/<family>.jsonl
  *
- * — which **one line of any content passes**. Meanwhile `seed-render.ts` emits a
- * DISCHARGE contract demanding exactly one of QUOTE / ABSENT / PARTIAL / PROBE
+ * — which **one line of any content passes**. Meanwhile the rendered family block
+ * (since removed with the agent survey) emitted a DISCHARGE contract demanding exactly one of QUOTE / ABSENT / PARTIAL / PROBE
  * per obligation, and nothing checked it. Measured on
  * `prreview__skillspro-1587-r1` (2026-08-22), against 31 obligations:
  *
@@ -109,7 +109,7 @@ import { noopLogger, type LoggerPort } from "./log.js";
 import type { ObligationContract, ObligationsDocument } from "./seed.js";
 
 /**
- * The four codes `seed-render.ts`'s DISCHARGE contract demands, and the only
+ * The four codes the DISCHARGE contract demands, and the only
  * four this gate accepts. `PROBE` is a discharge: an obligation that can only be
  * settled by running something is honestly answered by saying so, and WP4's gate
  * picks it up from there. The honest answer has to be available, or the model is

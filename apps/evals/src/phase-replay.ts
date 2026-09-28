@@ -1,9 +1,10 @@
 /**
- * Phase replays — ONE pr-review phase (`falsify`, `adjudicate`, or the
- * experimental per-site investigator `site-review`) re-run
- * against preserved fixtures, in minutes rather than a full arm's hours.
+ * Phase replays — ONE pr-review phase (`falsify`, or the per-site
+ * investigator `site-review`) re-run against preserved fixtures, in minutes
+ * rather than a full arm's hours. (`adjudicate` replays existed too; the phase
+ * and its script were removed, and their reports are no longer listed.)
  *
- * `scripts/micro-falsify.ts` and `scripts/micro-adjudicate.ts` write these
+ * `scripts/micro-falsify.ts` and `scripts/micro-site-review.ts` write these
  * reports to `eval-results/phase-replay/*.json`; `/api/phase-replay` lists them
  * and the dashboard's `phase-replay` page renders them. This module is the ONE
  * definition of the report shape and of every number derived from it, and it
@@ -26,7 +27,7 @@ import { unitSurveyStatus, type UnitSurveyStatus } from "./unit-survey-index.js"
 export const PHASE_REPLAY_DIR = "phase-replay";
 export const PHASE_REPLAY_VERSION = 1;
 
-export type PhaseKind = "falsify" | "adjudicate" | "site-review";
+export type PhaseKind = "falsify" | "site-review";
 export type PhaseReplayWriteStatus = "running" | "done" | "failed";
 export type PhaseReplayStatus = UnitSurveyStatus;
 
@@ -49,8 +50,6 @@ export interface PhaseReplayConfig {
   plan?: string;
   /** falsify `sites:<k>`: the site window (lines). */
   window?: number;
-  /** adjudicate: `admit --rules` spec, normalised. */
-  rules?: string;
   /** site-review: `none` (arm A, the brief alone), `subjects` (arm B, deduplicated `evidence.subject` leads) or `summary` (arm C, ≤ 5 summarised concerns per site). */
   leads?: string;
   /** site-review `summary`: the model of the one non-agentic summary call per site. */
@@ -233,24 +232,6 @@ export interface PhaseReplayGrade {
   error: string | null;
 }
 
-/** What `adjudicate` did, after `admit` and before posting. */
-export interface AdjudicateOutcome {
-  admitted: number;
-  filed: number;
-  filedByRule: Record<string, number>;
-  /** Gold-mapped rows `admit` filed before the model saw them — a rule's cost. */
-  goldFiled: string[];
-  promotedInline: number;
-  promotedBody: number;
-  internal: number;
-  dropped: number;
-  gateSatisfied: boolean;
-  /** Gold whose mapped row ended up cited by a PROMOTED finding. Deterministic. */
-  goldPromoted: number | null;
-  /** `null` in an audit (no model ran) or with no judge. */
-  grade: PhaseReplayGrade | null;
-}
-
 /** One fixture × one repeat. */
 export interface PhaseReplayCase {
   instanceId: string;
@@ -274,7 +255,6 @@ export interface PhaseReplayCase {
    * the whole array is `null` when the map was not judged. */
   goldRows: (string | null)[] | null;
   falsify?: FalsifyOutcome;
-  adjudicate?: AdjudicateOutcome;
   siteReview?: SiteReviewOutcome;
   /** The case's consolidated session transcript (`/data/phase-replay/sessions/…/full.jsonl`). */
   session?: string | null;
@@ -302,7 +282,7 @@ export interface PhaseReplayReport {
   version: typeof PHASE_REPLAY_VERSION;
   kind: PhaseKind;
   label: string;
-  /** No model ran: deterministic stats only (adjudicate `--audit`, a dry run). */
+  /** No model ran: deterministic stats only (a dry run, `--summaries-only`). */
   audit: boolean;
   startedAt: string;
   finishedAt: string | null;
@@ -361,19 +341,6 @@ export interface PhaseReplayTotals {
     /** `--plan sites:<k>`: sessions run, and distinct claims they named. */
     sites: number | null;
     claims: number | null;
-  };
-  adjudicate?: {
-    admitted: number;
-    filed: number;
-    filedByRule: Record<string, number>;
-    /** `null` when any case's gold map was not judged — unknown, not zero. */
-    goldFiled: number | null;
-    promoted: number;
-    goldPromoted: number | null;
-    f1: PhaseRange | null;
-    precision: PhaseRange | null;
-    recall: PhaseRange | null;
-    gateFailures: number;
   };
   siteReview?: {
     /** Sites investigated (selected). */
@@ -447,7 +414,7 @@ export function phaseReplayTotals(report: Pick<PhaseReplayReport, "kind" | "audi
         ? sum(f.flatMap((x) => (x.sites ?? []).map((s) => s.claims ?? 0)))
         : null,
     };
-  } else if (report.kind === "site-review") {
+  } else {
     const r = ok.map((c) => c.siteReview).filter((x): x is SiteReviewOutcome => !!x);
     const sites = r.flatMap((x) => x.sites);
     const judged = !report.audit && r.length > 0 && r.every((x) => x.goldStated !== null && x.matchedFindings !== null);
@@ -475,24 +442,6 @@ export function phaseReplayTotals(report: Pick<PhaseReplayReport, "kind" | "audi
         fallbacks: summaries.filter((x) => x.fallback).length,
         costUsd: summaries.every((x) => x.costUsd !== null) ? sum(summaries.map((x) => x.costUsd!)) : null,
       };
-  } else {
-    const a = ok.map((c) => c.adjudicate).filter((x): x is AdjudicateOutcome => !!x);
-    const filedByRule: Record<string, number> = {};
-    for (const x of a) mergeCounts(filedByRule, x.filedByRule);
-    const graded = a.map((x) => x.grade).filter((g): g is PhaseReplayGrade => !!g && g.error === null);
-    const promotedKnown = a.every((x) => x.goldPromoted !== null);
-    totals.adjudicate = {
-      admitted: sum(a.map((x) => x.admitted)),
-      filed: sum(a.map((x) => x.filed)),
-      filedByRule,
-      goldFiled: goldKnown ? sum(a.map((x) => x.goldFiled.length)) : null,
-      promoted: sum(a.map((x) => x.promotedInline + x.promotedBody)),
-      goldPromoted: a.length && promotedKnown ? sum(a.map((x) => x.goldPromoted ?? 0)) : null,
-      f1: phaseRange(graded.map((g) => g.f1)),
-      precision: phaseRange(graded.map((g) => g.precision)),
-      recall: phaseRange(graded.map((g) => g.recall)),
-      gateFailures: a.filter((x) => !x.gateSatisfied).length,
-    };
   }
   return totals;
 }
@@ -536,7 +485,7 @@ export function phaseReplayStatus(
 export function summarisePhaseReplay(id: string, raw: unknown, mtime: string): PhaseReplayEntry | null {
   const r = raw as Partial<PhaseReplayReport> | null;
   if (!r || typeof r !== "object" || r.version !== PHASE_REPLAY_VERSION) return null;
-  if (r.kind !== "falsify" && r.kind !== "adjudicate" && r.kind !== "site-review") return null;
+  if (r.kind !== "falsify" && r.kind !== "site-review") return null;
   if (!r.config || !Array.isArray(r.cases)) return null;
   return {
     id,

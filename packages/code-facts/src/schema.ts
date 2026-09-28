@@ -717,10 +717,8 @@ export const ReviewFindingSchema = z.looseObject({
   tier: z.enum(["inline", "body", "internal"]).optional(),
   /**
    * #399's typed attributes — what a finding CLAIMS is wrong, what KIND of
-   * wrong it is, and what to change. Under
-   * `review.analysis.adjudicate: "dossier"` these are what the adjudicator
-   * writes and a pure `computeTier()` derives `tier` from them; under `legacy`
-   * they are absent and `tier` is the model's own verdict.
+   * wrong it is, and what to change. When present, a pure `computeTier()`
+   * derives `tier` from them; when absent, `tier` is the writer's own verdict.
    *
    * The split exists because of what was measured on the two axes. Asking a
    * model *"is this finding correct?"* is dead three times over — over 2,145

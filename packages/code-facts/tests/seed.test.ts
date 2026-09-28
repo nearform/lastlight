@@ -12,7 +12,6 @@ import {
   validateObligation,
   type Obligation,
 } from "../src/seed.js";
-import { renderFamilyBlock } from "../src/seed-render.js";
 import type { AllDocument } from "../src/schema.js";
 import type { ObligationsDocument } from "../src/seed.js";
 
@@ -821,15 +820,11 @@ describe("D2b — registration minting", () => {
     ]);
   });
 
-  it("renders under the SECURITY family block", () => {
+  it("files under the SECURITY family", () => {
     const minted = seedObligations(envelope(factsOf(registered())), {
       mint: MINT_REGISTRATIONS,
     });
-    const block = renderFamilyBlock(minted, "security");
-    expect(block).toContain("buildServer registers 3 handler(s)/hook(s)");
-    expect(block).toContain(minted.obligations[0].id);
-    // …and not under any other family's.
-    expect(renderFamilyBlock(minted, "contract")).not.toContain("buildServer");
+    expect(minted.obligations.map((o) => o.family)).toEqual(["security"]);
   });
 });
 
@@ -853,84 +848,12 @@ describe("the `minting` stamp", () => {
   });
 });
 
-describe("the rendered block carries the rule, not just the data", () => {
-  const seeded = () =>
-    seedObligations(
-      envelope({
-        constants: {
-          sideDefinitions: {},
-          constants: [
-            constant({
-              declaredAt: "src/config.ts:12",
-              references: ["src/server/auth.ts:73"],
-            }),
-          ],
-        },
-      }),
-    );
-
-  it("emits the discharge contract with the obligations", () => {
-    // v3 measured a 17-row ledger honestly discharged into ZERO findings. The
-    // obligations without the contract reproduce exactly that, so they must not
-    // be separable — the same reason renderSpecObligations emits its own.
-    const block = renderFamilyBlock(seeded(), "enforcement");
-    expect(block).toMatch(/DISCHARGE EVERY OBLIGATION/);
-    expect(block).toMatch(/Reading a file is not a discharge/);
-    expect(block).toMatch(/OVER-PRODUCE/);
-    expect(block).toMatch(/found:        false/);
-  });
-
-  it("confines a pass to its own family's file", () => {
-    const block = renderFamilyBlock(seeded(), "enforcement");
-    expect(block).toMatch(/hypotheses\/enforcement\.jsonl/);
-    expect(block).toMatch(
-      /do NOT\s+reason about any family other than enforcement/,
-    );
-  });
-
-  it("says NOT MEASURED for `tests` rather than rendering an empty, clean-looking block", () => {
-    const block = renderFamilyBlock(seeded(), "tests");
-    expect(block).toMatch(/NOT MEASURED/);
-    expect(block).toMatch(/NOT a pass/);
-  });
-
-  it("never returns empty — a family with nothing to say still says so, in words", () => {
-    // It used to return `""` here, and the caller then wrote no file. That made
-    // a MISSING block mean three different things at once: nothing to say, the
-    // seeder died, or — measured as 27 of 27 failed reads across 120 survey
-    // branches on 2026-08-22 — the consumer resolved the path against the wrong
-    // base. Only the first is benign, and the survey prompts' "if the file does
-    // not exist, work the diff directly" escape hatch treated all three as it.
-    // A block that is always on disk is what makes its absence diagnostic.
-    const clean = seedObligations(envelope({}));
-    const block = renderFamilyBlock(clean, "contract");
-    expect(block).not.toBe("");
-    expect(block).toMatch(/No contract obligations could be built/);
-    // …and it is still not a licence to call the family clean.
-    expect(block).toMatch(/not a licence to skip the family/);
-
-    const degraded = seedObligations(
-      envelope(
-        {},
-        {
-          coverage: "degraded",
-          degraded: [{ extractor: "facts", reason: "x" }],
-        },
-      ),
-    );
-    // A degraded family renders the same way plus what was missed: "we could not
-    // look" and "we looked and it is clean" are different facts.
-    expect(renderFamilyBlock(degraded, "contract")).toContain("[facts] x");
-  });
-
+describe("the `contract` stamp", () => {
   /**
    * The contract is STAMPED, not passed twice.
    *
-   * `renderFamilyBlock` reads it off the document and `checkDischarge` reads it
-   * off the same document, so the block a survey was handed and the contract the
-   * gate grades against cannot come from two different answers. A render-time
-   * argument would have allowed exactly that — which is the separability this
-   * pipeline has now paid for three times.
+   * `checkDischarge` reads it off the document, so the contract the gate
+   * grades against cannot come from a second, different answer.
    */
   it("records which contract it rendered, and defaults to `full`", () => {
     expect(seedObligations(envelope({})).contract).toBe("full");
@@ -940,26 +863,5 @@ describe("the rendered block carries the rule, not just the data", () => {
     expect(
       seedObligations(envelope({}), { contract: "minimal" }).contract,
     ).toBe("minimal");
-  });
-
-  it("renders the block the document says it rendered", () => {
-    const minimal = seedObligations(
-      envelope({
-        constants: {
-          sideDefinitions: {},
-          constants: [
-            constant({
-              declaredAt: "src/config.ts:12",
-              references: ["src/server/auth.ts:73"],
-            }),
-          ],
-        },
-      }),
-      { contract: "minimal" },
-    );
-    expect(minimal.contract).toBe("minimal");
-    const block = renderFamilyBlock(minimal, "enforcement");
-    expect(block).not.toMatch(/"discharge":/);
-    expect(block).toContain("Append one JSON object per hypothesis to");
   });
 });

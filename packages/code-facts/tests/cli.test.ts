@@ -493,8 +493,6 @@ describe("`seed --contract`", () => {
         facts,
         "--out",
         join(dir, "obligations.json"),
-        "--blocks",
-        join(dir, "blocks"),
         ...argv,
       ],
       io,
@@ -507,22 +505,13 @@ describe("`seed --contract`", () => {
     expect(seedInto(dir, facts, []).code).toBe(EXIT_OK);
     const doc = JSON.parse(readFileSync(join(dir, "obligations.json"), "utf8"));
     expect(doc.contract).toBe("full");
-    expect(readFileSync(join(dir, "blocks", "enforcement.md"), "utf8")).toMatch(
-      /"discharge":/,
-    );
   });
 
-  it("`--contract minimal` reaches the BLOCK on disk, not just the option object", () => {
+  it("`--contract minimal` reaches the document on disk, not just the option object", () => {
     const { dir, facts } = factsTree();
     expect(seedInto(dir, facts, ["--contract", "minimal"]).code).toBe(EXIT_OK);
     const doc = JSON.parse(readFileSync(join(dir, "obligations.json"), "utf8"));
     expect(doc.contract).toBe("minimal");
-
-    const block = readFileSync(join(dir, "blocks", "enforcement.md"), "utf8");
-    expect(block).not.toMatch(/"discharge":/);
-    expect(block).not.toMatch(/"failureScenario":/);
-    expect(block).not.toContain("WORKED EXAMPLE");
-    expect(block).toContain("Append one JSON object per hypothesis to");
   });
 
   it("refuses an unrecognised value instead of quietly rendering `full`", () => {
@@ -641,39 +630,4 @@ const SUITE_OPENGREP_BIN = process.env.LASTLIGHT_OPENGREP_BIN;
 afterEach(() => {
   // Back to the suite-wide value (vitest.config.ts), which disables the scanner.
   process.env.LASTLIGHT_OPENGREP_BIN = SUITE_OPENGREP_BIN;
-});
-
-describe("runCli's one asynchronous command", () => {
-  /**
-   * `jev-classify` is the only branch that returns a `Promise<number>` — every
-   * other command returns a plain `number` immediately, which is what lets the
-   * existing synchronous callers stay synchronous.
-   *
-   * That widening is a footgun with no type error behind it. Every other test
-   * in this file is written as
-   * `expect(runCli([...], io)).toBe(EXIT_OK)`, and that shape applied to THIS
-   * command compares a pending Promise against a number — it fails for a
-   * reason that has nothing to do with the code under test, and it would pass
-   * for a command that was async and returned the wrong code. So the contract
-   * is pinned directly: this one is thenable, its neighbours are not.
-   *
-   * It runs offline. `classifyHypotheses` resolves to a document that SAYS it
-   * could not run (no key, no dossier) rather than throwing, and the command
-   * always exits 0 — so no key is needed and nothing is spent.
-   */
-  it("returns a thenable from `jev-classify`, and a bare number from its neighbours", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "jev-cli-"));
-    const io = { out: () => {}, err: () => {} };
-
-    const result = runCli(["jev-classify", "--dir", dir, "--out", join(dir, "out.json")], io);
-    expect(typeof result).not.toBe("number");
-    expect(typeof (result as Promise<number>).then).toBe("function");
-    await expect(result).resolves.toBe(EXIT_OK);
-
-    // The control: the same call shape on any other command is a number, which
-    // is why the widened return type is safe for existing callers.
-    expect(typeof runCli(["toolchain"], io)).toBe("number");
-
-    rmSync(dir, { recursive: true, force: true });
-  });
 });

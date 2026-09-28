@@ -27,12 +27,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { runCli } from "../src/cli.js";
-import { EXIT_DEGRADED, EXIT_OK } from "../src/errors.js";
+import { EXIT_OK, EXIT_UNAVAILABLE } from "../src/errors.js";
 import {
-  buildFindingsLedger,
   checkFindings,
   renderFindingsCheck,
-  renderFindingsLedger,
   titleFrom,
 } from "../src/findings.js";
 
@@ -639,29 +637,22 @@ describe("the output the next iteration has to act on", () => {
   });
 });
 
-// ── The exit-code contract, which is what `until_bash` actually reads ───────
+// ── The command line: the floor only ────────────────────────────────────────
 
-describe("the gate on a command line", () => {
+describe("findings on a command line", () => {
   const capture = () => {
     const out: string[] = [];
     return { out, io: { out: (s: string) => out.push(s), err: (s: string) => out.push(s) } };
   };
 
-  it("exits 0 when conservation holds and 3 when it does not", () => {
-    // Exit 0 CLOSES the `generic_loop.until_bash`; non-zero means keep looping.
-    const broken = workspace({
-      hypotheses: { contract: [H1, H2] },
-      findings: doc({ findings: [finding(["H-001"])] }),
-    });
-    const first = capture();
-    expect(runCli(["findings", "--dir", broken.dir], first.io)).toBe(EXIT_DEGRADED);
-    expect(first.out.join("\n")).toContain("contract-002");
-
+  it("refuses to grade without --repair — the gate went with the adjudicator", () => {
     const whole = workspace({
       hypotheses: { contract: [H1] },
       findings: doc({ findings: [finding(["H-001"])] }),
     });
-    expect(runCli(["findings", "--dir", whole.dir], capture().io)).toBe(EXIT_OK);
+    const { out, io } = capture();
+    expect(runCli(["findings", "--dir", whole.dir], io)).toBe(EXIT_UNAVAILABLE);
+    expect(out.join("\n")).toContain("--repair");
   });
 
   it("exits 0 under --repair, because a floor that can fail is not a floor", () => {
@@ -694,138 +685,6 @@ describe("a claim is a sentence; a title is a label", () => {
   });
 });
 
-// ── `--ledger`: the checklist half, and its DIFFERENT exit contract ─────────
-//
-// The gate answers the harness ("may the loop stop?") with an exit code. The
-// ledger answers the adjudicator ("what must I account for?") with a list. The
-// measured reason it exists: attempt 1 spent 426 s / $0.52 reconstructing the
-// id set by hand, missed some, and bought a second 274 s / $0.43 attempt.
-
-describe("the conservation ledger", () => {
-  const capture = () => {
-    const out: string[] = [];
-    return { out, io: { out: (s: string) => out.push(s), err: (s: string) => out.push(s) } };
-  };
-
-  it("lists every declared id, grouped by family, marking what is accounted for", () => {
-    const { dir } = workspace({
-      hypotheses: { contract: [H1], enforcement: [H2], tests: [H3] },
-      findings: doc({ findings: [finding(["H-001"])] }),
-    });
-    const ledger = buildFindingsLedger({ dir });
-
-    expect(ledger.entries.map((e) => e.id)).toEqual(["contract-001", "enforcement-001", "tests-001"]);
-    expect(ledger.families).toEqual(["contract", "enforcement", "tests"]);
-    expect(ledger.uncovered.map((e) => e.id)).toEqual(["enforcement-001", "tests-001"]);
-    expect(ledger.satisfied).toBe(false);
-
-    // The fields that let a claim be DISPOSED of travel with it — an id alone
-    // is not actionable, which is the whole complaint against the six .jsonl.
-    expect(ledger.entries[0]).toMatchObject({
-      id: "contract-001",
-      family: "contract",
-      obligation: "O-014",
-      severity: "Critical",
-      path: "src/config.ts",
-      accounted: true,
-    });
-  });
-
-  it("NEVER truncates the list — the cap is on each claim, not the count", () => {
-    // `renderFindingsCheck` stops naming ids at 20 because it is a log line. A
-    // checklist that elided entries would reproduce the omission it exists to
-    // prevent, so this asserts the opposite property on the same data.
-    const many = Array.from({ length: 45 }, (_, i) => ({
-      id: `H-${String(i + 1).padStart(3, "0")}`,
-      family: "contract",
-      claim: `${"x".repeat(400)}. trailing`,
-    }));
-    const { dir } = workspace({ hypotheses: { contract: many }, findings: doc() });
-    const text = renderFindingsLedger(buildFindingsLedger({ dir }));
-
-    // Canonical ids, not the model's — every one of the 45 is listed.
-    for (let n = 1; n <= many.length; n += 1)
-      expect(text).toContain(`contract-${String(n).padStart(3, "0")}`);
-    expect(text).not.toMatch(/and \d+ more/);
-    // Bounded per line: `titleFrom` caps at 100 chars.
-    for (const line of text.split("\n")) expect(line.length).toBeLessThan(140);
-  });
-
-  it("degrades sanely with zero hypotheses, and does not read as a completed review", () => {
-    const { dir } = workspace({ findings: doc() });
-    const ledger = buildFindingsLedger({ dir });
-    expect(ledger.entries).toEqual([]);
-    // Rule 7: nothing to conserve ⇒ the gate passes. The prose has to stop that
-    // being read as "the adjudication was complete".
-    expect(ledger.satisfied).toBe(true);
-    expect(renderFindingsLedger(ledger)).toMatch(/NOT evidence that the review/);
-  });
-
-  it("says so plainly when everything is already accounted for", () => {
-    const { dir } = workspace({
-      hypotheses: { contract: [H1, H2] },
-      findings: doc({ findings: [finding(["H-001"]), finding(["H-002"], { tier: "internal" })] }),
-    });
-    const ledger = buildFindingsLedger({ dir });
-    expect(ledger.uncovered).toEqual([]);
-    expect(ledger.satisfied).toBe(true);
-    expect(renderFindingsLedger(ledger)).toContain("Conservation holds");
-  });
-
-  it("treats an absent findings.json as every id outstanding, not as an error", () => {
-    // Iteration 1 reaches this with whatever the `review` phase wrote; a run
-    // where that is missing must still get a usable checklist rather than a
-    // zod dump.
-    const { dir } = workspace({ hypotheses: { contract: [H1, H2] } });
-    const ledger = buildFindingsLedger({ dir });
-    expect(ledger.documentError).not.toBeNull();
-    expect(ledger.uncovered.map((e) => e.id)).toEqual(["contract-001", "contract-002"]);
-    expect(renderFindingsLedger(ledger)).toContain("contract-002");
-  });
-
-  it("ALWAYS exits 0 — it reports, it does not grade", () => {
-    // The adjudicator runs this inside its own bash tool. The gate's non-zero
-    // "keep looping" would read there as a tool failure, so the two modes must
-    // not share an exit contract.
-    const broken = workspace({
-      hypotheses: { contract: [H1, H2] },
-      findings: doc({ findings: [finding(["H-001"])] }),
-    });
-    const bare = capture();
-    expect(runCli(["findings", "--dir", broken.dir], bare.io)).toBe(EXIT_DEGRADED);
-
-    const led = capture();
-    expect(runCli(["findings", "--dir", broken.dir, "--ledger"], led.io)).toBe(EXIT_OK);
-    expect(led.out.join("\n")).toContain("contract-002");
-  });
-
-  it("does not write anything — the ledger is a read", () => {
-    const { dir, read } = workspace({
-      hypotheses: { contract: [H1, H2] },
-      findings: doc({ findings: [finding(["H-001"])] }),
-    });
-    const before = JSON.stringify(read());
-    runCli(["findings", "--dir", dir, "--ledger"], capture().io);
-    expect(JSON.stringify(read())).toBe(before);
-  });
-});
-
-/**
- * IDENTITY — the two defects that made the gate pass falsely on the first real
- * run, and the mechanism that closes both.
- *
- * Measured on `prreview__skillspro-1587-r1` (2026-08-22, 30 hypotheses across
- * six families): `contract.jsonl` minted `H-001..H-005` and `security.jsonl`
- * independently minted `H-001..H-003`, so the reader's flat first-write-wins map
- * DISCARDED the three security claims and the gate reported `5/5 accounted for`,
- * exit 0. Separately, only **8 of 30** rows carried an `id` at all, so 22 real
- * claims were structurally invisible to conservation.
- *
- * Both are the same species: identity minted by a model is an instruction, and
- * this plan's most expensive lesson is that an instruction is not a mechanism.
- * `<family>-NNN` is assigned at ingest, from the filename and the append-only
- * position, so it exists for every row and cannot collide.
- */
 describe("findings — hypothesis identity", () => {
   it("gives two families minting the same id two distinct ids, and reports both", () => {
     // The exact shape from the real run, minimised.
@@ -946,24 +805,6 @@ describe("findings — hypothesis identity", () => {
     const result = checkFindings({ dir: fx.dir });
     expect(result.hypotheses).toEqual([]);
     expect(result.satisfied).toBe(true);
-  });
-
-  it("names every family in the ledger, including free-form ones", () => {
-    const fx = workspace({
-      hypotheses: {
-        contract: [{ id: "H-001", claim: "a producer changed shape." }],
-        enforcement: [{ claim: "a value is never enforced." }],
-      },
-      findings: { summary: "s", event: "COMMENT", findings: [] },
-    });
-    const ledger = buildFindingsLedger({ dir: fx.dir });
-    expect(ledger.families).toEqual(["contract", "enforcement"]);
-    expect(ledger.entries.map((e) => e.id)).toEqual(["contract-001", "enforcement-001"]);
-    // Every entry is attributable to a family — there is no "(no family)" row.
-    expect(ledger.entries.every((e) => e.family.length > 0)).toBe(true);
-    const rendered = renderFindingsLedger(ledger);
-    expect(rendered).toContain("── enforcement ──");
-    expect(rendered).toContain("[ ] enforcement-001");
   });
 });
 

@@ -210,6 +210,25 @@ function asString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+/**
+ * The file a hypothesis is about.
+ *
+ * Read off `quotes[0].path` before the row's own `path`, because that is what
+ * the surveys actually write: over the 267 hypotheses in the 8-case probes arm,
+ * **229 carry `quotes[]` and only 61 carry a top-level `path`.** Keying on
+ * `path` alone reported "no path on this hypothesis" for three quarters of the
+ * corpus. `file` is the third spelling seen in the wild (5 rows).
+ */
+export function pathOfRow(row: Record<string, unknown>): string | null {
+  const nonBlank = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v : null);
+  const quotes = Array.isArray(row.quotes) ? row.quotes : [];
+  for (const q of quotes) {
+    const path = nonBlank((q as Record<string, unknown>)?.path);
+    if (path) return path;
+  }
+  return nonBlank(row.path) ?? nonBlank(row.file);
+}
+
 /** `<family>-<NNN>`. Padded so a family's ids sort in declaration order. */
 export function hypothesisId(family: string, ordinal: number): string {
   return `${family}-${String(ordinal).padStart(3, "0")}`;

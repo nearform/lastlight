@@ -524,8 +524,7 @@ file tsgo failed to read.
 | `discharge` | each `survey` branch's exit gate — every obligation the family owns carries a `QUOTE` / `ABSENT` / `PARTIAL` / `PROBE` discharge in `hypotheses/<family>.jsonl`. Degrades to the `test -s` floor on an unreadable `obligations.json` **or** on `contract: "minimal"`. See below |
 | `probe-plan` | which hypotheses `falsify` owes a verdict on — the gate's own `requiresProbe` set, ranked and capped at `--max-probes`, written to `probes/plan.json` + `probes/plan.md`. See below |
 | `probes` | the `falsify` loop's exit gate — every hypothesis that needed a probe (exactly `probes/plan.json`'s `selected` when a plan exists, else `requiresProbe` over every row) has a verdict, and every claim of evidence (`reproduced` / `corroborated` / `refuted`) has a transcript. Since issue #405 it also refuses `reproduced` on a **behavioural** claim (`isBehaviouralClaim` — a stated consequence live at head, derived from the evidence record) whose every command only reads code (`isReadOnlyCommand`, quote-aware) — that is `corroborated` — and reports transcripts borrowed from another hypothesis (`borrowedFrom`) without failing on them. `probeStrength()` is the one reader of what a verdict counts for |
-| `findings` | the `adjudicate` loop's exit gate — the **conservation check**. See below. `--repair` (the `reconcile` phase) also stamps each hypothesis-derived finding's **derived severity** (`finding-severity.ts`: evidence record + probe strength; the model's value kept as `declaredSeverity`) plus its **`rankEvidence`** (crosses a boundary / strongest probe / merged-hypothesis count, over non-refuted constituents), which the poster breaks severity ties on — the one derivation the evals read too (`buildSeverityIndex`). Honours `admission.json`: a row `dossier --admit` filed is owed no disposition, is left out of `--ledger`, and `--repair` files it at `internal` with `filedBy: <rule>` |
-| `dossier` | the `adjudicate` pass's one input document. `--admit <spec>` first decides which hypotheses it weighs (`admission.json`) and renders only those. See below |
+| `findings` | the **conservation floor** — `--repair` only (the `reconcile` phase; the grading gate went with the adjudicator). See below. It also stamps each hypothesis-derived finding's **derived severity** (`finding-severity.ts`: evidence record + probe strength; the model's value kept as `declaredSeverity`) plus its **`rankEvidence`** (crosses a boundary / strongest probe / merged-hypothesis count, over non-refuted constituents), which the poster breaks severity ties on — the one derivation the evals read too (`buildSeverityIndex`) |
 | `units` | the unit survey's INPUT — one unit per changed function/method, at most one module unit per file (its module-scope regions plus folded small functions), one `pr` unit for obligations no unit holds, each carrying the COMPLETE model request behind a run-constant shared prefix. See below |
 | `units-ingest` | the unit survey's replies → `hypotheses/<family>.jsonl` rows of the existing shape, plus `units/ingest.json`. See below |
 | `sites` | the `sites` review engine's deterministic steps (`review.analysis.reviewEngine: sites`): `--plan`, `--check <site-id>`, `--merge`, `--check-select`, `--finalize`. See below |
@@ -1025,7 +1024,7 @@ closes the loop** and non-zero means iterate again — the same contract as
 
 #### Identity is assigned at ingest, not minted by the model
 
-`src/hypotheses.ts` is the one reader `findings`, `--ledger` and `probes` all go
+`src/hypotheses.ts` is the one reader `findings`, `probes` and `sites` all go
 through, so no two gates can disagree about which claims exist. Every row gets
 **`<family>-NNN`** — the family from the FILENAME, the ordinal from its position
 in an append-only file. Both halves were bought with a measurement on the first
@@ -1153,47 +1152,6 @@ Output is capped at 20 named ids plus a `+N more`, on both the gap list and the
 repair list. It goes into an agent's context, and *"3 hypotheses unaccounted
 for"* without the ids cannot be acted on by the next iteration — being acted on
 is the entire point.
-
-#### `--ledger` — the same reading, the other audience
-
-`checkFindings` answers the HARNESS ("may the loop stop?") with an exit code.
-`buildFindingsLedger` answers the ADJUDICATOR ("what must I account for, and
-what have I not?") with a list: every declared id by family, with its obligation,
-severity and path, marked `[x]`/`[ ]`, plus an outstanding set. Both read through
-the same `inspect`, so the checklist and the verdict cannot disagree about which
-ids exist — which is the reason it lives here rather than in the prompt as an
-instruction to go and count.
-
-It is what makes the gate satisfiable on the FIRST attempt. Measured on
-`prreview__skillspro-1587-r1`: attempt 1 spent **426 s and $0.52** reconstructing
-the id set from six `.jsonl` files, missed some, and bought a second **274 s /
-$0.43** attempt — 40% of the case's wall clock and 38% of its cost, for a set
-that is mechanically derivable.
-
-Three properties that are decisions:
-
-- **It ALWAYS exits 0**, unlike the two gate modes beside it. Its caller is the
-  agent's own bash tool, where the gate's non-zero *"iterate again"* would read
-  as a tool failure. Two audiences, two exit contracts; conflating them is how
-  the checklist would come to be treated as the gate.
-- **Nothing is capped.** `renderFindingsCheck` stops at 20 ids because it is a
-  log line; a checklist that elided entries would reproduce the exact omission it
-  exists to prevent. The bound is on each claim (`titleFrom`, one sentence) and
-  the outstanding list WRAPS rather than truncating.
-- **An unreadable `findings.json` means every id is outstanding**, not zero.
-  `inspect` early-returns with no gaps in that case — correct for the gate, which
-  fails on the document error alone, and a lie of omission for a checklist.
-
-`fresh_context: true` on the `adjudicate` loop is what makes re-running it the
-whole retry mechanism: iteration 2 carries no prior transcript
-(`phase-executor.ts` passes `previousOutput: ""`), so the ledger is how a retry
-learns what is left — freshly, rather than from stale plumbing.
-
-What it deliberately does **not** do: read a transcript, judge a verdict,
-validate a quote, or check anything about `summary` / `event` / `verdict`. Quote
-*resolution* is checked upstream; quote *semantics* still is not. v3's five-line
-gate earned the investigation's only gold match and v2's full validator is what
-made it expensive.
 
 ### `units` / `units-ingest` — the unit survey's deterministic halves
 
@@ -1398,43 +1356,14 @@ one verdict.
   `QUOTE`, then declaration order — and cut at `--max-probes`
   (`review.analysis.maxProbes`, `null` = no cap). A deterministic tiebreak, not
   a quality model; the micro-falsify eval is what should move the cap.
-- **One list, three readers.** `probes/plan.md` (the selected records, verbatim,
+- **One list, two readers.** `probes/plan.md` (the selected records, verbatim,
   in rank order) is what falsify reads; `probes/plan.json` is what the `probes`
   gate owes — exactly `selected`, so it cannot owe a row the agent was never
-  shown; and the dossier renders a `deferred` row as *owed one (rank N of M) but
-  past this deployment's probe cap*, so "no verdict" reads as nobody asked.
+  shown.
 - **No plan ⇒ the old owed set.** `checkProbes` falls back to `requiresProbe`
   over every row (an older workflow, a replayed workspace), which is why the
   phase runs `--never-fail`: a failure costs the cap, never a probe. Exit 0 =
   plan written, 2 = it could not be.
-
-### `dossier --admit` — which rows `adjudicate` weighs
-
-`src/adjudicate-admit.ts`. Adjudicate writes a disposition for every row it is
-shown, and that is its wall clock (2026-09-27: 52 rows, 8.7 min on Sonnet 4.6).
-There is **no standalone `admit` command** — the admission exists only to shape
-the dossier, so `dossier --admit <spec>` writes `admission.json` and renders
-only the admitted rows (`review.analysis.admit`, the `admitRules` context key).
-
-- **Rules, a comma list.** `no-clean-quote`, `no-consequence`, `no-code-change`
-  read typed evidence fields only — **no rule reads claim prose**;
-  `jev:<category>@<p>` reads `jev.json` (`jev-classify`'s category, confidence
-  ≥ p); `top:<n>` then keeps at most n by probe strength, stated consequence,
-  `crosses_boundary`, declaration order. A row with no evidence record is left
-  alone, a row jev did not classify is admitted, and a row whose probe
-  EXECUTED overrides every rule but `top:<n>` (which ranks it first).
-- **Nothing is deleted.** The `findings` gate owes dispositions only for
-  admitted rows, the ledger and dossier omit filed ones, and `findings --repair`
-  files them at `internal` with `filedBy: <rule>` (machine-read, so an eval can
-  measure what each rule filed).
-- **Never strands adjudicate.** An unknown token or a `jev:` rule with no
-  `jev.json` throws inside the parser; the CLI says so on stderr, removes any
-  stale `admission.json`, and admits every row. No `admission.json` ⇒ every row.
-- **Measured, not shipped** (16 unit-survey fixtures, 1,794 rows, 13
-  gold-matched): `jev:verification@0,jev:nit@0,jev:maintainability@0` filed 473
-  rows and 0 gold; `top:40` filed 1,155 and 7 of 13; `no-clean-quote` 197/1;
-  `no-consequence` 330/1; `no-code-change` 54/0. Unmeasured end to end — the
-  default is `null`.
 
 ### `clusterSites` — rows grouped into sites (library only)
 

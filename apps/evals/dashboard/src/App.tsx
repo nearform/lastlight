@@ -20,7 +20,7 @@ export default function App() {
   const { data: micro, isLoading: microLoading } = useMicroIndex();
   // A third, for the same reason: unit-survey replays (`/api/unit-survey`).
   const { data: unitSurvey, isLoading: unitLoading } = useUnitSurveyIndex();
-  // A fourth: phase replays (micro-falsify / micro-adjudicate, `/api/phase-replay`).
+  // A fourth: phase replays (micro-falsify / micro-site-review, `/api/phase-replay`).
   const { data: phaseReplay, isLoading: phaseLoading } = usePhaseReplayIndex();
   const route = useRoute();
   const navigate = useNavigate();
@@ -104,7 +104,7 @@ export default function App() {
             {phaseReports.length > 0 && (
               <button
                 onClick={() => navigate(PHASE_REPLAY_TIER_KEY)}
-                title="Phase replays — falsify, adjudicate or site-review re-run over preserved pr-review fixtures"
+                title="Phase replays — falsify or site-review re-run over preserved pr-review fixtures"
                 className={
                   "rounded-lg border px-3 py-1.5 font-mono text-xs font-semibold " +
                   (phaseRoute

@@ -1,6 +1,6 @@
 /**
- * `probe-plan` — the owed set, decided once and read by the gate, the prompt
- * and the dossier.
+ * `probe-plan` — the owed set, decided once and read by the gate and the
+ * prompt.
  *
  * The case this exists for: a unit-survey row carries an evidence record and
  * NO `severity` field, so a prompt keyed on `"severity": "Critical"` saw nothing
@@ -12,7 +12,6 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildEntries, renderAdjudicationDossier } from "../src/adjudicate-render.js";
 import { runCli } from "../src/cli.js";
 import { readHypothesisSet } from "../src/hypotheses.js";
 import { planProbes, readProbePlan, renderProbePlan, writeProbePlan } from "../src/probe-plan.js";
@@ -162,21 +161,6 @@ describe("what falsify and adjudicate read", () => {
     const dir = workspace({ security: [{ claim: "q", evidence: quiet }] });
     const { plan } = writeProbePlan(dir, { maxProbes: 5 });
     expect(renderProbePlan(plan, readHypothesisSet(dir))).toMatch(/None of the 1 hypotheses is owed a probe/);
-  });
-
-  it("the dossier tells a deferred row apart from a row falsify skipped", () => {
-    const dir = workspace({
-      security: [
-        { claim: "first", evidence: critical("ABSENT") },
-        { claim: "second", evidence: critical("ABSENT") },
-      ],
-    });
-    writeProbePlan(dir, { maxProbes: 1 });
-    const { entries } = buildEntries({ dir, repo: join(dir, "..", "..") });
-    expect(entries.map((e) => e.deferred)).toEqual([null, { rank: 2, owed: 2, cap: 1 }]);
-    const doc = renderAdjudicationDossier({ dir, repo: join(dir, "..", "..") });
-    expect(doc).toMatch(/owed one \(rank 2 of 2\) but past this deployment's probe cap of 1/);
-    expect(doc).toMatch(/no verdict was written for this hypothesis/);
   });
 });
 

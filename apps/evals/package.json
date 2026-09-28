@@ -53,7 +53,6 @@
     "agentic-pi": "^0.7.0"
   },
   "devDependencies": {
-    "@typesafe-ai/sdk": "^0.6.0",
     "@types/node": "^26.6.2",
     "agentic-pi": "workspace:*",
     "tsx": "^4.23.15",

@@ -442,9 +442,8 @@ function borrowedFromOf(set: HypothesisSet, ownId: string, transcript: string | 
  * Every hypothesis that has an answer, canonical id resolved, newest line
  * winning — the one reader of `probes/verdicts.jsonl`.
  *
- * Split out of {@link checkProbes} so the adjudication dossier
- * (`adjudicate-render.ts`) can inline a verdict and its transcript without a
- * second parser. Two readers of one append-only artifact is two places for
+ * Split out of {@link checkProbes} so every other reader (the severity
+ * derivation among them) can read a verdict without a second parser. Two readers of one append-only artifact is two places for
  * "which line wins" and "which id does this answer" to disagree, and both
  * questions have already cost this pipeline a measurement.
  *

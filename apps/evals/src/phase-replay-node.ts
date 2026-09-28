@@ -363,14 +363,6 @@ export function followSession(sessionsDir: string, dir: string): () => void {
   };
 }
 
-/** Stage a skill directory into scratch, fresh — `skills/<name>` from core, or an override dir. */
-export function stageSkill(scratch: string, source: string): string {
-  const dest = join(scratch, "skills", basename(source));
-  mkdirSync(dirname(dest), { recursive: true });
-  cpSync(source, dest, { recursive: true });
-  return dest;
-}
-
 // ── the live report ─────────────────────────────────────────────────────────
 
 /**

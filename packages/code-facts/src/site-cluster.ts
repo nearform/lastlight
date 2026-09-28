@@ -4,7 +4,7 @@
  *
  * The unit survey writes 39–234 rows per case (1,794 over 16 case-arms, 14
  * gold-matched), and every row-level cut tried after it failed: `top:40`
- * (`adjudicate-admit.ts`) filed 7 of the 14 gold, and one `adjudicate` call
+ * (the since-removed `dossier --admit`) filed 7 of the 14 gold, and one `adjudicate` call
  * over the whole set does not finish. Several units and several families
  * routinely flag the same few lines, and that agreement is the signal: in the
  * 2026-09-27 screen (`apps/evals/scripts/cluster-screen.ts`), ±20 lines across
@@ -50,8 +50,7 @@
  * hand a per-site investigator what the rows said there, from the typed
  * `evidence.subject` only.
  */
-import { pathOfRow } from "./adjudicate-render.js";
-import type { HypothesisSet } from "./hypotheses.js";
+import { pathOfRow, type HypothesisSet } from "./hypotheses.js";
 import { plannedProbe, planProbes, PROBE_PLAN_VERSION, type ProbePlan } from "./probe-plan.js";
 import { severityOf, type SurveyEvidence } from "./survey-verdict.js";
 
