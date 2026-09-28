@@ -102,14 +102,14 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "^0.5.5",
-    "@opentelemetry/context-async-hooks": "^2.10.0",
+    "@electric-sql/pglite": "^0.5.8",
+    "@opentelemetry/context-async-hooks": "^2.11.0",
     "@opentelemetry/sdk-trace-base": "^2.10.0",
-    "@types/node": "^26.2.0",
+    "@types/node": "^26.6.2",
     "@types/pg": "^8.23.1",
     "concurrently": "^10.0.5",
-    "drizzle-kit": "^0.31.10",
-    "tsx": "^4.23.12",
+    "drizzle-kit": "^0.31.11",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"
   }
