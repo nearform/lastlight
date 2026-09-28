@@ -97,7 +97,7 @@ describe("units node — spec-obligations.json through a quoted heredoc", () => 
     expect(stdout).toContain("units: no spec obligations for this PR");
   });
 
-  it("the projection is the SAME set the rendered block came from, present exactly when it is", () => {
+  it("projects the raw set, and a degraded one, and nothing with the pipeline off", () => {
     const pr = {
       repo: "acme/widgets",
       prNumber: 7,
@@ -110,7 +110,6 @@ describe("units node — spec-obligations.json through a quoted heredoc", () => 
     const review = defaultReviewConfig();
     const on = { ...review, analysis: { ...review.analysis, enabled: true } };
     const ctx = renderContext(pr, defaultFixConfig(), defaultDependenciesConfig(), on) as unknown as Record<string, unknown>;
-    expect(typeof ctx.specObligations).toBe("string");
     const set = JSON.parse(String(ctx.specObligationsJson)) as SpecObligationSet;
     expect(set.obligations[0]?.criterion).toContain('"{{"');
     // End to end: rendered, guarded and written by `sh`.
@@ -130,9 +129,8 @@ describe("units node — spec-obligations.json through a quoted heredoc", () => 
     expect(dset.obligations).toEqual([]);
     expect(dset.degraded.length).toBeGreaterThan(0);
 
-    // Pipeline off: neither key, so the node writes nothing.
+    // Pipeline off: no key, so the node writes nothing.
     const off = renderContext(pr, defaultFixConfig(), defaultDependenciesConfig(), review) as unknown as Record<string, unknown>;
-    expect("specObligations" in off).toBe(false);
     expect("specObligationsJson" in off).toBe(false);
   });
 });

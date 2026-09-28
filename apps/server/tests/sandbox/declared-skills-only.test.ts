@@ -72,8 +72,8 @@ describe("every backend loads ONLY the skills the phase declared", () => {
   });
 
   it("kubernetes emits --no-skills in the in-pod argv, alongside the declared --skill dirs", () => {
-    const args = buildRunAgentScript({ ...k8sBase, profile: true, skillDirs: ["/skills/survey-pass"] });
-    expect(args).toContain("--skill /skills/survey-pass");
+    const args = buildRunAgentScript({ ...k8sBase, profile: true, skillDirs: ["/skills/pr-review"] });
+    expect(args).toContain("--skill /skills/pr-review");
     expect(args).toContain("--no-skills");
   });
 

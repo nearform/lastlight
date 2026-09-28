@@ -849,9 +849,9 @@ const SEVERITY_WEIGHT: Record<string, number> = {
  * "Enforcement check passed: LOGIN_HINT_STORAGE_KEY" — 21 rows tied at the
  * maximum rank of 3.00, 11 of them verification reports.
  *
- * `review-adjudicate.md` already tells the model to price the defect and not its
- * own certainty, and warns that confidences which do not spread have disabled
- * the thresholds. The instruction does not take, and this is what it cost.
+ * The (since removed) `review-adjudicate.md` told the model to price the defect
+ * and not its own certainty, and warned that confidences which do not spread
+ * disable the thresholds. The instruction did not take, and this is what it cost.
  *
  * **Severity stays** — at 0.521 with a CI straddling 0.500 it is indistinguishable
  * from neutral, so it is not carrying the rank but it is not poisoning it either,

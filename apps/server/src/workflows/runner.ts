@@ -309,16 +309,15 @@ const RUN_SPAN_NAME = "lastlight.workflow.run";
  * ABSENT. An absent value in a `skip_if` coerces to false, so
  * `scratch.reviewTriage.depth == 'light'` would not match — which is the safe
  * direction for the pipeline phases — but `prompts/review.md` chooses between
- * three mutually exclusive `{{#if}}` arms, and with none of the three keys set
- * it would render NO brief at all. Seeding is what makes "exactly one arm" true
- * by construction rather than by the triage phase having run.
+ * two mutually exclusive `{{#if}}` arms, and with neither key set it would
+ * render NO brief at all. Seeding is what makes "exactly one arm" true by
+ * construction rather than by the triage phase having run.
  *
- * `deep` / `baseline` mirror today's two arms: the pipeline has already run, or
- * it has not. `harvestReviewTriage` replaces the whole namespace with
+ * `harvestReviewTriage` replaces the whole namespace with
  * `{ depth: "light", light: true }` when the triage phase asks for a single
- * pass, which is what clears the other two — and `skipReview`, the flag that
- * skips the `review` phase when the pipeline is on without
- * `review.analysis.independentReview`. A light review therefore always runs it.
+ * pass, which is what clears `baseline` — and `skipReview`, the flag that
+ * skips the `review` phase when the pipeline is on. A light review therefore
+ * always runs it.
  *
  * Scoped to REVIEW-SHAPED workflows by the structural fact rather than by name:
  * a workflow that declares a `post-review` phase is one that posts a review, so

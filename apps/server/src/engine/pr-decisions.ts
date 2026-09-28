@@ -33,12 +33,7 @@ import { HOLD_LABEL } from "../cron/dependabot-discovery.js";
 import { ATTEMPT_FREE_CLASSES } from "./fix-markers.js";
 import { renderPrNotes } from "./pr-notes.js";
 import { PR_NOTES_FILE_NAME, VERIFY_SCRIPT_NAME } from "./fix-scratch.js";
-import {
-  buildSpecObligations,
-  renderLinkedIssues,
-  renderSpecObligations,
-  type SpecObligationSet,
-} from "./review-spec.js";
+import { buildSpecObligations, type SpecObligationSet } from "./review-spec.js";
 
 /**
  * A skip that must be ESCALATED on the pull request — labelled `requires-human`
@@ -1598,27 +1593,6 @@ export function renderContext(
 }
 
 /**
- * The `spec`-axis half of {@link renderContext} — the review evidence pipeline's
- * WP0 (`docs/plans/deterministic-pr-levers.md` §Decisions, D7).
- *
- * Returns `{}` unless `review.analysis.enabled`, and that empty object IS the
- * inertness guarantee (locked decision 8): with the axis off, the reviewing
- * agent's Context block is character-for-character the one it has always had.
- *
- * Three variables, and the first two are the plumbing §E2 found missing.
- * `prBody` is a declared `TemplateContext` field that nothing has ever
- * populated, and `closingIssuesReferences` existed on the client with
- * `repo-digest.ts` as its only consumer — so the reviewer has never once been
- * told what the change was FOR. That is the whole reason every candidate to
- * date could only ever have moved the standards axis.
- *
- * They are gated with the obligations rather than shipped unconditionally
- * because nothing else consumes them yet: an ungated `prBody` would change the
- * `pr-review` prompt on a deployment that has not opted into the pipeline, which
- * is precisely what locked decision 8 forbids. WP1+ can un-gate them the moment
- * a second consumer exists.
- */
-/**
  * The TRIAGE half of {@link renderContext} — what the `triage` phase of
  * `pr-review.yaml` gates on and renders (issue #378).
  *
@@ -1722,6 +1696,13 @@ export function specObligationsLine(set: SpecObligationSet): string {
   return JSON.stringify(set).replace(/\{\{/g, "{\\u007b");
 }
 
+/**
+ * The review evidence pipeline's half of {@link renderContext}.
+ *
+ * Returns `{}` unless `review.analysis.enabled`, and that empty object IS the
+ * inertness guarantee (locked decision 8): with the pipeline off, the reviewing
+ * agent's Context block is character-for-character the one it has always had.
+ */
 function specContext(state: PrState, review?: ReviewConfig): Record<string, unknown> {
   if (!review?.analysis?.enabled) return {};
   const specSet = buildSpecObligations({
@@ -1730,7 +1711,10 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
     changedFiles: state.changedFiles,
     max: review.analysis.maxSpecObligations,
   });
-  const rendered = renderSpecObligations(specSet, review.analysis.obligationContract);
+  // Nothing to say AND nothing degraded writes no spec file; a degraded set
+  // still does, because "we could not look" and "we looked and it is fine"
+  // must stay distinguishable (locked decision 6).
+  const hasSpec = specSet.obligations.length > 0 || specSet.degraded.length > 0;
   return {
     /**
      * The ONE key WP3's phases gate on — `skip_if: "analysisEnabled != true"`.
@@ -1749,20 +1733,10 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      */
     analysisEnabled: "true",
     /**
-     * Whether the separate `review` pass runs alongside the pipeline. Present
-     * only when the operator asked, so the absence rule holds: a missing key
-     * reads as off. No phase gates on it directly — `skip_if` lists are OR-ed
-     * and "skip review" needs "and not light" too — so `runner.ts` folds it into
-     * the `scratch.reviewTriage.skipReview` seed (`reviewTriageSeed`), which the
-     * light harvest clears. Projected here so that seed reads the same run-
-     * scoped authority on every route, the eval harness's included.
-     */
-    ...(review.analysis.independentReview ? { independentReviewEnabled: "true" } : {}),
-    /**
      * The `review` phase's install mode (issue #403), read as
      * `install: { from: reviewInstallPolicy, default: allow }`. With the
-     * pipeline on, `prepare` and `falsify` own execution and `review` is an
-     * abbreviated read, so an install there is blocked. Absent when the
+     * pipeline on, `review` runs only as a light re-review's focused read, so
+     * an install there is blocked. Absent when the
      * pipeline is off — the YAML default then keeps the `pr-review` skill's
      * install-to-probe affordance for the one review pass there is.
      */
@@ -1777,41 +1751,15 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
     seedTimeoutSeconds: String(review.analysis.seedTimeoutSeconds),
     reconcileTimeoutSeconds: String(review.analysis.reconcileTimeoutSeconds),
     /**
-     * WP11c — the `survey` fan-out's concurrency CEILING, read by
-     * `max_concurrent: { from: surveyConcurrency, default: 6 }`.
-     *
-     * Projected unconditionally alongside `analysisEnabled` (not under the
-     * probes branch) because the fan-out is the surveys themselves, not a probe
-     * affordance. The run clamps it again per backend — gondolin pins to 1 — so
-     * this is the operator's ask, never the effective value.
+     * The `site-review` fan-out's concurrency CEILING, read by
+     * `max_concurrent: { from: surveyConcurrency, default: 6 }`. The run clamps
+     * it again per backend — gondolin pins to 1 — so this is the operator's
+     * ask, never the effective value.
      */
     surveyConcurrency: String(review.analysis.surveyConcurrency),
     /**
-     * The survey ENGINE (`docs/plans/unit-survey.md`) — the gate the three unit
-     * phases (`units`, `survey-units`, `units-ingest`) and the agent `survey`
-     * fan-out both read, in opposite directions.
-     *
-     * A bare-boolean key, not `surveyEngine: "units"`, and the grammar is why:
-     * `skip_if`'s quoted `!=` form reads an ABSENT variable as "no match", so
-     * `surveyEngine != 'units'` would RUN the unit phases on every deployment
-     * that never set the key. `unitSurveyEnabled != true` skips them there
-     * instead, and `unitSurveyEnabled == true` on the fan-out lets it run.
-     * Present only for `units`, so every failure direction is the agent survey.
-     */
-    ...(review.analysis.surveyEngine === "units" ? { unitSurveyEnabled: "true" } : {}),
-    /**
-     * The review ENGINE (`docs/plans/adjudicate-falsify-replay.md`) — the gate
-     * the five site phases (`site-plan`, `site-review`, `merge`, `select`, `site-finalize`) and
-     * the adjudicate chain both read, in opposite directions. Bare-boolean for
-     * the same reason as `unitSurveyEnabled`: present only for `sites`, so
-     * every failure direction is the shipped adjudicate chain.
-     */
-    ...(review.analysis.reviewEngine === "sites" ? { siteReviewEnabled: "true" } : {}),
-    /**
      * `survey-units`' in-flight ceiling. Read by the handler itself (a
-     * `max_concurrent` key is fan-out-only in the schema). Projected with the
-     * pipeline rather than with the engine so an eval arm's value is visible on
-     * the context whichever engine it picked.
+     * `max_concurrent` key is fan-out-only in the schema).
      */
     surveyUnitConcurrency: String(review.analysis.surveyUnitConcurrency),
     /**
@@ -1821,16 +1769,10 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      */
     surveyUnitsTimeoutSeconds: String(review.analysis.surveyUnitsTimeoutSeconds),
     /**
-     * The CONTROL arm — `--contract` on the `seed` phase's `lastlight-facts`
-     * invocation, and the argument `renderSpecObligations` above just took.
-     *
-     * Projected unconditionally beside `analysisEnabled` (not under the probes
-     * branch) because it governs the surveys themselves, and projected at all
-     * because the five facts-derived families are rendered by a CLI in the
-     * sandbox: the only way the operator's answer reaches them is through the
-     * phase's command line. `spec` gets it in-process, one call up. Two readers,
-     * one config key, so the sixth axis cannot silently stay on `full` while its
-     * five siblings move.
+     * `--contract` on the `seed` phase's `lastlight-facts` invocation. It is
+     * recorded in obligations.json, and all it changes now is how strictly the
+     * `discharge` post-check in `units-ingest` grades (`minimal` degrades it to
+     * a non-empty floor).
      *
      * A string like every other key here: the render context is projected to
      * strings, and the phase's shell defaults an empty value back to `minimal` —
@@ -1860,8 +1802,7 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      *
      * Truncation itself is PER FAMILY (`FAMILY_CAPS` in
      * `packages/code-facts/src/seed.ts` — contract 12, enforcement 12, state
-     * 8, security 8, tests 8), because each family feeds exactly one survey
-     * branch and the cost is per branch. This key is applied after those
+     * 8, security 8, tests 8). This key is applied after those
      * ceilings and defaults to their sum, so an operator moving it only ever
      * matters once they have raised one.
      *
@@ -1912,54 +1853,6 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      * `installed` off `env.json` and records what it could not run.
      */
     ...(review.analysis.probes !== "off" ? { probesEnabled: "true" } : {}),
-    /**
-     * #399's gate, and a third separate one — `skip_if: "dossierEnabled != true"`
-     * on the `dossier` phase, and the `{{#if dossierEnabled}}` pair that selects
-     * which half of `review-adjudicate.md` renders.
-     *
-     * Present only when the operator asked, so the absence rule holds here too:
-     * a deployment with the pipeline on and this off gets today's adjudicator
-     * byte-for-byte, and a typo anywhere still fails toward it. Its own key
-     * rather than a richer object because `evalSkipIf` compares scalars — the
-     * same reason `probesEnabled` is one.
-     *
-     * It gates BOTH halves of the change (the rendered input and the typed
-     * output) because they move one phase's measured surface together; see
-     * `ReviewAnalysisConfig.adjudicate`.
-     *
-     * `!= "legacy"` rather than `=== "dossier"`: `"jev"` (#399 idea 2) IMPLIES
-     * the dossier rendering and typed output — it only adds an extra
-     * annotation phase before `dossier`, never a different adjudicate input
-     * shape. Two adjudicate modes needing the dossier must not require two
-     * separate reads of this key.
-     */
-    ...(review.analysis.adjudicate !== "legacy" ? { dossierEnabled: "true" } : {}),
-    /**
-     * `dossier --admit`'s spec, rendered into the phase's shell only when there
-     * IS a dossier to shape. Absent ⇒ every row is admitted.
-     */
-    ...(review.analysis.adjudicate !== "legacy" && review.analysis.admit ? { admitRules: review.analysis.admit } : {}),
-    /**
-     * #399 idea 2's own gate — `skip_if: "jevClassifyEnabled != true"` on the
-     * `jev-classify` phase. A FOURTH separate key, same reasoning as
-     * `probesEnabled`/`dossierEnabled`: `evalSkipIf` compares scalars, and
-     * this is a third, narrower decision than "render the dossier" — run one
-     * TypeSafe call per hypothesis and annotate it in.
-     *
-     * Present only when the operator asked for `"jev"` specifically, so the
-     * absence rule holds a third time: a deployment on `"dossier"` gets
-     * exactly what it measured, with no annotation phase added underneath it.
-     */
-    // A `jev:` admission rule reads `jev.json`, so it runs the classifier under
-    // any dossier mode — not only `"jev"`, whose annotation it shares.
-    ...(review.analysis.adjudicate === "jev" ||
-    (review.analysis.adjudicate !== "legacy" && (review.analysis.admit ?? "").includes("jev:"))
-      ? {
-          jevClassifyEnabled: "true",
-          jevModel: review.analysis.jevModel ?? "",
-          jevTimeoutSeconds: String(review.analysis.jevTimeoutSeconds),
-        }
-      : {}),
     /**
      * The three sub-switches, projected only when probes are on at all.
      *
@@ -2045,26 +1938,15 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
           ),
         }
       : {}),
-    // The PR's own description — what the AUTHOR says they did.
-    prBody: state.body,
-    // The issues it closes — what was ASKED, fenced as reference material by
-    // `renderLinkedIssues` for the same reason `priorNotes` is fenced: this is
-    // text a stranger wrote, and it must never read as instructions to the agent.
-    linkedIssues: renderLinkedIssues(state.closes),
-    // A `{{#if specObligations}}`-able string. Absent (not empty) when there is
-    // genuinely nothing to say AND nothing degraded — but a DEGRADED set still
-    // renders, because "we could not look" and "we looked and it is fine" must
-    // stay distinguishable (locked decision 6).
-    ...(rendered ? { specObligations: rendered } : {}),
     /**
-     * The SAME set, raw, for `lastlight-facts units` — which cuts spec
+     * The spec obligation set, raw, for `lastlight-facts units` — which cuts spec
      * obligations into units and so needs ids, criteria and candidates, not
      * prose. The `units` phase writes it to
      * `.lastlight/pr-review/spec-obligations.json` through a QUOTED heredoc, so
      * this must stay ONE line (`JSON.stringify` with no indent never emits a raw
      * newline — string newlines are `\n` escapes) and can therefore never equal
-     * the heredoc's delimiter line. Present under exactly the condition
-     * `specObligations` is, so "nothing to say" writes no file.
+     * the heredoc's delimiter line. Absent when there is nothing to say and
+     * nothing degraded, so that case writes no file.
      *
      * `{` inside a string is escaped as `\u007b` wherever it would sit next to
      * another `{`: the bash-phase guard (`validateShellCommand`) rejects any
@@ -2073,6 +1955,6 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      * (JSON's own structure never puts two `{` side by side — an object's first
      * token is a string key — so every `{{` is inside a string.)
      */
-    ...(rendered ? { specObligationsJson: specObligationsLine(specSet) } : {}),
+    ...(hasSpec ? { specObligationsJson: specObligationsLine(specSet) } : {}),
   };
 }

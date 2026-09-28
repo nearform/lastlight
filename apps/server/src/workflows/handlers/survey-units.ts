@@ -60,7 +60,7 @@ const log = logger("survey-units");
  * **Only host-checkout backends.** The handler reads and writes the workspace
  * from the harness. `kubernetes` has no host checkout (its paths are in-pod;
  * see {@link HOST_READABLE_WORKSPACE}), so `loadConfig` refuses
- * `surveyEngine: units` there at startup; the run-time check below is a guard
+ * `review.analysis.enabled` there at startup; the run-time check below is a guard
  * that degrades, never the primary refusal.
  *
  * **Degrade, don't fail.** Every path INSIDE the phase — no `units.json`, an
@@ -1239,15 +1239,14 @@ export class SurveyUnitsHandler implements PhaseTypeHandler {
     };
 
     // A backend with no host checkout is refused at config load
-    // (`assertSurveyEngineSupported`); this is the belt to that. It comes
+    // (`assertReviewAnalysisSupported`); this is the belt to that. It comes
     // FIRST and touches nothing on disk: on kubernetes a `units.json` may even
     // be readable (the artifact upload unpacks `.lastlight/` host-side), but a
     // response written here would never reach the pod `units-ingest` runs in.
     if (!HOST_READABLE_WORKSPACE[this.run.backend]) {
       return degrade(
         `the ${this.run.backend} backend has no host checkout, so the harness cannot read units.json or write ` +
-          "the responses. `review.analysis.surveyEngine: units` should have been refused at startup — set " +
-          "`surveyEngine: agent` for this deployment.",
+          "the responses. `review.analysis.enabled` should have been refused at startup on this backend.",
       );
     }
 

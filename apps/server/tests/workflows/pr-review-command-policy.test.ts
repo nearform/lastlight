@@ -79,18 +79,16 @@ const modes = (p: ReturnType<typeof effective>) => ({
 });
 
 describe("pr-review command policy (#403)", () => {
-  it("survey and adjudicate never install and never run the suite", () => {
-    for (const name of ["survey", "adjudicate"]) {
-      const p = effective(name, { enabled: true, probes: "full" });
-      expect(modes(p), name).toEqual({ install: "block", "install-scratch": undefined, test: "block", host: "block" });
-      expect(p?.reason, name).toBeTruthy();
-    }
+  it("select never installs and never runs the suite", () => {
+    const p = effective("select", { enabled: true, probes: "full" });
+    expect(modes(p)).toEqual({ install: "block", "install-scratch": undefined, test: "block", host: "block" });
+    expect(p?.reason).toBeTruthy();
   });
 
-  it("every survey branch inherits the phase policy — none replaces it", () => {
-    const survey = phase("survey");
-    expect(survey.branches?.length).toBeGreaterThan(0);
-    for (const b of survey.branches ?? []) expect(b.command_policy, b.name).toBeUndefined();
+  it("every site-review branch inherits the phase policy — none replaces it", () => {
+    const sites = phase("site-review");
+    expect(sites.branches?.length).toBeGreaterThan(0);
+    for (const b of sites.branches ?? []) expect(b.command_policy, b.name).toBeUndefined();
   });
 
   it("falsify: repo installs blocked in every mode; tests and scratch installs follow the probe mode", () => {
@@ -124,7 +122,7 @@ describe("pr-review command policy (#403)", () => {
 
   it("host (#404): blocked in every phase that reads, logged in falsify, in every mode", () => {
     for (const over of [{ enabled: true, probes: "full" }, { enabled: true, probes: "static" }] as const) {
-      for (const name of ["survey", "review", "adjudicate"]) expect(effective(name, over)?.host, name).toBe("block");
+      for (const name of ["site-review", "select", "review"]) expect(effective(name, over)?.host, name).toBe("block");
       expect(effective("falsify", over)?.host).toBe("log");
     }
     expect(effective("review", { enabled: false })?.host).toBe("block");
@@ -133,14 +131,14 @@ describe("pr-review command policy (#403)", () => {
   it("site-review and select: no installs, no suite, nothing outside the checkout — probes on or off", () => {
     // The sites engine needs no probes, so its scratch-install mode must
     // resolve with the probe keys absent (probes: off) as well as present.
-    expect(modes(effective("site-review", { enabled: true, reviewEngine: "sites", probes: "off" }))).toEqual({
+    expect(modes(effective("site-review", { enabled: true, probes: "off" }))).toEqual({
       install: "block",
       "install-scratch": "block",
       test: "block",
       host: "block",
     });
-    expect(modes(effective("site-review", { enabled: true, reviewEngine: "sites", probes: "full" }))["install-scratch"]).toBe("log");
-    expect(modes(effective("select", { enabled: true, reviewEngine: "sites", probes: "off" }))).toEqual({
+    expect(modes(effective("site-review", { enabled: true, probes: "full" }))["install-scratch"]).toBe("log");
+    expect(modes(effective("select", { enabled: true, probes: "off" }))).toEqual({
       install: "block",
       "install-scratch": undefined,
       test: "block",

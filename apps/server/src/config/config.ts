@@ -1027,7 +1027,7 @@ export function loadConfig(): LastLightConfig {
     env: envLayer,
   });
   const fileCfg = normalizeFileConfig(mergedRaw);
-  assertSurveyEngineSupported(fileCfg.review.analysis.surveyEngine, fileCfg.sandbox.backend);
+  assertReviewAnalysisSupported(fileCfg.review.analysis.enabled, fileCfg.sandbox.backend);
 
   const stateDir = resolve(stringEnv("STATE_DIR", "./data"));
   const models = fileCfg.models;
@@ -1972,21 +1972,21 @@ function optionalStringArray(raw: unknown, path: string): string[] {
 }
 
 /**
- * `review.analysis.surveyEngine: units` needs a workspace the HARNESS can read
- * and write: the in-process `survey-units` phase reads `units.json` from the
- * host checkout and writes one response per unit back into it for the
- * sandboxed `units-ingest`. A backend with no host checkout
- * ({@link HOST_READABLE_WORKSPACE}, i.e. `kubernetes`) would survey nothing on
- * every review, so the combination is refused at startup, naming both keys —
- * a boot error an operator sees once beats a degraded survey on every run.
- * (The repo layer cannot reach this: `review.analysis` is operator-only.)
+ * `review.analysis` needs a workspace the HARNESS can read and write: the
+ * in-process `survey-units` phase reads `units.json` from the host checkout and
+ * writes one response per unit back into it for the sandboxed `units-ingest`.
+ * A backend with no host checkout ({@link HOST_READABLE_WORKSPACE}, i.e.
+ * `kubernetes`) would survey nothing on every review, so the combination is
+ * refused at startup, naming both keys — a boot error an operator sees once
+ * beats a degraded review on every run. (The repo layer cannot reach this:
+ * `review.analysis` is operator-only.)
  */
-export function assertSurveyEngineSupported(engine: SurveyEngine, backend: SandboxBackend): void {
-  if (engine !== "units" || HOST_READABLE_WORKSPACE[backend]) return;
+export function assertReviewAnalysisSupported(enabled: boolean, backend: SandboxBackend): void {
+  if (!enabled || HOST_READABLE_WORKSPACE[backend]) return;
   throw new Error(
-    `review.analysis.surveyEngine: units is not supported on the ${backend} sandbox backend — the survey-units ` +
+    `review.analysis.enabled is not supported on the ${backend} sandbox backend — the survey-units ` +
       "phase reads and writes the workspace from the harness, and this backend has no host checkout. " +
-      `Set review.analysis.surveyEngine: agent, or use a backend with a host-readable workspace ` +
+      `Set review.analysis.enabled: false, or use a backend with a host-readable workspace ` +
       `(${(Object.keys(HOST_READABLE_WORKSPACE) as SandboxBackend[]).filter((b) => HOST_READABLE_WORKSPACE[b]).join(", ")}).`,
   );
 }

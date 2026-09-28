@@ -454,7 +454,7 @@ describe("survey-units — degrade, don't fail", () => {
     const call = new FakeCall();
     const { outcome } = await runSurvey(call, { backend: "kubernetes" });
     expect(outcome.status).toBe("succeeded");
-    expect(outcome.results[0]?.output).toContain("surveyEngine: units");
+    expect(outcome.results[0]?.output).toContain("review.analysis.enabled");
     expect(outcome.results[0]?.output).toContain("kubernetes");
     expect(call.requests).toHaveLength(0);
     expect(readFileSync(join(prDir, "units", "responses", "u-001.json"), "utf8")).toBe("{}");

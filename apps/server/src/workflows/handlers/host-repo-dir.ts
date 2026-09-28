@@ -44,7 +44,7 @@ export function resolveHostRepoDir(
  *    branch is given the path to open itself. Attempting it would ENOENT every
  *    time and turn "the harness cannot see this workspace" into "the seeding
  *    step failed", which is a worse lie than the one this key removes.
- *  - `config.ts` (`loadConfig`): `review.analysis.surveyEngine: units` on a
+ *  - `config.ts` (`loadConfig`): `review.analysis.enabled` on a
  *    backend marked `false` here is REFUSED at startup — `survey-units` reads
  *    `units.json` and writes the responses from the harness.
  *  - `survey-units.ts`: the same check again at run time, as a guard that

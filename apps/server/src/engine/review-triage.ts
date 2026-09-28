@@ -30,12 +30,12 @@
  *
  * ## Why `light` REPLACES the namespace
  *
- * `runner.ts` seeds `{ depth: "full", deep, baseline }` at run start, and
- * exactly one of `deep` / `baseline` / `light` must be true so exactly one arm
- * of `prompts/review.md` renders — the template engine has no `else` and no
- * nesting, so three mutually exclusive keys is how a three-way choice is
- * expressed. Writing `{ depth: "light", light: true }` over the seed clears the
- * other two by replacement.
+ * `runner.ts` seeds `{ depth: "full", baseline: true }` at run start, and
+ * exactly one of `baseline` / `light` must be true so exactly one arm of
+ * `prompts/review.md` renders — the template engine has no `else` and no
+ * nesting, so mutually exclusive keys are how a choice is expressed. Writing
+ * `{ depth: "light", light: true }` over the seed clears `baseline` — and
+ * `skipReview` — by replacement.
  *
  * ## Failure direction
  *
@@ -61,43 +61,33 @@ export interface ReviewTriageScratch {
   depth: ReviewDepth;
   /** Render the light single-pass arm of `prompts/review.md`. */
   light?: boolean;
-  /** Render the abbreviated arm — the evidence pipeline ran ahead of us. */
-  deep?: boolean;
-  /** Render the original no-pipeline arm. */
+  /** Render the whole-review arm — the one a full review runs when `review` does. */
   baseline?: boolean;
   /**
-   * Skip the `review` phase: the pipeline is on and
-   * `review.analysis.independentReview` is off, so `adjudicate` writes
-   * findings.json from the hypotheses alone. Read by `review`'s
+   * Skip the `review` phase: the pipeline is on, so `site-finalize` writes
+   * findings.json. Read by `review`'s
    * `skip_if: "scratch.reviewTriage.skipReview == true"`.
    *
    * It lives HERE, not on the render context, because the skip is "pipeline
-   * on AND independent pass off AND not light", `skip_if` lists are OR-ed, and
-   * `light` is only known mid-run. The light harvest replaces the whole
-   * namespace, which drops this flag — so a light review always runs `review`.
-   * Absent reads as false: every failure direction runs the review pass.
+   * on AND not light", `skip_if` lists are OR-ed, and `light` is only known
+   * mid-run. The light harvest replaces the whole namespace, which drops this
+   * flag — so a light review always runs `review`, the only phase that then
+   * writes findings.json. Absent reads as false: every failure direction runs
+   * the review pass.
    */
   skipReview?: boolean;
 }
 
 /**
- * The dispatch-time seed — `{ depth: "full" }` plus exactly one of `deep` /
- * `baseline`, and `skipReview` when the pipeline is on without the
- * independent pass. Pure over the render context's string projections
- * (`analysisEnabled`, `independentReviewEnabled` from `specContext`), read the
- * way the phases' own guards read them.
+ * The dispatch-time seed — `{ depth: "full", baseline: true }`, and
+ * `skipReview` when the pipeline is on. Pure over the render context's string
+ * projection `analysisEnabled` (from `specContext`), read the way the phases'
+ * own guards read it.
  */
 export function reviewTriageSeed(ctx: Record<string, unknown>): ReviewTriageScratch {
   const on = (v: unknown) => v === "true" || v === true;
-  const analysisEnabled = on(ctx.analysisEnabled);
-  const seed: ReviewTriageScratch = {
-    depth: "full",
-    deep: analysisEnabled,
-    baseline: !analysisEnabled,
-  };
-  // Under the `sites` engine `sites --finalize` writes findings.json, so an
-  // independent pass would be overwritten: skip it whatever was asked.
-  if (analysisEnabled && (!on(ctx.independentReviewEnabled) || on(ctx.siteReviewEnabled))) seed.skipReview = true;
+  const seed: ReviewTriageScratch = { depth: "full", baseline: true };
+  if (on(ctx.analysisEnabled)) seed.skipReview = true;
   return seed;
 }
 
@@ -141,7 +131,6 @@ export function readReviewTriage(
   return {
     depth: raw.depth === "light" ? "light" : "full",
     light: raw.light === true,
-    deep: raw.deep === true,
     baseline: raw.baseline === true,
     skipReview: raw.skipReview === true,
   };

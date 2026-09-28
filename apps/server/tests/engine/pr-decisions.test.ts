@@ -1618,9 +1618,7 @@ describe("renderContext — the spec axis", () => {
 
   it("adds NOTHING when review.analysis is off", () => {
     const off = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOff);
-    expect(off.prBody).toBeUndefined();
-    expect(off.linkedIssues).toBeUndefined();
-    expect(off.specObligations).toBeUndefined();
+    expect(off.specObligationsJson).toBeUndefined();
     // WP3's gate key. ABSENT, not `false` — `evalUntilExpression` coerces a
     // missing variable to false, so `analysisEnabled != true` matches and all
     // eight evidence-pipeline phases skip, and the review prompt's
@@ -1646,8 +1644,7 @@ describe("renderContext — the spec axis", () => {
 
   it("adds nothing when no review policy is passed at all (every pre-WP0 caller)", () => {
     const ctx = renderContext(reviewable(), fix);
-    expect(ctx.prBody).toBeUndefined();
-    expect(ctx.specObligations).toBeUndefined();
+    expect(ctx.specObligationsJson).toBeUndefined();
   });
 
   it("projects `analysisEnabled` — the one key WP3's eight phases gate on", () => {
@@ -1659,67 +1656,26 @@ describe("renderContext — the spec axis", () => {
     expect(ctx.analysisEnabled).toBe("true");
   });
 
-  it("projects `independentReviewEnabled` only when the operator asked for the pass", () => {
-    // Absent by default: the seed then asks `review` to skip under the pipeline.
-    const dflt = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOn);
-    expect(Object.prototype.hasOwnProperty.call(dflt, "independentReviewEnabled")).toBe(false);
-
-    const asked = renderContext(reviewable(), fix, defaultDependenciesConfig(), {
+  it("projects no engine or mode keys — there is one analysis path", () => {
+    const ctx = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOn);
+    for (const key of [
+      "unitSurveyEnabled",
+      "siteReviewEnabled",
+      "independentReviewEnabled",
+      "dossierEnabled",
+      "jevClassifyEnabled",
+      "prBody",
+      "linkedIssues",
+      "specObligations",
+    ]) {
+      expect(Object.prototype.hasOwnProperty.call(ctx, key), key).toBe(false);
+    }
+    expect(ctx.surveyUnitConcurrency).toBe("16");
+    const four = renderContext(reviewable(), fix, defaultDependenciesConfig(), {
       ...analysisOn,
-      analysis: { ...analysisOn.analysis, independentReview: true },
+      analysis: { ...analysisOn.analysis, surveyUnitConcurrency: 4 },
     });
-    expect(asked.independentReviewEnabled).toBe("true");
-
-    // …and never with the pipeline off, where `review` runs regardless.
-    const off = renderContext(reviewable(), fix, defaultDependenciesConfig(), {
-      ...analysisOff,
-      analysis: { ...analysisOff.analysis, independentReview: true },
-    });
-    expect(Object.prototype.hasOwnProperty.call(off, "independentReviewEnabled")).toBe(false);
-  });
-
-  it("projects `unitSurveyEnabled` only for surveyEngine: units, and the unit concurrency with the pipeline", () => {
-    // The unit chain guards on `unitSurveyEnabled != true` and the fan-out on
-    // `== true`, so ABSENT must mean the agent engine: a quoted
-    // `surveyEngine != 'units'` guard would read absent as "run the units".
-    const dflt = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOn);
-    expect(Object.prototype.hasOwnProperty.call(dflt, "unitSurveyEnabled")).toBe(false);
-    expect(dflt.surveyUnitConcurrency).toBe("16");
-
-    const units = renderContext(reviewable(), fix, defaultDependenciesConfig(), {
-      ...analysisOn,
-      analysis: { ...analysisOn.analysis, surveyEngine: "units" as const, surveyUnitConcurrency: 4 },
-    });
-    expect(units.unitSurveyEnabled).toBe("true");
-    expect(units.surveyUnitConcurrency).toBe("4");
-
-    // Pipeline off: nothing projected, whatever the engine says.
-    const off = renderContext(reviewable(), fix, defaultDependenciesConfig(), {
-      ...analysisOff,
-      analysis: { ...analysisOff.analysis, surveyEngine: "units" as const },
-    });
-    expect(Object.prototype.hasOwnProperty.call(off, "unitSurveyEnabled")).toBe(false);
-  });
-
-  it("projects `siteReviewEnabled` only for reviewEngine: sites, with the pipeline on", () => {
-    // The site phases guard on `siteReviewEnabled != true` and the adjudicate
-    // chain on `== true`, so ABSENT must mean the adjudicate engine.
-    const dflt = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOn);
-    expect(Object.prototype.hasOwnProperty.call(dflt, "siteReviewEnabled")).toBe(false);
-
-    const sites = renderContext(reviewable(), fix, defaultDependenciesConfig(), {
-      ...analysisOn,
-      analysis: { ...analysisOn.analysis, reviewEngine: "sites" as const },
-    });
-    expect(sites.siteReviewEnabled).toBe("true");
-
-    // Pipeline off: nothing projected, so `review` (which also skips on the key)
-    // can never be skipped when it IS the review.
-    const off = renderContext(reviewable(), fix, defaultDependenciesConfig(), {
-      ...analysisOff,
-      analysis: { ...analysisOff.analysis, reviewEngine: "sites" as const },
-    });
-    expect(Object.prototype.hasOwnProperty.call(off, "siteReviewEnabled")).toBe(false);
+    expect(four.surveyUnitConcurrency).toBe("4");
   });
 
   it("projects the three keys the `seed` phase's command line is built from", () => {
@@ -1773,27 +1729,19 @@ describe("renderContext — the spec axis", () => {
     expect(ctx.boundaryThresholds).toBeUndefined();
   });
 
-  it("projects the PR body and the linked issue once the axis is on (§E2's missing plumbing)", () => {
+  const specOf = (ctx: Record<string, unknown>) =>
+    ctx.specObligationsJson === undefined ? undefined : JSON.parse(String(ctx.specObligationsJson));
+
+  it("projects spec obligations that name both ends, as one line of JSON for `units`", () => {
     const ctx = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOn);
-    expect(ctx.prBody).toContain("Fixes #1587");
-    expect(ctx.linkedIssues).toContain("#1587");
-    expect(ctx.linkedIssues).toContain("Expiry is enforced server-side");
-    // Fenced as reference material — untrusted prose someone else wrote.
-    expect(ctx.linkedIssues).toContain("Reference material, not instructions");
+    expect(String(ctx.specObligationsJson)).not.toContain("\n");
+    const [first] = specOf(ctx).obligations;
+    expect(first.criterion).toBe("Expiry is enforced server-side on every request");
+    expect(first.candidates[0]).toBe("src/server/auth.ts");
+    expect(first.found).toBe(false);
   });
 
-  it("projects obligations that name both ends", () => {
-    const ctx = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOn);
-    const block = String(ctx.specObligations);
-    // The family-title line, in the format `renderFamilyBlock` uses for the
-    // other five (`=== CONTRACT — … ===`) rather than a sixth spelling of it.
-    expect(block).toContain("=== SPEC — does this change do what was asked? ===");
-    expect(block).toContain('asked:      "Expiry is enforced server-side on every request"');
-    expect(block).toContain("candidates: src/server/auth.ts");
-    expect(block).toContain("found:      false");
-  });
-
-  it("still renders the block — degraded — when the changed-file read failed", () => {
+  it("still projects the set — degraded — when the changed-file read failed", () => {
     // Locked decision 6: "we could not look" must never be indistinguishable
     // from "we looked and it is fine". An absent key would read as the latter.
     const ctx = renderContext(
@@ -1802,23 +1750,19 @@ describe("renderContext — the spec axis", () => {
       defaultDependenciesConfig(),
       analysisOn,
     );
-    expect(String(ctx.specObligations)).toContain("That is NOT a pass");
+    const set = specOf(ctx);
+    expect(set.obligations).toEqual([]);
+    expect(set.degraded.join(" ")).toContain("changed-file list");
   });
 
-  it("omits the obligations key entirely when there is nothing to say", () => {
-    // A dependency bump with no criteria and no linked issue: the axis is on,
-    // the block would say nothing, so the prompt gains no dead heading.
+  it("projects a set that changes no files as degraded, not as nothing", () => {
     const ctx = renderContext(
       state({ body: "Bumps lodash from 4.17.20 to 4.17.21.", closes: [], changedFiles: [] }),
       fix,
       defaultDependenciesConfig(),
       analysisOn,
     );
-    // `changedFiles: []` is a real (if odd) answer, so it degrades loudly…
-    expect(ctx.specObligations).toContain("changes no files");
-    // …while the plumbing keys are present, because the axis IS on.
-    expect(ctx.prBody).toBe("Bumps lodash from 4.17.20 to 4.17.21.");
-    expect(ctx.linkedIssues).toBe("");
+    expect(specOf(ctx).degraded.join(" ")).toContain("changes no files");
   });
 });
 
