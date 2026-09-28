@@ -52,7 +52,7 @@ describe("the site-review fan-out's soft-failure policy survives parsing", () =>
     // `{ from, default }` rather than a literal, so an operator dials it without
     // forking the workflow — and `default` is what a deployment whose context
     // lacks the key falls back to, loudly.
-    expect(survey?.max_concurrent).toEqual({ from: "surveyConcurrency", default: 6 });
+    expect(survey?.max_concurrent).toEqual({ from: "siteConcurrency", default: 6 });
   });
 
   /**

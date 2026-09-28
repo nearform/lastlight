@@ -229,46 +229,10 @@ describe("loadConfig — review.analysis.maxBodyComments", () => {
 });
 
 /**
- * `review.analysis.independentReview` — the separate `review` pass under the
- * pipeline. Off unless the literal `true`: it is a second strong-model session
- * on the operator's budget.
+ * `review.analysis.surveyUnitConcurrency` / `siteConcurrency`, and the one
+ * setup the pipeline cannot run on (docs/plans/pr-review-units-sites-only.md).
  */
-describe("loadConfig — review.analysis.independentReview", () => {
-  beforeEach(() => {
-    for (const k of ["GITHUB_APP_ID", "SLACK_BOT_TOKEN", "LASTLIGHT_MODEL", "LASTLIGHT_MODELS"]) {
-      vi.stubEnv(k, "");
-    }
-  });
-
-  afterEach(() => {
-    vi.unstubAllEnvs();
-    resetRuntimeConfigForTests();
-  });
-
-  const independentFor = (yaml: string) => {
-    vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlayWith(yaml));
-    return loadConfig().review.analysis.independentReview;
-  };
-
-  it("defaults to false — in the packaged config and the TS policy alike", () => {
-    expect(independentFor("review:\n  analysis:\n    enabled: true\n")).toBe(false);
-    expect(defaultReviewConfig().analysis.independentReview).toBe(false);
-  });
-
-  it("turns on only for the literal `true`", () => {
-    expect(independentFor("review:\n  analysis:\n    independentReview: true\n")).toBe(true);
-    for (const bad of ['"true"', "yes", "1", "null"]) {
-      expect(independentFor(`review:\n  analysis:\n    independentReview: ${bad}\n`), bad).toBe(false);
-    }
-  });
-});
-
-/**
- * `review.analysis.surveyEngine` / `surveyUnitConcurrency` — which survey runs
- * (docs/plans/unit-survey.md). The unit engine is unmeasured, so only the
- * literal `units` selects it.
- */
-describe("loadConfig — review.analysis.surveyEngine", () => {
+describe("loadConfig — the unit survey and the sites engine", () => {
   beforeEach(() => {
     for (const k of ["GITHUB_APP_ID", "SLACK_BOT_TOKEN", "LASTLIGHT_MODEL", "LASTLIGHT_MODELS"]) {
       vi.stubEnv(k, "");
@@ -285,19 +249,21 @@ describe("loadConfig — review.analysis.surveyEngine", () => {
     return loadConfig().review.analysis;
   };
 
-  it("defaults to the agent fan-out at 16 unit calls — in the packaged config and the TS policy alike", () => {
+  it("defaults to 16 unit calls and 6 investigators — in the packaged config and the TS policy alike", () => {
     const a = analysisFor("review:\n  analysis:\n    enabled: true\n");
-    expect(a.surveyEngine).toBe("agent");
     expect(a.surveyUnitConcurrency).toBe(16);
-    expect(defaultReviewConfig().analysis.surveyEngine).toBe("agent");
+    expect(a.siteConcurrency).toBe(6);
     expect(defaultReviewConfig().analysis.surveyUnitConcurrency).toBe(16);
+    expect(defaultReviewConfig().analysis.siteConcurrency).toBe(6);
   });
 
-  it("selects units only for the literal `units`", () => {
-    expect(analysisFor("review:\n  analysis:\n    surveyEngine: units\n").surveyEngine).toBe("units");
-    for (const bad of ["Units", "true", "unit", "null", "agent"]) {
-      expect(analysisFor(`review:\n  analysis:\n    surveyEngine: ${bad}\n`).surveyEngine, bad).toBe("agent");
-    }
+  it("reads `siteConcurrency`, and `surveyConcurrency` as its old name", () => {
+    expect(analysisFor("review:\n  analysis:\n    siteConcurrency: 3\n").siteConcurrency).toBe(3);
+    expect(analysisFor("review:\n  analysis:\n    surveyConcurrency: 2\n").siteConcurrency).toBe(2);
+    // The new name wins when both are pinned.
+    expect(
+      analysisFor("review:\n  analysis:\n    siteConcurrency: 3\n    surveyConcurrency: 2\n").siteConcurrency,
+    ).toBe(3);
   });
 
   it("takes an operator's concurrency, and never lets it reach zero", () => {
@@ -387,18 +353,19 @@ describe("loadConfig — review.analysis.probes", () => {
  * backend.
  */
 /**
- * The REMOVED boundary keys — `review.analysis.internalFloor` and
- * `review.analysis.thresholds`.
+ * The REMOVED `review.analysis` keys — the confidence gates
+ * (`internalFloor`, `thresholds`; deleted 2026-09-21 after `finding.confidence`
+ * measured AUROC 0.228) and the engine/adjudicator keys units + sites replaced
+ * (`surveyEngine`, `reviewEngine`, `independentReview`, `adjudicate`,
+ * `jevModel`, `admit`, `jevTimeoutSeconds`, `surveyPasses`).
  *
- * Both were confidence gates, deleted 2026-09-21 after `finding.confidence`
- * measured AUROC 0.228 [0.171, 0.299] over 516 findings. Two overlay repos in
- * the wild and ~17 eval overlays may still pin them, so the contract is
- * **accepted and ignored, never rejected**: this loader only ever reads keys
- * it knows, so a stale leaf cannot fail a boot — and it says so, because an
- * operator who pinned a floor should learn it stopped meaning anything rather
- * than believe a bar is in force.
+ * Both production overlays and many eval overlays still pin some of them, so
+ * the contract is **accepted and ignored, never rejected**: this loader only
+ * ever reads keys it knows, so a stale leaf cannot fail a boot — and it says
+ * so, because an operator who pinned one should learn it stopped meaning
+ * anything rather than believe it is in force.
  */
-describe("loadConfig — a config still pinning the removed confidence gates", () => {
+describe("loadConfig — a config still pinning removed analysis keys", () => {
   beforeEach(() => {
     for (const k of ["GITHUB_APP_ID", "SLACK_BOT_TOKEN", "LASTLIGHT_MODEL", "LASTLIGHT_MODELS"]) {
       vi.stubEnv(k, "");
@@ -426,6 +393,29 @@ describe("loadConfig — a config still pinning the removed confidence gates", (
     // Gone from the shape entirely, not carried through as dead config.
     expect(analysis.internalFloor).toBeUndefined();
     expect(analysis.thresholds).toBeUndefined();
+  });
+
+  it("boots with the old engine keys — jevTimeoutSeconds is no longer a required budget", () => {
+    vi.stubEnv(
+      "LASTLIGHT_OVERLAY_DIR",
+      overlayWith(
+        "review:\n  analysis:\n    enabled: true\n    surveyEngine: units\n    reviewEngine: sites\n" +
+          "    adjudicate: dossier\n    admit: top:40\n    jevTimeoutSeconds: 60\n    independentReview: true\n",
+      ),
+    );
+    const analysis = loadConfig().review.analysis as Record<string, unknown>;
+    for (const key of ["surveyEngine", "reviewEngine", "adjudicate", "admit", "jevTimeoutSeconds", "independentReview"]) {
+      expect(analysis[key], key).toBeUndefined();
+    }
+    const said = warnSpy.mock.calls.find((c) => typeof c[0] === "string" && c[0].includes("removed"));
+    expect((said?.[1] as { keys: string[] }).keys).toEqual([
+      "surveyEngine",
+      "reviewEngine",
+      "independentReview",
+      "adjudicate",
+      "admit",
+      "jevTimeoutSeconds",
+    ]);
   });
 
   it("warns, naming the keys it ignored", () => {

@@ -265,65 +265,6 @@ export function coerceProbeMode(raw: unknown): ProbeMode {
 }
 
 /**
- * What `adjudicate` reads and what it writes. See
- * {@link ReviewAnalysisConfig.adjudicate}.
- *
- * Three literals rather than a boolean because this selects a PHASE SHAPE.
- * `"jev"` is the third value this type's doc comment predicted — a per-row
- * System-1 classifier over the same dossier
- * ([#399](https://github.com/nearform/lastlight/issues/399) idea 2) — built
- * and measured 2026-09-22: 260 hypotheses across an 8-case arm, 83.6%
- * agreement with a Sonnet adjudicate call on the identical dossier evidence,
- * for $0.0053. It **implies** `"dossier"` (the rendering and the typed
- * `claim`/`category`/`fix` output are unchanged) and additionally runs
- * `jev-classify`, whose per-hypothesis category is rendered into the dossier
- * as an ADVISORY line — Sonnet still writes every disposition itself. Not a
- * replacement of the adjudicator: the measured agreement is weakest exactly
- * on the rarest, highest-stakes categories (`defect` 33%, `correctness-risk`
- * 40% recall against Sonnet's own call), so nothing here skips or overrides
- * Sonnet's judgement yet. `obligationContract` has the same three-value shape
- * for the same reason (a phase shape, not a flag).
- */
-export type AdjudicateMode = "legacy" | "dossier" | "jev";
-
-/**
- * Read an operator's `adjudicate` value. **Total**, and it fails toward the
- * shipped phase.
- *
- * Only the literals `"dossier"` and `"jev"` move a deployment. A bare `true`
- * does NOT — unlike {@link coerceProbeMode}, where `true` meant something
- * specific historically, nothing has ever written `adjudicate: true`, so
- * there is no compatibility to preserve and no reason to let a truthy-ish
- * value select an unmeasured phase shape.
- */
-export function coerceAdjudicateMode(raw: unknown): AdjudicateMode {
-  if (raw === "jev") return "jev";
-  return raw === "dossier" ? "dossier" : "legacy";
-}
-
-/** `review.analysis.surveyEngine` — see {@link ReviewAnalysisConfig.surveyEngine}. */
-export type SurveyEngine = "agent" | "units";
-
-/**
- * Read an operator's `surveyEngine` value. **Total**, failing toward the
- * shipped fan-out: only the literal `"units"` selects the unmeasured engine.
- */
-export function coerceSurveyEngine(raw: unknown): SurveyEngine {
-  return raw === "units" ? "units" : "agent";
-}
-
-/** `review.analysis.reviewEngine` — see {@link ReviewAnalysisConfig.reviewEngine}. */
-export type ReviewEngine = "adjudicate" | "sites";
-
-/**
- * Read an operator's `reviewEngine` value. **Total**, failing toward the
- * shipped chain: only the literal `"sites"` selects the unmeasured engine.
- */
-export function coerceReviewEngine(raw: unknown): ReviewEngine {
-  return raw === "sites" ? "sites" : "adjudicate";
-}
-
-/**
  * How much automation a trigger mode buys, ascending — the scale the repo-layer
  * clamp takes the minimum on.
  *
@@ -369,21 +310,6 @@ export interface ReviewAnalysisConfig {
   /** `false` ⇒ today's two-phase review, byte-for-byte. */
   enabled: boolean;
   /**
-   * Run the separate `review` pass alongside the pipeline.
-   *
-   * **Only meaningful with `enabled`.** With the pipeline on, the surveys have
-   * already done the deep work and `adjudicate` can write `findings.json` from
-   * the hypotheses alone, so the independent pass is OFF by default — one
-   * strong-model session less per review. With the pipeline off, `review` is
-   * the whole review and always runs whatever this says. A `light` triage
-   * depth skips the pipeline, so `review` runs there too.
-   *
-   * Reaches the run as the `skipReview` flag `runner.ts` seeds onto
-   * `scratch.reviewTriage` — a flag the light harvest clears by replacing the
-   * namespace, which is how "skip unless light" is one `skip_if` expression.
-   */
-  independentReview: boolean;
-  /**
    * How many `spec` obligations one PR may carry.
    *
    * A **safety bound**, not a budget — it should never bind on a real PR. The
@@ -424,9 +350,9 @@ export interface ReviewAnalysisConfig {
    */
   maxObligations: number;
   /**
-   * Which obligation BLOCK the six survey families are handed — the CONTROL for
-   * 2026-08-23, and the only key in this block that exists to make a result
-   * readable rather than to buy compute.
+   * Which obligation contract `lastlight-facts seed` records — the CONTROL for
+   * 2026-08-23, measured on the (since removed) agent survey. Today it only
+   * changes how strictly the `discharge` post-check in `units-ingest` grades.
    *
    * `full` (the default) is that day's block: a mandatory discharge contract
    * with a `discharge` field to record a code in, an un-truncated id checklist,
@@ -443,45 +369,14 @@ export interface ReviewAnalysisConfig {
    * same obligations, delivered just as reliably, asking the old question — so
    * one arm separates them.
    *
-   * It reaches the five facts-derived families as `lastlight-facts seed
-   * --contract`, is stamped into `obligations.json`, and the `spec` family reads
-   * it directly (`renderSpecObligations`) because it is rendered harness-side.
+   * It reaches the seeder as `lastlight-facts seed --contract` and is stamped
+   * into `obligations.json`.
    * **`lastlight-facts discharge` degrades to its `test -s` floor under
    * `minimal`**: measured compliance under that block was 0/31, 0/34 and 0/40,
    * so a gate demanding a code the block never asked for would fail every family
    * of every run.
    */
   obligationContract: "full" | "minimal";
-  /**
-   * What `adjudicate` is handed, and what shape it writes back.
-   *
-   * - `legacy` — the shipped phase. The prompt names the files and the model
-   *   shells out to assemble them, then writes a `tier` and a `confidence` per
-   *   finding.
-   * - `dossier` — a deterministic `dossier` phase renders every record the
-   *   phase needs (`lastlight-facts dossier`) and the harness attaches it, and
-   *   the model writes typed ATTRIBUTES (`claim` / `category` / `fix`) from
-   *   which a pure `computeTier()` derives the tier. `confidence` is not asked
-   *   for.
-   *
-   * **One key for both halves on purpose.** They change the same phase's
-   * measured surface — its input and its output — so shipping them together
-   * costs ONE comparability break with the archive instead of two, and one arm
-   * validates both. Splitting them would buy a second baseline nobody wants.
-   *
-   * What it is fixing, measured on the 8-case probes arm: `adjudicate` spends
-   * **137 bash calls across 8 adjudications** (35 turns / 30 bash on the
-   * stress case) re-deriving records the harness already holds — about a third
-   * of case cost — and then makes its actual judgement at the end of a long,
-   * noisy transcript, which is the condition under which every measured
-   * failure of this phase has happened. See
-   * [#399](https://github.com/nearform/lastlight/issues/399).
-   *
-   * Defaults to `legacy`, and an unrecognised value lands there too: the same
-   * direction every switch in this block fails. No deployment changes
-   * behaviour until an operator asks and an arm has measured it.
-   */
-  adjudicate: AdjudicateMode;
   /**
    * Which D2 minting arms `lastlight-facts seed` runs, as a comma-list over
    * `all-in-diff` (contract obligations for symbols whose every reference is
@@ -502,70 +397,20 @@ export interface ReviewAnalysisConfig {
    */
   mint: string;
   /**
-   * How many of the six survey families actually run.
-   *
-   * **Six, and the default is not negotiable down without saying which.** The
-   * previous design defaulted this to 3 against six families and never recorded
-   * which three ran — so half the families silently never executed, and
-   * `enforcement`, the one that produced the only gold match, could have been
-   * among them (§D4). A value below 6 takes the families in the seeder's rank
-   * order and the run says so in its artifact.
-   */
-  surveyPasses: number;
-  /**
-   * How many survey families run CONCURRENTLY (WP11c).
+   * How many `site-review` investigators run CONCURRENTLY.
    *
    * A CEILING, not a guarantee: the run clamps it to what the active sandbox
    * backend can actually hold. `none` and `docker` take the declared value;
    * `gondolin` boots a QEMU micro-VM per agent session inside the harness
-   * process and pins to 1, as do `smol` and `kubernetes` until measured. So on
-   * a stock deployment (gondolin) this key changes nothing at all today.
-   *
-   * Six by default because six is what the fan-out exists for. The six families
-   * write six disjoint append-only files and never read each other's, so there
-   * was never an ordering constraint between them — only a scheduler that ran
-   * one DAG node at a time. Chained, they were 851s of a 29-minute review (49%
-   * of the wall clock); concurrent, they are the slowest single family.
+   * process and pins to 1, as does `smol` until measured. So on a stock
+   * deployment (gondolin) this key changes nothing at all today.
    *
    * Lower it to bound provider rate-limit pressure or memory, not to bound
-   * spend: the six passes cost the same in tokens either way.
+   * spend: the investigators cost the same in tokens either way. Read from the
+   * config as `siteConcurrency`, or its old name `surveyConcurrency` (the agent
+   * survey fan-out it used to bound is gone).
    */
-  surveyConcurrency: number;
-  /**
-   * Which engine runs the survey (`docs/plans/unit-survey.md`).
-   *
-   * - `agent` (the default): the five-branch agent `survey` fan-out.
-   * - `units`: deterministic units from `lastlight-facts units`, ONE bounded,
-   *   non-agentic model call per unit (the in-process `survey-units` phase),
-   *   then `lastlight-facts units-ingest` writes the same
-   *   `hypotheses/<family>.jsonl` the fan-out does — so everything after the
-   *   survey is unchanged.
-   *
-   * Only meaningful with `enabled`. UNMEASURED: nothing here is a default until
-   * the eval A/B in the plan says so. `units` needs a host-readable workspace,
-   * so the phase fails loud on the `kubernetes` backend.
-   *
-   * Reaches the run as `unitSurveyEnabled: "true"` (`specContext`), present only
-   * for `units` — so an absent or garbled value runs the agent survey.
-   */
-  surveyEngine: SurveyEngine;
-  /**
-   * Which engine turns the survey's hypotheses into the review
-   * (docs/plans/adjudicate-falsify-replay.md, "Pipeline integration").
-   *
-   * - `adjudicate` (the default): `probe-plan` → `falsify` → `jev-classify` →
-   *   `dossier` → `adjudicate`, weighing every hypothesis row.
-   * - `sites`: the rows are only a VOLUME signal. `lastlight-facts sites
-   *   --plan` ranks the places they point at, one investigator per top site
-   *   (`site-review`, a 5-branch fan-out) writes grounded findings, `merge`
-   *   pools them and `select` (one agent call) merges duplicates and orders
-   *   them by importance; every row is filed at `internal`.
-   *
-   * Only meaningful with `enabled`. UNMEASURED end to end. Reaches the run as
-   * `siteReviewEnabled: "true"` (`specContext`), present only for `sites` — so
-   * an absent or garbled value runs the adjudicate chain.
-   */
-  reviewEngine: ReviewEngine;
+  siteConcurrency: number;
   /**
    * How many unit calls `survey-units` keeps in flight at once. No backend
    * clamp: the calls are in-process HTTP requests, not sandboxes, so this
@@ -660,7 +505,7 @@ export interface ReviewAnalysisConfig {
    */
   falsifyTimeoutSeconds: number;
   /**
-   * WHOLE-PHASE deadline on `survey-units` (`surveyEngine: units`), in seconds.
+   * WHOLE-PHASE deadline on `survey-units`, in seconds.
    *
    * The in-process handler runs every unit call under one `AbortController`
    * armed for this long; a unit not finished by then is recorded `ok: false`
@@ -680,13 +525,12 @@ export interface ReviewAnalysisConfig {
   /**
    * At most this many hypotheses are put in front of `falsify`, `null` for no
    * cap. `lastlight-facts probe-plan` ranks the owed set (derived Critical
-   * first, then a survey's own ask) and cuts it here; the rest reach
-   * `adjudicate` unprobed, and the dossier says they were never asked.
+   * first, then a survey's own ask) and cuts it here. Inert while falsify is
+   * not attached (docs/plans/pr-review-units-sites-only.md, stage 5).
    *
-   * Eight, provisionally. Under the agent survey 0–2 rows per case were owed on
-   * all 8 skillspro cases, so it never binds there; under `surveyEngine: units`
-   * 20–33 were, which no single oracle session in one round gets through. The
-   * micro-falsify eval is what should move this number.
+   * Eight, provisionally. Under the unit survey 20–33 rows per case were owed,
+   * which no single oracle session in one round gets through. The micro-falsify
+   * eval is what should move this number.
    */
   maxProbes: number | null;
   /**
@@ -753,29 +597,6 @@ export interface ReviewAnalysisConfig {
    * explicitly instead of inheriting whatever it currently is.
    */
   maxBodyComments: number | null;
-  /**
-   * The TypeSafe model id `jev-classify` calls, under `adjudicate: "jev"`.
-   * `null` ⇒ the CLI's own default (`TYPESAFE_MODEL` env, else `jev-latest`) —
-   * kept out of the `models:` map because TypeSafe is a separate provider
-   * from the `provider/model` chat models that map resolves, and conflating
-   * them would let an unrelated key silently redirect a model call nothing
-   * else reads.
-   */
-  jevModel: string | null;
-  /**
-   * Which hypotheses `adjudicate` weighs — `lastlight-facts dossier --admit`
-   * (`packages/code-facts/src/adjudicate-admit.ts`). The rest are filed at
-   * `internal` by `reconcile` without a model, naming the rule that filed them.
-   * `null` ⇒ every row, the behaviour before admission existed. Needs a
-   * dossier mode (`adjudicate` ≠ `legacy`); a `jev:` rule also runs
-   * `jev-classify`, whatever `adjudicate` says. Typed-field rules and the jev
-   * category only — no rule reads a claim's prose. See `default.yaml`.
-   */
-  admit: string | null;
-  /** Phase budget for `jev-classify`, in seconds. Cheap and fast per call (a
-   * TypeSafe `systemOne` round trip is ~100ms), but the phase makes one call
-   * per hypothesis and a case can carry dozens. */
-  jevTimeoutSeconds: number;
 }
 
 /**
@@ -921,8 +742,7 @@ export type ReviewAnalysisDurationKey =
   | "seedTimeoutSeconds"
   | "reconcileTimeoutSeconds"
   | "falsifyTimeoutSeconds"
-  | "surveyUnitsTimeoutSeconds"
-  | "jevTimeoutSeconds";
+  | "surveyUnitsTimeoutSeconds";
 
 /**
  * A {@link ReviewConfig} WITHOUT its duration leaves (`triage.timeoutSeconds`
@@ -976,9 +796,6 @@ export function defaultReviewPolicy(): ReviewPolicy {
     triage: { enabled: true },
     analysis: {
       enabled: false,
-      // Off: with the pipeline on, `adjudicate` writes findings.json from the
-      // hypotheses alone. Inert with the pipeline off. See the field's doc.
-      independentReview: false,
       // A safety bound, not a budget — see config/default.yaml for why this is
       // 40 rather than the 6 it shipped with. It must not bind on a real PR:
       // capping generation truncates discovery, which is the measured ceiling.
@@ -993,30 +810,16 @@ export function defaultReviewPolicy(): ReviewPolicy {
       // remains the opt-in telemetry arm (discharge codes + the
       // clean-discharge demotion at the posting boundary).
       obligationContract: "minimal",
-      // `dossier` measured 2026-09-22 (mechanism confirmed; posted-recall
-      // guardrail inconclusive on n=1 — repeats pending). `jev` built and
-      // screened the same day (83.6% agreement with Sonnet, $0.0053) but not
-      // yet compared against gold. Neither has an arm behind it yet. See the
-      // field's doc.
-      adjudicate: "legacy",
       // Both D2 rules — the measured shipped shape. See the field's doc.
       mint: "all-in-diff,registrations",
-      surveyPasses: 6,
-      surveyConcurrency: 6,
-      // The agent fan-out stays the survey until the unit engine is measured
-      // against it (docs/plans/unit-survey.md, "Evals").
-      surveyEngine: "agent",
-      // The adjudicate chain stays the review until the sites engine is
-      // measured end to end (docs/plans/adjudicate-falsify-replay.md).
-      reviewEngine: "adjudicate",
+      siteConcurrency: 6,
       surveyUnitConcurrency: 16,
       probes: "off",
       probeLifecycleScripts: false,
       probeTypecheck: false,
       probeCoverage: false,
       probeRounds: 2,
-      // Provisional — never binds under the agent survey (0–2 owed per case).
-      // See the field's doc.
+      // Provisional. See the field's doc.
       maxProbes: 8,
       // Five, down from ten (issue #405): the rank it spends is now a derived
       // severity that varies, so a lower ceiling keeps the strongest claims
@@ -1030,10 +833,6 @@ export function defaultReviewPolicy(): ReviewPolicy {
       // compromise; `null` restores the legacy unlimited funnel. See the
       // field's doc.
       maxBodyComments: 5,
-      // `null` ⇒ jev-classify's own default (TYPESAFE_MODEL env, else
-      // jev-latest). Inert unless `adjudicate: "jev"`.
-      jevModel: null,
-      admit: null,
     },
   };
 }

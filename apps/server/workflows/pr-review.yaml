@@ -416,9 +416,9 @@ phases:
       - "scratch.reviewTriage.depth == 'light'"
     depends_on: [site-plan]
     trigger_rule: all_done
-    # The survey's ceiling: the same class of session, clamped per backend
-    # (gondolin pins to 1 — five sites then run in series).
-    max_concurrent: { from: surveyConcurrency, default: 6 }
+    # `review.analysis.siteConcurrency`, clamped per backend (gondolin pins to
+    # 1 — five sites then run in series).
+    max_concurrent: { from: siteConcurrency, default: 6 }
     # An investigator RUNS code — copied lines under `node`, a differential
     # `git show` — and that is its evidence. Installing the repo and the suite
     # are never a probe; scratch installs follow falsify's switch, and `block`

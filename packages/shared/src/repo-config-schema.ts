@@ -51,10 +51,7 @@ import {
   isDependencyImpact,
   isDiagnosisClass,
   isReviewTrigger,
-  coerceAdjudicateMode,
   coerceProbeMode,
-  coerceSurveyEngine,
-  coerceReviewEngine,
   reviewTriggerRank,
   type DependenciesConfig,
   type DisabledConfig,
@@ -1695,27 +1692,16 @@ function shapeReviewAnalysis(raw: unknown, d: ReviewPolicy["analysis"]): ReviewP
   const node = isPlainObject(raw) ? raw : {};
   return {
     enabled: node.enabled === true,
-    // Operator-only projection like `enabled`: `=== true`, so an absent or
-    // garbled value lands on the shipped `false`.
-    independentReview: node.independentReview === true,
     maxSpecObligations: num(node.maxSpecObligations, d.maxSpecObligations),
     maxObligations: num(node.maxObligations, d.maxObligations),
     // Operator-only like the rest of `review.analysis`, so this only ever
     // projects the operator's answer into the merged view. `minimal` or nothing.
     obligationContract: node.obligationContract === "minimal" ? "minimal" : d.obligationContract,
-    // Operator-only as well, and the most important one to keep that way: it
-    // selects a phase SHAPE whose measured surface differs from the archive's.
-    adjudicate: coerceAdjudicateMode(node.adjudicate),
     // Operator-only projection too. A plain string — the CLI (`--mint`) is the
     // loud validator, exactly as for obligationContract above.
     mint: typeof node.mint === "string" ? node.mint : d.mint,
-    surveyPasses: num(node.surveyPasses, d.surveyPasses),
-    surveyConcurrency: num(node.surveyConcurrency, d.surveyConcurrency),
-    // Operator-only projection like `adjudicate`: it selects a phase SHAPE, and
-    // only the literal `"units"` moves it off the shipped fan-out.
-    surveyEngine: coerceSurveyEngine(node.surveyEngine),
-    // Operator-only, and a phase SHAPE like `surveyEngine`: only `"sites"` moves it.
-    reviewEngine: coerceReviewEngine(node.reviewEngine),
+    // `surveyConcurrency` is the old name, read when the new one is absent.
+    siteConcurrency: num(node.siteConcurrency, num(node.surveyConcurrency, d.siteConcurrency)),
     surveyUnitConcurrency: num(node.surveyUnitConcurrency, d.surveyUnitConcurrency),
     // Tri-state (`off` | `static` | `full`), with a bare `true` reading as
     // `static` so an upgrade never silently buys an install. Operator-only
@@ -1734,10 +1720,6 @@ function shapeReviewAnalysis(raw: unknown, d: ReviewPolicy["analysis"]): ReviewP
     // shipped `0`). Operator-only like the rest of `review.analysis`, so this
     // only ever projects the operator's answer into the merged view.
     maxBodyComments: node.maxBodyComments === null ? null : num(node.maxBodyComments, d.maxBodyComments ?? 0),
-    // Operator-only projection, same reasoning as `mint`/`obligationContract`.
-    jevModel: typeof node.jevModel === "string" ? node.jevModel : d.jevModel,
-    // Operator-only projection, same reasoning as `mint`.
-    admit: typeof node.admit === "string" ? node.admit : d.admit,
   };
 }
 

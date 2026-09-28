@@ -1752,11 +1752,11 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
     reconcileTimeoutSeconds: String(review.analysis.reconcileTimeoutSeconds),
     /**
      * The `site-review` fan-out's concurrency CEILING, read by
-     * `max_concurrent: { from: surveyConcurrency, default: 6 }`. The run clamps
+     * `max_concurrent: { from: siteConcurrency, default: 6 }`. The run clamps
      * it again per backend — gondolin pins to 1 — so this is the operator's
      * ask, never the effective value.
      */
-    surveyConcurrency: String(review.analysis.surveyConcurrency),
+    siteConcurrency: String(review.analysis.siteConcurrency),
     /**
      * `survey-units`' in-flight ceiling. Read by the handler itself (a
      * `max_concurrent` key is fan-out-only in the schema).

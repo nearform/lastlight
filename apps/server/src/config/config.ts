@@ -135,11 +135,7 @@ export type { DisabledConfig, RouteConfig } from "lastlight-shared/config-types"
 // surface for the runtime config shape.
 import {
   DIAGNOSIS_CLASSES,
-  coerceAdjudicateMode,
   coerceProbeMode,
-  coerceSurveyEngine,
-  coerceReviewEngine,
-  type SurveyEngine,
   defaultDependenciesConfig,
   defaultFixConfig,
   defaultNotificationsConfig,
@@ -856,7 +852,6 @@ export function withReviewDurations(policy: ReviewPolicy, operator: ReviewConfig
       reconcileTimeoutSeconds: operator.analysis.reconcileTimeoutSeconds,
       falsifyTimeoutSeconds: operator.analysis.falsifyTimeoutSeconds,
       surveyUnitsTimeoutSeconds: operator.analysis.surveyUnitsTimeoutSeconds,
-      jevTimeoutSeconds: operator.analysis.jevTimeoutSeconds,
     },
   };
 }
@@ -886,6 +881,27 @@ function applyDeprecatedGateAlias(layer: Record<string, unknown> | null, label: 
   log.warn("fix.gateTimeoutSeconds is deprecated — mapped to gate.timeoutSeconds; rename it", {
     layer: label,
     gateTimeoutSeconds: legacy,
+  });
+}
+
+/**
+ * `review.analysis.surveyConcurrency`, the old name of `siteConcurrency`
+ * (it bounded the agent survey fan-out, removed with it), applied to ONE layer
+ * in place before the merge — as {@link applyDeprecatedGateAlias} does, and for
+ * the same reason: `default.yaml` carries the new name, so an alias resolved
+ * after the merge would always lose to the packaged value.
+ */
+function applySiteConcurrencyAlias(layer: Record<string, unknown> | null, label: string): void {
+  const review = layer && isPlainObject(layer.review) ? layer.review : undefined;
+  const analysis = review && isPlainObject(review.analysis) ? review.analysis : undefined;
+  if (!analysis || !("surveyConcurrency" in analysis)) return;
+  const legacy = analysis.surveyConcurrency;
+  delete analysis.surveyConcurrency;
+  if (analysis.siteConcurrency !== undefined) return;
+  analysis.siteConcurrency = legacy;
+  log.warn("review.analysis.surveyConcurrency is deprecated — mapped to siteConcurrency; rename it", {
+    layer: label,
+    siteConcurrency: legacy,
   });
 }
 
@@ -1014,6 +1030,7 @@ export function loadConfig(): LastLightConfig {
     overlayRaw = readYamlFile(join(overlayDir, "config.yaml"), false);
   }
   applyDeprecatedGateAlias(overlayRaw, "overlay");
+  applySiteConcurrencyAlias(overlayRaw, "overlay");
 
   // Build the env layer once: a partial config tree in the same shape as the
   // YAML layers. This is the single place that maps env vars onto config paths
@@ -1249,7 +1266,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const exploreRaw = isPlainObject(raw.explore) ? raw.explore : {};
   const reviewRaw = isPlainObject(raw.review) ? raw.review : {};
   const analysisRaw = isPlainObject(reviewRaw.analysis) ? reviewRaw.analysis : {};
-  warnRemovedBoundaryKeys(analysisRaw);
+  warnRemovedAnalysisKeys(analysisRaw);
   const triageRaw = isPlainObject(reviewRaw.triage) ? reviewRaw.triage : {};
   const autonomyRaw = isPlainObject(raw.autonomy) ? raw.autonomy : {};
   const fixRaw = isPlainObject(raw.fix) ? raw.fix : {};
@@ -1408,11 +1425,6 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     // overlay must not switch a deployment onto an unmeasured pipeline.
     analysis: {
       enabled: analysisRaw.enabled === true,
-      // `=== true` like `enabled`: the independent `review` pass is a second
-      // strong-model session on the operator's budget, so only the literal
-      // `true` buys it back. Inert with the pipeline off — `review` is then
-      // the whole review and runs regardless.
-      independentReview: analysisRaw.independentReview === true,
       maxSpecObligations:
         nonNegativeNumber(analysisRaw.maxSpecObligations) ?? reviewDefaults.analysis.maxSpecObligations,
       maxObligations: nonNegativeNumber(analysisRaw.maxObligations) ?? reviewDefaults.analysis.maxObligations,
@@ -1431,21 +1443,13 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
       // the same rule. A non-string falls back to the default (""), which is
       // the baseline arm — the direction every switch in this block fails.
       mint: typeof analysisRaw.mint === "string" ? analysisRaw.mint.trim() : reviewDefaults.analysis.mint,
-      surveyPasses: nonNegativeNumber(analysisRaw.surveyPasses) ?? reviewDefaults.analysis.surveyPasses,
-      // WP11c. A CEILING the run clamps again per backend, so an overlay that
-      // asks for six on gondolin still gets one — the operator's ask is not the
+      // A CEILING the run clamps again per backend, so an overlay that asks for
+      // six on gondolin still gets one — the operator's ask is not the
       // effective value and the run logs when the host overrides it.
-      surveyConcurrency:
-        nonNegativeNumber(analysisRaw.surveyConcurrency) ?? reviewDefaults.analysis.surveyConcurrency,
-      // Which engine runs the survey. Only the literal `"units"` moves a
-      // deployment off the agent fan-out — the direction every switch in this
-      // block fails — because the unit engine is unmeasured and needs a
-      // host-readable workspace (`loadConfig` refuses it on kubernetes).
-      surveyEngine: coerceSurveyEngine(analysisRaw.surveyEngine),
-      // Which engine turns hypotheses into the review. Only the literal
-      // `"sites"` moves a deployment off the adjudicate chain.
-      reviewEngine: coerceReviewEngine(analysisRaw.reviewEngine),
-      // No backend clamp, unlike `surveyConcurrency`: unit calls are in-process
+      // `surveyConcurrency`, its old name, is mapped onto it per layer
+      // (`applySiteConcurrencyAlias`).
+      siteConcurrency: nonNegativeNumber(analysisRaw.siteConcurrency) ?? reviewDefaults.analysis.siteConcurrency,
+      // No backend clamp, unlike `siteConcurrency`: unit calls are in-process
       // HTTP requests, not sandboxes, so this bounds rate-limit pressure only.
       // Zero would stall the phase, so it floors at one.
       surveyUnitConcurrency: Math.max(
@@ -1462,12 +1466,6 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
       // `"static"` (so no existing deployment gains an install by upgrading),
       // and every other value — including `"true"` and `"yes"` — is `"off"`.
       probes: coerceProbeMode(analysisRaw.probes),
-      // #399. Selects what `adjudicate` is handed and what shape it writes
-      // back, in ONE key because both halves move the same phase's measured
-      // surface. Only the literal `"dossier"` moves a deployment; everything
-      // else is the shipped phase, which is the direction the whole block
-      // fails.
-      adjudicate: coerceAdjudicateMode(analysisRaw.adjudicate),
       probeLifecycleScripts: analysisRaw.probeLifecycleScripts === true,
       probeTypecheck: analysisRaw.probeTypecheck === true,
       probeCoverage: analysisRaw.probeCoverage === true,
@@ -1515,17 +1513,6 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
         analysisRaw.maxBodyComments === null
           ? null
           : nonNegativeNumber(analysisRaw.maxBodyComments) ?? reviewDefaults.analysis.maxBodyComments,
-      // #399 idea 2. `null` ⇒ `jev-classify`'s own default. A non-string is
-      // the same direction every switch in this block fails: the default,
-      // never a fabricated model id.
-      jevModel: typeof analysisRaw.jevModel === "string" ? analysisRaw.jevModel.trim() : reviewDefaults.analysis.jevModel,
-      // The CLI is the loud validator (an unknown rule is reported and every
-      // row admitted), exactly as for `mint`. Blank ⇒ null.
-      admit:
-        typeof analysisRaw.admit === "string" && analysisRaw.admit.trim() !== ""
-          ? analysisRaw.admit.trim()
-          : reviewDefaults.analysis.admit,
-      jevTimeoutSeconds: requiredSeconds(analysisRaw.jevTimeoutSeconds, "review.analysis.jevTimeoutSeconds"),
     },
   };
 
@@ -1798,26 +1785,37 @@ function nonNegativeNumber(raw: unknown): number | undefined {
 }
 
 /**
- * Keys this config once honoured under `review.analysis` and now IGNORES.
+ * Keys this config once honoured under `review.analysis` and now IGNORES, each
+ * with why.
  *
- * Both were confidence gates on the attention boundary, removed 2026-09-21
- * after `finding.confidence` measured AUROC 0.228 [0.171, 0.299] over 516
- * findings — a strong signal pointing the wrong way — and after the preserved
- * archive showed neither had ever cost a gold finding. Two overlay repos and
- * ~17 eval overlays may still pin them, so they are ACCEPTED AND IGNORED
- * rather than rejected: this loader reads only the keys it knows, so an
+ * Overlay repos and eval overlays may still pin them, so they are ACCEPTED AND
+ * IGNORED rather than rejected: this loader reads only the keys it knows, so an
  * unknown leaf was already inert. The warning is so an operator who pinned one
- * learns it stopped meaning anything, instead of believing a bar is in force.
+ * learns it stopped meaning anything, instead of believing it is in force.
  */
-const REMOVED_ANALYSIS_KEYS = ["internalFloor", "thresholds"] as const;
+const REMOVED_ANALYSIS_KEYS: Record<string, string> = {
+  // Confidence gates on the attention boundary, removed 2026-09-21 after
+  // `finding.confidence` measured AUROC 0.228 [0.171, 0.299] over 516 findings.
+  internalFloor: "the attention boundary no longer gates on finding.confidence (AUROC 0.228)",
+  thresholds: "the attention boundary no longer gates on finding.confidence (AUROC 0.228)",
+  // Units + sites became the only analysis path
+  // (docs/plans/pr-review-units-sites-only.md).
+  surveyEngine: "the unit survey is the only survey engine",
+  reviewEngine: "the sites engine is the only review engine",
+  independentReview: "the sites engine writes findings.json; `review` runs only with the pipeline off or on a light re-review",
+  adjudicate: "the adjudicator was removed; the sites engine selects the review",
+  jevModel: "jev-classify was removed with the adjudicator",
+  admit: "dossier admission was removed with the adjudicator",
+  jevTimeoutSeconds: "jev-classify was removed with the adjudicator",
+  surveyPasses: "the agent survey fan-out was removed",
+};
 
-function warnRemovedBoundaryKeys(analysisRaw: Record<string, unknown>): void {
-  const present = REMOVED_ANALYSIS_KEYS.filter((k) => analysisRaw[k] !== undefined);
+function warnRemovedAnalysisKeys(analysisRaw: Record<string, unknown>): void {
+  const present = Object.keys(REMOVED_ANALYSIS_KEYS).filter((k) => analysisRaw[k] !== undefined);
   if (present.length === 0) return;
   log.warn("review.analysis keys were removed and are ignored", {
     keys: present,
-    detail:
-      "the attention boundary no longer gates on finding.confidence (AUROC 0.228); remove these keys from your overlay",
+    detail: `${present.map((k) => `${k}: ${REMOVED_ANALYSIS_KEYS[k]}`).join("; ")} — remove these keys from your overlay`,
   });
 }
 
