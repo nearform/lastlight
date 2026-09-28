@@ -430,15 +430,10 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
         TIER_GUARD,
       ]);
     }
-    // `post-review` has no guard; `review` has two, on the seeded scratch flag
-    // and on the sites engine — never `analysisEnabled`, and `siteReviewEnabled`
-    // is projected only with the pipeline on, so it can never skip with the
-    // pipeline off.
+    // `post-review` has no guard; `review` has one, the seeded scratch flag —
+    // never a context key, which the light harvest could not clear.
     expect(phaseSkipIfExpressions(byName.get("post-review")!)).toEqual([]);
-    expect(phaseSkipIfExpressions(byName.get("review")!)).toEqual([
-      "scratch.reviewTriage.skipReview == true",
-      SITE_SKIP,
-    ]);
+    expect(phaseSkipIfExpressions(byName.get("review")!)).toEqual(["scratch.reviewTriage.skipReview == true"]);
   });
 });
 
@@ -914,8 +909,19 @@ describe("golden — reviewEngine: sites", () => {
     const ctx = { ...SITES, independentReviewEnabled: "true" };
     const { ran, skipped } = simulate(def.phases, ctx, seeded(ctx));
     expect(ran).not.toContain("review");
-    expect(skipped.find((x) => x.name === "review")?.reason).toBe("skip_if matched: siteReviewEnabled == true");
+    expect(skipped.find((x) => x.name === "review")?.reason).toBe(
+      "skip_if matched: scratch.reviewTriage.skipReview == true",
+    );
     expect(ran).toContain("post-review");
+  });
+
+  it("LIGHT depth: `review` runs and posts — no site phase is left to write findings.json", () => {
+    // What `harvestReviewTriage` writes on `REVIEW_DEPTH: light`. Every site
+    // phase and `reconcile` skip on the tier guard, so a `review` skipped by
+    // the engine key would leave `post-review` with nothing to read.
+    const ctx = { ...SITES, ...TRIAGE_ON };
+    const { ran } = simulate(def.phases, ctx, { reviewTriage: { depth: "light", light: true } });
+    expect(ran).toEqual(["triage", ...LEGACY_PHASES]);
   });
 
   it("runs after the agent survey too — site-plan waits on both survey engines", () => {
@@ -926,15 +932,19 @@ describe("golden — reviewEngine: sites", () => {
   });
 
   it("drives five investigator branches and one select loop through the real scheduler, then posts", async () => {
-    const { result, agent, postReview } = await runPrReview({
-      owner: "acme",
-      repo: "widgets",
-      prNumber: 7,
-      ...SITES,
-      probeTestPolicy: "block",
-      probeScratchInstallPolicy: "block",
-      reviewInstallPolicy: "block",
-    });
+    const { result, agent, postReview } = await runPrReview(
+      {
+        owner: "acme",
+        repo: "widgets",
+        prNumber: 7,
+        ...SITES,
+        probeTestPolicy: "block",
+        probeScratchInstallPolicy: "block",
+        reviewInstallPolicy: "block",
+      },
+      undefined,
+      seeded(SITES),
+    );
     const seen = result.phases.map((p) => p.phase);
     for (const slot of ["site-001", "site-002", "site-003", "site-004", "site-005"]) {
       expect(seen, slot).toContain(`site-review_branch_${slot}`);
@@ -1190,12 +1200,10 @@ describe("golden — the `review` phase's two-mode brief", () => {
     const { depends_on, trigger_rule, command_policy, skip_if, ...rest } = review as Record<string, unknown>;
     expect(depends_on).toEqual(["falsify"]);
     expect(trigger_rule).toBe("all_done");
-    // Two guards: the seeded scratch flag, and the sites review engine (which
-    // writes findings.json itself). Never `analysisEnabled`, and the engine key
-    // is projected only with the pipeline on — so the phase runs whenever the
-    // seed did not ask it to skip (pipeline off, light, independent review on,
-    // or an unseeded run) on the adjudicate engine.
-    expect(skip_if).toEqual(["scratch.reviewTriage.skipReview == true", "siteReviewEnabled == true"]);
+    // One guard, the seeded scratch flag — never a context key, which the light
+    // harvest could not clear. The phase runs whenever the seed did not ask it
+    // to skip: pipeline off, light, or an unseeded run.
+    expect(skip_if).toEqual(["scratch.reviewTriage.skipReview == true"]);
     // The suite is blocked in both modes; an install only when the pipeline is
     // on (issue #403) — pinned in pr-review-command-policy.test.ts.
     expect(command_policy).toMatchObject({ install: { from: "reviewInstallPolicy", default: "allow" }, test: "block" });

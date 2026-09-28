@@ -197,6 +197,11 @@ describe("reviewTriageSeed", () => {
     expect(seed.skipReview).toBeUndefined();
   });
 
+  it("the sites engine skips `review` even with the independent pass asked for — finalize writes findings.json", () => {
+    const seed = reviewTriageSeed({ analysisEnabled: "true", independentReviewEnabled: "true", siteReviewEnabled: "true" });
+    expect(seed.skipReview).toBe(true);
+  });
+
   it("reads the flags the way the phases' guards do — the string `true` or a boolean", () => {
     expect(reviewTriageSeed({ analysisEnabled: true }).skipReview).toBe(true);
     expect(reviewTriageSeed({ analysisEnabled: true, independentReviewEnabled: true }).skipReview).toBeUndefined();

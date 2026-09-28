@@ -789,14 +789,12 @@ phases:
     # deployment that has not enabled the pipeline.
     depends_on: [falsify]
     trigger_rule: all_done
-    # The second guard is the `sites` review engine, which writes findings.json
-    # itself (`sites --finalize`) — an independent pass there would be
-    # overwritten, so `independentReview` does not apply to it. The key is
-    # projected only when the pipeline is on, so an analysis-off review (where
-    # this phase IS the review) can never be skipped by it.
+    # ONE guard, the scratch flag, even under the `sites` engine (which writes
+    # findings.json itself, so the seed sets the flag there whatever
+    # `independentReview` says). A context-key guard here would survive the
+    # light harvest, and a light review would then post nothing.
     skip_if:
       - "scratch.reviewTriage.skipReview == true"
-      - "siteReviewEnabled == true"
     prompt: prompts/review.md
     skills: [pr-review, code-review]
     model: "{{models.review}}"

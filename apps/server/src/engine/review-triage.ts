@@ -95,7 +95,9 @@ export function reviewTriageSeed(ctx: Record<string, unknown>): ReviewTriageScra
     deep: analysisEnabled,
     baseline: !analysisEnabled,
   };
-  if (analysisEnabled && !on(ctx.independentReviewEnabled)) seed.skipReview = true;
+  // Under the `sites` engine `sites --finalize` writes findings.json, so an
+  // independent pass would be overwritten: skip it whatever was asked.
+  if (analysisEnabled && (!on(ctx.independentReviewEnabled) || on(ctx.siteReviewEnabled))) seed.skipReview = true;
   return seed;
 }
 
