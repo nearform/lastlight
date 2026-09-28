@@ -1,7 +1,7 @@
 import { join, relative } from "path";
 import { mkdtempSync, mkdirSync, rmSync } from "fs";
 import { tmpdir } from "os";
-import { spawnSync } from "child_process";
+import { spawn } from "child_process";
 import type { run as agenticRunType, RunResult, ThinkingLevel } from "agentic-pi";
 import type { CommandPolicy } from "lastlight-workflow-engine";
 import type { OtelConfig, SandboxBackend } from "../config/config.js";
@@ -690,22 +690,13 @@ class InProcessSandbox implements Sandbox {
   }
 
   async runCommand(_taskId: string, command: string, opts: RunCommandOpts): Promise<RawCommandResult> {
-    // gondolin / none run the command on the host worktree via spawnSync — the
-    // same degraded model those backends already used.
-    const proc = spawnSync("sh", ["-c", command], {
+    // gondolin / none run the command on the host worktree — the same degraded
+    // model those backends already used.
+    return runHostCommand(command, {
       cwd: opts.cwd,
       env: { ...process.env, ...this.opts.env, ...(opts.sandboxEnv ?? {}) },
-      encoding: "utf-8",
-      timeout: opts.timeoutSeconds * 1000,
-      maxBuffer: 256 * 1024 * 1024,
+      timeoutMs: opts.timeoutSeconds * 1000,
     });
-    const exitCode = proc.status ?? (proc.signal ? 124 : 1);
-    return {
-      exitCode,
-      stdout: proc.stdout ?? "",
-      stderr: proc.stderr ?? "",
-      timedOut: proc.signal === "SIGTERM",
-    };
   }
 
   dispose(): void {
@@ -724,6 +715,70 @@ class InProcessSandbox implements Sandbox {
       this.mode === "gondolin" ? { HOME: "/root", USER: "root", LOGNAME: "root" } : {};
     return { ...otel, ...base, ...homeOverride };
   }
+}
+
+/** The in-process backends' output ceiling per stream — what `spawnSync`'s `maxBuffer` was. */
+const HOST_COMMAND_MAX_BUFFER = 256 * 1024 * 1024;
+
+/**
+ * Run `sh -c <command>` on the host, ASYNCHRONOUSLY.
+ *
+ * It was `spawnSync`, which blocks the harness's whole event loop for as long
+ * as the command runs — every webhook, the admin API, every other run's agent
+ * session and a fan-out's sibling branches stall behind one `facts` phase
+ * (measured in the evals: the live dashboard served nothing while three cases
+ * sat in `facts` for minutes). Same result shape as before: the exit status,
+ * 124 for a signal with no status, 1 when the shell could not start; a timeout
+ * or an overflowing stream kills the child with SIGTERM, and a timeout reads
+ * `timedOut`.
+ */
+export function runHostCommand(
+  command: string,
+  opts: { cwd?: string; env: NodeJS.ProcessEnv; timeoutMs: number; maxBuffer?: number },
+): Promise<RawCommandResult> {
+  const maxBuffer = opts.maxBuffer ?? HOST_COMMAND_MAX_BUFFER;
+  return new Promise((resolve) => {
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    let outBytes = 0;
+    let errBytes = 0;
+    let timedOut = false;
+    let settled = false;
+    const child = spawn("sh", ["-c", command], { cwd: opts.cwd, env: opts.env, stdio: ["ignore", "pipe", "pipe"] });
+    const timer =
+      opts.timeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            child.kill("SIGTERM");
+          }, opts.timeoutMs)
+        : undefined;
+    const collect = (chunks: Buffer[], add: (n: number) => number) => (chunk: Buffer) => {
+      if (add(chunk.length) > maxBuffer) {
+        child.kill("SIGTERM");
+        return;
+      }
+      chunks.push(chunk);
+    };
+    child.stdout.on("data", collect(out, (n) => (outBytes += n)));
+    child.stderr.on("data", collect(err, (n) => (errBytes += n)));
+    const finish = (result: RawCommandResult) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(result);
+    };
+    child.on("error", (e) =>
+      finish({ exitCode: 1, stdout: Buffer.concat(out).toString("utf-8"), stderr: `${Buffer.concat(err).toString("utf-8")}${e.message}`, timedOut }),
+    );
+    child.on("close", (code, signal) =>
+      finish({
+        exitCode: code ?? (signal ? 124 : 1),
+        stdout: Buffer.concat(out).toString("utf-8"),
+        stderr: Buffer.concat(err).toString("utf-8"),
+        timedOut: timedOut && signal === "SIGTERM",
+      }),
+    );
+  });
 }
 
 // ── FakeSandbox (test-only) ─────────────────────────────────────────
