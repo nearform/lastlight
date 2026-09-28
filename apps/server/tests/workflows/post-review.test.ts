@@ -718,12 +718,12 @@ describe("post-review action (runPostReview)", () => {
         });
         const taskId = "widget-42-incomplete";
         const summary =
-          "Adjudication did not complete, so the 2 candidate issues this review's analysis recorded were not weighed " +
+          "The review did not complete, so the 2 candidate issues this review's analysis recorded were not weighed " +
           "and nothing is posted inline. This is not a clean review: the change was not assessed.";
         seedFindings(taskId, "widget", {
           summary,
           event: "COMMENT",
-          incomplete: { phase: "adjudicate", reason: "the adjudicator timed out" },
+          incomplete: { phase: "site-finalize", reason: "site-finalize timed out" },
           findings: [
             { path: "src/foo.ts", line: 7, severity: "Critical", title: "never weighed A", body: "b", tier: "internal" },
             { path: "src/foo.ts", line: 8, severity: "Minor", title: "never weighed B", body: "b", tier: "internal" },
@@ -740,7 +740,7 @@ describe("post-review action (runPostReview)", () => {
         expect((await executor.execute(NODE, {})).status).toBe("succeeded");
         const posted = reviews[0]!.body as { body: string; event: string; comments: unknown[] };
         expect(posted.body).toContain(summary);
-        expect(posted.body).toContain("the adjudicator timed out");
+        expect(posted.body).toContain("site-finalize timed out");
         expect(posted.body).not.toContain("No issues to raise");
         expect(posted.event).toBe("COMMENT");
         expect(posted.comments ?? []).toEqual([]);

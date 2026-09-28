@@ -59,7 +59,7 @@ There are four verdicts, strongest evidence first:
 | `refuted` | you ran something that WOULD have shown the defect and it did not | a transcript. **Only a transcript may refute** |
 | `unprobed` | nothing you could run would settle it | a `reason` naming WHICH constraint: no runner, no dependencies, no toolchain, or not the kind of claim execution decides |
 
-An `unprobed` or `corroborated` hypothesis **survives** to adjudication.
+An `unprobed` or `corroborated` hypothesis **survives** — it is kept, never deleted.
 
 ### Structural or behavioural — which one the claim is decides what `reproduced` needs
 
@@ -99,8 +99,8 @@ Concretely:
   `lastlight-facts facts --repo . …`.
 - **If you executed nothing, the verdict is `unprobed`**, with a `reason` saying
   which constraint stopped you. That is a completely acceptable outcome and it
-  costs the finding **nothing**: an `unprobed` hypothesis survives to
-  adjudication at lowered confidence, exactly as if you had never been asked.
+  costs the finding **nothing**: an `unprobed` hypothesis survives at
+  lowered confidence, exactly as if you had never been asked.
   There is no pressure here to manufacture a verdict — the only wrong answer is
   a claim of execution that did not happen.
 - **The gate reads your transcript's first line.** `lastlight-facts probes`
@@ -188,7 +188,7 @@ package-manager cache or another project counts, whatever happens to be
 installed there. Never search outside the checkout for a dependency (`find /`,
 `find ~`, `ls ~/.nvm`), and never change `PATH` to point outside the workspace.
 If the dependency is not in the checkout, the hypothesis is `unprobed` with
-`"reason": "dependency not installed"`, and it survives to adjudication.
+`"reason": "dependency not installed"`, and it survives.
 
 <!-- MEASURED (issue #404, martian oc-survey-glmf arm, probes: static,
      --sandbox none): once installs were blocked, falsify went looking for the
@@ -215,7 +215,7 @@ running a program as such.
 
 Anything that needs a tier **above** these — a real install, a service, a
 network call, a full test suite — is `unprobed` with that named as the reason,
-and it **survives** to adjudication. Do not install anything to reach it.
+and it **survives**. Do not install anything to reach it.
 
 **Every probe must terminate on its own.** A probe is a question that gets an
 answer and stops; a command that keeps running is not a probe, whatever it

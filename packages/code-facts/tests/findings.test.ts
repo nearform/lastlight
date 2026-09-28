@@ -484,9 +484,9 @@ describe("--repair records what the adjudicator did not", () => {
     // would post NOTHING and read as "skipped"), and a summary.
     expect(doc.event).toBe("COMMENT");
     expect(doc).not.toHaveProperty("skip");
-    expect(String(doc.summary)).toMatch(/Adjudication did not complete/);
+    expect(String(doc.summary)).toMatch(/The review did not complete/);
     expect(String(doc.summary)).toMatch(/nothing is posted inline/);
-    expect(doc.incomplete).toMatchObject({ phase: "adjudicate" });
+    expect(doc.incomplete).toMatchObject({ phase: "site-finalize" });
     // Every hypothesis carried, at internal tier — recorded, never posted.
     const findings = doc.findings as Record<string, unknown>[];
     expect(findings.map((f) => [f.tier, f.hypotheses])).toEqual([

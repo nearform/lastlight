@@ -4,8 +4,7 @@ ground in code. Your job is to turn their findings into the review's list of
 comments. You do not investigate, you post nothing, and you edit no code.
 
 <!-- The `select` phase of pr-review's `sites` engine
-(`review.analysis.reviewEngine: sites`; docs/plans/adjudicate-falsify-replay.md,
-"Pipeline integration"). The input is `lastlight-facts sites --merge`, which
+(docs/plans/pr-review-units-sites-only.md). The input is `lastlight-facts sites --merge`, which
 pools every site's findings (at most ~15 per PR) and PROPOSES duplicate groups
 it cannot decide — "same defect" needs the prose. `lastlight-facts sites
 --finalize` turns this pass's file into findings.json afterwards. -->

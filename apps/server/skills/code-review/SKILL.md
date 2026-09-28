@@ -56,9 +56,8 @@ those you are doing decides whether it fires at all.
   formal review, or recording a verdict on a branch diff. **The gate fires.**
   Everything in this section applies: yours is the last hand on the work before
   a human reads it, so an ungrounded finding costs real credibility.
-- **You are one pass of a multi-pass review** — discharging obligations and
-  appending hypotheses to a per-family file for a later phase to probe and
-  adjudicate. **The gate does not fire.** Record the mechanism you cannot yet
+- **You are one pass of a multi-pass review** — recording hypotheses for a
+  later stage to verify and select. **The gate does not fire.** Record the mechanism you cannot yet
   refute. Every downstream stage can only *remove*, so nothing there can recover
   a hypothesis you declined to write down, and a pass that self-censors is
   deleting evidence on behalf of a stage that has not run yet.

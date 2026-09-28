@@ -654,7 +654,7 @@ describe("the falsify prompt carries the constraints, not just the task", () => 
     expect(prompt).toMatch(/If you executed nothing, the verdict is `unprobed`/i);
     // …and that it costs the finding nothing, which is what keeps the gate
     // satisfiable honestly rather than pushing the pass into a fabrication.
-    expect(prompt).toMatch(/survives to\s+adjudication at lowered confidence/i);
+    expect(prompt).toMatch(/survives at\s+lowered confidence/i);
     expect(prompt).toMatch(/first line/i);
   });
 

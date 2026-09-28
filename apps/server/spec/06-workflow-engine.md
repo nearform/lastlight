@@ -351,14 +351,13 @@ extend when a deployment needs a step the engine should not know about.
 
   A document may also be marked **`incomplete: { phase, reason }`** — the
   conservation floor (`lastlight-facts findings --repair`, in `reconcile`)
-  writes one when the adjudicator never produced `findings.json` but
-  hypotheses exist. The handler never posts such a document as a clean review:
+  writes one when no earlier phase produced `findings.json` but hypotheses
+  exist. The handler never posts such a document as a clean review:
   it posts the document's own not-assessed summary plus the reason, on every
   posting branch.
 - **survey-units** — the per-unit review survey
-  (`src/workflows/handlers/survey-units.ts`), selected by
-  `review.analysis.surveyEngine: units` (**experimental and unmeasured**; the
-  shipped default is the `survey` fan-out). Runs on the harness, with no
+  (`src/workflows/handlers/survey-units.ts`), the survey of the evidence
+  pipeline (`review.analysis.enabled`). Runs on the harness, with no
   sandbox and no agent: it reads `.lastlight/pr-review/units.json` (written by
   the preceding `units` bash phase, `lastlight-facts units`) from the host
   checkout and makes **one bounded, non-agentic model call per unit** — `prompt:`
@@ -372,29 +371,29 @@ extend when a deployment needs a step the engine should not know about.
   `post-review`, an `executions` row with its cost. It **succeeds on every path
   inside the phase** — no units, every call failing, the deadline — because
   `units-ingest` records each unanswered obligation. Needing a host-readable
-  workspace, it is refused at config load on `kubernetes`. See
+  workspace, `review.analysis.enabled` is refused at config load on
+  `kubernetes`. See
   [Configuration](/spec/02-configuration) and `docs/plans/unit-survey.md`.
 
 ### `fanout` — N agent sessions, one workspace
 
 ```yaml
-- name: survey
+- name: site-review
   type: fanout
-  depends_on: [seed]
+  prompt: prompts/review-site.md
+  depends_on: [site-plan]
   trigger_rule: all_done
-  skills: [survey-pass]
-  model: "{{models.review-survey}}"
-  max_concurrent: { from: surveyConcurrency, default: 6 }
+  model: "{{#if models.review-site}}{{models.review-site}}{{/if}}{{#if !models.review-site}}{{models.review-survey}}{{/if}}"
+  max_concurrent: { from: siteConcurrency, default: 6 }
   on_branch_soft_failure: { retries: 1, then: complete }
   on_branch_gate_failure: { retries: 1 }
   branches:
-    - name: contract
-      prompt: prompts/survey-contract.md
-      context_file: .lastlight/pr-review/obligations/contract.md
-      until_bash: lastlight-facts discharge --dir .lastlight/pr-review --family contract
-    - name: security
-      prompt: prompts/survey-security.md
-      context_file: .lastlight/pr-review/obligations/security.md
+    - name: site-001
+      context_file: .lastlight/pr-review/sites/site-001.md
+      until_bash: lastlight-facts sites --check site-001 --dir .lastlight/pr-review --repo .
+    - name: site-002
+      context_file: .lastlight/pr-review/sites/site-002.md
+      until_bash: lastlight-facts sites --check site-002 --dir .lastlight/pr-review --repo .
 ```
 
 Each branch inherits the phase's `prompt` / `skills` / `model` /
@@ -405,26 +404,21 @@ the reserved `-retry` / `-check` / `-regate` suffixes.
 
 **A branch's `skills` REPLACES the phase's — it does not union with it**
 (`branchPhase()` in `handlers/fanout.ts`), so an override has to re-list
-everything it still wants. `pr-review.yaml` no longer uses one: the fan-out
-stages the single `survey-pass` skill on every branch, and the family's
-question lives in its prompt. That is LD9 — specialists separated by *question*,
-not by tool access — and it is also what keeps the shared prompt head
-byte-identical across the five branches, so they share one provider-side cached
-prefix. The `security` branch used to override with a third skill and voided
-that for itself.
+everything it still wants. `pr-review.yaml` uses none: every branch shares one
+prompt head, byte-identical, so the branches share one provider-side cached
+prefix, and what differs per branch arrives last, as its `context_file`.
 
-(The `model:` line above is why `pr-review.yaml`'s downstream `adjudicate`
-phase carries its own key the guarded way —
-`model: "{{#if models.review-adjudicate}}{{models.review-adjudicate}}{{/if}}{{#if !models.review-adjudicate}}{{models.review}}{{/if}}"`.
-The `{{#if}}` pair is load-bearing: a bare unset key renders *empty*, and an
-empty `model:` resolves to the **default** model — not to `models.review`,
-which is the fallback the phase actually wants.)
+(The `{{#if}}` pair in the `model:` line above is load-bearing: a bare unset
+`{{models.review-site}}` renders *empty*, and an empty `model:` resolves to the
+**default** model — not to `models.review-survey`, which is the fallback the
+phase actually wants.)
 
 **`context_file` — a path in a prompt is not a path.** A branch may name a
 workspace file, relative to the AGENT'S OWN CWD, whose contents the harness
 reads and appends to that branch's rendered prompt. The model never resolves
 it. This exists because it was measured: across three stored `pr-review` runs
-on 2026-08-22, 27 of 133 attempts to open the per-family obligations block
+on 2026-08-22 (the since-removed agent survey fan-out), 27 of 133 attempts to
+open the per-family obligations block
 resolved against the workspace ROOT rather than the checkout and hit ENOENT
 (23 of 120 branches never recovered), while all 98 relative reads succeeded.
 The model's only absolute anchor by its first turn is its skill bundle at
@@ -440,10 +434,8 @@ none". The one carve-out is **`kubernetes`**, whose `hostAgentCwd` is an in-pod
 path this process cannot see at all — there the read is not attempted and the
 branch is handed the path to open itself, with the mis-anchoring trap named.
 
-`pr-review.yaml` has a second fan-out, `site-review`, run only under
-`review.analysis.reviewEngine: sites` (unmeasured end to end — see
-[Configuration](/spec/02-configuration)). It is the case `context_file` makes
-possible: five **static** branches (`site-001` … `site-005`) share one
+`site-review` (see [Configuration](/spec/02-configuration)) is the case
+`context_file` makes possible: five **static** branches (`site-001` … `site-005`) share one
 slot-generic prompt (`prompts/review-site.md`), and everything that differs per
 branch — the site, its id, its output file — arrives in the brief the
 preceding `site-plan` bash phase wrote for that slot. A PR with fewer sites
@@ -487,9 +479,10 @@ one `current_phase`, one artifact harvest, one dispose.
    that hard-failed, and a branch deduped on resume are never re-run. A
    re-run that fails leaves the first attempt's result standing. Absent
    the key the gate stays purely observational — every fan-out's
-   behaviour before it existed. `pr-review`'s `survey` declares it,
-   because an observational gate let a half-done hypotheses file (2 of
-   12 seeded checks answered) go downstream as if complete.
+   behaviour before it existed. `pr-review`'s `site-review` declares it
+   (it was introduced on the since-removed survey fan-out, where an
+   observational gate let a half-done hypotheses file — 2 of 12 seeded
+   checks answered — go downstream as if complete).
 6. One harvest, one dispose.
 
 **Concurrency is `min(max_concurrent, backend ceiling)`**, and the
@@ -1253,8 +1246,9 @@ command_policy:
   guard, not a security boundary: `sh -c "$(…)"` or a script under another name
   gets past it.
 
-`pr-review.yaml` sets `survey` and `adjudicate` to `install: block, test:
-block, host: block`, and `review` and `falsify` set `host` to `block` and
+`pr-review.yaml` sets `site-review` and `select` to `install: block, test:
+block, host: block` (`site-review`'s `install-scratch` follows the probe mode,
+`block` when probes are off), and `review` and `falsify` set `host` to `block` and
 `log` respectively (falsify moves to `block` once an eval arm's log shows
 nothing legitimate is caught). `review` blocks `test` always and `install` only when
 `review.analysis.enabled` (context key `reviewInstallPolicy`; with the pipeline

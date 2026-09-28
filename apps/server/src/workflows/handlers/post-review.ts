@@ -667,7 +667,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       const summary = await writePostedSummary({
         event: review.event,
         tiered: review.tiered,
-        adjudicatorSummary: doc.summary,
+        documentSummary: doc.summary,
         prTitle: typeof ctx.prTitle === "string" && ctx.prTitle ? ctx.prTitle : undefined,
         model: this.run.modelFor?.("review-summary"),
         chat: this.run.chat ?? chat,

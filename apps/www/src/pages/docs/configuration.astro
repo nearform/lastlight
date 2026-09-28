@@ -222,17 +222,15 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 			the <code>models:</code> block of <code>config/default.yaml</code> is a
 			commented-out example except <code>review-survey</code> and
 			<code>review-triage</code>, both pinned to
-			<code>anthropic/claude-haiku-4-5-20251001</code>. It is the key the five
-			survey branches of the <a href="#workflow-policy">review evidence
-			pipeline</a> declare, and — having no key of its own — its
-			<code>falsify</code> phase too, so six phases resolve through it. Pinning
-			it is not a cost downgrade: on review <em>recall</em> Haiku 4.5 beats
-			Sonnet 4.6 on two independent evals, and its price is merely what makes a
-			five-way fan-out affordable. The consequence for you: if your
-			<code>models.default</code> points at a <strong>non-Anthropic</strong>
-			provider, override <code>models.review-survey</code> in your overlay
-			<code>config.yaml</code> as well, or those six phases reach for a provider
-			you have no key for. Nothing happens either way until
+			<code>anthropic/claude-haiku-4-5-20251001</code>. It is the model of the
+			<a href="#workflow-policy">review evidence pipeline</a>'s unit survey, and
+			the fall-through of its site investigators (<code>models.review-site</code>)
+			when you have not pinned them. Pinning it is not a cost downgrade: on
+			review <em>recall</em> Haiku 4.5 beats Sonnet 4.6 on two independent
+			evals. The consequence for you: if your <code>models.default</code> points
+			at a <strong>non-Anthropic</strong> provider, override
+			<code>models.review-survey</code> in your overlay <code>config.yaml</code>
+			as well, or those phases reach for a provider you have no key for. Nothing happens either way until
 			<code>review.analysis.enabled</code> is on — those phases skip while it is
 			off. <code>review-triage</code> is pinned for a different reason and is
 			<em>not</em> gated on that switch: it is the pass that decides how much
@@ -541,51 +539,27 @@ review:
     timeoutSeconds: 300
   analysis:
     enabled: false             # the review evidence pipeline — off, and inert
-    independentReview: false   # also run the separate `review` pass beside the
-                               # pipeline. Off: adjudicate writes findings.json
-                               # from the hypotheses alone
     maxSpecObligations: 40     # SAFETY BOUND for the `spec` family — should never bind
     maxObligations: 48         # TOTAL backstop over the five facts-derived
                                # families, which are capped PER FAMILY (contract
                                # 12, enforcement 12, state 8, security 8, tests
                                # 8). 48 is their sum, so it cannot bind unless
                                # you raise one of those ceilings
-    obligationContract: minimal  # minimal | full — how much each survey records
-                               # per obligation. minimal is the measured default
-    adjudicate: legacy         # legacy | dossier. dossier renders every record
-                               # the adjudication needs (hypotheses, probe
-                               # transcripts, the conservation ledger, quotes
-                               # already checked against the tree) instead of
-                               # having the model shell out ~30 times to
-                               # assemble them — and asks it for claim /
-                               # category / fix instead of a tier and a
-                               # confidence
-    admit: null                # which hypotheses adjudicate weighs (dossier
-                               # --admit); null = every row. Comma list of
-                               # no-clean-quote, no-consequence, no-code-change,
-                               # jev:&lt;category&gt;@&lt;p&gt;, top:&lt;n&gt;. The rest are filed
-                               # at internal without a model. Needs a dossier
-                               # mode; unmeasured end to end
+    obligationContract: minimal  # minimal | full — how strictly the seeded
+                               # obligations' discharge is checked. minimal is
+                               # the measured default
     mint: all-in-diff,registrations  # extra seeding rules beyond the original
                                # four; "" = the pre-D2 baseline set
-    surveyPasses: 6            # RECORDED, not consumed — the fan-out branch list
-                               # is the authority
-    surveyConcurrency: 6       # survey families running at once (a ceiling,
-                               # clamped per sandbox backend)
-    surveyEngine: agent        # agent | units. units = one model call per unit
-                               # instead of the agent fan-out. EXPERIMENTAL and
-                               # unmeasured; refused on the kubernetes backend
-    reviewEngine: adjudicate   # adjudicate | sites. sites = one investigator per
-                               # top-5 code site + a selection pass, instead of
-                               # probe → adjudicate over every hypothesis.
-                               # UNMEASURED end to end
-    surveyUnitConcurrency: 16  # unit calls in flight under `units` (no backend
-                               # clamp — lower it only for provider rate limits)
+    siteConcurrency: 6         # site investigators running at once (a ceiling,
+                               # clamped per sandbox backend). Old name:
+                               # surveyConcurrency, still read
+    surveyUnitConcurrency: 16  # unit survey calls in flight (no backend clamp
+                               # — lower it only for provider rate limits)
     surveyUnitsTimeoutSeconds: 600  # whole-phase deadline on the unit calls
-    probes: "off"              # off | static | full. static runs the probe
-                               # phases WITHOUT installing anything; full also
-                               # installs the PR's dependencies. A bare `true`
-                               # reads as static
+    probes: "off"              # off | static | full. NOT ATTACHED yet — the
+                               # probe phases skip whatever this says. static
+                               # runs them WITHOUT installing anything; full
+                               # also installs the PR's dependencies
     probeLifecycleScripts: false  # full only: let the PR's own postinstall run.
                                # Off: it is the author's code, on your machine
     probeTypecheck: false      # the repo's own tsc --noEmit, for per-line diagnostics
@@ -595,8 +569,7 @@ review:
     probeRounds: 2
     maxProbes: 8               # at most this many hypotheses go in front of
                                # falsify (probe-plan ranks the owed set and cuts
-                               # it here); null = no cap. The rest reach
-                               # adjudicate unprobed, and the dossier says so
+                               # it here); null = no cap
     falsifyTimeoutSeconds: 600 # the oracle's whole-phase ceiling, all rounds
     maxInlineComments: 5       # the attention boundary — findings past this go
                                # to the review body, never dropped. Ranked by a
@@ -607,7 +580,11 @@ review:
                                # null = unlimited
                                # (`thresholds` and `internalFloor` were removed
                                #  in 2026-09 — the boundary no longer gates on a
-                               #  finding's confidence; both keys are ignored)
+                               #  finding's confidence; both keys are ignored.
+                               #  So are surveyEngine, reviewEngine,
+                               #  independentReview, adjudicate, admit, jevModel,
+                               #  jevTimeoutSeconds and surveyPasses, removed
+                               #  with the agent survey and the adjudicator)
 
 fix:                           # every PR-fixing workflow: pr-fix, dependabot-ci-fix
   maxAttempts: 3               # attempts ACROSS runs for one PR, then a human is asked
@@ -765,101 +742,54 @@ dependencies:
 	</p>
 
 	<p>
-		With the pipeline on, the separate <code>review</code> pass no longer runs
-		by default. The surveys have already done the deep work, so the
-		adjudicator writes the review's findings from their hypotheses alone and
-		the run saves one strong-model session. Set
-		<code>independentReview: true</code> to run that pass beside the pipeline
-		again, as it did before the key existed. It changes nothing with the
-		pipeline off (the <code>review</code> pass is then the whole review), and a
-		re-review that triage marks <code>light</code> always runs it. If the
-		adjudicator fails and leaves no findings behind, a deterministic floor
-		writes them, unposted, and the review says plainly that the change was
-		not assessed — it is never posted as a clean review.
-	</p>
-
-	<p>
-		<code>surveyEngine</code> chooses how the survey step runs, and it is
-		<strong>experimental</strong>: <code>units</code> has not been measured
-		against the default, so <code>agent</code> stays the default until it is.
-		<code>agent</code> is the fan-out of survey agents, one per family.
-		<code>units</code> instead cuts the pull request into small deterministic
-		units — a changed function or method, a file's module-level code, the pull
-		request as a whole — and makes one bounded model call per unit on
-		<code>models.review-survey</code>, with no tools and no sandbox, from the
-		Last Light process itself. The replies land in the same hypothesis files
-		the fan-out writes, so everything after the survey is unchanged. Replies
+		With the pipeline on, a review runs one path. First the pull request is cut
+		into small deterministic units — a changed function or method, a file's
+		module-level code, the pull request as a whole — and Last Light makes one
+		bounded model call per unit on <code>models.review-survey</code>, with no
+		tools and no sandbox, recording every defect each unit might hold. Replies
 		are cached on disk, so a re-review only re-asks the units whose code or
-		context changed. A unit that does not answer in time is recorded as unanswered
-		rather than dropped. Because those calls read the review workspace
-		directly, <code>units</code> is refused at startup on the
-		<code>kubernetes</code> sandbox backend.
+		context changed, and a unit that does not answer in time is recorded as
+		unanswered rather than dropped. Those records are only a signal of
+		<em>where</em> to look: the stretches of code that many independent units
+		pointed at are ranked, one investigator goes to each of the top five
+		(<code>models.review-site</code>, falling back to
+		<code>models.review-survey</code>), and each must ground one to three
+		findings in the code or back a "nothing here" with a probe it actually ran.
+		One selection pass (<code>models.review-select</code>, falling back to
+		<code>models.review</code>) then merges duplicates, decides how important
+		each one is, and writes the comments. A nit is recorded, never posted.
+		Cheap investigator models measured better than Haiku here, on both recall
+		and precision, at a quarter to a half of the cost — pin
+		<code>models.review-site</code> in your overlay. Because the unit calls read
+		the review workspace directly, <code>analysis.enabled</code> is refused at
+		startup on the <code>kubernetes</code> sandbox backend.
 	</p>
 
 	<p>
-		<code>reviewEngine</code> chooses how the survey's hypotheses become the
-		review, and <code>sites</code> is <strong>unmeasured</strong> end to end,
-		so <code>adjudicate</code> stays the default. <code>adjudicate</code> probes
-		and weighs every hypothesis the survey wrote. <code>sites</code> treats
-		them only as a signal of <em>where</em> to look: it ranks the stretches of
-		code that many independent survey passes pointed at, sends one
-		investigator to each of the top five (<code>models.review-site</code>,
-		falling back to <code>models.review-survey</code>), each of which must
-		ground one to three findings in the code or back a "nothing here" with a
-		probe it actually ran, and then one selection pass
-		(<code>models.review-select</code>, falling back to
-		<code>models.review</code>) merges duplicates, decides how important each
-		one is, and writes the comments. A nit is recorded, never posted. The
-		independent <code>review</code> pass does not run under
-		<code>sites</code>, whatever <code>independentReview</code> says.
+		The separate <code>review</code> pass does not run while the pipeline is
+		on; a re-review that triage marks <code>light</code> skips the pipeline and
+		runs it instead. If the pipeline fails and leaves no findings behind, a
+		deterministic floor writes them, unposted, and the review says plainly that
+		the change was not assessed — it is never posted as a clean review.
 	</p>
 
 	<p>
 		What it adds today is a <strong>spec axis</strong>. Every item in the
 		reviewer's rubric — correctness, contracts, edge cases, security, test
 		coverage — is a <em>standards</em> check, and none of them asks whether the
-		change does what was asked. Turning <code>analysis</code> on hands the
-		reviewer the PR's body and the issues it closes (which it had never been
-		shown), extracts the acceptance criteria out of them, and pairs each one
-		with the files the PR actually changed. The reviewer then has to quote the
-		line that implements a criterion, or say that no changed file does. It also
-		lets the review carry a verdict <em>per axis</em>: a change that is clean by
-		every standards check but doesn't do what the issue asked can no longer be
-		approved on the strength of the half that passed.
+		change does what was asked. Turning <code>analysis</code> on reads the
+		issues the PR closes and its body, extracts the acceptance criteria out of
+		them, and pairs each one with the files the PR actually changed; each
+		criterion then becomes a question the unit survey has to answer — quote the
+		line that implements it, or say that no changed file does.
 	</p>
 
 	<p>
-		<code>adjudicate</code> selects what the adjudication phase reads and
-		what shape it writes back, in one key because both halves change the
-		same phase. Under <code>legacy</code> the prompt names the files and
-		the model shells out to assemble them; measured on an eight-case arm
-		that was <strong>137 shell calls across 8 adjudications</strong>, about
-		a third of the run's cost, spent re-deriving records the harness had
-		already parsed. Under <code>dossier</code> a deterministic phase
-		renders them once — every hypothesis, every probe transcript, the
-		conservation ledger, and every quote already checked against the actual
-		file it names — and the model spends its budget deciding rather than
-		fetching. It also stops asking for a tier and a confidence and asks
-		instead for what is <em>wrong</em>, what <em>kind</em> of wrong, and
-		what to <em>change</em>; the tier is then arithmetic. Off until you ask
-		for it.
-	</p>
-
-	<p>
-		Under either shape, two things are no longer the adjudicator's call. Every
-		finding states its <em>impact</em> — what a user or maintainer would
-		actually hit — and a finding whose only consequence is a style, layering,
-		locale or presentation preference, missing tests, dead code, or a
-		convention the repository does not follow is recorded but never posted,
-		however well its mechanism was confirmed. And a finding's
-		<em>severity</em>, which is what the two posting budgets rank on, is
-		derived in code from the evidence behind it (does the consequence reach
-		beyond the code that holds it, and did a probe actually execute it) rather
-		than written by the model — so the budgets keep the strongest claims
-		instead of cutting in document order. Within a severity, ties are
-		broken on the same evidence: a boundary-crossing consequence first, then
-		an executed probe (ahead of one that only read code), then how many
-		independent hypotheses the finding merges. The review's opening summary is written
+		A posted finding's <em>severity</em>, which is what the two posting
+		budgets rank on, comes from the importance the selection pass gave it —
+		a must-fix outranks a worth-mentioning for the inline slots — so the
+		budgets keep the strongest claims instead of cutting in document order.
+		The review's opening summary is written
 		only after those budgets have cut, from the findings that actually post, so
 		it never mentions one that was held back (pin
 		<code>models.review-summary</code> to choose the model; unset, it uses
@@ -867,7 +797,10 @@ dependencies:
 	</p>
 
 	<p>
-		<code>probes</code> is a <strong>second switch</strong> under the same
+		<code>probes</code> is kept but <strong>not attached yet</strong>: the probe
+		phases skip whatever it says, because nothing in the review reads their
+		output until they are wired back in. As designed, it is a
+		<strong>second switch</strong> under the same
 		block, and it has three values because it used to conflate two decisions.
 		It turns on the <em>oracle</em> — a pass that settles a claim by running
 		something instead of reasoning about it — and, separately, it can install

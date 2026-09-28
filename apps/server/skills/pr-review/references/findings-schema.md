@@ -19,10 +19,10 @@ You never call `github_create_pull_request_review` yourself; writing this file i
 how you submit.
 
 > **Analysis mode writes a superset.** When the review evidence pipeline is on,
-> the adjudicate phase owns this file and adds `tier` / `family` / `hypotheses` /
-> `confidence` per finding and a `dropped[]` list. That contract lives in the
-> adjudicate prompt (`workflows/prompts/review-adjudicate.md`); everything below
-> is the shape both modes share.
+> no agent writes this file: `site-finalize` (`lastlight-facts sites
+> --finalize`, `packages/code-facts/src/site-review.ts`) builds it from the
+> sites engine's selection and adds pipeline fields such as `tier` and an
+> `internal[]` list; everything below is the shape both modes share.
 
 ## Top-level object
 

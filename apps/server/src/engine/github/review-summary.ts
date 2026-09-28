@@ -105,8 +105,8 @@ export interface PostedSummary {
 export interface PostedSummaryInput {
   event: ReviewEvent;
   tiered: TieredFindings;
-  /** The adjudicator's summary — read ONLY for its leading re-review ledger. */
-  adjudicatorSummary?: string | null;
+  /** `findings.json`'s own summary — read ONLY for its leading re-review ledger. */
+  documentSummary?: string | null;
   prTitle?: string;
   model?: string;
   chat?: ChatFunction;
@@ -116,7 +116,7 @@ export interface PostedSummaryInput {
 /** Write the review summary from the posted findings only. Never throws. */
 export async function writePostedSummary(input: PostedSummaryInput): Promise<PostedSummary> {
   const posted = postedFindings(input.tiered);
-  const ledger = extractPriorLedger(input.adjudicatorSummary);
+  const ledger = extractPriorLedger(input.documentSummary);
   const withLedger = (text: string) => (ledger ? `${ledger}\n\n${text}` : text);
   const fallback = (reason: string): PostedSummary => ({
     text: withLedger(renderFallbackSummary(input.event, posted)),

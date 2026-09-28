@@ -226,7 +226,7 @@ Phase kinds the runner recognises:
   loop, so interleaving would serialise the whole fan-out on the one
   backend it exists to speed up. They are observational unless the phase
   declares `on_branch_gate_failure: { retries: 1 }` (the `pr-review`
-  survey does, and so does `site-review` under `reviewEngine: sites`): then a branch whose gate ran and said no is re-run once
+  `site-review` fan-out does): then a branch whose gate ran and said no is re-run once
   (`_regate` row) with the gate's output appended to its prompt, and
   gated again. No `approval_gate` (a fan-out cannot
   pause mid-flight) and no `loop:`/`generic_loop:` (the branches are the
@@ -240,10 +240,9 @@ Phase kinds the runner recognises:
   host end of the `cwd` a `type: bash` phase runs in — and an unreadable
   path appends a loud NOT AVAILABLE notice rather than nothing. See
   `spec/06-workflow-engine.md` → "`fanout`".
-- **survey-units** (`type: survey-units`) — the per-unit review survey,
-  run only under the experimental, unmeasured
-  `review.analysis.surveyEngine: units` (the `survey` fan-out is the
-  default). Handler: `handlers/survey-units.ts`, registered on
+- **survey-units** (`type: survey-units`) — the per-unit review survey of
+  the `review.analysis` evidence pipeline (refused at boot on kubernetes,
+  which has no host checkout). Handler: `handlers/survey-units.ts`, registered on
   `EnginePorts.handlers` in `runner.ts` like `post-review`/`fanout`. Runs
   **in the harness process — no sandbox, no agent**: reads
   `.lastlight/pr-review/units.json` (from the preceding `units` bash phase)

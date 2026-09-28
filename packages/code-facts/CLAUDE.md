@@ -527,7 +527,7 @@ file tsgo failed to read.
 | `findings` | the **conservation floor** — `--repair` only (the `reconcile` phase; the grading gate went with the adjudicator). See below. It also stamps each hypothesis-derived finding's **derived severity** (`finding-severity.ts`: evidence record + probe strength; the model's value kept as `declaredSeverity`) plus its **`rankEvidence`** (crosses a boundary / strongest probe / merged-hypothesis count, over non-refuted constituents), which the poster breaks severity ties on — the one derivation the evals read too (`buildSeverityIndex`) |
 | `units` | the unit survey's INPUT — one unit per changed function/method, at most one module unit per file (its module-scope regions plus folded small functions), one `pr` unit for obligations no unit holds, each carrying the COMPLETE model request behind a run-constant shared prefix. See below |
 | `units-ingest` | the unit survey's replies → `hypotheses/<family>.jsonl` rows of the existing shape, plus `units/ingest.json`. See below |
-| `sites` | the `sites` review engine's deterministic steps (`review.analysis.reviewEngine: sites`): `--plan`, `--check <site-id>`, `--merge`, `--check-select`, `--finalize`. See below |
+| `sites` | the `sites` review engine's deterministic steps: `--plan`, `--check <site-id>`, `--merge`, `--check-select`, `--finalize`. See below |
 | `toolchain` | the manifest and what actually resolved |
 
 Three fixes must not regress. Two are carried forward from v3 and live in
@@ -1018,9 +1018,10 @@ because this package cannot see the PR body or the linked issue it comes from.
 
 ### `findings` — conservation, and the floor that makes it a mechanism
 
-`src/findings.ts`, WP6c. It is the `adjudicate` phase's `until_bash`, so **exit 0
-closes the loop** and non-zero means iterate again — the same contract as
-`probes`, and for the same reason it is not wrapped by `--never-fail`.
+`src/findings.ts`, WP6c. Only `--repair` remains — the `reconcile` phase's
+model-free floor under `site-finalize`. The grading gate described below was the
+removed adjudicate phase's `until_bash`; the conservation rules it enforced are
+what `--repair` still restores.
 
 #### Identity is assigned at ingest, not minted by the model
 
@@ -1158,9 +1159,10 @@ is the entire point.
 `src/units.ts`, `src/units-render.ts`, `src/unit-response.ts`,
 `src/units-ingest.ts`; the design and the file contract are
 [`docs/plans/unit-survey.md`](../../docs/plans/unit-survey.md). Selected by
-`review.analysis.surveyEngine: units` — **unmeasured, not a default**. The
+the `review.analysis` evidence pipeline, whose only survey it is. The
 pipeline is `units` (bash) → `survey-units` (core, one `completeSimple` call per
-unit) → `units-ingest` (bash), replacing the five-branch agent `survey` fan-out.
+unit) → `units-ingest` (bash); it replaced the five-branch agent `survey`
+fan-out.
 Everything here is deterministic and testable without a model; **core only does
 the model I/O**, and does not depend on this package for it.
 
@@ -1438,11 +1440,10 @@ investigator gets the site plus short leads and writes the findings.
 
 ### `sites` — the sites review engine's deterministic steps
 
-`src/site-review.ts`, exported from `index.ts`. Under
-`review.analysis.reviewEngine: sites` (operator-only, default `adjudicate`,
-**unmeasured end to end**) pr-review skips `probe-plan` → `adjudicate` and runs
-`site-plan` → `site-review` (a 5-branch fan-out) → `merge` → `select` →
-`site-finalize` instead. Every step but the investigators and `select` is this
+`src/site-review.ts`, exported from `index.ts`. With `review.analysis` on,
+pr-review runs `site-plan` → `site-review` (a 5-branch fan-out) → `merge` →
+`select` → `site-finalize` after the unit survey — the only review engine
+(docs/plans/pr-review-units-sites-only.md). Every step but the investigators and `select` is this
 command. The rows stop being the items the review weighs and become a VOLUME
 signal: where many independent units pointed is where an investigator looks.
 

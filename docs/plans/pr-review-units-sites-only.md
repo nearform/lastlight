@@ -1,10 +1,34 @@
 # pr-review: units + sites as the only analysis path
 
-Status: **planned, nothing started (2026-09-28).** Follow-on to
-[`site-review-recall.md`](site-review-recall.md), whose conclusions made the
-units survey + `sites` review engine the best analysis path measured. Branch
-state when written: `feat/unit-survey`, with the `sites` engine, h13
-`review-site.md` and the recall work **uncommitted**. Commit that first.
+Status: **stages 0–4, 6 and 7 built (2026-09-28); 5 (falsify) and 8 (release,
+roll-out) open.** Follow-on to [`site-review-recall.md`](site-review-recall.md),
+whose conclusions made the units survey + `sites` review engine the best
+analysis path measured.
+
+Decisions taken while building:
+
+- **D1** as recommended: `review` keeps its `light` and `baseline` arms; the
+  `deep` arm is gone. The triage seed is `{depth: "full", baseline: true}`,
+  plus `skipReview` whenever the pipeline is on.
+- **D2** option (c): `prepare`, `probe-plan` and `falsify` stay in the YAML but
+  skip on `falsifyAttached != true`, which nothing projects — so `probes:
+  static|full` no longer pays for probes nothing reads. Stage 5 wires (b).
+- **D3** as recommended: `review.analysis.enabled` is refused at boot on
+  kubernetes (`assertReviewAnalysisSupported`).
+- **D4**: `models.review-site` stays unset in `default.yaml`; overlays pin it.
+- **Stage 4**: `obligationContract` kept (it grades the `discharge`
+  post-check); `prBody` / `linkedIssues` / the rendered `specObligations`
+  dropped (only `specObligationsJson` feeds units). `surveyConcurrency` →
+  `siteConcurrency`, the old name mapped per config layer before the merge.
+- **Not renamed**: the `adjudicated` demotion label — it is persisted in
+  `disposition.json` and the eval archives are read by it; its meaning is now
+  "the findings document chose this tier". `computeTier` keeps its name;
+  `adjudicatorSummary` became `documentSummary`.
+- Two measured prompts changed one phrase each ("probe and adjudicate" →
+  "investigate"): `survey-unit.md` and the unit request in `units-render.ts`.
+  Both are part of the unit reply-cache key, so each unit is re-asked once.
+- The conservation floor's missing-`findings.json` document now says "The
+  review did not complete" with `incomplete.phase: "site-finalize"`.
 
 ## Goal
 

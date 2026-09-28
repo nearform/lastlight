@@ -19,7 +19,11 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		review</strong> with each finding as an <strong>inline comment anchored to
 		its diff line</strong> (with an applyable suggestion where a concrete fix
 		fits). A finding whose line isn't in the diff is folded into the review
-		summary instead.
+		summary instead. With the <a href="/docs/configuration#workflow-policy">review
+		evidence pipeline</a> on, the agent phase is replaced: a per-unit survey
+		records where defects might be, five investigators each examine one of the
+		most-pointed-at stretches of code, and one selection pass decides what is
+		worth posting.
 	</p>
 
 	<p>

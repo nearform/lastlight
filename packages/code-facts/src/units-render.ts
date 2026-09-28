@@ -285,7 +285,7 @@ const NOT_FINDINGS = [
  */
 const DEFECTS_BREADTH = [
   "DEFECTS — record every defect you can see in this unit that a changed (+) or removed (-|) line causes or makes",
-  "reachable. Later stages probe and adjudicate every entry: they can remove a risk, but they can never recover one that",
+  "reachable. Later stages investigate every entry: they can remove a risk, but they can never recover one that",
   "was not written down. Only the NOT FINDINGS categories above stay out. A defect that exists only if someone later",
   "edits the code is recorded with trigger \"code_change\" — label it honestly, never as input or state. A defect always",
   "has a consequence; a check that holds belongs in an obligation's answer, never in defects.",

@@ -293,8 +293,8 @@ src/
                         `fanout.ts` (N concurrent agent sessions in ONE
                         provisioned workspace) and `survey-units.ts` (the
                         per-unit review survey — one bounded model call per
-                        unit from the harness, no sandbox; only under the
-                        experimental `review.analysis.surveyEngine: units`).
+                        unit from the harness, no sandbox; the survey of
+                        the `review.analysis` evidence pipeline).
                         NOT to be confused with
                         `src/cron/fanout.ts`, which fans a cron out over
                         repos.
@@ -922,8 +922,8 @@ data/
                             keyed by pi-ai sessionId).
       -home-agent-workspace/  Sandbox sessions (cwd inside the container).
   sandboxes/                Cloned repos per task (one dir per taskId).
-  unit-survey-cache/        `survey-units` reply cache (only under
-                            `review.analysis.surveyEngine: units`):
+  unit-survey-cache/        `survey-units` reply cache (only with
+                            `review.analysis.enabled`):
                             <owner>/<repo>/, keyed on endpoint, thinking level,
                             system text and request. Pure cache — safe to
                             delete; a re-review then re-asks every unit.

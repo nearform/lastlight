@@ -502,15 +502,15 @@ export function checkFindings(options: CheckFindingsOptions): CheckFindingsResul
   // A MISSING `findings.json` over a non-empty hypothesis set: the floor
   // WRITES one. It used to refuse ("a fabricated summary is a review nobody
   // wrote"), and that was right while `review` always ran — but with the
-  // evidence pipeline on, `review` is skipped by default and `adjudicate` is
-  // the ONLY writer. An adjudicator that fails, times out or never writes the
-  // file then left post-review with nothing to read: the phase fails, the run
+  // evidence pipeline on, `review` is skipped and `site-finalize` is the ONLY
+  // writer. A finalize that fails, times out or never writes the file would
+  // leave post-review with nothing to read: the phase fails, the run
   // goes red with nothing posted, per-head dedup records nothing, and the
   // thirty-minute sweep re-buys the whole pipeline on the same SHA forever.
   // What is written is not a review anyone wrote, and it says so: every
   // hypothesis at `internal` (recorded, never posted — the same row the floor
   // writes for an uncovered one), `event: COMMENT`, a summary stating that
-  // adjudication did not complete, and an `incomplete` marker a reader can
+  // the review did not complete, and an `incomplete` marker a reader can
   // key on. Safe in every workflow shape: when `review` RAN, a missing file
   // means review failed, and post-review (`none_failed` on `review`) does not
   // run at all. No hypotheses ⇒ nothing to conserve and nothing is invented.
@@ -519,19 +519,19 @@ export function checkFindings(options: CheckFindingsOptions): CheckFindingsResul
     const count = first.hypotheses.length;
     const created: Record<string, unknown> = {
       summary:
-        `Adjudication did not complete, so the ${count} candidate issue${count === 1 ? "" : "s"} this review's analysis ` +
+        `The review did not complete, so the ${count} candidate issue${count === 1 ? "" : "s"} this review's analysis ` +
         "recorded were not weighed and nothing is posted inline. They are kept, unposted, for the record. " +
         "This is not a clean review: the change was not assessed.",
       event: "COMMENT",
       incomplete: {
-        phase: "adjudicate",
-        reason: "findings.json did not exist when the conservation floor ran — the adjudicator failed, timed out, or never wrote it",
+        phase: "site-finalize",
+        reason: "findings.json did not exist when the conservation floor ran — site-finalize failed, timed out, or never wrote it",
       },
       findings: first.hypotheses.map((id) =>
         internalFinding(
           id,
           first.rows.get(id),
-          "Never adjudicated — findings.json was never written. Conserved at internal tier by the §D12 floor.",
+          "Never weighed — findings.json was never written. Conserved at internal tier by the §D12 floor.",
         ),
       ),
     };

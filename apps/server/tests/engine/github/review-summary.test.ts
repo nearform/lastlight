@@ -57,7 +57,7 @@ describe("writePostedSummary", () => {
     await writePostedSummary({
       event: "COMMENT",
       tiered: tiered(),
-      adjudicatorSummary: "Also flagged below: withheld by budget.",
+      documentSummary: "Also flagged below: withheld by budget.",
       model: "m/x",
       chat,
     });
@@ -100,7 +100,7 @@ describe("writePostedSummary", () => {
     const out = await writePostedSummary({
       event: "COMMENT",
       tiered: tiered(),
-      adjudicatorSummary: `${ledger}\n\nThen prose naming withheld by budget.`,
+      documentSummary: `${ledger}\n\nThen prose naming withheld by budget.`,
       model: "m/x",
       chat: recorder("New summary.").chat,
     });

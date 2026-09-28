@@ -83,9 +83,10 @@ export interface ReviewFinding {
    */
   tier?: "inline" | "body" | "internal";
   /**
-   * #399's typed attributes, written INSTEAD of `tier` under
-   * `review.analysis.adjudicate: "dossier"`. {@link computeTier} turns them
-   * into a tier; absent, everything below behaves exactly as it did.
+   * #399's typed attributes, written INSTEAD of `tier` (by the removed
+   * adjudicator's `dossier` mode; `site-finalize` writes a `category`).
+   * {@link computeTier} turns them into a tier; absent, everything below
+   * behaves exactly as it did.
    *
    * `claim` is what is WRONG (not what the code does), `fix` is what to
    * change, and `category` is the axis that measured **AUC 0.897** where
@@ -703,6 +704,9 @@ export function splitFindings(
  * `below-threshold` was a fourth, retired with the per-family confidence bars
  * it named — see {@link rankOf} for the measurement.
  */
+// `adjudicated` means "the findings document chose this tier itself" — named
+// for the removed adjudicator that wrote it, and kept because it is persisted
+// in `disposition.json` and the eval archives are read by it.
 export type DemotionReason = "off-diff" | "overflow" | "adjudicated";
 
 /** One demoted finding, carrying the reason it did not earn an inline comment. */
