@@ -134,6 +134,53 @@ and a running report's detail poll at 1.5 s while anything is `running`
 (`src/lib/recentRuns.ts` → `mergeRecent`, tested) behind a `unit-survey` kind
 chip, linking to `#/unit-survey/<id>`; micro-survey reports do not.
 
+## The phase-replay page (`#/phase-replay`)
+
+`src/components/PhaseReplay.tsx` renders `/api/phase-replay` (list) and one
+report fetched from `/data/phase-replay/<id>.json` (detail: per-case table) —
+the reports `scripts/micro-falsify.ts`, `scripts/micro-adjudicate.ts` and
+`scripts/micro-site-review.ts` write, each tagged with a `falsify` /
+`adjudicate` / `site-review` kind chip. Same shape as the
+unit-survey page: its own endpoint, its own reserved first hash segment
+(`PHASE_REPLAY_TIER_KEY` in `src/lib/router.ts`), a nav chip only when there
+are reports, and hooks in `src/lib/api.ts` (`usePhaseReplayIndex` polls at
+1.5 s while any report is running, 15 s otherwise; `usePhaseReplayReport` at
+1.5 s while live). Totals and status come from the harness's node-free
+`../src/phase-replay.ts` (`phaseReplayTotals`, `phaseReplayStatus`), never a
+local copy.
+
+The rule it pins: **absent is not zero**. An audit (`--audit`, no model) has
+no cost, wall clock or verdicts — they render `n/a` / *not run (audit)*, not
+`$0.00` or `0` — and a gold count over an unjudged gold map is `null` and
+renders `n/a`. Per-case quality numbers are min–max ranges, never means.
+A `site-review` detail page also shows a **human grades** box (below).
+
+## The grading page (`#/grade`)
+
+`src/components/Grade.tsx` renders `/api/findings` — every finding a
+site-review report flagged, deduplicated by label key — as cards grouped by
+PR: title, path:line, mechanism, consequence, a ±8-line code excerpt from the
+fixture, the case gold per instance, and where the finding appeared (report
+label · instance · arm · repeat · site, the judge's gold match, a log
+button). Controls: REAL? yes/no/unsure, IMPORTANCE (must-fix /
+worth-mentioning / nit, shown only when real = yes), a "same as gold N"
+select, a note, clear. Each click POSTs the full label to `/api/labels`;
+`useSaveLabel` patches the `["findings"]` cache in place rather than
+refetching, and cards graded this visit stay visible under the `ungraded`
+filter. Keys: j/k, y/n/u, 1/2/3 (implies yes), x; n/u/1–3 advance.
+`#/grade/<report-label>` pre-filters to one arm (`GRADE_TIER_KEY` in
+`src/lib/router.ts`; the nav chip shows once a non-audit site-review report
+exists). The per-arm table and the phase-replay page's `HumanGradesBox` both
+come from `gradedMetrics` in the node-free `../src/labels.ts` — the key rule
+and its trade-off are documented there, not here.
+
+Machine proposals (`f.proposals`) render in a muted dashed "suggested by
+<grader>" box, never in the human controls; "accept suggestion" (key `a`,
+first grader) POSTs it as the human label. Extra filters: "disagrees with
+suggestion" (`proposalAgrees` false) and "has suggestion, ungraded". The
+header's per-grader agreement (n, % real agree, κ, confusion matrix) is
+`agreementMetrics`, recomputed client-side so an in-place label patch updates it.
+
 ## Testing
 
 `vitest.config.ts`, `environment: "node"` — everything worth testing here is pure

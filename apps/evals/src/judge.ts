@@ -20,9 +20,11 @@ interface Provider {
   /** Auth + version headers. */
   headers: Record<string, string>;
   /** Build the request body for a single system+user turn. */
-  body: (model: string, system: string, user: string, temperature?: number) => unknown;
+  body: (model: string, system: string, user: string, temperature?: number, maxTokens?: number) => unknown;
   /** Pull the assistant text out of the response JSON. */
   extract: (json: unknown) => string;
+  /** Pull the token usage out of the response JSON (`null` fields = not reported). */
+  usage: (json: unknown) => { inputTokens: number | null; outputTokens: number | null };
 }
 
 /** Strip the `provider/` prefix, leaving the wire model id (keeps any further
@@ -36,8 +38,9 @@ function openAiCompatible(url: string, apiKey: string): Provider {
   return {
     url,
     headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-    body: (model, system, user, temperature) => ({
+    body: (model, system, user, temperature, maxTokens) => ({
       model,
+      ...(maxTokens !== undefined ? { max_completion_tokens: maxTokens } : {}),
       messages: [
         { role: "system", content: system },
         { role: "user", content: user },
@@ -58,6 +61,10 @@ function openAiCompatible(url: string, apiKey: string): Provider {
       const j = json as { choices?: { message?: { content?: string } }[] };
       return j.choices?.[0]?.message?.content ?? "";
     },
+    usage: (json) => {
+      const u = (json as { usage?: { prompt_tokens?: number; completion_tokens?: number } }).usage;
+      return { inputTokens: u?.prompt_tokens ?? null, outputTokens: u?.completion_tokens ?? null };
+    },
   };
 }
 
@@ -70,9 +77,9 @@ function providerFor(modelId: string): Provider {
     return {
       url: "https://api.anthropic.com/v1/messages",
       headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      body: (m, system, user, temperature) => ({
+      body: (m, system, user, temperature, maxTokens) => ({
         model,
-        max_tokens: 2048,
+        max_tokens: maxTokens ?? 2048,
         system,
         messages: [{ role: "user", content: user }],
         ...(temperature !== undefined ? { temperature } : {}),
@@ -81,6 +88,14 @@ function providerFor(modelId: string): Provider {
         const j = json as { content?: { type: string; text?: string }[] };
         return (j.content ?? []).filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
       },
+      usage: (json) => {
+        const u = (json as { usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } }).usage;
+        if (!u) return { inputTokens: null, outputTokens: null };
+        return {
+          inputTokens: (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0),
+          outputTokens: u.output_tokens ?? null,
+        };
+      },
     };
   }
   if (family === "openrouter") {
@@ -88,7 +103,7 @@ function providerFor(modelId: string): Provider {
     if (!key) throw new Error("judge: OPENROUTER_API_KEY not set for an openrouter judge model");
     // openrouter keeps the vendor prefix (e.g. `anthropic/claude-...`).
     const or = openAiCompatible("https://openrouter.ai/api/v1/chat/completions", key);
-    return { ...or, body: (_m, s, u, t) => or.body(model, s, u, t) };
+    return { ...or, body: (_m, s, u, t, mt) => or.body(model, s, u, t, mt) };
   }
   if (family === "fireworks") {
     const key = process.env.FIREWORKS_API_KEY;
@@ -120,11 +135,11 @@ export function defaultJudgeModel(): string {
   throw new Error("judge: no provider key set (ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY)");
 }
 
-async function post(provider: Provider, model: string, system: string, user: string, temperature?: number): Promise<string> {
+async function postRaw(provider: Provider, model: string, system: string, user: string, temperature?: number, maxTokens?: number): Promise<unknown> {
   const res = await fetch(provider.url, {
     method: "POST",
     headers: provider.headers,
-    body: JSON.stringify(provider.body(model, system, user, temperature)),
+    body: JSON.stringify(provider.body(model, system, user, temperature, maxTokens)),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -132,7 +147,11 @@ async function post(provider: Provider, model: string, system: string, user: str
     err.status = res.status;
     throw err;
   }
-  return provider.extract(await res.json());
+  return res.json();
+}
+
+async function post(provider: Provider, model: string, system: string, user: string, temperature?: number): Promise<string> {
+  return provider.extract(await postRaw(provider, model, system, user, temperature));
 }
 
 /**
@@ -148,6 +167,33 @@ export async function judge(model: string, system: string, user: string): Promis
     if ((err as { status?: number }).status === 400) {
       return post(provider, wm, system, user, undefined);
     }
+    throw err;
+  }
+}
+
+/** A one-shot completion with its token usage. */
+export interface Completion {
+  text: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+}
+
+/**
+ * {@link judge}'s call — same provider routing, same temperature-0-then-retry —
+ * returning the token usage beside the text, for a harness step that has to
+ * report what it spent (micro-site-review's `--leads summary`).
+ */
+export async function complete(model: string, system: string, user: string, opts: { maxTokens?: number } = {}): Promise<Completion> {
+  const provider = providerFor(model);
+  const wm = wireModel(model);
+  const once = async (temperature?: number): Promise<Completion> => {
+    const json = await postRaw(provider, wm, system, user, temperature, opts.maxTokens);
+    return { text: provider.extract(json), ...provider.usage(json) };
+  };
+  try {
+    return await once(0);
+  } catch (err) {
+    if ((err as { status?: number }).status === 400) return once(undefined);
     throw err;
   }
 }

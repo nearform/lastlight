@@ -386,3 +386,29 @@ unreadable file is never overwritten; no hypotheses ⇒ nothing is invented.
 Decision rule (written before running): flip `surveyEngine: units` only if C's
 recall is within the baseline's run-to-run range and case wall clock drops
 substantially.
+
+**Stage 3 was stopped (2026-09-27).** The first unit-survey arm showed the two
+phases after the survey could not absorb its volume: `adjudicate` on Sonnet 4.6
+took 8.7 min to write dispositions for 52 rows (and was still inside one turn
+at 12 min on 173), and on one case the `probes` gate owed 21 rows while
+`falsify` wrote one verdict — its prompt keyed on a literal `"severity":
+"Critical"` field a unit-survey row never carries (severity is derived). A
+whole-pipeline A/B measures neither phase, so it was replaced by:
+
+- **`probe-plan`** (`lastlight-facts probe-plan`, a new phase before `falsify`)
+  — the owed set derived in code with the gate's own `requiresProbe`, ranked
+  and capped at `review.analysis.maxProbes` (default 8); falsify reads
+  `probes/plan.md` and the gate owes exactly its `selected` list.
+- **`dossier --admit`** (`review.analysis.admit`, default `null` = every row) —
+  which hypotheses adjudicate weighs; the rest are filed at `internal` by
+  `findings --repair`, named with the rule.
+- **Phase replays** — `apps/evals/scripts/micro-falsify.ts` and
+  `micro-adjudicate.ts` re-run ONE phase over preserved fixtures (`--audit` =
+  the $0 plan/admission only), reported at `#/phase-replay`. They are what
+  should move `maxProbes` and pick an admission spec; neither is measured end
+  to end yet.
+
+What those replays found, the research on why "one call picks 5 from hundreds"
+fails, and the proposed replacement (site clustering → per-site refute →
+setwise selection) are in
+[`adjudicate-falsify-replay.md`](adjudicate-falsify-replay.md).

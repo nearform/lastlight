@@ -1,0 +1,133 @@
+import { describe, expect, it } from "vitest";
+
+import { phaseReplayTotals, summarisePhaseReplay, type PhaseReplayCase, type PhaseReplayReport } from "./phase-replay.js";
+
+const baseCase = (over: Partial<PhaseReplayCase>): PhaseReplayCase => ({
+  instanceId: "prreview__x",
+  arm: "arm1",
+  fixture: "/f",
+  repeat: 1,
+  ok: true,
+  error: null,
+  wallMs: 1000,
+  costUsd: 0.5,
+  turns: 3,
+  outputTokens: 100,
+  iterations: 1,
+  rows: 10,
+  gold: [{ severity: "high", summary: "g" }],
+  goldRows: ["security-001"],
+  ...over,
+});
+
+const report = (over: Partial<PhaseReplayReport>): PhaseReplayReport => ({
+  version: 1,
+  kind: "adjudicate",
+  label: "l",
+  audit: false,
+  startedAt: "2026-09-27T12:00:00.000Z",
+  finishedAt: null,
+  status: "running",
+  heartbeat: "2026-09-27T12:00:01.000Z",
+  error: null,
+  config: { model: "m", thinking: null, prompt: "p", promptSha256: "s", promptOverride: false, skill: null, skillOverride: false, rounds: 2, judgeModel: null },
+  planned: [],
+  cases: [],
+  ...over,
+});
+
+describe("phaseReplayTotals", () => {
+  it("an audit has no cost and no wall clock — n/a, not a free instant run", () => {
+    const t = phaseReplayTotals(
+      report({
+        audit: true,
+        cases: [baseCase({ wallMs: null, costUsd: null, adjudicate: { admitted: 4, filed: 6, filedByRule: { "no-clean-quote": 6 }, goldFiled: [], promotedInline: 0, promotedBody: 0, internal: 0, dropped: 0, gateSatisfied: true, goldPromoted: null, grade: null } })],
+      }),
+    );
+    expect(t.costUsd).toBeNull();
+    expect(t.wallMedianMs).toBeNull();
+    expect(t.adjudicate).toMatchObject({ admitted: 4, filed: 6, goldFiled: 0, f1: null, goldPromoted: null });
+  });
+
+  it("F1 is a range over graded cases; an errored grade is left out, not scored zero", () => {
+    const outcome = (f1: number | null, error: string | null = null) => ({
+      admitted: 1, filed: 0, filedByRule: {}, goldFiled: [], promotedInline: 1, promotedBody: 0, internal: 0, dropped: 0, gateSatisfied: true, goldPromoted: 1,
+      grade: f1 === null ? null : { precision: f1, recall: f1, f1, matched: 1, posted: 1, gold: 1, error },
+    });
+    const t = phaseReplayTotals(report({ cases: [baseCase({ adjudicate: outcome(0.2) }), baseCase({ adjudicate: outcome(0.6) }), baseCase({ adjudicate: outcome(0, "judge down") })] }));
+    expect(t.adjudicate?.f1).toMatchObject({ min: 0.2, max: 0.6, n: 2 });
+    expect(t.adjudicate?.goldPromoted).toBe(3);
+  });
+
+  it("gold counts over an unjudged gold map are unknown (null), never zero", () => {
+    const t = phaseReplayTotals(
+      report({
+        kind: "falsify",
+        cases: [baseCase({ goldRows: null, falsify: { owed: 1, selected: 1, deferred: 0, verdicts: { none: 1 }, gateSatisfied: true, gaps: 0, goldSelected: [], goldRefuted: [], goldReproduced: [] } })],
+      }),
+    );
+    expect(t.falsify).toMatchObject({ goldSelected: null, goldRefuted: null, goldReproduced: null });
+  });
+
+  it("falsify counts gold refuted and treats `none` as unanswered", () => {
+    const t = phaseReplayTotals(
+      report({
+        kind: "falsify",
+        cases: [baseCase({ falsify: { owed: 5, selected: 3, deferred: 2, verdicts: { refuted: 1, none: 1, unprobed: 1 }, gateSatisfied: false, gaps: 1, goldSelected: ["security-001"], goldRefuted: ["security-001"], goldReproduced: [] } })],
+      }),
+    );
+    expect(t.falsify).toMatchObject({ owed: 5, selected: 3, answered: 2, goldRefuted: 1, gateFailures: 1 });
+  });
+
+  it("falsify sites: counts sessions and claims, and a rows-mode report has neither (null, not zero)", () => {
+    const f = { owed: 2, selected: 2, deferred: 0, verdicts: { corroborated: 2 }, gateSatisfied: true, gaps: 0, goldSelected: [], goldRefuted: [], goldReproduced: [] };
+    const site = (id: string, claims: number | null) => ({
+      id, origin: "support" as const, path: "a.ts", startLine: 1, endLine: 2, rows: 1, gold: [], ok: true, error: null,
+      wallMs: 1, costUsd: 0, turns: 1, outputTokens: 1, gateSatisfied: true, verdicts: {}, claims, session: null,
+    });
+    const sites = phaseReplayTotals(report({ kind: "falsify", cases: [baseCase({ falsify: { ...f, sites: [site("site-001", 2), site("site-002", null)] } })] }));
+    expect(sites.falsify).toMatchObject({ sites: 2, claims: 2 });
+    const rows = phaseReplayTotals(report({ kind: "falsify", cases: [baseCase({ falsify: f })] }));
+    expect(rows.falsify).toMatchObject({ sites: null, claims: null });
+  });
+});
+
+describe("phaseReplayTotals — site-review", () => {
+  const site = (over: Record<string, unknown> = {}) => ({
+    id: "site-001", path: "a.ts", startLine: 1, endLine: 20, rows: 10, voters: 3, leads: 4, gold: [] as string[], ok: true, error: null,
+    wallMs: 1, costUsd: 0.1, turns: 5, outputTokens: 10, gateSatisfied: true, findings: 1, none: false, session: null, ...over,
+  });
+  const outcome = (over: Record<string, unknown> = {}) => ({
+    sitesFormed: 12, skippedRows: 3, sites: [site(), site({ id: "site-002", rows: 5, leads: 0, findings: 0, none: true, gateSatisfied: false, gapsByRound: [{ "too-many": 1 }, { "too-many": 1 }] })],
+    goldInSites: ["security-001"],
+    findings: [{ site: "site-001", path: "a.ts", line: 3, title: "t", strength: "read", leads: [], gold: 0 }, { site: "site-001", path: "a.ts", line: 9, title: "u", strength: "read", leads: [], gold: null }],
+    goldStated: [0], matchedFindings: 1, ...over,
+  });
+
+  it("counts sites, findings, gold stated and pooled precision", () => {
+    const t = phaseReplayTotals(report({ kind: "site-review", cases: [baseCase({ siteReview: outcome() }), baseCase({ siteReview: outcome({ goldStated: [], matchedFindings: 0 }) })] }));
+    expect(t.siteReview).toMatchObject({ sites: 4, rowsInSites: 30, leads: 8, goldInSites: 2, findings: 4, noneSites: 2, goldStated: 1, matchedFindings: 1, precision: 0.25, gateFailures: 2, secondRounds: 2 });
+  });
+
+  it("an audit has no findings and no judged numbers (n/a, not zero); an unjudged case nulls gold stated", () => {
+    const audit = phaseReplayTotals(report({ kind: "site-review", audit: true, cases: [baseCase({ siteReview: outcome({ findings: [], goldStated: null, matchedFindings: null }) })] }));
+    expect(audit.siteReview).toMatchObject({ findings: null, noneSites: null, goldStated: null, precision: null, goldInSites: 1 });
+    const unjudged = phaseReplayTotals(report({ kind: "site-review", cases: [baseCase({ siteReview: outcome() }), baseCase({ siteReview: outcome({ goldStated: null, matchedFindings: null }) })] }));
+    expect(unjudged.siteReview).toMatchObject({ goldStated: null, matchedFindings: null, precision: null, findings: 4 });
+    const noMap = phaseReplayTotals(report({ kind: "site-review", cases: [baseCase({ goldRows: null, siteReview: outcome() })] }));
+    expect(noMap.siteReview?.goldInSites).toBeNull();
+  });
+
+  it("is listed by the index", () => {
+    expect(summarisePhaseReplay("id", report({ kind: "site-review", cases: [baseCase({ siteReview: outcome() })] }), "t")).toMatchObject({ kind: "site-review", totals: { siteReview: { sites: 2 } } });
+  });
+});
+
+describe("summarisePhaseReplay", () => {
+  it("lists a phase-replay report and refuses anything else", () => {
+    const e = summarisePhaseReplay("id", report({ planned: [{ instanceId: "a", arm: "arm1", fixture: "/f", repeat: 1 }] }), "2026-01-01T00:00:00Z");
+    expect(e).toMatchObject({ id: "id", kind: "adjudicate", planned: 1, report: "/data/phase-replay/id.json", status: "running" });
+    expect(summarisePhaseReplay("x", { version: 2 }, "t")).toBeNull();
+    expect(summarisePhaseReplay("x", { stage: "replay" }, "t")).toBeNull();
+  });
+});

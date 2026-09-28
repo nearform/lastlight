@@ -1723,6 +1723,8 @@ function shapeReviewAnalysis(raw: unknown, d: ReviewPolicy["analysis"]): ReviewP
     probeTypecheck: node.probeTypecheck === true,
     probeCoverage: node.probeCoverage === true,
     probeRounds: num(node.probeRounds, d.probeRounds),
+    // Operator-only projection; nullable like `maxBodyComments` below.
+    maxProbes: node.maxProbes === null ? null : num(node.maxProbes, d.maxProbes ?? 0),
     maxInlineComments: num(node.maxInlineComments, d.maxInlineComments),
     // Nullable like `fix.maxCostUsd`: an explicit `null` is the documented
     // "unlimited body overflow" value, distinct from an absent key (the
@@ -1731,6 +1733,8 @@ function shapeReviewAnalysis(raw: unknown, d: ReviewPolicy["analysis"]): ReviewP
     maxBodyComments: node.maxBodyComments === null ? null : num(node.maxBodyComments, d.maxBodyComments ?? 0),
     // Operator-only projection, same reasoning as `mint`/`obligationContract`.
     jevModel: typeof node.jevModel === "string" ? node.jevModel : d.jevModel,
+    // Operator-only projection, same reasoning as `mint`.
+    admit: typeof node.admit === "string" ? node.admit : d.admit,
   };
 }
 

@@ -476,6 +476,34 @@ phases:
       done
       exit 0
 
+  # WHICH hypotheses `falsify` owes a verdict on — decided in code, not by the
+  # oracle. `lastlight-facts probe-plan` derives the owed set (a derived-Critical
+  # row, or a survey's own `needsProbe`), ranks it and caps it at
+  # `review.analysis.maxProbes`, writing `probes/plan.json` (the `probes` gate
+  # owes exactly that list) and `probes/plan.md` (the records falsify reads).
+  # The prompt used to say "probe every row whose severity is Critical", and a
+  # derived severity is never written on a row: measured 2026-09-27, the gate
+  # owed 21 rows on one case and falsify probed one. `--never-fail`: with no
+  # plan on disk the gate and the prompt fall back to the pre-plan owed set, so
+  # a failure here costs the cap, never a probe.
+  - name: probe-plan
+    label: Falsify · plan the probes
+    type: bash
+    skip_if:
+      - "analysisEnabled != true"
+      - "probesEnabled != true"
+      - "scratch.reviewTriage.depth == 'light'"
+    # Both survey engines, for the reason `falsify` gives below.
+    depends_on: [survey, units-ingest]
+    trigger_rule: all_done
+    timeout_seconds: { from: seedTimeoutSeconds }
+    command: |
+      set -u
+      FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+      MAX_PROBES="{{maxProbes}}"
+      if [ -z "$MAX_PROBES" ] || [ "$MAX_PROBES" = "null" ]; then set --; else set -- --max-probes "$MAX_PROBES"; fi
+      "$FACTS" probe-plan --dir .lastlight/pr-review "$@" --never-fail
+
   # The only phase that RUNS anything. It reads the hypothesis RECORDS and the
   # code, never an earlier pass's transcript — a checker that can see the
   # reasoning which produced a claim almost never rejects it.
@@ -494,15 +522,12 @@ phases:
       - "analysisEnabled != true"
       - "probesEnabled != true"
       - "scratch.reviewTriage.depth == 'light'"
-    # BOTH survey engines, because exactly one of them runs and the other
-    # SKIPS: the fan-out under `agent`, `units-ingest` (the unit chain's last
-    # phase) under `units`. `all_done` is what lets a skipped engine through —
-    # a skipped dep is terminal, and every dep being terminal is the whole
-    # rule. Not `none_failed`: a FAILED survey never stopped falsify before
-    # this (the fan-out's `then: complete` already folds most failures, and
-    # falsify probes whatever rows exist), and the unit engine must not be
-    # stricter than the engine it is measured against.
-    depends_on: [survey, units-ingest]
+    # After `probe-plan`, which waits on BOTH survey engines (the fan-out under
+    # `agent`, `units-ingest` under `units`) with `all_done` — a skipped engine
+    # is terminal, so exactly one of them lets it through. `all_done` here too:
+    # a FAILED plan step never stopped falsify, which then reads the pre-plan
+    # owed set (see `probe-plan` above).
+    depends_on: [probe-plan]
     trigger_rule: all_done
     # A WHOLE-PHASE ceiling, across every round. `probeRounds` bounds how many
     # times the loop may go round and not what it may spend, and this is the
@@ -667,7 +692,11 @@ phases:
     command: |
       set -u
       FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+      # `--admit` (review.analysis.admit) decides which hypotheses adjudicate
+      # weighs; the rest are filed at internal by `reconcile`. Its summary goes
+      # to stderr, into the phase log, never into the dossier.
       "$FACTS" dossier --dir .lastlight/pr-review --repo . \
+        {{#if admitRules}}--admit "{{admitRules}}"{{/if}} \
         --out .lastlight/pr-review/dossier.md || true
       if [ -s .lastlight/pr-review/dossier.md ]; then
         cat .lastlight/pr-review/dossier.md

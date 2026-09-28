@@ -1,6 +1,6 @@
 import { Moon, Sun } from "lucide-react";
-import { useIndex, useMicroIndex, useUnitSurveyIndex } from "./lib/api";
-import { MICRO_TIER_KEY, UNIT_SURVEY_TIER_KEY, useNavigate, useRoute } from "./lib/router";
+import { useIndex, useMicroIndex, usePhaseReplayIndex, useUnitSurveyIndex } from "./lib/api";
+import { GRADE_TIER_KEY, MICRO_TIER_KEY, PHASE_REPLAY_TIER_KEY, UNIT_SURVEY_TIER_KEY, useNavigate, useRoute } from "./lib/router";
 import { useTheme } from "./hooks/useTheme";
 import { Home } from "./components/Home";
 import { MicroSurveyDetail, MicroSurveyList } from "./components/MicroSurvey";
@@ -9,6 +9,8 @@ import { Overview } from "./components/Overview";
 import { RepeatView } from "./components/RepeatView";
 import { RunView } from "./components/RunView";
 import { UnitSurveyDetail, UnitSurveyList } from "./components/UnitSurvey";
+import { PhaseReplayDetail, PhaseReplayList } from "./components/PhaseReplay";
+import { GradePage } from "./components/Grade";
 
 export default function App() {
   const { data: index, isLoading, error } = useIndex();
@@ -18,6 +20,8 @@ export default function App() {
   const { data: micro, isLoading: microLoading } = useMicroIndex();
   // A third, for the same reason: unit-survey replays (`/api/unit-survey`).
   const { data: unitSurvey, isLoading: unitLoading } = useUnitSurveyIndex();
+  // A fourth: phase replays (micro-falsify / micro-adjudicate, `/api/phase-replay`).
+  const { data: phaseReplay, isLoading: phaseLoading } = usePhaseReplayIndex();
   const route = useRoute();
   const navigate = useNavigate();
   const { isDark, toggleTheme } = useTheme();
@@ -31,6 +35,13 @@ export default function App() {
   const unitReports = unitSurvey?.reports ?? [];
   const unitRoute = route.tierKey === UNIT_SURVEY_TIER_KEY;
   const unitEntry = unitRoute && route.runId ? unitReports.find((r) => r.id === route.runId) : undefined;
+  const phaseReports = phaseReplay?.reports ?? [];
+  const phaseRoute = route.tierKey === PHASE_REPLAY_TIER_KEY;
+  const phaseEntry = phaseRoute && route.runId ? phaseReports.find((r) => r.id === route.runId) : undefined;
+  // Human grading: its findings come from site-review reports, so the nav link
+  // shows once one exists (or while the page is open).
+  const gradeRoute = route.tierKey === GRADE_TIER_KEY;
+  const hasGradable = phaseReports.some((r) => r.kind === "site-review" && !r.audit);
   // No tier in the URL → the Home landing (all tiers + recent runs). A tier is
   // only "selected" when its key is actually in the route.
   const selectedTier = route.tierKey ? tiers.find((t) => t.key === route.tierKey) : undefined;
@@ -90,6 +101,35 @@ export default function App() {
                 <span className="ml-1.5 text-base-content/40">{unitReports.length}</span>
               </button>
             )}
+            {phaseReports.length > 0 && (
+              <button
+                onClick={() => navigate(PHASE_REPLAY_TIER_KEY)}
+                title="Phase replays — falsify, adjudicate or site-review re-run over preserved pr-review fixtures"
+                className={
+                  "rounded-lg border px-3 py-1.5 font-mono text-xs font-semibold " +
+                  (phaseRoute
+                    ? "border-info bg-info/15 text-info"
+                    : "border-base-300 bg-base-200 text-base-content/60 hover:border-info hover:text-base-content")
+                }
+              >
+                phase-replay
+                <span className="ml-1.5 text-base-content/40">{phaseReports.length}</span>
+              </button>
+            )}
+            {(hasGradable || gradeRoute) && (
+              <button
+                onClick={() => navigate(GRADE_TIER_KEY)}
+                title="Grade flagged findings by hand — real? × importance, reused across arms and repeats"
+                className={
+                  "rounded-lg border px-3 py-1.5 font-mono text-xs font-semibold " +
+                  (gradeRoute
+                    ? "border-info bg-info/15 text-info"
+                    : "border-base-300 bg-base-200 text-base-content/60 hover:border-info hover:text-base-content")
+                }
+              >
+                grade
+              </button>
+            )}
             <button
               onClick={toggleTheme}
               className="rounded-lg border border-base-300 bg-base-200 p-1.5 text-base-content/60 hover:border-info hover:text-base-content"
@@ -109,6 +149,13 @@ export default function App() {
 
         {error && !index ? (
           <ServerDown message={(error as Error).message} />
+        ) : gradeRoute ? (
+          <div>
+            <button onClick={() => navigate()} className="mb-5 font-mono text-xs text-info hover:underline">
+              ← overview
+            </button>
+            <GradePage reportLabel={route.runId} />
+          </div>
         ) : microRoute && microLoading && !micro ? (
           <Loading />
         ) : microRoute && microEntry ? (
@@ -146,6 +193,25 @@ export default function App() {
               ← overview
             </button>
             <UnitSurveyList reports={unitReports} />
+          </div>
+        ) : phaseRoute && phaseLoading && !phaseReplay ? (
+          <Loading />
+        ) : phaseRoute && phaseEntry ? (
+          <div>
+            <button
+              onClick={() => navigate(PHASE_REPLAY_TIER_KEY)}
+              className="mb-5 font-mono text-xs text-info hover:underline"
+            >
+              ← all phase-replay reports
+            </button>
+            <PhaseReplayDetail entry={phaseEntry} />
+          </div>
+        ) : phaseRoute ? (
+          <div>
+            <button onClick={() => navigate()} className="mb-5 font-mono text-xs text-info hover:underline">
+              ← overview
+            </button>
+            <PhaseReplayList reports={phaseReports} />
           </div>
         ) : isLoading && !index ? (
           <Loading />

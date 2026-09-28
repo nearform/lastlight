@@ -1,11 +1,17 @@
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { microStatus, withMicroEntryDefaults } from "../../../src/micro-survey.js";
 import { unitSurveyStatus } from "../../../src/unit-survey-index.js";
+import { phaseReplayStatus } from "../../../src/phase-replay.js";
 import type {
   DashboardIndex,
+  FindingLabel,
+  FindingsResponse,
+  LabelInput,
   MicroSurveyIndex,
   MicroSurveyReport,
+  PhaseReplayIndex,
+  PhaseReplayReport,
   ReplayReport,
   Scorecard,
   UnitSurveyIndex,
@@ -148,6 +154,79 @@ export function useUnitSurveyReport(url: string | undefined, live = false) {
     refetchInterval: live ? 1500 : false,
     staleTime: live ? 0 : Infinity,
     placeholderData: (prev) => prev,
+  });
+}
+
+/**
+ * The phase-replay index (`/api/phase-replay`) — micro-falsify and
+ * micro-adjudicate reports. Same contract as {@link useUnitSurveyIndex}: a 404
+ * is an empty list, and it polls at the live cadence while any report is
+ * genuinely running (the scripts write after every case plus a 15 s heartbeat).
+ */
+export const phaseReplayActive = (idx?: PhaseReplayIndex, now = Date.now()): boolean =>
+  !!idx?.reports.some((r) => phaseReplayStatus(r, now) === "running");
+
+export function usePhaseReplayIndex() {
+  return useQuery({
+    queryKey: ["phase-replay-index"],
+    queryFn: async (): Promise<PhaseReplayIndex> => {
+      const res = await fetch("/api/phase-replay", { headers: { accept: "application/json" } });
+      if (res.status === 404) return { generatedAt: new Date().toISOString(), reports: [] };
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText} — /api/phase-replay`);
+      const idx = (await res.json()) as PhaseReplayIndex;
+      return { ...idx, reports: idx.reports ?? [] };
+    },
+    refetchInterval: (q) => (phaseReplayActive(q.state.data) ? 1500 : 15000),
+  });
+}
+
+/** One phase-replay report in full; live while running, cached once settled. */
+export function usePhaseReplayReport(url: string | undefined, live = false) {
+  return useQuery({
+    queryKey: ["phase-replay-report", url, live],
+    queryFn: () => getJson<PhaseReplayReport>(url as string),
+    enabled: !!url,
+    refetchInterval: live ? 1500 : false,
+    staleTime: live ? 0 : Infinity,
+    placeholderData: (prev) => prev,
+  });
+}
+
+/**
+ * Every flagged finding + its human label (`/api/findings`). A scan over the
+ * reports and fixtures, so it polls slowly; a saved label patches the cache in
+ * place rather than refetching the whole list under the grader's cursor.
+ */
+export function useFindings(enabled = true) {
+  return useQuery({
+    queryKey: ["findings"],
+    queryFn: () => getJson<FindingsResponse>("/api/findings"),
+    enabled,
+    refetchInterval: 60000,
+    refetchOnWindowFocus: false,
+  });
+}
+
+export function useSaveLabel() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: LabelInput): Promise<FindingLabel> => {
+      const res = await fetch("/api/labels", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify(input),
+      });
+      const body = (await res.json().catch(() => ({}))) as FindingLabel & { error?: string };
+      if (!res.ok) throw new Error(body.error ?? `${res.status} ${res.statusText}`);
+      return body;
+    },
+    onSuccess: (label) =>
+      qc.setQueryData<FindingsResponse>(["findings"], (prev) =>
+        prev && {
+          ...prev,
+          findings: prev.findings.map((f) => (f.key === label.key ? { ...f, label: label.real === null ? null : label } : f)),
+        },
+      ),
   });
 }
 

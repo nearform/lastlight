@@ -567,8 +567,11 @@ describe("falsify — the loop, its gate, and the rule with money on it", () => 
     // WP11c: the six chained survey phases became one `survey` fan-out node,
     // so the edge that used to name the LAST family now names the whole node.
     // The unit engine's last phase is the other edge: exactly one of the two
-    // runs, and `all_done` lets the skipped one through.
-    expect(falsify!.depends_on).toEqual(["survey", "units-ingest"]);
+    // runs, and `all_done` lets the skipped one through. Both edges now land on
+    // `probe-plan`, the deterministic step that decides what falsify owes.
+    expect(byName.get("probe-plan")?.depends_on).toEqual(["survey", "units-ingest"]);
+    expect(byName.get("probe-plan")?.trigger_rule).toBe("all_done");
+    expect(falsify!.depends_on).toEqual(["probe-plan"]);
     expect(falsify!.trigger_rule).toBe("all_done");
     expect(byName.get("review")?.depends_on).toEqual(["falsify"]);
   });

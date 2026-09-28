@@ -560,6 +560,12 @@ review:
                                # assemble them — and asks it for claim /
                                # category / fix instead of a tier and a
                                # confidence
+    admit: null                # which hypotheses adjudicate weighs (dossier
+                               # --admit); null = every row. Comma list of
+                               # no-clean-quote, no-consequence, no-code-change,
+                               # jev:&lt;category&gt;@&lt;p&gt;, top:&lt;n&gt;. The rest are filed
+                               # at internal without a model. Needs a dossier
+                               # mode; unmeasured end to end
     mint: all-in-diff,registrations  # extra seeding rules beyond the original
                                # four; "" = the pre-D2 baseline set
     surveyPasses: 6            # RECORDED, not consumed — the fan-out branch list
@@ -583,6 +589,10 @@ review:
     prepareTimeoutSeconds: 300
     coverageTimeoutSeconds: 900
     probeRounds: 2
+    maxProbes: 8               # at most this many hypotheses go in front of
+                               # falsify (probe-plan ranks the owed set and cuts
+                               # it here); null = no cap. The rest reach
+                               # adjudicate unprobed, and the dossier says so
     falsifyTimeoutSeconds: 600 # the oracle's whole-phase ceiling, all rounds
     maxInlineComments: 5       # the attention boundary — findings past this go
                                # to the review body, never dropped. Ranked by a

@@ -1927,6 +1927,11 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      */
     ...(review.analysis.adjudicate !== "legacy" ? { dossierEnabled: "true" } : {}),
     /**
+     * `dossier --admit`'s spec, rendered into the phase's shell only when there
+     * IS a dossier to shape. Absent ⇒ every row is admitted.
+     */
+    ...(review.analysis.adjudicate !== "legacy" && review.analysis.admit ? { admitRules: review.analysis.admit } : {}),
+    /**
      * #399 idea 2's own gate — `skip_if: "jevClassifyEnabled != true"` on the
      * `jev-classify` phase. A FOURTH separate key, same reasoning as
      * `probesEnabled`/`dossierEnabled`: `evalSkipIf` compares scalars, and
@@ -1937,7 +1942,10 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      * absence rule holds a third time: a deployment on `"dossier"` gets
      * exactly what it measured, with no annotation phase added underneath it.
      */
-    ...(review.analysis.adjudicate === "jev"
+    // A `jev:` admission rule reads `jev.json`, so it runs the classifier under
+    // any dossier mode — not only `"jev"`, whose annotation it shares.
+    ...(review.analysis.adjudicate === "jev" ||
+    (review.analysis.adjudicate !== "legacy" && (review.analysis.admit ?? "").includes("jev:"))
       ? {
           jevClassifyEnabled: "true",
           jevModel: review.analysis.jevModel ?? "",
@@ -1997,6 +2005,9 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
           prepareTimeoutSeconds: String(review.analysis.prepareTimeoutSeconds),
           coverageTimeoutSeconds: String(review.analysis.coverageTimeoutSeconds),
           probeRounds: String(review.analysis.probeRounds),
+          // `probe-plan`'s cap, read by the phase's shell. `null` renders as
+          // the literal `"null"`, which the phase maps to "no --max-probes".
+          maxProbes: review.analysis.maxProbes === null ? "null" : String(review.analysis.maxProbes),
           falsifyTimeoutSeconds: String(review.analysis.falsifyTimeoutSeconds),
           /**
            * The PHASE's ceiling, which is not any one step's.

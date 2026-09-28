@@ -588,6 +588,26 @@ review:
     # Kept out of the `models:` map above — TypeSafe is a distinct provider
     # from the `provider/model` chat models that map resolves.
     jevModel: null
+    # Which hypotheses `adjudicate` weighs (`lastlight-facts dossier --admit`).
+    # Adjudicate writes a disposition per row it is shown, and that is its
+    # wall clock: measured 2026-09-27, Sonnet 4.6 spent 8.7 min on 52 rows and
+    # was still inside one turn at 12 min on 173. Rows not admitted are filed at
+    # `internal` by `reconcile` without a model, named with the rule.
+    #
+    # Comma list, `null` = every row (the default):
+    #   no-clean-quote     binding, in-time, unbypassed quoted control, no consequence
+    #   no-consequence     no consequence stated at all
+    #   no-code-change     the survey LABELLED the trigger `code_change`
+    #   jev:<category>@<p> jev-classify called it <category> at confidence >= p
+    #                      (runs jev-classify under any dossier mode)
+    #   top:<n>            then keep at most n, by probe strength / consequence /
+    #                      crosses_boundary / order
+    # No rule reads a claim's prose. A row a probe EXECUTED is always admitted.
+    # Needs a dossier mode (`adjudicate` ≠ legacy). Measured 2026-09-27 over 16
+    # unit-survey fixtures (1,794 rows, 13 gold-matched):
+    # `jev:verification@0,jev:nit@0,jev:maintainability@0` filed 473 rows and 0
+    # gold; `top:40` filed 1,155 and 7 of the 13 gold. Unmeasured end to end.
+    admit: null
 
     # Which D2 minting rules `lastlight-facts seed` runs beyond the original
     # four. A comma-list; the valid tokens are `all-in-diff` (contract
@@ -725,6 +745,14 @@ review:
     # five-line existence gate, not a validator — v2's full quote validator was
     # overkill and cost 2.4x for a worse result.
     probeRounds: 2
+    # At most this many hypotheses go in front of `falsify`, `null` for no cap.
+    # `lastlight-facts probe-plan` derives the owed set (a derived-Critical row,
+    # or a survey's own `needsProbe`), ranks it and cuts it here; the rest reach
+    # adjudicate unprobed and the dossier says they were never asked.
+    # Provisional: under the agent survey 0–2 rows per case were owed, so it
+    # never binds there; under `surveyEngine: units` 16–25 were on the 1587
+    # cases. The micro-falsify eval is what should move this number.
+    maxProbes: 8
     # The WHOLE-PHASE ceiling on `falsify`, across every round. It had none at
     # all until the oracle could run without an install, and `probeRounds` was
     # never a budget: a round count bounds how many times the loop may go round,

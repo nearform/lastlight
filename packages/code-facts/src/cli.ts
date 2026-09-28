@@ -52,10 +52,12 @@ import { classifyHypotheses, writeJevClassifyDocument, jevClassifyPath } from ".
 import { renderFamilyBlock } from "./seed-render.js";
 import { buildUnitsOrEmpty, emptyUnitsDocument } from "./units.js";
 import { ingestUnits, renderIngest } from "./units-ingest.js";
+import { renderProbePlanSummary, writeProbePlan } from "./probe-plan.js";
+import { admissionPath, parseAdmitSpec, renderAdmissionSummary, writeAdmission } from "./adjudicate-admit.js";
 import { loadManifest, resolveFactsBin, toolchainStamp } from "./toolchain.js";
 import { compilerInfo } from "./project.js";
 import { packageRoot } from "./toolchain.js";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { LoggerPort } from "./log.js";
 
@@ -82,6 +84,10 @@ Commands:
               label kept as \`declared_id\`). \`--ungraded\` for a family whose
               obligations are not on disk (\`spec\`): the id rewrite plus a
               non-empty-file check
+  probe-plan  decide WHICH hypotheses \`falsify\` probes: the gate's owed set
+              (derived Critical, or a survey's own \`needsProbe\`), ranked and
+              capped, written to probes/plan.json + the records falsify reads,
+              probes/plan.md. The \`probes\` gate then owes exactly that list
   probes      the \`falsify\` loop's exit gate — every hypothesis that needed a
               probe has a verdict, and every claim of execution has a transcript
               that OPENS with the command it ran
@@ -154,6 +160,16 @@ passes; it reads no quote and judges no claim):
   the ingested rows. 3 = something was unanswered (its rows still written). 2 =
   units.json unreadable (rows still written for every obligation).
 
+\`probe-plan\` options:
+  --dir <dir>         the .lastlight/pr-review directory
+                      (default: .lastlight/pr-review)
+  --max-probes <n>    select at most this many (default: no cap). The rest are
+                      recorded as deferred and reach adjudication unprobed
+  --never-fail        exit 0 whatever happened. Without a plan file every reader
+                      falls back to the pre-plan owed set, so a failure here
+                      costs the cap, never a probe
+  Exit 0 = plan written. 2 = it could not be written.
+
 \`probes\` options (a near-existence gate, not a validator — it reads a
 transcript's FIRST LINE and nothing else):
   --dir <dir>         the .lastlight/pr-review directory
@@ -190,6 +206,12 @@ transcript's FIRST LINE and nothing else):
   deletion has nothing to show for it, or there is no readable findings.json.
 
 \`dossier\` options (it reads the pipeline's own artifacts; no --base/--head):
+  --admit <spec>      first decide which hypotheses the adjudicator weighs, and
+                      render only those; writes admission.json, which the
+                      \`findings\` gate and --repair then honour. Comma list:
+                      no-clean-quote, no-consequence, no-code-change,
+                      jev:<category>@<p>, top:<n> (default: none — every row).
+                      A bad spec is reported and every row admitted
   --dir <dir>         the .lastlight/pr-review directory
                       (default: .lastlight/pr-review)
   --repo <dir>        what a quote path and a transcript path are relative to
@@ -572,6 +594,20 @@ export function runCli(
     }
   }
 
+  if (command === "probe-plan") {
+    const neverFail = flags["never-fail"] === true;
+    try {
+      const { plan } = writeProbePlan(stringFlag(flags.dir) ?? ".lastlight/pr-review", {
+        maxProbes: numberFlag(flags["max-probes"]) ?? null,
+      });
+      io.out(renderProbePlanSummary(plan));
+      return EXIT_OK;
+    } catch (err) {
+      io.err(`probe-plan failed: ${err instanceof Error ? err.message : String(err)}`);
+      return neverFail ? EXIT_OK : EXIT_UNAVAILABLE;
+    }
+  }
+
   if (command === "probes") {
     // The `falsify` loop's `until_bash`. NOT wrapped by `--never-fail`: its
     // non-zero exit is the loop condition, not a failure — the phase around it
@@ -636,6 +672,21 @@ export function runCli(
       repo: stringFlag(flags.repo),
       transcriptChars: numberFlag(flags["transcript-chars"]),
     };
+    // `--admit <spec>` decides which hypotheses the adjudicator weighs, then
+    // renders only those (`adjudicate-admit.ts`). A bad spec, or a `jev:` rule
+    // with no classification on disk, must not strand `adjudicate` with no input
+    // — this command never fails — so it is said LOUDLY, any stale admission is
+    // removed, and every row is admitted, exactly as with no `--admit` at all.
+    const admitRaw = stringFlag(flags.admit);
+    if (admitRaw !== undefined) {
+      try {
+        const admission = writeAdmission(dossierOptions.dir, parseAdmitSpec(admitRaw), { repo: dossierOptions.repo });
+        io.err(renderAdmissionSummary(admission));
+      } catch (err) {
+        rmSync(admissionPath(dossierOptions.dir), { force: true });
+        io.err(`dossier --admit failed — EVERY row is admitted: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     // `--json` hands back the STRUCTURED rows `buildEntries` already computed
     // for the rendered Markdown — same excerpt resolution, same probe join,
     // same ids — for a consumer that wants to key off `record.id` rather than
@@ -830,7 +881,7 @@ export function runCli(
 
   if (!EXTRACTORS.includes(command as ExtractorName)) {
     io.err(
-      `unknown command "${command}". One of: ${EXTRACTORS.join(", ")}, seed, prepare, discharge, probes, findings, units, units-ingest, toolchain`,
+      `unknown command "${command}". One of: ${EXTRACTORS.join(", ")}, seed, prepare, discharge, probe-plan, probes, findings, units, units-ingest, toolchain`,
     );
     return EXIT_UNAVAILABLE;
   }

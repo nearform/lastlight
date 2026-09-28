@@ -11,6 +11,13 @@
  *                                loose reports in eval-results/micro-survey/).
  *   GET /api/unit-survey       → the unit-survey replay index (the same scan,
  *                                over eval-results/unit-survey/*.json).
+ *   GET /api/phase-replay      → the phase-replay index (micro-falsify /
+ *                                micro-adjudicate, eval-results/phase-replay/).
+ *   GET /api/findings          → every finding the pipeline flagged (site-review
+ *                                reports for now), deduplicated by label key,
+ *                                with excerpt, gold and the current human label.
+ *   POST /api/labels           → append one human grade to
+ *                                eval-results/labels/findings.jsonl.
  *   GET /data/<tier>/<run>/…   → the raw run artifacts (scorecard.json, …),
  *                                served straight from `eval-results/`.
  *   GET /*                     → the built dashboard SPA (with an index.html
@@ -24,7 +31,9 @@ import { createServer, type Server } from "node:http";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve, sep } from "node:path";
 
-import { buildIndex, buildMicroIndex, buildUnitSurveyIndex } from "./report.js";
+import { appendLabel, buildFindings, labelsFilePath } from "./labels-node.js";
+import { validateLabelInput } from "./labels.js";
+import { buildIndex, buildMicroIndex, buildPhaseReplayIndex, buildUnitSurveyIndex } from "./report.js";
 
 export interface ServeOptions {
   /** `eval-results/` root to index + serve raw artifacts from. */
@@ -34,6 +43,8 @@ export interface ServeOptions {
   /** Preferred port; falls back to an ephemeral port if it's taken. */
   port?: number;
   host?: string;
+  /** Human-grade store; default `<resultsRoot>/labels/findings.jsonl`. */
+  labelsFile?: string;
 }
 
 export interface RunningServer {
@@ -101,6 +112,7 @@ const NO_DASHBOARD = (root: string) =>
  */
 export function startServer(opts: ServeOptions): Promise<RunningServer> {
   const { resultsRoot, dashboardRoot } = opts;
+  const labelsFile = opts.labelsFile ?? labelsFilePath(resultsRoot);
   const host = opts.host ?? "127.0.0.1";
   const preferred = opts.port ?? (Number(process.env.LASTLIGHT_EVALS_PORT) || 4319);
 
@@ -138,6 +150,66 @@ export function startServer(opts: ServeOptions): Promise<RunningServer> {
       const body = JSON.stringify(buildUnitSurveyIndex(resultsRoot, new Date().toISOString()));
       res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-cache" });
       res.end(body);
+      return;
+    }
+
+    // 2c) The phase-replay index — `scripts/micro-falsify.ts` and
+    //     `scripts/micro-adjudicate.ts`, one pr-review phase replayed over
+    //     preserved fixtures. Not a run either; bodies via `/data/phase-replay/…`.
+    if (path === "/api/phase-replay") {
+      const body = JSON.stringify(buildPhaseReplayIndex(resultsRoot, new Date().toISOString()));
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-cache" });
+      res.end(body);
+      return;
+    }
+
+    // 2d) Human grading. The findings list is a scan like the indexes above
+    //     (recomputed per request, so a replay still writing shows up); the
+    //     label POST appends one line and returns what was stored.
+    if (path === "/api/findings") {
+      const body = JSON.stringify(buildFindings(resultsRoot, new Date().toISOString(), labelsFile));
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-cache" });
+      res.end(body);
+      return;
+    }
+    if (path === "/api/labels") {
+      const json = (status: number, v: unknown) => {
+        res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-cache" });
+        res.end(JSON.stringify(v));
+      };
+      if (req.method !== "POST") return json(405, { error: "POST only" });
+      let body = "";
+      let tooBig = false;
+      req.setEncoding("utf8");
+      req.on("data", (chunk: string) => {
+        body += chunk;
+        if (body.length > 64 * 1024) {
+          tooBig = true;
+          req.destroy();
+        }
+      });
+      req.on("end", () => {
+        if (tooBig) return json(413, { error: "body too large" });
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(body);
+        } catch {
+          return json(400, { error: "body is not JSON" });
+        }
+        const v = validateLabelInput(parsed);
+        if (!v.ok) return json(400, { error: v.error });
+        // The finding must exist NOW: its text is snapshotted onto the label.
+        const finding = buildFindings(resultsRoot, new Date().toISOString(), labelsFile).findings.find((f) => f.key === v.value.key);
+        if (!finding) return json(404, { error: `no finding with key ${v.value.key}` });
+        const g = v.value.gold;
+        if (g && !finding.gold.some((x) => x.instanceId === g.instanceId && g.index < x.items.length))
+          return json(400, { error: `gold: ${g.instanceId} has no gold ${g.index} for this finding` });
+        try {
+          json(200, appendLabel(labelsFile, v.value, finding));
+        } catch (err) {
+          json(500, { error: (err as Error).message });
+        }
+      });
       return;
     }
 

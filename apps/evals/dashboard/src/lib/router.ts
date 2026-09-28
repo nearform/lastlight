@@ -34,6 +34,21 @@ export const MICRO_TIER_KEY = "micro-survey";
  */
 export const UNIT_SURVEY_TIER_KEY = "unit-survey";
 
+/**
+ * The reserved first segment for the phase-replay views (micro-falsify /
+ * micro-adjudicate) — `#/phase-replay` and `#/phase-replay/<report-id>`. Safe
+ * for the same reason: `eval-results/phase-replay/` holds loose report files
+ * and never a `scorecard.json`, so `buildIndex` never emits this tier.
+ */
+export const PHASE_REPLAY_TIER_KEY = "phase-replay";
+
+/**
+ * The reserved first segment for the human grading page — `#/grade`, and
+ * `#/grade/<report-label>` pre-filtered to one arm. There is no
+ * `eval-results/grade/` directory, so `buildIndex` never emits this tier.
+ */
+export const GRADE_TIER_KEY = "grade";
+
 export interface Route {
   tierKey?: string;
   runId?: string;

@@ -58,6 +58,7 @@ import {
   type HypothesisRow,
 } from "./hypotheses.js";
 import { noopLogger, type LoggerPort } from "./log.js";
+import { readAdmission } from "./adjudicate-admit.js";
 import { FindingsDocumentSchema } from "./schema.js";
 import { severityOf } from "./survey-verdict.js";
 
@@ -89,8 +90,9 @@ export interface RepairAction {
   /** `recorded` — uncovered → internal. `promoted` — unbacked drop → internal.
    * `withdrawn` — unbacked drop whose hypothesis a finding already carries, so
    * the drop is removed and nothing is appended. `expanded` — an `internal[]`
-   * id-list entry materialized as a full internal row. */
-  kind: "recorded" | "promoted" | "withdrawn" | "expanded";
+   * id-list entry materialized as a full internal row. `filed` — a row
+   * `admit` kept away from the adjudicator, filed at internal with its rule. */
+  kind: "recorded" | "promoted" | "withdrawn" | "expanded" | "filed";
   hypothesis: string;
   detail: string;
 }
@@ -240,6 +242,12 @@ function inspect(options: CheckFindingsOptions): CheckFindingsResult & {
    * expands the resolvable ones into full rows. */
   internalShorthand: { cited: string; id: string | null }[];
   rows: Map<string, HypothesisRecord>;
+  /**
+   * Hypotheses `admit` filed before adjudication (`admission.json`) that no
+   * disposition covers yet — owed nothing by the gate, filed at `internal`
+   * by the repair pass with the rule that filed them.
+   */
+  unadmitted: { id: string; rule: string }[];
 } {
   const repo = options.repo ?? process.cwd();
   const findingsPath = join(options.dir, "findings.json");
@@ -249,6 +257,11 @@ function inspect(options: CheckFindingsOptions): CheckFindingsResult & {
 
   const set = readHypothesisSet(options.dir);
   const { byId: hypotheses, families, malformed } = set;
+  // Rows `admit` filed before adjudication are owed no disposition by the
+  // adjudicator — it was never shown them. No file ⇒ every row is owed, which
+  // is the behaviour before admission existed.
+  const filedBy = new Map((readAdmission(options.dir)?.filed ?? []).map((f) => [f.id, f.rule]));
+  const unadmitted: { id: string; rule: string }[] = [];
 
   // ── `findings.json` — read before anything, because its absence is its own
   // failure and not a conservation one. A loop that has not written one yet
@@ -279,6 +292,7 @@ function inspect(options: CheckFindingsOptions): CheckFindingsResult & {
       claimedByFinding: new Set(),
       internalShorthand: [],
       rows: hypotheses,
+      unadmitted: [],
     };
   }
 
@@ -406,6 +420,10 @@ function inspect(options: CheckFindingsOptions): CheckFindingsResult & {
   const covered: string[] = [];
   for (const id of [...hypotheses.keys()].sort()) {
     const where = coveredBy.get(id) ?? [];
+    if (where.length === 0 && filedBy.has(id)) {
+      unadmitted.push({ id, rule: filedBy.get(id)! });
+      continue;
+    }
     if (where.length === 0) {
       gaps.push({
         kind: "uncovered",
@@ -471,6 +489,11 @@ function inspect(options: CheckFindingsOptions): CheckFindingsResult & {
     );
   }
   if (malformed > 0) notes.push(`${malformed} unparseable JSONL line(s) were ignored`);
+  if (unadmitted.length > 0) {
+    notes.push(
+      `${unadmitted.length} hypothesis(es) were not admitted to adjudication (admission.json) and are owed no disposition here — the repair pass files them at internal`,
+    );
+  }
 
   return {
     hypotheses: [...hypotheses.keys()].sort(),
@@ -488,6 +511,7 @@ function inspect(options: CheckFindingsOptions): CheckFindingsResult & {
     claimedByFinding,
     internalShorthand,
     rows: hypotheses,
+    unadmitted,
   };
 }
 
@@ -571,7 +595,11 @@ export function checkFindings(options: CheckFindingsOptions): CheckFindingsResul
   // shorthand: expansion is the reader-compat half of that contract —
   // post-review's disposition record, the pipeline stats and the
   // internal-recall judge all read full rows.
-  if (!options.repair || first.document === null || (first.satisfied && first.internalShorthand.length === 0)) {
+  if (
+    !options.repair ||
+    first.document === null ||
+    (first.satisfied && first.internalShorthand.length === 0 && first.unadmitted.length === 0)
+  ) {
     return strip(first);
   }
 
@@ -666,6 +694,20 @@ export function checkFindings(options: CheckFindingsOptions): CheckFindingsResul
       hypothesis: gap.hypothesis,
       detail: 'no disposition — recorded at tier "internal"',
     });
+  }
+
+  for (const { id, rule } of first.unadmitted) {
+    findings.push({
+      ...internalFinding(
+        id,
+        first.rows.get(id),
+        `Not admitted to adjudication (rule \`${rule}\`). Filed at internal tier without a model; kept for the record.`,
+      ),
+      // Machine-read, never rendered: which admission rule kept this row from
+      // the adjudicator, so an eval can measure what each rule filed.
+      filedBy: rule,
+    });
+    repaired.push({ kind: "filed", hypothesis: id, detail: `not admitted (${rule}) — filed at tier "internal"` });
   }
 
   if (repaired.length > 0) {
@@ -765,9 +807,15 @@ export function buildFindingsLedger(options: CheckFindingsOptions): FindingsLedg
       ? new Set(result.rows.keys())
       : new Set(result.gaps.filter((g) => g.kind === "uncovered").map((g) => g.hypothesis));
 
+  // Rows `admit` filed are not the adjudicator's to account for — it was never
+  // shown them, and the repair pass files them. Leaving them in the checklist
+  // would put back exactly the volume admission took out.
+  const filed = new Set((readAdmission(options.dir)?.filed ?? []).map((f) => f.id));
+
   const families: string[] = [];
   const entries: LedgerEntry[] = [];
   for (const [id, record] of result.rows) {
+    if (filed.has(id)) continue;
     const { row, family } = record;
     if (!families.includes(family)) families.push(family);
     const claim = asString(row.claim);

@@ -70,6 +70,8 @@ import { readHypothesisSet, type HypothesisRecord } from "./hypotheses.js";
 import { readJevClassifyDocument, type JevResult } from "./jev-classify-io.js";
 import { hypothesisSeverity } from "./finding-severity.js";
 import { isReadOnlyCommand, probeStrength, readProbeAnswers, type ProbeAnswer, type ProbeStrength } from "./probes.js";
+import { readAdmission, writeAdmission, type AdmitSpec } from "./adjudicate-admit.js";
+import { readProbePlan } from "./probe-plan.js";
 import { isBehaviouralClaim } from "./survey-verdict.js";
 
 export interface DossierOptions {
@@ -85,6 +87,15 @@ export interface DossierOptions {
    * design is happy to leave on the table.
    */
   transcriptChars?: number;
+  /**
+   * Decide which hypotheses this pass weighs BEFORE rendering (`dossier
+   * --admit`): writes `admission.json` — which the `findings` gate and
+   * `--repair` read afterwards — and renders only the admitted rows. One step,
+   * because the admission exists only to shape this document. Absent ⇒ the
+   * `admission.json` already on disk (if any) is honoured as it stands. Throws
+   * on a bad spec or a `jev:` rule with no `jev.json`, like `writeAdmission`.
+   */
+  admit?: AdmitSpec;
 }
 
 const DEFAULT_TRANSCRIPT_CHARS = 4_000;
@@ -176,6 +187,12 @@ export interface DossierEntry {
   /** Where `existingCode` sits in {@link path}, if anywhere. */
   excerpt: ExcerptLocation;
   quotes: DossierQuote[];
+  /**
+   * Set when `probe-plan` owed this row a probe but it fell past the cap, so
+   * "no verdict" reads as *nobody was asked* rather than *falsify skipped it*.
+   * `null` for every other row, including every row of a run with no plan.
+   */
+  deferred: { rank: number; owed: number; cap: number | null } | null;
 }
 
 function asString(v: unknown): string | null {
@@ -239,6 +256,8 @@ export function buildEntries(options: DossierOptions): DossierEntries {
   // document while a hypothesis line was silently unparseable — which is the
   // one shape this package refuses everywhere else.
   const malformed = set.malformed + badVerdicts;
+  const plan = readProbePlan(options.dir);
+  const deferred = new Map((plan?.deferred ?? []).map((p) => [p.id, p.rank]));
 
   const entries = set.records.map((record): DossierEntry => {
     const probe = answers.get(record.id) ?? null;
@@ -274,6 +293,10 @@ export function buildEntries(options: DossierOptions): DossierEntries {
       path,
       excerpt: locateExcerpt(repoRoot, path, asString(row.existingCode)),
       quotes,
+      deferred:
+        plan && deferred.has(record.id)
+          ? { rank: deferred.get(record.id)!, owed: plan.owed, cap: plan.maxProbes }
+          : null,
     };
   });
   return { entries, families: set.families, malformed };
@@ -476,7 +499,11 @@ function renderEntry(entry: DossierEntry, jev?: JevResult | null): string[] {
   }
 
   out.push("");
-  if (!probe) {
+  if (!probe && entry.deferred) {
+    out.push(
+      `**Probe.** none — owed one (rank ${entry.deferred.rank} of ${entry.deferred.owed}) but past this deployment's probe cap of ${entry.deferred.cap}, so falsify was never asked. Neither support nor refutation.`,
+    );
+  } else if (!probe) {
     out.push(`**Probe.** none — no verdict was written for this hypothesis.`);
   } else {
     const cmd = probe.command ? `\`${probe.command}\`` : "no command recorded";
@@ -586,7 +613,16 @@ function renderLedgerSection(ledger: FindingsLedger): string[] {
  */
 export function renderAdjudicationDossier(options: DossierOptions): string {
   const repoRoot = options.repo ?? process.cwd();
-  const { entries, families, malformed } = buildEntries(options);
+  if (options.admit) writeAdmission(options.dir, options.admit, { repo: options.repo });
+  const built = buildEntries(options);
+  const { families, malformed } = built;
+  // `admit` decided which rows this pass weighs; the rest are filed at
+  // `internal` by the repair pass and are not rendered here at all — rendering
+  // them would put back exactly the volume admission took out. No
+  // `admission.json` ⇒ every row, as before admission existed.
+  const admission = readAdmission(options.dir);
+  const admittedIds = admission ? new Set(admission.admitted) : null;
+  const entries = admittedIds ? built.entries.filter((e) => admittedIds.has(e.record.id)) : built.entries;
   const ledger = buildFindingsLedger({ dir: options.dir, repo: options.repo });
   // #399 idea 2. Absent (no file) under `legacy`/`dossier` — nothing below
   // changes for either. Present under `jev`: one advisory line per
@@ -634,6 +670,15 @@ export function renderAdjudicationDossier(options: DossierOptions): string {
   if (malformed) lines.push(`${malformed} line(s) in the pipeline's JSONL could not be parsed and are NOT represented below.`, "");
 
   lines.push(...renderLedgerSection(ledger), "");
+  if (admission && admission.filed.length) {
+    const byRule = new Map<string, number>();
+    for (const f of admission.filed) byRule.set(f.rule, (byRule.get(f.rule) ?? 0) + 1);
+    lines.push(
+      `${admission.filed.length} of ${admission.rows} hypotheses were not admitted to this pass (${[...byRule].map(([r, n]) => `\`${r}\` ${n}`).join(", ")}). ` +
+        "They are filed at `internal` automatically, are not listed below, and need nothing from you.",
+      "",
+    );
+  }
 
   // A READING ORDER, not a disposition — every id still needs its own entry
   // below and this map may be wrong about any one of them. Without it the
@@ -662,7 +707,14 @@ export function renderAdjudicationDossier(options: DossierOptions): string {
     }
   }
 
-  if (!entries.length) {
+  if (!entries.length && built.entries.length) {
+    lines.push(
+      "## Hypotheses",
+      "",
+      `**NONE ADMITTED.** All ${built.entries.length} hypotheses were filed before this pass; there is nothing here to weigh.`,
+      "",
+    );
+  } else if (!entries.length) {
     lines.push(
       "## Hypotheses",
       "",

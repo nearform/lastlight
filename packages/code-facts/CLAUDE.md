@@ -522,8 +522,10 @@ file tsgo failed to read.
 | `all` | one envelope, every payload — what a workflow phase writes. With `--stage-diff` it also writes the **staged diff** (`.lastlight/pr-review/diff/`), an index plus one patch per changed file. See below |
 | `prepare` | **not an extractor** — installs dependencies so a probe can be RUN, and writes `probes/env.json`. See below |
 | `discharge` | each `survey` branch's exit gate — every obligation the family owns carries a `QUOTE` / `ABSENT` / `PARTIAL` / `PROBE` discharge in `hypotheses/<family>.jsonl`. Degrades to the `test -s` floor on an unreadable `obligations.json` **or** on `contract: "minimal"`. See below |
-| `probes` | the `falsify` loop's exit gate — every hypothesis that needed a probe has a verdict, and every claim of evidence (`reproduced` / `corroborated` / `refuted`) has a transcript. Since issue #405 it also refuses `reproduced` on a **behavioural** claim (`isBehaviouralClaim` — a stated consequence live at head, derived from the evidence record) whose every command only reads code (`isReadOnlyCommand`, quote-aware) — that is `corroborated` — and reports transcripts borrowed from another hypothesis (`borrowedFrom`) without failing on them. `probeStrength()` is the one reader of what a verdict counts for |
-| `findings` | the `adjudicate` loop's exit gate — the **conservation check**. See below. `--repair` (the `reconcile` phase) also stamps each hypothesis-derived finding's **derived severity** (`finding-severity.ts`: evidence record + probe strength; the model's value kept as `declaredSeverity`) plus its **`rankEvidence`** (crosses a boundary / strongest probe / merged-hypothesis count, over non-refuted constituents), which the poster breaks severity ties on — the one derivation the evals read too (`buildSeverityIndex`) |
+| `probe-plan` | which hypotheses `falsify` owes a verdict on — the gate's own `requiresProbe` set, ranked and capped at `--max-probes`, written to `probes/plan.json` + `probes/plan.md`. See below |
+| `probes` | the `falsify` loop's exit gate — every hypothesis that needed a probe (exactly `probes/plan.json`'s `selected` when a plan exists, else `requiresProbe` over every row) has a verdict, and every claim of evidence (`reproduced` / `corroborated` / `refuted`) has a transcript. Since issue #405 it also refuses `reproduced` on a **behavioural** claim (`isBehaviouralClaim` — a stated consequence live at head, derived from the evidence record) whose every command only reads code (`isReadOnlyCommand`, quote-aware) — that is `corroborated` — and reports transcripts borrowed from another hypothesis (`borrowedFrom`) without failing on them. `probeStrength()` is the one reader of what a verdict counts for |
+| `findings` | the `adjudicate` loop's exit gate — the **conservation check**. See below. `--repair` (the `reconcile` phase) also stamps each hypothesis-derived finding's **derived severity** (`finding-severity.ts`: evidence record + probe strength; the model's value kept as `declaredSeverity`) plus its **`rankEvidence`** (crosses a boundary / strongest probe / merged-hypothesis count, over non-refuted constituents), which the poster breaks severity ties on — the one derivation the evals read too (`buildSeverityIndex`). Honours `admission.json`: a row `dossier --admit` filed is owed no disposition, is left out of `--ledger`, and `--repair` files it at `internal` with `filedBy: <rule>` |
+| `dossier` | the `adjudicate` pass's one input document. `--admit <spec>` first decides which hypotheses it weighs (`admission.json`) and renders only those. See below |
 | `units` | the unit survey's INPUT — one unit per changed function/method, at most one module unit per file (its module-scope regions plus folded small functions), one `pr` unit for obligations no unit holds, each carrying the COMPLETE model request behind a run-constant shared prefix. See below |
 | `units-ingest` | the unit survey's replies → `hypotheses/<family>.jsonl` rows of the existing shape, plus `units/ingest.json`. See below |
 | `toolchain` | the manifest and what actually resolved |
@@ -1379,6 +1381,128 @@ lastlight-facts units-ingest --dir .lastlight/pr-review          # → hypothese
   (rows still written), 2 unreadable `units.json` (rows still written for every
   obligation). `--never-fail` flattens both to 0, like every deterministic
   phase.
+
+### `probe-plan` — which rows `falsify` owes, decided in code
+
+`src/probe-plan.ts`. The decision used to live in the falsify prompt — *probe
+every row with `"needsProbe": true` and every row with `"severity": "Critical"`*
+— and a unit-survey row never carries a `severity` field: it is DERIVED
+(`severityOf`, `survey-verdict.ts`). The gate derives it and the prompt could
+not, so measured 2026-09-27 the gate owed 21 rows on `1587-r1` and falsify wrote
+one verdict.
+
+- **The owed set is the gate's.** `requiresProbe` (a derived Critical, or a raw
+  `needsProbe: true`) over every row, then ranked on the evidence record only —
+  Critical first, then a survey's own ask, then discharge `ABSENT` > `PARTIAL` >
+  `QUOTE`, then declaration order — and cut at `--max-probes`
+  (`review.analysis.maxProbes`, `null` = no cap). A deterministic tiebreak, not
+  a quality model; the micro-falsify eval is what should move the cap.
+- **One list, three readers.** `probes/plan.md` (the selected records, verbatim,
+  in rank order) is what falsify reads; `probes/plan.json` is what the `probes`
+  gate owes — exactly `selected`, so it cannot owe a row the agent was never
+  shown; and the dossier renders a `deferred` row as *owed one (rank N of M) but
+  past this deployment's probe cap*, so "no verdict" reads as nobody asked.
+- **No plan ⇒ the old owed set.** `checkProbes` falls back to `requiresProbe`
+  over every row (an older workflow, a replayed workspace), which is why the
+  phase runs `--never-fail`: a failure costs the cap, never a probe. Exit 0 =
+  plan written, 2 = it could not be.
+
+### `dossier --admit` — which rows `adjudicate` weighs
+
+`src/adjudicate-admit.ts`. Adjudicate writes a disposition for every row it is
+shown, and that is its wall clock (2026-09-27: 52 rows, 8.7 min on Sonnet 4.6).
+There is **no standalone `admit` command** — the admission exists only to shape
+the dossier, so `dossier --admit <spec>` writes `admission.json` and renders
+only the admitted rows (`review.analysis.admit`, the `admitRules` context key).
+
+- **Rules, a comma list.** `no-clean-quote`, `no-consequence`, `no-code-change`
+  read typed evidence fields only — **no rule reads claim prose**;
+  `jev:<category>@<p>` reads `jev.json` (`jev-classify`'s category, confidence
+  ≥ p); `top:<n>` then keeps at most n by probe strength, stated consequence,
+  `crosses_boundary`, declaration order. A row with no evidence record is left
+  alone, a row jev did not classify is admitted, and a row whose probe
+  EXECUTED overrides every rule but `top:<n>` (which ranks it first).
+- **Nothing is deleted.** The `findings` gate owes dispositions only for
+  admitted rows, the ledger and dossier omit filed ones, and `findings --repair`
+  files them at `internal` with `filedBy: <rule>` (machine-read, so an eval can
+  measure what each rule filed).
+- **Never strands adjudicate.** An unknown token or a `jev:` rule with no
+  `jev.json` throws inside the parser; the CLI says so on stderr, removes any
+  stale `admission.json`, and admits every row. No `admission.json` ⇒ every row.
+- **Measured, not shipped** (16 unit-survey fixtures, 1,794 rows, 13
+  gold-matched): `jev:verification@0,jev:nit@0,jev:maintainability@0` filed 473
+  rows and 0 gold; `top:40` filed 1,155 and 7 of 13; `no-clean-quote` 197/1;
+  `no-consequence` 330/1; `no-code-change` 54/0. Unmeasured end to end — the
+  default is `null`.
+
+### `clusterSites` — rows grouped into sites (library only)
+
+`src/site-cluster.ts`. The proposed replacement for row-level admission
+(`docs/plans/adjudicate-falsify-replay.md`): a site is a run of rows in one file
+whose anchor lines sit within `window` (default 20) of their neighbour, single
+linkage, **across families**; ranked by support (rows in the site), then
+strongest derived severity, then declaration order. The anchor is a row's first
+quote with a path and line, else `bothEnds.introducedAt` — never claim prose.
+An unanchored row is its own site; every row lands in exactly one.
+
+- **Why support, why across families.** The $0 screen
+  (`apps/evals/scripts/cluster-screen.ts`, 16 fixtures, 14 gold) at ±20: 0 gold
+  collisions, 9 / 12 of 14 gold in each case's top 5 / 10 sites, against 7 of
+  14 kept by `top:40`. Splitting by family (`byFamily`, kept as the ablation)
+  halves it; severity-first is worse because unit-survey severity is nearly
+  flat.
+- **A low rank is not a deletion.** Both gold outside the top 20 are lone rows —
+  the cost of any vote.
+- **`planProbeSites`** turns sites into a falsify plan: the top `topSites`
+  sites by support, then every row `planProbes` (capped at `maxProbes`) selects
+  that no top site holds, as a single-row site (`origin: "owed"`) — which keeps
+  today's Critical / survey-asked probes and is the only way a lone row reaches
+  the oracle. Every row is in at most one site, so sites can run in parallel
+  with one verdict writer per row. Each site carries its own `ProbePlan`
+  (rows the gate would not owe get reason `site`); `union` is what the gate
+  checks. `renderProbePlan(plan, set, site)` opens a per-site `plan.md` with
+  the site and the ask to label rows with a `claim`; `writeProbePlanFiles`
+  writes any prepared plan.
+- **Not wired in yet**: no CLI verb, no phase. Measured through
+  `micro-falsify --plan sites:<k>`.
+
+**Options from the paid site pilot** (all off by default, so the screen numbers
+above still describe the default plan; `planProbeSites` takes the same ones):
+
+- **`voters: "row" | "unit"`** (default `"row"`). Votes echo — 12 rows from one
+  unit in one pilot site, and a family-split unit re-reads the same lines up to
+  six times. Every `Site` now carries `voters` (distinct voters) beside
+  `support` (rows); `"unit"` ranks on voters, then rows, then severity, then
+  declaration order. Distinct voters ranked about as well (8.7 vs 9 of 14 gold
+  in the top 5) and cannot be inflated by one chatty unit. A voter is a row's
+  `unitId`; pass `units` (`units.json`'s `{ id, splitOf }`) to collapse split
+  siblings to their `splitOf` — rows carry only `unitId`, and the
+  `<splitOf>-<family>` id format is deliberately not parsed. A row with no
+  `unitId` is its own voter.
+- **`maxSpan`** (default `null`). Single linkage chains: the pilot's `site-001`
+  ran lines 1–125 of one file on 38 rows. A run whose span (last − first line)
+  would pass `maxSpan` starts a new site.
+- **`skipPath`** (e.g. `isTestPath` from `project.ts`, the per-language
+  test-file heuristic). 3 of the pilot's top 10 sites were `*.test.ts` files.
+  Skipped rows form no site and are listed in `SitePlan.skipped`, so
+  `sites` ∪ `skipped` still holds every row once. In `planProbeSites` a skipped
+  row that `planProbes` owes still gets its own `owed` site — skipping changes
+  ranking, never drops a Critical.
+
+**Per-site investigator inputs.** Rows only choose WHICH sites to look at; the
+investigator gets the site plus short leads and writes the findings.
+
+- **`siteLeads(site, set)`** → `{ leads, withoutSubject }`. One lead per
+  distinct `evidence.subject` (trimmed; merged by lowercase + collapsed
+  whitespace), carrying every row id and the min anchor line; ordered by rows
+  desc, then line. Only the typed `evidence.subject` is read — claim prose
+  echoes and would anchor the investigator on the survey's framing. Rows with
+  no subject are listed in `withoutSubject`.
+- **`renderSiteBrief(site, set, { leads })`** — data-only markdown: site id,
+  path, line range, rows/voters, then the numbered leads
+  (`subject (family, Lnn, N rows)`) or a line saying none are given. The
+  prompt carries the instructions, so a with/without-leads arm differs in the
+  lead list alone.
 
 ## `toolchain.json` — the single source of truth
 

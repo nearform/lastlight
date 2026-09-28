@@ -112,12 +112,20 @@ Concretely:
 
 ## What to probe
 
-Read every `.lastlight/pr-review/hypotheses/*.jsonl` line. Probe:
+Read `.lastlight/pr-review/probes/plan.md`. It lists, most important first, every
+hypothesis you owe a verdict on, each with its full record. **Probe exactly
+those** — nothing else needs a verdict, and the gate checks this list, not the
+hypothesis files. If it says there is nothing to probe, write no verdicts and stop.
 
-- every hypothesis with `"needsProbe": true`, and
-- **every** hypothesis with `"severity": "Critical"`, whether it asked or not.
+<!-- The list is computed, not left to you: severity is derived from each row's
+evidence record and never written on the row, so "probe every row whose
+`severity` is Critical" found nothing to probe — measured 2026-09-27, 1 verdict
+written against 21 owed. `lastlight-facts probe-plan` derives it, ranks the owed
+rows and caps them at `review.analysis.maxProbes`. -->
 
-Everything else you may leave alone entirely — it needs no verdict.
+If `plan.md` is missing, the plan step did not run: fall back to reading every
+`.lastlight/pr-review/hypotheses/*.jsonl` line and probe each one with
+`"needsProbe": true` or `"severity": "Critical"`.
 
 Read the **hypothesis record and the code**, not any earlier pass's reasoning.
 You are deliberately a fresh reader: trust your own execution over any claim in

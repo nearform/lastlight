@@ -1490,6 +1490,12 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
         "review.analysis.surveyUnitsTimeoutSeconds",
       ),
       probeRounds: nonNegativeNumber(analysisRaw.probeRounds) ?? reviewDefaults.analysis.probeRounds,
+      // Nullable like `maxBodyComments`: an explicit `null` is "no cap", distinct
+      // from an absent key, which takes the shipped default.
+      maxProbes:
+        analysisRaw.maxProbes === null
+          ? null
+          : nonNegativeNumber(analysisRaw.maxProbes) ?? reviewDefaults.analysis.maxProbes,
       // WP6b, the attention boundary. `maxInlineComments` allows 0 — a
       // deployment that wants every finding in the review body is a coherent
       // choice — so `nonNegativeNumber` is right and `|| default` would not be.
@@ -1509,6 +1515,12 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
       // the same direction every switch in this block fails: the default,
       // never a fabricated model id.
       jevModel: typeof analysisRaw.jevModel === "string" ? analysisRaw.jevModel.trim() : reviewDefaults.analysis.jevModel,
+      // The CLI is the loud validator (an unknown rule is reported and every
+      // row admitted), exactly as for `mint`. Blank ⇒ null.
+      admit:
+        typeof analysisRaw.admit === "string" && analysisRaw.admit.trim() !== ""
+          ? analysisRaw.admit.trim()
+          : reviewDefaults.analysis.admit,
       jevTimeoutSeconds: requiredSeconds(analysisRaw.jevTimeoutSeconds, "review.analysis.jevTimeoutSeconds"),
     },
   };

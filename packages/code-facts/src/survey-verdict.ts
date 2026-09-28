@@ -117,7 +117,7 @@ export interface SurveyVerdict {
 const str = (v: unknown): string => (typeof v === "string" ? v.trim().toLowerCase() : "");
 
 /** Present and not an empty/null-ish placeholder. */
-function stated(v: unknown): boolean {
+export function stated(v: unknown): boolean {
   if (v === null || v === undefined) return false;
   const s = str(v);
   return s !== "" && s !== "null" && s !== "none" && s !== "n/a" && s !== "-";

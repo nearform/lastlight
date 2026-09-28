@@ -27,6 +27,12 @@ import {
   type UnitSurveyIndex,
 } from "./unit-survey-index.js";
 import {
+  PHASE_REPLAY_DIR,
+  summarisePhaseReplay,
+  type PhaseReplayEntry,
+  type PhaseReplayIndex,
+} from "./phase-replay.js";
+import {
   boundaryMetrics,
   DETECTION_FLOOR_MICRO_RECALL,
   familyFunnels,
@@ -956,6 +962,39 @@ export function buildUnitSurveyIndex(resultsRoot: string, generatedAt: string): 
       /* raced with a delete */
     }
     const entry = summariseUnitSurveyReport(ent.name.replace(/\.json$/, ""), raw, mtime);
+    if (entry) reports.push(entry);
+  }
+  reports.sort((a, b) => (a.generatedAt < b.generatedAt ? 1 : a.generatedAt > b.generatedAt ? -1 : 0));
+  return { generatedAt, reports };
+}
+
+/**
+ * Build the phase-replay index from `eval-results/phase-replay/` — the reports
+ * `scripts/micro-falsify.ts` and `scripts/micro-adjudicate.ts` write — newest
+ * first. The same scan as {@link buildUnitSurveyIndex}: a report torn mid-write
+ * is skipped (the next poll sees it whole), and only regular `*.json` files are
+ * read, so the scripts' `rows/` and `.gold-cache/` subdirectories never list.
+ */
+export function buildPhaseReplayIndex(resultsRoot: string, generatedAt: string): PhaseReplayIndex {
+  const dir = join(resultsRoot, PHASE_REPLAY_DIR);
+  if (!existsSync(dir)) return { generatedAt, reports: [] };
+  const reports: PhaseReplayEntry[] = [];
+  for (const ent of readdirSync(dir, { withFileTypes: true })) {
+    if (!ent.isFile() || !ent.name.endsWith(".json")) continue;
+    const file = join(dir, ent.name);
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFileSync(file, "utf8"));
+    } catch {
+      continue;
+    }
+    let mtime = generatedAt;
+    try {
+      mtime = statSync(file).mtime.toISOString();
+    } catch {
+      /* raced with a delete */
+    }
+    const entry = summarisePhaseReplay(ent.name.replace(/\.json$/, ""), raw, mtime);
     if (entry) reports.push(entry);
   }
   reports.sort((a, b) => (a.generatedAt < b.generatedAt ? 1 : a.generatedAt > b.generatedAt ? -1 : 0));

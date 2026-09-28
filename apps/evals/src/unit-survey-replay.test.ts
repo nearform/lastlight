@@ -111,6 +111,12 @@ describe("seed flags and spec fidelity", () => {
     expect(s.source.maxObligations).toMatch(/not recorded/);
   });
 
+  it("takes max-obligations from a stamped obligations.json (a seed-fixtures fixture has no transcript)", () => {
+    const s = seedArgsOf({ contract: "minimal", minting: { allInDiff: true }, maxObligations: 40 }, 'MAX_OBLIGATIONS="12"');
+    expect(s).toMatchObject({ maxObligations: 40, mint: "all-in-diff" });
+    expect(s.source.maxObligations).toBe("obligations.json");
+  });
+
   it("matches a rebuilt spec set against the recorded prompt by criterion and id count", () => {
     const set = { obligations: [{ id: "S-1", criterion: "dry run must log" }, { id: "S-2", criterion: "never send DMs" }] };
     expect(specFidelity(set, "… S-1 dry run must log … S-2 never send DMs …").match).toBe(true);

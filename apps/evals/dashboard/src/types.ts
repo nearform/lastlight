@@ -44,8 +44,35 @@ import type {
   UnitSurveyEntry,
   UnitSurveyIndex,
 } from "../../src/unit-survey-index.js";
+// `/api/findings` + `/api/labels` — human grading.
+export type {
+  FindingLabel,
+  FindingsResponse,
+  GradeFinding,
+  GradedMetrics,
+  GraderAgreement,
+  Importance,
+  LabelInput,
+  Proposal,
+  RealGrade,
+} from "../../src/labels.js";
+// `/api/phase-replay` + the micro-falsify / micro-adjudicate report files.
+import type {
+  FalsifySite,
+  SiteReviewSite,
+  PhaseReplayCase,
+  PhaseReplayEntry,
+  PhaseReplayIndex,
+  PhaseReplayReport,
+} from "../../src/phase-replay.js";
 
 export type {
+  FalsifySite,
+  SiteReviewSite,
+  PhaseReplayCase,
+  PhaseReplayEntry,
+  PhaseReplayIndex,
+  PhaseReplayReport,
   InstanceResult,
   PhaseMetric,
   PhaseSession,

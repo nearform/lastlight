@@ -137,3 +137,11 @@ export type {
 } from "./workflows/handlers/survey-units.js";
 export { buildSpecObligations } from "./engine/review-spec.js";
 export type { SpecObligationSet, SpecInputs } from "./engine/review-spec.js";
+
+// The event shim — the stream-json session jsonl every agent phase writes, and
+// the one the evals dashboard follows live. Exported so a phase replay that
+// drives agentic-pi directly (`apps/evals/scripts/micro-{falsify,adjudicate}.ts`)
+// records its sessions in exactly the envelope a real run does, and the live
+// viewer follows them unchanged — never a second converter.
+export { AgenticShim } from "./engine/event-shim.js";
+export type { AgenticShimOptions } from "./engine/event-shim.js";

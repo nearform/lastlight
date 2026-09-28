@@ -71,6 +71,9 @@ const DECLARED = [
   "units",
   "survey-units",
   "units-ingest",
+  // WHICH rows falsify owes, decided in code (`lastlight-facts probe-plan`) —
+  // gated with falsify, after either survey engine.
+  "probe-plan",
   "falsify",
   "review",
   // #399 idea 2. One TypeSafe call per hypothesis, annotating what `dossier`
@@ -116,7 +119,7 @@ const TIER_GUARD = "scratch.reviewTriage.depth == 'light'";
  * workspace, then execute things in it — is not the same decision as "run the
  * surveys".
  */
-const WP4_PHASES = ["prepare", "falsify"];
+const WP4_PHASES = ["prepare", "probe-plan", "falsify"];
 // WP3's three. `falsify` is WP4's and carries BOTH gates, so it is asserted
 // under WP4_PHASES rather than here.
 const WP3_PHASES = ["facts", "seed", "survey"];
@@ -245,7 +248,8 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
       "survey-units": ["units"],
       "units-ingest": ["survey-units"],
       // BOTH engines' last phase: exactly one of them runs and the other skips.
-      falsify: ["survey", "units-ingest"],
+      "probe-plan": ["survey", "units-ingest"],
+      falsify: ["probe-plan"],
       review: ["falsify"],
       "jev-classify": ["review"],
       // TWO deps, same reasoning as `adjudicate` below: `dossier --json`'s
@@ -418,7 +422,7 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
     // so does the unit engine, which the fan-out stands in for by default.
     const off = [...WP4_PHASES, ...UNIT_PHASES, ...JEV_PHASES, "dossier"];
     expect(ran).toEqual(DECLARED.filter((n) => !off.includes(n) && n !== "triage"));
-    expect(skipped.map((s) => s.name)).toEqual(["triage", "prepare", ...UNIT_PHASES, "falsify", ...JEV_PHASES, "dossier"]);
+    expect(skipped.map((s) => s.name)).toEqual(["triage", "prepare", ...UNIT_PHASES, "probe-plan", "falsify", ...JEV_PHASES, "dossier"]);
   });
 
   it("runs every declared phase in order once every flag is on — but one survey engine", () => {
@@ -729,6 +733,9 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
       // Skipped — the default engine is the fan-out — and a skip is a phase
       // result under its own name.
       ...UNIT_PHASES,
+      // A bash phase, so it reports under its own name; `falsify` is a
+      // generic_loop and reports under its iteration labels instead.
+      "probe-plan",
       "review",
       // Skipped, not run — `jevClassifyEnabled` is not set in this context —
       // but a skip is still a phase result under its own name, same as

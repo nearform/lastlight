@@ -283,6 +283,51 @@ export {
   transcriptRecordsCommand,
 } from "./probes.js";
 export type { CheckProbesOptions, CheckProbesResult, ProbeAnswer, ProbeGapKind, ProbeStrength, ProbeVerdict } from "./probes.js";
+/** Which hypotheses `falsify` probes — ranked, capped, and read by the gate, the prompt and the dossier alike. */
+export {
+  plannedProbe,
+  planProbes,
+  PROBE_PLAN_VERSION,
+  probePlanPath,
+  readProbePlan,
+  renderProbePlan,
+  renderProbePlanSummary,
+  writeProbePlan,
+  writeProbePlanFiles,
+} from "./probe-plan.js";
+export type { OwedReason, PlannedProbe, PlanSite, ProbePlan, WriteProbePlanResult } from "./probe-plan.js";
+/** Which hypotheses `adjudicate` weighs — typed-field rules, a classifier threshold, a cap. */
+export {
+  ADMISSION_VERSION,
+  admissionPath,
+  admitHypotheses,
+  formatAdmitSpec,
+  parseAdmitSpec,
+  readAdmission,
+  renderAdmissionSummary,
+  writeAdmission,
+} from "./adjudicate-admit.js";
+export type { Admission, AdmitSpec, FieldRuleName, FiledRow, JevRule } from "./adjudicate-admit.js";
+/** Rows grouped into sites by anchor (path + line window, across families), ranked by support. */
+export {
+  clusterSites,
+  DEFAULT_SITE_WINDOW,
+  planProbeSites,
+  renderSiteBrief,
+  SITE_PLAN_VERSION,
+  siteLeads,
+} from "./site-cluster.js";
+export type {
+  ClusterOptions,
+  ProbeSite,
+  ProbeSitePlan,
+  Site,
+  SiteLead,
+  SiteLeads,
+  SitePlan,
+  SiteVoters,
+  VoterUnit,
+} from "./site-cluster.js";
 /** Issue #405 — a posted finding's severity, derived from evidence + probe strength. ONE derivation for the pipeline (reconcile) and the evals. */
 export {
   buildSeverityIndex,

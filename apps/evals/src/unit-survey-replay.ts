@@ -222,10 +222,12 @@ const MINT_ARMS: Record<string, string> = { allInDiff: "all-in-diff", registrati
  * seed phase's recorded command (`MAX_OBLIGATIONS="40"` — the rendered bash
  * the transcript opens with), falling back to the CLI default (48) and saying
  * so. The recorded command wins over nothing but the document: where both carry
- * a value, the document is what `seed` actually wrote.
+ * a value, the document is what `seed` actually wrote. A fixture built with no
+ * agent run (`scripts/seed-fixtures.ts`) has no transcript, so it stamps a
+ * `maxObligations` field into its minimal `obligations.json`, which wins over both.
  */
 export function seedArgsOf(
-  doc: { contract?: string; minting?: Record<string, boolean> | null },
+  doc: { contract?: string; minting?: Record<string, boolean> | null; maxObligations?: number },
   seedCommand: string | null,
 ): SeedArgs {
   const fromCmd = (name: string): string | undefined =>
@@ -239,7 +241,8 @@ export function seedArgsOf(
         .map(([k]) => MINT_ARMS[k] ?? k)
     : null;
   const contract = doc.contract ?? (cmdContract || "minimal");
-  const max = cmdMax && /^\d+$/.test(cmdMax) ? Number(cmdMax) : 48;
+  const docMax = typeof doc.maxObligations === "number" && Number.isInteger(doc.maxObligations) ? doc.maxObligations : undefined;
+  const max = docMax ?? (cmdMax && /^\d+$/.test(cmdMax) ? Number(cmdMax) : 48);
   const mint = docMint !== null ? (docMint.length ? docMint.join(",") : null) : cmdMint ? cmdMint : null;
   return {
     contract,
@@ -247,7 +250,7 @@ export function seedArgsOf(
     mint,
     source: {
       contract: doc.contract ? "obligations.json" : cmdContract ? "seed transcript" : "default (minimal)",
-      maxObligations: cmdMax ? "seed transcript" : "default (48) — not recorded in the fixture",
+      maxObligations: docMax !== undefined ? "obligations.json" : cmdMax ? "seed transcript" : "default (48) — not recorded in the fixture",
       mint: docMint !== null ? "obligations.json" : cmdMint !== undefined ? "seed transcript" : "none recorded",
     },
   };

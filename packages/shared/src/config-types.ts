@@ -650,6 +650,18 @@ export interface ReviewAnalysisConfig {
    */
   probeRounds: number;
   /**
+   * At most this many hypotheses are put in front of `falsify`, `null` for no
+   * cap. `lastlight-facts probe-plan` ranks the owed set (derived Critical
+   * first, then a survey's own ask) and cuts it here; the rest reach
+   * `adjudicate` unprobed, and the dossier says they were never asked.
+   *
+   * Eight, provisionally. Under the agent survey 0–2 rows per case were owed on
+   * all 8 skillspro cases, so it never binds there; under `surveyEngine: units`
+   * 20–33 were, which no single oracle session in one round gets through. The
+   * micro-falsify eval is what should move this number.
+   */
+  maxProbes: number | null;
+  /**
    * The inline-comment attention budget (WP6b).
    *
    * Preserving internal recall and spending a human's attention are two
@@ -722,6 +734,16 @@ export interface ReviewAnalysisConfig {
    * else reads.
    */
   jevModel: string | null;
+  /**
+   * Which hypotheses `adjudicate` weighs — `lastlight-facts dossier --admit`
+   * (`packages/code-facts/src/adjudicate-admit.ts`). The rest are filed at
+   * `internal` by `reconcile` without a model, naming the rule that filed them.
+   * `null` ⇒ every row, the behaviour before admission existed. Needs a
+   * dossier mode (`adjudicate` ≠ `legacy`); a `jev:` rule also runs
+   * `jev-classify`, whatever `adjudicate` says. Typed-field rules and the jev
+   * category only — no rule reads a claim's prose. See `default.yaml`.
+   */
+  admit: string | null;
   /** Phase budget for `jev-classify`, in seconds. Cheap and fast per call (a
    * TypeSafe `systemOne` round trip is ~100ms), but the phase makes one call
    * per hypothesis and a case can carry dozens. */
@@ -962,6 +984,9 @@ export function defaultReviewPolicy(): ReviewPolicy {
       probeTypecheck: false,
       probeCoverage: false,
       probeRounds: 2,
+      // Provisional — never binds under the agent survey (0–2 owed per case).
+      // See the field's doc.
+      maxProbes: 8,
       // Five, down from ten (issue #405): the rank it spends is now a derived
       // severity that varies, so a lower ceiling keeps the strongest claims
       // rather than cutting at random. See the field's doc.
@@ -977,6 +1002,7 @@ export function defaultReviewPolicy(): ReviewPolicy {
       // `null` ⇒ jev-classify's own default (TYPESAFE_MODEL env, else
       // jev-latest). Inert unless `adjudicate: "jev"`.
       jevModel: null,
+      admit: null,
     },
   };
 }
