@@ -68,6 +68,9 @@
  *   --summary-model <m>     arm C's summary call (default anthropic/claude-haiku-4-5-20251001)
  *   --summaries-only        arm C: selection + summary calls only, no investigator
  *   --top-sites <k>         sites per case (default 5)
+ *   --sites <id:rank,...>   investigate only these ranked sites (1-based, within
+ *                           --top-sites) — e.g. `prreview__cal-com-8330:1`; a case
+ *                           with no entry runs none. Replays a chosen few sites.
  *   --window <n>            clusterSites' line window (default 20)
  *   --max-span <n|none>     clusterSites' span cap (default 60)
  *   --voters unit|row       the ranking vote (default unit)
@@ -90,6 +93,7 @@ import {
   clusterSites,
   isTestPath,
   readHypothesisSet,
+  renderSiteAssignment,
   type HypothesisSet,
   type Site,
   type VoterUnit,
@@ -139,7 +143,7 @@ import type { GoldComment } from "../src/schema.js";
 import { DEFAULT_SUMMARY_MODEL, siteBriefFor, siteSummaryRows, summariseSite, type LeadsMode, type SiteSummaryResult } from "../src/site-summary.js";
 
 const argv = process.argv.slice(2);
-const VALUED = new Set(["--deadline-minutes", "--model", "--thinking", "--prompt", "--rounds", "--repeats", "--concurrency", "--only", "--label", "--judge-model", "--instances", "--gold-votes", "--leads", "--top-sites", "--window", "--max-span", "--voters", "--site-concurrency", "--summary-model"]);
+const VALUED = new Set(["--deadline-minutes", "--model", "--thinking", "--prompt", "--rounds", "--repeats", "--concurrency", "--only", "--label", "--judge-model", "--instances", "--gold-votes", "--leads", "--top-sites", "--window", "--max-span", "--voters", "--site-concurrency", "--summary-model", "--sites"]);
 const flag = (name: string): string | undefined => {
   const i = argv.indexOf(name);
   return i >= 0 ? argv[i + 1] : undefined;
@@ -159,6 +163,20 @@ const summaryModel = flag("--summary-model") ?? DEFAULT_SUMMARY_MODEL;
 const summaryPromptPath = join(serverRoot, "workflows/prompts/review-site-summary.md");
 const topSites = Number(flag("--top-sites") ?? "5");
 if (!Number.isInteger(topSites) || topSites < 1) throw new Error("--top-sites must be a positive integer");
+/** `--sites`: instance id → the 1-based ranks to investigate. */
+const siteFilter = (() => {
+  const raw = flag("--sites");
+  if (!raw) return null;
+  const m = new Map<string, Set<number>>();
+  for (const entry of raw.split(",")) {
+    const at = entry.lastIndexOf(":");
+    const rank = Number(entry.slice(at + 1));
+    if (at <= 0 || !Number.isInteger(rank) || rank < 1 || rank > topSites) throw new Error(`--sites entry "${entry}" is not <instance-id>:<rank 1..${topSites}>`);
+    const id = entry.slice(0, at);
+    m.set(id, (m.get(id) ?? new Set()).add(rank));
+  }
+  return m;
+})();
 const siteWindow = Number(flag("--window") ?? "20");
 const maxSpanRaw = flag("--max-span") ?? "60";
 const maxSpan = maxSpanRaw === "none" ? null : Number(maxSpanRaw);
@@ -190,7 +208,7 @@ if (!existsSync(promptPath)) throw new Error(`no prompt at ${promptPath}`);
 if (leadsMode === "summary" && !existsSync(summaryPromptPath)) throw new Error(`no summary prompt at ${summaryPromptPath}`);
 const summaryPrompt = leadsMode === "summary" ? readFileSync(summaryPromptPath, "utf8") : "";
 
-const fixtures = resolveFixtures(positional, only);
+const fixtures = resolveFixtures(positional, only).filter((fx) => !siteFilter || siteFilter.has(fx.instanceId));
 const instances = loadInstances(flag("--instances"));
 let judgeModel: string | null = null;
 if (!noJudge) {
@@ -256,13 +274,30 @@ const COMMAND_POLICY = {
     "Installing the repository's dependencies is not this pass's job, and the whole suite is never a probe. Run the one targeted check the site needs, or report what you read.",
 };
 
+/**
+ * The fan-out's `context_file` section (core `handlers/fanout.ts`,
+ * `BRANCH_CONTEXT_HEADING`), reproduced so the replay's prompt ends the way a
+ * `site-review` branch's does.
+ */
+function attachBrief(relPath: string, body: string): string {
+  return [
+    "## Attached: the file this pass was seeded with",
+    "",
+    `The contents of \`${relPath}\` are reproduced below **verbatim**. It has`,
+    "already been read for you — do not open it, and do not construct a path to it.",
+    "",
+    body.trimEnd(),
+    "",
+  ].join("\n");
+}
+
 function unitsOf(prDir: string): VoterUnit[] {
   const file = join(prDir, "units.json");
   if (!existsSync(file)) return [];
   return ((JSON.parse(readFileSync(file, "utf8")) as { units?: VoterUnit[] }).units ?? []).map((u) => ({ id: u.id, ...(u.splitOf ? { splitOf: u.splitOf } : {}) }));
 }
 
-function selectSites(prDir: string, set: HypothesisSet) {
+function selectSites(instanceId: string, prDir: string, set: HypothesisSet) {
   const units = unitsOf(prDir);
   if (voters === "unit" && !units.length) console.warn(`  ! no units.json under ${prDir}: each unitId is its own voter`);
   const plan = clusterSites(set, {
@@ -272,7 +307,10 @@ function selectSites(prDir: string, set: HypothesisSet) {
     maxSpan,
     ...(skipTests ? { skipPath: isTestPath } : {}),
   });
-  return { plan, top: plan.sites.slice(0, topSites) };
+  const top = plan.sites.slice(0, topSites);
+  if (!siteFilter) return { plan, top };
+  const ranks = siteFilter.get(instanceId) ?? new Set<number>();
+  return { plan, top: top.filter((_, i) => ranks.has(i + 1)) };
 }
 
 /** A summary call's result as the report carries it (a fallback site keeps no concerns). */
@@ -341,7 +379,7 @@ async function investigate(opts: { scratch: string; checkout: string; prDir: str
   let lastGaps: SiteGap[] = [];
   let gateNotes: string[] = [];
   const gate = () => {
-    const check = checkSiteFindings({ prDir: opts.prDir, repo: opts.checkout, siteId: opts.siteId, leadCount: opts.leadCount, siteRows: opts.siteRows });
+    const check = checkSiteFindings({ prDir: opts.prDir, repo: opts.checkout, siteId: opts.siteId, leadCount: opts.leadCount, siteRows: opts.siteRows, requireImportance: true });
     const kinds: Record<string, number> = {};
     for (const g of check.gaps) kinds[g.kind] = (kinds[g.kind] ?? 0) + 1;
     gapsByRound.push(kinds);
@@ -365,7 +403,7 @@ async function investigate(opts: { scratch: string; checkout: string; prDir: str
       rounds,
       gate,
     });
-    const final = checkSiteFindings({ prDir: opts.prDir, repo: opts.checkout, siteId: opts.siteId, leadCount: opts.leadCount, siteRows: opts.siteRows });
+    const final = checkSiteFindings({ prDir: opts.prDir, repo: opts.checkout, siteId: opts.siteId, leadCount: opts.leadCount, siteRows: opts.siteRows, requireImportance: true });
     return { ...loop, gapsByRound, gateNotes, final };
   } finally {
     stopFollow();
@@ -425,7 +463,7 @@ async function runCase(fx: Fixture, repeat: number): Promise<PhaseReplayCase> {
   try {
     const set = readHypothesisSet(fx.prDir);
     base.rows = set.records.length;
-    const { plan, top } = selectSites(fx.prDir, set);
+    const { plan, top } = selectSites(fx.instanceId, fx.prDir, set);
     const goldIds = new Set((goldRows ?? []).filter((id): id is string => id !== null));
     // Arm C: one summary call per site before anything else — the concern
     // count is the brief's lead count and the gate's lead-number bound.
@@ -479,15 +517,15 @@ async function runCase(fx: Fixture, repeat: number): Promise<PhaseReplayCase> {
       const copy = scratchCopy(fx);
       try {
         mkdirSync(join(copy.prDir, "sites", site.id), { recursive: true });
-        writeFileSync(join(copy.checkout, siteBriefRel(site.id)), briefs[i].brief);
-        const { text: prompt, unrendered } = renderPhasePrompt(promptPath, {
-          ...promptContext(inst),
-          siteId: site.id,
-          briefPath: siteBriefRel(site.id),
-          findingsPath: siteFindingsRel(site.id),
-          noneChecks: String(noneChecksRequired(site.rows.length)),
-        });
+        // The pipeline's brief shape: the site, then the assignment (site id,
+        // output file, `none` bar) — the prompt is slot-generic, so the brief
+        // carries what differs per site. Attached to the prompt the way the
+        // `site-review` fan-out's `context_file` attaches it, and kept on disk.
+        const brief = `${briefs[i].brief}\n${renderSiteAssignment(site.id, noneChecksRequired(site.rows.length))}`;
+        writeFileSync(join(copy.checkout, siteBriefRel(site.id)), brief);
+        const { text: rendered, unrendered } = renderPhasePrompt(promptPath, promptContext(inst));
         if (unrendered) console.warn(`! ${fx.instanceId} ${site.id}: unrendered {{marker}} left in the site prompt`);
+        const prompt = `${rendered.trimEnd()}\n\n${attachBrief(siteBriefRel(site.id), brief)}`;
         shell.session = `${sessionUrlRoot}/${site.id}/full.jsonl`;
         report.inFlight!.push({ instanceId: fx.instanceId, arm: fx.arm, repeat, site: site.id, startedAt: new Date().toISOString(), session: shell.session });
         writer.write();

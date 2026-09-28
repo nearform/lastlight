@@ -528,6 +528,7 @@ file tsgo failed to read.
 | `dossier` | the `adjudicate` pass's one input document. `--admit <spec>` first decides which hypotheses it weighs (`admission.json`) and renders only those. See below |
 | `units` | the unit survey's INPUT — one unit per changed function/method, at most one module unit per file (its module-scope regions plus folded small functions), one `pr` unit for obligations no unit holds, each carrying the COMPLETE model request behind a run-constant shared prefix. See below |
 | `units-ingest` | the unit survey's replies → `hypotheses/<family>.jsonl` rows of the existing shape, plus `units/ingest.json`. See below |
+| `sites` | the `sites` review engine's deterministic steps (`review.analysis.reviewEngine: sites`): `--plan`, `--check <site-id>`, `--merge`, `--check-select`, `--finalize`. See below |
 | `toolchain` | the manifest and what actually resolved |
 
 Three fixes must not regress. Two are carried forward from v3 and live in
@@ -1463,8 +1464,10 @@ An unanchored row is its own site; every row lands in exactly one.
   checks. `renderProbePlan(plan, set, site)` opens a per-site `plan.md` with
   the site and the ask to label rows with a `claim`; `writeProbePlanFiles`
   writes any prepared plan.
-- **Not wired in yet**: no CLI verb, no phase. Measured through
-  `micro-falsify --plan sites:<k>`.
+- **`planProbeSites` is not wired in**: no CLI verb, no phase. Measured through
+  `micro-falsify --plan sites:<k>`. `clusterSites` itself IS wired — through
+  `sites --plan` (below), with `voters: "unit"`, `maxSpan: 60` and test files
+  skipped.
 
 **Options from the paid site pilot** (all off by default, so the screen numbers
 above still describe the default plan; `planProbeSites` takes the same ones):
@@ -1503,6 +1506,54 @@ investigator gets the site plus short leads and writes the findings.
   (`subject (family, Lnn, N rows)`) or a line saying none are given. The
   prompt carries the instructions, so a with/without-leads arm differs in the
   lead list alone.
+
+### `sites` — the sites review engine's deterministic steps
+
+`src/site-review.ts`, exported from `index.ts`. Under
+`review.analysis.reviewEngine: sites` (operator-only, default `adjudicate`,
+**unmeasured end to end**) pr-review skips `probe-plan` → `adjudicate` and runs
+`site-plan` → `site-review` (a 5-branch fan-out) → `merge` → `select` →
+`site-finalize` instead. Every step but the investigators and `select` is this
+command. The rows stop being the items the review weighs and become a VOLUME
+signal: where many independent units pointed is where an investigator looks.
+
+- **`--plan`** (`site-plan`): `clusterSites` over the hypothesis rows
+  (distinct-unit votes, window 20, `maxSpan` 60, test files skipped), top 5 →
+  `sites/plan.json` plus one brief per SLOT, `sites/site-001.md` …
+  `site-005.md` (`--top` / `--window` override). It clears `sites/` first. A
+  slot past the PR's last site gets a brief saying there is no site and to
+  write one `{"site", "empty": true}` line — the fan-out is static, so every
+  slot runs. Each brief ends with the slot's assignment: the site id, the one
+  file it writes (`sites/<id>.findings.jsonl`) and how many probed suspicions
+  a `none` needs (`noneChecksRequired`: 1 for a site of ≤ 3 rows, else 2).
+- **`--check <site-id>`** (each branch's `until_bash`): 1–3 grounded findings,
+  each with `importance` `must-fix | worth-mentioning | nit`; or a `none` whose
+  `checked` list carries enough suspicions each answered by an EXECUTED command
+  (`isExecutionCommand` — falsify's `isReadOnlyCommand` classifier, so the two
+  gates agree on what a read is); or `empty` on a slot the plan left empty.
+  This gate moved here from `apps/evals/src/site-review.ts` (which re-exports
+  it), so the replay and the pipeline run the same code; `requireImportance`
+  is on in the pipeline and off for the replay's older prompts.
+- **`--merge`** (`merge`, `output_var: siteMerge`): pools every slot's
+  findings as `F1…Fn` with an excerpt, and PROPOSES cross-site duplicate
+  groups (same file, lines within ±10) — it cannot decide "same defect", no
+  rule reads prose. Writes `sites/merged.json` + `merged.md`; stdout is the
+  select prompt's input.
+- **`--check-select`** (`select`'s loop gate): conservation over
+  `sites/selected.json` — every `F` id in exactly one item. A selection may
+  merge and demote, never silently drop.
+- **`--finalize`** (`site-finalize`): `findings.json` in the shape
+  `post-review` reads — each item at its primary finding's path/line,
+  `existingCode` = that line's text, severity must-fix → Important,
+  worth-mentioning → Minor, a `nit` filed at tier `internal`, category
+  `defect`; every hypothesis row id in `internal[]`, so `reconcile`'s
+  conservation holds. A missing or invalid `selected.json` falls back to one
+  item per pooled finding at the investigator's own importance, so a failed
+  `select` still posts.
+
+Exit codes: the two gates are loop conditions — 0 satisfied, 3 iterate again,
+never flattened by `--never-fail`. The three steps are 0, or 2 on a thrown
+error (`--never-fail` flattens that to 0).
 
 ## `toolchain.json` — the single source of truth
 

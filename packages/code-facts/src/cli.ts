@@ -56,6 +56,18 @@ import { renderProbePlanSummary, writeProbePlan } from "./probe-plan.js";
 import { admissionPath, parseAdmitSpec, renderAdmissionSummary, writeAdmission } from "./adjudicate-admit.js";
 import { loadManifest, resolveFactsBin, toolchainStamp } from "./toolchain.js";
 import { compilerInfo } from "./project.js";
+import {
+  checkSelection,
+  checkSiteSlot,
+  finalizeSiteFindings,
+  renderFinalize,
+  renderSelectionCheck,
+  renderSiteCheck,
+  renderSiteMerge,
+  renderSitePlanSummary,
+  writeSiteMerge,
+  writeSitePlan,
+} from "./site-review.js";
 import { packageRoot } from "./toolchain.js";
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -108,6 +120,10 @@ Commands:
               replies as hypotheses/<family>.jsonl rows (the shape every later
               phase already reads), plus units/ingest.json. Every obligation
               gets a row even when its unit failed — with unknown evidence
+  sites       the \`sites\` review engine's deterministic steps: --plan (rank
+              sites, write one brief per slot), --check <site-id> (a site
+              investigator's gate), --merge (pool the findings for \`select\`),
+              --check-select (select's gate), --finalize (write findings.json)
   toolchain   print the pinned manifest and what actually resolved
 
 \`discharge\` options (WP3 — it replaces \`test -s\`, which one line of any content
@@ -359,6 +375,11 @@ const BOOLEAN_FLAGS = new Set([
   // it keeps `--ledger` from swallowing the next token as one.
   "ledger",
   "ungraded",
+  // `sites`' mode switches. `--check` is the one that takes a value (the slot id).
+  "plan",
+  "merge",
+  "finalize",
+  "check-select",
 ]);
 
 export function parseArgv(argv: string[]): Parsed {
@@ -592,6 +613,53 @@ export function runCli(
       io.err(`units-ingest failed: ${err instanceof Error ? err.message : String(err)}`);
       return EXIT_OK;
     }
+  }
+
+  if (command === "sites") {
+    const dir = stringFlag(flags.dir) ?? ".lastlight/pr-review";
+    const repo = stringFlag(flags.repo) ?? ".";
+    const neverFail = flags["never-fail"] === true;
+    // The two GATES (`--check`, `--check-select`) are loop conditions, like
+    // `probes` and `findings`: non-zero means "iterate again", so they are not
+    // wrapped by `--never-fail`. The three steps are inputs, never gates, and
+    // `--never-fail` keeps a crash in one from failing the phase.
+    const check = stringFlag(flags.check);
+    if (check) {
+      const result = checkSiteSlot({ dir, repo, siteId: check });
+      io.out(renderSiteCheck(check, result));
+      return result.satisfied ? EXIT_OK : EXIT_DEGRADED;
+    }
+    if (flags["check-select"] === true) {
+      const result = checkSelection({ dir });
+      io.out(renderSelectionCheck(result));
+      return result.satisfied ? EXIT_OK : EXIT_DEGRADED;
+    }
+    try {
+      if (flags.plan === true) {
+        io.out(
+          renderSitePlanSummary(
+            writeSitePlan(dir, {
+              ...(numberFlag(flags.top) !== undefined ? { top: numberFlag(flags.top) } : {}),
+              ...(numberFlag(flags.window) !== undefined ? { window: numberFlag(flags.window) } : {}),
+            }),
+          ),
+        );
+        return EXIT_OK;
+      }
+      if (flags.merge === true) {
+        io.out(renderSiteMerge(writeSiteMerge(dir, repo)));
+        return EXIT_OK;
+      }
+      if (flags.finalize === true) {
+        io.out(renderFinalize(finalizeSiteFindings({ dir, repo })));
+        return EXIT_OK;
+      }
+    } catch (err) {
+      io.err(`sites failed: ${err instanceof Error ? err.message : String(err)}`);
+      return neverFail ? EXIT_OK : EXIT_UNAVAILABLE;
+    }
+    io.err("sites: pass one of --plan, --check <site-id>, --merge, --check-select, --finalize");
+    return EXIT_UNAVAILABLE;
   }
 
   if (command === "probe-plan") {

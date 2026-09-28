@@ -138,6 +138,7 @@ import {
   coerceAdjudicateMode,
   coerceProbeMode,
   coerceSurveyEngine,
+  coerceReviewEngine,
   type SurveyEngine,
   defaultDependenciesConfig,
   defaultFixConfig,
@@ -1441,6 +1442,9 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
       // block fails — because the unit engine is unmeasured and needs a
       // host-readable workspace (`loadConfig` refuses it on kubernetes).
       surveyEngine: coerceSurveyEngine(analysisRaw.surveyEngine),
+      // Which engine turns hypotheses into the review. Only the literal
+      // `"sites"` moves a deployment off the adjudicate chain.
+      reviewEngine: coerceReviewEngine(analysisRaw.reviewEngine),
       // No backend clamp, unlike `surveyConcurrency`: unit calls are in-process
       // HTTP requests, not sandboxes, so this bounds rate-limit pressure only.
       // Zero would stall the phase, so it floors at one.

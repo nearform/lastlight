@@ -575,6 +575,10 @@ review:
     surveyEngine: agent        # agent | units. units = one model call per unit
                                # instead of the agent fan-out. EXPERIMENTAL and
                                # unmeasured; refused on the kubernetes backend
+    reviewEngine: adjudicate   # adjudicate | sites. sites = one investigator per
+                               # top-5 code site + a selection pass, instead of
+                               # probe → adjudicate over every hypothesis.
+                               # UNMEASURED end to end
     surveyUnitConcurrency: 16  # unit calls in flight under `units` (no backend
                                # clamp — lower it only for provider rate limits)
     surveyUnitsTimeoutSeconds: 600  # whole-phase deadline on the unit calls
@@ -790,6 +794,24 @@ dependencies:
 		rather than dropped. Because those calls read the review workspace
 		directly, <code>units</code> is refused at startup on the
 		<code>kubernetes</code> sandbox backend.
+	</p>
+
+	<p>
+		<code>reviewEngine</code> chooses how the survey's hypotheses become the
+		review, and <code>sites</code> is <strong>unmeasured</strong> end to end,
+		so <code>adjudicate</code> stays the default. <code>adjudicate</code> probes
+		and weighs every hypothesis the survey wrote. <code>sites</code> treats
+		them only as a signal of <em>where</em> to look: it ranks the stretches of
+		code that many independent survey passes pointed at, sends one
+		investigator to each of the top five (<code>models.review-site</code>,
+		falling back to <code>models.review-survey</code>), each of which must
+		ground one to three findings in the code or back a "nothing here" with a
+		probe it actually ran, and then one selection pass
+		(<code>models.review-select</code>, falling back to
+		<code>models.review</code>) merges duplicates, decides how important each
+		one is, and writes the comments. A nit is recorded, never posted. The
+		independent <code>review</code> pass does not run under
+		<code>sites</code>, whatever <code>independentReview</code> says.
 	</p>
 
 	<p>

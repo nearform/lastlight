@@ -1800,6 +1800,14 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      */
     ...(review.analysis.surveyEngine === "units" ? { unitSurveyEnabled: "true" } : {}),
     /**
+     * The review ENGINE (`docs/plans/adjudicate-falsify-replay.md`) — the gate
+     * the five site phases (`site-plan`, `site-review`, `merge`, `select`, `site-finalize`) and
+     * the adjudicate chain both read, in opposite directions. Bare-boolean for
+     * the same reason as `unitSurveyEnabled`: present only for `sites`, so
+     * every failure direction is the shipped adjudicate chain.
+     */
+    ...(review.analysis.reviewEngine === "sites" ? { siteReviewEnabled: "true" } : {}),
+    /**
      * `survey-units`' in-flight ceiling. Read by the handler itself (a
      * `max_concurrent` key is fan-out-only in the schema). Projected with the
      * pipeline rather than with the engine so an eval arm's value is visible on

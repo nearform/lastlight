@@ -10,10 +10,23 @@ It absorbs [`unit-pr-review-revise.md`](unit-pr-review-revise.md) (the
 
 ## Status log (newest first)
 
-- **Next (planned, separate piece of work): the `sites` review engine in
-  the workflow** — site-plan → site-review fan-out → merge → select, behind
-  `review.analysis.reviewEngine`. See
-  [Pipeline integration](#pipeline-integration-the-sites-review-engine-planned-not-built).
+- **First end-to-end arm (2026-09-28): the plumbing holds, recall is poor.**
+  Martian held-out, `overlays/sites-haiku`, stopped at 16/18: 13 of 44 gold
+  posted (micro-recall 0.30). On the overlapping cal.com cases, the plain
+  shipped reviewer matched 4/8 and sites 2/8. The loss is in the
+  investigators, not `select`: 40 of 46 reporting sites wrote exactly one
+  finding, and 27 sites closed `none`. Evidence and hypotheses (one and done;
+  `none` bounded by the investigator's own suspicions; top-5 coverage; Haiku vs
+  Sonnet) are in [`site-review-recall.md`](site-review-recall.md).
+- **Built (2026-09-28): the `sites` review engine in pr-review**, behind
+  operator-only `review.analysis.reviewEngine: adjudicate | sites` (default
+  `adjudicate`). Under `sites`, `probe-plan` → `adjudicate` and `review` skip;
+  `site-plan` → `site-review` (5 static branches) → `merge` → `select` →
+  `site-finalize` run. The gate moved into `lastlight-facts sites`
+  (`packages/code-facts/src/site-review.ts`; evals re-exports it); investigators
+  now write an `importance`; a missing or invalid selection falls back to one
+  item per pooled finding. UNMEASURED end to end when built; the first arm is in the bullet above. See
+  [Pipeline integration](#pipeline-integration-the-sites-review-engine-built-2026-09-28-unmeasured).
 - **Machine proposals on the grade page (2026-09-28).** `/api/findings` now
   attaches each `eval-results/labels/proposals-<grader>.jsonl` proposal to its
   finding and returns per-grader agreement with the human labels (n, real
@@ -741,7 +754,21 @@ because a loose key would let one grade silently cover two claims. Per arm,
 worth-mentioning), human precision (real ÷ graded, unsure in the
 denominator) and gold-linked.
 
-## Pipeline integration: the `sites` review engine (planned, not built)
+## Pipeline integration: the `sites` review engine (built 2026-09-28, unmeasured)
+
+**Built 2026-09-28, unmeasured end to end; nothing is a default.** Where the
+build differs from the plan below: slots are named `site-001` … `site-005`
+(the `clusterSites` ids), not `slot-N`; the one prompt is slot-generic and the
+brief carries a "Your assignment" section (site id, output file, `none` bar);
+`select` is an agent phase (`generic_loop`, 2 iterations, `fresh_context`,
+model `models.review-select` → `models.review`) that writes
+`sites/selected.json` under a conservation gate (`sites --check-select`), and a
+fifth deterministic phase, `site-finalize` (`sites --finalize`), turns that
+into `findings.json` (every hypothesis row in `internal[]`) or falls back to
+one item per pooled finding. `review` skips too, so `independentReview` does
+not apply. Investigators run on `models.review-site` → `models.review-survey`.
+The first end-to-end Martian arm ran on 2026-09-28; its results and the
+recall hypotheses are in [`site-review-recall.md`](site-review-recall.md).
 
 Written 2026-09-28 so it can be picked up separately. It replaces the tail of
 today's pipeline, from `probe-plan` through `adjudicate`. The front (`facts`
@@ -856,7 +883,8 @@ $0 → replay → paid):
 1. ~~Read the two misses by hand, then land clustering as a
    `lastlight-code-facts` module~~ — done: `clusterSites`
    (`packages/code-facts/src/site-cluster.ts`, tests in
-   `tests/site-cluster.test.ts`). Not yet a CLI verb or a phase.
+   `tests/site-cluster.test.ts`). Wired since 2026-09-28 through
+   `lastlight-facts sites --plan` (the `sites` review engine).
 2. ~~**Per-site falsify replay**~~ — pilot done (above): safe, poor yield,
    $6.38/case. Superseded by **3a**. Originally (`micro-falsify --plan sites:10`) on the 1587
    fixtures: gold sites refuted (must be 0), claims per site verified,

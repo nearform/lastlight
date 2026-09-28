@@ -440,6 +440,16 @@ none". The one carve-out is **`kubernetes`**, whose `hostAgentCwd` is an in-pod
 path this process cannot see at all — there the read is not attempted and the
 branch is handed the path to open itself, with the mis-anchoring trap named.
 
+`pr-review.yaml` has a second fan-out, `site-review`, run only under
+`review.analysis.reviewEngine: sites` (unmeasured end to end — see
+[Configuration](/spec/02-configuration)). It is the case `context_file` makes
+possible: five **static** branches (`site-001` … `site-005`) share one
+slot-generic prompt (`prompts/review-site.md`), and everything that differs per
+branch — the site, its id, its output file — arrives in the brief the
+preceding `site-plan` bash phase wrote for that slot. A PR with fewer sites
+still runs every branch; an empty slot's brief says so and its gate
+(`lastlight-facts sites --check <site-id>`) accepts one `empty` line.
+
 **Why one node instead of N parallel phases.** Real DAG concurrency is
 parked behind four hard blockers, and
 [the WP5 parking rationale](../../../docs/plans/deterministic-pr-levers.md#parked-parallel-phases-wp5)

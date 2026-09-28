@@ -198,6 +198,14 @@ export function buildPrState(args: {
   seed?: PrStateSeed;
   /** Harness-derived changed paths; the case's own seed beats it. See {@link prContextPatch}. */
   changedFiles?: string[];
+  /**
+   * The PR's base branch from the instance (`pr.base_ref`); the case's own
+   * `pr_state.base_ref` beats it. Without it every case read `"main"`, and
+   * `renderContext` projects `baseBranch` from this snapshot OVER the one the
+   * harness set — so a `master`-based PR (sentry) had post-review diff against
+   * an `origin/main` that does not exist, and every finding went to the body.
+   */
+  baseRef?: string;
 }): PrState {
   const s = args.seed ?? {};
   const at = new Date().toISOString();
@@ -216,7 +224,7 @@ export function buildPrState(args: {
     authorLogin: "dependabot[bot]",
     authorIsOurs: false,
     headRef: s.head_ref ?? args.branch,
-    baseRef: s.base_ref ?? "main",
+    baseRef: s.base_ref ?? args.baseRef ?? "main",
     isDraft: s.is_draft ?? false,
     isFork: s.is_fork ?? false,
     headRepoFullName: args.repo,
@@ -350,6 +358,8 @@ export async function prContextPatch(args: {
   body: string;
   branch: string;
   seed?: PrStateSeed;
+  /** The instance's `pr.base_ref` — see {@link buildPrState}. */
+  baseRef?: string;
   /**
    * A `GitHubClient` pointed at the fake — the seam that makes the `spec` axis
    * production-shaped.

@@ -1701,6 +1701,27 @@ describe("renderContext — the spec axis", () => {
     expect(Object.prototype.hasOwnProperty.call(off, "unitSurveyEnabled")).toBe(false);
   });
 
+  it("projects `siteReviewEnabled` only for reviewEngine: sites, with the pipeline on", () => {
+    // The site phases guard on `siteReviewEnabled != true` and the adjudicate
+    // chain on `== true`, so ABSENT must mean the adjudicate engine.
+    const dflt = renderContext(reviewable(), fix, defaultDependenciesConfig(), analysisOn);
+    expect(Object.prototype.hasOwnProperty.call(dflt, "siteReviewEnabled")).toBe(false);
+
+    const sites = renderContext(reviewable(), fix, defaultDependenciesConfig(), {
+      ...analysisOn,
+      analysis: { ...analysisOn.analysis, reviewEngine: "sites" as const },
+    });
+    expect(sites.siteReviewEnabled).toBe("true");
+
+    // Pipeline off: nothing projected, so `review` (which also skips on the key)
+    // can never be skipped when it IS the review.
+    const off = renderContext(reviewable(), fix, defaultDependenciesConfig(), {
+      ...analysisOff,
+      analysis: { ...analysisOff.analysis, reviewEngine: "sites" as const },
+    });
+    expect(Object.prototype.hasOwnProperty.call(off, "siteReviewEnabled")).toBe(false);
+  });
+
   it("projects the three keys the `seed` phase's command line is built from", () => {
     // The seeder is a CLI in the sandbox: the phase's command line is the ONLY
     // way an operator's answer reaches it, so a key that is not projected here

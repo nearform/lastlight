@@ -312,6 +312,17 @@ export function coerceSurveyEngine(raw: unknown): SurveyEngine {
   return raw === "units" ? "units" : "agent";
 }
 
+/** `review.analysis.reviewEngine` — see {@link ReviewAnalysisConfig.reviewEngine}. */
+export type ReviewEngine = "adjudicate" | "sites";
+
+/**
+ * Read an operator's `reviewEngine` value. **Total**, failing toward the
+ * shipped chain: only the literal `"sites"` selects the unmeasured engine.
+ */
+export function coerceReviewEngine(raw: unknown): ReviewEngine {
+  return raw === "sites" ? "sites" : "adjudicate";
+}
+
 /**
  * How much automation a trigger mode buys, ascending — the scale the repo-layer
  * clamp takes the minimum on.
@@ -538,6 +549,23 @@ export interface ReviewAnalysisConfig {
    * for `units` — so an absent or garbled value runs the agent survey.
    */
   surveyEngine: SurveyEngine;
+  /**
+   * Which engine turns the survey's hypotheses into the review
+   * (docs/plans/adjudicate-falsify-replay.md, "Pipeline integration").
+   *
+   * - `adjudicate` (the default): `probe-plan` → `falsify` → `jev-classify` →
+   *   `dossier` → `adjudicate`, weighing every hypothesis row.
+   * - `sites`: the rows are only a VOLUME signal. `lastlight-facts sites
+   *   --plan` ranks the places they point at, one investigator per top site
+   *   (`site-review`, a 5-branch fan-out) writes grounded findings, `merge`
+   *   pools them and `select` (one agent call) merges duplicates and orders
+   *   them by importance; every row is filed at `internal`.
+   *
+   * Only meaningful with `enabled`. UNMEASURED end to end. Reaches the run as
+   * `siteReviewEnabled: "true"` (`specContext`), present only for `sites` — so
+   * an absent or garbled value runs the adjudicate chain.
+   */
+  reviewEngine: ReviewEngine;
   /**
    * How many unit calls `survey-units` keeps in flight at once. No backend
    * clamp: the calls are in-process HTTP requests, not sandboxes, so this
@@ -978,6 +1006,9 @@ export function defaultReviewPolicy(): ReviewPolicy {
       // The agent fan-out stays the survey until the unit engine is measured
       // against it (docs/plans/unit-survey.md, "Evals").
       surveyEngine: "agent",
+      // The adjudicate chain stays the review until the sites engine is
+      // measured end to end (docs/plans/adjudicate-falsify-replay.md).
+      reviewEngine: "adjudicate",
       surveyUnitConcurrency: 16,
       probes: "off",
       probeLifecycleScripts: false,

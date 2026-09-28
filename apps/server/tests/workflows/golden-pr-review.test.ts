@@ -71,6 +71,15 @@ const DECLARED = [
   "units",
   "survey-units",
   "units-ingest",
+  // The `sites` review engine (docs/plans/adjudicate-falsify-replay.md): the
+  // alternative to the probe-plan → adjudicate chain, chosen by
+  // `siteReviewEnabled`. Declared BEFORE `reconcile` and `post-review`, which
+  // is what makes the sequential scheduler run them first.
+  "site-plan",
+  "site-review",
+  "merge",
+  "select",
+  "site-finalize",
   // WHICH rows falsify owes, decided in code (`lastlight-facts probe-plan`) —
   // gated with falsify, after either survey engine.
   "probe-plan",
@@ -131,6 +140,17 @@ const WP3_PHASES = ["facts", "seed", "survey"];
  */
 const UNIT_PHASES = ["units", "survey-units", "units-ingest"];
 const UNIT_GUARD = "unitSurveyEnabled != true";
+
+/**
+ * The `sites` review engine's five — the alternative to the adjudicate chain,
+ * gated on the review ENGINE as well as the pipeline. Off unless
+ * `siteReviewEnabled`, which `specContext` projects only for
+ * `review.analysis.reviewEngine: sites`; the chain they replace carries the
+ * same key the other way round (`== true`).
+ */
+const SITE_PHASES = ["site-plan", "site-review", "merge", "select", "site-finalize"];
+const SITE_GUARD = "siteReviewEnabled != true";
+const SITE_SKIP = "siteReviewEnabled == true";
 
 /**
  * WP6's two. `adjudicate` is the model pass; `reconcile` is its deterministic
@@ -247,6 +267,12 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
       units: ["seed"],
       "survey-units": ["units"],
       "units-ingest": ["survey-units"],
+      // Like `probe-plan`, after either survey engine.
+      "site-plan": ["survey", "units-ingest"],
+      "site-review": ["site-plan"],
+      merge: ["site-review"],
+      select: ["merge"],
+      "site-finalize": ["select"],
       // BOTH engines' last phase: exactly one of them runs and the other skips.
       "probe-plan": ["survey", "units-ingest"],
       falsify: ["probe-plan"],
@@ -257,15 +283,18 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
       // — not phase declaration order — is what enforces that (#399 idea 2).
       dossier: ["review", "jev-classify"],
       adjudicate: ["review", "dossier"],
-      reconcile: ["adjudicate"],
+      // Both review engines' last step: `adjudicate`, or the sites engine's
+      // `site-finalize` — the floor runs over whichever wrote findings.json.
+      reconcile: ["adjudicate", "site-finalize"],
       "post-review": ["review"],
     };
     const declaredEdges = def.phases.filter((p) => p.depends_on?.length);
     // Every phase but the root declares an edge.
     expect(declaredEdges).toHaveLength(DECLARED.length - 1);
-    // `falsify`, `dossier` AND `adjudicate` each declare TWO edges — three
-    // fan-ins — so the edge count is (phases - 1) plus one per fan-in.
-    expect(declaredEdges.flatMap((p) => p.depends_on ?? [])).toHaveLength(DECLARED.length + 2);
+    // `probe-plan`, `site-plan`, `dossier`, `adjudicate` AND `reconcile` each
+    // declare TWO edges — five fan-ins — so the edge count is (phases - 1)
+    // plus one per fan-in.
+    expect(declaredEdges.flatMap((p) => p.depends_on ?? [])).toHaveLength(DECLARED.length + 4);
 
     const dag = buildDag(def.phases, { chainIfNoDeps: true });
     // Exactly one root, and it is the first declared phase.
@@ -288,6 +317,7 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
       "seed",
       "survey",
       ...UNIT_PHASES,
+      ...SITE_PHASES,
       "falsify",
       "review",
       "jev-classify",
@@ -357,21 +387,30 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
     // `falsify` then EXECUTES things in that tree. Both carry BOTH expressions,
     // so probes cannot run without the pipeline even if the projection that
     // pairs them is ever changed.
+    //
+    // `prepare` is not on the adjudicate chain the sites engine replaces, so
+    // only `probe-plan` and `falsify` also carry the engine guard.
     for (const name of WP4_PHASES) {
       expect(phaseSkipIfExpressions(byName.get(name)!), `${name}.skip_if`).toEqual([
         "analysisEnabled != true",
         "probesEnabled != true",
         TIER_GUARD,
+        ...(name === "prepare" ? [] : [SITE_SKIP]),
       ]);
     }
     // WP6's two ride the pipeline switch alone: they neither install anything
     // nor execute anything from the PR, so `probesEnabled` is not their gate.
-    for (const name of WP6_PHASES) {
-      expect(phaseSkipIfExpressions(byName.get(name)!), `${name}.skip_if`).toEqual([
-        "analysisEnabled != true",
-        TIER_GUARD,
-      ]);
-    }
+    // `adjudicate` skips under the sites engine; `reconcile` is the floor both
+    // engines share.
+    expect(phaseSkipIfExpressions(byName.get("adjudicate")!), "adjudicate.skip_if").toEqual([
+      "analysisEnabled != true",
+      TIER_GUARD,
+      SITE_SKIP,
+    ]);
+    expect(phaseSkipIfExpressions(byName.get("reconcile")!), "reconcile.skip_if").toEqual([
+      "analysisEnabled != true",
+      TIER_GUARD,
+    ]);
     // `jev-classify` carries its OWN third switch, same shape as `probesEnabled`
     // above: a deployment on `dossier` alone must not gain the annotation phase.
     for (const name of JEV_PHASES) {
@@ -379,14 +418,26 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
         "analysisEnabled != true",
         "jevClassifyEnabled != true",
         TIER_GUARD,
+        SITE_SKIP,
       ]);
     }
-    // `post-review` has no guard; `review` has exactly one, on the seeded
-    // scratch flag — never `analysisEnabled`, so it can never skip with the
+    // The sites engine's five, BARE-BOOLEAN `!= true` like the unit chain: an
+    // absent key (every deployment that never chose) skips them.
+    for (const name of SITE_PHASES) {
+      expect(phaseSkipIfExpressions(byName.get(name)!), `${name}.skip_if`).toEqual([
+        "analysisEnabled != true",
+        SITE_GUARD,
+        TIER_GUARD,
+      ]);
+    }
+    // `post-review` has no guard; `review` has two, on the seeded scratch flag
+    // and on the sites engine — never `analysisEnabled`, and `siteReviewEnabled`
+    // is projected only with the pipeline on, so it can never skip with the
     // pipeline off.
     expect(phaseSkipIfExpressions(byName.get("post-review")!)).toEqual([]);
     expect(phaseSkipIfExpressions(byName.get("review")!)).toEqual([
       "scratch.reviewTriage.skipReview == true",
+      SITE_SKIP,
     ]);
   });
 });
@@ -401,7 +452,9 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
     const { ran, skipped } = simulate(def.phases, { owner: "acme", repo: "widgets" });
 
     expect(ran).toEqual(LEGACY_PHASES);
-    expect(skipped.map((s) => s.name)).toEqual(["triage", ...ANALYSIS_PHASES]);
+    // As a SET: two independent chains (the sites engine and the adjudicate
+    // chain) become ready side by side, so the skip order interleaves them.
+    expect(skipped.map((s) => s.name).sort()).toEqual(["triage", ...ANALYSIS_PHASES].sort());
     // Every skip is the CONDITIONAL one (which keeps the run green), never a
     // trigger-rule cascade (which would drag `review` down with it).
     for (const s of skipped) {
@@ -420,9 +473,9 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
     // `dossier` and `jev-classify` join the skip list for the same reason:
     // two more independent switches (#399), off until an operator asks — and
     // so does the unit engine, which the fan-out stands in for by default.
-    const off = [...WP4_PHASES, ...UNIT_PHASES, ...JEV_PHASES, "dossier"];
+    const off = [...WP4_PHASES, ...UNIT_PHASES, ...SITE_PHASES, ...JEV_PHASES, "dossier"];
     expect(ran).toEqual(DECLARED.filter((n) => !off.includes(n) && n !== "triage"));
-    expect(skipped.map((s) => s.name)).toEqual(["triage", "prepare", ...UNIT_PHASES, "probe-plan", "falsify", ...JEV_PHASES, "dossier"]);
+    expect(skipped.map((s) => s.name).sort()).toEqual(["triage", ...off].sort());
   });
 
   it("runs every declared phase in order once every flag is on — but one survey engine", () => {
@@ -433,10 +486,10 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
       jevClassifyEnabled: "true",
       ...TRIAGE_ON,
     });
-    // The two engines are alternatives, so "every flag" is every phase but the
-    // engine not chosen — the unit chain, on the default engine.
-    expect(ran).toEqual(DECLARED.filter((n) => !UNIT_PHASES.includes(n)));
-    expect(skipped.map((s) => s.name)).toEqual(UNIT_PHASES);
+    // The engines are alternatives, so "every flag" is every phase but the
+    // engines not chosen — the unit chain and the sites engine, on the defaults.
+    expect(ran).toEqual(DECLARED.filter((n) => !UNIT_PHASES.includes(n) && !SITE_PHASES.includes(n)));
+    expect(skipped.map((s) => s.name)).toEqual([...UNIT_PHASES, ...SITE_PHASES]);
   });
 
   it("skips the dossier without taking the adjudicator with it (#399)", () => {
@@ -451,8 +504,10 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
       probesEnabled: "true",
       ...TRIAGE_ON,
     });
-    expect(skipped.map((s) => s.name)).toEqual([...UNIT_PHASES, "jev-classify", "dossier"]);
-    expect(ran).toEqual(DECLARED.filter((n) => n !== "dossier" && n !== "jev-classify" && !UNIT_PHASES.includes(n)));
+    expect(skipped.map((s) => s.name)).toEqual([...UNIT_PHASES, ...SITE_PHASES, "jev-classify", "dossier"]);
+    expect(ran).toEqual(
+      DECLARED.filter((n) => n !== "dossier" && n !== "jev-classify" && !UNIT_PHASES.includes(n) && !SITE_PHASES.includes(n)),
+    );
     expect(ran).toContain("adjudicate");
   });
 
@@ -481,7 +536,9 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
         jevClassifyEnabled: value,
         ...TRIAGE_ON,
       });
-      expect(ran, `all=${JSON.stringify(value)}`).toEqual(DECLARED.filter((n) => !UNIT_PHASES.includes(n)));
+      expect(ran, `all=${JSON.stringify(value)}`).toEqual(
+        DECLARED.filter((n) => !UNIT_PHASES.includes(n) && !SITE_PHASES.includes(n)),
+      );
     }
   });
 
@@ -489,7 +546,7 @@ describe("golden — with review.analysis off, pr-review resolves to review → 
     for (const value of ["false", "", "0", "no", "TRUE-ish"]) {
       const { ran } = simulate(def.phases, { analysisEnabled: "true", probesEnabled: value });
       expect(ran, `probesEnabled=${JSON.stringify(value)}`).toEqual(
-        DECLARED.filter((n) => ![...WP4_PHASES, ...UNIT_PHASES, ...JEV_PHASES, "dossier"].includes(n) && n !== "triage"),
+        DECLARED.filter((n) => ![...WP4_PHASES, ...UNIT_PHASES, ...SITE_PHASES, ...JEV_PHASES, "dossier"].includes(n) && n !== "triage"),
       );
     }
   });
@@ -689,7 +746,7 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
   it("records all ten phases — eight skipped, two done — so the dashboard is not silent", async () => {
     const { result, reporter } = await runPrReview({ owner: "acme", repo: "widgets", prNumber: 7 });
 
-    expect(result.phases.map((p) => p.phase)).toEqual(DECLARED);
+    expect(result.phases.map((p) => p.phase).sort()).toEqual([...DECLARED].sort());
     // A conditional skip is a SUCCESS: painting the run red would post
     // `messages.on_failure`, offer a Retry that cannot succeed and defeat the
     // per-head-SHA dedup.
@@ -701,7 +758,7 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
     }
     expect(reporter.failures).toEqual([]);
     const skippedSteps = reporter.steps.filter((s) => s.status === "skipped").map((s) => s.key);
-    expect(skippedSteps).toEqual(["triage", ...ANALYSIS_PHASES]);
+    expect(skippedSteps.sort()).toEqual(["triage", ...ANALYSIS_PHASES].sort());
   });
 
   it("runs every phase once both flags are on — the pipeline is wired, not decorative", async () => {
@@ -733,6 +790,8 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
       // Skipped — the default engine is the fan-out — and a skip is a phase
       // result under its own name.
       ...UNIT_PHASES,
+      // Skipped too — the default review engine is the adjudicate chain.
+      ...SITE_PHASES,
       // A bash phase, so it reports under its own name; `falsify` is a
       // generic_loop and reports under its iteration labels instead.
       "probe-plan",
@@ -807,6 +866,89 @@ describe("golden — the real scheduler, driven with review.analysis off", () =>
     // …and the floor runs BEFORE the post, so what gets posted is the repaired
     // document rather than whatever the failed adjudicator left behind.
     expect(postReview.calls).toEqual(["post-review"]);
+  });
+});
+
+// ── `review.analysis.reviewEngine: sites` ────────────────────────────────────
+
+/**
+ * The sites engine replaces the probe-plan → adjudicate chain with site-plan →
+ * site-review → merge → select → site-finalize, and shares `reconcile` and
+ * `post-review` with it. `siteReviewEnabled` is projected only for
+ * `reviewEngine: sites`, so every test above (key absent) is the adjudicate
+ * chain.
+ */
+describe("golden — reviewEngine: sites", () => {
+  const def = getWorkflow("pr-review");
+  const SITES = {
+    analysisEnabled: "true",
+    unitSurveyEnabled: "true",
+    siteReviewEnabled: "true",
+    // Every other switch ON, to show the engine key alone turns the chain off.
+    probesEnabled: "true",
+    dossierEnabled: "true",
+    jevClassifyEnabled: "true",
+  };
+  const seeded = (ctx: Record<string, unknown>) => ({ reviewTriage: reviewTriageSeed(ctx) });
+
+  it("runs the five site phases, skips the whole adjudicate chain, and still floors then posts", () => {
+    const { ran, skipped } = simulate(def.phases, SITES, seeded(SITES));
+    expect(ran).toEqual([
+      "prepare",
+      "facts",
+      "seed",
+      ...UNIT_PHASES,
+      ...SITE_PHASES,
+      "reconcile",
+      "post-review",
+    ]);
+    for (const name of ["probe-plan", "falsify", "review", "jev-classify", "dossier", "adjudicate"]) {
+      expect(skipped.find((x) => x.name === name)?.reason, name).toMatch(/^skip_if matched: /);
+    }
+    // Every skip is conditional — no trigger-rule cascade reaches `reconcile`
+    // or `post-review` through the skipped chain.
+    expect(skipped.filter((x) => x.reason === "trigger rule not satisfied")).toEqual([]);
+  });
+
+  it("skips `review` even when the independent pass is asked for — finalize would overwrite it", () => {
+    const ctx = { ...SITES, independentReviewEnabled: "true" };
+    const { ran, skipped } = simulate(def.phases, ctx, seeded(ctx));
+    expect(ran).not.toContain("review");
+    expect(skipped.find((x) => x.name === "review")?.reason).toBe("skip_if matched: siteReviewEnabled == true");
+    expect(ran).toContain("post-review");
+  });
+
+  it("runs after the agent survey too — site-plan waits on both survey engines", () => {
+    const ctx = { ...SITES, unitSurveyEnabled: undefined };
+    const { ran } = simulate(def.phases, ctx, seeded(ctx));
+    expect(ran.slice(0, 4)).toEqual(["prepare", "facts", "seed", "survey"]);
+    expect(ran).toEqual(expect.arrayContaining(SITE_PHASES));
+  });
+
+  it("drives five investigator branches and one select loop through the real scheduler, then posts", async () => {
+    const { result, agent, postReview } = await runPrReview({
+      owner: "acme",
+      repo: "widgets",
+      prNumber: 7,
+      ...SITES,
+      probeTestPolicy: "block",
+      probeScratchInstallPolicy: "block",
+      reviewInstallPolicy: "block",
+    });
+    const seen = result.phases.map((p) => p.phase);
+    for (const slot of ["site-001", "site-002", "site-003", "site-004", "site-005"]) {
+      expect(seen, slot).toContain(`site-review_branch_${slot}`);
+    }
+    expect(seen).toContain("select_iter_1");
+    expect(seen).not.toContain("adjudicate_iter_1");
+    expect(seen).not.toContain("falsify_iter_1");
+    // The floor runs after finalize, and before the post.
+    expect(seen.indexOf("site-finalize")).toBeLessThan(seen.indexOf("reconcile"));
+    expect(seen.indexOf("reconcile")).toBeLessThan(seen.indexOf("post-review"));
+    expect(postReview.calls).toEqual(["post-review"]);
+    expect(result.phases.every((p) => p.success)).toBe(true);
+    // Five investigators + the select call — nothing from the adjudicate chain.
+    expect(agent.calls.filter((c) => c.kind === "agent")).toHaveLength(6);
   });
 });
 
@@ -1048,10 +1190,12 @@ describe("golden — the `review` phase's two-mode brief", () => {
     const { depends_on, trigger_rule, command_policy, skip_if, ...rest } = review as Record<string, unknown>;
     expect(depends_on).toEqual(["falsify"]);
     expect(trigger_rule).toBe("all_done");
-    // ONE guard, on the seeded scratch flag — never on `analysisEnabled`, so the
-    // phase runs whenever the seed did not ask it to skip (pipeline off, light,
-    // independent review on, or an unseeded run).
-    expect(skip_if).toEqual(["scratch.reviewTriage.skipReview == true"]);
+    // Two guards: the seeded scratch flag, and the sites review engine (which
+    // writes findings.json itself). Never `analysisEnabled`, and the engine key
+    // is projected only with the pipeline on — so the phase runs whenever the
+    // seed did not ask it to skip (pipeline off, light, independent review on,
+    // or an unseeded run) on the adjudicate engine.
+    expect(skip_if).toEqual(["scratch.reviewTriage.skipReview == true", "siteReviewEnabled == true"]);
     // The suite is blocked in both modes; an install only when the pipeline is
     // on (issue #403) — pinned in pr-review-command-policy.test.ts.
     expect(command_policy).toMatchObject({ install: { from: "reviewInstallPolicy", default: "allow" }, test: "block" });

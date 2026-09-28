@@ -105,7 +105,13 @@ describe("adjudicate — the phase", () => {
   });
 
   it("rides the pipeline switch alone — it installs nothing and executes nothing", () => {
-    expect(adjudicate!.skip_if).toEqual(["analysisEnabled != true", "scratch.reviewTriage.depth == 'light'"]);
+    // Plus the review ENGINE: under `reviewEngine: sites` the site phases write
+    // findings.json and this chain skips.
+    expect(adjudicate!.skip_if).toEqual([
+      "analysisEnabled != true",
+      "scratch.reviewTriage.depth == 'light'",
+      "siteReviewEnabled == true",
+    ]);
   });
 });
 
@@ -196,7 +202,13 @@ describe("the dossier phase (#399), and the skip that must not take the adjudica
     expect(evaluateTriggerRule("none_failed", ["skipped", "skipped"])).toBe(true);
     expect(evaluateTriggerRule("none_failed_min_one_success", ["skipped", "skipped"])).toBe(false);
     // Analysis-off and `light` are the phase's own `skip_if`, not the rule's.
-    expect(adjudicate!.skip_if).toEqual(["analysisEnabled != true", "scratch.reviewTriage.depth == 'light'"]);
+    // Plus the review ENGINE: under `reviewEngine: sites` the site phases write
+    // findings.json and this chain skips.
+    expect(adjudicate!.skip_if).toEqual([
+      "analysisEnabled != true",
+      "scratch.reviewTriage.depth == 'light'",
+      "siteReviewEnabled == true",
+    ]);
   });
 
   it("still refuses to adjudicate a failed review", () => {
@@ -265,7 +277,8 @@ describe("reconcile — §D12's floor", () => {
 
   it("runs even when the adjudicator failed or was cut short", () => {
     // `all_done`, because that is exactly when there is something to repair.
-    expect(reconcile!.depends_on).toEqual(["adjudicate"]);
+    // …or the sites engine's `site-finalize`, whichever engine ran.
+    expect(reconcile!.depends_on).toEqual(["adjudicate", "site-finalize"]);
     expect(reconcile!.trigger_rule).toBe("all_done");
   });
 

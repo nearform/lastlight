@@ -41,6 +41,8 @@ models:
   #   review-adjudicate: anthropic/claude-sonnet-4-6      # the adjudication pass
   #   review-summary: openai/gpt-5.4-mini                # post-review's summary, written after the caps
   #   review-falsify: anthropic/claude-haiku-4-5-20251001 # the probe oracle
+  #   review-site: anthropic/claude-haiku-4-5-20251001    # a site investigator (reviewEngine: sites)
+  #   review-select: anthropic/claude-sonnet-4-6          # sites' selection pass (reviewEngine: sites)
   # A per-task entry wins over `default`. `classifier`/`screener` are the cheap
   # one-shot helpers (src/engine/llm.ts); when unset they fall back to the first
   # configured provider's fast model, NOT `default`.
@@ -95,6 +97,11 @@ models:
   # discovery, so it can be moved independently of `models.review`. Unset, it
   # falls through to `models.review` (the phase's template guards it), so a
   # deployment that never sets it keeps today's behaviour exactly.
+  #
+  # `review-site` and `review-select` are the `sites` review engine's keys
+  # (`review.analysis.reviewEngine: sites`): the five site investigators fall
+  # through to `review-survey` (the graded arms ran Haiku), and `select` — the
+  # one call that merges and orders their findings — to `models.review`.
 
 # Provider endpoints. Ships EMPTY — every provider keeps the endpoint baked into
 # the registry (packages/shared/src/providers.ts), which is exactly today's
@@ -660,6 +667,23 @@ review:
     # config load REFUSES it on the kubernetes backend (no host checkout).
     # Anything but the literal `units` is `agent`.
     surveyEngine: agent
+    # Which engine turns the survey's hypotheses into the review
+    # (docs/plans/adjudicate-falsify-replay.md, "Pipeline integration").
+    #
+    #   adjudicate — probe-plan → falsify → jev-classify → dossier → adjudicate
+    #                over every hypothesis row. The shipped chain.
+    #   sites      — the rows are only a VOLUME signal: `lastlight-facts sites
+    #                --plan` ranks the places they point at (distinct-unit
+    #                votes, span ≤ 60, test files skipped), one investigator
+    #                per top-5 site writes grounded findings (the `site-review`
+    #                fan-out, model `models.review-site`, else review-survey),
+    #                `merge` pools them and `select` (one agent call, model
+    #                `models.review-select`, else review) merges duplicates and
+    #                orders them by importance. Every row is filed `internal`.
+    #                UNMEASURED end to end; `independentReview` does not apply.
+    #
+    # Anything but the literal `sites` is `adjudicate`.
+    reviewEngine: adjudicate
     # Unit calls in flight at once under `surveyEngine: units`. No backend
     # clamp — they are HTTP requests from the harness, not sandboxes — so lower
     # it only to ease provider rate limits. Spend is the same either way.

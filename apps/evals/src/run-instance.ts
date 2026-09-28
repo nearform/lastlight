@@ -440,6 +440,7 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
           body: inst.pr?.body ?? inst.issue?.body ?? inst.problem_statement,
           branch,
           seed: inst.pr_state,
+          baseRef: inst.pr?.base_ref,
           // A REAL `GitHubClient` pointed at the fake — the same construction
           // `post-review` already uses against the mock. Core's own
           // `resolveSpecContext` then reads BOTH ends of the spec axis through

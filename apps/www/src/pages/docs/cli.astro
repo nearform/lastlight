@@ -311,7 +311,11 @@ lastlight-facts …                                 # the same code, as its own 
 		(<a href="/docs/configuration"><code>review.analysis.surveyEngine: units</code></a>),
 		and <code>probe-plan</code>, which decides in code which hypotheses the
 		<code>falsify</code> phase owes a verdict on, ranked and capped at
-		<code>review.analysis.maxProbes</code>.
+		<code>review.analysis.maxProbes</code>, and <code>sites</code>, the
+		deterministic steps of the unmeasured
+		<a href="/docs/configuration"><code>review.analysis.reviewEngine: sites</code></a>
+		(ranking the code sites to investigate, each investigator's gate, pooling
+		their findings, and writing the final findings file).
 	</p>
 	<p>
 		<code>opengrep</code> and <code>gitleaks</code> (used by

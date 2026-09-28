@@ -102,11 +102,11 @@ export function PhaseReplayList({ reports }: { reports: PhaseReplayEntry[] }) {
               <th className="px-3 py-2">report</th>
               <th className="px-3 py-2">status</th>
               <th className="px-3 py-2">config</th>
-              <th className="px-3 py-2 text-right">rows</th>
-              <th className="px-3 py-2">phase result</th>
-              <th className="px-3 py-2 text-right">wall p50 / max</th>
-              <th className="px-3 py-2 text-right">out tok</th>
-              <th className="px-3 py-2 text-right">$</th>
+              <th className="whitespace-nowrap px-3 py-2 text-right">rows</th>
+              <th className="whitespace-nowrap px-3 py-2">phase result</th>
+              <th className="whitespace-nowrap px-3 py-2 text-right">wall p50 / max</th>
+              <th className="whitespace-nowrap px-3 py-2 text-right">out tok</th>
+              <th className="whitespace-nowrap px-3 py-2 text-right">$</th>
             </tr>
           </thead>
           <tbody>
@@ -127,16 +127,16 @@ export function PhaseReplayList({ reports }: { reports: PhaseReplayEntry[] }) {
                   <StatusChip entry={{ ...e, done: e.totals.cases }} />
                   {e.totals.errored > 0 && <div className="mt-1 text-2xs text-error">{e.totals.errored} errored</div>}
                 </td>
-                <td className="px-3 py-2 text-2xs text-base-content/70">{configLine(e)}</td>
+                <td className="max-w-sm px-3 py-2 text-2xs text-base-content/70">{configLine(e)}</td>
                 <td className="px-3 py-2 text-right tabular-nums">{e.totals.rows}</td>
-                <td className="px-3 py-2 text-2xs">
+                <td className="min-w-[20rem] px-3 py-2 text-2xs">
                   <ResultCell entry={e} />
                 </td>
-                <td className="px-3 py-2 text-right tabular-nums">
+                <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">
                   {fmtMs(e.totals.wallMedianMs)} / {fmtMs(e.totals.wallMaxMs)}
                 </td>
-                <td className="px-3 py-2 text-right tabular-nums">{e.totals.outputTokens === null ? NA : fmtTokens(e.totals.outputTokens)}</td>
-                <td className="px-3 py-2 text-right tabular-nums">{fmtUsd(e.totals.costUsd)}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">{e.totals.outputTokens === null ? NA : fmtTokens(e.totals.outputTokens)}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">{fmtUsd(e.totals.costUsd)}</td>
               </tr>
             ))}
           </tbody>

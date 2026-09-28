@@ -54,6 +54,7 @@ import {
   coerceAdjudicateMode,
   coerceProbeMode,
   coerceSurveyEngine,
+  coerceReviewEngine,
   reviewTriggerRank,
   type DependenciesConfig,
   type DisabledConfig,
@@ -1713,6 +1714,8 @@ function shapeReviewAnalysis(raw: unknown, d: ReviewPolicy["analysis"]): ReviewP
     // Operator-only projection like `adjudicate`: it selects a phase SHAPE, and
     // only the literal `"units"` moves it off the shipped fan-out.
     surveyEngine: coerceSurveyEngine(node.surveyEngine),
+    // Operator-only, and a phase SHAPE like `surveyEngine`: only `"sites"` moves it.
+    reviewEngine: coerceReviewEngine(node.reviewEngine),
     surveyUnitConcurrency: num(node.surveyUnitConcurrency, d.surveyUnitConcurrency),
     // Tri-state (`off` | `static` | `full`), with a bare `true` reading as
     // `static` so an upgrade never silently buys an install. Operator-only

@@ -226,7 +226,7 @@ Phase kinds the runner recognises:
   loop, so interleaving would serialise the whole fan-out on the one
   backend it exists to speed up. They are observational unless the phase
   declares `on_branch_gate_failure: { retries: 1 }` (the `pr-review`
-  survey does): then a branch whose gate ran and said no is re-run once
+  survey does, and so does `site-review` under `reviewEngine: sites`): then a branch whose gate ran and said no is re-run once
   (`_regate` row) with the gate's output appended to its prompt, and
   gated again. No `approval_gate` (a fan-out cannot
   pause mid-flight) and no `loop:`/`generic_loop:` (the branches are the

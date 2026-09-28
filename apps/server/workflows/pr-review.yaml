@@ -476,6 +476,201 @@ phases:
       done
       exit 0
 
+  # ── The `sites` review engine (docs/plans/adjudicate-falsify-replay.md) ────
+  #
+  # Selected by `review.analysis.reviewEngine: sites`, and UNMEASURED end to
+  # end. It replaces the tail from `probe-plan` through `adjudicate` (all five
+  # skip on `siteReviewEnabled == true`); the front and `reconcile` /
+  # `post-review` are unchanged. The hypothesis rows stop being the items the
+  # review weighs and become a VOLUME signal: where many independent units
+  # pointed is where an investigator looks.
+  #
+  #   site-plan    deterministic: rank sites (distinct-unit votes, span ≤ 60,
+  #                test files skipped), one brief per slot.
+  #   site-review  fan-out: one investigator per top-5 site writes 1–3
+  #                grounded findings, or a probe-backed `none`.
+  #   merge        deterministic: pool the findings, propose duplicate groups.
+  #   select       one agent call: merge true duplicates, set importance,
+  #                write the comments.
+  #   site-finalize deterministic: `sites --finalize` → findings.json (every
+  #                row `internal`); then `reconcile`'s usual floor.
+  #
+  # Guards: the pipeline's two plus the engine's, BARE-BOOLEAN like
+  # `unitSurveyEnabled` — absent (every deployment that never set the key)
+  # skips all five. `all_done` down the chain: each step must run on whatever
+  # the last one left, and the floor in `reconcile` covers a failed `select`.
+  - name: site-plan
+    label: Sites · plan
+    type: bash
+    skip_if:
+      - "analysisEnabled != true"
+      - "siteReviewEnabled != true"
+      - "scratch.reviewTriage.depth == 'light'"
+    # Both survey engines, like `probe-plan`: exactly one of them runs.
+    depends_on: [survey, units-ingest]
+    trigger_rule: all_done
+    timeout_seconds: { from: seedTimeoutSeconds }
+    # Writes `sites/plan.json` and `sites/site-001.md` … `site-005.md` (it
+    # clears `sites/` first — a reused workspace holds the last head's). A
+    # slot past the PR's last site gets a brief saying so, and its branch
+    # writes one `empty` line; the fan-out is static, so every slot runs.
+    command: |
+      set -u
+      FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+      "$FACTS" sites --plan --dir .lastlight/pr-review --never-fail
+      exit 0
+
+  # One investigator per site, concurrently, in one workspace. The prompt is
+  # slot-generic (a branch has no variables of its own): the attached brief
+  # names the site id, the one file the branch writes
+  # (`sites/<site id>.findings.jsonl` — disjoint across branches, which is the
+  # fan-out's isolation model) and how many probed suspicions a `none` needs.
+  # The gate is the one the evals replay graded (`sites --check`), and
+  # `on_branch_gate_failure` hands its gaps back once — the round-2 feedback the
+  # replay built by hand.
+  - name: site-review
+    label: Sites · investigate
+    type: fanout
+    prompt: prompts/review-site.md
+    # Its own key, falling through to the survey model — the graded arms ran
+    # Haiku. The `{{#if}}` pair is load-bearing, as on `falsify`.
+    model: "{{#if models.review-site}}{{models.review-site}}{{/if}}{{#if !models.review-site}}{{models.review-survey}}{{/if}}"
+    skip_if:
+      - "analysisEnabled != true"
+      - "siteReviewEnabled != true"
+      - "scratch.reviewTriage.depth == 'light'"
+    depends_on: [site-plan]
+    trigger_rule: all_done
+    # The survey's ceiling: the same class of session, clamped per backend
+    # (gondolin pins to 1 — five sites then run in series).
+    max_concurrent: { from: surveyConcurrency, default: 6 }
+    # An investigator RUNS code — copied lines under `node`, a differential
+    # `git show` — and that is its evidence. Installing the repo and the suite
+    # are never a probe; scratch installs follow falsify's switch, and `block`
+    # when probes are off (the key is projected only with probes on — the
+    # sites engine does not need them).
+    command_policy:
+      install: block
+      install-scratch: { from: probeScratchInstallPolicy, default: block }
+      test: block
+      host: block
+      reason: >-
+        Installing the repository's dependencies is not this pass's job, and the whole
+        suite is never a probe. Run the one targeted check the site needs (a copied
+        function under `node`, a differential `git show`), or report what you read.
+        Nothing outside the checkout counts.
+    on_branch_soft_failure: { retries: 1, then: complete }
+    on_branch_gate_failure: { retries: 1 }
+    branches:
+      - name: site-001
+        context_file: .lastlight/pr-review/sites/site-001.md
+        until_bash: |
+          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+          "$FACTS" sites --check site-001 --dir .lastlight/pr-review --repo .
+      - name: site-002
+        context_file: .lastlight/pr-review/sites/site-002.md
+        until_bash: |
+          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+          "$FACTS" sites --check site-002 --dir .lastlight/pr-review --repo .
+      - name: site-003
+        context_file: .lastlight/pr-review/sites/site-003.md
+        until_bash: |
+          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+          "$FACTS" sites --check site-003 --dir .lastlight/pr-review --repo .
+      - name: site-004
+        context_file: .lastlight/pr-review/sites/site-004.md
+        until_bash: |
+          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+          "$FACTS" sites --check site-004 --dir .lastlight/pr-review --repo .
+      - name: site-005
+        context_file: .lastlight/pr-review/sites/site-005.md
+        until_bash: |
+          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+          "$FACTS" sites --check site-005 --dir .lastlight/pr-review --repo .
+
+  # Pool every site's findings for `select`: numbered `F1…Fn`, each with an
+  # excerpt, and the duplicate groups line proximity PROPOSES (it cannot decide
+  # "same defect"; no rule here reads prose). STDOUT is the delivery mechanism
+  # — `output_var` puts it in the select prompt, as `dossier` does for
+  # adjudicate — and `sites/merged.json` is what `--finalize` reads.
+  - name: merge
+    label: Sites · merge
+    type: bash
+    skip_if:
+      - "analysisEnabled != true"
+      - "siteReviewEnabled != true"
+      - "scratch.reviewTriage.depth == 'light'"
+    depends_on: [site-review]
+    trigger_rule: all_done
+    output_var: siteMerge
+    timeout_seconds: { from: reconcileTimeoutSeconds }
+    command: |
+      set -u
+      FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+      if ! "$FACTS" sites --merge --dir .lastlight/pr-review --repo . --never-fail; then
+        echo "MERGE NOT AVAILABLE — \`lastlight-facts sites --merge\` failed. Write {\"items\": []}."
+      fi
+      exit 0
+
+  # One agent call over at most ~15 findings: merge true duplicates, set
+  # importance, write the comments to `sites/selected.json`. The gate is
+  # conservation — every pooled finding in exactly one item — so selecting can
+  # merge and demote (`nit` is recorded, never posted) but never silently drop.
+  # A selection that never closes is not fatal: `sites --finalize` falls back
+  # to one item per finding at the investigator's own importance.
+  - name: select
+    label: Sites · select
+    prompt: prompts/review-select.md
+    model: "{{#if models.review-select}}{{models.review-select}}{{/if}}{{#if !models.review-select}}{{models.review}}{{/if}}"
+    variant: "{{variants.review}}"
+    skip_if:
+      - "analysisEnabled != true"
+      - "siteReviewEnabled != true"
+      - "scratch.reviewTriage.depth == 'light'"
+    depends_on: [merge]
+    trigger_rule: all_done
+    command_policy:
+      install: block
+      test: block
+      host: block
+      reason: >-
+        This phase selects; it does not verify. The investigators already ran their
+        probes — read their findings above, and the code only to decide whether two
+        findings are the same defect.
+    generic_loop:
+      on_soft_failure: { retries: 1, then: complete }
+      max_iterations: 2
+      fresh_context: true
+      until_bash: |
+        FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+        "$FACTS" sites --check-select --dir .lastlight/pr-review
+
+  # `select`'s file → findings.json, the shape `post-review` reads: each item at
+  # its primary finding's location (with the line's text as `existingCode`, so
+  # the poster anchors it), severity from importance (must-fix outranks
+  # worth-mentioning for the inline slots; a `nit` is filed `internal`), and
+  # every hypothesis row by id in `internal[]` — the rows are the volume
+  # record, and `reconcile`'s conservation check then holds. A missing or
+  # invalid selection falls back to one item per site finding at the
+  # investigator's own importance, so a failed `select` still posts.
+  - name: site-finalize
+    label: Sites · findings.json
+    type: bash
+    skip_if:
+      - "analysisEnabled != true"
+      - "siteReviewEnabled != true"
+      - "scratch.reviewTriage.depth == 'light'"
+    depends_on: [select]
+    trigger_rule: all_done
+    timeout_seconds: { from: reconcileTimeoutSeconds }
+    command: |
+      set -u
+      FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+      if ! "$FACTS" sites --finalize --dir .lastlight/pr-review --repo .; then
+        echo "site-finalize: sites --finalize failed; reconcile's floor files every hypothesis internal"
+      fi
+      exit 0
+
   # WHICH hypotheses `falsify` owes a verdict on — decided in code, not by the
   # oracle. `lastlight-facts probe-plan` derives the owed set (a derived-Critical
   # row, or a survey's own `needsProbe`), ranks it and caps it at
@@ -493,6 +688,7 @@ phases:
       - "analysisEnabled != true"
       - "probesEnabled != true"
       - "scratch.reviewTriage.depth == 'light'"
+      - "siteReviewEnabled == true"
     # Both survey engines, for the reason `falsify` gives below.
     depends_on: [survey, units-ingest]
     trigger_rule: all_done
@@ -522,6 +718,7 @@ phases:
       - "analysisEnabled != true"
       - "probesEnabled != true"
       - "scratch.reviewTriage.depth == 'light'"
+      - "siteReviewEnabled == true"
     # After `probe-plan`, which waits on BOTH survey engines (the fan-out under
     # `agent`, `units-ingest` under `units`) with `all_done` — a skipped engine
     # is terminal, so exactly one of them lets it through. `all_done` here too:
@@ -592,8 +789,14 @@ phases:
     # deployment that has not enabled the pipeline.
     depends_on: [falsify]
     trigger_rule: all_done
+    # The second guard is the `sites` review engine, which writes findings.json
+    # itself (`sites --finalize`) — an independent pass there would be
+    # overwritten, so `independentReview` does not apply to it. The key is
+    # projected only when the pipeline is on, so an analysis-off review (where
+    # this phase IS the review) can never be skipped by it.
     skip_if:
       - "scratch.reviewTriage.skipReview == true"
+      - "siteReviewEnabled == true"
     prompt: prompts/review.md
     skills: [pr-review, code-review]
     model: "{{models.review}}"
@@ -641,6 +844,7 @@ phases:
       - "analysisEnabled != true"
       - "jevClassifyEnabled != true"
       - "scratch.reviewTriage.depth == 'light'"
+      - "siteReviewEnabled == true"
     depends_on: [review]
     trigger_rule: all_done
     timeout_seconds: { from: jevTimeoutSeconds }
@@ -679,6 +883,7 @@ phases:
       - "analysisEnabled != true"
       - "dossierEnabled != true"
       - "scratch.reviewTriage.depth == 'light'"
+      - "siteReviewEnabled == true"
     # `jev-classify` too, not just `review` — `all_done` already tolerates a
     # skipped dependency (it is what `review` itself already relies on here;
     # the stricter `none_failed` below is for `adjudicate`, which must not run
@@ -735,6 +940,7 @@ phases:
     skip_if:
       - "analysisEnabled != true"
       - "scratch.reviewTriage.depth == 'light'"
+      - "siteReviewEnabled == true"
     # `none_failed`, NOT `all_success`, and the difference is load-bearing in
     # every direction:
     #
@@ -789,7 +995,9 @@ phases:
     skip_if:
       - "analysisEnabled != true"
       - "scratch.reviewTriage.depth == 'light'"
-    depends_on: [adjudicate]
+    # `site-finalize` too: under `reviewEngine: sites` the adjudicator skips and
+    # that phase BUILDS findings.json; the floor then runs over it as usual.
+    depends_on: [adjudicate, site-finalize]
     # `all_done`: the floor must apply even when the adjudicator failed — that
     # is precisely when there is something to repair.
     trigger_rule: all_done

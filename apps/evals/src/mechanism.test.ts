@@ -1312,6 +1312,15 @@ describe("PR context — core's own projection, not a copy", () => {
     expect(ctx.maxFlakyDeferrals).toBe(defaultFixConfig().maxFlakyDeferrals);
   });
 
+  it("projects the instance's base branch, with the case's pr_state winning", async () => {
+    // A `master`-based PR (sentry) read `"main"` here, and `baseBranch` from this
+    // projection overwrote the harness's own — post-review then diffed against
+    // an `origin/main` that does not exist and demoted every finding.
+    expect((await prContextPatch({ ...args, baseRef: "master" })).baseBranch).toBe("master");
+    expect((await prContextPatch({ ...args, baseRef: "master", seed: { base_ref: "develop" } })).baseBranch).toBe("develop");
+    expect((await prContextPatch(args)).baseBranch).toBe("main");
+  });
+
   it("projects the merge gate's verdict AND its reason, from one decision", async () => {
     const green = await prContextPatch({
       ...args,

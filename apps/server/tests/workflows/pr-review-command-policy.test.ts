@@ -130,6 +130,25 @@ describe("pr-review command policy (#403)", () => {
     expect(effective("review", { enabled: false })?.host).toBe("block");
   });
 
+  it("site-review and select: no installs, no suite, nothing outside the checkout — probes on or off", () => {
+    // The sites engine needs no probes, so its scratch-install mode must
+    // resolve with the probe keys absent (probes: off) as well as present.
+    expect(modes(effective("site-review", { enabled: true, reviewEngine: "sites", probes: "off" }))).toEqual({
+      install: "block",
+      "install-scratch": "block",
+      test: "block",
+      host: "block",
+    });
+    expect(modes(effective("site-review", { enabled: true, reviewEngine: "sites", probes: "full" }))["install-scratch"]).toBe("log");
+    expect(modes(effective("select", { enabled: true, reviewEngine: "sites", probes: "off" }))).toEqual({
+      install: "block",
+      "install-scratch": undefined,
+      test: "block",
+      host: "block",
+    });
+    for (const b of phase("site-review").branches ?? []) expect(b.command_policy, b.name).toBeUndefined();
+  });
+
   it("the probe-mode keys are seeded only when probes are on", () => {
     const off = contextFor({ enabled: true, probes: "off" }) as Record<string, unknown>;
     expect(off.probeTestPolicy).toBeUndefined();
