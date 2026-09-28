@@ -342,12 +342,12 @@ export function ensureOverrideSymlink(): void {
 
 // ── Clack helper — bail on cancel ───────────────────────────────────────────
 
-function required<T>(value: T | symbol): T {
+function required<T>(value: T | symbol): Exclude<T, symbol> {
   if (p.isCancel(value)) {
     p.cancel("Setup cancelled.");
     process.exit(0);
   }
-  return value;
+  return value as Exclude<T, symbol>;
 }
 
 // ── Banner ──────────────────────────────────────────────────────────────────
