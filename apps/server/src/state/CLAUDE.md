@@ -30,6 +30,7 @@ and the PGlite leg replays the entire behavioural suite against real Postgres.
 |---|---|
 | `db.ts` | `StateDb` — the async factory (`await StateDb.open(url)` / `StateDb.fromClient(client, dialect)`; **no public constructor**). Picks the engine off the URL, runs that dialect's migrator, wires the stores together, and is the single import surface for their types. Every store method returns a `Promise`. |
 | `client.ts` | The Drizzle client type, `tablesOf(client)`, and the **connection-scoped** op serializer the nine transaction sites share. |
+| `sqlite-write-lock.ts` | `withSqliteWriteLock(raw)` — wraps the libsql client so every write (plain statement or whole transaction) holds one in-process lock, re-arms `busy_timeout` on each swapped-in connection, and drops a connection a BUSY failure poisoned. |
 | `dialect.ts` | The portability seam — everything that genuinely differs between the dialects. Reaching around it is a portability bug. |
 | `schema/sqlite.ts` | The Drizzle schema. **The source of truth**, and the only one any store may import. |
 | `schema/pg.ts` | The name-parity `pgTable` mirror. **Nothing under `src/` may import it** except `pg-client.ts`. |
@@ -199,8 +200,15 @@ If you touch `pg-client.ts`, run that leg.
   one for the next query — against `:memory:` that is a fresh, empty database, so
   the store silently vanishes after the first commit. Use `makeTestDb()`
   (`tests/helpers/state-db.ts`), a per-test temp file.
-- **The op serializer is connection-scoped, and it — not `busy_timeout` — is the
-  concurrency defence.** `busy_timeout` does not survive a transaction.
+- **On SQLite, the write lock — not `busy_timeout`, not the op serializer — is
+  the concurrency defence.** The op serializer orders transactions against each
+  other only; a plain write racing an open transaction lands on the second
+  connection libsql opened and fails `database is locked`, and the statement it
+  leaves un-reset makes the NEXT commit on that connection fail `cannot commit
+  transaction - SQL statements in progress`. `withSqliteWriteLock` makes every
+  write hold one in-process lock. Its one rule for store code: **inside a
+  transaction callback, write through `tx`, never the root client** — that write
+  would wait on its own transaction's lock forever.
 - **`tsc` cannot see a dropped promise.** Every store method is async now.
   `!promise` is always `false`, and TS2801 fires only on the bare `if (promise)`
   form; the Drizzle migration shipped 14 such bugs through a clean compiler.

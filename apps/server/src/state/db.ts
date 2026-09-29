@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import * as sqliteSchema from "./schema/sqlite.js";
 import { applyLegacySqliteCompat } from "./legacy-sqlite.js";
+import { withSqliteWriteLock } from "./sqlite-write-lock.js";
 import { isPostgresUrl, type PgDriver } from "lastlight-shared/database-url";
 import {
   makeOpSerializer,
@@ -207,12 +208,12 @@ export class StateDb {
       input === ":memory:" || input.startsWith("file:") ? input : `file:${resolve(input)}`;
     const raw = createClient({ url });
     await raw.execute("PRAGMA journal_mode = WAL");
-    // Best-effort only: this pragma is connection-scoped and the libsql client
-    // opens a fresh connection after every transaction, so it covers just the
-    // pre-first-transaction window. The op serializer is the real defense.
-    await raw.execute("PRAGMA busy_timeout = 5000");
-    await applyLegacySqliteCompat(raw);
-    const client = drizzle(raw, { schema: sqliteSchema });
+    // Every write — plain or transactional — takes the in-process write lock,
+    // which also re-arms busy_timeout on each connection libsql swaps in. See
+    // sqlite-write-lock.ts for the SQLITE_BUSY failure this closes.
+    const locked = withSqliteWriteLock(raw);
+    await applyLegacySqliteCompat(locked);
+    const client = drizzle(locked, { schema: sqliteSchema });
     await migrate(client, { migrationsFolder: MIGRATIONS_DIR });
     return new StateDb(client, "sqlite", () => raw.close());
   }

@@ -103,9 +103,14 @@ export function tablesOf(client: StateClient): StateTables {
  * completely unguarded. Overlapping libsql interactive transactions fail in
  * ways beyond SQLITE_BUSY (nested BEGIN, shared-handle interleaving), and
  * `busy_timeout` cannot help because it is connection-scoped and the client
- * swaps connections after each transaction. So this mutex, not the pragma, is
- * the load-bearing defense — and it is semantically free in a single-writer
- * process.
+ * swaps connections after each transaction.
+ *
+ * On SQLite this orders transactions only; it does NOT cover a plain write
+ * racing an open transaction. That is `withSqliteWriteLock`'s job (the
+ * client-level lock every sqlite write takes — `sqlite-write-lock.ts`). This
+ * chain stays because it is dialect-agnostic: the Postgres leg keeps its
+ * transactions ordered the same way. It is also the building block for that
+ * lock, and for admission's own loop serializer.
  */
 export type OpSerializer = <T>(fn: () => Promise<T>) => Promise<T>;
 
