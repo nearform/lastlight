@@ -660,7 +660,13 @@ ${repo}-${issueNumber}-${workflowName}-${runId.slice(0, 8)}
   per-phase `${taskId}-${phaseName}` clones are gone.
 
 `resume.ts` reconstructs the taskId from the stored `context.taskId` so
-a resumed run lands in the same sandbox dir the original started in.
+a resumed run lands in the same sandbox dir the original started in. It also
+restores the dispatch's whole template context from the row
+(`restoredDispatchContext` — everything but the keys resume owns: bare `repo`,
+taskId, branch, models, …). Every resume path needs it — boot recovery,
+Retry, and an **admission promotion** of a run created `queued` at the cap: a
+pr-review that lost `analysisEnabled` skipped all its analysis phases and
+posted the light review instead.
 
 **Per-PR reuse exception (issue #107).** A workflow declaring
 `workspace: per-target-reuse` (`pr-review`, `pr-fix`, `dependabot-ci-fix`,

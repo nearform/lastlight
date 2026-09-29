@@ -946,7 +946,11 @@ approval resumes it. For each `running` run:
 1. Increment `restart_count`. If `> 3` (`MAX_RESTART_RESUMES`), mark
    the run `failed` and skip. This is the crash-loop circuit breaker.
 2. Mark stale execution rows failed.
-3. Call `resumeSimpleRun()` in the background (non-blocking).
+3. Call `resumeSimpleRun()` in the background (non-blocking). It rebuilds
+   the template context from the row: resume's own fields (bare `repo`,
+   taskId, branch, refreshed issue, effective models) over the dispatch's
+   persisted context (`restoredDispatchContext`), so a resumed or
+   admitted pr-review keeps `analysisEnabled` and its PR snapshot.
 
 **Approval / reply gate resume** — `simple.ts:317–397` handles inbound
 approval responses. Fetches the `workflow_approvals` row, updates its
