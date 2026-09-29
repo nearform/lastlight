@@ -61,6 +61,9 @@ export interface ReviewCommentSeed {
   path: string;
   line?: number;
   body: string;
+  /** The thread's resolution — GraphQL-only on GitHub (`reviewThreads.isResolved`),
+   * so only the discussion query serves it. Default false. */
+  resolved?: boolean;
 }
 
 /** Seed state for one pull request, served by the fake GitHub for the

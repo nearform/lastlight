@@ -1397,8 +1397,8 @@ An unanchored row is its own site; every row lands in exactly one.
   writes any prepared plan.
 - **`planProbeSites` is not wired in**: no CLI verb, no phase. Measured through
   `micro-falsify --plan sites:<k>`. `clusterSites` itself IS wired — through
-  `sites --plan` (below), with `voters: "unit"`, `maxSpan: 60` and test files
-  skipped.
+  `sites --plan` (below), with `voters: "unit"`, `maxSpan: 60` and test-file
+  sites demoted.
 
 **Options from the paid site pilot** (all off by default, so the screen numbers
 above still describe the default plan; `planProbeSites` takes the same ones):
@@ -1422,6 +1422,14 @@ above still describe the default plan; `planProbeSites` takes the same ones):
   `sites` ∪ `skipped` still holds every row once. In `planProbeSites` a skipped
   row that `planProbes` owes still gets its own `owed` site — skipping changes
   ranking, never drops a Critical.
+- **`demotePath`** (the `sites` engine passes `isTestPath`). A matching site
+  still forms but ranks after every other site, in its own vote order; a site
+  never spans files, so it is wholly demoted or not. It replaced `skipPath` in
+  `sites --plan` (2026-09-29): at a fixed cap, test sites ranked with the rest
+  displaced better ones (H3 audit: top 5 + tests 15 gold-mapped rows in a site,
+  tests skipped 16), but skipping them left slots empty on a PR with few sites
+  and lost the gold Martian files against test code. Demoted, they take only
+  free slots, so coverage cannot fall below the skip plan's.
 
 **Per-site investigator inputs.** Rows only choose WHICH sites to look at; the
 investigator gets the site plus short leads and writes the findings.
@@ -1441,19 +1449,26 @@ investigator gets the site plus short leads and writes the findings.
 ### `sites` — the sites review engine's deterministic steps
 
 `src/site-review.ts`, exported from `index.ts`. With `review.analysis` on,
-pr-review runs `site-plan` → `site-review` (a 5-branch fan-out) → `merge` →
+pr-review runs `site-plan` → `site-review` (a static 16-branch fan-out) → `merge` →
 `select` → `site-finalize` after the unit survey — the only review engine
 (docs/plans/pr-review-units-sites-only.md). Every step but the investigators and `select` is this
 command. The rows stop being the items the review weighs and become a VOLUME
 signal: where many independent units pointed is where an investigator looks.
 
 - **`--plan`** (`site-plan`): `clusterSites` over the hypothesis rows
-  (distinct-unit votes, window 20, `maxSpan` 60, test files skipped), top 5 →
-  `sites/plan.json` plus one brief per SLOT, `sites/site-001.md` …
-  `site-005.md` (`--top` / `--window` override). It clears `sites/` first. A
-  slot past the PR's last site gets a brief saying there is no site and to
-  write one `{"site", "empty": true}` line — the fan-out is static, so every
-  slot runs. Each brief ends with the slot's assignment: the site id, the one
+  (distinct-unit votes, window 20, `maxSpan` 60; test-file sites rank after
+  every other site — `clusterSites`' `demotePath: isTestPath` — so they fill only
+  the slots code sites leave free, counted as `testSites`), top 5 →
+  `sites/plan.json` plus one brief per SLOT, `sites/site-001.md` … (`--top`
+  1–8 / `--window` override; `--slots <n>` is the fan-out's branch count, 16 in
+  pr-review, and must hold the slots in use). **`--pair`** puts a second
+  investigator on every selected site: slot 8 + `r` (`PAIR_SLOT_OFFSET`)
+  re-briefs rank `r`, marked `pairOf` in the plan, and the workflow gives slots
+  9–16 `models.review-site-pair`; `--merge`'s proximity groups then propose the
+  two investigators' duplicates. It clears `sites/` first. An unused slot gets a
+  brief saying there is no site, and `--plan` writes its
+  `{"site", "empty": true}` line itself, so the fan-out's
+  `skip_satisfied_branches` pre-gate starts no session for it. Each brief ends with the slot's assignment: the site id, the one
   file it writes (`sites/<id>.findings.jsonl`) and how many probed suspicions
   a `none` needs (`noneChecksRequired`: 1 for a site of ≤ 3 rows, else 2).
 - **`--check <site-id>`** (each branch's `until_bash`): 1–3 grounded findings,
@@ -1475,7 +1490,8 @@ signal: where many independent units pointed is where an investigator looks.
 - **`--finalize`** (`site-finalize`): `findings.json` in the shape
   `post-review` reads — each item at its primary finding's path/line,
   `existingCode` = that line's text, severity must-fix → Important,
-  worth-mentioning → Minor, a `nit` filed at tier `internal`, category
+  worth-mentioning → Minor, a `nit` or an `alreadyRaised` item (select saw the
+  point in the PR's prior discussion) filed at tier `internal`, category
   `defect`; every hypothesis row id in `internal[]`, so `reconcile`'s
   conservation holds. A missing or invalid `selected.json` falls back to one
   item per pooled finding at the investigator's own importance, so a failed

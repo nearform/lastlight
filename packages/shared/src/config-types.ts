@@ -412,6 +412,14 @@ export interface ReviewAnalysisConfig {
    */
   siteConcurrency: number;
   /**
+   * How many vote-ranked sites get an investigator, 1–8 (`lastlight-facts
+   * sites --plan --top`). Measured on the 18 Martian cases' surveys
+   * (docs/plans/site-review-recall.md, H3 audit): top 5 put 16 of the 25
+   * gold-mapped rows inside a selected site, top 8 put 21, for ~2 more sites
+   * per PR. Values outside 1–8 fall back to the default.
+   */
+  siteTop: number;
+  /**
    * How many unit calls `survey-units` keeps in flight at once. No backend
    * clamp: the calls are in-process HTTP requests, not sandboxes, so this
    * bounds provider rate-limit pressure and nothing else.
@@ -813,6 +821,7 @@ export function defaultReviewPolicy(): ReviewPolicy {
       // Both D2 rules — the measured shipped shape. See the field's doc.
       mint: "all-in-diff,registrations",
       siteConcurrency: 6,
+      siteTop: 5,
       surveyUnitConcurrency: 16,
       probes: "off",
       probeLifecycleScripts: false,

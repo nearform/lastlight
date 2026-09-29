@@ -64,7 +64,13 @@ export interface PhaseReplayConfig {
   maxSpan?: number | null;
   /** site-review: the ranking vote (`unit` | `row`). */
   voters?: string;
-  /** site-review: test files left out of site ranking (`isTestPath`). */
+  /**
+   * site-review: test-file sites — `last` (ranked after every other site, the
+   * pipeline's plan), `skip` (left out, the plan before 2026-09-29) or `mix`
+   * (ranked with the rest). Older reports carry `skipTests` instead.
+   */
+  tests?: "last" | "skip" | "mix";
+  /** site-review, reports before `tests`: `false` = tests ranked with the rest. */
   skipTests?: boolean;
   /** The judge used for the gold map and the grade; `null` = location only. */
   judgeModel: string | null;

@@ -1702,6 +1702,7 @@ function shapeReviewAnalysis(raw: unknown, d: ReviewPolicy["analysis"]): ReviewP
     mint: typeof node.mint === "string" ? node.mint : d.mint,
     // `surveyConcurrency` is the old name, read when the new one is absent.
     siteConcurrency: num(node.siteConcurrency, num(node.surveyConcurrency, d.siteConcurrency)),
+    siteTop: num(node.siteTop, d.siteTop),
     surveyUnitConcurrency: num(node.surveyUnitConcurrency, d.surveyUnitConcurrency),
     // Tri-state (`off` | `static` | `full`), with a bare `true` reading as
     // `static` so an upgrade never silently buys an install. Operator-only

@@ -592,14 +592,19 @@ describe("golden — the real scheduler", () => {
     reviewInstallPolicy: "block",
   };
 
-  it("analysis ON: the unit survey once, five investigators, one select loop, the floor, then the post", async () => {
+  it("analysis ON: the unit survey once, sixteen investigator slots, one select loop, the floor, then the post", async () => {
     const { result, agent, postReview, surveyUnits } = await runPrReview(PIPELINE_CTX, undefined, seeded(PIPELINE_CTX));
     const seen = result.phases.map((p) => p.phase);
     expect(surveyUnits.calls).toEqual(["survey-units"]);
     // A node with sub-units reports under the sub-unit's label, never its own
     // name — fan-out branches under `<phase>_branch_<name>`, generic loops
     // under `<phase>_iter_N`.
-    for (const slot of ["site-001", "site-002", "site-003", "site-004", "site-005"]) {
+    // Sixteen static slots: 1–8 the ranked sites, 9–16 their pair. The real
+    // handler starts no session for a slot `site-plan` closed as empty
+    // (`skip_satisfied_branches`, pinned in fanout.test.ts); this double runs
+    // every declared branch, so the tally below counts all sixteen.
+    for (let n = 1; n <= 16; n++) {
+      const slot = `site-${String(n).padStart(3, "0")}`;
       expect(seen, slot).toContain(`site-review_branch_${slot}`);
     }
     expect(seen).toContain("select_iter_1");
@@ -609,8 +614,8 @@ describe("golden — the real scheduler", () => {
     expect(seen.indexOf("reconcile")).toBeLessThan(seen.indexOf("post-review"));
     expect(postReview.calls).toEqual(["post-review"]);
     expect(result.phases.every((p) => p.success)).toBe(true);
-    // Five investigators + the select call — `review` skipped, nothing else.
-    expect(agent.calls.filter((c) => c.kind === "agent")).toHaveLength(6);
+    // Sixteen slots + the select call — `review` skipped, nothing else.
+    expect(agent.calls.filter((c) => c.kind === "agent")).toHaveLength(17);
   });
 
   it("posts the review even when SELECT hard-fails — the money property", async () => {

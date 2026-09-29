@@ -66,7 +66,7 @@ function configLine(e: Pick<PhaseReplayEntry, "kind" | "config" | "audit">): str
     e.audit ? "audit (no model)" : `${c.model}${c.thinking ? ` · thinking ${c.thinking}` : ""}`,
     e.kind === "falsify"
       ? `${c.plan && c.plan !== "rows" ? `plan ${c.plan} ±${c.window} · ` : ""}max-probes ${c.maxProbes ?? "none"}`
-      : `leads ${c.leads ?? "?"} · top ${c.topSites ?? "?"} sites ±${c.window ?? "?"} · span ≤${c.maxSpan ?? "∞"} · voters ${c.voters ?? "?"}${c.skipTests === false ? " · tests ranked" : ""}`,
+      : `leads ${c.leads ?? "?"} · top ${c.topSites ?? "?"} sites ±${c.window ?? "?"} · span ≤${c.maxSpan ?? "∞"} · voters ${c.voters ?? "?"}${c.tests ? ` · tests ${c.tests}` : c.skipTests === false ? " · tests ranked" : ""}`,
   ];
   if (!e.audit) parts.push(`${c.rounds} round${c.rounds === 1 ? "" : "s"}`);
   if (c.promptOverride) parts.push(`prompt ${c.prompt.split("/").pop()}`);

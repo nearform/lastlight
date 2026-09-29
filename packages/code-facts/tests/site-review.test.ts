@@ -91,6 +91,56 @@ describe("sites --plan", () => {
     expect(readSitePlan(dir)?.slots).toHaveLength(5);
   });
 
+  it("fills the slots the code sites leave free with test-file sites, and never lets one displace a code site", () => {
+    const { dir } = workspace();
+    // Three units on a test file: more votes than site 2, but a test file.
+    const testRows = [at("src/a.test.ts", 5, "u5"), at("src/a.test.ts", 6, "u6"), at("src/a.test.ts", 7, "u7")];
+    writeFileSync(join(dir, "hypotheses", "tests.jsonl"), `${testRows.map((r) => JSON.stringify(r)).join("\n")}\n`);
+    const plan = writeSitePlan(dir);
+    expect(plan.slots.slice(0, 3).map((s) => s.site?.path ?? null)).toEqual(["src/a.ts", "src/a.ts", "src/a.test.ts"]);
+    expect(plan.testSites).toBe(1);
+    // At top 2 the code sites keep both slots.
+    expect(writeSitePlan(dir, { top: 2 }).slots.map((s) => s.site?.path)).toEqual(["src/a.ts", "src/a.ts"]);
+  });
+
+  it("closes an empty slot's gate up front, so no investigator has to write it", () => {
+    const { dir, repo } = workspace();
+    writeSitePlan(dir);
+    expect(checkSiteSlot({ dir, repo, siteId: "site-004" }).satisfied).toBe(true);
+    // A slot WITH a site still waits for its investigator.
+    expect(existsSync(join(dir, "sites", "site-001.findings.jsonl"))).toBe(false);
+  });
+
+  it("pairs: a second investigator on every selected site, in slot 8 + rank", () => {
+    const { dir } = workspace();
+    const plan = writeSitePlan(dir, { top: 3, pair: true, slots: 16 });
+    const bySlot = new Map(plan.slots.map((s) => [s.slot, s]));
+    expect(plan.slots).toHaveLength(16);
+    expect([1, 2, 3, 4, 8].map((n) => bySlot.get(n)?.site?.startLine ?? null)).toEqual([10, 150, null, null, null]);
+    expect(bySlot.get(9)).toMatchObject({ siteId: "site-009", pairOf: "site-001", site: { startLine: 10 } });
+    expect(bySlot.get(10)).toMatchObject({ siteId: "site-010", pairOf: "site-002", site: { startLine: 150 } });
+    // Rank 3 has no site, so neither does its pair; past top, nothing.
+    expect([11, 12, 16].map((n) => bySlot.get(n)?.site ?? null)).toEqual([null, null, null]);
+    expect(bySlot.get(11)?.pairOf).toBeUndefined();
+    // The pair gets the same site under its own id, output file and scratch dir.
+    const brief = readFileSync(join(dir, "sites", "site-009.md"), "utf8");
+    expect(brief).toContain(".lastlight/pr-review/sites/site-009.findings.jsonl");
+    expect(brief).toContain(".lastlight/pr-review/sites/site-009/");
+  });
+
+  it("without pair, plans every slot the fan-out declares and leaves the pair range empty", () => {
+    const { dir } = workspace();
+    const plan = writeSitePlan(dir, { top: 8, slots: 16 });
+    expect(plan.slots.filter((s) => s.site).map((s) => s.siteId)).toEqual(["site-001", "site-002"]);
+    expect(plan.slots.some((s) => s.pairOf)).toBe(false);
+  });
+
+  it("refuses a top past the maximum, or slots that cannot hold the plan", () => {
+    const { dir } = workspace();
+    expect(() => writeSitePlan(dir, { top: 9 })).toThrow(/top must be 1…8/);
+    expect(() => writeSitePlan(dir, { top: 5, pair: true, slots: 10 })).toThrow(/needs 13/);
+  });
+
   it("clears the last head's sites first", () => {
     const { dir } = workspace();
     mkdirSync(join(dir, "sites"), { recursive: true });
@@ -140,7 +190,7 @@ describe("sites --merge", () => {
     expect(merge.groups).toEqual([["F1", "F2", "F3"]]);
     expect(merge.findings[0].excerpt).toContain(">");
     expect(merge.findings[0].lineText).toBe("const line12 = 12;");
-    expect(merge.slots.map((s) => s.outcome)).toEqual(["findings", "findings", "missing", "missing", "missing"]);
+    expect(merge.slots.map((s) => s.outcome)).toEqual(["findings", "findings", "empty", "empty", "empty"]);
     expect(renderSiteMerge(merge)).toContain("## F4");
   });
 
@@ -209,6 +259,36 @@ describe("sites --check-select and --finalize", () => {
     expect(doc.internal).toEqual(["contract-001", "contract-002", "contract-003", "state-001"]);
     // The conservation gate reconcile runs over it holds.
     expect(checkFindings({ dir, repo }).satisfied).toBe(true);
+  });
+
+  it("records an item the PR's discussion already raised at internal, whatever its importance", () => {
+    const { repo, dir } = merged();
+    select(dir, {
+      items: [
+        { findings: ["F1"], title: "Inverted guard", importance: "must-fix", alreadyRaised: "@alice's inline thread on src/a.ts:12" },
+        { findings: ["F2", "F3"], title: "Other", importance: "worth-mentioning" },
+      ],
+    });
+    expect(checkSelection({ dir }).satisfied).toBe(true);
+    const r = finalizeSiteFindings({ dir, repo });
+    expect(r).toMatchObject({ posted: 1, recorded: 1 });
+    const doc = JSON.parse(readFileSync(join(dir, "findings.json"), "utf8"));
+    expect(doc.findings[0]).toMatchObject({ tier: "internal", importance: "must-fix", alreadyRaised: "@alice's inline thread on src/a.ts:12" });
+    expect(doc.findings[1].tier).toBeUndefined();
+    expect(checkFindings({ dir, repo }).satisfied).toBe(true);
+  });
+
+  it("counts areas, not investigators, in the fallback summary when sites are paired", () => {
+    const ws = workspace();
+    writeSitePlan(ws.dir, { pair: true, slots: 16 });
+    writeFindings(ws.dir, "site-001", [finding("site-001", 12)]);
+    writeFindings(ws.dir, "site-009", [finding("site-009", 13)]);
+    writeFindings(ws.dir, "site-002", [{ site: "site-002", none: true, reason: "r", checked: [] }]);
+    writeFindings(ws.dir, "site-010", [{ site: "site-010", none: true, reason: "r", checked: [] }]);
+    writeSiteMerge(ws.dir, ws.repo);
+    finalizeSiteFindings({ dir: ws.dir, repo: ws.repo });
+    const doc = JSON.parse(readFileSync(join(ws.dir, "findings.json"), "utf8"));
+    expect(doc.summary).toMatch(/^Investigated 2 area\(s\)/);
   });
 
   it("falls back to one item per finding when the selection is missing", () => {

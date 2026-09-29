@@ -391,6 +391,230 @@ luna is `openai/gpt-6-luna`; `/low` and `/medium` are its thinking level.
 7. Worth an arm: luna and Haiku investigators on the same site, since their
    gold is disjoint (~+5% cost over Haiku alone).
 
+## Final round before release (2026-09-29)
+
+External research (SWR-Bench arXiv 2509.01494, Cursor Bugbot, c-CRAB arXiv
+2603.23448, "Wisdom and Delusion of LLM Ensembles" arXiv 2510.21513) points at
+one lever with measured evidence: sample more than once and take the UNION —
+repeated runs overlap little, and heterogeneous models more than one model's
+repeats. Majority vote throws each model's unique finds away. Our 2/3/5-of-11
+luna draws are that effect.
+
+### H5 — pair two investigators per site ($0 screens)
+
+**Replay union** (the 10 recall sites, 9 cases; Fable grades; gold = judge ∪
+Fable; `~/lastlight-micro-fixtures/2026-09-29-union-screen/union.py`):
+
+| union | findings | real-rate | distinct gold | $ |
+|---|---|---|---|---|
+| luna alone (3 draws) | 14 / 10 / 14 | 0.93–1.00 | 4 / 3 / 6 | 0.12 |
+| luna × 2, same model | 24–28 | 0.96–1.00 | 4 / 6 / 6 | 0.24 |
+| luna + deepseek | 23–27 | 0.89–0.93 | **8 / 7 / 9** | 0.48 |
+| luna + glm | 26–30 | 0.89–0.93 | 7 / 6 / 8 | 0.43 |
+
+**Posted-level oracle union** (Martian 18 e2e bands — an upper bound: each arm
+re-ran its own survey, so the sites differ):
+
+| union | matched / 54 | recall | posted |
+|---|---|---|---|
+| luna r1 / r2 | 24 / 19 | 0.44 / 0.35 | 47 / 48 |
+| luna + luna | 26 | 0.48 | 95 |
+| luna + deepseek (4 pairs) | 30–33 | 0.56–0.61 | ~115 |
+| deepseek + deepseek | 35 | 0.65 | 136 |
+
+So pairing clears the go bar (heterogeneous ≥ same-model + 2 gold, real-rate ≥
+0.85) on the replay, but end to end **deepseek × 2 beats luna + deepseek** —
+the paid replay needs a deepseek × 2 arm beside luna + deepseek.
+
+### H3 — the $0 coverage audit
+
+`micro-site-review --audit`, the 18 Martian v7 surveys, 25 gold-mapped rows:
+
+| selection | sites/PR | gold rows in a site |
+|---|---|---|
+| top 5, tests skipped (shipped) | 4.7 | 16 |
+| **top 8, tests skipped** | 6.7 | **21** |
+| top 5 + tests | 4.8 | 15 |
+| top 8 + tests | 7.2 | 20 |
+| top 12 + tests | 10.1 | 21 |
+| every site | 18.2 | 25 |
+
+Top 8 is ~+2 investigators per PR (≈ +$0.02 on luna, not the $0.25/site the
+Haiku estimate above assumed). Including test files HURTS at a fixed cap —
+they displace better-ranked sites. **29 of the 54 gold map to no survey row at
+all**: no selection or investigator change reaches them.
+
+### What was built (all default-off)
+
+- `review.analysis.siteTop` (1–8, default 5) → `sites --plan --top`.
+- `models.review-site-pair` → `sites --plan --pair`: slots 9–(8+top) re-run
+  ranks 1–top on that model; `merge` proposes the cross-slot duplicates and
+  `select` merges them.
+- `site-review` declares 16 static branches with `skip_satisfied_branches`:
+  `site-plan` writes every empty slot's `empty` line, so an unused slot starts
+  no session.
+- H6: the investigator reads `{{prIntent}}` (PR title, body, closed issues;
+  template comments stripped) framed as a claim to check. Replay arm:
+  `micro-site-review --pr-context`.
+- `select` reads `{{priorDiscussion}}` (reviews, inline threads with
+  resolution, comments — one GraphQL read, served by the evals fake too) and
+  marks an item `alreadyRaised`, which `finalize` files internal.
+
+### The paid replay (2026-09-29) — fresh draws, every finding Fable-graded
+
+10 recall sites, 3 draws per new arm (plus the earlier draws), bands over every
+draw combination; gold = judge ∪ Fable. Script:
+`~/lastlight-micro-fixtures/2026-09-29-union-screen/union2.py`; grades merged
+into `eval-results/labels/proposals-fable.jsonl`.
+
+| arm | distinct gold | real-rate | findings | $ / 10 sites |
+|---|---|---|---|---|
+| luna × 1 | 4.3 [3–6] | 0.98 | 12.7 | 0.12 |
+| luna + PR context × 1 | 4.3 [3–6] | 0.95 | 13.0 | 0.12 |
+| deepseek × 1 (default thinking) | 6.0 [6–6] | 0.84 | 15.5 | 0.53 |
+| deepseek × 1, `low` | 4.3 [3–5] | 0.67 | 9.0 | 0.23 |
+| luna × 2 | 5.3 [4–6] | 0.97 | 25.3 | 0.24 |
+| **luna + deepseek** | **8.2 [7–10]** | **0.90** | 28.2 | **0.65** |
+| luna + deepseek-low | 6.6 [4–9] | 0.84 | 21.7 | 0.35 |
+| deepseek × 2 | 8.8 [8–10] | 0.84 | 31.0 | 1.05 |
+| luna + deepseek × 2 | 10.4 [9–12] | 0.88 | 43.7 | 1.17 |
+
+Conclusions:
+
+1. **Pair luna with deepseek.** It nearly doubles luna's gold at 0.90 real-rate,
+   and gets 93% of deepseek × 2's gold for 62% of the cost at higher precision.
+2. **deepseek's thinking is what it is paid for.** pi-ai maps
+   `deepseek-v4-flash`'s `medium` to NO reasoning-effort parameter
+   (`thinkingLevelMap.medium: null`), so "medium" is the provider default,
+   ~75% of output tokens as reasoning. `low` cut $ by 60% and wall by 55%, but
+   dropped gold 6.0 → 4.3 and real-rate 0.84 → 0.67: its extra wrong findings
+   rest on false premises (e.g. "uploads have no size validation"). Keep the
+   default; never pin `low`.
+3. **PR context is neutral** on gold and precision. Its visible effect is
+   grafana-94942 (the "disable SQL expressions" PR), which luna now closes
+   `none` 3/3 — the contested gold. Keep it; it is not a lever.
+4. **Why sites with gold closed `none`.** Three sites, all draws, all models:
+   cal-com-22345 (gold is a guard UNCHANGED on main — "the PR caused it"
+   correctly excludes it), grafana-94942 (the stubs ARE the PR's fix), and
+   cal-com-14943 (one real miss: a `none` that never asked the concurrency
+   class — the H2 residue). So judge-gold recall under-reads h13 arms: Martian
+   gold includes pre-existing bugs in touched code and intended behaviour.
+
+### Next step — the end-to-end Martian arm
+
+**Config under test** (all switches built on this branch, default-off):
+
+- `models.review-site: openai/gpt-6-luna`, `variants.site-review: medium`
+- `models.review-site-pair: opencode/deepseek-v4-flash` (the pair branches
+  inherit `variants.site-review`; deepseek's `medium` = provider default,
+  which is what was measured)
+- `{{prIntent}}` and `{{priorDiscussion}}` on (they ride `analysis.enabled`)
+
+**Arms** (Martian 18 × 2 repeats, `--keep-workspace`, dashboard open), each
+against the existing `sites-luna` band (`2026-09-28_081311` + `…_084709`):
+
+1. `overlays/sites-pair` — the config above, `siteTop: 5`. The one variable
+   is the pair (plus the two context blocks, measured neutral / untestable on
+   Martian). Expect ~$0.65/PR, wall bound by deepseek (~3 min/site).
+2. `overlays/sites-pair-top8` — the same with `siteTop: 8` (the H3 audit's
+   +5 gold rows in reach). Run after (1) so the pair's effect reads on its own.
+
+**Before the paid band ($0):**
+
+- Smoke: one case of `sites-pair` — all 16 branches account for themselves
+  (5 run, 11 skip with no session), `merge` proposes the cross-slot
+  duplicates, `select` closes its gate over ~20 findings, the post lands.
+- Docs-sync over the branch (spec 02/06/07, www configuration, code-facts
+  `sites` verbs), then commit.
+
+**Smoke (2026-09-29, `2026-09-29_072004-4dd91f8`, keycloak-40940): passed.**
+4 sites, so 8 of the 16 branches ran (4 luna, 4 deepseek pair) and 8 skipped
+with no session; two branches closed on their regate; `merge` pooled 3
+findings (one luna, two deepseek) into one proximity group and `select` merged
+them into ONE comment; posted 1, gold 1/2, $0.34, 10.5 min. Docs synced (spec
+02/06/07, www configuration, code-facts and workflows guides); the turbo gate
+is green.
+
+**Concurrency.** The fan-out ceiling on `none` was 6, so a paired top-5 PR (10
+slots) ran in two waves and a paired top-8 (16) in three, each as slow as its
+slowest deepseek site. It is now 16 on `none` (the widest static fan-out);
+`docker`, the production backend, stays 6. Both pair overlays set
+`siteConcurrency: 16`, and the band runs `--concurrency 6
+--repeat-concurrency 2`, so **its wall/PR is not comparable** with the earlier
+bands (they ran 3 cases at once with repeats in series).
+
+**Test-file sites now fill free slots (built 2026-09-29, AFTER the
+`sites-pair` band started — that band still skips them).** `sites --plan`
+ranks test-file sites after every other site (`clusterSites`' `demotePath`)
+instead of dropping their rows, so they take only the slots code sites leave
+empty and cannot displace one. The smoke case shows why: 9 of keycloak-40940's
+17 rows were in test files, and 4 sites left rank 5 empty. Not a config key.
+It lands in `packages/code-facts/dist` only when that is rebuilt after the band
+(the eval runs the built CLI), so `sites-pair-top8` is the first arm to carry
+it — making that arm two variables (top 8 + test fill); the H3 audit re-run
+with `--tests last` against `--tests skip` separates them at $0.
+
+**Branch failures no longer fail the run (fixed 2026-09-29, after the band
+started).** In the band, sentry-greptile-1 reported `workflowSucceeded: false`
+although it posted and was graded: one deepseek pair slot hit an OpenCode Zen
+"404 status code (no body)" (`error_agent`, never retried), and the scheduler
+failed the workflow on any failed row. Now a provider error re-runs its branch
+once, and a failed branch in a fan-out that succeeded is `tolerated` — visible,
+not a workflow failure. In production the old behaviour left the head
+unassessed and the review sweep re-dispatched a posted review. The band's
+scorecard still carries such cases as errors; their review metrics count.
+
+**The band, and the laptop sleep.** Band `2026-09-29_075200-4dd91f8` +
+`…_075201-…`: the 13 non-cal.com instances finished clean in both repeats.
+At 08:37 UTC the laptop clamshell-slept on battery for ~90 min (`pmset -g
+log`), freezing every in-flight session: `select`'s Sonnet call returned 111
+min later, and pair slots died with "Connection error." on wake. The five
+cal.com instances in flight (10967, 11059, 22345, 22532, 8330) are re-run ×2
+under `caffeinate -i` at `--concurrency 3` (`2026-09-29_103239-4dd91f8` +
+`…_103240-…`, core with the retry/tolerated fix, code-facts unchanged) and
+spliced in for those five. Separately: the in-process backend never passes
+the agent timeout to agentic-pi, so a hung call on `none`/gondolin runs until
+it returns (production is docker) — a follow-up.
+
+**Result — judge gold on the POSTED review, 18 cases × 2** (13 instances
+from the band, the 5 cal.com from the re-run):
+
+| arm | matched (of 54) | micro-R | micro-P | posted/PR | $/PR |
+|---|---|---|---|---|---|
+| **sites-pair r1 / r2** | **28 / 28** | **0.52 / 0.52** | 0.37 / 0.32 | 4.2 / 4.7 | 0.69 / 0.71 |
+| sites-luna r1 / r2 | 24 / 19 | 0.44 / 0.35 | 0.47 / 0.40 | 2.6 / 2.7 | 0.38 / 0.37 |
+| sites-dsv4flash r1 / r2 | 26 / 28 | 0.48 / 0.52 | 0.37 / 0.41 | 3.8 / 3.8 | 0.62 / 0.61 |
+
+- The pair's recall is the best band yet and the steadiest: 28 in both
+  repeats (luna 24/19, deepseek 26/28). It keeps deepseek's cal.com wins
+  (cal-com-8330 2/2 twice, 14943 1–2) and luna's where deepseek slips.
+- But on judge gold it is deepseek × 1 plus comments: same recall as
+  deepseek's better repeat, 0.4–0.9 more comments per PR, precision at
+  deepseek's level (≈ 10 points under luna), $0.08–0.10/PR more. `select`
+  merges the pair's duplicates (the smoke) but still posts more.
+- Wall/PR is not comparable (12 cases at once, then the cal.com re-run at 3).
+- Over ~$1/PR: cal-com-10967 ($1.31/$1.32) and keycloak-37634
+  ($1.15/$1.20); every other case-run ≤ $0.91.
+- Not yet read: real-rate of the posted comments (Fable pre-grade, then
+  human). The ship rule turns on it — judge gold alone cannot tell whether
+  the pair's extra comments are real defects gold misses (as on
+  discourse-graphite-1, grafana-79265) or noise.
+
+**Read the band on**, in order: human grades of the POSTED comments
+(`#/grade`, Fable proposals pre-filled; primary), Fable real-rate, judge-gold
+micro-recall/precision, comments/PR, $/PR, wall/PR. `select` must MERGE the
+pair's duplicates — watch posted comments/PR, not pooled findings.
+
+**Ship if:** posted real findings/PR rise over `sites-luna` with real-rate no
+more than 10 points below it, ≤ ~$1/PR, and no `post-review` failures. Else
+ship `sites-luna` (h13, `models.review-site` pinned) and pick up the verifier.
+
+**Deferred (one variable at a time):** a `preExisting` finding flag (report
+pre-existing bugs in touched code at a low tier — what Martian gold rewards);
+`none` must record which defect classes it asked of each changed statement,
+with concurrency required on a site that writes shared state; the stage-5
+verifier as the precision gate if the pair's posted precision slips.
+
 ## Caveats
 
 - **One run.** Repeats of one arm have swung micro-recall 0.32 → 0.08 on

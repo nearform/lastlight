@@ -67,7 +67,7 @@ import {
 } from "lastlight-core/evals";
 
 /**
- * The two reads `resolveSpecContext` makes. Declared structurally so the fake
+ * The reads `resolveSpecContext` makes. Declared structurally so the fake
  * only has to satisfy what is actually called — the same reasoning that lets a
  * `FakeGitHub` stand in as a `GitHubClient` for `fetchRepoConfigTree`.
  */
@@ -82,6 +82,8 @@ export interface SpecGitHub {
     repo: string,
     pullNumber: number,
   ) => Promise<string[] | null>;
+  /** The PR's prior conversation, for `select`. Optional: core tolerates a port without it. */
+  getPullRequestDiscussion?: (owner: string, repo: string, pullNumber: number) => Promise<unknown>;
 }
 
 /** One failing CI job, as a case writes it. */
@@ -255,6 +257,10 @@ export function buildPrState(args: {
       ...(c.state ? { state: c.state } : {}),
       ...(c.url ? { url: c.url } : {}),
     })),
+    // Filled by core's `resolveSpecContext` when the harness hands it a client
+    // (the fake serves the discussion query from the case's seeded reviews and
+    // comments); null otherwise — "not read", never "nobody said anything".
+    discussion: null,
     // `??`, not `||`: a case seeding `[]` is asserting "this PR changes no
     // files", which is a different fact from "we could not read the list" and
     // yields a different degraded message. Only a genuinely absent seed falls

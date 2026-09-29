@@ -287,6 +287,25 @@ describe("clusterSites — skipPath", () => {
     expect([...plan.sites.flatMap((x) => x.rows), ...plan.skipped].sort()).toEqual(s.records.map((r) => r.id).sort());
     expect(clusterSites(s).skipped).toEqual([]);
   });
+
+  it("demotes: a matching site ranks after every other site, however many votes it has", () => {
+    const s = set({
+      contract: [at("src/a.test.ts", 1), at("src/a.test.ts", 2), at("src/a.test.ts", 3), at("src/a.ts", 1)],
+      state: [at("src/b.test.ts", 1), at("src/b.ts", 1)],
+    });
+    const plan = clusterSites(s, { demotePath: isTestPath });
+    // Non-test sites first (declaration order on a vote tie), then the test
+    // sites in their own vote order — the 3-row one before the 1-row one.
+    expect(plan.sites.map((x) => [x.path, x.rank])).toEqual([
+      ["src/a.ts", 1],
+      ["src/b.ts", 2],
+      ["src/a.test.ts", 3],
+      ["src/b.test.ts", 4],
+    ]);
+    expect(plan.skipped).toEqual([]);
+    // Without it the 3-row test site leads.
+    expect(clusterSites(s).sites[0].path).toBe("src/a.test.ts");
+  });
 });
 
 describe("planProbeSites — cluster options", () => {

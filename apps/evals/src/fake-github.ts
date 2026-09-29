@@ -110,6 +110,8 @@ interface Issue {
 }
 interface InlineComment {
   id: number;
+  /** A seeded thread's resolution, served by the discussion GraphQL query. */
+  resolved?: boolean;
   user: { login: string };
   path: string;
   line?: number;
@@ -363,6 +365,7 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
         path: c.path,
         line: c.line,
         body: c.body,
+        ...(c.resolved ? { resolved: true } : {}),
         created_at: NOW,
       })),
       submitted: [],
@@ -622,6 +625,38 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
           data: {
             repository: {
               pullRequest: { closingIssuesReferences: { nodes } },
+            },
+          },
+        });
+        return true;
+      }
+      // The PR's prior conversation (`GitHubClient.getPullRequestDiscussion`,
+      // read by core's `resolveSpecContext` for `select`). Served from the
+      // seeded reviews, review comments (one thread each) and the shadow
+      // issue's comments — plus whatever the run itself posts, as GitHub would.
+      if (q.includes("reviewThreads")) {
+        const num = Number(vars.number ?? 0);
+        const pr = pulls.find((p) => p.number === num);
+        const author = (login: string) => ({ __typename: /\[bot\]$/.test(login) ? "Bot" : "User", login: login.replace(/\[bot\]$/, "") });
+        const inline = pr ? [...pr.reviewComments, ...pr.reviews.flatMap((r) => r.comments)] : [];
+        json(200, {
+          data: {
+            repository: {
+              pullRequest: pr
+                ? {
+                    reviews: { nodes: pr.reviews.map((r) => ({ author: author(r.user.login), state: r.state, body: r.body, submittedAt: r.submitted_at })) },
+                    reviewThreads: {
+                      nodes: inline.map((c) => ({
+                        path: c.path,
+                        line: c.line ?? null,
+                        isResolved: c.resolved === true,
+                        isOutdated: false,
+                        comments: { nodes: [{ author: author(c.user.login), body: c.body }] },
+                      })),
+                    },
+                    comments: { nodes: (issues.get(num)?.comments ?? []).map((c) => ({ author: author(c.user.login), body: c.body, createdAt: c.created_at })) },
+                  }
+                : null,
             },
           },
         });

@@ -40,6 +40,7 @@ models:
   #   review-summary: openai/gpt-5.4-mini                # post-review's summary, written after the caps
   #   review-falsify: anthropic/claude-haiku-4-5-20251001 # the probe oracle
   #   review-site: anthropic/claude-haiku-4-5-20251001    # a site investigator
+  #   review-site-pair: opencode/deepseek-v4-flash         # a second investigator per site (opt-in)
   #   review-select: anthropic/claude-sonnet-4-6          # the sites engine's selection pass
   # A per-task entry wins over `default`. `classifier`/`screener` are the cheap
   # one-shot helpers (src/engine/llm.ts); when unset they fall back to the first
@@ -82,13 +83,15 @@ models:
   # see `review.analysis.probes`.
   #
   # `review-site` and `review-select` are the `sites` review engine's keys: the
-  # five site investigators fall through to `review-survey`, and `select` — the
+  # site investigators fall through to `review-survey`, and `select` — the
   # one call that merges and orders their findings — to `models.review`.
   # Measured (docs/plans/site-review-recall.md): cheap investigators
   # (`openai/gpt-6-luna`, `opencode/deepseek-v4-flash`, medium) beat Haiku on
   # recall and posted precision at ¼–½ the cost. Left UNSET here for the
   # `diagnose` reason — a default must be a provider every deployment has a key
-  # for — so pin it in your overlay.
+  # for — so pin it in your overlay. `review-site-pair` is OFF unless set: it
+  # puts a second investigator, on this model, on every selected site
+  # (`review.analysis.siteTop`), and `select` merges what the two agree on.
 
 # Provider endpoints. Ships EMPTY — every provider keeps the endpoint baked into
 # the registry (packages/shared/src/providers.ts), which is exactly today's
@@ -537,11 +540,18 @@ review:
     # A CEILING the run clamps again per backend, never the effective value. On
     # the shipped default backend (gondolin) each agent session is a QEMU
     # micro-VM inside the harness process, so it pins to 1 and this key changes
-    # nothing at all until that is measured; `none` and `docker` take it as
-    # written. Lower it to bound provider rate-limit pressure or memory, NOT to
+    # nothing at all until that is measured; `none` takes it up to 16 (a
+    # paired top-8 fan-out) and `docker` up to 6. Lower it to bound provider rate-limit pressure or memory, NOT to
     # bound spend: the investigators cost the same in tokens either way.
     # `surveyConcurrency` is still read as its old name.
     siteConcurrency: 6
+
+    # How many vote-ranked sites get an investigator (1–8). Top 5 put 16 of 25
+    # gold-mapped rows inside a selected site on the Martian audit, top 8 put
+    # 21, for ~2 more investigators per PR. Setting `models.review-site-pair`
+    # puts a SECOND investigator on every selected site (a different model:
+    # two models' blind spots are disjoint), so the sessions double.
+    siteTop: 5
 
     # The analysis path (docs/plans/pr-review-units-sites-only.md): `facts` and
     # `seed`, then the unit survey — `lastlight-facts units` (deterministic

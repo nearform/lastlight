@@ -26,9 +26,9 @@ const def = getWorkflow("pr-review");
 const survey = def.phases.find((p) => p.name === "site-review");
 
 describe("the site-review fan-out's soft-failure policy survives parsing", () => {
-  it("is a fanout phase with five branches — one per site slot", () => {
+  it("is a fanout phase with sixteen branches — one per site slot, pair slots included", () => {
     expect(survey?.type).toBe("fanout");
-    expect(survey?.branches).toHaveLength(5);
+    expect(survey?.branches).toHaveLength(16);
   });
 
   it("carries `{ retries: 1, then: complete }` AFTER the schema has had it", () => {
@@ -53,6 +53,14 @@ describe("the site-review fan-out's soft-failure policy survives parsing", () =>
     // forking the workflow — and `default` is what a deployment whose context
     // lacks the key falls back to, loudly.
     expect(survey?.max_concurrent).toEqual({ from: "siteConcurrency", default: 6 });
+  });
+
+  it("starts no session for a slot `site-plan` already closed, and runs the pair slots on their own model", () => {
+    expect(survey?.skip_satisfied_branches).toBe(true);
+    const branches = survey?.branches ?? [];
+    expect(branches).toHaveLength(16);
+    expect(branches.slice(0, 8).every((b) => b.model === undefined)).toBe(true);
+    expect(branches.slice(8).every((b) => b.model === "{{models.review-site-pair}}")).toBe(true);
   });
 
   /**

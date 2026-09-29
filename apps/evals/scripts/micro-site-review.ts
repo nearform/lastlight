@@ -10,7 +10,7 @@
  * do bookkeeping and anchor it on each row's framing. Here the rows are only a
  * VOLUME signal. `clusterSites` (±`--window`, distinct-unit votes with split
  * siblings collapsed via the fixture's `units.json`, spans capped at
- * `--max-span`, test files skipped) picks the top `--top-sites` sites, and
+ * `--max-span`, test-file sites ranked last) picks the top `--top-sites` sites, and
  * each gets ONE agentic session — an investigator that reads a site brief
  * (`renderSiteBrief`) and writes FINDINGS, not verdicts. Rows are never
  * deleted or dispositioned.
@@ -74,7 +74,14 @@
  *   --window <n>            clusterSites' line window (default 20)
  *   --max-span <n|none>     clusterSites' span cap (default 60)
  *   --voters unit|row       the ranking vote (default unit)
- *   --no-skip-tests         rank test files too (default: `isTestPath` skipped)
+ *   --tests last|skip|mix   test-file sites: ranked after every other site (last,
+ *                           the default and the pipeline's plan), left out (skip,
+ *                           the plan before 2026-09-29), or ranked with the rest
+ *                           (mix). `--no-skip-tests` is an alias for mix.
+ *   --pr-context            render the prompt's `{{prIntent}}` block (the PR's title
+ *                           and body, via core's `renderPrIntent`) — the pipeline
+ *                           projects it; without the flag the replay stays blind,
+ *                           the arm every earlier replay ran
  *   --site-concurrency <n>  investigator sessions in flight per case (default 4)
  *   --audit                 selection + gold only; no model
  *   --model <m>             default anthropic/claude-haiku-4-5-20251001
@@ -98,6 +105,8 @@ import {
   type Site,
   type VoterUnit,
 } from "lastlight-code-facts";
+
+import { renderPrIntent } from "lastlight-core/evals";
 
 import { gradeInternalRecall } from "../src/grade.js";
 import { defaultJudgeModel } from "../src/judge.js";
@@ -183,7 +192,9 @@ const maxSpan = maxSpanRaw === "none" ? null : Number(maxSpanRaw);
 if (maxSpan !== null && (!Number.isInteger(maxSpan) || maxSpan < 0)) throw new Error(`--max-span must be a non-negative integer or "none"`);
 const voters = flag("--voters") ?? "unit";
 if (voters !== "unit" && voters !== "row") throw new Error(`--voters must be "unit" or "row", not ${voters}`);
-const skipTests = !has("--no-skip-tests");
+const tests = flag("--tests") ?? (has("--no-skip-tests") ? "mix" : "last");
+if (tests !== "last" && tests !== "skip" && tests !== "mix") throw new Error(`--tests must be last, skip or mix, not ${tests}`);
+const prContext = has("--pr-context");
 const siteConcurrency = Math.max(1, Number(flag("--site-concurrency") ?? "4"));
 const model = flag("--model") ?? "anthropic/claude-haiku-4-5-20251001";
 const thinking = flag("--thinking") ?? null;
@@ -250,7 +261,8 @@ const report: PhaseReplayReport = {
     window: siteWindow,
     maxSpan,
     voters,
-    skipTests,
+    tests,
+    prContext,
     judgeModel,
   },
   planned: plannedWork.map(({ fx, repeat }) => ({ instanceId: fx.instanceId, arm: fx.arm, fixture: fx.dir, repeat })),
@@ -305,7 +317,7 @@ function selectSites(instanceId: string, prDir: string, set: HypothesisSet) {
     voters: voters as "unit" | "row",
     units,
     maxSpan,
-    ...(skipTests ? { skipPath: isTestPath } : {}),
+    ...(tests === "skip" ? { skipPath: isTestPath } : tests === "last" ? { demotePath: isTestPath } : {}),
   });
   const top = plan.sites.slice(0, topSites);
   if (!siteFilter) return { plan, top };
@@ -523,7 +535,10 @@ async function runCase(fx: Fixture, repeat: number): Promise<PhaseReplayCase> {
         // `site-review` fan-out's `context_file` attaches it, and kept on disk.
         const brief = `${briefs[i].brief}\n${renderSiteAssignment(site.id, noneChecksRequired(site.rows.length))}`;
         writeFileSync(join(copy.checkout, siteBriefRel(site.id)), brief);
-        const { text: rendered, unrendered } = renderPhasePrompt(promptPath, promptContext(inst));
+        const { text: rendered, unrendered } = renderPhasePrompt(promptPath, {
+          ...promptContext(inst),
+          ...(prContext ? { prIntent: renderPrIntent({ title: String(inst?.pr?.title ?? ""), body: String(inst?.pr?.body ?? "") }) } : {}),
+        });
         if (unrendered) console.warn(`! ${fx.instanceId} ${site.id}: unrendered {{marker}} left in the site prompt`);
         const prompt = `${rendered.trimEnd()}\n\n${attachBrief(siteBriefRel(site.id), brief)}`;
         shell.session = `${sessionUrlRoot}/${site.id}/full.jsonl`;

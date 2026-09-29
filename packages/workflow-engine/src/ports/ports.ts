@@ -62,6 +62,16 @@ export interface PhaseResult {
    * failure — e.g. `logPhaseEnd` logs `error_quota` at `warn`, not `error`.
    */
   stopReason?: string;
+  /**
+   * A failed row its phase TOLERATED: a fan-out branch that failed while the
+   * fan-out node succeeded (it gathers independent evidence, so one branch
+   * lost does not lose the phase). The row keeps `success: false` so the
+   * failure stays visible, but the scheduler does not count it against the
+   * workflow — otherwise one investigator's provider blip marked a review run
+   * `failed` after it posted, and a failed run leaves the head unassessed for
+   * the review sweep to re-dispatch.
+   */
+  tolerated?: boolean;
 }
 
 export interface WorkflowResult {

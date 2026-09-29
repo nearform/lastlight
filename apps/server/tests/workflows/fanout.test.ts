@@ -69,6 +69,12 @@ class CountingSandbox extends FakeSandbox {
     private readonly opts: {
       /** Prompt substring → the failure to throw for that branch. */
       failOn?: Record<string, string>;
+      /**
+       * Prompt substring → how many times that branch's run ends in a PROVIDER
+       * error (pi's synthesized assistant turn with `stopReason: "error"` —
+       * what an endpoint 404/5xx looks like), before it runs normally.
+       */
+      providerErrorOn?: Record<string, number>;
       /** Prompt substring → ms to stall, so overlap is observable. */
       delayOn?: Record<string, number>;
       commandExit?: number;
@@ -118,6 +124,18 @@ class CountingSandbox extends FakeSandbox {
       if (delay) await new Promise((r) => setTimeout(r, delay));
       const fail = Object.entries(this.opts.failOn ?? {}).find(([k]) => prompt.includes(k))?.[1];
       if (fail) throw new Error(fail);
+      const providerKey = Object.keys(this.opts.providerErrorOn ?? {}).find((k) => prompt.includes(k));
+      if (providerKey && this.opts.providerErrorOn![providerKey] > 0) {
+        this.opts.providerErrorOn![providerKey] -= 1;
+        return {
+          ok: true,
+          exitCode: 0,
+          agentEnded: true,
+          finalText: "",
+          toolErrors: false,
+          messages: [{ role: "assistant", stopReason: "error", errorMessage: "404 status code (no body)" }],
+        } as unknown as RunResult;
+      }
       return await super.runAgent(taskId, prompt, opts, onEvent);
     } finally {
       this.inFlight -= 1;
@@ -353,6 +371,34 @@ describe("fanout — one workspace, N turns", () => {
   });
 });
 
+describe("fanout — skip_satisfied_branches", () => {
+  const withSkip = () => fanoutPhase({ skip_satisfied_branches: true });
+
+  it("starts no session for a branch whose gate already closes, and runs the rest", async () => {
+    // a.jsonl's gate closes before the agent; b.jsonl's does not until after.
+    const sandbox = new CountingSandbox({ commandScript: { "b.jsonl": [{ exitCode: 3 }, { exitCode: 0 }] } });
+    const { outcome } = await runFanout(withSkip(), sandbox);
+
+    expect(sandbox.agentPrompts.some((p) => p.includes("prompts/a.md"))).toBe(false);
+    expect(sandbox.agentPrompts.filter((p) => p.includes("prompts/b.md") || p.includes("prompts/c.md"))).toHaveLength(2);
+    // Pre-gates for both gated branches, then the post-join gate for b only —
+    // the settled branch is not gated twice. `security` has no gate and always runs.
+    expect(sandbox.commands).toEqual(["test -s a.jsonl", "test -s b.jsonl", "test -s b.jsonl"]);
+    expect(outcome.status).toBe("succeeded");
+  });
+
+  it("changes nothing without the key", async () => {
+    const sandbox = new CountingSandbox();
+    await runFanout(fanoutPhase(), sandbox);
+    expect(sandbox.agentPrompts).toHaveLength(3);
+  });
+
+  it("is refused off a fanout", () => {
+    const r = AgentWorkflowSchema.safeParse({ name: "wf", phases: [{ name: "p", prompt: "prompts/a.md", skip_satisfied_branches: true }] });
+    expect(r.success).toBe(false);
+  });
+});
+
 describe("fanout — the backend ceiling", () => {
   it("clamps gondolin to one in-flight session", async () => {
     // Each session is a QEMU micro-VM in the harness process (WP5's D7), and the
@@ -366,10 +412,57 @@ describe("fanout — the backend ceiling", () => {
     expect(outcome.status).toBe("succeeded");
   });
 
+  it("lets the in-process backend run sixteen branches at once", async () => {
+    // A paired top-8 `site-review` is 16 branches of model calls; at the old
+    // cap of 6 they ran in three waves, each as slow as its slowest site.
+    const branches = Array.from({ length: 16 }, (_, i) => ({ name: `s${i + 1}`, prompt: `prompts/s${i + 1}.md` }));
+    const sandbox = new CountingSandbox({ delayOn: { "prompts/": 20 } });
+    await runFanout(fanoutPhase({ branches, max_concurrent: 16 }), sandbox, "none");
+    expect(sandbox.peakInFlight).toBe(16);
+  });
+
+  it("keeps docker at six", async () => {
+    const branches = Array.from({ length: 8 }, (_, i) => ({ name: `s${i + 1}`, prompt: `prompts/s${i + 1}.md` }));
+    const sandbox = new CountingSandbox({ delayOn: { "prompts/": 20 } });
+    await runFanout(fanoutPhase({ branches, max_concurrent: 16 }), sandbox, "docker");
+    expect(sandbox.peakInFlight).toBe(6);
+  });
+
   it("honours an explicit max_concurrent below the backend ceiling", async () => {
     const sandbox = new CountingSandbox({ delayOn: { "prompts/": 20 } });
     await runFanout(fanoutPhase({ max_concurrent: 2 }), sandbox, "none");
     expect(sandbox.peakInFlight).toBe(2);
+  });
+});
+
+describe("fanout — provider errors and the workflow verdict", () => {
+  it("retries a branch once on a provider error, even with no soft-retry policy", async () => {
+    const sandbox = new CountingSandbox({ providerErrorOn: { "prompts/b.md": 1 } });
+    const { outcome } = await runFanout(fanoutPhase(), sandbox);
+
+    const b = outcome.results.find((r) => r.phase === "survey_branch_enforcement");
+    expect(b?.success).toBe(true);
+    // a + b twice + c.
+    expect(sandbox.agentPrompts.filter((p) => p.includes("prompts/b.md"))).toHaveLength(2);
+    expect(outcome.status).toBe("succeeded");
+  });
+
+  it("retries a provider error only once", async () => {
+    const sandbox = new CountingSandbox({ providerErrorOn: { "prompts/b.md": 5 } });
+    const { outcome } = await runFanout(fanoutPhase(), sandbox);
+    expect(sandbox.agentPrompts.filter((p) => p.includes("prompts/b.md"))).toHaveLength(2);
+    expect(outcome.results.find((r) => r.phase === "survey_branch_enforcement")?.success).toBe(false);
+  });
+
+  it("marks a failed branch tolerated when the fan-out succeeds, and not when every branch fails", async () => {
+    const one = await runFanout(fanoutPhase(), new CountingSandbox({ failOn: { "prompts/b.md": "boom" } }));
+    const failed = one.outcome.results.find((r) => r.phase === "survey_branch_enforcement");
+    expect(failed).toMatchObject({ success: false, tolerated: true });
+    expect(one.outcome.results.filter((r) => r.tolerated)).toHaveLength(1);
+
+    const all = await runFanout(fanoutPhase(), new CountingSandbox({ failOn: { "prompts/": "boom" } }));
+    expect(all.outcome.status).toBe("failed");
+    expect(all.outcome.results.some((r) => r.tolerated)).toBe(false);
   });
 });
 

@@ -553,6 +553,7 @@ review:
     siteConcurrency: 6         # site investigators running at once (a ceiling,
                                # clamped per sandbox backend). Old name:
                                # surveyConcurrency, still read
+    siteTop: 5                 # how many ranked sites get an investigator (1–8)
     surveyUnitConcurrency: 16  # unit survey calls in flight (no backend clamp
                                # — lower it only for provider rate limits)
     surveyUnitsTimeoutSeconds: 600  # whole-phase deadline on the unit calls
@@ -752,12 +753,19 @@ dependencies:
 		unanswered rather than dropped. Those records are only a signal of
 		<em>where</em> to look: the stretches of code that many independent units
 		pointed at are ranked, one investigator goes to each of the top five
-		(<code>models.review-site</code>, falling back to
-		<code>models.review-survey</code>), and each must ground one to three
-		findings in the code or back a "nothing here" with a probe it actually ran.
-		One selection pass (<code>models.review-select</code>, falling back to
+		(<code>analysis.siteTop</code>, up to eight; <code>models.review-site</code>,
+		falling back to <code>models.review-survey</code>), and each must ground
+		one to three findings in the code or back a "nothing here" with a probe it
+		actually ran. Each investigator also reads the PR's title, description and
+		closed issues, as a claim to check rather than a reason to stop looking.
+		Set <code>models.review-site-pair</code> to a second, different model and
+		every site gets a second investigator on it: two models miss different
+		things, so the pair finds more than either alone. One selection pass
+		(<code>models.review-select</code>, falling back to
 		<code>models.review</code>) then merges duplicates, decides how important
-		each one is, and writes the comments. A nit is recorded, never posted.
+		each one is, and writes the comments. It reads the PR's earlier reviews,
+		threads and comments first, so a point someone already raised is recorded
+		rather than posted again. A nit is recorded, never posted.
 		Cheap investigator models measured better than Haiku here, on both recall
 		and precision, at a quarter to a half of the cost — pin
 		<code>models.review-site</code> in your overlay. Because the unit calls read

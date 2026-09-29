@@ -1483,6 +1483,72 @@ describe("PR context — core's own projection, not a copy", () => {
     }
   });
 
+  // `select`'s view of the PR's prior conversation, through the same production
+  // path: core's resolver → a real client → the fake's discussion query, served
+  // from the case's seeds. A resolved thread must read as resolved — it is the
+  // one fact REST cannot carry.
+  it("serves the prior discussion to core's resolver, resolution included", async () => {
+    const fake = await startFakeGitHub({
+      owner: "acme",
+      repo: "widgets",
+      pulls: [
+        {
+          number: 413,
+          title: "fix: cache ttl",
+          body: "Keeps the TTL at 120s.",
+          base_ref: "main",
+          head_ref: "fix/ttl",
+          base_commit: "a".repeat(40),
+          head_commit: "b".repeat(40),
+          reviews: [{ user: "alice", state: "CHANGES_REQUESTED", body: "TTL outlives the fetch." }],
+          review_comments: [
+            { user: "last-light[bot]", path: "src/cache.ts", line: 12, body: "Null deref on miss.", resolved: true },
+            { user: "bob", path: "src/cache.ts", line: 40, body: "Off by one?" },
+          ],
+          issue_comments: [{ user: "carol", body: "LGTM once CI is green" }],
+        },
+      ],
+    });
+    try {
+      fake.setPullFiles(413, [{ filename: "src/cache.ts", status: "modified", additions: 3, deletions: 1, changes: 4, sha: "c".repeat(40) }]);
+      const ctx = await prContextPatch({
+        repo: "acme/widgets",
+        prNumber: 413,
+        title: "fix: cache ttl",
+        body: "Keeps the TTL at 120s.",
+        branch: "fix/ttl",
+        review: { analysis: withAnalysis },
+        github: resolveReviewGitHubClient({ githubApiBaseUrl: fake.url }),
+      });
+      const block = String(ctx.priorDiscussion ?? "");
+      expect(block).toContain("@alice — CHANGES_REQUESTED: TTL outlives the fetch.");
+      expect(block).toContain("`src/cache.ts:12` [RESOLVED] @last-light (bot): Null deref on miss.");
+      expect(block).toContain("`src/cache.ts:40` [open] @bob: Off by one?");
+      expect(block).toContain("@carol: LGTM once CI is green");
+      // The investigators' side of the same projection.
+      expect(String(ctx.prIntent ?? "")).toContain("Keeps the TTL at 120s.");
+    } finally {
+      await fake.close();
+    }
+  });
+
+  // The common case — a Martian PR nobody has discussed — must answer EMPTY
+  // from the fake, not error: an error would read as "could not look" and log
+  // a read failure on every pr-review case.
+  it("answers the discussion query for an undiscussed PR with empty lists, not an error", async () => {
+    const fake = await startFakeGitHub({
+      owner: "acme",
+      repo: "widgets",
+      pulls: [{ number: 414, title: "t", body: "", base_ref: "main", head_ref: "x", base_commit: "a".repeat(40), head_commit: "b".repeat(40) }],
+    });
+    try {
+      const gh = resolveReviewGitHubClient({ githubApiBaseUrl: fake.url });
+      await expect(gh.getPullRequestDiscussion("acme", "widgets", 414)).resolves.toEqual({ reviews: [], threads: [], comments: [] });
+    } finally {
+      await fake.close();
+    }
+  });
+
   // GitHub's own boundary: a closing keyword links, a bare reference does not.
   // Getting this wrong would seed the axis with criteria from an issue the PR
   // never promised to satisfy — a confident obligation about the wrong "what

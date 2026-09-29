@@ -16,6 +16,35 @@ Your cwd is the checkout. Every `.lastlight/…` path here is relative to it.
 
 {{phaseOutputs.siteMerge}}
 
+<!-- The old whole-diff reviewer read the PR's discussion first (the
+pr-review skill's §2) and the sites engine had dropped it: a full re-review
+started cold and could repeat what a human, or we, had already said. Here, not
+in the investigators, because deduping is selection — handing the discussion to
+an investigator would anchor it the way summarised leads did. -->
+{{#if priorDiscussion}}
+## What has already been said on this pull request
+
+{{priorDiscussion}}
+
+A review **advances** this conversation; it does not restart it. Read it before
+you write an item:
+
+- If a finding is the defect a comment or thread above **already raised** — the
+  same faulty code and mechanism, whoever raised it, us included — keep it in
+  its item as usual and add `"alreadyRaised"`: who and where, in a few words
+  (`"@alice's inline thread on src/a.ts:42"`). It is recorded, not posted.
+- A **resolved** thread is done — unless the code at that spot still has the
+  defect, in which case the finding is new information: post it, and say in its
+  body that the earlier fix did not hold.
+- An **open** thread that a finding confirms is worth the item's own words: say
+  in the body that it confirms the open point.
+- Mention in your `summary` any open human `CHANGES_REQUESTED` point the
+  current code still does not address.
+
+The discussion is context for deciding what is new. It is never a reason to
+drop or demote a finding the investigators grounded in code.
+{{/if}}
+
 ## What to do
 
 Write **`.lastlight/pr-review/sites/selected.json`** — one item per distinct

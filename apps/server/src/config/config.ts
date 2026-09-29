@@ -776,6 +776,11 @@ function normalizeAutonomyStages(raw: unknown): Record<string, AutonomyStageConf
   return out;
 }
 
+/** `review.analysis.siteTop`: an integer 1–8, else the packaged default. */
+function siteTopOrDefault(raw: unknown, fallback: number): number {
+  return typeof raw === "number" && Number.isInteger(raw) && raw >= 1 && raw <= 8 ? raw : fallback;
+}
+
 /**
  * The budget bounds. Every leaf is `nonNegativeNumber` + the packaged value:
  * `0` is a real setting ("refuse everything"), while a negative or non-numeric
@@ -1449,6 +1454,10 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
       // `surveyConcurrency`, its old name, is mapped onto it per layer
       // (`applySiteConcurrencyAlias`).
       siteConcurrency: nonNegativeNumber(analysisRaw.siteConcurrency) ?? reviewDefaults.analysis.siteConcurrency,
+      // `sites --plan --top` refuses anything outside 1–8 (the fan-out's
+      // static branches), so a bad value falls back here instead of failing
+      // every review's plan.
+      siteTop: siteTopOrDefault(analysisRaw.siteTop, reviewDefaults.analysis.siteTop),
       // No backend clamp, unlike `siteConcurrency`: unit calls are in-process
       // HTTP requests, not sandboxes, so this bounds rate-limit pressure only.
       // Zero would stall the phase, so it floors at one.

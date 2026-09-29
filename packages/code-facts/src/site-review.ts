@@ -4,11 +4,13 @@
  * review engine"). Four verbs, one per pipeline step that needs no model:
  *
  *   --plan       `site-plan`: {@link clusterSites} over the hypothesis rows
- *                (distinct-unit votes, span 60, test files skipped), the top
- *                {@link SITE_SLOTS} written to `sites/plan.json`, and one brief
- *                per SLOT (`sites/site-001.md` … `site-005.md`) — an empty
- *                slot's brief says there is no site, so a static fan-out of
- *                five branches fits every PR.
+ *                (distinct-unit votes, span 60, test-file sites ranked last), the top
+ *                `--top` sites written to `sites/plan.json`, and one brief
+ *                per SLOT (`sites/site-001.md` …) — an empty slot's brief says
+ *                there is no site, and its `empty` line is written up front,
+ *                so a static fan-out fits every PR. `--pair` puts a SECOND
+ *                investigator on each site, in slot {@link PAIR_SLOT_OFFSET}
+ *                + rank (see {@link planSiteSlots}).
  *   --check <id> the `site-review` branch gate ({@link checkSiteFindings}):
  *                1–3 grounded findings, a `none` backed by executed probes, or
  *                an `empty` line for a slot the plan left empty.
@@ -41,8 +43,15 @@ import { clusterSites, renderSiteBrief, type Site, type SiteVoters, type VoterUn
 
 // ── layout ──────────────────────────────────────────────────────────────────
 
-/** The fan-out's static branch count: `site-001` … `site-005`. */
+/** The default number of sites investigated: `site-001` … `site-005`. */
 export const SITE_SLOTS = 5;
+/**
+ * The most sites a plan may select. Also where the pair slots start: rank `r`'s
+ * second investigator is slot `PAIR_SLOT_OFFSET + r`, whatever `top` is, so a
+ * workflow's static branch list can give slots 9–16 their own model once.
+ */
+export const MAX_SITE_TOP = 8;
+export const PAIR_SLOT_OFFSET = MAX_SITE_TOP;
 export const SITE_REVIEW_VERSION = 1;
 export const MAX_SITE_FINDINGS = 3;
 
@@ -96,26 +105,42 @@ export function isExecutionCommand(command: string): boolean {
 
 /** The plan's selection options — the replay's defaults, which the graded arms ran. */
 export interface SitePlanOptions {
+  /** Sites investigated, 1…{@link MAX_SITE_TOP}. */
   top?: number;
+  /**
+   * A second investigator on every selected site, in slot
+   * {@link PAIR_SLOT_OFFSET} + rank. Measured (docs/plans/site-review-recall.md,
+   * H5): runs of one investigator overlap little, and two models' blind spots
+   * are disjoint — the union of a luna and a deepseek draw stated 8/7/9 gold on
+   * the 10 recall sites where two luna draws stated 4/6/6.
+   */
+  pair?: boolean;
+  /**
+   * The static branch count the workflow's fan-out declares. Every slot up to
+   * it is planned (empty past the last site), so each branch has a brief.
+   * Defaults to the highest slot the plan uses.
+   */
+  slots?: number;
   window?: number;
   maxSpan?: number | null;
   voters?: SiteVoters;
-  skipTests?: boolean;
 }
 
-export const DEFAULT_SITE_PLAN: Required<SitePlanOptions> = {
+export const DEFAULT_SITE_PLAN: Required<Omit<SitePlanOptions, "slots">> = {
   top: SITE_SLOTS,
+  pair: false,
   window: 20,
   maxSpan: 60,
   voters: "unit",
-  skipTests: true,
 };
 
 export interface SiteSlot {
   slot: number;
   siteId: string;
-  /** `null` — the PR has fewer sites than slots. */
+  /** `null` — the PR has fewer sites than slots, or the slot is a pair slot with pairing off. */
   site: Site | null;
+  /** A pair slot: the primary slot investigating the same site. */
+  pairOf?: string;
   /** {@link noneChecksRequired} for the site; 0 on an empty slot. */
   noneChecks: number;
 }
@@ -127,8 +152,15 @@ export interface SiteReviewPlan {
   rows: number;
   /** Sites `clusterSites` formed, before the cut. */
   sitesFormed: number;
-  /** Rows the test-file skip left out of ranking. */
-  skipped: number;
+  /**
+   * Sites in test files. They rank after every other site, so they fill only
+   * the slots the others leave free: at a fixed cap, ranking tests WITH the
+   * rest displaced better sites (the H3 audit, docs/plans/site-review-recall.md:
+   * top 5 + tests put 15 gold-mapped rows in a site, tests skipped 16), while
+   * skipping them outright left slots empty on a PR with few sites and lost
+   * the gold Martian files against test code.
+   */
+  testSites: number;
   slots: SiteSlot[];
 }
 
@@ -144,21 +176,45 @@ export function readVoterUnits(dir: string): VoterUnit[] {
   }
 }
 
-/** Pure: the slots for a hypothesis set. */
+/**
+ * Pure: the slots for a hypothesis set. Slot `r` (1…`top`) investigates the
+ * site of rank `r`; with `pair`, slot {@link PAIR_SLOT_OFFSET} + `r` investigates
+ * it too. Every other slot up to `slots` is empty.
+ */
 export function planSiteSlots(set: HypothesisSet, units: readonly VoterUnit[], options: SitePlanOptions = {}): SiteReviewPlan {
   const o = { ...DEFAULT_SITE_PLAN, ...options };
+  if (!Number.isInteger(o.top) || o.top < 1 || o.top > MAX_SITE_TOP) throw new Error(`top must be 1…${MAX_SITE_TOP}, got ${o.top}`);
+  const used = o.pair ? PAIR_SLOT_OFFSET + o.top : o.top;
+  const slotCount = options.slots ?? used;
+  if (!Number.isInteger(slotCount) || slotCount < used) throw new Error(`${slotCount} slot(s) cannot hold top ${o.top}${o.pair ? " paired" : ""} (needs ${used})`);
   const plan = clusterSites(set, {
     window: o.window,
     voters: o.voters,
     units,
     maxSpan: o.maxSpan,
-    ...(o.skipTests ? { skipPath: isTestPath } : {}),
+    demotePath: isTestPath,
   });
-  const slots: SiteSlot[] = Array.from({ length: o.top }, (_, i) => {
-    const site = plan.sites[i] ?? null;
-    return { slot: i + 1, siteId: siteIdForSlot(i + 1), site, noneChecks: site ? noneChecksRequired(site.rows.length) : 0 };
+  const slots: SiteSlot[] = Array.from({ length: slotCount }, (_, i) => {
+    const n = i + 1;
+    const pairSlot = o.pair && n > PAIR_SLOT_OFFSET && n <= PAIR_SLOT_OFFSET + o.top;
+    const rank = n <= o.top ? n : pairSlot ? n - PAIR_SLOT_OFFSET : null;
+    const site = rank !== null ? (plan.sites[rank - 1] ?? null) : null;
+    return {
+      slot: n,
+      siteId: siteIdForSlot(n),
+      site,
+      ...(pairSlot && site ? { pairOf: siteIdForSlot(rank!) } : {}),
+      noneChecks: site ? noneChecksRequired(site.rows.length) : 0,
+    };
   });
-  return { version: SITE_REVIEW_VERSION, options: o, rows: set.records.length, sitesFormed: plan.sites.length, skipped: plan.skipped.length, slots };
+  return {
+    version: SITE_REVIEW_VERSION,
+    options: { ...o, slots: slotCount },
+    rows: set.records.length,
+    sitesFormed: plan.sites.length,
+    testSites: plan.sites.filter((s) => s.path !== null && isTestPath(s.path)).length,
+    slots,
+  };
 }
 
 /**
@@ -195,7 +251,12 @@ export function renderEmptySlotBrief(siteId: string): string {
   ].join("\n");
 }
 
-/** Write `sites/plan.json` and one brief per slot. Clears the directory first: a reused workspace holds the last head's sites. */
+/**
+ * Write `sites/plan.json` and one brief per slot. Clears the directory first: a
+ * reused workspace holds the last head's sites. An empty slot's `empty` line is
+ * written here too, so its gate is closed before any investigator runs — a
+ * fan-out with `skip_satisfied_branches` then starts no session for it.
+ */
 export function writeSitePlan(dir: string, options: SitePlanOptions = {}): SiteReviewPlan {
   const sitesDir = join(dir, "sites");
   rmSync(sitesDir, { recursive: true, force: true });
@@ -208,6 +269,7 @@ export function writeSitePlan(dir: string, options: SitePlanOptions = {}): SiteR
       : renderEmptySlotBrief(slot.siteId);
     writeFileSync(join(sitesDir, `${slot.siteId}.md`), brief);
     mkdirSync(join(sitesDir, slot.siteId), { recursive: true });
+    if (!slot.site) writeFileSync(join(sitesDir, `${slot.siteId}.findings.jsonl`), `${JSON.stringify({ site: slot.siteId, empty: true })}\n`);
   }
   writeFileSync(join(sitesDir, "plan.json"), `${JSON.stringify(plan, null, 2)}\n`);
   return plan;
@@ -225,12 +287,12 @@ export function readSitePlan(dir: string): SiteReviewPlan | null {
 
 export function renderSitePlanSummary(plan: SiteReviewPlan): string {
   const lines = [
-    `site-plan: ${plan.rows} row(s) → ${plan.sitesFormed} site(s) (${plan.skipped} test-file row(s) skipped); top ${plan.options.top}:`,
+    `site-plan: ${plan.rows} row(s) → ${plan.sitesFormed} site(s) (${plan.testSites} in test files, ranked last); top ${plan.options.top}${plan.options.pair ? ", paired" : ""}:`,
   ];
   for (const s of plan.slots) {
     lines.push(
       s.site
-        ? `  ${s.siteId}  ${s.site.path ?? "unanchored"}:${s.site.startLine ?? "?"}–${s.site.endLine ?? "?"}  rows ${s.site.rows.length}  voters ${s.site.voters}  none-checks ${s.noneChecks}`
+        ? `  ${s.siteId}  ${s.site.path ?? "unanchored"}:${s.site.startLine ?? "?"}–${s.site.endLine ?? "?"}  rows ${s.site.rows.length}  voters ${s.site.voters}  none-checks ${s.noneChecks}${s.pairOf ? `  (pair of ${s.pairOf})` : ""}`
         : `  ${s.siteId}  (empty slot)`,
     );
   }
@@ -773,6 +835,14 @@ export interface SelectionItem {
   /** What to change. */
   fix?: string;
   importance: Importance;
+  /**
+   * Where the PR's prior discussion already raised this defect — who and
+   * where, in a few words (`@alice's inline thread on src/a.ts:12`). An item
+   * that carries it is recorded at `internal`, never posted: repeating a point
+   * already on the PR spends the author's attention on something they have.
+   * Conservation still holds — it is a tier, not a drop.
+   */
+  alreadyRaised?: string;
 }
 
 export interface SelectionDocument {
@@ -834,6 +904,7 @@ export function checkSelection(opts: { dir: string; merge?: SiteMerge | null }):
       ...(str(o.body) ? { body: str(o.body)! } : {}),
       ...(str(o.fix) ? { fix: str(o.fix)! } : {}),
       importance: importance ?? "worth-mentioning",
+      ...(str(o.alreadyRaised) ? { alreadyRaised: str(o.alreadyRaised)! } : {}),
     });
   });
   for (const id of known) if (!seen.has(id)) gaps.push({ kind: "uncovered-finding", detail: `${id} is in no item — every finding goes in exactly one (a weak one as \`nit\`)` });
@@ -913,7 +984,8 @@ export function finalizeSiteFindings(opts: { dir: string; repo: string }): Final
     const primary = byId.get(item.primary ?? item.findings[0]);
     if (!primary) continue;
     const members = item.findings.map((id) => byId.get(id)).filter((f): f is PooledFinding => !!f);
-    const nit = item.importance === "nit";
+    // Recorded, never posted: trivia, and anything the PR's discussion already raised.
+    const nit = item.importance === "nit" || !!item.alreadyRaised;
     const text = primary.lineText.trim();
     findings.push({
       path: primary.path,
@@ -927,6 +999,7 @@ export function finalizeSiteFindings(opts: { dir: string; repo: string }): Final
       ...(item.fix ? { fix: item.fix } : {}),
       ...(nit ? { tier: "internal" } : {}),
       importance: item.importance,
+      ...(item.alreadyRaised ? { alreadyRaised: item.alreadyRaised } : {}),
       investigatorImportance: primary.importance,
       strength: primary.unbacked ? "read" : primary.strength,
       source: "site-review",
@@ -937,7 +1010,9 @@ export function finalizeSiteFindings(opts: { dir: string; repo: string }): Final
   }
 
   const set = readHypothesisSet(dir);
-  const siteCount = merge.slots.filter((s) => s.outcome !== "empty").length;
+  // A pair slot re-investigates its primary's site: count areas, not investigators.
+  const pairSlots = new Set((readSitePlan(dir)?.slots ?? []).filter((s) => s.pairOf).map((s) => s.siteId));
+  const siteCount = merge.slots.filter((s) => s.outcome !== "empty" && !pairSlots.has(s.siteId)).length;
   const summary =
     selection.summary ??
     (posted

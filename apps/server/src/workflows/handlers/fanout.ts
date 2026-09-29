@@ -5,6 +5,7 @@ import {
   PhaseRef,
   buildPhasePrompt,
   isSoftOutcome,
+  isTerminated,
   phaseConfigFor,
   renderTemplate,
   resolveTemplatedNumber,
@@ -54,9 +55,13 @@ const log = logger("fanout");
  *    `authFile`, `sandboxEnv`, `cwd`, `allowedHttpHosts`) travels as an explicit
  *    argument, and issue #215 made that true *precisely because* concurrent
  *    in-process runs share `process.env`. So N concurrent turns are safe, and
- *    this is the backend the eval harness uses.
+ *    this is the backend the eval harness uses. Its ceiling is 16, the widest
+ *    static fan-out (`site-review`, top 8 paired): the branches are model
+ *    calls plus light probes — installs and the suite are blocked — so a lower
+ *    cap only queues them behind the slowest investigator.
  *  - **`docker`** is N `docker exec`s into the one container the phase already
- *    provisioned.
+ *    provisioned. It stays at 6: it is the production backend, and each exec'd
+ *    agent is memory inside a capped container.
  *  - **`gondolin`** boots a QEMU micro-VM per agent session, inside the harness
  *    process. That is WP5's D7 exactly, and the nearform host has no swap, a
  *    hard agent memory cap, and has wedged under memory pressure before.
@@ -69,12 +74,24 @@ const log = logger("fanout");
  * eval harness on `none`.
  */
 const BACKEND_MAX_CONCURRENT: Record<SandboxBackend, number> = {
-  none: 6,
+  none: 16,
   docker: 6,
   gondolin: 1,
   smol: 1,
   kubernetes: 1,
 };
+
+/**
+ * A branch that died on a provider error — the agent loop caught a failed
+ * model call (`error_agent`: a 404/5xx/rate-limit from the endpoint), not a
+ * crash or a kill. With ten or sixteen concurrent sessions per PR these are
+ * the common branch failure (2026-09-29: three OpenCode Zen "404 status code
+ * (no body)" in one second, four turns into their sessions), and a second
+ * attempt is cheap next to a lost site.
+ */
+function isProviderError(r: { success: boolean; stopReason?: string; error?: string }): boolean {
+  return !r.success && r.stopReason === "error_agent" && !isTerminated(r.error);
+}
 
 /** Absent `on_branch_soft_failure` ⇒ no retry, and one soft branch never fails the phase. */
 const DEFAULT_BRANCH_SOFT_POLICY = { retries: 0, then: "complete" as const };
@@ -399,8 +416,9 @@ export class FanoutHandler implements PhaseTypeHandler {
         },
         async (session) => {
           try {
+            const settled = phase.skip_satisfied_branches ? await this.preGate(session, phase, branches) : new Map<FanoutBranch, BranchOutcome>();
             const ran = await mapPool(branches, concurrency, (branch) =>
-              this.runBranch(session, phase, branch, outputs, policy),
+              Promise.resolve(settled.get(branch) ?? this.runBranch(session, phase, branch, outputs, policy)),
             );
             await this.runGates(session, phase, ran);
             // `on_branch_gate_failure`: one directed re-run per branch whose gate
@@ -437,8 +455,10 @@ export class FanoutHandler implements PhaseTypeHandler {
   /**
    * Run one branch, with the one-shot soft retry `on_branch_soft_failure`
    * describes. A HARD failure (terminated / fatal / tool error / non-zero exit)
-   * is never retried — that is `isSoftOutcome`'s split, shared with the reviewer
-   * and generic loops so all three stay in lockstep.
+   * is not retried by that policy — that is `isSoftOutcome`'s split, shared
+   * with the reviewer and generic loops so all three stay in lockstep. The one
+   * exception is a provider error ({@link isProviderError}): it gets one retry
+   * of its own, whatever the soft policy says.
    */
   private async runBranch(
     session: SandboxSession,
@@ -495,6 +515,7 @@ export class FanoutHandler implements PhaseTypeHandler {
     const prompt = this.withBranchContext(session, phase, branch, rendered);
 
     let attempt = 0;
+    let providerRetried = false;
     for (;;) {
       const attemptLabel =
         attempt === 0 ? label : PhaseRef.branchRetry(phase.name, branch.name).format();
@@ -514,6 +535,16 @@ export class FanoutHandler implements PhaseTypeHandler {
       }
 
       const result = this.run.observeResult(pr.result);
+      if (!providerRetried && isProviderError(result)) {
+        log.warn("fan-out branch hit a provider error — retrying once", {
+          phase: phase.name,
+          branch: branch.name,
+          error: result.error,
+        });
+        providerRetried = true;
+        attempt += 1;
+        continue;
+      }
       const soft = !result.success && isSoftOutcome(result);
       if (!soft || attempt >= policy.retries) return { branch, label, result, deduped: false, prompt };
 
@@ -648,6 +679,30 @@ export class FanoutHandler implements PhaseTypeHandler {
         );
       },
     );
+  }
+
+  /**
+   * `skip_satisfied_branches`: each gated branch's `until_bash` BEFORE any
+   * agent starts; a branch whose gate already closes gets a done outcome and
+   * no session. Sequential, for the reason {@link runGates} is — and before
+   * the pool, so no branch's turns interleave with a blocking gate.
+   */
+  private async preGate(
+    session: SandboxSession,
+    phase: PhaseDefinition,
+    branches: readonly FanoutBranch[],
+  ): Promise<Map<FanoutBranch, BranchOutcome>> {
+    const settled = new Map<FanoutBranch, BranchOutcome>();
+    for (const branch of branches) {
+      if (!branch.until_bash?.trim()) continue;
+      const label = PhaseRef.branch(phase.name, branch.name).format();
+      const probe: BranchOutcome = { branch, label, deduped: true, result: { success: true, output: "", turns: 0, durationMs: 0 } };
+      const gate = await this.runBranchGate(session, phase, probe);
+      if (!gate?.met) continue;
+      log.info("fan-out branch gate already closed — no session", { phase: phase.name, branch: branch.name });
+      settled.set(branch, { ...probe, gate });
+    }
+    return settled;
   }
 
   /**
@@ -852,8 +907,12 @@ export class FanoutHandler implements PhaseTypeHandler {
    * records no `assessedHeadShaByWorkflow` and hands `cron-review.yaml` something
    * to re-dispatch every thirty minutes forever.
    *
-   * A HARD branch failure still fails the phase. That is not the soft policy's
-   * business, and a fan-out where every branch crashed is not a success.
+   * A HARD branch failure is reported failed, but when a sibling succeeded the
+   * phase still succeeds and the failed row is marked `tolerated`, so the
+   * scheduler does not fail the workflow over it: one site investigator's
+   * provider error used to mark a posted review `failed`, and a failed run
+   * leaves the head unassessed for the review sweep to re-dispatch. A fan-out
+   * where every branch failed is not a success.
    */
   private async report(
     phase: PhaseDefinition,
@@ -889,6 +948,7 @@ export class FanoutHandler implements PhaseTypeHandler {
       return { results, status: "failed", outputVars };
     }
 
+    for (const r of failed) r.tolerated = true;
     await this.reporter.persistPhase(phase.name, summary);
     await this.reporter.onEnd(phase.name, { phase: phase.name, success: true, output: joined });
     await this.reporter.step(phase.name, "done", phase.messages?.on_success);

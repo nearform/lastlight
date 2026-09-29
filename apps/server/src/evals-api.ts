@@ -136,6 +136,9 @@ export type {
   UnitsDocument as SurveyUnitsDocument,
 } from "./workflows/handlers/survey-units.js";
 export { buildSpecObligations } from "./engine/review-spec.js";
+// The site investigator's `{{prIntent}}` block — the replay's `--pr-context`
+// renders it from the case's PR with the same function the pipeline uses.
+export { renderPrIntent } from "./engine/pr-intent.js";
 export type { SpecObligationSet, SpecInputs } from "./engine/review-spec.js";
 
 // The event shim — the stream-json session jsonl every agent phase writes, and

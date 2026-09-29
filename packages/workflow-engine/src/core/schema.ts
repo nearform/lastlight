@@ -556,6 +556,16 @@ const PhaseDefinitionSchema = z
         retries: z.number().int().min(0).max(1).default(0),
       })
       .optional(),
+    /**
+     * Run each branch's `until_bash` BEFORE its agent, and start no session
+     * for a branch whose gate already closes — it is reported as done, like a
+     * resume dedup. For a fan-out whose earlier phase settles some branches in
+     * code: `sites --plan` writes an empty slot's `empty` line itself, so a
+     * PR with two sites does not pay for fourteen agents writing one line
+     * each. Sequential, before any branch starts (a gate is a `spawnSync` on
+     * the in-process backends). A branch with no `until_bash` always runs.
+     */
+    skip_satisfied_branches: z.boolean().optional(),
     /** Rules applied to agent output */
     on_output: PhaseOnOutputSchema.optional(),
     /** Actions taken on successful completion */
@@ -651,7 +661,7 @@ const PhaseDefinitionSchema = z
         }
       }
     } else {
-      for (const key of ["branches", "max_concurrent", "on_branch_soft_failure", "on_branch_gate_failure"] as const) {
+      for (const key of ["branches", "max_concurrent", "on_branch_soft_failure", "on_branch_gate_failure", "skip_satisfied_branches"] as const) {
         if (p[key] !== undefined) {
           ctx.addIssue({ code: z.ZodIssueCode.custom, message: `\`${key}:\` is only valid on type \`fanout\`` });
         }

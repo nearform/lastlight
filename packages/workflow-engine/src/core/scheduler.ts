@@ -255,7 +255,9 @@ export async function runWorkflowCore(
   // If the definition declares an `on_success.set_phase` terminal marker on any
   // phase, record it so the DB row shows the workflow as fully complete. Also
   // opportunistically extract a PR number from the terminal phase's output.
-  const anyFailed = phases.some((p) => !p.success);
+  // A `tolerated` row failed inside a phase that succeeded (a fan-out branch):
+  // visible as failed, but not a workflow failure.
+  const anyFailed = phases.some((p) => !p.success && !p.tolerated);
   const success = !anyFailed;
 
   let prNumber: number | undefined;
@@ -280,7 +282,7 @@ export async function runWorkflowCore(
       await db.runs.finishRun(workflowId, "succeeded", terminalMarker ? { terminalMarker } : {});
     }
   } else {
-    const firstFailure = phases.find((p) => !p.success);
+    const firstFailure = phases.find((p) => !p.success && !p.tolerated);
     await reporter.failWorkflow(firstFailure?.error || "workflow failed");
   }
 

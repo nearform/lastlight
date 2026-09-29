@@ -217,7 +217,7 @@ Phase kinds the runner recognises:
   skill bundle, and gets its own `executions` row under
   `<phase>_branch_<name>` — which is what preserves resume, dedup,
   per-branch cost and the dashboard's longest-prefix grouping.
-  `max_concurrent` is clamped by a backend ceiling (`none`/`docker` 6;
+  `max_concurrent` is clamped by a backend ceiling (`none` 16, `docker` 6;
   `gondolin`/`smol`/`kubernetes` **1**, because each branch would be a
   micro-VM in the harness process). A ceiling of 1 runs them as a chain,
   byte-identical to declaring sequential phases. Branch `until_bash`
@@ -228,7 +228,16 @@ Phase kinds the runner recognises:
   declares `on_branch_gate_failure: { retries: 1 }` (the `pr-review`
   `site-review` fan-out does): then a branch whose gate ran and said no is re-run once
   (`_regate` row) with the gate's output appended to its prompt, and
-  gated again. No `approval_gate` (a fan-out cannot
+  gated again. **`skip_satisfied_branches: true`** runs each branch's
+  gate once BEFORE the pool, sequentially: a branch whose gate already
+  closes is reported done and starts no session (`site-review` declares
+  16 branches, and `sites --plan` writes every unused slot's `empty`
+  line). A branch that died on a provider error (`error_agent`) is
+  re-run once regardless of the soft policy. The node fails only when
+  every branch failed; otherwise its failed branch rows carry
+  `tolerated: true`, which the scheduler does not count against the
+  workflow (a failed pr-review run leaves the head unassessed, and the
+  review sweep re-dispatches it). No `approval_gate` (a fan-out cannot
   pause mid-flight) and no `loop:`/`generic_loop:` (the branches are the
   iteration shape). Isolation is by **disjoint output paths**, not
   separate checkouts. A branch may also declare **`context_file`** — a

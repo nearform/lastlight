@@ -25,6 +25,8 @@
  * mock, no sandbox, no harness.
  */
 
+import { renderPriorDiscussion } from "./pr-discussion.js";
+import { renderPrIntent } from "./pr-intent.js";
 import type { DependenciesConfig, FixConfig, ReviewConfig } from "../config/config.js";
 import type { PrState } from "./pr-state.js";
 import { renderCiFailureReport } from "./github/github.js";
@@ -1742,6 +1744,20 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      */
     reviewInstallPolicy: "block",
     /**
+     * What the author says the PR does, for the site investigators
+     * (`{{#if prIntent}}` in `review-site.md`): title, body and closed issues,
+     * bounded, template comments stripped (`renderPrIntent`). Empty — so the
+     * guard reads false — when the PR has none of the three.
+     */
+    prIntent: renderPrIntent({ title: state.title, body: state.body, closes: state.closes }),
+    /**
+     * The PR's prior conversation, for `select` (`{{#if priorDiscussion}}` in
+     * `review-select.md`): what was already raised, which threads the author
+     * resolved, the human review verdicts. Empty when the read failed or
+     * nobody has said anything (`renderPriorDiscussion`).
+     */
+    priorDiscussion: renderPriorDiscussion(state.discussion ?? null),
+    /**
      * Phase budgets for `pr-review.yaml`'s deterministic `facts` / `seed` /
      * `reconcile` steps, read as `timeout_seconds: { from: … }` (issue #385).
      * Beside `analysisEnabled` because those three phases run exactly when it
@@ -1757,6 +1773,8 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      * ask, never the effective value.
      */
     siteConcurrency: String(review.analysis.siteConcurrency),
+    /** `sites --plan --top`: how many ranked sites get an investigator. */
+    siteTop: String(review.analysis.siteTop),
     /**
      * `survey-units`' in-flight ceiling. Read by the handler itself (a
      * `max_concurrent` key is fan-out-only in the schema).

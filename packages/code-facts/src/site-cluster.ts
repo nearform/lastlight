@@ -123,6 +123,13 @@ export interface ClusterOptions {
   maxSpan?: number | null;
   /** Rows whose anchor path matches are left out of ranking — e.g. `isTestPath` (`project.ts`). */
   skipPath?: (path: string) => boolean;
+  /**
+   * Sites whose path matches rank AFTER every other site, in their own vote
+   * order — e.g. `isTestPath`. A site never spans files, so a site is wholly
+   * demoted or not. Unlike `skipPath` a demoted site still forms: it takes a
+   * slot only when the others leave one free, so it never displaces one.
+   */
+  demotePath?: (path: string) => boolean;
 }
 
 const SEVERITY_ORDER: Record<string, number> = { Critical: 0, Important: 1, Minor: 2 };
@@ -227,6 +234,7 @@ export function clusterSites(set: HypothesisSet, options: ClusterOptions = {}): 
       severity,
       rows: rows.map((a) => a.id),
       first: rows[0].position,
+      demoted: run[0].path !== null && !!options.demotePath?.(run[0].path),
     };
   });
 
@@ -234,9 +242,10 @@ export function clusterSites(set: HypothesisSet, options: ClusterOptions = {}): 
   // putting voters before severity there moved a gold from the top 10 to 11.
   // `"unit"` breaks voter ties by rows first — the screen's `--tiebreak rows`.
   drafts.sort((a, b) =>
-    voters === "unit"
+    Number(a.demoted) - Number(b.demoted) ||
+    (voters === "unit"
       ? b.voters - a.voters || b.support - a.support || severityRank(a.severity) - severityRank(b.severity) || a.first - b.first
-      : b.support - a.support || severityRank(a.severity) - severityRank(b.severity) || a.first - b.first,
+      : b.support - a.support || severityRank(a.severity) - severityRank(b.severity) || a.first - b.first),
   );
 
   return {
@@ -247,7 +256,7 @@ export function clusterSites(set: HypothesisSet, options: ClusterOptions = {}): 
     maxSpan,
     rows: set.records.length,
     skipped,
-    sites: drafts.map(({ first: _first, ...d }, i) => ({
+    sites: drafts.map(({ first: _first, demoted: _demoted, ...d }, i) => ({
       id: `site-${String(i + 1).padStart(3, "0")}`,
       rank: i + 1,
       ...d,

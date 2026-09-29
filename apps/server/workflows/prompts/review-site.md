@@ -50,6 +50,23 @@ this site. Treat them exactly as what they are:
 - You may report a defect **no lead names**, and you may ignore every lead.
 - If the brief lists no leads, investigate the site on your own.
 
+<!-- Measured (docs/plans/site-review-recall.md, H6): the investigator was
+context-blind — a path, lines and a vote count — and grafana-94942's gold is
+contested because it never saw the PR description. Framed as a claim to check,
+never a reason to close: arm C's summarised leads halved precision, and H2's
+"not intent" rule below stands. -->
+{{#if prIntent}}
+## What the author says this PR does
+
+{{prIntent}}
+
+This is the author's **claim** about the change, not evidence. Use it to learn
+what the code at your site is meant to do, then check that it does it: code that
+does not do what the description promises (a case it names but the code skips, a
+behaviour it says is preserved but the diff changes) is a defect. It never closes
+a suspicion — "the description says this is intended" is not a probe.
+{{/if}}
+
 ## What to do
 
 Investigate the code at the site, and whatever it calls or is called by, with

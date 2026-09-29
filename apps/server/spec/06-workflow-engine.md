@@ -214,6 +214,7 @@ router routed nine, which is why the dashboard showed no Slack trigger for
   max_concurrent?: number | { from: string; default: number };  // fanout width, clamped by the backend ceiling
   on_branch_soft_failure?: { retries: number; then: "fail" | "complete" };  // per-BRANCH; not generic_loop's key
   on_branch_gate_failure?: { retries: 0 | 1 };  // fanout only — re-run a branch whose until_bash said no, once
+  skip_satisfied_branches?: boolean;    // fanout only — run each until_bash first; a branch whose gate already closes starts no session
   output_var?: string;                  // alias for {{this.field}} in later phases
   unrestricted_egress?: boolean;        // bypass strict allowlist for this phase
   web_search?: boolean;                 // enable agentic-pi web tools
@@ -387,6 +388,7 @@ extend when a deployment needs a step the engine should not know about.
   max_concurrent: { from: siteConcurrency, default: 6 }
   on_branch_soft_failure: { retries: 1, then: complete }
   on_branch_gate_failure: { retries: 1 }
+  skip_satisfied_branches: true
   branches:
     - name: site-001
       context_file: .lastlight/pr-review/sites/site-001.md
@@ -394,6 +396,8 @@ extend when a deployment needs a step the engine should not know about.
     - name: site-002
       context_file: .lastlight/pr-review/sites/site-002.md
       until_bash: lastlight-facts sites --check site-002 --dir .lastlight/pr-review --repo .
+    # … site-008; then site-009 … site-016, each with
+    #   model: "{{models.review-site-pair}}"
 ```
 
 Each branch inherits the phase's `prompt` / `skills` / `model` /
@@ -435,12 +439,19 @@ path this process cannot see at all — there the read is not attempted and the
 branch is handed the path to open itself, with the mis-anchoring trap named.
 
 `site-review` (see [Configuration](/spec/02-configuration)) is the case
-`context_file` makes possible: five **static** branches (`site-001` … `site-005`) share one
+`context_file` makes possible: sixteen **static** branches (`site-001` … `site-016`) share one
 slot-generic prompt (`prompts/review-site.md`), and everything that differs per
 branch — the site, its id, its output file — arrives in the brief the
-preceding `site-plan` bash phase wrote for that slot. A PR with fewer sites
-still runs every branch; an empty slot's brief says so and its gate
-(`lastlight-facts sites --check <site-id>`) accepts one `empty` line.
+preceding `site-plan` bash phase wrote for that slot. Slots 1–8 are the ranked
+sites (`review.analysis.siteTop` of them used); slots 9–16 re-investigate
+ranks 1–8 on `models.review-site-pair`, and are used only when that key is set.
+`site-plan` writes every unused slot's `empty` line itself — the one line its
+gate (`lastlight-facts sites --check <site-id>`) accepts — and
+**`skip_satisfied_branches: true`** runs each branch's `until_bash` before any
+agent starts, so a branch whose gate already closes is reported done (like a
+resume dedup) and starts no session. The pre-gates run one at a time, before
+the pool; a branch with no `until_bash` always runs. Without the key, a PR with
+two sites would pay for fourteen agents each writing one line.
 
 **Why one node instead of N parallel phases.** Real DAG concurrency is
 parked behind four hard blockers, and
@@ -458,7 +469,12 @@ one `current_phase`, one artifact harvest, one dispose.
    The bundle is already keyed per phase so concurrent readers cannot
    collide; staging is filesystem work and is serialised rather than
    reasoned about.
-3. Branches run through a bounded `mapPool`.
+3. Branches run through a bounded `mapPool`. A branch that died on a
+   **provider error** (`stopReason: error_agent` — the agent loop caught a
+   failed model call, a 404/5xx/rate limit, not a crash or a kill) is
+   re-run once, whatever `on_branch_soft_failure` says, as
+   `<phase>_branch_<name>_retry`; at ten or sixteen concurrent sessions
+   per PR it is the common branch failure.
 4. **`until_bash` gates run after the join, sequentially.**
    `InProcessSandbox.runCommand` is a `spawnSync` — it blocks the event
    loop — so interleaving a gate with the agent turns would serialise
@@ -485,12 +501,22 @@ one `current_phase`, one artifact harvest, one dispose.
    checks answered — go downstream as if complete).
 6. One harvest, one dispose.
 
+**The fan-out's verdict, and the workflow's.** The node fails only when
+every branch failed. Otherwise it succeeds, and each failed branch row
+keeps `success: false` but carries **`tolerated: true`** — the scheduler
+counts a tolerated row as visible, not as a workflow failure. Before it,
+one site investigator's provider 404 marked a `pr-review` run `failed`
+after the review had posted, and a failed run leaves the head unassessed
+(`assessedHeadShaByWorkflow` counts succeeded runs only), so the review
+sweep re-dispatched a full review.
+
 **Concurrency is `min(max_concurrent, backend ceiling)`**, and the
 clamp is logged when the host has the last word:
 
 | backend | ceiling | why |
 |---|---:|---|
-| `none`, `docker` | 6 | in-process `run()`, or N `docker exec` into the one provisioned container |
+| `none` | 16 | in-process `run()`; 16 is the widest static fan-out (`site-review`, top 8 paired) |
+| `docker` | 6 | N `docker exec` into the one provisioned container — the production backend, memory-capped |
 | `gondolin`, `smol`, `kubernetes` | **1** | a QEMU micro-VM (or equivalent) per branch, in the harness process |
 
 A ceiling of 1 runs the branches as a chain — byte-identical in
