@@ -1106,6 +1106,52 @@ describe('applyPrDispatchGate — the cron / api route crosses the same gate', (
     expect(db.runs.createRun).not.toHaveBeenCalled();
   });
 
+  it('cancels and awaits a review of an older head before letting the new review run', async () => {
+    const db = mockDb();
+    const github = prGithubStub({ checksState: 'passing' });
+    const supersede = vi.fn().mockResolvedValue(true);
+    const d = await applyPrDispatchGate(
+      {
+        workflowName: 'pr-review',
+        state: prState({
+          checksState: 'passing',
+          runInFlight: { workflow: 'pr-review', runId: 'run-old', headSha: '1111111000000000' },
+        }),
+        policy: policy(),
+        route: 'checks-settled',
+        logPrefix: '[event]',
+      },
+      { db: db as any, github, supersede },
+    );
+
+    expect(d.decision).toBe('run');
+    expect(supersede).toHaveBeenCalledWith('run-old', 'superseded by a review of abcdef1');
+  });
+
+  it('does not supersede a review of the same head', async () => {
+    const db = mockDb();
+    const github = prGithubStub({ checksState: 'passing' });
+    const supersede = vi.fn().mockResolvedValue(true);
+    const d = await applyPrDispatchGate(
+      {
+        workflowName: 'pr-review',
+        state: prState({
+          checksState: 'passing',
+          runInFlight: { workflow: 'pr-review', runId: 'run-old', headSha: 'abcdef1234567890' },
+        }),
+        policy: policy(),
+        route: 'checks-settled',
+        explicitRequest: true,
+        logPrefix: '[event]',
+      },
+      { db: db as any, github, supersede },
+    );
+
+    expect(d.decision).toBe('skip');
+    expect(d.runInFlight?.runId).toBe('run-old');
+    expect(supersede).not.toHaveBeenCalled();
+  });
+
   it('blocks the daily green sweep from merging a PR with a live fix run', async () => {
     const db = mockDb();
     const github = prGithubStub({ checksState: 'passing' });

@@ -1402,6 +1402,14 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     // Historically `review.postsCheck` defaulted OFF for anything that wasn't
     // literally `true`; keep that exact reading.
     postsCheck: reviewRaw.postsCheck === true,
+    // Ships ON (today's behaviour), so only a literal `false` turns it off.
+    placeholderCheck: reviewRaw.placeholderCheck !== false,
+    sweepPendingGraceMinutes:
+      typeof reviewRaw.sweepPendingGraceMinutes === "number" &&
+      Number.isFinite(reviewRaw.sweepPendingGraceMinutes) &&
+      reviewRaw.sweepPendingGraceMinutes >= 0
+        ? reviewRaw.sweepPendingGraceMinutes
+        : reviewDefaults.sweepPendingGraceMinutes,
     trigger: isReviewTrigger(reviewRaw.trigger) ? reviewRaw.trigger : reviewDefaults.trigger,
     requestLabel:
       typeof reviewRaw.requestLabel === "string" && reviewRaw.requestLabel.trim()

@@ -360,6 +360,10 @@ review:
 				<td>turn it <strong>off</strong>. Doing so buys the repo more review runs on its own attention, which is entirely its call; turning it on over an operator who disabled it would suppress reviews you asked to keep.</td>
 			</tr>
 			<tr>
+				<td><code>review.placeholderCheck</code>, <code>review.sweepPendingGraceMinutes</code></td>
+				<td><strong>nothing</strong> — operator-only. They set how the deployment presents and paces reviews across every repo it serves.</td>
+			</tr>
+			<tr>
 				<td><code>review.triage</code></td>
 				<td><strong>nothing</strong> — operator-only, for the same reason as <code>analysis</code> below and in both directions. Turning triage on buys a cheap pass on your budget; turning it off buys the full evidence pipeline on every re-review, which is far more of the same.</td>
 			</tr>

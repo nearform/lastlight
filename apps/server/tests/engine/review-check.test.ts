@@ -380,6 +380,15 @@ describe("postReviewCheckForSkip — the deferred placeholder", () => {
     expect(opts.output.summary).toContain("@nearform-lastlight review");
   });
 
+  it("review.placeholderCheck: false posts no queued/neutral placeholder", async () => {
+    // The check then appears only once a review dispatches — nothing of ours
+    // sits on the PR while its CI is still running.
+    const github = fakeGithub();
+    await postReviewCheckForSkip({ ...args, placeholderCheck: false, placement: "queued" }, { github });
+    await postReviewCheckForSkip({ ...args, placeholderCheck: false, placement: "neutral" }, { github });
+    expect(github.createCheckRun).not.toHaveBeenCalled();
+  });
+
   it("posts NOTHING for a plain skip — a run that never dispatches creates no check", async () => {
     const github = fakeGithub();
     await postReviewCheckForSkip({ ...args, placement: "none" }, { github });

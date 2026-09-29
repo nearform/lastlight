@@ -332,6 +332,8 @@ export async function postReviewCheckForSkip(
     workflowName: string;
     placement: ReviewCheckPlacement;
     postsCheck: boolean;
+    /** `review.placeholderCheck` — `false` suppresses `queued` / `neutral`. Default on. */
+    placeholderCheck?: boolean;
     route: "attention" | "checks-settled" | "sweep";
     owner: string;
     repo: string;
@@ -346,6 +348,11 @@ export async function postReviewCheckForSkip(
   } else {
     if (args.route !== "attention") return;
     if (args.placement !== "queued" && args.placement !== "neutral") return;
+    // `review.placeholderCheck: false` — the check appears only once a review
+    // dispatches, so nothing of ours sits on the PR while CI is still running.
+    // `carried-over` above is not a placeholder (it repeats a real verdict) and
+    // is unaffected.
+    if (args.placeholderCheck === false) return;
   }
   await postPlaceholderReviewCheck(
     { owner: args.owner, repo: args.repo, headSha: args.headSha, carriedOver: args.carriedOver },

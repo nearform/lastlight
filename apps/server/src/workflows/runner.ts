@@ -54,6 +54,7 @@ import { fileVerdictReader } from "./handlers/verdict-reader.js";
 import { QuotaExceededError } from "../sandbox/k8s/quota.js";
 import type { ProgressReporter } from "../notify/types.js";
 import { collapseDetail } from "../notify/render.js";
+import { markRunLive } from "./live-runs.js";
 
 // `isTerminated` used to live here; re-exported for API stability.
 export { isTerminated };
@@ -369,6 +370,31 @@ export async function runWorkflow(
   // a parameter with a default doesn't count toward it. Existing callers are
   // unaffected — omitting it reproduces today's behaviour exactly.
   repoConfig: RunRepoConfig | undefined = undefined,
+): Promise<WorkflowResult & { backpressure?: boolean }> {
+  // Every route into the runner crosses here, so this is where a run becomes
+  // "live in this process" (`./live-runs.ts`) — for the whole execution, not
+  // just while its row says `running`.
+  const release = workflowId ? markRunLive(workflowId) : () => {};
+  try {
+    return await runWorkflowBody(
+      definition, ctx, config, callbacks, db, models, approvalConfig, workflowId, variants, repoConfig,
+    );
+  } finally {
+    release();
+  }
+}
+
+async function runWorkflowBody(
+  definition: AgentWorkflowDefinition,
+  ctx: TemplateContext,
+  config: ExecutorConfig,
+  callbacks: RunnerCallbacks,
+  db: StateDb | undefined,
+  models: ModelConfig | undefined,
+  approvalConfig: ApprovalGateConfig | undefined,
+  workflowId: string | undefined,
+  variants: VariantConfig | undefined,
+  repoConfig: RunRepoConfig | undefined,
 ): Promise<WorkflowResult & { backpressure?: boolean }> {
   const outputs: Record<string, unknown> = {};
   const { taskId } = ctx;

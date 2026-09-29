@@ -844,8 +844,8 @@ the check say" are different questions:
 
 | Decision | When | `last-light/review` (only when `review.postsCheck`) |
 |---|---|---|
-| `dispatch` | an explicit request, the `review.requestLabel`, `eager` on PR attention, or a settled suite under `after-checks` | `in_progress`, completed from the run's terminal transition |
-| `defer` | `on-request` with nobody asking; `after-checks` waiting for CI (on every route but the sweep — see below), or reached on PR attention rather than a settle | `queued` under `after-checks`, `neutral` under `on-request` — and only on a PR-attention event, since a placeholder is a statement about a head SHA and the 30-minute sweep would otherwise re-post one per tick |
+| `dispatch` | an explicit request, the `review.requestLabel`, `eager` on PR attention, or a settled suite under `after-checks` — including one that **supersedes** a `pr-review` run still reviewing an older head (below) | `in_progress`, completed from the run's terminal transition |
+| `defer` | `on-request` with nobody asking; `after-checks` waiting for CI (on every route but the sweep — see below), or reached on PR attention rather than a settle | `queued` under `after-checks`, `neutral` under `on-request` — unless `review.placeholderCheck` is `false` — and only on a PR-attention event, since a placeholder is a statement about a head SHA and the 30-minute sweep would otherwise re-post one per tick |
 | `skip` | draft (`review.skipDraft`), already reviewed at this head, a `pr-review` run that already assessed this head without posting, a re-review whose own diff is unchanged (`review.skipUnchangedDiff`), only generated files changed since the review we posted (`review.generatedPaths`), or another PR-scoped run in flight | **nothing** — except the unchanged-diff and generated-only cases, which post a completed `carried-over` check restating the prior verdict. A run that never dispatches must otherwise not create a check and immediately conclude it |
 
 Two consequences worth stating outright:
@@ -873,15 +873,37 @@ Two consequences worth stating outright:
   opened a check and crashed — leaves the aggregate `pending` with no
   further `check_suite` ever coming, so deferring on every route deferred
   forever, and with `review.postsCheck` on the `queued` placeholder sat
-  there permanently. Nothing in the snapshot dates the pending state, so the
-  sweep cannot tell "CI is still running" from "this will never settle" and
-  must pick which error to make: a review posted 30 minutes into a running
+  there permanently. The sweep cannot fully tell "CI is still running" from
+  "this will never settle", so it must pick which error to make — but it no
+  longer has to make it two minutes after a push: the exemption applies only
+  once the head's CI has been pending for `review.sweepPendingGraceMinutes`
+  (default 60), dated from the oldest still-pending check
+  (`PrState.checksPendingSince`). Before that window the sweep defers like
+  every other route (nearform/skillspro#2008 was reviewed mid-CI on the next
+  :00 tick). An undatable pending state still dispatches. Past the window: a review posted 30 minutes into a running
   suite costs timing (it cannot cite a failure that has not happened, and
   the next push re-arms `botReviewAtHead`), while a PR that is never
   reviewed and possibly never mergeable costs correctness. `after-checks`
   is "on settle, either colour" — the colour was never the gate, and on the
   one route that exists to pick up what no webhook will fire for, neither is
   settling.
+- **A newer head supersedes an in-flight review.** The run lock drops a
+  second PR-scoped dispatch — except when the holder is itself a `pr-review`
+  run whose recorded head (`runInFlight.headSha`, from its run context) is
+  **older** than the PR's current head *and* the resolver, evaluated as though
+  the lock were free, says `dispatch`. That review is stale the moment it
+  lands, so the decision carries `supersedes`, and `applyPrDispatchGate`
+  cancels the old run, kills its sandbox containers and waits for its runner
+  to actually stop (`src/engine/supersede.ts`, `src/workflows/live-runs.ts`)
+  before returning `run` — both runs share the per-target workspace. A new
+  head whose own review is merely *deferred* (CI still pending) leaves the old
+  review running, a fix-family holder is never superseded (it may be mid-push),
+  and a **same-head** holder never is either: an `@bot review` while the review
+  of that very commit is mid-flight keeps the lock and its reply rather than
+  discarding the work. As a backstop, `prePopulateWorkspace` refuses to reset a
+  per-target workspace whose marker names a run still executing in this
+  process (`WorkspaceBusyError`), so a lock miss fails the newcomer instead of
+  destroying both runs.
 - **A push with nothing new to say does not earn a review** (issue #271).
   Per-head dedup was the only suppression gate, so every new head SHA bought a
   full formal review *by design* — and a lock file re-derivation is a new head
