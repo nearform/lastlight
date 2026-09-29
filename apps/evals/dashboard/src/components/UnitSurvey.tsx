@@ -12,7 +12,7 @@ import { caseRow, coverageText, entryModelCells, fmtChars, NA, unitSurveyProgres
  * The unit-survey replay views — `scripts/unit-survey-replay.ts` rendered.
  *
  * A replay answers two questions of the per-unit survey
- * (`docs/plans/unit-survey.md` → "Evals"): stage 1 ($0) — does some unit even
+ * (`docs/plans/pr-review-units-sites.md` → "Evals"): stage 1 ($0) — does some unit even
  * SHOW the model each gold line; stage 2 — scored by the same judge on the same
  * gold, do the units' hypotheses find what the preserved AGENT survey found, at
  * what cost and wall clock.

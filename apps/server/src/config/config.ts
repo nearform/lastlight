@@ -1808,7 +1808,7 @@ const REMOVED_ANALYSIS_KEYS: Record<string, string> = {
   internalFloor: "the attention boundary no longer gates on finding.confidence (AUROC 0.228)",
   thresholds: "the attention boundary no longer gates on finding.confidence (AUROC 0.228)",
   // Units + sites became the only analysis path
-  // (docs/plans/pr-review-units-sites-only.md).
+  // (docs/plans/pr-review-units-sites.md).
   surveyEngine: "the unit survey is the only survey engine",
   reviewEngine: "the sites engine is the only review engine",
   independentReview: "the sites engine writes findings.json; `review` runs only with the pipeline off or on a light re-review",

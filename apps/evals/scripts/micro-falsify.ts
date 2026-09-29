@@ -22,7 +22,7 @@
  * `--audit` stops after the plan: no model, no spend beyond the (cached) gold map.
  * The gold→row map is shared with micro-adjudicate (same cache, same judge).
  *
- * `--plan sites:<k>` (docs/plans/adjudicate-falsify-replay.md) swaps WHICH rows
+ * `--plan sites:<k>` (docs/plans/pr-review-units-sites.md) swaps WHICH rows
  * are probed and HOW: code-facts' `planProbeSites` — the top k sites by
  * support (rows from independent survey passes pointing at the same lines),
  * plus every row probe-plan would have selected that none of them holds, as a

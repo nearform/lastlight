@@ -1158,7 +1158,7 @@ is the entire point.
 
 `src/units.ts`, `src/units-render.ts`, `src/unit-response.ts`,
 `src/units-ingest.ts`; the design and the file contract are
-[`docs/plans/unit-survey.md`](../../docs/plans/unit-survey.md). Selected by
+[`docs/plans/pr-review-units-sites.md`](../../docs/plans/pr-review-units-sites.md). Selected by
 the `review.analysis` evidence pipeline, whose only survey it is. The
 pipeline is `units` (bash) → `survey-units` (core, one `completeSimple` call per
 unit) → `units-ingest` (bash); it replaced the five-branch agent `survey`
@@ -1370,7 +1370,7 @@ one verdict.
 ### `clusterSites` — rows grouped into sites (library only)
 
 `src/site-cluster.ts`. The proposed replacement for row-level admission
-(`docs/plans/adjudicate-falsify-replay.md`): a site is a run of rows in one file
+(`docs/plans/pr-review-units-sites.md`): a site is a run of rows in one file
 whose anchor lines sit within `window` (default 20) of their neighbour, single
 linkage, **across families**; ranked by support (rows in the site), then
 strongest derived severity, then declaration order. The anchor is a row's first
@@ -1451,7 +1451,7 @@ investigator gets the site plus short leads and writes the findings.
 `src/site-review.ts`, exported from `index.ts`. With `review.analysis` on,
 pr-review runs `site-plan` → `site-review` (a static 16-branch fan-out) → `merge` →
 `select` → `site-finalize` after the unit survey — the only review engine
-(docs/plans/pr-review-units-sites-only.md). Every step but the investigators and `select` is this
+(docs/plans/pr-review-units-sites.md). Every step but the investigators and `select` is this
 command. The rows stop being the items the review weighs and become a VOLUME
 signal: where many independent units pointed is where an investigator looks.
 

@@ -230,7 +230,7 @@ describe("loadConfig — review.analysis.maxBodyComments", () => {
 
 /**
  * `review.analysis.surveyUnitConcurrency` / `siteConcurrency`, and the one
- * setup the pipeline cannot run on (docs/plans/pr-review-units-sites-only.md).
+ * setup the pipeline cannot run on (docs/plans/pr-review-units-sites.md).
  */
 describe("loadConfig — the unit survey and the sites engine", () => {
   beforeEach(() => {

@@ -3,7 +3,7 @@
  *
  * Cuts a pull request into UNITS and renders, for each, the complete request a
  * single bounded, non-agentic model call receives (see
- * `docs/plans/unit-survey.md`). The five-branch agent survey spent minutes per
+ * `docs/plans/pr-review-units-sites.md`). The five-branch agent survey spent minutes per
  * branch re-deriving with bash the context `facts`/`seed` had already computed;
  * this prints that context instead, once, per unit.
  *

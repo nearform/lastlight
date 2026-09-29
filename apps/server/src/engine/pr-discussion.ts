@@ -7,7 +7,7 @@
  * treat a resolved thread as done) and the `sites` engine dropped it. Deduping
  * against it is a selection job; handing it to an investigator would anchor it
  * the way summarised leads did (arm C halved precision,
- * docs/plans/adjudicate-falsify-replay.md).
+ * docs/plans/pr-review-units-sites.md).
  *
  * Pure: `resolveSpecContext` reads the discussion, this renders it.
  */

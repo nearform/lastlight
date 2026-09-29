@@ -308,7 +308,7 @@ is one phase — `review`, where the precision gate is meant to fire, and whose
 | `falsify` (not attached) | *nothing* | Produces no review, tiers nothing, writes no `findings.json`. The workspace layout is the only shared material it needs, and it is inline in `prompts/review-falsify.md` |
 
 The agent survey's `survey-pass` and the adjudicator's `adjudicate-pass` were
-removed with those phases (docs/plans/pr-review-units-sites-only.md).
+removed with those phases (docs/plans/pr-review-units-sites.md).
 
 ### `fixing` vs `building`
 

@@ -1,5 +1,5 @@
 /**
- * Replay the per-unit survey (`docs/plans/unit-survey.md` → "Evals") over
+ * Replay the per-unit survey (`docs/plans/pr-review-units-sites.md` → "Evals") over
  * preserved pr-review workspaces, and score it against the AGENT survey those
  * workspaces already carry.
  *

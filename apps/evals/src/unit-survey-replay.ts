@@ -3,7 +3,7 @@
  * the file and process work, this module holds everything that decides a
  * number, so it is testable with no fixture, no CLI and no network.
  *
- * `docs/plans/unit-survey.md` → "Evals" asks two questions of the per-unit
+ * `docs/plans/pr-review-units-sites.md` → "Evals" asks two questions of the per-unit
  * survey before it may become a default:
  *
  *  1. **$0 coverage** — does some unit even SHOW the model each gold line? A

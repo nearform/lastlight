@@ -10,7 +10,7 @@
  * gold-matched), and every cut tried after it failed: `top:40` filed 7 of the
  * 14 gold, the jev rule filed 473 rows and no gold, and one `adjudicate` call
  * over a 130–220k-char dossier does not finish. The proposed replacement
- * (docs/plans/adjudicate-falsify-replay.md) is cluster → refute each cluster →
+ * (docs/plans/pr-review-units-sites.md) is cluster → refute each cluster →
  * setwise tournament. This measures its first step before anything is spent.
  *
  * ── What it measures ───────────────────────────────────────────────────────
@@ -27,7 +27,7 @@
  *    defects, the only way clustering itself loses recall.
  *  - how the gold clusters rank under `--order` — against the gold `top:40` kept.
  *
- * ── Orders (docs/plans/unit-pr-review-revise.md, screen 1) ─────────────────
+ * ── Orders (docs/plans/pr-review-units-sites.md, screen 1) ─────────────────
  *
  * `severity` and `support` read the survey's rows; everything else is a NULL
  * MODEL that reads no model output past the site's own path and line extent.

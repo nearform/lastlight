@@ -1,6 +1,6 @@
 /**
  * Arm C of the site-review replay (`micro-site-review --leads summary`):
- * SUMMARISED leads. docs/plans/adjudicate-falsify-replay.md, "Site review".
+ * SUMMARISED leads. docs/plans/pr-review-units-sites.md, "Site review".
  *
  * Arm B's subject leads barely deduplicate (about one lead per row, e.g. 18
  * leads for 18 rows), so they are the row list minus prose rather than a

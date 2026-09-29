@@ -413,7 +413,7 @@ export * from "./schema.js";
 
 export { deriveVerdict, effectiveTrigger, hasEvidence, isBehaviouralClaim, severityOf, needsProbeOf, isReassurance, probeReasonOf, type ProbeReason, type SurveyEvidence, type SurveyVerdict, type Discharge, type Severity } from "./survey-verdict.js";
 
-/** The unit survey (docs/plans/unit-survey.md) — the assembler, the reply schema, the ingest. */
+/** The unit survey (docs/plans/pr-review-units-sites.md) — the assembler, the reply schema, the ingest. */
 export {
   buildUnits,
   buildUnitsOrEmpty,

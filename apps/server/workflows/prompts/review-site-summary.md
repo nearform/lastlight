@@ -4,7 +4,7 @@ every row.
 
 <!-- Not yet a workflow phase: run by the evals harness's `micro-site-review
 --leads summary` replay only, as one non-agentic call per site
-(docs/plans/adjudicate-falsify-replay.md, "Site review"). -->
+(docs/plans/pr-review-units-sites.md, "Site review"). -->
 
 The user message lists the site's hypothesis rows. Each row has an `id`, a
 `family`, an anchor `line`, a `claim`, and three fields from its evidence

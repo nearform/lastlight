@@ -40,7 +40,7 @@ const log = logger("survey-units");
 
 /**
  * The `type: survey-units` phase — the model half of the per-unit survey
- * (`docs/plans/unit-survey.md`).
+ * (`docs/plans/pr-review-units-sites.md`).
  *
  * `lastlight-facts units` (a bash phase, in the sandbox) has already cut the PR
  * into units and rendered each one's COMPLETE request. This handler does only

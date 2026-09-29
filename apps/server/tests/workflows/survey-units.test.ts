@@ -37,7 +37,7 @@ import type { SandboxBackend } from "#src/config/config.js";
 import { installProviderOverrides } from "#src/config/provider-registry.js";
 
 /**
- * The `survey-units` phase (docs/plans/unit-survey.md): one model call per
+ * The `survey-units` phase (docs/plans/pr-review-units-sites.md): one model call per
  * unit, from the harness, against the host checkout. Everything here runs with
  * a FAKE model call — the handler takes it by injection — so the properties
  * pinned are the mechanism's: the bound on calls in flight, the single retry,

@@ -265,7 +265,7 @@ Phase kinds the runner recognises:
   and it **succeeds on every path inside the phase** — `units-ingest`
   records every unanswered obligation. Needs a host-readable workspace
   (`handlers/host-repo-dir.ts`), so config load refuses the engine on
-  `kubernetes`. See `docs/plans/unit-survey.md`.
+  `kubernetes`. See `docs/plans/pr-review-units-sites.md`.
 - **loop-phase** — any phase with `loop:` set. Always executes as an
   agent phase internally, but repeated in `reviewer → fix → reviewer`
   pairs up to `max_cycles`. See loop iteration naming below.

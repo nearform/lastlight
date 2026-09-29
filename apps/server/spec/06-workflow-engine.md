@@ -374,7 +374,7 @@ extend when a deployment needs a step the engine should not know about.
   `units-ingest` records each unanswered obligation. Needing a host-readable
   workspace, `review.analysis.enabled` is refused at config load on
   `kubernetes`. See
-  [Configuration](/spec/02-configuration) and `docs/plans/unit-survey.md`.
+  [Configuration](/spec/02-configuration) and `docs/plans/pr-review-units-sites.md`.
 
 ### `fanout` — N agent sessions, one workspace
 

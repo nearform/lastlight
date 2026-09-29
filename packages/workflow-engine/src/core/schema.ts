@@ -243,7 +243,7 @@ const PhaseDefinitionSchema = z
      *   as the system prompt and the unit's pre-rendered request as the user
      *   message. Needs a host-readable workspace, so it fails loud on
      *   `kubernetes`. Like `post-review` it is app-registered — the engine
-     *   only validates the shape. See `docs/plans/unit-survey.md`.
+     *   only validates the shape. See `docs/plans/pr-review-units-sites.md`.
      *
      * `bash`/`script` phases run in the SAME sandbox/workspace as agent
      * phases (the host workDir persists across phases keyed by taskId), honour

@@ -8,7 +8,7 @@
  * description promises". Of the false positives SWR-Bench classified, 48% came
  * from missing context (arXiv 2509.01494), and grafana-94942's gold is contested
  * precisely because the investigator never saw the PR description
- * (docs/plans/site-review-recall.md). The prompt frames it as a CLAIM to check,
+ * (docs/plans/pr-review-units-sites.md). The prompt frames it as a CLAIM to check,
  * never a reason to close a suspicion — H2's "not intent" rule stands.
  *
  * Pure, and shared with the evals replay (`micro-site-review --pr-context`) via

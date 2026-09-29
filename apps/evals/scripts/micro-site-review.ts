@@ -1,6 +1,6 @@
 /**
  * Replay a per-SITE investigator over preserved pr-review fixtures — the
- * "site review" experiment in docs/plans/adjudicate-falsify-replay.md ("Site
+ * "site review" experiment in docs/plans/pr-review-units-sites.md ("Site
  * review: rows as volume, leads not items").
  *
  * ── Why ────────────────────────────────────────────────────────────────────

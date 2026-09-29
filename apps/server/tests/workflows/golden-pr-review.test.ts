@@ -63,7 +63,7 @@ const DECLARED = [
   "prepare",
   "facts",
   "seed",
-  // The unit survey (docs/plans/unit-survey.md).
+  // The unit survey (docs/plans/pr-review-units-sites.md).
   "units",
   "survey-units",
   "units-ingest",
@@ -74,7 +74,7 @@ const DECLARED = [
   "merge",
   "select",
   "site-finalize",
-  // Kept but NOT attached (docs/plans/pr-review-units-sites-only.md, D2 c).
+  // Kept but NOT attached (docs/plans/pr-review-units-sites.md, D2 c).
   "probe-plan",
   "falsify",
   "review",

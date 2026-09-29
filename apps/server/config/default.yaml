@@ -85,7 +85,7 @@ models:
   # `review-site` and `review-select` are the `sites` review engine's keys: the
   # site investigators fall through to `review-survey`, and `select` — the
   # one call that merges and orders their findings — to `models.review`.
-  # Measured (docs/plans/site-review-recall.md): cheap investigators
+  # Measured (docs/plans/pr-review-units-sites.md): cheap investigators
   # (`openai/gpt-6-luna`, `opencode/deepseek-v4-flash`, medium) beat Haiku on
   # recall and posted precision at ¼–½ the cost. Left UNSET here for the
   # `diagnose` reason — a default must be a provider every deployment has a key
@@ -553,7 +553,7 @@ review:
     # two models' blind spots are disjoint), so the sessions double.
     siteTop: 5
 
-    # The analysis path (docs/plans/pr-review-units-sites-only.md): `facts` and
+    # The analysis path (docs/plans/pr-review-units-sites.md): `facts` and
     # `seed`, then the unit survey — `lastlight-facts units` (deterministic
     # units: a symbol, a module, the PR), ONE bounded, non-agentic model call
     # per unit on `models.review-survey`, and `lastlight-facts units-ingest`,
@@ -582,7 +582,7 @@ review:
     #
     # NOT ATTACHED to the sites engine yet: the three probe phases skip whatever
     # this says, because nothing reads their output
-    # (docs/plans/pr-review-units-sites-only.md, stage 5). The keys stay so the
+    # (docs/plans/pr-review-units-sites.md, stage 5). The keys stay so the
     # re-attachment is a wiring change, not a config one.
     #
     # A SECOND switch under an already-gated block, and TRI-STATE — the middle

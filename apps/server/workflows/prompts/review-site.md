@@ -6,7 +6,7 @@ no `findings.json`, and you touch no other pass's files.
 (`review.analysis.reviewEngine: sites`) and for the evals `micro-site-review`
 replay: a fan-out branch has no per-branch variables, so the attached brief
 names the site id, the output file and the `none` bar
-(docs/plans/adjudicate-falsify-replay.md, "Pipeline integration"). -->
+(docs/plans/pr-review-units-sites.md, "Act 6"). -->
 
 Reviewing **{{owner}}/{{repo}}#{{prNumber}}**, head `{{headSha}}` against `{{baseBranch}}`.
 
@@ -50,7 +50,7 @@ this site. Treat them exactly as what they are:
 - You may report a defect **no lead names**, and you may ignore every lead.
 - If the brief lists no leads, investigate the site on your own.
 
-<!-- Measured (docs/plans/site-review-recall.md, H6): the investigator was
+<!-- Measured (docs/plans/pr-review-units-sites.md, H6): the investigator was
 context-blind — a path, lines and a vote count — and grafana-94942's gold is
 contested because it never saw the PR description. Framed as a claim to check,
 never a reason to close: arm C's summarised leads halved precision, and H2's
@@ -80,7 +80,7 @@ grounded in code you read or ran. At most **3 findings** for this site, the
 strongest first. `none` is a legitimate answer, but it must be **earned** by the
 probes you ran (see Output), not asserted from a reading.
 
-<!-- Measured (docs/plans/site-review-recall.md, H1/H2): on the Martian e2e
+<!-- Measured (docs/plans/pr-review-units-sites.md, H1/H2): on the Martian e2e
 run 40 of 46 reporting sites reported exactly one finding, and 6 gold misses
 sat in a reporting site beside the defect it did report; 5 more sat in sites
 closed `none` after probing only the investigator's own first suspicions. The
@@ -129,7 +129,7 @@ A class that plainly cannot apply to a statement needs no probe. A class that
 could apply needs an answer from the code, not from what the author seems to
 have meant.
 
-<!-- Measured (docs/plans/adjudicate-falsify-replay.md, "Human grades on arms
+<!-- Measured (docs/plans/pr-review-units-sites.md, "Human grades on arms
 A/C", 41 findings hand-graded): the findings the user graded NOT real were
 mostly hypothetical-environment robustness — sessionStorage/localStorage
 blocked (SecurityError), quota exceeded, non-atomic storage writes, type-guard
@@ -153,7 +153,7 @@ difference is negligible" or "the author probably handles that elsewhere" is not
 a reason to close a suspicion — check what the code does when it is called, and
 if callers reach the wrong behaviour in normal use, it is a defect.
 
-<!-- Measured (docs/plans/site-review-recall.md, "Fable grades", 2026-09-28):
+<!-- Measured (docs/plans/pr-review-units-sites.md, Act 7, the h12/h13 replays, 2026-09-28):
 of the findings Fable graded NOT real across six replay arms, the recurring
 causes were code byte-identical on the base branch (a pre-existing race, a
 bounded loop unchanged by the PR) and scenarios that need a caller that does
@@ -188,7 +188,7 @@ like; a probe tells you what it does. Use the cheap ladder, cheapest first:
 4. **`lastlight-facts`** (on `PATH`, else `/opt/lastlight/bin/lastlight-facts`)
    for reference counts, signature deltas and duplicated constants.
 
-<!-- Measured (docs/plans/site-review-recall.md, 2026-09-28): an investigator
+<!-- Measured (docs/plans/pr-review-units-sites.md, 2026-09-28): an investigator
 recognised a real reference-equality bug on two library objects, could not
 import the library (dependencies are never installed), and dropped the finding
 instead of writing it as `read`. -->

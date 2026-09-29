@@ -9,7 +9,7 @@
  * routinely flag the same few lines, and that agreement is the signal: in the
  * 2026-09-27 screen (`apps/evals/scripts/cluster-screen.ts`), ±20 lines across
  * families put 10 of the 14 gold in their case's top-5 sites, where 5 sites at
- * random find about 2. See `docs/plans/adjudicate-falsify-replay.md`.
+ * random find about 2. See `docs/plans/pr-review-units-sites.md`.
  *
  * A site is a run of rows in one file whose anchor lines sit within `window`
  * lines of their neighbour (single linkage). The anchor is the row's first

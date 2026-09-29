@@ -414,7 +414,7 @@ export interface ReviewAnalysisConfig {
   /**
    * How many vote-ranked sites get an investigator, 1–8 (`lastlight-facts
    * sites --plan --top`). Measured on the 18 Martian cases' surveys
-   * (docs/plans/site-review-recall.md, H3 audit): top 5 put 16 of the 25
+   * (docs/plans/pr-review-units-sites.md, H3 audit): top 5 put 16 of the 25
    * gold-mapped rows inside a selected site, top 8 put 21, for ~2 more sites
    * per PR. Values outside 1–8 fall back to the default.
    */
@@ -534,7 +534,7 @@ export interface ReviewAnalysisConfig {
    * At most this many hypotheses are put in front of `falsify`, `null` for no
    * cap. `lastlight-facts probe-plan` ranks the owed set (derived Critical
    * first, then a survey's own ask) and cuts it here. Inert while falsify is
-   * not attached (docs/plans/pr-review-units-sites-only.md, stage 5).
+   * not attached (docs/plans/pr-review-units-sites.md, stage 5).
    *
    * Eight, provisionally. Under the unit survey 20–33 rows per case were owed,
    * which no single oracle session in one round gets through. The micro-falsify

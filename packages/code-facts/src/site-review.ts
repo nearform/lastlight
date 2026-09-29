@@ -1,7 +1,7 @@
 /**
  * The `sites` review engine's deterministic layer — `lastlight-facts sites`
- * (docs/plans/adjudicate-falsify-replay.md, "Pipeline integration: the `sites`
- * review engine"). Four verbs, one per pipeline step that needs no model:
+ * (docs/plans/pr-review-units-sites.md, "Act 6 — The sites engine, end to
+ * end"). Four verbs, one per pipeline step that needs no model:
  *
  *   --plan       `site-plan`: {@link clusterSites} over the hypothesis rows
  *                (distinct-unit votes, span 60, test-file sites ranked last), the top
@@ -109,7 +109,7 @@ export interface SitePlanOptions {
   top?: number;
   /**
    * A second investigator on every selected site, in slot
-   * {@link PAIR_SLOT_OFFSET} + rank. Measured (docs/plans/site-review-recall.md,
+   * {@link PAIR_SLOT_OFFSET} + rank. Measured (docs/plans/pr-review-units-sites.md,
    * H5): runs of one investigator overlap little, and two models' blind spots
    * are disjoint — the union of a luna and a deepseek draw stated 8/7/9 gold on
    * the 10 recall sites where two luna draws stated 4/6/6.
@@ -155,7 +155,7 @@ export interface SiteReviewPlan {
   /**
    * Sites in test files. They rank after every other site, so they fill only
    * the slots the others leave free: at a fixed cap, ranking tests WITH the
-   * rest displaced better sites (the H3 audit, docs/plans/site-review-recall.md:
+   * rest displaced better sites (the H3 audit, docs/plans/pr-review-units-sites.md:
    * top 5 + tests put 15 gold-mapped rows in a site, tests skipped 16), while
    * skipping them outright left slots empty on a PR with few sites and lost
    * the gold Martian files against test code.

@@ -69,7 +69,7 @@ phases:
   # engine → reconcile. `prepare`, `probe-plan` and `falsify` are kept but NOT
   # ATTACHED (`falsifyAttached != true` — no code projects the key): nothing in
   # the sites engine reads their output yet, and wiring them back in is its own
-  # measured change (docs/plans/pr-review-units-sites-only.md, stage 5).
+  # measured change (docs/plans/pr-review-units-sites.md, stage 5).
   #
   # Each also carries the TIER guard, `scratch.reviewTriage.depth == 'light'`.
   # Quoted `==` there, the mirror image of the bare-boolean form above: an
@@ -208,7 +208,7 @@ phases:
       fi
       exit 0
 
-  # ── The unit survey (docs/plans/unit-survey.md) ─────────────────────────────
+  # ── The unit survey (docs/plans/pr-review-units-sites.md) ─────────────────────────────
   #
   # Three phases that end in `hypotheses/<family>.jsonl` — the rows `site-plan`
   # clusters into sites:
@@ -358,7 +358,7 @@ phases:
       done
       exit 0
 
-  # ── The `sites` review engine (docs/plans/site-review-recall.md) ──────────
+  # ── The `sites` review engine (docs/plans/pr-review-units-sites.md) ──────────
   #
   # The hypothesis rows are not the items the review weighs; they are a VOLUME
   # signal: where many independent units pointed is where an investigator

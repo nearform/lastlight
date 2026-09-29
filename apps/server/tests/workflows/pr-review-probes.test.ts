@@ -560,7 +560,7 @@ describe("falsify — the loop, its gate, and the rule with money on it", () => 
   });
 
   it("is kept but NOT attached — its own guard, which no code projects", () => {
-    // docs/plans/pr-review-units-sites-only.md, D2 (c): nothing in the sites
+    // docs/plans/pr-review-units-sites.md, D2 (c): nothing in the sites
     // engine reads falsify's verdicts yet, so the three phases skip on a key
     // `renderContext` never sets, whatever `probes` says — no deployment pays
     // for probes nobody reads. Wiring them back is its own measured change.

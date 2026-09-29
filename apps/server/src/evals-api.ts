@@ -115,7 +115,7 @@ export {
 } from "lastlight-shared/overlay-bootstrap";
 export type { GhStatus, ScaffoldResult, BootstrapOpts } from "lastlight-shared/overlay-bootstrap";
 
-// ── the unit survey's model half (docs/plans/unit-survey.md → "Evals") ───────
+// ── the unit survey's model half (docs/plans/pr-review-units-sites.md → "Evals") ───────
 //
 // The `survey-units` phase is one bounded call per unit, and its handler only
 // wraps a runner with a ledger row and a transcript. The runner is exported so
