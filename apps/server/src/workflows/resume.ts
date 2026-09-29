@@ -230,6 +230,51 @@ async function resumedRunConfig(run: WorkflowRun, opts: ResumeOptions): Promise<
 }
 
 /**
+ * Keys of the stored `run.context` that are the run ROW's bookkeeping, or that
+ * resume re-derives itself — everything else is the dispatch's template
+ * context (`request.extra`) and is restored onto the resumed run.
+ *
+ * `repo` above all: the dispatch context carries the FULL `owner/repo`, while
+ * the template context's `repo` is the bare name that `workflowScopedTaskId`
+ * and every path build from.
+ */
+const RESUME_OWNED_KEYS = new Set([
+  "kind",
+  "owner",
+  "repo",
+  "issueNumber",
+  "branch",
+  "taskId",
+  "issueDir",
+  "prePopulateBranch",
+  "models",
+  "variants",
+  "repoConfig",
+  "error",
+  "sender",
+  "triggerIdOverride",
+]);
+
+/**
+ * The dispatch's own template context, as persisted on the run row.
+ *
+ * A fresh dispatch renders `{ …base fields, ...request.extra }` and persists
+ * the same `extra` on the row (`runSimpleWorkflow` → `createRun`). Resume used
+ * to rebuild ONLY the base fields, so everything the dispatch had rendered —
+ * the PR snapshot (`headSha`, `prTitle`, `ciSection`, …), `analysisEnabled`,
+ * `triageEnabled`, a comment's `commentBody` — was gone on every resumed run.
+ * That is not just boot recovery: an ADMISSION promotion (a run created
+ * `queued` at the concurrency cap) and the dashboard's Retry both come through
+ * here. A pr-review whose `analysisEnabled` vanished skips all seven analysis
+ * phases (`skip_if: analysisEnabled != true`) and silently posts the light
+ * single-pass review instead — nearform/lastlight#424, queued at the cap and
+ * admitted 20 s later.
+ */
+export function restoredDispatchContext(stored: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(stored).filter(([k]) => !RESUME_OWNED_KEYS.has(k)));
+}
+
+/**
  * Resume a workflow run by calling runWorkflow directly with the existing
  * workflowId. We bypass runSimpleWorkflow because that wrapper always creates a
  * fresh workflow_runs row — we want to keep the existing one and let the
@@ -298,13 +343,17 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
     ?? (issueNumber ? `.lastlight/issue-${issueNumber}` : `.lastlight/${run.workflowName}`);
 
   const ctx: TemplateContext = {
+    // FIRST, so every field below — the ones resume owns — wins over it. See
+    // `restoredDispatchContext`: without this a resumed run loses the PR
+    // snapshot and `analysisEnabled`, and a pr-review degrades to light.
+    ...restoredDispatchContext(stored),
     owner,
     repo,
     issueNumber: issueNumber ?? 0,
     issueTitle: issue.title,
     issueBody: issue.body,
     issueLabels: issue.labels,
-    commentBody: "",
+    commentBody: typeof stored.commentBody === "string" ? stored.commentBody : "",
     sender: "system:resume",
     branch,
     taskId,
