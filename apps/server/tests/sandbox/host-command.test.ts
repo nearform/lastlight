@@ -27,6 +27,19 @@ describe("runHostCommand", () => {
     expect(r.exitCode).toBe(124);
   });
 
+  it("kills the command's children on timeout, not just the shell", async () => {
+    // A compound command makes every shell FORK `sleep` rather than exec it (a
+    // lone `sleep 5` is exec'd by bash but forked by dash, which is why the test
+    // above passed on macOS and hung on Linux CI). Killing only `sh` orphans the
+    // child, which holds stdout/stderr open, so the call would not return until
+    // the child exited on its own — after this test's timeout.
+    const started = Date.now();
+    const r = await runHostCommand("sleep 5; echo done", { env: process.env, timeoutMs: 200 });
+    expect(r.timedOut).toBe(true);
+    expect(r.stdout).not.toContain("done");
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+
   it("runs in the given cwd", async () => {
     const r = await runHostCommand("pwd", { cwd: "/", env: process.env, timeoutMs: 10_000 });
     expect(r.stdout.trim()).toBe("/");

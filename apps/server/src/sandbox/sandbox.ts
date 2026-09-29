@@ -720,6 +720,9 @@ class InProcessSandbox implements Sandbox {
 /** The in-process backends' output ceiling per stream — what `spawnSync`'s `maxBuffer` was. */
 const HOST_COMMAND_MAX_BUFFER = 256 * 1024 * 1024;
 
+/** How long a killed host command's process group gets to exit on SIGTERM before SIGKILL. */
+const HOST_COMMAND_KILL_GRACE_MS = 5_000;
+
 /**
  * Run `sh -c <command>` on the host, ASYNCHRONOUSLY.
  *
@@ -729,8 +732,15 @@ const HOST_COMMAND_MAX_BUFFER = 256 * 1024 * 1024;
  * (measured in the evals: the live dashboard served nothing while three cases
  * sat in `facts` for minutes). Same result shape as before: the exit status,
  * 124 for a signal with no status, 1 when the shell could not start; a timeout
- * or an overflowing stream kills the child with SIGTERM, and a timeout reads
+ * or an overflowing stream kills the command with SIGTERM, and a timeout reads
  * `timedOut`.
+ *
+ * The command runs in its OWN process group (`detached`), and a kill signals
+ * the whole group. `sh -c` forks a child for anything it does not exec (a
+ * compound command always; a lone one too under dash, Linux's `sh`), and
+ * killing only `sh` orphaned that child — which kept stdout/stderr open, so the
+ * call did not return until the child exited on its own, timeout or not. A
+ * group that ignores SIGTERM gets SIGKILL after {@link HOST_COMMAND_KILL_GRACE_MS}.
  */
 export function runHostCommand(
   command: string,
@@ -744,17 +754,38 @@ export function runHostCommand(
     let errBytes = 0;
     let timedOut = false;
     let settled = false;
-    const child = spawn("sh", ["-c", command], { cwd: opts.cwd, env: opts.env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("sh", ["-c", command], {
+      cwd: opts.cwd,
+      env: opts.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
+    });
+    let killTimer: NodeJS.Timeout | undefined;
+    const signalGroup = (signal: NodeJS.Signals) => {
+      try {
+        // A negative pid signals the process group the detached spawn leads.
+        if (child.pid !== undefined) process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch {
+        // The group is already gone.
+      }
+    };
+    const killGroup = () => {
+      if (killTimer) return;
+      signalGroup("SIGTERM");
+      killTimer = setTimeout(() => signalGroup("SIGKILL"), HOST_COMMAND_KILL_GRACE_MS);
+      killTimer.unref();
+    };
     const timer =
       opts.timeoutMs > 0
         ? setTimeout(() => {
             timedOut = true;
-            child.kill("SIGTERM");
+            killGroup();
           }, opts.timeoutMs)
         : undefined;
     const collect = (chunks: Buffer[], add: (n: number) => number) => (chunk: Buffer) => {
       if (add(chunk.length) > maxBuffer) {
-        child.kill("SIGTERM");
+        killGroup();
         return;
       }
       chunks.push(chunk);
@@ -765,6 +796,7 @@ export function runHostCommand(
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       resolve(result);
     };
     child.on("error", (e) =>
