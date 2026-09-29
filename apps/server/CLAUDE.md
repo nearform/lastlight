@@ -384,6 +384,9 @@ src/
                         would break value mapping on Postgres), and the
                         CONNECTION-scoped op serializer the nine transaction
                         sites share.
+    sqlite-write-lock.ts  The in-process single-writer lock every SQLite write
+                        (plain or transactional) takes; inside a transaction
+                        callback, write through `tx`, never the root client.
     dialect.ts          The portability seam — everything that genuinely
                         differs between sqlite and Postgres: rows() / changes()
                         / isUniqueViolation() / likeEscape() / dayBucket() /

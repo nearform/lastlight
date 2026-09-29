@@ -988,8 +988,9 @@ const db = StateDb.fromClient(client, "postgres"); // tests, DI
 through, a `file:` URL passes through, `postgres(ql)://` takes the Postgres
 branch, and anything else is treated as a filesystem path (resolved, then
 `file:`-prefixed). Callers never build `file:` URLs themselves. On the sqlite
-path it then sets the boot pragmas (`journal_mode=WAL`, `busy_timeout=5000`),
-runs the legacy pre-step, and applies `drizzle/sqlite`; on the Postgres path it
+path it then sets `journal_mode=WAL`, wraps the client in the in-process write
+lock (`withSqliteWriteLock`, which also applies `busy_timeout=5000` to every
+connection libsql opens), runs the legacy pre-step, and applies `drizzle/sqlite`; on the Postgres path it
 resolves the driver, builds a pool and applies `drizzle/pg`. `close()` is async
 too, and on Postgres it is load-bearing — it drains the pool.
 
@@ -1074,10 +1075,16 @@ Two consequences worth stating, because they are not local to this page:
   *new* one for the next query — against `:memory:` that new connection is a
   fresh, empty database, so the whole store silently vanishes after the first
   commit. Tests use `makeTestDb()` (`tests/helpers/state-db.ts`), a per-test
-  temp file. Same root cause: `busy_timeout` is connection-scoped and does not
-  survive a transaction, so the connection-scoped op serializer in
-  `src/state/client.ts` — not the pragma — is the load-bearing concurrency
-  defense for the nine transaction sites.
+  temp file. Same root cause: a plain write racing an open transaction runs on
+  a second connection, fails `SQLITE_BUSY: database is locked`, and leaves an
+  un-reset statement that fails the next commit on that connection (`cannot
+  commit transaction - SQL statements in progress`). So every SQLite write —
+  one statement, or a whole transaction — holds one in-process lock
+  (`withSqliteWriteLock`, `src/state/sqlite-write-lock.ts`); reads skip it. The
+  op serializer in `src/state/client.ts` still orders the nine transaction
+  sites (on both dialects), but on SQLite the write lock is the defense. Inside
+  a transaction callback, write through `tx`, never the root client — that
+  write would wait on its own transaction's lock.
 
 ## Wire contract
 
@@ -1145,6 +1152,7 @@ precisely because of that.
 |---|---|
 | `StateDb` — async `open()` / `fromClient()` factory, store wiring, shared import surface | `src/state/db.ts` |
 | The Drizzle client, `tablesOf()`, and the connection-scoped op serializer | `src/state/client.ts` |
+| The in-process SQLite write lock | `src/state/sqlite-write-lock.ts` |
 | The portability seam (`rows` / `changes` / `isUniqueViolation` / buckets) | `src/state/dialect.ts` |
 | Schema declaration — sqlite source of truth + Postgres name-parity mirror | `src/state/schema/sqlite.ts`, `src/state/schema/pg.ts` |
 | Generated migrations (journaled; shipped in the npm tarball and the image) | `drizzle/sqlite/`, `drizzle/pg/` |

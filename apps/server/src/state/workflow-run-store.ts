@@ -165,7 +165,10 @@ type RunRowLike = Pick<
  * {@link OpSerializer}, the ONE connection-scoped mutex shared with
  * `TeamStore`: overlapping libsql interactive transactions fail in ways
  * `busy_timeout` cannot help with (it is connection-scoped, and the client
- * swaps connections after each transaction).
+ * swaps connections after each transaction). Plain writes racing those
+ * transactions are covered one layer down, by the client-level SQLite write
+ * lock (`sqlite-write-lock.ts`) — which is why every write inside a
+ * transaction callback must go through `tx`, never `this.client`.
  *
  * The long-running re-dispatch (`dispatchWorkflow`, which spawns a Docker
  * sandbox for minutes) is deliberately NOT part of any transaction here. The
