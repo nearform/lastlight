@@ -219,7 +219,7 @@ export interface SiteReviewSite {
  * of the votes), `null` = none, absent = not judged.
  */
 export interface SelectItem {
-  /** The pooled finding ids (`F1`…) the item merged. */
+  /** The pooled findings the item merged, as findings.json's `siteFindings` refs (`<siteId>#<n>`) — not the `F<n>` ids `selected.json` uses. */
   findings: string[];
   importance: string;
   /** Posted (must-fix / worth-mentioning) vs recorded only (nit / already raised). */

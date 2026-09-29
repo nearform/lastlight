@@ -281,6 +281,7 @@ async function judge(gold: GoldComment[], findings: FinalFinding[]): Promise<{ g
 
 async function runCase(c: Case, repeat: number): Promise<PhaseReplayCase> {
   const inst = instances.get(c.instanceId);
+  if (!inst) console.warn(`  ! ${c.instanceId}: not in --instances — no gold, no grade`);
   const gold = inst?.review_gold ?? [];
   const caseKey = `${c.run}__${c.instanceId}__r${repeat}`;
   const outcome: SelectOutcome = {
@@ -397,7 +398,10 @@ async function runCase(c: Case, repeat: number): Promise<PhaseReplayCase> {
       line: f.line,
     }));
 
-    if (judgeModel) {
+    // No gold loaded (an id missing from `--instances`, or no `--instances` at
+    // all) is NOT a measured zero: leave the gold fields null so the case and
+    // the arm read n/a, the module's "absent is not zero" rule.
+    if (judgeModel && gold.length) {
       const postedIdx = items.map((f, i) => (f.tier !== "internal" ? i : -1)).filter((i) => i >= 0);
       const [all, posted] = await Promise.all([judge(gold, items), judge(gold, postedIdx.map((i) => items[i]))]);
       const err = all.error ?? posted.error;
