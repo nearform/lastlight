@@ -621,6 +621,33 @@ export interface ReviewAnalysisConfig {
 export interface ReviewConfig {
   /** Post the `last-light/review` Check Run. */
   postsCheck: boolean;
+  /**
+   * With `postsCheck` on, also post the PLACEHOLDER check a deferred review
+   * leaves behind — `queued` while `after-checks` waits for CI, `neutral` while
+   * `on-request` waits for a human. `false` means the check appears only when a
+   * review actually DISPATCHES (and then concludes from the run), so under
+   * `after-checks` nothing of ours shows on a PR until its CI has settled.
+   *
+   * Off is for a deployment that wants the in-progress/verdict signal but not a
+   * Last Light check sitting in the list before CI has even run. The cost: a
+   * branch-protection rule requiring `last-light/review` has nothing to wait on
+   * until the review starts, and `on-request` loses the Re-run-button request
+   * affordance. Operator-only.
+   */
+  placeholderCheck: boolean;
+  /**
+   * How long a head's CI must have been PENDING before the review sweep stops
+   * waiting for it and reviews anyway, in minutes.
+   *
+   * The sweep is the release valve for a check that never concludes (a dead
+   * runner, a fork workflow awaiting approval), so it cannot defer on `pending`
+   * forever. But without a grace window it dispatched a review two minutes
+   * after a push, mid-CI, on whichever :00/:30 tick came next — the opposite of
+   * `after-checks`. `0` restores that. Dated from the oldest still-pending check
+   * (`PrState.checksPendingSince`); when that cannot be read the sweep
+   * dispatches, as before. Operator-only.
+   */
+  sweepPendingGraceMinutes: number;
   /** Which trigger mode this deployment/repo uses. */
   trigger: ReviewTrigger;
   /** Label that requests a review in `on-request` mode. `null` = no label route. */
@@ -775,6 +802,8 @@ export type ReviewPolicy = Omit<ReviewConfig, "triage" | "analysis"> & {
 export function defaultReviewPolicy(): ReviewPolicy {
   return {
     postsCheck: false,
+    placeholderCheck: true,
+    sweepPendingGraceMinutes: 60,
     trigger: "after-checks",
     requestLabel: null,
     skipDraft: true,

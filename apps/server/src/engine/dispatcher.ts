@@ -36,6 +36,7 @@ import {
   type ReviewTriggerOptions,
 } from "./pr-decisions.js";
 import { postReviewCheckForSkip } from "./review-check.js";
+import { supersedeRun } from "./supersede.js";
 import {
   escalatePr,
   noticeForkPr,
@@ -560,6 +561,11 @@ export interface PrGateDeps extends EscalationDeps {
    * to the boot config's.
    */
   botMention?: string;
+  /**
+   * Cancels and awaits a superseded review (`Decision.supersedes`). Injected for
+   * tests; defaults to `supersedeRun` against `deps.db`.
+   */
+  supersede?: (runId: string, reason: string) => Promise<boolean>;
 }
 
 /** What {@link applyPrDispatchGate} was asked to decide. */
@@ -618,7 +624,21 @@ export async function applyPrDispatchGate(
     decision: disposition.decision,
     reason: disposition.reason,
   });
-  if (disposition.decision !== "skip") return disposition;
+  if (disposition.decision !== "skip") {
+    // A review of a newer head replacing one still running on an older head.
+    // Here — the one gate every route crosses — so the webhook, the sweep and
+    // `/api/run` all supersede identically, and BEFORE returning `run`: the
+    // caller provisions the shared workspace next, which must not happen while
+    // the old runner is still writing to it.
+    if (disposition.supersedes) {
+      const reason = `superseded by a review of ${state.headSha.slice(0, 7)}`;
+      await (deps.supersede ?? ((id, why) => supersedeRun(id, why, { db: deps.db })))(
+        disposition.supersedes.runId,
+        reason,
+      );
+    }
+    return disposition;
+  }
 
   // The HOLD is an instruction, not a verdict: no placeholder, no label, no
   // comment, no run row — silent, exactly like `upstream-broken`. Stated here as
@@ -668,6 +688,7 @@ export async function applyPrDispatchGate(
           unchanged: !!disposition.reviewUnchanged,
         }),
         postsCheck: policy.review.postsCheck,
+        placeholderCheck: policy.review.placeholderCheck,
         route,
         owner: state.repo.split("/")[0] ?? "",
         repo: state.repo.split("/")[1] ?? "",

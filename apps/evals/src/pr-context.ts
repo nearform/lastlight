@@ -235,6 +235,7 @@ export function buildPrState(args: {
     body: args.body,
     checksState: s.checks_state ?? CHECKS_DEFAULT,
     settledCheckCount: s.settled_check_count ?? 0,
+    checksPendingSince: null,
     baseChecksState: s.base_checks_state ?? CHECKS_DEFAULT,
     botReviewAtHead: null,
     // No prior posted review, so the generated-only re-review gate (issue #271)

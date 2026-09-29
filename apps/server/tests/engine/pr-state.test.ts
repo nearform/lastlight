@@ -796,3 +796,35 @@ describe("resolvePrState — the unchanged-diff fingerprint", () => {
     });
   });
 });
+
+describe("applyDerivedState — the run lock records the holder's head", () => {
+  function derive(active: Partial<WorkflowRun> | null) {
+    const db = {
+      runs: {
+        activeForTrigger: () => active,
+        latestSucceededForTriggers: () => ({}),
+        latestForTrigger: () => null,
+      },
+      executions: { costForTriggerWorkflows: () => 0, phaseSucceededInRun: () => false },
+    } as unknown as StateDb;
+    return db;
+  }
+
+  it("carries the in-flight run's head SHA, so a newer head can supersede a stale review", async () => {
+    const state = { repo: "cliftonc/lastlight", prNumber: 190, headSha: "newhead", readErrors: [] } as unknown as PrState;
+    await applyDerivedState(state, {
+      github: null,
+      db: derive({ id: "run-old", workflowName: "pr-review", context: { headSha: "oldhead" } }),
+    });
+    expect(state.runInFlight).toEqual({ workflow: "pr-review", runId: "run-old", headSha: "oldhead" });
+  });
+
+  it("records a null head for a row that never stored one", async () => {
+    const state = { repo: "cliftonc/lastlight", prNumber: 190, headSha: "newhead", readErrors: [] } as unknown as PrState;
+    await applyDerivedState(state, {
+      github: null,
+      db: derive({ id: "run-old", workflowName: "pr-fix", context: {} }),
+    });
+    expect(state.runInFlight).toEqual({ workflow: "pr-fix", runId: "run-old", headSha: null });
+  });
+});

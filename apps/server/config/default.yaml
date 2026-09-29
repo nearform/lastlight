@@ -355,6 +355,20 @@ explore:
 
 review:
   postsCheck: false            # post the `last-light/review` Check Run
+  # With postsCheck on, also post the PLACEHOLDER check a deferred review leaves
+  # (`queued` while after-checks waits for CI, `neutral` while on-request waits
+  # for a human). `false` = the check appears only once a review actually starts,
+  # so under after-checks nothing of ours shows on a PR until its CI settles —
+  # it still shows "in progress" and then the verdict (or "didn't complete").
+  # Trade-off: a required `last-light/review` has nothing to wait on until the
+  # review starts. Operator-only.
+  placeholderCheck: true
+  # The 30-min review sweep is the release valve for CI that never concludes,
+  # so it reviews a PR whose checks are still `pending` — but only once they
+  # have been pending this long (minutes, dated from the oldest pending check).
+  # Without it the sweep reviewed mid-CI, minutes after a push. `0` = no grace.
+  # Operator-only.
+  sweepPendingGraceMinutes: 60
   # When a pr-review run is triggered:
   #   eager        — on pr.opened / synchronize / reopened, in parallel with CI
   #   after-checks — once the head SHA's checks SETTLE, either colour (default:

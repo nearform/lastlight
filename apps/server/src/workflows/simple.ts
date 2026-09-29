@@ -1590,9 +1590,16 @@ export async function runSimpleWorkflow(
       );
       return { success: true, queued: true, backpressure: true, phases: result.phases };
     } else if (!result.success && !result.paused) {
-      await db.runs.finishRun(workflowId, "failed", {
-        error: result.phases.find((p) => !p.success)?.error || "workflow failed",
-      });
+      // A run cancelled out from under its runner (the admin cancel, or a
+      // superseding review) stops at the next phase boundary and lands here.
+      // It already reached its terminal state — and fired its terminal
+      // observers — when it was cancelled; re-finishing it `failed` would
+      // rewrite that history and conclude its review check a second time.
+      if ((await db.runs.getRun(workflowId))?.status !== "cancelled") {
+        await db.runs.finishRun(workflowId, "failed", {
+          error: result.phases.find((p) => !p.success)?.error || "workflow failed",
+        });
+      }
     }
 
     return result;

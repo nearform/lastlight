@@ -6,6 +6,7 @@ import { SANDBOX_IMAGE, isSandboxAvailable } from "./images.js";
 import { githubBasicAuthB64, githubExtraheaderArgs } from "./git-http-auth.js";
 import { resetPrNotesJournal, resetVerifyScript } from "../engine/executors/shared.js";
 import { logger } from "../logging/logger.js";
+import { isRunLive } from "../workflows/live-runs.js";
 
 const log = logger("sandbox");
 
@@ -229,6 +230,20 @@ function isPathLike(value: string): boolean {
     value.startsWith("~");
 }
 
+/**
+ * A per-target workspace is owned by a run that is still executing in this
+ * process — see `prePopulateWorkspace`.
+ */
+export class WorkspaceBusyError extends Error {
+  constructor(
+    readonly workDir: string,
+    readonly ownerRunId: string,
+  ) {
+    super(`workspace ${workDir} is in use by live run ${ownerRunId}; refusing to reset it`);
+    this.name = "WorkspaceBusyError";
+  }
+}
+
 /** Marker file (at the workspace root, outside the repo so `git clean` can't
  * touch it) recording which run last provisioned this workspace. */
 const RUN_MARKER = ".lastlight-run";
@@ -335,6 +350,15 @@ export function prePopulateWorkspace(
         refreshedBase: pre.baseBranch ?? null,
       });
       return;
+    }
+    // Another run's workspace, and that run is STILL EXECUTING here. Resetting
+    // it (`git clean -fdx`, or the rebuild below) would delete the
+    // `.lastlight/` artifacts it is midway through writing — two concurrent
+    // reviews of nearform/skillspro#2008 destroyed each other exactly so. The
+    // run lock should have kept this run out; if it did not, fail THIS run
+    // rather than both.
+    if (lastRun && isRunLive(lastRun)) {
+      throw new WorkspaceBusyError(workDir, lastRun);
     }
     if (pre.recreateFromBase) {
       // build (#153): a prior incomplete run left a checkout on a possibly

@@ -279,6 +279,24 @@ describe("GitHubClient.getChecksSummary — superseded re-runs", () => {
     });
   });
 
+  it("dates a pending state from its oldest still-pending check", async () => {
+    // The review sweep's grace window reads this to tell "CI started two
+    // minutes ago" from "this check will never conclude".
+    const c = clientWith(
+      fakeOctokit(
+        [
+          attempt("Lint and test", null, "2026-08-06T10:20:00Z"),
+          attempt("Coverage", null, "2026-08-06T10:12:00Z"),
+          attempt("Typecheck", "success", "2026-08-06T10:05:00Z"),
+        ],
+        noStatus,
+      ),
+    );
+    const summary = await c.getChecksSummary("o", "r", "sha");
+    expect(summary.state).toBe("pending");
+    expect(summary.pendingSince).toBe("2026-08-06T10:12:00Z");
+  });
+
   it("does NOT collapse runs that carry no name — no identity, no de-dupe", async () => {
     // Fail safe: without a name there is no claim that two runs are the same
     // check, and keeping both can only ever report the SHA redder than it is.

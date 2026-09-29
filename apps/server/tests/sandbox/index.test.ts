@@ -37,7 +37,8 @@ import {
 } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { __prePopulateWorkspaceForTest as prePopulateWorkspace } from "#src/sandbox/index.js";
+import { __prePopulateWorkspaceForTest as prePopulateWorkspace, WorkspaceBusyError } from "#src/sandbox/index.js";
+import { markRunLive, __resetLiveRunsForTest } from "#src/workflows/live-runs.js";
 
 const mockExec = vi.mocked(execFileSync);
 
@@ -255,6 +256,27 @@ describe("prePopulateWorkspace clone depth + per-PR reuse (issue #107)", () => {
     expect(setUrl[setUrl.length - 1]).toBe("https://github.com/cliftonc/lastlight.git");
     // Marker advanced to the new run.
     expect(readFileSync(join(workDir, ".lastlight-run"), "utf-8")).toBe("new-run");
+  });
+
+  it("refuses to reset a workspace whose owning run is still executing", () => {
+    // Two concurrent reviews of nearform/skillspro#2008 shared this directory;
+    // the second one's `git clean -fdx` deleted the first one's findings and
+    // both failed. A live owner now fails the NEWCOMER, untouched workspace.
+    seedExistingClone("old-run");
+    const release = markRunLive("old-run");
+    try {
+      expect(() =>
+        prePopulateWorkspace(workDir, {
+          owner: "cliftonc", repo: REPO, branch: "pr-head", token: TOKEN,
+          runId: "new-run", shallow: true,
+        }),
+      ).toThrow(WorkspaceBusyError);
+      expect(mockExec).not.toHaveBeenCalled();
+      expect(readFileSync(join(workDir, ".lastlight-run"), "utf-8")).toBe("old-run");
+    } finally {
+      release();
+      __resetLiveRunsForTest();
+    }
   });
 
   it("does not advance the marker if the refresh fetch fails", () => {

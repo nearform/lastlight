@@ -2230,6 +2230,13 @@ export class GitHubClient {
     state: "passing" | "failing" | "pending" | "none";
     settledCount: number;
     pendingCount: number;
+    /**
+     * When the ref's CI started being pending: the oldest `started_at` of a
+     * still-pending check run, or `created_at` of a pending status context.
+     * `null` unless `state` is `pending`, or when no pending entry carries a
+     * timestamp. Dates the review sweep's grace window.
+     */
+    pendingSince?: string | null;
   }> {
     const kit = await this.kit(owner);
     // `allSettled`, not `all` — the two legs need different permissions and
@@ -2273,7 +2280,18 @@ export class GitHubClient {
     }
 
     if (runPendingCount > 0 || statusPending) {
-      return { state: "pending", settledCount, pendingCount };
+      const stamps = [
+        ...runs
+          .filter((r) => r.status === "queued" || r.status === "in_progress")
+          .map((r) => r.started_at),
+        ...(statusPending
+          ? (statuses as Array<{ state?: string; created_at?: string | null }>)
+              .filter((st) => st.state === "pending")
+              .map((st) => st.created_at)
+          : []),
+      ].filter((t): t is string => typeof t === "string" && t.length > 0);
+      const pendingSince = stamps.length > 0 ? stamps.reduce((a, b) => (a < b ? a : b)) : null;
+      return { state: "pending", settledCount, pendingCount, pendingSince };
     }
 
     const runFailing = runs.some(

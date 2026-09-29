@@ -52,6 +52,7 @@ function state(over: Partial<PrState> = {}): PrState {
     body: "",
     checksState: "failing",
     settledCheckCount: 3,
+    checksPendingSince: null,
     baseChecksState: "passing",
     botReviewAtHead: null,
     lastBotReview: null,
@@ -782,6 +783,34 @@ describe("resolveReviewTrigger", () => {
       /sweep route, checks pending$/,
     ],
     [
+      // …but only once CI has been pending past the grace window. Without it
+      // the next :00/:30 tick after EVERY push reviewed mid-CI — nearform/
+      // skillspro#2008 was reviewed two minutes after a push, before its CI
+      // ran. `now` is pinned below; this head went pending 5 minutes earlier.
+      "the sweep waits out a pending state younger than the grace window",
+      { checksState: "pending", checksPendingSince: "2026-09-29T10:55:00Z" },
+      { trigger: "after-checks", sweepPendingGraceMinutes: 60 },
+      { route: "sweep", now: new Date("2026-09-29T11:00:00Z") },
+      "defer",
+      /^checks-pending: CI pending since 2026-09-29T10:55:00Z, inside the 60-minute sweep grace window$/,
+    ],
+    [
+      "the sweep releases a pending state older than the grace window",
+      { checksState: "pending", checksPendingSince: "2026-09-29T09:55:00Z" },
+      { trigger: "after-checks", sweepPendingGraceMinutes: 60 },
+      { route: "sweep", now: new Date("2026-09-29T11:00:00Z") },
+      "dispatch",
+      /sweep route, checks pending$/,
+    ],
+    [
+      "a zero grace window restores dispatch-on-pending",
+      { checksState: "pending", checksPendingSince: "2026-09-29T10:59:00Z" },
+      { trigger: "after-checks", sweepPendingGraceMinutes: 0 },
+      { route: "sweep", now: new Date("2026-09-29T11:00:00Z") },
+      "dispatch",
+      /sweep route, checks pending$/,
+    ],
+    [
       // The exemption is the SWEEP's alone. A settle event that somehow arrives
       // with the aggregate still pending is a genuine "not yet" — another suite
       // is still running and one is coming.
@@ -846,6 +875,93 @@ describe("resolveReviewTrigger", () => {
  * and this step re-decided it in the other direction, for eight minutes and no
  * review.
  */
+describe("resolveReviewTrigger — a newer head supersedes an in-flight review", () => {
+  // The in-flight review is of `1111111…`; the PR has since moved to the
+  // fixture's `abcdef1…`.
+  const staleReview = { workflow: "pr-review", runId: "run-old", headSha: "1111111000000000" };
+
+  it("replaces a review of an older head when this head is owed one", () => {
+    const d = resolveReviewTrigger(
+      state({ checksState: "passing", runInFlight: staleReview }),
+      { ...review, trigger: "after-checks" },
+      { route: "checks-settled" },
+    );
+    expect(d.decision).toBe("dispatch");
+    expect(d.supersedes).toEqual({ workflow: "pr-review", runId: "run-old" });
+    expect(d.runInFlight).toBeUndefined();
+    expect(d.reason).toMatch(/^supersede: run-old is reviewing 1111111, the PR is now at abcdef1 — after-checks:/);
+  });
+
+  it("an explicit ask on the new head supersedes too", () => {
+    const d = resolveReviewTrigger(
+      state({ checksState: "pending", runInFlight: staleReview }),
+      review,
+      { explicitRequest: true },
+    );
+    expect(d.decision).toBe("dispatch");
+    expect(d.supersedes?.runId).toBe("run-old");
+  });
+
+  it("a new head still waiting on CI leaves the old review running", () => {
+    // Only a would-be DISPATCH supersedes. Killing the old review on a push
+    // whose own review is deferred would leave the PR with no review at all
+    // until CI settles.
+    const d = resolveReviewTrigger(
+      state({ checksState: "pending", runInFlight: staleReview }),
+      { ...review, trigger: "after-checks" },
+      { route: "attention" },
+    );
+    expect(d.decision).toBe("skip");
+    expect(d.supersedes).toBeUndefined();
+    expect(d.runInFlight?.runId).toBe("run-old");
+  });
+
+  it("never supersedes a review of the SAME head — an @bot review waits for it", () => {
+    // The 11:15 case on nearform/skillspro#2008: the auto review of this very
+    // commit was mid-flight. Killing it would redo the work on identical input.
+    const d = resolveReviewTrigger(
+      state({ runInFlight: { ...staleReview, headSha: "abcdef1234567890" } }),
+      review,
+      { explicitRequest: true },
+    );
+    expect(d.decision).toBe("skip");
+    expect(d.supersedes).toBeUndefined();
+    expect(d.reason).toMatch(/^run-in-flight: pr-review run-old/);
+  });
+
+  it("never supersedes a run that is not a review", () => {
+    // A fix run may be mid-push to the branch; the lock holds.
+    const d = resolveReviewTrigger(
+      state({ checksState: "passing", runInFlight: { ...staleReview, workflow: "pr-fix" } }),
+      review,
+      { route: "checks-settled" },
+    );
+    expect(d.decision).toBe("skip");
+    expect(d.supersedes).toBeUndefined();
+  });
+
+  it("holds the lock when the in-flight run's head is unknown", () => {
+    const d = resolveReviewTrigger(
+      state({ checksState: "passing", runInFlight: { ...staleReview, headSha: null } }),
+      review,
+      { route: "checks-settled" },
+    );
+    expect(d.decision).toBe("skip");
+    expect(d.supersedes).toBeUndefined();
+  });
+
+  it("the dispatch disposition carries the supersede through", () => {
+    const d = resolveDispatchDisposition(
+      "pr-review",
+      state({ checksState: "passing", runInFlight: staleReview }),
+      { fix, dependencies: deps, review },
+      { route: "checks-settled" },
+    );
+    expect(d.decision).toBe("run");
+    expect(d.supersedes).toEqual({ workflow: "pr-review", runId: "run-old" });
+  });
+});
+
 describe("resolveReviewPost", () => {
   const prior = { state: "APPROVED", submittedAt: "2026-08-05T20:14:46Z" };
   /** The one this run posted before it died and was resumed. */

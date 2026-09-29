@@ -98,7 +98,14 @@ export interface Decision<T> {
    * and `check-prs-awaiting-review`. A future phase must convert
    * drop-on-lock into queue-on-lock before removing any of them.
    */
-  runInFlight?: { workflow: string; runId: string };
+  runInFlight?: { workflow: string; runId: string; headSha?: string | null };
+  /**
+   * Set ONLY on a `pr-review` dispatch that REPLACES an in-flight review of an
+   * older head (see `resolveReviewTrigger`). The gate cancels that run and
+   * waits for it to stop before this one provisions the shared workspace
+   * (`./supersede.ts`). Typed for the same reason as {@link runInFlight}.
+   */
+  supersedes?: { workflow: string; runId: string };
   /**
    * Set ONLY on the `budget-exhausted` skip of {@link resolveBuildTrigger} —
    * the autonomy pipeline's daily spend ceiling, harness-wide or per-repo.
@@ -832,6 +839,24 @@ export interface ReviewTriggerOptions {
    * new commit exists, so no further `check_suite` will ever fire for them.
    */
   route?: "attention" | "checks-settled" | "sweep";
+  /** The clock, for the sweep's pending grace window. Defaults to now. */
+  now?: Date;
+}
+
+/**
+ * Has the head's CI been pending for at least the sweep's grace window?
+ *
+ * `true` when the pending start cannot be dated, or the window is `0` — both
+ * restore the sweep's old "dispatch on pending" behaviour, which is the safe
+ * direction for a release valve (a PR reviewed early costs timing; a PR never
+ * reviewed costs correctness).
+ */
+export function pendingOutlastedGrace(state: PrState, cfg: ReviewConfig, now: Date): boolean {
+  const graceMs = Math.max(0, cfg.sweepPendingGraceMinutes ?? 0) * 60_000;
+  if (graceMs === 0 || !state.checksPendingSince) return true;
+  const since = Date.parse(state.checksPendingSince);
+  if (!Number.isFinite(since)) return true;
+  return now.getTime() - since >= graceMs;
 }
 
 /**
@@ -862,6 +887,7 @@ export function resolveReviewTrigger(
     requestLabel: cfg.requestLabel,
     isDraft: state.isDraft,
     checksState: state.checksState,
+    checksPendingSince: state.checksPendingSince,
     botReviewAtHead: state.botReviewAtHead?.state ?? null,
     lastBotReviewSha: state.lastBotReview?.sha ?? null,
     assessedHeadSha: state.assessedHeadShaByWorkflow["pr-review"] ?? null,
@@ -908,7 +934,35 @@ export function resolveReviewTrigger(
   // `@bot review` does NOT override. The dispatcher replies to the human whose
   // request it dropped; the 30-minute sweep is the re-pickup.
   const locked = runLockDrop<ReviewTriggerDecision>("skip", state, inputs);
-  if (locked) return locked;
+  if (locked) {
+    // …except where the lock holder is itself a REVIEW of an older head. That
+    // review is stale the moment it lands, so a review this head is owed
+    // replaces it rather than waiting behind it (cancel-in-progress). Decided
+    // as though the lock were free: only a would-be `dispatch` supersedes — a
+    // new head whose CI is still pending defers as usual and leaves the old
+    // review running. A SAME-head holder is never superseded: an `@bot review`
+    // while the review of this very commit is mid-flight would throw that work
+    // away to redo it on identical input, so it keeps the lock (and its reply).
+    const holder = state.runInFlight;
+    if (
+      holder &&
+      holder.workflow === "pr-review" &&
+      holder.headSha &&
+      state.headSha &&
+      holder.headSha !== state.headSha
+    ) {
+      const fresh = resolveReviewTrigger({ ...state, runInFlight: null }, cfg, opts);
+      if (fresh.decision === "dispatch") {
+        return {
+          ...fresh,
+          reason: `supersede: ${holder.runId} is reviewing ${holder.headSha.slice(0, 7)}, the PR is now at ${state.headSha.slice(0, 7)} — ${fresh.reason}`,
+          inputs,
+          supersedes: { workflow: holder.workflow, runId: holder.runId },
+        };
+      }
+    }
+    return locked;
+  }
 
   const labelRequested = !!cfg.requestLabel && state.labels.includes(cfg.requestLabel);
   if (opts.explicitRequest || labelRequested) {
@@ -1090,8 +1144,25 @@ export function resolveReviewTrigger(
     // costs CORRECTNESS. `after-checks` is "on settle, either colour" — the
     // COLOUR was never the gate, and on the one route that exists precisely to
     // pick up what no webhook will ever fire for, neither is settling.
-    if (state.checksState === "pending" && route !== "sweep") {
-      return { decision: "defer", reason: "checks-pending: waiting for CI to settle", inputs };
+    //
+    // …but only once the pending state has outlasted
+    // `review.sweepPendingGraceMinutes`, dated from the oldest pending check.
+    // Without that the sweep could not tell "CI started two minutes ago" from
+    // "this check will never conclude" and reviewed mid-CI on the next :00/:30
+    // tick after every push (nearform/skillspro#2008). An undatable pending
+    // state still dispatches — see `pendingOutlastedGrace`.
+    if (
+      state.checksState === "pending" &&
+      (route !== "sweep" || !pendingOutlastedGrace(state, cfg, opts.now ?? new Date()))
+    ) {
+      return {
+        decision: "defer",
+        reason:
+          route === "sweep"
+            ? `checks-pending: CI pending since ${state.checksPendingSince}, inside the ${cfg.sweepPendingGraceMinutes}-minute sweep grace window`
+            : "checks-pending: waiting for CI to settle",
+        inputs,
+      };
     }
     if (route === "attention") {
       return {
@@ -1444,6 +1515,7 @@ export function resolveDispatchDisposition(
       // the same reason and one more — it is what stops the caller posting a
       // placeholder check against a head SHA we could not read.
       ...(review.runInFlight ? { runInFlight: review.runInFlight } : {}),
+      ...(review.supersedes ? { supersedes: review.supersedes } : {}),
       // Carried through the collapse for the same reason as the rest: the
       // caller keys on the typed field, and `decision: "skip"` alone cannot say
       // which skip it was.

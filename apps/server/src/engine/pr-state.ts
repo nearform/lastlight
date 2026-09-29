@@ -205,6 +205,13 @@ export interface PrState {
    */
   settledCheckCount: number;
   /**
+   * ISO time the head's CI has been pending since (the oldest still-pending
+   * check), or `null` when it is not pending or the read carried no timestamp.
+   * The one thing that lets the review sweep tell "CI is still running" from
+   * "this check will never conclude" (`review.sweepPendingGraceMinutes`).
+   */
+  checksPendingSince: string | null;
+  /**
    * Check state of the BASE branch tip — the sole signal for `upstream-broken`.
    * A live precondition, never a stored verdict: see `resolveFixDisposition`.
    */
@@ -489,7 +496,16 @@ export interface PrState {
    * A PR-scoped run already in flight, or null. The lock is across EVERY
    * PR-scoped workflow, not per family (09 → S4).
    */
-  runInFlight: { workflow: string; runId: string } | null;
+  runInFlight: {
+    workflow: string;
+    runId: string;
+    /**
+     * The head SHA that run was dispatched against (its context's `headSha`),
+     * or `null` when the row does not record one. A `pr-review` run reviewing
+     * an OLDER head than the PR's current one is what `supersedes` replaces.
+     */
+    headSha?: string | null;
+  } | null;
   /**
    * The GitHub reads that failed while resolving, if any.
    *
@@ -603,6 +619,7 @@ export async function resolvePrState(
     body: "",
     checksState: "none",
     settledCheckCount: 0,
+    checksPendingSince: null,
     baseChecksState: "none",
     botReviewAtHead: null,
     lastBotReview: null,
@@ -696,6 +713,7 @@ export async function resolvePrState(
       if (summary) {
         state.checksState = summary.state;
         state.settledCheckCount = summary.settledCount;
+        state.checksPendingSince = summary.pendingSince ?? null;
       }
       state.baseChecksState = baseState;
       state.botReviewAtHead = review.atHead
@@ -860,7 +878,14 @@ export async function applyDerivedState(state: PrState, deps: PrStateDeps): Prom
   const triggerId = prTriggerId(state.repo, state.prNumber);
 
   const inFlight = await deps.db.runs.activeForTrigger(prScoped, triggerId);
-  state.runInFlight = inFlight ? { workflow: inFlight.workflowName, runId: inFlight.id } : null;
+  const inFlightHead = (inFlight?.context as Record<string, unknown> | undefined)?.headSha;
+  state.runInFlight = inFlight
+    ? {
+        workflow: inFlight.workflowName,
+        runId: inFlight.id,
+        headSha: typeof inFlightHead === "string" && inFlightHead ? inFlightHead : null,
+      }
+    : null;
 
   const lifetimeCostUsd = await deps.db.executions.costForTriggerWorkflows(triggerId, family);
 

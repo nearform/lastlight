@@ -1250,6 +1250,16 @@ function sanitizeReview(
         out.skipUnchangedDiff = value;
         break;
       }
+      case "placeholderCheck":
+      case "sweepPendingGraceMinutes":
+        // Operator-only: both are about how THIS deployment presents and paces
+        // reviews across every repo it serves, not a per-repo caution dial.
+        warn(
+          "key-not-allowed",
+          path,
+          `Ignored "${path}": this key is set by the deployment operator only.`,
+        );
+        break;
       case "triage":
         // Operator-only for the same reason `analysis` is, one line below: it
         // is spend. A repo turning triage ON would buy a cheap pass on the
@@ -1663,6 +1673,9 @@ function shapeReview(raw: unknown): ReviewPolicy {
   const node = isPlainObject(raw) ? raw : {};
   return {
     postsCheck: typeof node.postsCheck === "boolean" ? node.postsCheck : d.postsCheck,
+    // Operator-only (dropped from a repo layer below), projected like the rest.
+    placeholderCheck: node.placeholderCheck !== false,
+    sweepPendingGraceMinutes: num(node.sweepPendingGraceMinutes, d.sweepPendingGraceMinutes),
     trigger: isReviewTrigger(node.trigger) ? node.trigger : d.trigger,
     requestLabel: typeof node.requestLabel === "string" && node.requestLabel.trim() ? node.requestLabel.trim() : null,
     skipDraft: typeof node.skipDraft === "boolean" ? node.skipDraft : d.skipDraft,
