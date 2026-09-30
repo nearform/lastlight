@@ -138,9 +138,10 @@ chip, linking to `#/unit-survey/<id>`; micro-survey reports do not.
 
 `src/components/PhaseReplay.tsx` renders `/api/phase-replay` (list) and one
 report fetched from `/data/phase-replay/<id>.json` (detail: per-case table) —
-the reports `scripts/micro-falsify.ts`, `scripts/micro-adjudicate.ts` and
-`scripts/micro-site-review.ts` write, each tagged with a `falsify` /
-`adjudicate` / `site-review` kind chip. Same shape as the
+the reports `scripts/micro-falsify.ts`, `scripts/micro-site-review.ts` and
+`scripts/micro-select.ts` write, each tagged with a `falsify` /
+`site-review` / `select` kind chip (`select` cases render their items —
+importance, merged ids, posted vs recorded, the gold-credited ones in green). Same shape as the
 unit-survey page: its own endpoint, its own reserved first hash segment
 (`PHASE_REPLAY_TIER_KEY` in `src/lib/router.ts`), a nav chip only when there
 are reports, and hooks in `src/lib/api.ts` (`usePhaseReplayIndex` polls at

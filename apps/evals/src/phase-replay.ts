@@ -4,7 +4,8 @@
  * rather than a full arm's hours. (`adjudicate` replays existed too; the phase
  * and its script were removed, and their reports are no longer listed.)
  *
- * `scripts/micro-falsify.ts` and `scripts/micro-site-review.ts` write these
+ * `scripts/micro-falsify.ts`, `scripts/micro-site-review.ts` and
+ * `scripts/micro-select.ts` (the sites engine's `select` pass) write these
  * reports to `eval-results/phase-replay/*.json`; `/api/phase-replay` lists them
  * and the dashboard's `phase-replay` page renders them. This module is the ONE
  * definition of the report shape and of every number derived from it, and it
@@ -27,7 +28,7 @@ import { unitSurveyStatus, type UnitSurveyStatus } from "./unit-survey-index.js"
 export const PHASE_REPLAY_DIR = "phase-replay";
 export const PHASE_REPLAY_VERSION = 1;
 
-export type PhaseKind = "falsify" | "site-review";
+export type PhaseKind = "falsify" | "site-review" | "select";
 export type PhaseReplayWriteStatus = "running" | "done" | "failed";
 export type PhaseReplayStatus = UnitSurveyStatus;
 
@@ -74,6 +75,10 @@ export interface PhaseReplayConfig {
   skipTests?: boolean;
   /** The judge used for the gold map and the grade; `null` = location only. */
   judgeModel: string | null;
+  /** select: `--recorded` — the source run's own `selected.json` finalized; no model ran. */
+  recorded?: boolean;
+  /** select: the eval run dirs the cases came from. */
+  runs?: string[];
 }
 
 /** One gold comment, as the report carries it (summary trimmed). */
@@ -208,6 +213,59 @@ export interface SiteReviewSite {
   session: string | null;
 }
 
+/**
+ * One item `select` produced, as `sites --finalize` filed it. `gold` is the
+ * index into the case's `gold` the ALL-items judge credited it with (majority
+ * of the votes), `null` = none, absent = not judged.
+ */
+export interface SelectItem {
+  /** The pooled findings the item merged, as findings.json's `siteFindings` refs (`<siteId>#<n>`) — not the `F<n>` ids `selected.json` uses. */
+  findings: string[];
+  importance: string;
+  /** Posted (must-fix / worth-mentioning) vs recorded only (nit / already raised). */
+  posted: boolean;
+  title: string;
+  path: string;
+  line: number;
+  gold?: number | null;
+}
+
+/**
+ * What `select` did with one case's pooled site findings. It cannot drop a
+ * finding (the gate enforces conservation), so the quantities that move with
+ * the model are the merges, the importance mix, what is posted, and whether
+ * the gate held at all.
+ */
+export interface SelectOutcome {
+  /** Findings `sites --merge` pooled — select's whole input. */
+  pooled: number;
+  /** Items finalized; `null` if finalize never ran. */
+  items: number | null;
+  /** pooled − items. */
+  merges: number | null;
+  /** Items by importance (`must-fix` / `worth-mentioning` / `nit`). */
+  importance: Record<string, number>;
+  posted: number | null;
+  recordedOnly: number | null;
+  /** The gate failed and finalize fell back to one item per finding — why; `null` = the selection held. */
+  fallback: string | null;
+  gateSatisfied: boolean | null;
+  /** Gold indices a POSTED item states (judged); `null` = not judged. */
+  goldPosted: number[] | null;
+  /** Gold indices ANY item states — select cannot lose these, so a move is judge noise. */
+  goldAnywhere: number[] | null;
+  /** Posted items the judge matched to a gold; `null` = not judged. */
+  postedMatched: number | null;
+  /**
+   * Gold comments loaded for the case. `0` = none (not in `--instances`): the
+   * case has nothing to judge and sits OUT of the arm's gold rollup rather
+   * than blanking it. Absent on reports written before the field existed.
+   */
+  goldCount?: number;
+  judgeError?: string | null;
+  itemsOut: SelectItem[];
+}
+
 /** What the per-site investigators found, over the top-k sites. */
 export interface SiteReviewOutcome {
   /** Sites `clusterSites` formed (before the top-k cut). */
@@ -262,6 +320,7 @@ export interface PhaseReplayCase {
   goldRows: (string | null)[] | null;
   falsify?: FalsifyOutcome;
   siteReview?: SiteReviewOutcome;
+  select?: SelectOutcome;
   /** The case's consolidated session transcript (`/data/phase-replay/sessions/…/full.jsonl`). */
   session?: string | null;
 }
@@ -378,6 +437,24 @@ export interface PhaseReplayTotals {
       costUsd: number | null;
     };
   };
+  select?: {
+    pooled: number;
+    items: number;
+    merges: number;
+    importance: Record<string, number>;
+    posted: number;
+    recordedOnly: number;
+    /** Cases whose selection failed the gate (finalize fell back). */
+    fallbacks: number;
+    /** `null` when any case was not judged — unknown, not zero. */
+    goldPosted: number | null;
+    goldAnywhere: number | null;
+    postedMatched: number | null;
+    /** Posted items in the cases WITH gold — precision's denominator (`posted` counts every case). */
+    postedJudged: number;
+    /** Pooled: postedMatched ÷ postedJudged, over judged cases; `null` unjudged or nothing posted. */
+    precision: number | null;
+  };
 }
 
 const sum = (xs: number[]): number => xs.reduce((a, b) => a + b, 0);
@@ -419,6 +496,37 @@ export function phaseReplayTotals(report: Pick<PhaseReplayReport, "kind" | "audi
       claims: f.some((x) => x.sites?.some((s) => s.claims !== null))
         ? sum(f.flatMap((x) => (x.sites ?? []).map((s) => s.claims ?? 0)))
         : null,
+    };
+  } else if (report.kind === "select") {
+    const r = ok.map((c) => c.select).filter((x): x is SelectOutcome => !!x);
+    const importance: Record<string, number> = {};
+    for (const x of r) mergeCounts(importance, x.importance);
+    // A case with no gold loaded has nothing to judge: it sits out of the
+    // gold rollup (as falsify's `goldKnown` exempts it) instead of nulling the
+    // arm. Among the rest, "absent is not zero" still holds — one unjudged
+    // case makes that metric n/a. Posted and anywhere are judged separately,
+    // so one judge failing does not blank the other.
+    const g = r.filter((x) => x.goldCount !== 0);
+    const postedJudged = g.length > 0 && g.every((x) => x.goldPosted !== null && x.postedMatched !== null);
+    const anywhereJudged = g.length > 0 && g.every((x) => x.goldAnywhere !== null);
+    const posted = sum(r.map((x) => x.posted ?? 0));
+    const postedOfJudged = sum(g.map((x) => x.posted ?? 0));
+    const matched = postedJudged ? sum(g.map((x) => x.postedMatched ?? 0)) : null;
+    totals.select = {
+      pooled: sum(r.map((x) => x.pooled)),
+      items: sum(r.map((x) => x.items ?? 0)),
+      merges: sum(r.map((x) => x.merges ?? 0)),
+      importance,
+      posted,
+      recordedOnly: sum(r.map((x) => x.recordedOnly ?? 0)),
+      fallbacks: r.filter((x) => x.fallback !== null).length,
+      goldPosted: postedJudged ? sum(g.map((x) => x.goldPosted!.length)) : null,
+      goldAnywhere: anywhereJudged ? sum(g.map((x) => x.goldAnywhere!.length)) : null,
+      postedMatched: matched,
+      postedJudged: postedOfJudged,
+      // Over the judged cases only: a gold-less case's posted items have no
+      // gold to match, and counting them would deflate precision.
+      precision: matched !== null && postedOfJudged > 0 ? matched / postedOfJudged : null,
     };
   } else {
     const r = ok.map((c) => c.siteReview).filter((x): x is SiteReviewOutcome => !!x);
@@ -491,7 +599,7 @@ export function phaseReplayStatus(
 export function summarisePhaseReplay(id: string, raw: unknown, mtime: string): PhaseReplayEntry | null {
   const r = raw as Partial<PhaseReplayReport> | null;
   if (!r || typeof r !== "object" || r.version !== PHASE_REPLAY_VERSION) return null;
-  if (r.kind !== "falsify" && r.kind !== "site-review") return null;
+  if (r.kind !== "falsify" && r.kind !== "site-review" && r.kind !== "select") return null;
   if (!r.config || !Array.isArray(r.cases)) return null;
   return {
     id,

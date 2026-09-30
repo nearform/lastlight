@@ -10,8 +10,8 @@ import { SessionModal, type SessionSource } from "./SessionModal";
 import { HumanGradesBox } from "./Grade";
 
 /**
- * Phase replays — `scripts/micro-falsify.ts` and `scripts/micro-site-review.ts`
- * rendered. One pr-review phase re-run over preserved fixtures, so a prompt,
+ * Phase replays — `scripts/micro-falsify.ts`, `scripts/micro-site-review.ts`
+ * and `scripts/micro-select.ts` rendered. One pr-review phase re-run over preserved fixtures, so a prompt,
  * model, skill or deterministic filter can be measured in minutes.
  *
  * Two rules, as on the unit-survey page: **n/a is not 0** (an audit ran no
@@ -34,7 +34,7 @@ function KindChip({ kind }: { kind: PhaseReplayEntry["kind"] }) {
     <span
       className={clsx(
         "whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-2xs font-semibold",
-        kind === "site-review" ? "bg-success/15 text-success" : "bg-info/15 text-info",
+        kind === "site-review" ? "bg-success/15 text-success" : kind === "select" ? "bg-warning/15 text-warning" : "bg-info/15 text-info",
       )}
     >
       {kind}
@@ -62,6 +62,15 @@ function StatusChip({ entry }: { entry: Pick<PhaseReplayEntry, "status" | "heart
 /** The knobs this arm turned, one line. */
 function configLine(e: Pick<PhaseReplayEntry, "kind" | "config" | "audit">): string {
   const c = e.config;
+  if (e.kind === "select") {
+    const parts = [
+      c.recorded ? "recorded selection (no model)" : `${c.model}${c.thinking ? ` · thinking ${c.thinking}` : ""}`,
+      `${c.runs?.length ?? 0} source run${c.runs?.length === 1 ? "" : "s"}`,
+    ];
+    if (!e.audit) parts.push(`${c.rounds} round${c.rounds === 1 ? "" : "s"}`);
+    if (c.promptOverride) parts.push(`prompt ${c.prompt.split("/").pop()}`);
+    return parts.join(" · ");
+  }
   const parts = [
     e.audit ? "audit (no model)" : `${c.model}${c.thinking ? ` · thinking ${c.thinking}` : ""}`,
     e.kind === "falsify"
@@ -82,14 +91,17 @@ export function PhaseReplayList({ reports }: { reports: PhaseReplayEntry[] }) {
     <div>
       <h1 className="mb-1 text-2xl font-semibold text-base-content">phase-replay</h1>
       <p className="mb-4 max-w-3xl font-mono text-xs text-base-content/50">
-        {reports.length} report{reports.length === 1 ? "" : "s"} · one pr-review phase (falsify or site-review) replayed over
+        {reports.length} report{reports.length === 1 ? "" : "s"} · one pr-review phase (falsify, site-review or select) replayed over
         preserved fixtures · click a report for its cases
       </p>
       <p className="mb-6 max-w-3xl text-2xs leading-5 text-base-content/50">
         <b className="font-semibold text-base-content/70">falsify</b>: of the rows <code>probe-plan</code> selected, how many
         got a verdict, and whether any row the judge matched to gold was <b>refuted</b> (the one outcome that loses recall).{" "}
         <b className="font-semibold text-base-content/70">site-review</b>: one investigator per top site; the findings
-        written, the gold they state (judged) and their precision, beside the gold-mapped rows the selected sites hold.
+        written, the gold they state (judged) and their precision, beside the gold-mapped rows the selected sites hold.{" "}
+        <b className="font-semibold text-base-content/70">select</b>: the pooled site findings merged into items; the
+        importance mix, what is posted vs recorded, gold posted vs gold anywhere (select cannot drop a finding, so a gap
+        there is judge noise) and posted precision. <i>recorded</i> = the source run&apos;s own selection, same instrument.
       </p>
       <div className="overflow-x-auto rounded-xl border border-base-300">
         <table className="w-full font-mono text-xs">
@@ -184,6 +196,25 @@ function ResultCell({ entry }: { entry: Pick<PhaseReplayEntry, "totals" | "audit
       </div>
     );
   }
+  if (t.select) {
+    const x = t.select;
+    return (
+      <div className="space-y-0.5">
+        <div>
+          pooled {x.pooled} → {x.items} items ({x.merges} merged) · posted {x.posted} · recorded {x.recordedOnly}
+          {x.fallbacks > 0 && <span className="text-warning"> · {x.fallbacks} fallback</span>}
+        </div>
+        <div className="text-base-content/70">
+          must-fix {x.importance["must-fix"] ?? 0} · worth-mentioning {x.importance["worth-mentioning"] ?? 0} · nit {x.importance.nit ?? 0}
+        </div>
+        <div className="text-base-content/70">
+          {x.goldPosted === null
+            ? "gold n/a — not judged"
+            : `gold posted ${x.goldPosted} · anywhere ${x.goldAnywhere ?? NA} · P ${x.precision === null ? NA : `${x.precision.toFixed(2)} (${x.postedMatched}/${x.postedJudged})`}`}
+        </div>
+      </div>
+    );
+  }
   return <span className="text-base-content/40">{NA}</span>;
 }
 
@@ -261,6 +292,7 @@ function CaseTable({ report }: { report: PhaseReplayReport }) {
   const totals = phaseReplayTotals(report);
   const isF = report.kind === "falsify";
   const isS = report.kind === "site-review";
+  const isSel = report.kind === "select";
   return (
     <div className="overflow-x-auto rounded-xl border border-base-300">
       <table className="w-full font-mono text-xs">
@@ -268,7 +300,14 @@ function CaseTable({ report }: { report: PhaseReplayReport }) {
           <tr>
             <th className="px-3 py-2">case</th>
             <th className="px-3 py-2 text-right">rows</th>
-            {isS ? (
+            {isSel ? (
+              <>
+                <th className="px-3 py-2">selection</th>
+                <th className="px-3 py-2">items</th>
+                <th className="px-3 py-2">gold</th>
+                <th className="px-3 py-2 text-right">P posted</th>
+              </>
+            ) : isS ? (
               <>
                 <th className="px-3 py-2">sites</th>
                 <th className="px-3 py-2">findings</th>
@@ -305,7 +344,7 @@ function CaseTable({ report }: { report: PhaseReplayReport }) {
                 )}
               </td>
               <td className="px-3 py-2 text-right tabular-nums">{c.rows}</td>
-              {isS ? <SiteReviewCells c={c} audit={report.audit} /> : <FalsifyCells c={c} audit={report.audit} />}
+              {isSel ? <SelectCells c={c} /> : isS ? <SiteReviewCells c={c} audit={report.audit} /> : <FalsifyCells c={c} audit={report.audit} />}
               <td className="px-3 py-2 text-right tabular-nums">{fmtMs(c.wallMs)}</td>
               <td className="px-3 py-2 text-right tabular-nums">{c.turns ?? NA}</td>
               <td className="px-3 py-2 text-right tabular-nums">{c.outputTokens === null ? NA : fmtTokens(c.outputTokens)}</td>
@@ -467,6 +506,83 @@ function SiteReviewCells({ c, audit }: { c: PhaseReplayCase; audit: boolean }) {
         {audit || matched === null || r.findings.length === 0 ? NA : `${(matched / r.findings.length).toFixed(2)} (${matched}/${r.findings.length})`}
       </td>
     </>
+  );
+}
+
+/** `select`: what the pass did with the pooled findings, and what the judge credited. */
+function SelectCells({ c }: { c: PhaseReplayCase }) {
+  const x = c.select;
+  if (!x) return <td className="px-3 py-2 text-base-content/40" colSpan={4}>{NA}</td>;
+  const posted = x.posted ?? 0;
+  return (
+    <>
+      <td className="px-3 py-2 text-2xs">
+        {x.pooled} pooled → {x.items ?? NA} items ({x.merges ?? NA} merged)
+        <div className="text-base-content/60">
+          must-fix {x.importance["must-fix"] ?? 0} · worth-mentioning {x.importance["worth-mentioning"] ?? 0} · nit {x.importance.nit ?? 0}
+        </div>
+        <div className={clsx(x.fallback ? "text-warning" : "text-base-content/40")}>
+          {x.fallback ? `FALLBACK (${x.fallback}) — one item per finding` : `gate ${x.gateSatisfied === null ? "not run" : x.gateSatisfied ? "pass" : "unsatisfied"}`}
+        </div>
+      </td>
+      <td className="px-3 py-2 text-2xs">
+        {x.posted ?? NA} posted · {x.recordedOnly ?? NA} recorded
+        <ul className="mt-1 space-y-0.5">
+          {x.itemsOut.map((it, i) => (
+            <li
+              key={i}
+              className={clsx(typeof it.gold === "number" ? "font-semibold text-success" : it.posted ? "text-base-content/70" : "text-base-content/40")}
+              title={`${it.path}:${it.line} · ${it.findings.join(", ")}`}
+            >
+              [{it.importance}]{it.posted ? "" : " (recorded)"} {it.title}
+              <span className="text-base-content/40"> · {it.findings.length > 1 ? `${it.findings.length} merged` : it.findings[0]}</span>
+              {typeof it.gold === "number" && ` → gold ${it.gold + 1}`}
+            </li>
+          ))}
+        </ul>
+      </td>
+      <td className="px-3 py-2 text-2xs">
+        {x.goldPosted === null && x.goldAnywhere === null ? (
+          <span className={clsx(x.judgeError ? "text-error" : "text-base-content/40")} title={x.judgeError ?? undefined}>
+            {x.judgeError ? "judge failed" : "n/a — not judged"}
+          </span>
+        ) : (
+          // Two judges, each shown on its own: one failing must not hide the
+          // other's measurement, and a failed one reads as FAILED, not as an
+          // unmeasured NA.
+          <>
+            <div>
+              posted{" "}
+              {x.goldPosted === null ? (
+                <GoldFailed error={x.judgeError} />
+              ) : (
+                <>
+                  {x.goldPosted.length}/{c.gold.length}
+                  {x.goldPosted.length > 0 && ` (${x.goldPosted.map((g) => g + 1).join(", ")})`}
+                </>
+              )}
+            </div>
+            <div className="text-base-content/50">
+              anywhere {x.goldAnywhere === null ? <GoldFailed error={x.judgeError} /> : `${x.goldAnywhere.length}/${c.gold.length}`}
+            </div>
+          </>
+        )}
+      </td>
+      <td className="px-3 py-2 text-right tabular-nums">
+        {x.postedMatched === null || posted === 0 ? NA : `${(x.postedMatched / posted).toFixed(2)} (${x.postedMatched}/${posted})`}
+      </td>
+    </>
+  );
+}
+
+/** A gold measurement whose judge failed — red with the reason, never the grey unmeasured NA. */
+function GoldFailed({ error }: { error?: string | null }) {
+  return error ? (
+    <span className="text-error" title={error}>
+      judge failed
+    </span>
+  ) : (
+    <span className="text-base-content/40">{NA}</span>
   );
 }
 

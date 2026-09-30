@@ -107,6 +107,71 @@ describe("phaseReplayTotals — site-review", () => {
   });
 });
 
+describe("phaseReplayTotals — select", () => {
+  const sel = (over: Partial<NonNullable<PhaseReplayCase["select"]>>): NonNullable<PhaseReplayCase["select"]> => ({
+    pooled: 9,
+    items: 4,
+    merges: 5,
+    importance: { "must-fix": 1, "worth-mentioning": 3 },
+    posted: 4,
+    recordedOnly: 0,
+    fallback: null,
+    gateSatisfied: true,
+    goldPosted: [0],
+    goldAnywhere: [0],
+    postedMatched: 1,
+    itemsOut: [],
+    ...over,
+  });
+
+  it("pools the shape and the judged grade across cases", () => {
+    const t = phaseReplayTotals(
+      report({
+        kind: "select",
+        cases: [
+          baseCase({ goldRows: null, select: sel({}) }),
+          baseCase({ goldRows: null, select: sel({ pooled: 2, items: 2, merges: 0, importance: { nit: 2 }, posted: 0, recordedOnly: 2, fallback: "missing-file", goldPosted: [], goldAnywhere: [0], postedMatched: 0 }) }),
+        ],
+      }),
+    ).select!;
+    expect(t).toMatchObject({ pooled: 11, items: 6, merges: 5, posted: 4, recordedOnly: 2, fallbacks: 1, goldPosted: 1, goldAnywhere: 2, postedMatched: 1 });
+    expect(t.importance).toEqual({ "must-fix": 1, "worth-mentioning": 3, nit: 2 });
+    expect(t.precision).toBeCloseTo(0.25);
+  });
+
+  it("an unjudged case makes the gold totals unknown, not zero", () => {
+    const t = phaseReplayTotals(report({ kind: "select", cases: [baseCase({ select: sel({}) }), baseCase({ select: sel({ goldPosted: null, goldAnywhere: null, postedMatched: null }) })] })).select!;
+    expect(t.goldPosted).toBeNull();
+    expect(t.precision).toBeNull();
+  });
+
+  it("leaves a gold-less case out of the gold rollup instead of blanking the arm", () => {
+    const t = phaseReplayTotals(
+      report({
+        kind: "select",
+        cases: [
+          baseCase({ select: sel({ goldCount: 3 }) }),
+          baseCase({ select: sel({ goldCount: 0, posted: 6, goldPosted: null, goldAnywhere: null, postedMatched: null }) }),
+        ],
+      }),
+    ).select!;
+    expect(t).toMatchObject({ posted: 10, postedJudged: 4, goldPosted: 1, goldAnywhere: 1, postedMatched: 1 });
+    // Over the judged case's 4 posted items, not all 10.
+    expect(t.precision).toBeCloseTo(0.25);
+  });
+
+  it("judges posted and anywhere separately — one judge failing does not blank the other", () => {
+    const t = phaseReplayTotals(report({ kind: "select", cases: [baseCase({ select: sel({ goldAnywhere: null, judgeError: "all: boom" }) })] })).select!;
+    expect(t.goldAnywhere).toBeNull();
+    expect(t.goldPosted).toBe(1);
+    expect(t.precision).toBeCloseTo(0.25);
+  });
+
+  it("lists a select report", () => {
+    expect(summarisePhaseReplay("id", report({ kind: "select" }), "t")?.kind).toBe("select");
+  });
+});
+
 describe("summarisePhaseReplay", () => {
   it("lists a phase-replay report and refuses anything else", () => {
     const e = summarisePhaseReplay("id", report({ planned: [{ instanceId: "a", arm: "arm1", fixture: "/f", repeat: 1 }] }), "2026-01-01T00:00:00Z");
