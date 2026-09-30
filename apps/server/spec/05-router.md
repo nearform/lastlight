@@ -895,7 +895,12 @@ Two consequences worth stating outright:
   lands, so the decision carries `supersedes`, and `applyPrDispatchGate`
   cancels the old run, kills its sandbox containers and waits for its runner
   to actually stop (`src/engine/supersede.ts`, `src/workflows/live-runs.ts`)
-  before returning `run` — both runs share the per-target workspace. A new
+  before returning `run` — both runs share the per-target workspace. The
+  cancel is final: `finishRun` never moves a `cancelled` row, so the killed
+  phase's failure cannot flip it to `failed` and hide it from the scheduler's
+  cancel check; a fan-out checks for it before each branch, gate and gate
+  re-run; and the supersede's `superseded: …` reason on the open ledger rows
+  survives the killed phase's late `exit 137` finish (first verdict wins). A new
   head whose own review is merely *deferred* (CI still pending) leaves the old
   review running, a fix-family holder is never superseded (it may be mid-push),
   and a **same-head** holder never is either: an `@bot review` while the review

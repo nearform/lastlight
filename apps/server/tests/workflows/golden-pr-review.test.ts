@@ -14,6 +14,7 @@ import {
   PhaseRef,
 } from "lastlight-workflow-engine";
 import type {
+  CommandSpec,
   DagNode,
   ExecutorConfig,
   GitSandboxAccess,
@@ -257,6 +258,8 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
       expect(phaseSkipIfExpressions(byName.get(name)!), `${name}.skip_if`).toEqual([
         "analysisEnabled != true",
         TIER_GUARD,
+        // `select` alone also skips an empty pool — its answer is fixed.
+        ...(name === "select" ? ["phaseOutputs.siteMerge.contains('SITE_MERGE_EMPTY')"] : []),
       ]);
     }
     for (const name of FALSIFY_PHASES) {
@@ -467,6 +470,24 @@ class FailOnePromptAgent extends FakeAgentPort {
 }
 
 /**
+ * `sites --merge` pooled nothing: it prints the marker `select` skips on
+ * (`SITE_MERGE_EMPTY_MARKER` in lastlight-code-facts, which core does not
+ * depend on — hence the literal).
+ */
+class EmptyMergeAgent extends FakeAgentPort {
+  constructor() {
+    super({ success: true, output: "reviewed", turns: 1, durationMs: 0 });
+  }
+  override async runCommand(spec: CommandSpec, config: never, opts: never) {
+    const res = await super.runCommand(spec, config, opts);
+    if (spec.kind === "bash" && spec.command.includes("sites --merge")) {
+      return { ...res, output: `# Site findings to select from\n\nSITE_MERGE_EMPTY\n` };
+    }
+    return res;
+  }
+}
+
+/**
  * The config-derived budgets `dispatchWorkflow` + `renderContext` seed on every
  * real pr-review run (issue #385). This harness drives the scheduler directly,
  * so it seeds them itself — from the same resolved defaults, never a literal.
@@ -638,6 +659,16 @@ describe("golden — the real scheduler", () => {
     // …and it is honestly reported as a failed RUN, not quietly swallowed.
     expect(result.success).toBe(false);
     expect(result.phases.filter((p) => p.phase.startsWith("select")).some((p) => !p.success)).toBe(true);
+  });
+
+  it("skips select when merge pooled nothing — no model call for a fixed answer", async () => {
+    const { result, postReview } = await runPrReview(PIPELINE_CTX, new EmptyMergeAgent(), seeded(PIPELINE_CTX));
+    const seen = result.phases.map((p) => p.phase);
+    expect(seen).not.toContain("select_iter_1");
+    expect(result.phases.find((p) => p.phase === "select")?.output).toContain("SITE_MERGE_EMPTY");
+    expect(seen).toContain("site-finalize");
+    expect(postReview.calls).toEqual(["post-review"]);
+    expect(result.success).toBe(true);
   });
 
   it("the unit calls FAILING still reach the sites and the post — ingest records the gap", async () => {

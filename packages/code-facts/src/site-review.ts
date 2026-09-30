@@ -761,6 +761,15 @@ export function mergeSiteFindings(opts: { dir: string; repo: string }): SiteMerg
   return { version: SITE_REVIEW_VERSION, findings, groups, slots, unpooled };
 }
 
+/**
+ * Printed by `sites --merge` when it pooled nothing. pr-review's `select` phase
+ * `skip_if`s on it: an empty pool has exactly one correct selection, and the
+ * agent asked to write it produced the file and then an empty completion,
+ * which failed the phase and its retry (nearform, 2026-09-29). With `select`
+ * skipped, `--finalize` finds no selection and falls back to the (empty) pool.
+ */
+export const SITE_MERGE_EMPTY_MARKER = "SITE_MERGE_EMPTY";
+
 /** `select`'s input, as Markdown: the pooled findings with excerpts, and the proposed groups. */
 export function renderSiteMerge(merge: SiteMerge): string {
   const out: string[] = ["# Site findings to select from", ""];
@@ -770,7 +779,7 @@ export function renderSiteMerge(merge: SiteMerge): string {
     "",
   );
   if (!merge.findings.length) {
-    out.push("There are no findings. Write `{\"items\": []}` and stop.", "");
+    out.push("There are no findings. Write `{\"items\": []}` and stop.", "", SITE_MERGE_EMPTY_MARKER, "");
     return `${out.join("\n")}\n`;
   }
   for (const f of merge.findings) {

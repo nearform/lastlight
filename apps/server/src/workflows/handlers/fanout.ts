@@ -321,6 +321,19 @@ export function gateRetrySection(command: string, output: string): string {
 }
 
 /**
+ * A branch the fan-out never started because the run was cancelled first.
+ * `deduped`, so no gate runs on it and it is never re-run.
+ */
+function cancelledOutcome(phase: PhaseDefinition, branch: FanoutBranch): BranchOutcome {
+  return {
+    branch,
+    label: PhaseRef.branch(phase.name, branch.name).format(),
+    deduped: true,
+    result: { success: false, error: "run cancelled before this branch started", output: "", turns: 0, durationMs: 0 },
+  };
+}
+
+/**
  * Does this branch get an `on_branch_gate_failure` re-run?
  *
  * Only when its gate RAN and said no. A timed-out gate says nothing about the
@@ -417,14 +430,22 @@ export class FanoutHandler implements PhaseTypeHandler {
         async (session) => {
           try {
             const settled = phase.skip_satisfied_branches ? await this.preGate(session, phase, branches) : new Map<FanoutBranch, BranchOutcome>();
-            const ran = await mapPool(branches, concurrency, (branch) =>
-              Promise.resolve(settled.get(branch) ?? this.runBranch(session, phase, branch, outputs, policy)),
-            );
+            // The scheduler only sees a cancel between phases, and this whole
+            // fan-out is one phase. So it looks for itself before each piece of
+            // work it has not started: a superseded review's sandbox is already
+            // killed, and every branch or re-run launched into it fails at once.
+            const ran = await mapPool(branches, concurrency, async (branch) => {
+              const done = settled.get(branch);
+              if (done) return done;
+              if (await this.runCancelled()) return cancelledOutcome(phase, branch);
+              return this.runBranch(session, phase, branch, outputs, policy);
+            });
+            if (await this.runCancelled()) return ran;
             await this.runGates(session, phase, ran);
             // `on_branch_gate_failure`: one directed re-run per branch whose gate
             // ran and said no, concurrently like the first round, then those
             // branches' gates again. Nothing else is re-run.
-            if ((phase.on_branch_gate_failure?.retries ?? 0) > 0) {
+            if ((phase.on_branch_gate_failure?.retries ?? 0) > 0 && !(await this.runCancelled())) {
               const failing = ran.filter((o) => gateRetryWanted(o));
               if (failing.length > 0) {
                 await mapPool(failing, concurrency, (o) => this.rerunForGate(session, phase, o));
@@ -448,6 +469,13 @@ export class FanoutHandler implements PhaseTypeHandler {
     }
 
     return this.report(phase, outcomes, policy);
+  }
+
+  /** Has the run been cancelled (an admin cancel, or a superseding review)? */
+  private async runCancelled(): Promise<boolean> {
+    const { store, workflowId } = this.run;
+    if (!store || !workflowId) return false;
+    return (await store.runs.getRun(workflowId))?.status === "cancelled";
   }
 
   // ── Branches ───────────────────────────────────────────────────────────────

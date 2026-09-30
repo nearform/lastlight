@@ -201,6 +201,31 @@ export function runExecutionsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
       });
     });
 
+    describe("recordFinish — the first verdict wins", () => {
+      it("keeps a supersede's reason when the killed phase finishes late, but records its spend", async () => {
+        await db.executions.recordStart({
+          id: "sup-1",
+          triggerType: "webhook",
+          triggerId: "owner/repo#9",
+          skill: "pr-review:select",
+          startedAt: "2026-09-01T10:00:00.000Z",
+          workflowRunId: "run-sup",
+        });
+        await db.executions.recordFinish("sup-1", { success: false, error: "superseded: a review of 7608eb5" });
+        await db.executions.recordFinish("sup-1", {
+          success: false,
+          error: "Sandbox agent failed (exit 137): no output",
+          stopReason: "error_exit_137",
+          costUsd: 0.25,
+        });
+
+        const [row] = await db.executions.getExecutionsForWorkflowRun("run-sup", "owner/repo#9");
+        expect(row.error).toBe("superseded: a review of 7608eb5");
+        expect(row.stopReason).toBeFalsy();
+        expect(row.costUsd).toBe(0.25);
+      });
+    });
+
     describe("recordSkippedPhase — skips land in the executions ledger", () => {
       it("writes a finished, non-successful skip row that shouldRunPhase re-evaluates", async () => {
         const skill = "build:merge";
