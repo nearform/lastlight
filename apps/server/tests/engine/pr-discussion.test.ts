@@ -12,7 +12,7 @@ import { MAX_DISCUSSION_CHARS, renderPriorDiscussion } from "../../src/engine/pr
 
 const SELECT_PROMPT = readFileSync(join(__dirname, "../../workflows/prompts/review-select.md"), "utf8");
 
-const empty: PrDiscussionRead = { reviews: [], threads: [], comments: [] };
+const empty: PrDiscussionRead = { reviews: [], threads: [], threadsTruncated: false, comments: [] };
 
 describe("renderPriorDiscussion", () => {
   it("is empty when the read failed or nobody said anything, so the guard reads false", () => {
