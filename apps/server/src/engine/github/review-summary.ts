@@ -63,8 +63,9 @@ export interface ReviewHistoryContext {
   rereview?: boolean;
   /**
    * A point an earlier review raised is still unresolved: a `Still open` ledger
-   * line, or a finding recorded `alreadyRaised` rather than re-posted. Either
-   * way a clean-looking re-review is not a "good to merge".
+   * line, a finding recorded `alreadyRaised` rather than re-posted, or an open
+   * thread of ours on unchanged code. Any of them and a clean-looking
+   * re-review is not a "good to merge".
    */
   stillOpen?: boolean;
 }
@@ -146,8 +147,10 @@ export interface PostedSummaryInput {
   /** `findings.json`'s own summary — read ONLY for its leading re-review ledger. */
   documentSummary?: string | null;
   prTitle?: string;
-  /** We have reviewed this PR before. */
+  /** We reviewed an earlier head of this PR — the author has pushed since. */
   rereview?: boolean;
+  /** An earlier review of ours has an open inline thread on unchanged code. */
+  priorOpen?: boolean;
   model?: string;
   chat?: ChatFunction;
   timeoutMs?: number;
@@ -160,7 +163,7 @@ export async function writePostedSummary(input: PostedSummaryInput): Promise<Pos
   const withLedger = (text: string) => (ledger ? `${ledger}\n\n${text}` : text);
   const history: ReviewHistoryContext = {
     rereview: input.rereview,
-    stillOpen: hasStillOpen(ledger, input.tiered),
+    stillOpen: !!input.priorOpen || hasStillOpen(ledger, input.tiered),
   };
   const fallback = (reason: string): PostedSummary => ({
     text: withLedger(renderFallbackSummary(input.event, posted, history)),
@@ -175,6 +178,9 @@ export async function writePostedSummary(input: PostedSummaryInput): Promise<Pos
     input.prTitle ? `Pull request: ${input.prTitle}` : "",
     `Review event: ${input.event}`,
     input.rereview ? "This is a re-review: the author has pushed changes since the last one." : "",
+    history.stillOpen
+      ? "A point an earlier review raised is still unresolved: do not call the change ready or good to merge."
+      : "",
     `Posted findings (${posted.length}):`,
     ...posted.map(describe),
   ]

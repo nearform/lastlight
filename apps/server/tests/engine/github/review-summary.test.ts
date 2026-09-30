@@ -175,6 +175,16 @@ describe("writePostedSummary — re-review", () => {
     expect(out.text).toBe("- **Fixed** — the null check at a.ts:3\n\nThanks for the updates — nothing further from me. Good to merge.");
   });
 
+  it("does not say good to merge over an open thread of ours", async () => {
+    const out = await writePostedSummary({
+      event: "COMMENT",
+      tiered: { inline: [], body: [], internal: [] },
+      rereview: true,
+      priorOpen: true,
+    });
+    expect(out.text).toBe("Thanks for the updates — nothing new to raise.");
+  });
+
   it("does not say good to merge when the ledger has a point still open", async () => {
     const out = await writePostedSummary({
       event: "COMMENT",
