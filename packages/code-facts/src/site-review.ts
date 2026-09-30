@@ -1040,11 +1040,12 @@ export function finalizeSiteFindings(opts: { dir: string; repo: string }): Final
     const nit = item.importance === "nit" || !!item.alreadyRaised;
     const text = primary.lineText.trim();
     // A range posts as its whole text: the poster matches it against the diff
-    // and derives `start_line` from the match. `anchorLine` is the single line
-    // it falls back to when the range reaches outside a hunk (a range that
-    // cannot anchor inline must never cost a finding its inline comment).
+    // and derives `start_line` from the match. `anchorLine` is ALWAYS written
+    // for a range — even a short end line like `}` — because it is how the
+    // poster knows to resolve a range that misses exactly as the range-less
+    // finding would (whose own short-line rule is the `>= 4` below).
     const anchor = primary.rangeText
-      ? { existingCode: primary.rangeText, ...(text.length >= 4 ? { anchorLine: primary.lineText } : {}) }
+      ? { existingCode: primary.rangeText, anchorLine: primary.lineText }
       : text.length >= 4
         ? { existingCode: primary.lineText }
         : {};

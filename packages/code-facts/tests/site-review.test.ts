@@ -253,6 +253,20 @@ describe("a finding's optional range", () => {
     });
   });
 
+  it("writes anchorLine for a range even when its end line is too short to be evidence", () => {
+    const { repo, dir } = workspace();
+    const src = readFileSync(join(repo, "src", "a.ts"), "utf8").split("\n");
+    src[13] = "}";
+    writeFileSync(join(repo, "src", "a.ts"), src.join("\n"));
+    writeSitePlan(dir);
+    writeFindings(dir, "site-001", [finding("site-001", 14, { startLine: 12 })]);
+    writeSiteMerge(dir, repo);
+    writeFileSync(join(dir, "sites", "selected.json"), JSON.stringify({ items: [{ findings: ["F1"], title: "t", importance: "must-fix" }] }));
+    finalizeSiteFindings({ dir, repo });
+    const doc = JSON.parse(readFileSync(join(dir, "findings.json"), "utf8"));
+    expect(doc.findings[0]).toMatchObject({ existingCode: "const line12 = 12;\nconst line13 = 13;\n}", anchorLine: "}" });
+  });
+
   it("drops the range when the cited end line was blank and moved", () => {
     const { repo, dir } = workspace();
     const src = readFileSync(join(repo, "src", "a.ts"), "utf8").split("\n");
