@@ -90,6 +90,15 @@ export interface ReviewFinding {
    */
   tier?: "inline" | "body" | "internal";
   /**
+   * The selection's importance (`must-fix` / `worth-mentioning` / `nit`), and
+   * — on a re-review — who already raised this point and where. Written by
+   * `sites --finalize`; an `alreadyRaised` finding is recorded `internal`,
+   * never re-posted, but it is still OPEN, so the summary must not call the PR
+   * good to merge over it.
+   */
+  importance?: string;
+  alreadyRaised?: string;
+  /**
    * #399's typed attributes, written INSTEAD of `tier` (by the removed
    * adjudicator's `dossier` mode; `site-finalize` writes a `category`).
    * {@link computeTier} turns them into a tier; absent, everything below
