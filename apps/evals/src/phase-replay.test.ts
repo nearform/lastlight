@@ -155,7 +155,7 @@ describe("phaseReplayTotals — select", () => {
         ],
       }),
     ).select!;
-    expect(t).toMatchObject({ posted: 10, goldPosted: 1, goldAnywhere: 1, postedMatched: 1 });
+    expect(t).toMatchObject({ posted: 10, postedJudged: 4, goldPosted: 1, goldAnywhere: 1, postedMatched: 1 });
     // Over the judged case's 4 posted items, not all 10.
     expect(t.precision).toBeCloseTo(0.25);
   });

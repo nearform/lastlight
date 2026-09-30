@@ -144,7 +144,11 @@ const checkoutsRoot = flag("--checkouts") ? resolve(flag("--checkouts")!) : null
 const label = (flag("--label") ?? (recorded ? "recorded" : `${model.split("/").pop()}${thinking ? `-${thinking}` : ""}`)).replace(/[^A-Za-z0-9._@:-]+/g, "_");
 const GATE_TIMEOUT_SECONDS = 900;
 
-if (!positional.length || !checkoutsRoot) {
+// `--instances` is REQUIRED: it is the PR context the select prompt is
+// rendered against (owner/repo/number/head), not only the gold. Without it the
+// prompt silently reads "owner/repo#0, head HEAD" and the model is benchmarked
+// on a misdescribed PR.
+if (!positional.length || !checkoutsRoot || !flag("--instances")) {
   console.error("usage: micro-select.ts <run-dir>... --checkouts <root> --instances <instances.json> [--model m] [--thinking t] [--recorded] …");
   process.exit(2);
 }
@@ -304,7 +308,6 @@ async function judge(gold: GoldComment[], findings: FinalFinding[]): Promise<{ g
 
 async function runCase(c: Case, repeat: number): Promise<PhaseReplayCase> {
   const inst = instances.get(c.instanceId);
-  if (!inst) console.warn(`  ! ${c.instanceId}: not in --instances — no gold, no grade`);
   const gold = inst?.review_gold ?? [];
   const caseKey = `${c.run}__${c.instanceId}__r${repeat}`;
   const outcome: SelectOutcome = {
@@ -341,6 +344,13 @@ async function runCase(c: Case, repeat: number): Promise<PhaseReplayCase> {
     select: outcome,
     session: null,
   };
+  // A case missing from `--instances` has no PR context to render the prompt
+  // against — replaying it would benchmark the model on a placeholder PR. It
+  // errors, loudly, instead.
+  if (!inst) {
+    console.warn(`  ! ${c.instanceId}: not in --instances — no PR context, case skipped`);
+    return { ...result, ok: false, error: `${c.instanceId} is not in --instances: no PR context to replay against` };
+  }
   const scratch = mkdtempSync(join(tmpdir(), `micro-select-${c.instanceId}-`));
   const sessionDir = join(outDir, "sessions", stem, caseKey);
   const sessionUrl = `/data/${PHASE_REPLAY_DIR}/sessions/${stem}/${caseKey}/full.jsonl`;
@@ -490,7 +500,7 @@ console.log(
     `  importance must-fix ${sel.importance["must-fix"] ?? 0} · worth-mentioning ${sel.importance["worth-mentioning"] ?? 0} · nit ${sel.importance.nit ?? 0}`,
     sel.goldPosted === null
       ? "  not judged"
-      : `  gold posted ${sel.goldPosted} / anywhere ${sel.goldAnywhere} / total ${t.gold} · posted precision ${sel.precision === null ? "n/a" : sel.precision.toFixed(2)} (${sel.postedMatched}/${sel.posted})`,
+      : `  gold posted ${sel.goldPosted} / anywhere ${sel.goldAnywhere} / total ${t.gold} · posted precision ${sel.precision === null ? "n/a" : sel.precision.toFixed(2)} (${sel.postedMatched}/${sel.postedJudged})`,
     recorded ? "" : `  $${(t.costUsd ?? 0).toFixed(2)} · wall p50 ${t.wallMedianMs === null ? "n/a" : `${Math.round(t.wallMedianMs / 1000)}s`}`,
   ]
     .filter(Boolean)

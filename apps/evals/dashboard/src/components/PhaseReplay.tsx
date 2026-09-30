@@ -210,7 +210,7 @@ function ResultCell({ entry }: { entry: Pick<PhaseReplayEntry, "totals" | "audit
         <div className="text-base-content/70">
           {x.goldPosted === null
             ? "gold n/a — not judged"
-            : `gold posted ${x.goldPosted} · anywhere ${x.goldAnywhere} · P ${x.precision === null ? NA : x.precision.toFixed(2)}`}
+            : `gold posted ${x.goldPosted} · anywhere ${x.goldAnywhere ?? NA} · P ${x.precision === null ? NA : `${x.precision.toFixed(2)} (${x.postedMatched}/${x.postedJudged})`}`}
         </div>
       </div>
     );
@@ -542,17 +542,29 @@ function SelectCells({ c }: { c: PhaseReplayCase }) {
         </ul>
       </td>
       <td className="px-3 py-2 text-2xs">
-        {x.goldPosted === null ? (
+        {x.goldPosted === null && x.goldAnywhere === null ? (
           <span className={clsx(x.judgeError ? "text-error" : "text-base-content/40")} title={x.judgeError ?? undefined}>
             {x.judgeError ? "judge failed" : "n/a — not judged"}
           </span>
         ) : (
+          // Two judges, each shown on its own: one failing must not hide the
+          // other's measurement, and a failed one reads as FAILED, not as an
+          // unmeasured NA.
           <>
             <div>
-              posted {x.goldPosted.length}/{c.gold.length}
-              {x.goldPosted.length > 0 && ` (${x.goldPosted.map((g) => g + 1).join(", ")})`}
+              posted{" "}
+              {x.goldPosted === null ? (
+                <GoldFailed error={x.judgeError} />
+              ) : (
+                <>
+                  {x.goldPosted.length}/{c.gold.length}
+                  {x.goldPosted.length > 0 && ` (${x.goldPosted.map((g) => g + 1).join(", ")})`}
+                </>
+              )}
             </div>
-            <div className="text-base-content/50">anywhere {x.goldAnywhere?.length ?? NA}/{c.gold.length}</div>
+            <div className="text-base-content/50">
+              anywhere {x.goldAnywhere === null ? <GoldFailed error={x.judgeError} /> : `${x.goldAnywhere.length}/${c.gold.length}`}
+            </div>
           </>
         )}
       </td>
@@ -560,6 +572,17 @@ function SelectCells({ c }: { c: PhaseReplayCase }) {
         {x.postedMatched === null || posted === 0 ? NA : `${(x.postedMatched / posted).toFixed(2)} (${x.postedMatched}/${posted})`}
       </td>
     </>
+  );
+}
+
+/** A gold measurement whose judge failed — red with the reason, never the grey unmeasured NA. */
+function GoldFailed({ error }: { error?: string | null }) {
+  return error ? (
+    <span className="text-error" title={error}>
+      judge failed
+    </span>
+  ) : (
+    <span className="text-base-content/40">{NA}</span>
   );
 }
 

@@ -450,7 +450,9 @@ export interface PhaseReplayTotals {
     goldPosted: number | null;
     goldAnywhere: number | null;
     postedMatched: number | null;
-    /** Pooled: postedMatched ÷ posted, over judged cases; `null` unjudged or nothing posted. */
+    /** Posted items in the cases WITH gold — precision's denominator (`posted` counts every case). */
+    postedJudged: number;
+    /** Pooled: postedMatched ÷ postedJudged, over judged cases; `null` unjudged or nothing posted. */
     precision: number | null;
   };
 }
@@ -521,6 +523,7 @@ export function phaseReplayTotals(report: Pick<PhaseReplayReport, "kind" | "audi
       goldPosted: postedJudged ? sum(g.map((x) => x.goldPosted!.length)) : null,
       goldAnywhere: anywhereJudged ? sum(g.map((x) => x.goldAnywhere!.length)) : null,
       postedMatched: matched,
+      postedJudged: postedOfJudged,
       // Over the judged cases only: a gold-less case's posted items have no
       // gold to match, and counting them would deflate precision.
       precision: matched !== null && postedOfJudged > 0 ? matched / postedOfJudged : null,
