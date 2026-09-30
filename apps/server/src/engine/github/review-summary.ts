@@ -57,22 +57,59 @@ function plural(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`;
 }
 
+/** What the reviewer knows about the PR's earlier reviews, for the tone of a clean one. */
+export interface ReviewHistoryContext {
+  /** We have reviewed this PR before — this is a re-review. */
+  rereview?: boolean;
+  /**
+   * A point an earlier review raised is still unresolved: a `Still open` ledger
+   * line, or a finding recorded `alreadyRaised` rather than re-posted. Either
+   * way a clean-looking re-review is not a "good to merge".
+   */
+  stillOpen?: boolean;
+}
+
+const STILL_OPEN_LINE = /^\s*(?:[-*]\s*)?(?:\*\*)?Still open\b/im;
+
+/**
+ * Is anything an earlier review raised still open? Reads the carried-over
+ * ledger and the findings recorded `internal` because the PR's discussion had
+ * already raised them (a `nit` does not hold a merge up).
+ */
+export function hasStillOpen(ledger: string, tiered: TieredFindings): boolean {
+  if (STILL_OPEN_LINE.test(ledger)) return true;
+  return tiered.internal.some((r) => !!r.finding.alreadyRaised && r.finding.importance !== "nit");
+}
+
 /**
  * The summary rendered in code — used when there is nothing to summarise and
  * whenever the model's answer cannot be used. Names no finding: the findings
  * render themselves below it.
+ *
+ * Brief and kind. A clean re-review thanks the author for the updates and
+ * says it is good to merge — unless an earlier point is still open, when it
+ * thanks them and claims nothing more.
  */
-export function renderFallbackSummary(event: ReviewEvent, posted: ReviewFinding[]): string {
+export function renderFallbackSummary(
+  event: ReviewEvent,
+  posted: ReviewFinding[],
+  history: ReviewHistoryContext = {},
+): string {
   const n = posted.length;
-  if (event === "APPROVE") {
-    return n === 0 ? "Looks good to merge." : `Looks good to merge; ${plural(n, "note", "notes")} below.`;
-  }
   if (event === "REQUEST_CHANGES") {
     return n === 0
       ? "Requesting changes."
       : `Requesting changes: ${plural(n, "issue", "issues")} below should be addressed before this merges.`;
   }
-  return n === 0 ? "No issues to raise." : `${plural(n, "issue", "issues")} below worth a look.`;
+  if (n === 0 && history.rereview) {
+    return history.stillOpen
+      ? "Thanks for the updates — nothing new to raise."
+      : "Thanks for the updates — nothing further from me. Good to merge.";
+  }
+  if (event === "APPROVE") {
+    return n === 0 ? "Looks good to merge." : `Looks good to merge; ${plural(n, "note", "notes")} below.`;
+  }
+  return n === 0 ? "Looks good — no issues to raise." : `${plural(n, "issue", "issues")} below worth a look.`;
 }
 
 const SYSTEM = [
@@ -81,6 +118,7 @@ const SYSTEM = [
   "Write 1 to 3 sentences of plain prose: the overall assessment of the change and why the review's event (approve / request changes / comment) follows.",
   "You may refer to the single most serious finding by what it is about. Never mention, hint at or count any issue that is not in the list.",
   "No lists, no headings, no severity labels, no file paths. Do not mention reviews, pipelines, models or tools.",
+  "Be brief and kind: plain and warm, never curt, no flattery. On a re-review, open with a short thanks for the updates.",
   "Output only the summary text.",
 ].join(" ");
 
@@ -108,6 +146,8 @@ export interface PostedSummaryInput {
   /** `findings.json`'s own summary — read ONLY for its leading re-review ledger. */
   documentSummary?: string | null;
   prTitle?: string;
+  /** We have reviewed this PR before. */
+  rereview?: boolean;
   model?: string;
   chat?: ChatFunction;
   timeoutMs?: number;
@@ -118,8 +158,12 @@ export async function writePostedSummary(input: PostedSummaryInput): Promise<Pos
   const posted = postedFindings(input.tiered);
   const ledger = extractPriorLedger(input.documentSummary);
   const withLedger = (text: string) => (ledger ? `${ledger}\n\n${text}` : text);
+  const history: ReviewHistoryContext = {
+    rereview: input.rereview,
+    stillOpen: hasStillOpen(ledger, input.tiered),
+  };
   const fallback = (reason: string): PostedSummary => ({
-    text: withLedger(renderFallbackSummary(input.event, posted)),
+    text: withLedger(renderFallbackSummary(input.event, posted, history)),
     source: "fallback",
     reason,
   });
@@ -130,6 +174,7 @@ export async function writePostedSummary(input: PostedSummaryInput): Promise<Pos
   const user = [
     input.prTitle ? `Pull request: ${input.prTitle}` : "",
     `Review event: ${input.event}`,
+    input.rereview ? "This is a re-review: the author has pushed changes since the last one." : "",
     `Posted findings (${posted.length}):`,
     ...posted.map(describe),
   ]

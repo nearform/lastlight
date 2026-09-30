@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   extractPriorLedger,
   renderFallbackSummary,
+  hasStillOpen,
   writePostedSummary,
 } from "#src/engine/github/review-summary.js";
 import type { ChatMessage } from "#src/engine/llm.js";
@@ -118,6 +119,70 @@ describe("extractPriorLedger", () => {
   it("is empty when the summary does not open with a ledger", () => {
     expect(extractPriorLedger("Looks good. Fixed: nothing")).toBe("");
     expect(extractPriorLedger(undefined)).toBe("");
+  });
+});
+
+describe("renderFallbackSummary — a clean review", () => {
+  it("is positive on a first review", () => {
+    expect(renderFallbackSummary("COMMENT", [])).toBe("Looks good — no issues to raise.");
+    expect(renderFallbackSummary("APPROVE", [])).toBe("Looks good to merge.");
+  });
+
+  it("thanks the author and says good to merge on a re-review", () => {
+    for (const event of ["COMMENT", "APPROVE"] as const) {
+      expect(renderFallbackSummary(event, [], { rereview: true })).toBe(
+        "Thanks for the updates — nothing further from me. Good to merge.",
+      );
+    }
+  });
+
+  it("never says good to merge while an earlier point is still open", () => {
+    const text = renderFallbackSummary("COMMENT", [], { rereview: true, stillOpen: true });
+    expect(text).toBe("Thanks for the updates — nothing new to raise.");
+    expect(text).not.toContain("merge");
+  });
+
+  it("keeps the re-review wording off a review that posts findings or requests changes", () => {
+    expect(renderFallbackSummary("COMMENT", [f("a", 1)], { rereview: true })).toBe("1 issue below worth a look.");
+    expect(renderFallbackSummary("REQUEST_CHANGES", [], { rereview: true })).toBe("Requesting changes.");
+  });
+});
+
+describe("hasStillOpen", () => {
+  const withInternal = (finding: Record<string, unknown>) =>
+    ({ inline: [], body: [], internal: [{ finding, reason: "adjudicated" }] }) as never;
+
+  it("reads a Still open ledger line", () => {
+    expect(hasStillOpen("- **Still open** — the race at a.ts:9", { inline: [], body: [], internal: [] })).toBe(true);
+    expect(hasStillOpen("- **Fixed** — a.ts:3", { inline: [], body: [], internal: [] })).toBe(false);
+  });
+
+  it("counts an already-raised finding, but not an already-raised nit", () => {
+    expect(hasStillOpen("", withInternal({ path: "a.ts", alreadyRaised: "@x on a.ts:9", importance: "must-fix" }))).toBe(true);
+    expect(hasStillOpen("", withInternal({ path: "a.ts", alreadyRaised: "@x", importance: "nit" }))).toBe(false);
+    expect(hasStillOpen("", withInternal({ path: "a.ts", importance: "must-fix" }))).toBe(false);
+  });
+});
+
+describe("writePostedSummary — re-review", () => {
+  it("renders the re-review wording when nothing posts, after the ledger", async () => {
+    const out = await writePostedSummary({
+      event: "COMMENT",
+      tiered: { inline: [], body: [], internal: [] },
+      documentSummary: "- **Fixed** — the null check at a.ts:3",
+      rereview: true,
+    });
+    expect(out.text).toBe("- **Fixed** — the null check at a.ts:3\n\nThanks for the updates — nothing further from me. Good to merge.");
+  });
+
+  it("does not say good to merge when the ledger has a point still open", async () => {
+    const out = await writePostedSummary({
+      event: "COMMENT",
+      tiered: { inline: [], body: [], internal: [] },
+      documentSummary: "- **Still open** — the race at a.ts:9",
+      rereview: true,
+    });
+    expect(out.text).not.toContain("Good to merge");
   });
 });
 

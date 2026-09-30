@@ -669,6 +669,9 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
         tiered: review.tiered,
         documentSummary: doc.summary,
         prTitle: typeof ctx.prTitle === "string" && ctx.prTitle ? ctx.prTitle : undefined,
+        // Any earlier review of ours on this PR. A failed history read leaves
+        // it null, which reads as a first review — the plainer wording.
+        rereview: history.latest !== null,
         model: this.run.modelFor?.("review-summary"),
         chat: this.run.chat ?? chat,
       });
