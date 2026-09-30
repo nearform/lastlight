@@ -305,6 +305,7 @@ export interface SiteFindingLine {
   site?: unknown;
   path?: unknown;
   line?: unknown;
+  startLine?: unknown;
   title?: unknown;
   mechanism?: unknown;
   consequence?: unknown;
@@ -332,6 +333,12 @@ export interface SiteFinding {
   site: string;
   path: string;
   line: number;
+  /**
+   * Optional first line of the stretch the finding is about, `line` being the
+   * last. Posted as a multi-line comment, so GitHub highlights the defect's
+   * own code rather than whatever sits above a single anchored line.
+   */
+  startLine?: number;
   title: string;
   mechanism: string;
   consequence: string;
@@ -362,6 +369,7 @@ export type SiteGapKind =
   | "path-missing"
   | "path-outside"
   | "line-out-of-range"
+  | "bad-start-line"
   | "no-transcript"
   | "transcript-command";
 
@@ -417,6 +425,7 @@ function asFinding(l: SiteFindingLine, siteId: string): SiteFinding | null {
     site: str(l.site) ?? siteId,
     path,
     line: l.line,
+    ...(validStartLine(l.startLine, l.line) ? { startLine: l.startLine as number } : {}),
     title,
     mechanism: str(l.mechanism) ?? "",
     consequence: str(l.consequence) ?? "",
@@ -426,6 +435,24 @@ function asFinding(l: SiteFindingLine, siteId: string): SiteFinding | null {
     transcript: str(l.transcript),
     leads: Array.isArray(l.leads) ? l.leads.filter((n): n is number => Number.isInteger(n)) : [],
   };
+}
+
+/**
+ * The most lines a finding's range may span. A range is for the defect's own
+ * stretch — a condition and the statement it fails to guard — not a function.
+ */
+export const MAX_SITE_RANGE_LINES = 12;
+
+/** A `startLine` that is a real range start for `line`: an integer in `[line - MAX + 1, line)`. */
+function validStartLine(start: unknown, line: unknown): boolean {
+  return (
+    typeof start === "number" &&
+    Number.isInteger(start) &&
+    typeof line === "number" &&
+    start >= 1 &&
+    start < line &&
+    line - start < MAX_SITE_RANGE_LINES
+  );
 }
 
 function inside(root: string, candidate: string): boolean {
@@ -562,6 +589,11 @@ export function checkSiteFindings(opts: {
     const missing: string[] = (["path", "title", "mechanism", "consequence"] as const).filter((k) => !str(l[k]));
     if (typeof l.line !== "number" || !Number.isInteger(l.line)) missing.push("line");
     if (missing.length) gaps.push({ kind: "missing-field", detail: `${at}: missing ${missing.join(", ")}` });
+    if (l.startLine !== undefined && l.startLine !== null && !validStartLine(l.startLine, l.line))
+      gaps.push({
+        kind: "bad-start-line",
+        detail: `${at}: \`startLine\` must be an integer before \`line\`, at most ${MAX_SITE_RANGE_LINES} lines in all — or omit it for a single line`,
+      });
     const f = asFinding(l, siteId);
     if (f) out.findings.push(f);
 
@@ -646,6 +678,8 @@ export interface PooledFinding extends SiteFinding {
   lineText: string;
   /** The line the investigator wrote, when it was blank and `line` moved off it. */
   citedLine?: number;
+  /** The verbatim text of `startLine…line`, when the finding is a range. */
+  rangeText?: string;
 }
 
 export interface SiteMerge {
@@ -722,13 +756,18 @@ export function mergeSiteFindings(opts: { dir: string; repo: string }): SiteMerg
       // the nearest non-blank line within ±3, below first. `citedLine` keeps
       // what was written.
       const line = nearestCodeLine(lines, f.line);
+      // A range survives only if `line` did not move: a moved end paired with
+      // the cited start would highlight code the investigator never named.
+      const startLine = line === f.line ? f.startLine : undefined;
       const claimed = f.strength === "reproduced" || f.strength === "corroborated";
       const unbacked =
         claimed &&
         transcriptGap({ repo, prDir: dir, at: ref, verdict: f.strength, command: f.command, transcript: f.transcript, orElse: "" }) !== null;
+      const { startLine: _cited, ...rest } = f;
       findings.push({
-        ...f,
+        ...rest,
         line,
+        ...(startLine !== undefined ? { startLine, rangeText: lines.slice(startLine - 1, line).join("\n") } : {}),
         ...(line !== f.line ? { citedLine: f.line } : {}),
         site: siteId,
         id: `F${findings.length + 1}`,
@@ -1000,10 +1039,20 @@ export function finalizeSiteFindings(opts: { dir: string; repo: string }): Final
     // Recorded, never posted: trivia, and anything the PR's discussion already raised.
     const nit = item.importance === "nit" || !!item.alreadyRaised;
     const text = primary.lineText.trim();
+    // A range posts as its whole text: the poster matches it against the diff
+    // and derives `start_line` from the match. `anchorLine` is ALWAYS written
+    // for a range — even a short end line like `}` — because it is how the
+    // poster knows to resolve a range that misses exactly as the range-less
+    // finding would (whose own short-line rule is the `>= 4` below).
+    const anchor = primary.rangeText
+      ? { existingCode: primary.rangeText, anchorLine: primary.lineText }
+      : text.length >= 4
+        ? { existingCode: primary.lineText }
+        : {};
     findings.push({
       path: primary.path,
       line: primary.line,
-      ...(text.length >= 4 ? { existingCode: primary.lineText } : {}),
+      ...anchor,
       severity: SEVERITY_FOR[item.importance],
       title: item.title,
       body: findingBody(primary, item),
