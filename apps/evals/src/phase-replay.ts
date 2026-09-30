@@ -256,6 +256,12 @@ export interface SelectOutcome {
   goldAnywhere: number[] | null;
   /** Posted items the judge matched to a gold; `null` = not judged. */
   postedMatched: number | null;
+  /**
+   * Gold comments loaded for the case. `0` = none (not in `--instances`): the
+   * case has nothing to judge and sits OUT of the arm's gold rollup rather
+   * than blanking it. Absent on reports written before the field existed.
+   */
+  goldCount?: number;
   judgeError?: string | null;
   itemsOut: SelectItem[];
 }
@@ -493,9 +499,17 @@ export function phaseReplayTotals(report: Pick<PhaseReplayReport, "kind" | "audi
     const r = ok.map((c) => c.select).filter((x): x is SelectOutcome => !!x);
     const importance: Record<string, number> = {};
     for (const x of r) mergeCounts(importance, x.importance);
-    const judged = r.length > 0 && r.every((x) => x.goldPosted !== null && x.goldAnywhere !== null && x.postedMatched !== null);
+    // A case with no gold loaded has nothing to judge: it sits out of the
+    // gold rollup (as falsify's `goldKnown` exempts it) instead of nulling the
+    // arm. Among the rest, "absent is not zero" still holds — one unjudged
+    // case makes that metric n/a. Posted and anywhere are judged separately,
+    // so one judge failing does not blank the other.
+    const g = r.filter((x) => x.goldCount !== 0);
+    const postedJudged = g.length > 0 && g.every((x) => x.goldPosted !== null && x.postedMatched !== null);
+    const anywhereJudged = g.length > 0 && g.every((x) => x.goldAnywhere !== null);
     const posted = sum(r.map((x) => x.posted ?? 0));
-    const matched = judged ? sum(r.map((x) => x.postedMatched ?? 0)) : null;
+    const postedOfJudged = sum(g.map((x) => x.posted ?? 0));
+    const matched = postedJudged ? sum(g.map((x) => x.postedMatched ?? 0)) : null;
     totals.select = {
       pooled: sum(r.map((x) => x.pooled)),
       items: sum(r.map((x) => x.items ?? 0)),
@@ -504,10 +518,12 @@ export function phaseReplayTotals(report: Pick<PhaseReplayReport, "kind" | "audi
       posted,
       recordedOnly: sum(r.map((x) => x.recordedOnly ?? 0)),
       fallbacks: r.filter((x) => x.fallback !== null).length,
-      goldPosted: judged ? sum(r.map((x) => x.goldPosted!.length)) : null,
-      goldAnywhere: judged ? sum(r.map((x) => x.goldAnywhere!.length)) : null,
+      goldPosted: postedJudged ? sum(g.map((x) => x.goldPosted!.length)) : null,
+      goldAnywhere: anywhereJudged ? sum(g.map((x) => x.goldAnywhere!.length)) : null,
       postedMatched: matched,
-      precision: matched !== null && posted > 0 ? matched / posted : null,
+      // Over the judged cases only: a gold-less case's posted items have no
+      // gold to match, and counting them would deflate precision.
+      precision: matched !== null && postedOfJudged > 0 ? matched / postedOfJudged : null,
     };
   } else {
     const r = ok.map((c) => c.siteReview).filter((x): x is SiteReviewOutcome => !!x);

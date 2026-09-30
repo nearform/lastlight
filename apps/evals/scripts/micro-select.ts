@@ -277,9 +277,17 @@ async function judge(gold: GoldComment[], findings: FinalFinding[]): Promise<{ g
   const judgeFs = findings.map((f) => ({ description: `${f.title} (${f.path}:${f.line}). ${f.body}`, file: f.path }));
   const passes = await Promise.all(Array.from({ length: goldVotes }, () => gradeInternalRecall({ gold, findings: judgeFs, judgeModel: judgeModel! })));
   const ok = passes.filter((g) => g && !g.error);
-  if (!ok.length) return { goldForFinding: findings.map(() => null), goldHit: [], error: passes.find((g) => g?.error)?.error ?? "judge failed" };
+  // The majority is over the passes REQUESTED, not the ones that came back: a
+  // failed pass is a vote for no match. Otherwise one success among three
+  // passes would be a one-vote "majority", returned as if fully voted. And
+  // when too few came back for any majority to exist, say so.
+  if (ok.length * 2 <= goldVotes) {
+    const why = passes.find((g) => g?.error)?.error ?? "judge failed";
+    return { goldForFinding: findings.map(() => null), goldHit: [], error: `only ${ok.length}/${goldVotes} judge passes succeeded: ${why}` };
+  }
+  const failed = Array.from({ length: goldVotes - ok.length }, () => gold.map(() => null));
   const { rowForGold } = microGoldVote(
-    ok.map((g) => g!.goldToFinding),
+    [...ok.map((g) => g!.goldToFinding), ...failed],
     gold.length,
   );
   const goldForFinding: (number | null)[] = findings.map(() => null);
@@ -311,6 +319,7 @@ async function runCase(c: Case, repeat: number): Promise<PhaseReplayCase> {
     goldPosted: null,
     goldAnywhere: null,
     postedMatched: null,
+    goldCount: gold.length,
     itemsOut: [],
   };
   const result: PhaseReplayCase = {
@@ -426,13 +435,17 @@ async function runCase(c: Case, repeat: number): Promise<PhaseReplayCase> {
     if (judgeModel && gold.length) {
       const postedIdx = items.map((f, i) => (f.tier !== "internal" ? i : -1)).filter((i) => i >= 0);
       const [all, posted] = await Promise.all([judge(gold, items), judge(gold, postedIdx.map((i) => items[i]))]);
-      const err = all.error ?? posted.error;
-      if (err) outcome.judgeError = err;
-      else {
+      // Each judge fills its own metrics: one failing must not discard the
+      // other's valid measurement.
+      const errs = [all.error && `all: ${all.error}`, posted.error && `posted: ${posted.error}`].filter(Boolean);
+      if (errs.length) outcome.judgeError = errs.join("; ");
+      if (!all.error) {
         outcome.goldAnywhere = all.goldHit;
+        outcome.itemsOut.forEach((it, i) => (it.gold = all.goldForFinding[i]));
+      }
+      if (!posted.error) {
         outcome.goldPosted = posted.goldHit;
         outcome.postedMatched = posted.goldForFinding.filter((g) => g !== null).length;
-        outcome.itemsOut.forEach((it, i) => (it.gold = all.goldForFinding[i]));
       }
     }
     return result;

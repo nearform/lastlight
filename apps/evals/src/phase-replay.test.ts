@@ -145,6 +145,28 @@ describe("phaseReplayTotals — select", () => {
     expect(t.precision).toBeNull();
   });
 
+  it("leaves a gold-less case out of the gold rollup instead of blanking the arm", () => {
+    const t = phaseReplayTotals(
+      report({
+        kind: "select",
+        cases: [
+          baseCase({ select: sel({ goldCount: 3 }) }),
+          baseCase({ select: sel({ goldCount: 0, posted: 6, goldPosted: null, goldAnywhere: null, postedMatched: null }) }),
+        ],
+      }),
+    ).select!;
+    expect(t).toMatchObject({ posted: 10, goldPosted: 1, goldAnywhere: 1, postedMatched: 1 });
+    // Over the judged case's 4 posted items, not all 10.
+    expect(t.precision).toBeCloseTo(0.25);
+  });
+
+  it("judges posted and anywhere separately — one judge failing does not blank the other", () => {
+    const t = phaseReplayTotals(report({ kind: "select", cases: [baseCase({ select: sel({ goldAnywhere: null, judgeError: "all: boom" }) })] })).select!;
+    expect(t.goldAnywhere).toBeNull();
+    expect(t.goldPosted).toBe(1);
+    expect(t.precision).toBeCloseTo(0.25);
+  });
+
   it("lists a select report", () => {
     expect(summarisePhaseReplay("id", report({ kind: "select" }), "t")?.kind).toBe("select");
   });
