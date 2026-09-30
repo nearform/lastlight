@@ -570,7 +570,8 @@ phases:
   # A selection that never closes is not fatal: `sites --finalize` falls back
   # to one item per finding at the investigator's own importance.
   #
-  # Skipped when `merge` pooled nothing (it prints `SITE_MERGE_EMPTY`): the one
+  # Skipped when `merge` pooled nothing (its FIRST line is `SITE_MERGE_EMPTY`;
+  # `startsWith`, because a finding's code excerpt can quote the marker): the one
   # correct selection is empty, `--finalize` falls back to the empty pool, and
   # an agent asked to write it wrote the file and then an empty completion,
   # failing the phase and its retry. A resumed run has no `siteMerge` output
@@ -583,7 +584,7 @@ phases:
     skip_if:
       - "analysisEnabled != true"
       - "scratch.reviewTriage.depth == 'light'"
-      - "phaseOutputs.siteMerge.contains('SITE_MERGE_EMPTY')"
+      - "phaseOutputs.siteMerge.startsWith('SITE_MERGE_EMPTY')"
     depends_on: [merge]
     trigger_rule: all_done
     command_policy:

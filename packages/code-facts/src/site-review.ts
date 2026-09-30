@@ -762,8 +762,10 @@ export function mergeSiteFindings(opts: { dir: string; repo: string }): SiteMerg
 }
 
 /**
- * Printed by `sites --merge` when it pooled nothing. pr-review's `select` phase
- * `skip_if`s on it: an empty pool has exactly one correct selection, and the
+ * The FIRST line `sites --merge` prints when it pooled nothing — first, so
+ * pr-review's `select` can `skip_if` on `startsWith`: a non-empty pool starts
+ * with the heading, and its code excerpts may quote this very constant, so an
+ * unanchored `contains` would skip a real selection. `select` skips on it: an empty pool has exactly one correct selection, and the
  * agent asked to write it produced the file and then an empty completion,
  * which failed the phase and its retry (nearform, 2026-09-29). With `select`
  * skipped, `--finalize` finds no selection and falls back to the (empty) pool.
@@ -772,14 +774,16 @@ export const SITE_MERGE_EMPTY_MARKER = "SITE_MERGE_EMPTY";
 
 /** `select`'s input, as Markdown: the pooled findings with excerpts, and the proposed groups. */
 export function renderSiteMerge(merge: SiteMerge): string {
-  const out: string[] = ["# Site findings to select from", ""];
+  const out: string[] = merge.findings.length
+    ? ["# Site findings to select from", ""]
+    : [SITE_MERGE_EMPTY_MARKER, "", "# Site findings to select from", ""];
   const tally = (o: string) => merge.slots.filter((s) => s.outcome === o).length;
   out.push(
     `${merge.findings.length} finding(s) from ${tally("findings")} site(s); ${tally("none")} site(s) closed \`none\`, ${tally("empty")} empty slot(s), ${tally("missing") + tally("invalid")} site(s) wrote nothing usable.`,
     "",
   );
   if (!merge.findings.length) {
-    out.push("There are no findings. Write `{\"items\": []}` and stop.", "", SITE_MERGE_EMPTY_MARKER, "");
+    out.push("There are no findings. Write `{\"items\": []}` and stop.", "");
     return `${out.join("\n")}\n`;
   }
   for (const f of merge.findings) {

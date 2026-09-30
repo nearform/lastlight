@@ -1,6 +1,24 @@
 import { describe, it, expect } from "vitest";
 import { evalUntilExpression, evalSkipIf } from "#src/workflows/loop-eval.js";
 
+describe("evalUntilExpression — startsWith", () => {
+  it("matches only at the start, ignoring leading whitespace", () => {
+    const ctx = { output: "", phaseOutputs: { siteMerge: "\nSITE_MERGE_EMPTY\n\n# Site findings" } };
+    expect(evalUntilExpression("phaseOutputs.siteMerge.startsWith('SITE_MERGE_EMPTY')", ctx)).toBe(true);
+  });
+
+  it("does not match the text quoted later in the output", () => {
+    const ctx = { output: "", phaseOutputs: { siteMerge: "# Site findings\n```\nexport const M = \"SITE_MERGE_EMPTY\";\n```" } };
+    expect(evalUntilExpression("phaseOutputs.siteMerge.startsWith('SITE_MERGE_EMPTY')", ctx)).toBe(false);
+    expect(evalUntilExpression("phaseOutputs.siteMerge.contains('SITE_MERGE_EMPTY')", ctx)).toBe(true);
+  });
+
+  it("is false for an absent or non-string value", () => {
+    expect(evalUntilExpression("phaseOutputs.siteMerge.startsWith('X')", { output: "" })).toBe(false);
+    expect(evalUntilExpression("scratch.a.startsWith('X')", { output: "", scratch: { a: { X: 1 } } })).toBe(false);
+  });
+});
+
 describe("evalUntilExpression — output.contains", () => {
   it("returns true when output contains the target string", () => {
     expect(evalUntilExpression("output.contains('APPROVED')", { output: "VERDICT: APPROVED" })).toBe(true);

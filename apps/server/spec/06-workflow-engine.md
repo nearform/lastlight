@@ -1088,6 +1088,9 @@ A custom mini-DSL (not `eval()`). Accepts:
   context (`output` is the degenerate one-segment case). Strings and
   numbers only: stringifying an object yields `"[object Object]"`, which
   is a substring match waiting to surprise someone
+- `a.b.c.startsWith('text')` — an anchored match (leading whitespace
+  ignored), for a marker a tool prints as its first line; `contains` cannot
+  tell it from the same text quoted later in the output
 - `variable == 'value'` / `variable != 'value'` — equality / inequality
 - `variable == true` / `== false` — boolean coercion of bare literals
 - Dotted keys for nested access: `scratch.socratic.ready == true`

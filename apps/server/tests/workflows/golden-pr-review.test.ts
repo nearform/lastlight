@@ -259,7 +259,7 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
         "analysisEnabled != true",
         TIER_GUARD,
         // `select` alone also skips an empty pool — its answer is fixed.
-        ...(name === "select" ? ["phaseOutputs.siteMerge.contains('SITE_MERGE_EMPTY')"] : []),
+        ...(name === "select" ? ["phaseOutputs.siteMerge.startsWith('SITE_MERGE_EMPTY')"] : []),
       ]);
     }
     for (const name of FALSIFY_PHASES) {
@@ -481,7 +481,7 @@ class EmptyMergeAgent extends FakeAgentPort {
   override async runCommand(spec: CommandSpec, config: never, opts: never) {
     const res = await super.runCommand(spec, config, opts);
     if (spec.kind === "bash" && spec.command.includes("sites --merge")) {
-      return { ...res, output: `# Site findings to select from\n\nSITE_MERGE_EMPTY\n` };
+      return { ...res, output: `SITE_MERGE_EMPTY\n\n# Site findings to select from\n` };
     }
     return res;
   }

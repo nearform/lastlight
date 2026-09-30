@@ -202,7 +202,7 @@ describe("sites --merge", () => {
     writeFindings(dir, "site-001", [{ site: "site-001", none: true, reason: "r", checked: [] }]);
     const merge = mergeSiteFindings({ dir, repo });
     expect(merge.findings).toEqual([]);
-    expect(renderSiteMerge(merge)).toContain(SITE_MERGE_EMPTY_MARKER);
+    expect(renderSiteMerge(merge).startsWith(`${SITE_MERGE_EMPTY_MARKER}\n`)).toBe(true);
   });
 
   it("moves a finding off a blank cited line to the nearest code line, keeping what was cited", () => {

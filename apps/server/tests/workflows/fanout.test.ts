@@ -672,6 +672,37 @@ describe("fanout — a cancelled run starts no more work", () => {
       "run cancelled before this branch started",
     ]);
   });
+
+  it("launches no further gate re-run or gate once a re-run is cancelled under it", async () => {
+    // Both gated branches fail their gate; the cancel lands during the first
+    // re-run. The second re-run and the re-gates must not start.
+    const store = new InMemoryStateStore(RUN_ID);
+    const sandbox = new (class extends CountingSandbox {
+      override async runAgent(...args: Parameters<CountingSandbox["runAgent"]>) {
+        if (this.agentPrompts.length === 3) await store.runs.finishRun(RUN_ID, "cancelled");
+        return super.runAgent(...args);
+      }
+    })({ commandExit: 3 });
+    await runFanout(fanoutPhase({ on_branch_gate_failure: { retries: 1 } }), sandbox, "gondolin", store);
+
+    // Three branches, then ONE re-run; the two first-round gates and nothing after.
+    expect(sandbox.agentPrompts).toHaveLength(4);
+    expect(sandbox.commands).toEqual(["test -s a.jsonl", "test -s b.jsonl"]);
+  });
+
+  it("runs no further pre-gate, and starts no branch, once a pre-gate is cancelled under it", async () => {
+    const store = new InMemoryStateStore(RUN_ID);
+    const sandbox = new (class extends CountingSandbox {
+      override async runCommand(taskId: string, command: string, opts: never) {
+        if (this.commands.length === 0) await store.runs.finishRun(RUN_ID, "cancelled");
+        return super.runCommand(taskId, command, opts);
+      }
+    })({ commandExit: 3 });
+    await runFanout(fanoutPhase({ skip_satisfied_branches: true }), sandbox, "gondolin", store);
+
+    expect(sandbox.commands).toEqual(["test -s a.jsonl"]);
+    expect(sandbox.agentPrompts).toHaveLength(0);
+  });
 });
 
 describe("fanout — the schema refuses what the shape cannot support", () => {
