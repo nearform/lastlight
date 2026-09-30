@@ -111,18 +111,33 @@ const flag = (name: string): string | undefined => {
   return i >= 0 ? argv[i + 1] : undefined;
 };
 const has = (name: string) => argv.includes(name);
+/**
+ * A positive-integer flag. A bad value exits loud: `Number("oops")` is NaN,
+ * `Math.max(1, NaN)` is NaN, and a NaN pool size runs zero workers — a
+ * "completed" report with nothing in it.
+ */
+const intFlag = (name: string, fallback: number): number => {
+  const raw = flag(name);
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) {
+    console.error(`${name} must be a positive integer, got ${JSON.stringify(raw)}`);
+    process.exit(2);
+  }
+  return n;
+};
 const positional = argv.filter((a, i) => !a.startsWith("--") && !VALUED.has(argv[i - 1] ?? ""));
 
 const recorded = has("--recorded");
 const model = flag("--model") ?? "anthropic/claude-sonnet-4-6";
 const thinking = flag("--thinking") ?? null;
 const promptPath = resolve(flag("--prompt") ?? join(serverRoot, "workflows/prompts/review-select.md"));
-const rounds = Math.max(1, Number(flag("--rounds") ?? "2"));
-const repeats = recorded ? 1 : Math.max(1, Number(flag("--repeats") ?? "1"));
-const concurrency = Math.max(1, Number(flag("--concurrency") ?? "3"));
+const rounds = intFlag("--rounds", 2);
+const repeats = recorded ? 1 : intFlag("--repeats", 1);
+const concurrency = intFlag("--concurrency", 3);
 const only = flag("--only") ? new Set(flag("--only")!.split(",")) : undefined;
-const deadlineMs = Math.max(1, Number(flag("--deadline-minutes") ?? "15")) * 60_000;
-const goldVotes = Math.max(1, Number(flag("--gold-votes") ?? "3"));
+const deadlineMs = intFlag("--deadline-minutes", 15) * 60_000;
+const goldVotes = intFlag("--gold-votes", 3);
 const noJudge = has("--no-judge");
 const keep = has("--keep");
 const checkoutsRoot = flag("--checkouts") ? resolve(flag("--checkouts")!) : null;
@@ -334,6 +349,13 @@ async function runCase(c: Case, repeat: number): Promise<PhaseReplayCase> {
     const merge = writeSiteMerge(prDir, checkout);
     outcome.pooled = merge.findings.length;
     result.rows = merge.findings.length;
+    // An empty pool has exactly one correct selection, and pr-review never
+    // asks a model for it (#426 skips `select` on an empty pool). Write it for
+    // either arm that lacks it — a replay arm's file was deleted above, and a
+    // recorded run from after that skip never wrote one — so both arms gate
+    // the same input the same way instead of the replay reading `missing-file`.
+    if (merge.findings.length === 0 && !existsSync(join(prDir, "sites", "selected.json")))
+      writeFileSync(join(prDir, "sites", "selected.json"), `${JSON.stringify({ items: [] })}\n`);
 
     if (!recorded && merge.findings.length > 0) {
       const { text, unrendered } = renderPhasePrompt(promptPath, { ...promptContext(inst), phaseOutputs: { siteMerge: renderSiteMerge(merge) } });
