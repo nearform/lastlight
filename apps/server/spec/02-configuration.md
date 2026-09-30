@@ -776,7 +776,14 @@ the posted findings only (`src/engine/github/review-summary.ts`). It resolves
 through the run's model chain (`models.review-summary || models.default`); a
 failed, empty or oversized reply, or a review with nothing to post, falls back
 to a summary rendered in code, and the `summary` in `findings.json` is never
-posted beyond its leading re-review ledger.
+posted beyond its leading re-review ledger. The rendered summary is brief and
+kind: a clean first review reads "Looks good — no issues to raise."; a clean
+**re-review** (the bot reviewed an earlier head — an `@bot review` of the same
+head is not one) thanks the author and says it is good to merge — unless a
+point an earlier review raised is still open (a `Still open` ledger line, a
+finding recorded `alreadyRaised`, or an unresolved, non-outdated inline thread
+of the bot's; a failed thread read counts as open), when it thanks them and
+claims nothing more. The model-written summary is told the same.
 `review-site`, `review-select` and `review-falsify` are the keys with a
 **fall-through**: each phase's `model:` template is an `{{#if}}` /
 `{{#if !x}}` pair rendering `models.review-survey` (`review-site`,

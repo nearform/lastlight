@@ -645,7 +645,10 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
               pullRequest: pr
                 ? {
                     reviews: { nodes: pr.reviews.map((r) => ({ author: author(r.user.login), state: r.state, body: r.body, submittedAt: r.submitted_at })) },
+                    // One page, like the real read: the fake never holds more
+                    // threads than that page.
                     reviewThreads: {
+                      pageInfo: { hasNextPage: false },
                       nodes: inline.map((c) => ({
                         path: c.path,
                         line: c.line ?? null,

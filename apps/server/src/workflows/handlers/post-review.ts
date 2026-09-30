@@ -79,6 +79,55 @@ export interface PostReviewRunScope {
  * that mutates the process env in future. Exported for the concurrent-clear
  * regression test.
  */
+/**
+ * Is this a re-review — of a head the author has MOVED since our last review?
+ * An explicit `@bot review` of the head we already reviewed is not: nothing
+ * was pushed, so there are no "updates" to thank them for. A failed history
+ * read leaves `latest` null, which reads as a first review — the plainer wording.
+ */
+export function isRereview(latest: { sha: string } | null, headSha: string | undefined | null): boolean {
+  return latest !== null && !!headSha && latest.sha !== headSha;
+}
+
+/**
+ * Does an earlier review of ours still have an open inline thread on code
+ * this head did not change? A clean re-review must not say "good to merge"
+ * over one: `select` only marks a prior point `alreadyRaised` when a site
+ * re-finds it this round, and the carried ledger is absent on the sites
+ * pipeline, so a prior finding nobody re-grounded is otherwise invisible.
+ *
+ * An OUTDATED thread does not count: the code it sat on changed, and this
+ * review — which read the new code — found nothing to raise there. A failed
+ * read counts as open, and so does a TRUNCATED one with no open thread in the
+ * page it holds: the threads it could not see are unknown, not closed. The
+ * claim that needs the evidence is the one withheld.
+ *
+ * Every posted thread counts, whatever its label: the sites pipeline never
+ * posts a `nit` (finalize files it `internal`), so a posted thread is
+ * `must-fix` or `worth-mentioning` — the same bar `hasStillOpen` holds.
+ */
+export async function openBotThreads(
+  github: Pick<GitHubClient, "getPullRequestDiscussion">,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  botLogin = getRuntimeConfig()?.botLogin ?? "last-light[bot]",
+): Promise<boolean> {
+  // GraphQL names a Bot without REST's `[bot]` suffix.
+  const bot = botLogin.replace(/\[bot\]$/, "");
+  try {
+    const d = await github.getPullRequestDiscussion(owner, repo, prNumber);
+    const open = d.threads.some((t) => {
+      const first = t.comments[0];
+      return !t.isResolved && !t.isOutdated && !!first?.isBot && first.author === bot;
+    });
+    return open || d.threadsTruncated;
+  } catch (err: unknown) {
+    log.warn("Could not read review threads — not calling the re-review good to merge", { owner, repo, prNumber, err });
+    return true;
+  }
+}
+
 export function resolveReviewGitHubClient(runConfig: {
   githubApiBaseUrl?: string;
 }): GitHubClient {
@@ -664,11 +713,14 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       postedSummary = incomplete;
       review = withSummary(review, incomplete);
     } else if (boundary && review.tiered) {
+      const rereview = isRereview(history.latest, headSha);
       const summary = await writePostedSummary({
         event: review.event,
         tiered: review.tiered,
         documentSummary: doc.summary,
         prTitle: typeof ctx.prTitle === "string" && ctx.prTitle ? ctx.prTitle : undefined,
+        rereview,
+        priorOpen: rereview ? await openBotThreads(github, owner, repo, prNumber) : false,
         model: this.run.modelFor?.("review-summary"),
         chat: this.run.chat ?? chat,
       });
