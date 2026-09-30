@@ -167,7 +167,7 @@ const COMMAND_POLICY = {
 
 interface Case {
   instanceId: string;
-  /** `<run-id>` — the source run, so two repeats of one instance stay apart. */
+  /** `<run-id>[@<model>]` — the source run (and model, in a multi-model run), so two rows for one instance stay apart. */
   run: string;
   /** The run's preserved `…/pr-review/` (has `sites/`). */
   artifacts: string;
@@ -191,7 +191,7 @@ function discoverCases(): Case[] {
   for (const dir of positional.map((p) => resolve(p))) {
     const card = join(dir, "scorecard.json");
     if (!existsSync(card)) throw new Error(`${dir} is not an eval run dir (no scorecard.json)`);
-    const results = (JSON.parse(readFileSync(card, "utf8")) as { results?: { instance_id: string; pipelineArtifactRel?: string }[] }).results ?? [];
+    const results = (JSON.parse(readFileSync(card, "utf8")) as { results?: { instance_id: string; model?: string; pipelineArtifactRel?: string }[] }).results ?? [];
     for (const r of results) {
       if (only && !only.has(r.instance_id)) continue;
       if (!r.pipelineArtifactRel) continue;
@@ -200,16 +200,19 @@ function discoverCases(): Case[] {
         console.warn(`  ! ${basename(dir)}/${r.instance_id}: no sites/ in the preserved artifacts — skipped`);
         continue;
       }
-      if (recorded && !existsSync(join(artifacts, "sites", "selected.json"))) {
-        console.warn(`  ! ${basename(dir)}/${r.instance_id}: no recorded selected.json — skipped`);
-        continue;
-      }
       const co = checkoutFor(r.instance_id);
       if (!co) {
         console.warn(`  ! ${r.instance_id}: no checkout under ${checkoutsRoot} — skipped`);
         continue;
       }
-      out.push({ instanceId: r.instance_id, run: basename(dir), artifacts, ...co });
+      // A multi-model run's scorecard has one row PER MODEL for an instance,
+      // each with its own artifacts: the model is part of the arm, or two rows
+      // share a case key — clobbering each other's session and selection, and
+      // double-counting the totals. (A recorded run with no selected.json is
+      // kept: an empty pool never wrote one, which the case synthesises, and a
+      // non-empty one without it is a run whose select really fell back.)
+      const run = r.model ? `${basename(dir)}@${r.model.split("/").pop()!.replace(/[^A-Za-z0-9._-]+/g, "_")}` : basename(dir);
+      out.push({ instanceId: r.instance_id, run, artifacts, ...co });
     }
   }
   return out;

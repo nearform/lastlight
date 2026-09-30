@@ -522,7 +522,7 @@ function SelectCells({ c }: { c: PhaseReplayCase }) {
           must-fix {x.importance["must-fix"] ?? 0} · worth-mentioning {x.importance["worth-mentioning"] ?? 0} · nit {x.importance.nit ?? 0}
         </div>
         <div className={clsx(x.fallback ? "text-warning" : "text-base-content/40")}>
-          {x.fallback ? `FALLBACK (${x.fallback}) — one item per finding` : `gate ${x.gateSatisfied ? "pass" : "unsatisfied"}`}
+          {x.fallback ? `FALLBACK (${x.fallback}) — one item per finding` : `gate ${x.gateSatisfied === null ? "not run" : x.gateSatisfied ? "pass" : "unsatisfied"}`}
         </div>
       </td>
       <td className="px-3 py-2 text-2xs">
