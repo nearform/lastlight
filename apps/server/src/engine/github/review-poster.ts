@@ -48,6 +48,13 @@ export interface ReviewFinding {
    */
   existingCode?: string;
   /**
+   * The single line to anchor on when a multi-line `existingCode` does not
+   * match inside one hunk — a range that reaches into unchanged code would
+   * otherwise leave the finding off the diff and demote it. Set by
+   * `sites --finalize` for a site finding with a `startLine`.
+   */
+  anchorLine?: string;
+  /**
    * The obligation family this came from (WP6b).
    *
    * It keyed the per-family confidence threshold until that bar was removed —
@@ -505,7 +512,7 @@ function resolutionOf(
  *
  * | # | Step | Model? |
  * |---|---|---|
- * | 1 | Match the excerpt against the file's own hunks — new side, then old side | no |
+ * | 1 | Match the excerpt against the file's own hunks — new side, then old side (a range that misses falls back to its `anchorLine`) | no |
  * | 2 | Scan the full head-side file content | no |
  * | 3 | Relocate across files: a **unique** hit anywhere in the diff re-files the finding | no |
  * | 4 | Ask a model to regenerate the excerpt and retry step 1 | yes |
@@ -547,6 +554,19 @@ export function resolveAnchor(
       const runs = own.hunks.flatMap((h) => findRuns(view(h), needle));
       const run = nearest(runs, f.line);
       if (run) return resolutionOf(f.path, side, run, "hunk");
+    }
+    // Step 1b — a range that did not fit inside a hunk falls back to its
+    // `anchorLine`, the single line a range-less finding would have used, so
+    // asking for a range never costs a finding its inline comment.
+    const single = needleOf(f.anchorLine);
+    if (needle.length > 1 && single.length > 0) {
+      for (const [side, view] of [
+        ["RIGHT", newSide],
+        ["LEFT", oldSide],
+      ] as const) {
+        const run = nearest(own.hunks.flatMap((h) => findRuns(view(h), single)), f.line);
+        if (run) return resolutionOf(f.path, side, run, "hunk");
+      }
     }
   }
 

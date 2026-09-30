@@ -230,7 +230,7 @@ brief names): one JSON object per line.
 For each finding (at most 3):
 
 ```
-{"site": "<site id>", "path": "src/file.ts", "line": 42,
+{"site": "<site id>", "path": "src/file.ts", "line": 42, "startLine": 39,
  "title": "one line: what is wrong",
  "mechanism": "how the code produces the wrong behaviour, citing what you read or ran",
  "consequence": "what a user or caller sees when it happens",
@@ -243,6 +243,11 @@ For each finding (at most 3):
 
 - `path` is relative to the checkout and must be a real file; `line` must be a
   line of that file, the line where the defect is.
+- `startLine` is optional: when the defect is a short stretch rather than one
+  line, give its first line (at most 12 lines, ending at `line`) and the comment
+  highlights that stretch. For a missing check or step, the stretch runs from
+  the code that goes unguarded to where the check belongs. Omit it for a
+  single line.
 - `leads` lists the brief's lead numbers the finding came from; `[]` if none.
 - `importance` is what the PR's author should do about it:
   - `must-fix`: merging as-is ships the bug to users or callers who will hit it

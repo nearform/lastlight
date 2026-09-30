@@ -130,6 +130,31 @@ describe("resolveAnchor — step 1, the file's own hunks", () => {
     });
   });
 
+  it("falls back to a range's anchorLine when the range reaches outside the hunk", () => {
+    // A site finding's range starts on a line the diff does not show (line 69,
+    // above the hunk): matched whole it would miss step 1 and be demoted.
+    const res = resolveAnchor(
+      finding({
+        line: 72,
+        existingCode: "export function verify() {\n  const token = read();\n  const age = Date.now() - token.issuedAt;",
+        anchorLine: "  const age = Date.now() - token.issuedAt;",
+      }),
+      FILES,
+    );
+    expect(res).toEqual({ path: "src/auth.ts", line: 72, side: "RIGHT", via: "hunk" });
+  });
+
+  it("prefers the whole range when it does fit, anchorLine or not", () => {
+    const res = resolveAnchor(
+      finding({
+        existingCode: '  if (!token) throw new Error("no token");\n  const age = Date.now() - token.issuedAt;',
+        anchorLine: "  const age = Date.now() - token.issuedAt;",
+      }),
+      FILES,
+    );
+    expect(res).toMatchObject({ line: 72, start_line: 71 });
+  });
+
   it("falls to the old side, as LEFT, for an excerpt that was deleted", () => {
     const res = resolveAnchor(finding({ existingCode: "if (!token) return null;" }), FILES);
     expect(res).toEqual({ path: "src/auth.ts", line: 71, side: "LEFT", via: "hunk" });
