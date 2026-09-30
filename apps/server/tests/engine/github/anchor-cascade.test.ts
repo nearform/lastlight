@@ -130,6 +130,66 @@ describe("resolveAnchor — step 1, the file's own hunks", () => {
     });
   });
 
+  it("falls back to a range's anchorLine when the range reaches outside the hunk", () => {
+    // A site finding's range starts on a line the diff does not show (line 69,
+    // above the hunk): matched whole it would miss step 1 and be demoted.
+    const res = resolveAnchor(
+      finding({
+        line: 72,
+        existingCode: "export function verify() {\n  const token = read();\n  const age = Date.now() - token.issuedAt;",
+        anchorLine: "  const age = Date.now() - token.issuedAt;",
+      }),
+      FILES,
+    );
+    expect(res).toEqual({ path: "src/auth.ts", line: 72, side: "RIGHT", via: "hunk" });
+  });
+
+  it("resolves a missed range with a SHORT end line exactly as the range-less finding — the model's line stands", () => {
+    // `}` is not evidence (sites --finalize writes no existingCode for it), so
+    // the range-less finding resolves to null and its own line is used.
+    const range = finding({ line: 74, existingCode: "export function verify() {\n  return token;\n}", anchorLine: "}" });
+    const rangeLess = finding({ line: 74 });
+    expect(resolveAnchor(range, FILES)).toBeNull();
+    expect(resolveAnchor(rangeLess, FILES)).toBeNull();
+  });
+
+  it("never pairs a range's start and end across two hunks — the whole-file step never sees a range", () => {
+    // config.ts, hunk 1 ends at line 12 and hunk 2 runs 41–43. A range from 12
+    // to the `}` at 43 has both ends on the diff but in DIFFERENT hunks; the
+    // whole-file step would pair them into a start_line/line GitHub 422s on.
+    const lines = [
+      ...Array.from({ length: 9 }, (_, i) => `// ${i + 1}`),
+      "export const MAX_TOKEN_AGE = 900;",
+      "export const MIN_TOKEN_AGE = 1;",
+      'export const NAME = "x";',
+      ...Array.from({ length: 28 }, (_, i) => `// ${i + 13}`),
+      "function guard() {",
+      "  const age = Date.now() - token.issuedAt;",
+      "}",
+    ];
+    const readHead = () => lines.join("\n");
+    const existingCode = lines.slice(11, 43).join("\n");
+    // The hazard, on a multi-line excerpt with no range marker: a cross-hunk pair.
+    expect(resolveAnchor(finding({ path: "src/config.ts", line: 43, existingCode }), FILES, readHead)).toMatchObject({
+      start_line: 12,
+      line: 43,
+      via: "file",
+    });
+    // A site range ending on the same short `}`: resolved as its range-less self.
+    expect(resolveAnchor(finding({ path: "src/config.ts", line: 43, existingCode, anchorLine: "}" }), FILES, readHead)).toBeNull();
+  });
+
+  it("prefers the whole range when it does fit, anchorLine or not", () => {
+    const res = resolveAnchor(
+      finding({
+        existingCode: '  if (!token) throw new Error("no token");\n  const age = Date.now() - token.issuedAt;',
+        anchorLine: "  const age = Date.now() - token.issuedAt;",
+      }),
+      FILES,
+    );
+    expect(res).toMatchObject({ line: 72, start_line: 71 });
+  });
+
   it("falls to the old side, as LEFT, for an excerpt that was deleted", () => {
     const res = resolveAnchor(finding({ existingCode: "if (!token) return null;" }), FILES);
     expect(res).toEqual({ path: "src/auth.ts", line: 71, side: "LEFT", via: "hunk" });

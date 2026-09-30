@@ -224,6 +224,72 @@ describe("sites --merge", () => {
   });
 });
 
+describe("a finding's optional range", () => {
+  it("accepts a startLine before line, and refuses one after it or spanning too far", () => {
+    const { repo, dir } = workspace();
+    writeSitePlan(dir);
+    writeFindings(dir, "site-001", [finding("site-001", 14, { startLine: 10 })]);
+    expect(checkSiteSlot({ dir, repo, siteId: "site-001" }).satisfied).toBe(true);
+    for (const startLine of [14, 20, 1, 10.5]) {
+      writeFindings(dir, "site-001", [finding("site-001", 14, { startLine })]);
+      expect(checkSiteSlot({ dir, repo, siteId: "site-001" }).gaps.map((g) => g.kind), String(startLine)).toEqual(["bad-start-line"]);
+    }
+  });
+
+  it("carries the range's text through merge and posts it as existingCode, with the end line to fall back to", () => {
+    const { repo, dir } = workspace();
+    writeSitePlan(dir);
+    writeFindings(dir, "site-001", [finding("site-001", 14, { startLine: 12 })]);
+    writeSiteMerge(dir, repo);
+    const [f] = mergeSiteFindings({ dir, repo }).findings;
+    expect([f.startLine, f.rangeText]).toEqual([12, "const line12 = 12;\nconst line13 = 13;\nconst line14 = 14;"]);
+    writeFileSync(join(dir, "sites", "selected.json"), JSON.stringify({ items: [{ findings: ["F1"], title: "t", importance: "must-fix" }] }));
+    finalizeSiteFindings({ dir, repo });
+    const doc = JSON.parse(readFileSync(join(dir, "findings.json"), "utf8"));
+    expect(doc.findings[0]).toMatchObject({
+      line: 14,
+      existingCode: "const line12 = 12;\nconst line13 = 13;\nconst line14 = 14;",
+      anchorLine: "const line14 = 14;",
+    });
+  });
+
+  it("writes anchorLine for a range even when its end line is too short to be evidence", () => {
+    const { repo, dir } = workspace();
+    const src = readFileSync(join(repo, "src", "a.ts"), "utf8").split("\n");
+    src[13] = "}";
+    writeFileSync(join(repo, "src", "a.ts"), src.join("\n"));
+    writeSitePlan(dir);
+    writeFindings(dir, "site-001", [finding("site-001", 14, { startLine: 12 })]);
+    writeSiteMerge(dir, repo);
+    writeFileSync(join(dir, "sites", "selected.json"), JSON.stringify({ items: [{ findings: ["F1"], title: "t", importance: "must-fix" }] }));
+    finalizeSiteFindings({ dir, repo });
+    const doc = JSON.parse(readFileSync(join(dir, "findings.json"), "utf8"));
+    expect(doc.findings[0]).toMatchObject({ existingCode: "const line12 = 12;\nconst line13 = 13;\n}", anchorLine: "}" });
+  });
+
+  it("drops the range when the cited end line was blank and moved", () => {
+    const { repo, dir } = workspace();
+    const src = readFileSync(join(repo, "src", "a.ts"), "utf8").split("\n");
+    src[13] = "";
+    writeFileSync(join(repo, "src", "a.ts"), src.join("\n"));
+    writeSitePlan(dir);
+    writeFindings(dir, "site-001", [finding("site-001", 14, { startLine: 12 })]);
+    const [f] = mergeSiteFindings({ dir, repo }).findings;
+    expect(f.line).not.toBe(14);
+    expect(f.startLine).toBeUndefined();
+    expect(f.rangeText).toBeUndefined();
+  });
+
+  it("changes nothing for a finding without one", () => {
+    const { repo, dir } = workspace();
+    writeSitePlan(dir);
+    writeFindings(dir, "site-001", [finding("site-001", 14)]);
+    const [f] = mergeSiteFindings({ dir, repo }).findings;
+    expect(f.startLine).toBeUndefined();
+    expect(f.rangeText).toBeUndefined();
+  });
+});
+
 describe("sites --check-select and --finalize", () => {
   function merged() {
     const ws = workspace();

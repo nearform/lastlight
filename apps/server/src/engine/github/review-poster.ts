@@ -48,6 +48,13 @@ export interface ReviewFinding {
    */
   existingCode?: string;
   /**
+   * The range's end line, set by `sites --finalize` for every site finding
+   * with a `startLine`. When the multi-line `existingCode` does not match
+   * inside one hunk, the finding is resolved as if it had no range at all —
+   * see step 1b of {@link resolveAnchor}.
+   */
+  anchorLine?: string;
+  /**
    * The obligation family this came from (WP6b).
    *
    * It keyed the per-family confidence threshold until that bar was removed —
@@ -514,7 +521,7 @@ function resolutionOf(
  *
  * | # | Step | Model? |
  * |---|---|---|
- * | 1 | Match the excerpt against the file's own hunks — new side, then old side | no |
+ * | 1 | Match the excerpt against the file's own hunks — new side, then old side (a range that misses re-resolves as its single `anchorLine`) | no |
  * | 2 | Scan the full head-side file content | no |
  * | 3 | Relocate across files: a **unique** hit anywhere in the diff re-files the finding | no |
  * | 4 | Ask a model to regenerate the excerpt and retry step 1 | yes |
@@ -557,6 +564,19 @@ export function resolveAnchor(
       const run = nearest(runs, f.line);
       if (run) return resolutionOf(f.path, side, run, "hunk");
     }
+  }
+
+  // Step 1b — a RANGE that did not fit inside one of its file's hunks is
+  // resolved exactly as the range-less finding would be: the whole cascade
+  // again on its single end line (`anchorLine`), including the rule that an
+  // end line too short to be evidence (`}`, `);`) leaves the model's own line
+  // standing. A range never reaches steps 2–3 as a range — step 2 could pair
+  // a start and end from DIFFERENT hunks, a comment GitHub 422s, which fails
+  // the whole review to body-only. So asking for a range can only ever add a
+  // `start_line`, never cost a finding the placement it would have had.
+  if (f.anchorLine !== undefined && needle.length > 1) {
+    const single = f.anchorLine.trim().length >= 4 ? f.anchorLine : undefined;
+    return resolveAnchor({ ...f, existingCode: single, anchorLine: undefined }, files, readHeadFile);
   }
 
   // Step 2 — the whole head-side file. Covers an excerpt that sits outside any
