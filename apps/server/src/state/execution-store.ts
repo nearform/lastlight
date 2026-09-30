@@ -491,6 +491,18 @@ export class ExecutionStore {
     return row?.outputText ?? null;
   }
 
+  /**
+   * Close an execution row. The FIRST verdict wins: when the row is already
+   * finished, a later finish only fills in what the run measured (cost,
+   * tokens, turns, usage) and leaves `success`, `error`, `stop_reason` and
+   * `finished_at` as they were.
+   *
+   * That is for a row finished out from under its process. `supersedeRun`
+   * closes a superseded run's open rows `superseded: …` and then kills their
+   * sandbox; the killed phase's own finish lands afterwards with the kill's
+   * symptom (`Sandbox agent failed (exit 137)`), which used to overwrite the
+   * reason and read as a sandbox crash in the dashboard.
+   */
   async recordFinish(
     id: string,
     result: {
@@ -516,15 +528,26 @@ export class ExecutionStore {
     },
   ): Promise<void> {
     const { executions } = this.t;
+    const [existing] = await this.client
+      .select({ finishedAt: executions.finishedAt })
+      .from(executions)
+      .where(eq(executions.id, id))
+      .limit(1);
+    const verdict = existing?.finishedAt
+      ? {}
+      : {
+          finishedAt: new Date().toISOString(),
+          success: result.success,
+          error: result.error ?? null,
+          ...(result.stopReason !== undefined ? { stopReason: result.stopReason } : {}),
+        };
     // The ten optional columns were `COALESCE(?, col)` under raw SQL — "leave
     // what's there when this finish reports nothing". Omitting the key from the
     // SET entirely says the same thing, and says it without a round trip.
     await this.client
       .update(executions)
       .set({
-        finishedAt: new Date().toISOString(),
-        success: result.success,
-        error: result.error ?? null,
+        ...verdict,
         turns: result.turns ?? null,
         durationMs: result.durationMs ?? null,
         ...(result.sessionId !== undefined ? { sessionId: result.sessionId } : {}),
@@ -538,7 +561,6 @@ export class ExecutionStore {
           : {}),
         ...(result.outputTokens !== undefined ? { outputTokens: result.outputTokens } : {}),
         ...(result.apiDurationMs !== undefined ? { apiDurationMs: result.apiDurationMs } : {}),
-        ...(result.stopReason !== undefined ? { stopReason: result.stopReason } : {}),
         ...(result.cpuSeconds !== undefined ? { cpuSeconds: result.cpuSeconds } : {}),
         ...(result.peakMemoryBytes !== undefined ? { peakMemoryBytes: result.peakMemoryBytes } : {}),
         ...(result.memoryLimitBytes !== undefined ? { memoryLimitBytes: result.memoryLimitBytes } : {}),

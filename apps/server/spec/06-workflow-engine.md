@@ -946,7 +946,11 @@ approval resumes it. For each `running` run:
 1. Increment `restart_count`. If `> 3` (`MAX_RESTART_RESUMES`), mark
    the run `failed` and skip. This is the crash-loop circuit breaker.
 2. Mark stale execution rows failed.
-3. Call `resumeSimpleRun()` in the background (non-blocking).
+3. Call `resumeSimpleRun()` in the background (non-blocking). It rebuilds
+   the template context from the row: resume's own fields (bare `repo`,
+   taskId, branch, refreshed issue, effective models) over the dispatch's
+   persisted context (`restoredDispatchContext`), so a resumed or
+   admitted pr-review keeps `analysisEnabled` and its PR snapshot.
 
 **Approval / reply gate resume** — `simple.ts:317–397` handles inbound
 approval responses. Fetches the `workflow_approvals` row, updates its
@@ -1084,6 +1088,9 @@ A custom mini-DSL (not `eval()`). Accepts:
   context (`output` is the degenerate one-segment case). Strings and
   numbers only: stringifying an object yields `"[object Object]"`, which
   is a substring match waiting to surprise someone
+- `a.b.c.startsWith('text')` — an anchored match (leading whitespace
+  ignored), for a marker a tool prints as its first line; `contains` cannot
+  tell it from the same text quoted later in the output
 - `variable == 'value'` / `variable != 'value'` — equality / inequality
 - `variable == true` / `== false` — boolean coercion of bare literals
 - Dotted keys for nested access: `scratch.socratic.ready == true`
@@ -1097,6 +1104,11 @@ returns the **first matching expression**, so the scheduler can name it in
 the skip reason. The longer dotted path exists for `skip_if`, which needs
 to read a *sibling* value (`scratch.fixMarkers.diagnosis.class == '…'`)
 that the loop never did.
+
+The cancel check is that `getRun` at the top of every scheduler iteration:
+a `cancelled` row stops the run at the next phase boundary. It holds because
+a cancel is final — `finishRun` refuses to move a `cancelled` row, so the
+`failWorkflow` a killed phase triggers cannot overwrite it with `failed`.
 
 `runScope.scratch` is refreshed from the run row on each iteration, inside
 the `getRun` the cancel check already makes — so a guard reading `scratch`

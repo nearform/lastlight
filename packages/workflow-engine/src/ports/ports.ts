@@ -214,6 +214,11 @@ export interface FinishOpts {
 export interface RunStore {
   getRun(id: string): Promise<WorkflowRunView | null>;
   appendPhase(id: string, phase: string, entry: PhaseHistoryEntry): Promise<void>;
+  /**
+   * Flip the run terminal. A no-op on a `cancelled` run (a cancel is final —
+   * the scheduler's cancel check depends on it surviving the killed phase's
+   * failure) and for `succeeded` on a `paused` one.
+   */
   finishRun(id: string, status: "succeeded" | "failed" | "cancelled", opts?: FinishOpts): Promise<void>;
   mergeScratch(id: string, patch: Record<string, unknown>): Promise<void>;
   pauseForApproval(runId: string, approval: NewApproval, marker: PhaseMarker, scratchPatch?: Record<string, unknown>): Promise<void>;

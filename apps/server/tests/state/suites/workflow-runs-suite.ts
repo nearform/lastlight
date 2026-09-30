@@ -251,6 +251,32 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
         expect(observed).toEqual(["cancelled"]);
       });
 
+      it("refuses to flip a CANCELLED run to failed or succeeded", async () => {
+        // A superseding review cancels the row and kills the sandbox; the killed
+        // phase then fails and the runner's `failWorkflow` finishes the run
+        // `failed`. Honouring that hid the cancel from the scheduler, and the
+        // dead run carried on through its remaining phases.
+        const id = randomUUID();
+        await db.runs.createRun({
+          id,
+          workflowName: "pr-review",
+          triggerId: "owner/repo#8",
+          currentPhase: "select",
+          status: "running",
+          startedAt: new Date().toISOString(),
+        });
+        await db.runs.cancelRun(id);
+        const observed: string[] = [];
+        db.runs.addTerminalObserver((_run, status) => observed.push(status));
+
+        await db.runs.finishRun(id, "failed", { error: "Sandbox agent failed (exit 137): no output" });
+        await db.runs.finishRun(id, "succeeded");
+        const run = await db.runs.getRun(id);
+        expect(run!.status).toBe("cancelled");
+        expect(run!.context?.error).toBeUndefined();
+        expect(observed).toEqual([]);
+      });
+
       it("finishes a workflow run with failed status", async () => {
         const id = randomUUID();
         const now = new Date().toISOString();
