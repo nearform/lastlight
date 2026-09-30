@@ -317,6 +317,12 @@ export interface PrDiscussionRead {
     isOutdated: boolean;
     comments: { author: string; isBot: boolean; body: string }[];
   }[];
+  /**
+   * The PR has more review threads than this read holds (`reviewThreads` is
+   * one page). A caller asking "is anything still open?" must treat the
+   * unseen rest as unknown, not as none.
+   */
+  threadsTruncated: boolean;
   comments: { author: string; isBot: boolean; body: string; createdAt: string | null }[];
 }
 
@@ -2093,6 +2099,7 @@ export class GitHubClient {
            pullRequest(number: $number) {
              reviews(last: 30) { nodes { author { __typename login } state body submittedAt } }
              reviewThreads(first: 50) {
+               pageInfo { hasNextPage }
                nodes {
                  path line isResolved isOutdated
                  comments(first: 5) { nodes { author { __typename login } body } }
@@ -2118,6 +2125,7 @@ export class GitHubClient {
         isOutdated: t.isOutdated === true,
         comments: nodes(t.comments).map((c) => ({ ...who(c.author), body: cut(c.body) })),
       })),
+      threadsTruncated: pr?.reviewThreads?.pageInfo?.hasNextPage === true,
       comments: nodes(pr?.comments).map((c) => ({ ...who(c.author), body: cut(c.body), createdAt: c.createdAt ?? null })),
     };
   }
@@ -2701,6 +2709,7 @@ interface GraphQlPrDiscussion {
     pullRequest?: {
       reviews?: { nodes?: Array<{ author?: GraphQlAuthor | null; state?: string | null; body?: string | null; submittedAt?: string | null } | null> | null } | null;
       reviewThreads?: {
+        pageInfo?: { hasNextPage?: boolean | null } | null;
         nodes?: Array<{
           path?: string | null;
           line?: number | null;

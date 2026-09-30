@@ -27,11 +27,11 @@ describe("openBotThreads", () => {
     comments: [{ author, isBot, body: "finding" }],
     ...over,
   });
-  const client = (threads: PrDiscussionRead["threads"]) => ({
-    getPullRequestDiscussion: async () => ({ reviews: [], comments: [], threads }),
+  const client = (threads: PrDiscussionRead["threads"], threadsTruncated = false) => ({
+    getPullRequestDiscussion: async () => ({ reviews: [], comments: [], threads, threadsTruncated }),
   });
-  const open = (threads: PrDiscussionRead["threads"]) =>
-    openBotThreads(client(threads), "o", "r", 1, "nearform-lastlight[bot]");
+  const open = (threads: PrDiscussionRead["threads"], truncated = false) =>
+    openBotThreads(client(threads, truncated), "o", "r", 1, "nearform-lastlight[bot]");
 
   it("counts our unresolved thread on unchanged code", async () => {
     expect(await open([thread({})])).toBe(true);
@@ -40,6 +40,11 @@ describe("openBotThreads", () => {
   it("ignores a resolved or outdated thread, and one another author opened", async () => {
     expect(await open([thread({ isResolved: true }), thread({ isOutdated: true })])).toBe(false);
     expect(await open([thread({}, "alice", false), thread({}, "other-bot", true)])).toBe(false);
+  });
+
+  it("counts a truncated read as open — the threads past the page are unknown, not closed", async () => {
+    expect(await open([thread({ isResolved: true })], true)).toBe(true);
+    expect(await open([thread({ isResolved: true })], false)).toBe(false);
   });
 
   it("counts a failed read as open — the claim that needs evidence is withheld", async () => {

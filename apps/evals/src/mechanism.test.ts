@@ -1543,7 +1543,7 @@ describe("PR context — core's own projection, not a copy", () => {
     });
     try {
       const gh = resolveReviewGitHubClient({ githubApiBaseUrl: fake.url });
-      await expect(gh.getPullRequestDiscussion("acme", "widgets", 414)).resolves.toEqual({ reviews: [], threads: [], comments: [] });
+      await expect(gh.getPullRequestDiscussion("acme", "widgets", 414)).resolves.toEqual({ reviews: [], threads: [], threadsTruncated: false, comments: [] });
     } finally {
       await fake.close();
     }

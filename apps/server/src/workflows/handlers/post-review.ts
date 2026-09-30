@@ -98,7 +98,13 @@ export function isRereview(latest: { sha: string } | null, headSha: string | und
  *
  * An OUTDATED thread does not count: the code it sat on changed, and this
  * review — which read the new code — found nothing to raise there. A failed
- * read counts as open: the claim that needs the evidence is the one withheld.
+ * read counts as open, and so does a TRUNCATED one with no open thread in the
+ * page it holds: the threads it could not see are unknown, not closed. The
+ * claim that needs the evidence is the one withheld.
+ *
+ * Every posted thread counts, whatever its label: the sites pipeline never
+ * posts a `nit` (finalize files it `internal`), so a posted thread is
+ * `must-fix` or `worth-mentioning` — the same bar `hasStillOpen` holds.
  */
 export async function openBotThreads(
   github: Pick<GitHubClient, "getPullRequestDiscussion">,
@@ -111,10 +117,11 @@ export async function openBotThreads(
   const bot = botLogin.replace(/\[bot\]$/, "");
   try {
     const d = await github.getPullRequestDiscussion(owner, repo, prNumber);
-    return d.threads.some((t) => {
+    const open = d.threads.some((t) => {
       const first = t.comments[0];
       return !t.isResolved && !t.isOutdated && !!first?.isBot && first.author === bot;
     });
+    return open || d.threadsTruncated;
   } catch (err: unknown) {
     log.warn("Could not read review threads — not calling the re-review good to merge", { owner, repo, prNumber, err });
     return true;
