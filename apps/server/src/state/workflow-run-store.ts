@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, gte, inArray, isNotNull, ne, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, inArray, isNotNull, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
 import type { ApprovalStore } from "./approval-store.js";
 import type { TriggerActorType } from "./user-store.js";
 import {
@@ -999,6 +999,9 @@ export class WorkflowRunStore {
    * terminal observers, which advance the issue's stage label past the gate.
    * Failing or cancelling a paused run stays legal — that is how a rejection
    * and a dashboard cancel end one.
+   *
+   * A `cancelled` run is never flipped to anything else (see
+   * {@link flipFinished}); a retry re-opens one through `resumeRun`, not here.
    */
   async finishRun(
     id: string,
@@ -1029,7 +1032,7 @@ export class WorkflowRunStore {
         ? await this.serialize(() => this.client.transaction(async (tx) => apply(tx)))
         : await apply(this.client);
     if (!flipped) {
-      log.warn("Refused to mark a paused run succeeded — it is waiting on a human", { runId: id });
+      log.warn("Refused to finish a run: it is paused for a human or already cancelled", { runId: id, status });
       return;
     }
     // AFTER the transaction commits — the observer reads the row back.
@@ -1038,9 +1041,17 @@ export class WorkflowRunStore {
 
   /**
    * Returns `false` — writing nothing — when `status` is `succeeded` and the row
-   * is `paused` (see {@link finishRun}). A status read rather than a conditional
-   * UPDATE's row count, so the guard never depends on a driver reporting
-   * affected rows.
+   * is `paused` (see {@link finishRun}), or when the row is already `cancelled`
+   * and `status` is anything else. A cancel is final: the phase a cancel kills
+   * (a superseding review kills the run's sandbox) comes back failed, and the
+   * runner's `failWorkflow` used to flip the row to `failed`. The scheduler's
+   * cancel check at the next phase then saw `failed`, not `cancelled`, and the
+   * dead run carried on through its remaining phases.
+   *
+   * The refusal is a predicate on the UPDATE itself, not a read before it: on
+   * Postgres a `cancelRun` committing between a read and a write would still be
+   * overwritten. `RETURNING` says whether the row flipped — the rows the
+   * statement wrote, not a driver's affected-row count.
    */
   private async flipFinished(
     id: string,
@@ -1049,14 +1060,8 @@ export class WorkflowRunStore {
     dbc: StateDbc = this.client,
   ): Promise<boolean> {
     const { workflowRuns } = this.t;
-    if (status === "succeeded") {
-      const [row] = await dbc
-        .select({ status: workflowRuns.status })
-        .from(workflowRuns)
-        .where(eq(workflowRuns.id, id))
-        .limit(1);
-      if (row?.status === "paused") return false;
-    }
+    const refusedFrom: WorkflowRun["status"][] =
+      status === "cancelled" ? [] : status === "succeeded" ? ["cancelled", "paused"] : ["cancelled"];
     const now = new Date().toISOString();
     const patch: Partial<StateTables["workflowRuns"]["$inferInsert"]> = {
       status,
@@ -1067,8 +1072,16 @@ export class WorkflowRunStore {
     // replaces expressed that as `CASE WHEN ? IS NOT NULL`, leaving the column
     // untouched otherwise.
     if (error !== undefined) patch.context = { ...(await this.readContext(id, dbc)), error };
-    await dbc.update(workflowRuns).set(patch).where(eq(workflowRuns.id, id));
-    return true;
+    const flipped = await dbc
+      .update(workflowRuns)
+      .set(patch)
+      .where(
+        refusedFrom.length
+          ? and(eq(workflowRuns.id, id), notInArray(workflowRuns.status, refusedFrom))
+          : eq(workflowRuns.id, id),
+      )
+      .returning({ id: workflowRuns.id });
+    return flipped.length > 0;
   }
 
   /** Cancel a workflow run */

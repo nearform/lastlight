@@ -640,6 +640,71 @@ describe("fanout — `on_branch_gate_failure` re-runs a branch whose gate said n
   });
 });
 
+describe("fanout — a cancelled run starts no more work", () => {
+  /** Cancels the run the moment the first branch's agent turn starts. */
+  class CancellingSandbox extends CountingSandbox {
+    constructor(private readonly store: InMemoryStateStore) {
+      super({ commandExit: 3 });
+    }
+    override async runAgent(...args: Parameters<CountingSandbox["runAgent"]>) {
+      if (this.agentPrompts.length === 0) await this.store.runs.finishRun(RUN_ID, "cancelled");
+      return super.runAgent(...args);
+    }
+  }
+
+  it("launches no queued branch, no gate and no gate re-run once the run is cancelled", async () => {
+    // A superseding review cancels the row and kills the sandbox mid fan-out;
+    // every branch or `_regate` launched after that failed at once with
+    // `No such container` (nearform, 2026-09-29).
+    const store = new InMemoryStateStore(RUN_ID);
+    const sandbox = new CancellingSandbox(store);
+    const { outcome } = await runFanout(
+      fanoutPhase({ on_branch_gate_failure: { retries: 1 } }),
+      sandbox,
+      "gondolin",
+      store,
+    );
+
+    expect(sandbox.agentPrompts).toHaveLength(1);
+    expect(sandbox.commands).toEqual([]);
+    expect(outcome.results.filter((r) => !r.success).map((r) => r.error)).toEqual([
+      "run cancelled before this branch started",
+      "run cancelled before this branch started",
+    ]);
+  });
+
+  it("launches no further gate re-run or gate once a re-run is cancelled under it", async () => {
+    // Both gated branches fail their gate; the cancel lands during the first
+    // re-run. The second re-run and the re-gates must not start.
+    const store = new InMemoryStateStore(RUN_ID);
+    const sandbox = new (class extends CountingSandbox {
+      override async runAgent(...args: Parameters<CountingSandbox["runAgent"]>) {
+        if (this.agentPrompts.length === 3) await store.runs.finishRun(RUN_ID, "cancelled");
+        return super.runAgent(...args);
+      }
+    })({ commandExit: 3 });
+    await runFanout(fanoutPhase({ on_branch_gate_failure: { retries: 1 } }), sandbox, "gondolin", store);
+
+    // Three branches, then ONE re-run; the two first-round gates and nothing after.
+    expect(sandbox.agentPrompts).toHaveLength(4);
+    expect(sandbox.commands).toEqual(["test -s a.jsonl", "test -s b.jsonl"]);
+  });
+
+  it("runs no further pre-gate, and starts no branch, once a pre-gate is cancelled under it", async () => {
+    const store = new InMemoryStateStore(RUN_ID);
+    const sandbox = new (class extends CountingSandbox {
+      override async runCommand(taskId: string, command: string, opts: never) {
+        if (this.commands.length === 0) await store.runs.finishRun(RUN_ID, "cancelled");
+        return super.runCommand(taskId, command, opts);
+      }
+    })({ commandExit: 3 });
+    await runFanout(fanoutPhase({ skip_satisfied_branches: true }), sandbox, "gondolin", store);
+
+    expect(sandbox.commands).toEqual(["test -s a.jsonl"]);
+    expect(sandbox.agentPrompts).toHaveLength(0);
+  });
+});
+
 describe("fanout — the schema refuses what the shape cannot support", () => {
   const parse = (phase: Record<string, unknown>) =>
     AgentWorkflowSchema.safeParse({ name: "wf", phases: [phase] });

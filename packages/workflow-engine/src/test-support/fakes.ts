@@ -203,8 +203,10 @@ export class InMemoryStateStore implements WorkflowStateStore {
     },
     finishRun: async (id, status, opts) => {
       const row = this.ensureRun(id);
-      // Mirrors the real store: a paused run is never flipped to `succeeded`.
+      // Mirrors the real store: a paused run is never flipped to `succeeded`,
+      // and a cancelled run is never flipped at all.
       if (status === "succeeded" && row.status === "paused") return;
+      if (row.status === "cancelled" && status !== "cancelled") return;
       if (opts?.terminalMarker) row.history.push({ ...opts.terminalMarker, timestamp: new Date().toISOString(), success: true } as PhaseHistoryEntry);
       row.status = status;
     },

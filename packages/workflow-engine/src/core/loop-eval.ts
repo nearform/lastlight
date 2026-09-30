@@ -6,6 +6,8 @@
  *   output.contains('text')   — true if the output string contains 'text'
  *   a.b.c.contains('text')    — same, against any dotted path in the context
  *                               (`output` is just the degenerate one-segment case)
+ *   a.b.c.startsWith('text')  — true if the value (leading whitespace ignored)
+ *                               starts with 'text'
  *   variable == 'value'       — equality check against the context map
  *   variable != 'value'       — inequality check against the context map
  *
@@ -67,6 +69,18 @@ export function evalUntilExpression(expr: string, ctx: LoopEvalContext): boolean
     // which is a substring match waiting to surprise someone.
     if (typeof v !== "string" && typeof v !== "number") return false;
     return String(v).includes(needle);
+  }
+
+  // <dotted.path>.startsWith('text') — an ANCHORED match, for a marker a
+  // tool prints as its first line. `contains` cannot tell the marker from the
+  // same text quoted later in the output (pr-review's merge embeds code
+  // excerpts, which can quote the marker's own source).
+  const startsMatch = trimmed.match(/^([\w.]+)\.startsWith\(['"](.+)['"]\)$/);
+  if (startsMatch) {
+    const [, key, needle] = startsMatch;
+    const v = readPath(ctx, key);
+    if (typeof v !== "string" && typeof v !== "number") return false;
+    return String(v).trimStart().startsWith(needle);
   }
 
   // dotted.path == true / == false / != true / != false (bare boolean literal)

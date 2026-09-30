@@ -1088,6 +1088,9 @@ A custom mini-DSL (not `eval()`). Accepts:
   context (`output` is the degenerate one-segment case). Strings and
   numbers only: stringifying an object yields `"[object Object]"`, which
   is a substring match waiting to surprise someone
+- `a.b.c.startsWith('text')` — an anchored match (leading whitespace
+  ignored), for a marker a tool prints as its first line; `contains` cannot
+  tell it from the same text quoted later in the output
 - `variable == 'value'` / `variable != 'value'` — equality / inequality
 - `variable == true` / `== false` — boolean coercion of bare literals
 - Dotted keys for nested access: `scratch.socratic.ready == true`
@@ -1101,6 +1104,11 @@ returns the **first matching expression**, so the scheduler can name it in
 the skip reason. The longer dotted path exists for `skip_if`, which needs
 to read a *sibling* value (`scratch.fixMarkers.diagnosis.class == '…'`)
 that the loop never did.
+
+The cancel check is that `getRun` at the top of every scheduler iteration:
+a `cancelled` row stops the run at the next phase boundary. It holds because
+a cancel is final — `finishRun` refuses to move a `cancelled` row, so the
+`failWorkflow` a killed phase triggers cannot overwrite it with `failed`.
 
 `runScope.scratch` is refreshed from the run row on each iteration, inside
 the `getRun` the cancel check already makes — so a guard reading `scratch`

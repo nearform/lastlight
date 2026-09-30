@@ -342,6 +342,7 @@ export {
   renderSiteAssignment,
   renderSiteCheck,
   renderSiteMerge,
+  SITE_MERGE_EMPTY_MARKER,
   renderSitePlanSummary,
   selectedRel,
   SITE_REVIEW_VERSION,

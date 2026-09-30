@@ -18,6 +18,7 @@ import {
   mergeSiteFindings,
   readSitePlan,
   renderSiteMerge,
+  SITE_MERGE_EMPTY_MARKER,
   writeSiteMerge,
   writeSitePlan,
 } from "../src/site-review.js";
@@ -192,6 +193,16 @@ describe("sites --merge", () => {
     expect(merge.findings[0].lineText).toBe("const line12 = 12;");
     expect(merge.slots.map((s) => s.outcome)).toEqual(["findings", "findings", "empty", "empty", "empty"]);
     expect(renderSiteMerge(merge)).toContain("## F4");
+    expect(renderSiteMerge(merge)).not.toContain(SITE_MERGE_EMPTY_MARKER);
+  });
+
+  it("marks an empty pool, so pr-review can skip `select`", () => {
+    const { repo, dir } = workspace();
+    writeSitePlan(dir);
+    writeFindings(dir, "site-001", [{ site: "site-001", none: true, reason: "r", checked: [] }]);
+    const merge = mergeSiteFindings({ dir, repo });
+    expect(merge.findings).toEqual([]);
+    expect(renderSiteMerge(merge).startsWith(`${SITE_MERGE_EMPTY_MARKER}\n`)).toBe(true);
   });
 
   it("moves a finding off a blank cited line to the nearest code line, keeping what was cited", () => {
