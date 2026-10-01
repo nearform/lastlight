@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ReactFlow,
   useNodesState,
@@ -25,6 +25,17 @@ import {
 } from "./pipeline-node";
 import { isNoOpSummary, phaseSummary } from "../lib/phase-outcome";
 import {
+  COMPACT_FANOUT_MIN,
+  chipsKey,
+  derivedLabel,
+  fanoutPlanOf,
+  findParentDeclared,
+  foldGateStatus,
+  gateOwnerOf,
+  parseDerived,
+  summarizeFanout,
+} from "../lib/fanout-group";
+import {
   cardHeight,
   crossHandles,
   extent,
@@ -37,6 +48,8 @@ import {
 type PhaseNodeData = PipelineNodeData;
 
 const nodeTypes = pipelineNodeTypes;
+
+const EMPTY_SET: ReadonlySet<string> = new Set();
 
 /** Compare the run-view fields we actually render, to skip needless updates. */
 function nodeDataEqual(a: PhaseNodeData, b: PhaseNodeData): boolean {
@@ -54,7 +67,18 @@ function nodeDataEqual(a: PhaseNodeData, b: PhaseNodeData): boolean {
     // updates" bugs, so a field it renders belongs in the comparison.
     a.phaseType === b.phaseType &&
     a.hasGate === b.hasGate &&
-    a.iterates === b.iterates
+    a.iterates === b.iterates &&
+    a.subtitle === b.subtitle &&
+    // The compact fan-out block: its chips ARE its rendered content.
+    a.compact === b.compact &&
+    a.collapsible === b.collapsible &&
+    a.counts?.done === b.counts?.done &&
+    a.counts?.active === b.counts?.active &&
+    a.counts?.failed === b.counts?.failed &&
+    a.counts?.pending === b.counts?.pending &&
+    a.counts?.skipped === b.counts?.skipped &&
+    a.counts?.unmet === b.counts?.unmet &&
+    chipsKey(a.chips) === chipsKey(b.chips)
   );
 }
 
@@ -181,6 +205,16 @@ const GROUP_PAD = 10;
 const GROUP_HEADER = 88;
 /** Pitch between branches inside the container, across the flow. */
 const BRANCH_GAP = 12;
+// ── The compact fan-out block (more than 4 branches) ──────────────────────
+/** Two cards and the gap between them, across the flow. */
+const COMPACT_CROSS = NODE_WIDTH * 2 + BRANCH_GAP;
+/** The count strip under the header. */
+const COMPACT_COUNTS = 22;
+/** One chip row, including its gap. Chips wrap in a grid of this pitch. */
+const CHIP_ROW = 24;
+const CHIP_WIDTH = 52;
+const CHIP_GAP = 4;
+const CHIPS_PER_ROW = Math.max(1, Math.floor((COMPACT_CROSS - GROUP_PAD * 2 + CHIP_GAP) / (CHIP_WIDTH + CHIP_GAP)));
 
 /**
  * Extents of one node, resolved per axis. A card is 190 wide and ~106 tall, so
@@ -218,87 +252,6 @@ function mainExtentOf(node: Node<PhaseNodeData>): number {
 }
 
 /**
- * Map a dynamic phase name (e.g. "reviewer_fix_1", "reviewer_recheck_1") back
- * to the declared phase it iterates on. The runner names loop iterations like
- * `${parent}_recheck_${n}` (re-reviews) or `${parent}_fix_${n}` (fix
- * iterations), so the parent is the longest declared name `d` such that the
- * dynamic name is `${d}` or starts with `${d}_`.
- */
-function findParentDeclared(name: string, declared: string[]): string | null {
-  let best: string | null = null;
-  for (const d of declared) {
-    if (name === d || name.startsWith(`${d}_`)) {
-      if (!best || d.length > best.length) best = d;
-    }
-  }
-  return best;
-}
-
-/**
- * The derived-phase-name grammar, MIRRORED from
- * `packages/workflow-engine/src/core/phase-ref.ts` (`PhaseRef.format`/`parse`).
- *
- * Mirrored rather than imported because the dashboard has no dependency on
- * `lastlight-workflow-engine` — the same reason it hand-mirrors the config
- * types in `api.ts`. If the grammar there gains a form, it has to be added
- * here too; the failure mode is cosmetic (the raw ledger key renders, which is
- * exactly what this replaces) rather than a crash.
- *
- * Branch names are schema-constrained to `[A-Za-z0-9-]`, and that is what makes
- * the greedy-base split unambiguous against a base that may itself contain `_`.
- * Order matters: the two SUFFIXED branch forms must be tried before the bare
- * one, and likewise for the iteration forms.
- */
-type DerivedRef =
-  | { kind: "branch"; base: string; branch: string; suffix?: "retry" | "check" | "regate" }
-  | { kind: "iter"; base: string; index: number; suffix?: "retry" | "check" }
-  | { kind: "fix" | "recheck"; base: string; index: number };
-
-function parseDerived(name: string): DerivedRef | null {
-  let m = name.match(/^(.*)_branch_([A-Za-z0-9-]+)_(retry|check|regate)$/);
-  if (m) return { kind: "branch", base: m[1]!, branch: m[2]!, suffix: m[3] as "retry" | "check" | "regate" };
-  m = name.match(/^(.*)_branch_([A-Za-z0-9-]+)$/);
-  if (m) return { kind: "branch", base: m[1]!, branch: m[2]! };
-  m = name.match(/^(.*)_iter_(\d+)_(retry|check)$/);
-  if (m) return { kind: "iter", base: m[1]!, index: Number(m[2]), suffix: m[3] as "retry" | "check" };
-  m = name.match(/^(.*)_iter_(\d+)$/);
-  if (m) return { kind: "iter", base: m[1]!, index: Number(m[2]) };
-  m = name.match(/^(.*)_fix_(\d+)$/);
-  if (m) return { kind: "fix", base: m[1]!, index: Number(m[2]) };
-  m = name.match(/^(.*)_recheck_(\d+)$/);
-  if (m) return { kind: "recheck", base: m[1]!, index: Number(m[2]) };
-  return null;
-}
-
-/**
- * A SHORT label for a derived node. Short is the requirement, not a preference:
- * these render in a narrow card inside a parent that already names the phase,
- * so
- * `survey_branch_contract` overflowed its box and read as a different phase
- * rather than as one branch of the node directly above it.
- */
-function derivedLabel(ref: DerivedRef): string {
-  const suffix =
-    "suffix" in ref && ref.suffix
-      ? ref.suffix === "check"
-        ? " · gate"
-        : ref.suffix === "regate"
-          ? " · re-run"
-          : " · retry"
-      : "";
-  switch (ref.kind) {
-    case "branch":
-      return `${ref.branch}${suffix}`;
-    case "iter":
-      return `#${ref.index}${suffix}`;
-    case "fix":
-      return `fix ${ref.index}`;
-    case "recheck":
-      return `recheck ${ref.index}`;
-  }
-}
-
-/**
  * The server's own mark for a row that is bookkeeping, not work: a fan-out's
  * shared-sandbox CPU / memory reading (`<phase>_sandbox`). Keyed on the stop
  * reason the server writes, NOT the name — a real phase that happens to end in
@@ -306,45 +259,6 @@ function derivedLabel(ref: DerivedRef): string {
  * (`src/sandbox/resource-usage.ts`); no import edge to core.
  */
 const RESOURCE_USAGE_STOP_REASON = "resource_usage";
-
-/**
- * The node a `_retry` / `_check` row is a verdict ABOUT, if it is one.
- *
- * Both shapes of container have them: a fan-out branch
- * (`survey_branch_contract_check`) and a loop iteration
- * (`adjudicate_iter_1_check`). Neither is independent work, so neither gets a
- * card of its own — see {@link foldGateStatus}.
- */
-function gateOwnerOf(name: string): string | null {
-  const ref = parseDerived(name);
-  if (!ref) return null;
-  if (ref.kind === "branch" && ref.suffix) return `${ref.base}_branch_${ref.branch}`;
-  if (ref.kind === "iter" && ref.suffix) return `${ref.base}_iter_${ref.index}`;
-  return null;
-}
-
-/**
- * Fold a `_check` (exit gate) or `_retry` row INTO the status of the node it
- * judges, instead of drawing it as a sibling card.
- *
- * A gate is a verdict about the row above it, not work of its own, and giving
- * each one a card doubled the height of every fan-out and every loop for rows
- * whose entire content is a tone. The verdict is not dropped — it decides the
- * colour, and the reason rides the card's tooltip and the detail panel.
- *
- * `unmet` only overrides a row that otherwise passed. A row that genuinely
- * failed keeps `failed`: a red gate under a red iteration is the same news
- * twice, and the row's own failure is the more specific of the two.
- */
-function foldGateStatus(
-  ownStatus: PhaseStatus,
-  gate: WorkflowRunExecution | undefined,
-): PhaseStatus {
-  if (!gate || ownStatus !== "done") return ownStatus;
-  if (gate.success === true && gate.stopReason === "condition_not_met") return "unmet";
-  if (gate.success === false && gate.stopReason !== "skipped") return "failed";
-  return ownStatus;
-}
 
 interface Props {
   run: WorkflowRun;
@@ -389,6 +303,29 @@ export function WorkflowPipeline({
   selectedPhase,
   onPhaseClick,
 }: Props) {
+  // Wide fan-outs the user expanded back to full cards, per run. Component
+  // state, deliberately: it is a viewing choice, not something to persist.
+  const [expanded, setExpanded] = useState<{ runId: string; phases: ReadonlySet<string> }>({
+    runId: run.id,
+    phases: new Set(),
+  });
+  const expandedPhases = expanded.runId === run.id ? expanded.phases : EMPTY_SET;
+  const toggleExpanded = useCallback(
+    (phase: string) =>
+      setExpanded((prev) => {
+        const phases = new Set(prev.runId === run.id ? prev.phases : []);
+        if (phases.has(phase)) phases.delete(phase);
+        else phases.add(phase);
+        return { runId: run.id, phases };
+      }),
+    [run.id],
+  );
+  // Node data carries the chip-click handler, and `reconcileNodes` keeps an
+  // unchanged node's OLD data object — so the handler must never go stale.
+  const onPhaseClickRef = useRef(onPhaseClick);
+  onPhaseClickRef.current = onPhaseClick;
+  const onChipClick = useCallback((id: string) => onPhaseClickRef.current?.(id), []);
+
   const computed = useMemo(() => {
     if (!definition) {
       return { nodes: [] as Node<PhaseNodeData>[], edges: [] as Edge[] };
@@ -743,9 +680,11 @@ export function WorkflowPipeline({
       }
       const name = slot.name;
       const children = childrenByParent.get(name) ?? [];
+      // A `branches_from:` fan-out's plan, recorded before any branch ran.
+      const plan = fanoutPlanOf(run, name);
 
-      // No dynamic children — an ordinary card on the chain.
-      if (children.length === 0) {
+      // No dynamic children (and no planned ones) — an ordinary card on the chain.
+      if (children.length === 0 && !plan?.planned.length) {
         const node = buildNode(name, x, 0, { withSummary: true });
         mainPos += mainExtentOf(node) + NODE_GAP;
         reactFlowNodes.push(node);
@@ -760,7 +699,7 @@ export function WorkflowPipeline({
       // rather than as a stack hanging below it. The one difference that
       // matters is preserved: a LOOP's iterations are sequential and stay
       // chained, a FAN-OUT's branches are concurrent and are not.
-      const isFanout = children.some((c) => parseDerived(c)?.kind === "branch");
+      const isFanout = !!plan || children.some((c) => parseDerived(c)?.kind === "branch");
 
       // Split the rows that are real work from the `_retry` / `_check` rows,
       // which are verdicts about them and fold into their colour.
@@ -787,6 +726,61 @@ export function WorkflowPipeline({
       // is no real order to preserve. Loop iterations keep the chronological
       // sort applied upstream — for them the order IS the information.
       if (isFanout) rows.sort((a, b) => a.localeCompare(b));
+
+      // ── A wide fan-out: one compact block, a chip per branch ─────────────
+      // Planned-but-unstarted branches (a `branches_from:` fan-out records its
+      // plan in scratch before any branch runs) count toward the width and
+      // draw as pending chips, so a live run shows the whole fan-out at once.
+      const branchCount = new Set([...rows, ...(plan?.planned ?? []).map((p) => `${name}_branch_${p.name}`)]).size;
+      const wide = isFanout && branchCount >= COMPACT_FANOUT_MIN;
+      if (wide && !expandedPhases.has(name)) {
+        const { chips, counts } = summarizeFanout(
+          name,
+          rows.map((r) => {
+            const n = buildNode(r, 0, 0, { gate: gateFor.get(r) });
+            return { id: r, status: n.data.status, duration: n.data.duration };
+          }),
+          plan,
+          selectedPhase,
+        );
+        const chipRows = Math.ceil(chips.length / CHIPS_PER_ROW);
+        const groupMain = GROUP_HEADER + COMPACT_COUNTS + chipRows * CHIP_ROW + GROUP_PAD;
+        mainPos += groupMain + NODE_GAP;
+        const parent = buildNode(name, x, centreCross(COMPACT_CROSS), { withSummary: true });
+        reactFlowNodes.push({
+          ...parent,
+          type: "fanout",
+          data: {
+            ...parent.data,
+            summary: undefined,
+            summaryNoOp: undefined,
+            subtitle: `${chips.length} branches${plan?.truncated ? ` (+${plan.truncated} over max)` : ""}`,
+            compact: true,
+            collapsible: true,
+            chips,
+            counts,
+            onChipClick,
+            onToggle: () => toggleExpanded(name),
+          },
+          style: extent(FLOW, groupMain, COMPACT_CROSS),
+        });
+        linkTo(name, prevId, prevStatus);
+        prevId = name;
+        prevStatus = parent.data.status;
+        return;
+      }
+
+      // A narrow planned fan-out none of whose branches has started yet has no
+      // children to draw a container around: an ordinary card until one does.
+      if (rows.length === 0) {
+        const node = buildNode(name, x, 0, { withSummary: true });
+        mainPos += mainExtentOf(node) + NODE_GAP;
+        reactFlowNodes.push(node);
+        linkTo(name, prevId, prevStatus);
+        prevId = name;
+        prevStatus = node.data.status;
+        return;
+      }
 
       // An interactive `generic_loop` approval belongs beside the iteration it
       // paused. These are human gates, not `until_bash` verdicts, so they stay
@@ -828,6 +822,8 @@ export function WorkflowPipeline({
           subtitle: isFanout
             ? `${stackItems.length} branches`
             : `${rows.length} iteration${rows.length === 1 ? "" : "s"}`,
+          // An expanded wide fan-out can fold back into its compact block.
+          ...(wide ? { collapsible: true, onToggle: () => toggleExpanded(name) } : {}),
         },
         style: extent(FLOW, groupMain, groupCross),
       });
@@ -882,7 +878,7 @@ export function WorkflowPipeline({
     });
 
     return { nodes: reactFlowNodes, edges: reactFlowEdges };
-  }, [definition, run, executions, approvals, selectedPhase]);
+  }, [definition, run, executions, approvals, selectedPhase, expandedPhases, toggleExpanded, onChipClick]);
 
   // ── Live React Flow state ──────────────────────────────────────────────
   // Hold the graph in xyflow's own state and reconcile `computed` into it each

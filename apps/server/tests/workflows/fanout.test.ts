@@ -212,6 +212,7 @@ async function runFanout(
   backend: SandboxBackend = "none",
   store?: InMemoryStateStore,
   reporter: RecordingReporter = new RecordingReporter(),
+  ctxExtra: Record<string, unknown> = {},
 ) {
   const config = {
     sandbox: backend,
@@ -231,6 +232,7 @@ async function runFanout(
       owner: "acme",
       repo: "widgets",
       timeouts: { agentSeconds: 1800, commandSeconds: 300, untilBashSeconds: 30 },
+      ...ctxExtra,
     } as unknown as TemplateContext,
     config,
     taskId: "task-1",
@@ -902,5 +904,164 @@ describe("fanout — `context_file` puts the seed IN the prompt", () => {
     for (const prompt of sandbox.agentPrompts) {
       expect(prompt).not.toContain(BRANCH_CONTEXT_HEADING);
     }
+  });
+});
+
+// ── `branches_from` — a fan-out whose branch list is a run-time manifest ──────
+
+/**
+ * pr-review's `site-review` used to declare sixteen static slots and have
+ * code-facts pre-close the unused ones. A dynamic fan-out instead reads the
+ * branch list `site-plan` wrote into the workspace, and renders `branch:` once
+ * per item. What is pinned here: item vars reach every templated field, the
+ * manifest's edge cases (empty, over `max`, malformed, unsafe) are loud or
+ * no-ops as designed, the plan lands in scratch, and resume still dedups.
+ */
+const MANIFEST = ".lastlight/pr-review/sites/branches.json";
+
+const dynamicPhase = (over: Record<string, unknown> = {}): PhaseDefinition =>
+  AgentWorkflowSchema.parse({
+    name: "wf",
+    phases: [
+      {
+        name: "site-review",
+        type: "fanout",
+        prompt: "prompts/review-site.md",
+        model: "phase/model",
+        branches_from: { file: MANIFEST, max: 4 },
+        branch: {
+          name: "{{item.id}}",
+          model: "{{#if item.pair}}{{models.pair}}{{/if}}",
+          context_file: ".lastlight/pr-review/sites/{{item.id}}.md",
+          until_bash: "check {{item.id}}",
+        },
+        ...over,
+      },
+    ],
+  }).phases[0];
+
+const manifest = (items: unknown[]): string => JSON.stringify({ items });
+
+class ModelSandbox extends SeedingSandbox {
+  readonly models: (string | undefined)[] = [];
+  override async runAgent(taskId: string, prompt: string, opts: RunAgentOpts, onEvent: (r: SandboxEvent) => void) {
+    this.models.push((opts as unknown as { model?: string }).model);
+    return super.runAgent(taskId, prompt, opts, onEvent);
+  }
+}
+
+async function runDynamic(seeds: Record<string, string>, phase = dynamicPhase(), store = new InMemoryStateStore(RUN_ID)) {
+  const sandbox = new ModelSandbox(seeds);
+  const { outcome, reporter } = await runFanout(phase, sandbox, "none", store, undefined, { models: { pair: "pair/model" } });
+  return { outcome, reporter, sandbox, store };
+}
+
+describe("fanout — `branches_from` resolves the branch list at run time", () => {
+  it("runs one branch per manifest item, with item vars in name, model, context_file and until_bash", async () => {
+    const { outcome, sandbox } = await runDynamic({
+      [MANIFEST]: manifest([{ id: "site-001" }, { id: "site-001-b", pair: true }]),
+      ".lastlight/pr-review/sites/site-001.md": "BRIEF ONE",
+      ".lastlight/pr-review/sites/site-001-b.md": "BRIEF ONE-B",
+    });
+    expect(outcome.status).toBe("succeeded");
+    expect(outcome.results.map((r) => r.phase).sort()).toEqual(["site-review_branch_site-001", "site-review_branch_site-001-b"]);
+    expect(sandbox.agentPrompts.some((p) => p.includes("BRIEF ONE-B"))).toBe(true);
+    expect(sandbox.commands.sort()).toEqual(["check site-001", "check site-001-b"]);
+    // The primary inherits the phase model; the pair runs on its own.
+    expect([...sandbox.models].sort()).toEqual(["pair/model", "phase/model"]);
+    // Evals record per-row models from the result, not from a branch list.
+    expect(outcome.results.find((r) => r.phase.endsWith("-b"))?.modelTemplate).toBe("pair/model");
+  });
+
+  it("records the plan in scratch before any branch runs", async () => {
+    const { store } = await runDynamic({ [MANIFEST]: manifest([{ id: "a" }, { id: "b", pair: true }]) });
+    const scratch = (await store.runs.getRun(RUN_ID))?.scratch as { fanout?: Record<string, unknown> };
+    expect(scratch.fanout?.["site-review"]).toEqual({
+      dynamic: true,
+      truncated: 0,
+      planned: [
+        { name: "a", model: "phase/model" },
+        { name: "b", model: "pair/model" },
+      ],
+    });
+  });
+
+  it("an empty manifest is a no-op success: no session work, no branch rows", async () => {
+    const { outcome, sandbox, store } = await runDynamic({ [MANIFEST]: manifest([]) });
+    expect(outcome.status).toBe("succeeded");
+    expect(outcome.results).toEqual([]);
+    expect(sandbox.agentPrompts).toHaveLength(0);
+    expect(store.executionRows().filter((r) => r.dedupKey.includes("_branch_"))).toHaveLength(0);
+  });
+
+  it("truncates past `max`, and says so in scratch", async () => {
+    const items = ["a", "b", "c", "d", "e", "f"].map((id) => ({ id }));
+    const { outcome, store } = await runDynamic({ [MANIFEST]: manifest(items) });
+    expect(outcome.results).toHaveLength(4);
+    const scratch = (await store.runs.getRun(RUN_ID))?.scratch as { fanout: Record<string, { truncated: number }> };
+    expect(scratch.fanout["site-review"].truncated).toBe(2);
+  });
+
+  it.each([
+    ["a missing manifest", {}, /branches\.json/],
+    ["malformed JSON", { [MANIFEST]: "{nope" }, /not valid JSON/],
+    ["no items array", { [MANIFEST]: "{}" }, /items/],
+    ["a duplicate rendered name", { [MANIFEST]: manifest([{ id: "a" }, { id: "a" }]) }, /twice/],
+    ["an invalid rendered name", { [MANIFEST]: manifest([{ id: "a_b" }]) }, /no underscores/],
+    ["a reserved suffix", { [MANIFEST]: manifest([{ id: "a-retry" }]) }, /reserved/],
+    ["a shell-unsafe item value", { [MANIFEST]: manifest([{ id: "a;rm -rf" }]) }, /characters outside/],
+  ])("fails the phase loudly on %s, before any branch runs", async (_what, seeds, message) => {
+    const { outcome, sandbox } = await runDynamic(seeds as Record<string, string>);
+    expect(outcome.status).toBe("failed");
+    expect(outcome.results).toHaveLength(1);
+    expect(outcome.results[0].phase).toBe("site-review");
+    expect(outcome.results[0].error).toMatch(message);
+    expect(sandbox.agentPrompts).toHaveLength(0);
+  });
+
+  it("refuses a backend whose workspace the harness cannot read", async () => {
+    const sandbox = new SeedingSandbox({ [MANIFEST]: manifest([{ id: "a" }]) });
+    const { outcome } = await runFanout(dynamicPhase(), sandbox, "kubernetes");
+    expect(outcome.status).toBe("failed");
+    expect(outcome.results[0].error).toMatch(/host-readable/);
+  });
+
+  it("resume re-resolves the same manifest and dedups the finished branches", async () => {
+    const store = new InMemoryStateStore(RUN_ID);
+    const seeds = { [MANIFEST]: manifest([{ id: "a" }, { id: "b" }]) };
+    await runDynamic(seeds, dynamicPhase(), store);
+    const second = await runDynamic(seeds, dynamicPhase(), store);
+    expect(second.outcome.status).toBe("succeeded");
+    expect(second.sandbox.agentPrompts).toHaveLength(0);
+  });
+});
+
+describe("fanout — the schema's `branches_from` rules", () => {
+  const parse = (phase: Record<string, unknown>) => AgentWorkflowSchema.safeParse({ name: "wf", phases: [phase] });
+  const base = { name: "s", type: "fanout", prompt: "p.md" };
+  const from = { file: "m.json", max: 4 };
+
+  it("accepts `branches_from` + `branch`", () => {
+    expect(parse({ ...base, branches_from: from, branch: { name: "{{item.id}}" } }).success).toBe(true);
+  });
+  it("refuses both `branches` and `branches_from`", () => {
+    const r = parse({ ...base, branches: [{ name: "a" }], branches_from: from, branch: { name: "{{item.id}}" } });
+    expect(JSON.stringify(r.error)).toContain("not both");
+  });
+  it("refuses `branches_from` without a `branch:` template, and `branch:` alone", () => {
+    expect(parse({ ...base, branches_from: from }).success).toBe(false);
+    expect(parse({ ...base, branches: [{ name: "a" }], branch: { name: "{{item.id}}" } }).success).toBe(false);
+  });
+  it("refuses a manifest path outside the workspace, and a missing `max`", () => {
+    expect(parse({ ...base, branches_from: { file: "../m.json", max: 4 }, branch: { name: "x" } }).success).toBe(false);
+    expect(parse({ ...base, branches_from: { file: "/m.json", max: 4 }, branch: { name: "x" } }).success).toBe(false);
+    expect(parse({ ...base, branches_from: { file: "m.json" }, branch: { name: "x" } }).success).toBe(false);
+  });
+  it("refuses run-context placeholders in `branch.until_bash` — it is shell", () => {
+    const r = parse({ ...base, branches_from: from, branch: { name: "{{item.id}}", until_bash: "echo {{issueTitle}}" } });
+    expect(JSON.stringify(r.error)).toContain("item.<key>");
+  });
+  it("refuses `branches_from` on a phase that is not a fanout", () => {
+    expect(parse({ name: "s", type: "agent", prompt: "p.md", branches_from: from }).success).toBe(false);
   });
 });

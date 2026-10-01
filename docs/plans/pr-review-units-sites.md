@@ -260,7 +260,7 @@ Built into `pr-review.yaml` (2026-09-28), then made the only path:
 → reconcile → post-review
 ```
 
-- **Static fan-out, slot-generic prompt.** The engine has no dynamic fan-out, so `site-review` declares static branches that share one byte-identical prompt (`review-site.md`, so they share a cached prefix); everything per-slot arrives last, in the brief `site-plan` wrote, via `context_file`. An empty slot's brief says so and its gate accepts one `empty` line.
+- **Static fan-out, slot-generic prompt.** *(Superseded by #423: `site-review` is now a `branches_from:` fan-out over `sites/branches.json`, one branch per real site, and there are no empty slots.)* The engine had no dynamic fan-out, so `site-review` declared static branches that share one byte-identical prompt (`review-site.md`, so they share a cached prefix); everything per-slot arrives last, in the brief `site-plan` wrote, via `context_file`. An empty slot's brief says so and its gate accepts one `empty` line.
 - **The gate lives in code-facts** (`lastlight-facts sites --check`), and `on_branch_gate_failure: { retries: 1 }` re-runs a failing branch with the gate's output appended — the round-2 feedback the replay built by hand. The replay and the pipeline run the same gate, so they cannot drift.
 - **`merge` proposes, never decides.** Same file, lines within ±10 → a candidate group. "Same defect" versus "two defects on neighbouring lines" needs prose, and no rule reads prose.
 - **`select` is safe at this size.** It sees ~5–20 findings, not hundreds — the long-list failure does not occur. Every pooled finding must land in exactly one item (conservation): it may merge and demote, never drop. `site-finalize` maps must-fix → Important, worth-mentioning → Minor, nit → internal; a failed `select` falls back to one item per pooled finding, so it still posts.
@@ -392,9 +392,9 @@ Top 8 costs ~2 more investigators per PR (≈ +$0.02 on luna). **Ranking tests w
 
 ### What was built
 
-- **`models.review-site-pair`** — a second investigator, on that model, on every selected site (slots 9–16 re-brief ranks 1–8). `merge` proposes the two investigators' duplicates; `select` merges them. Off unless set.
+- **`models.review-site-pair`** — a second investigator, on that model, on every selected site (slots 9–16 re-briefed ranks 1–8; since #423 the pair slot is `site-00N-b`). `merge` proposes the two investigators' duplicates; `select` merges them. Off unless set.
 - **`review.analysis.siteTop`** (1–8, default 5).
-- **16 static branches with `skip_satisfied_branches`.** `site-plan` writes every unused slot's `empty` line itself; the fan-out runs each branch's gate *before* its agent and starts no session for a branch already satisfied. A PR with two sites no longer pays for fourteen agents writing one line each.
+- **16 static branches with `skip_satisfied_branches`** *(superseded by #423's dynamic fan-out)*. `site-plan` writes every unused slot's `empty` line itself; the fan-out runs each branch's gate *before* its agent and starts no session for a branch already satisfied. A PR with two sites no longer pays for fourteen agents writing one line each.
 - **Test-file sites fill free slots.** They rank after every other site (`clusterSites`' `demotePath`) instead of being dropped: they cannot displace a code site, and they recover slots that sat empty on small PRs (9 of one smoke case's 17 rows were in test files, and rank 5 was empty). Not a config key.
 - **`{{prIntent}}`** for the investigators (title, body, closed issues — framed as a claim to check, never a reason to close) and **`{{priorDiscussion}}`** for `select` (reviews, inline threads with resolution, comments — one GraphQL read): an item that repeats an already-raised point is marked `alreadyRaised` and filed internal.
 

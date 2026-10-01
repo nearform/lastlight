@@ -12,6 +12,7 @@
 export * from "./core/types.js";
 export * from "./core/schema.js";
 export * from "./core/templates.js";
+export * from "./core/dynamic-branches.js";
 export * from "./core/templated-number.js";
 export * from "./core/command-policy.js";
 export * from "./core/dag.js";

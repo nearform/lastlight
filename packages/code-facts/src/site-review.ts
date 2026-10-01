@@ -5,15 +5,14 @@
  *
  *   --plan       `site-plan`: {@link clusterSites} over the hypothesis rows
  *                (distinct-unit votes, span 60, test-file sites ranked last), the top
- *                `--top` sites written to `sites/plan.json`, and one brief
- *                per SLOT (`sites/site-001.md` …) — an empty slot's brief says
- *                there is no site, and its `empty` line is written up front,
- *                so a static fan-out fits every PR. `--pair` puts a SECOND
- *                investigator on each site, in slot {@link PAIR_SLOT_OFFSET}
- *                + rank (see {@link planSiteSlots}).
+ *                `--top` sites written to `sites/plan.json`, one brief per
+ *                slot (`sites/site-001.md` …), and `sites/branches.json` —
+ *                the manifest `site-review`'s `branches_from:` fan-out runs
+ *                one investigator per entry of. Only real sites get a slot.
+ *                `--pair` puts a SECOND investigator on each site, slot
+ *                `site-00r-b` (see {@link planSiteSlots}).
  *   --check <id> the `site-review` branch gate ({@link checkSiteFindings}):
- *                1–3 grounded findings, a `none` backed by executed probes, or
- *                an `empty` line for a slot the plan left empty.
+ *                1–3 grounded findings, or a `none` backed by executed probes.
  *   --merge      `merge`: pool every slot's findings, number them `F1…Fn`,
  *                attach an excerpt, and PROPOSE duplicate groups (same file,
  *                lines within ±{@link DUPLICATE_LINE_WINDOW}, different sites).
@@ -45,13 +44,8 @@ import { clusterSites, renderSiteBrief, type Site, type SiteVoters, type VoterUn
 
 /** The default number of sites investigated: `site-001` … `site-005`. */
 export const SITE_SLOTS = 5;
-/**
- * The most sites a plan may select. Also where the pair slots start: rank `r`'s
- * second investigator is slot `PAIR_SLOT_OFFSET + r`, whatever `top` is, so a
- * workflow's static branch list can give slots 9–16 their own model once.
- */
+/** The most sites a plan may select (16 investigators when paired — `site-review`'s `branches_from.max`). */
 export const MAX_SITE_TOP = 8;
-export const PAIR_SLOT_OFFSET = MAX_SITE_TOP;
 export const SITE_REVIEW_VERSION = 1;
 export const MAX_SITE_FINDINGS = 3;
 
@@ -60,8 +54,12 @@ export const sitesRelDir = ".lastlight/pr-review/sites";
 export const siteBriefRel = (siteId: string): string => `${sitesRelDir}/${siteId}.md`;
 export const siteFindingsRel = (siteId: string): string => `${sitesRelDir}/${siteId}.findings.jsonl`;
 export const siteScratchRel = (siteId: string): string => `${sitesRelDir}/${siteId}/`;
-/** Slot `n` (1-based) is the site of rank `n` — `clusterSites` ids sites by rank. */
-export const siteIdForSlot = (n: number): string => `site-${String(n).padStart(3, "0")}`;
+/** The site of rank `r` (1-based) — `clusterSites` ids sites by rank. */
+export const siteIdForRank = (r: number): string => `site-${String(r).padStart(3, "0")}`;
+/** The pair investigator's slot on a site — the primary's id plus `-b`. */
+export const pairSiteId = (siteId: string): string => `${siteId}-b`;
+/** The fan-out manifest `site-review` reads through `branches_from:`. */
+export const siteBranchesRel = `${sitesRelDir}/branches.json`;
 
 export const IMPORTANCES = ["must-fix", "worth-mentioning", "nit"] as const;
 export type Importance = (typeof IMPORTANCES)[number];
@@ -108,25 +106,19 @@ export interface SitePlanOptions {
   /** Sites investigated, 1…{@link MAX_SITE_TOP}. */
   top?: number;
   /**
-   * A second investigator on every selected site, in slot
-   * {@link PAIR_SLOT_OFFSET} + rank. Measured (docs/plans/pr-review-units-sites.md,
+   * A second investigator on every selected site, in slot `<siteId>-b`
+   * ({@link pairSiteId}). Measured (docs/plans/pr-review-units-sites.md,
    * H5): runs of one investigator overlap little, and two models' blind spots
    * are disjoint — the union of a luna and a deepseek draw stated 8/7/9 gold on
    * the 10 recall sites where two luna draws stated 4/6/6.
    */
   pair?: boolean;
-  /**
-   * The static branch count the workflow's fan-out declares. Every slot up to
-   * it is planned (empty past the last site), so each branch has a brief.
-   * Defaults to the highest slot the plan uses.
-   */
-  slots?: number;
   window?: number;
   maxSpan?: number | null;
   voters?: SiteVoters;
 }
 
-export const DEFAULT_SITE_PLAN: Required<Omit<SitePlanOptions, "slots">> = {
+export const DEFAULT_SITE_PLAN: Required<SitePlanOptions> = {
   top: SITE_SLOTS,
   pair: false,
   window: 20,
@@ -135,13 +127,13 @@ export const DEFAULT_SITE_PLAN: Required<Omit<SitePlanOptions, "slots">> = {
 };
 
 export interface SiteSlot {
+  /** 1-based position in the plan: primaries by rank, then their pairs. */
   slot: number;
   siteId: string;
-  /** `null` — the PR has fewer sites than slots, or the slot is a pair slot with pairing off. */
-  site: Site | null;
+  site: Site;
   /** A pair slot: the primary slot investigating the same site. */
   pairOf?: string;
-  /** {@link noneChecksRequired} for the site; 0 on an empty slot. */
+  /** {@link noneChecksRequired} for the site. */
   noneChecks: number;
 }
 
@@ -177,16 +169,15 @@ export function readVoterUnits(dir: string): VoterUnit[] {
 }
 
 /**
- * Pure: the slots for a hypothesis set. Slot `r` (1…`top`) investigates the
- * site of rank `r`; with `pair`, slot {@link PAIR_SLOT_OFFSET} + `r` investigates
- * it too. Every other slot up to `slots` is empty.
+ * Pure: the slots for a hypothesis set — one per site actually formed, up to
+ * `top`, ranked; with `pair`, then one `<siteId>-b` per site. A PR with two
+ * sites plans two slots (four paired): there are no empty slots, because the
+ * fan-out reads its branch list from `branches.json` rather than declaring a
+ * fixed number.
  */
 export function planSiteSlots(set: HypothesisSet, units: readonly VoterUnit[], options: SitePlanOptions = {}): SiteReviewPlan {
   const o = { ...DEFAULT_SITE_PLAN, ...options };
   if (!Number.isInteger(o.top) || o.top < 1 || o.top > MAX_SITE_TOP) throw new Error(`top must be 1…${MAX_SITE_TOP}, got ${o.top}`);
-  const used = o.pair ? PAIR_SLOT_OFFSET + o.top : o.top;
-  const slotCount = options.slots ?? used;
-  if (!Number.isInteger(slotCount) || slotCount < used) throw new Error(`${slotCount} slot(s) cannot hold top ${o.top}${o.pair ? " paired" : ""} (needs ${used})`);
   const plan = clusterSites(set, {
     window: o.window,
     voters: o.voters,
@@ -194,22 +185,19 @@ export function planSiteSlots(set: HypothesisSet, units: readonly VoterUnit[], o
     maxSpan: o.maxSpan,
     demotePath: isTestPath,
   });
-  const slots: SiteSlot[] = Array.from({ length: slotCount }, (_, i) => {
-    const n = i + 1;
-    const pairSlot = o.pair && n > PAIR_SLOT_OFFSET && n <= PAIR_SLOT_OFFSET + o.top;
-    const rank = n <= o.top ? n : pairSlot ? n - PAIR_SLOT_OFFSET : null;
-    const site = rank !== null ? (plan.sites[rank - 1] ?? null) : null;
-    return {
-      slot: n,
-      siteId: siteIdForSlot(n),
-      site,
-      ...(pairSlot && site ? { pairOf: siteIdForSlot(rank!) } : {}),
-      noneChecks: site ? noneChecksRequired(site.rows.length) : 0,
-    };
-  });
+  const primaries: SiteSlot[] = plan.sites.slice(0, o.top).map((site, i) => ({
+    slot: i + 1,
+    siteId: siteIdForRank(i + 1),
+    site,
+    noneChecks: noneChecksRequired(site.rows.length),
+  }));
+  const pairs: SiteSlot[] = o.pair
+    ? primaries.map((p, i) => ({ ...p, slot: primaries.length + i + 1, siteId: pairSiteId(p.siteId), pairOf: p.siteId }))
+    : [];
+  const slots = [...primaries, ...pairs];
   return {
     version: SITE_REVIEW_VERSION,
-    options: { ...o, slots: slotCount },
+    options: o,
     rows: set.records.length,
     sitesFormed: plan.sites.length,
     testSites: plan.sites.filter((s) => s.path !== null && isTestPath(s.path)).length,
@@ -220,8 +208,8 @@ export function planSiteSlots(set: HypothesisSet, units: readonly VoterUnit[], o
 /**
  * The "your assignment" section every brief ends with: the site id, the one
  * file to write, the scratch directory and the `none` bar. The prompt is
- * generic across slots (a fan-out branch has no per-branch variables), so
- * these are the brief's to say.
+ * generic across slots (the branch's only per-slot input is this brief, its
+ * `context_file`), so these are the brief's to say.
  */
 export function renderSiteAssignment(siteId: string, noneChecks: number): string {
   return [
@@ -235,27 +223,11 @@ export function renderSiteAssignment(siteId: string, noneChecks: number): string
   ].join("\n");
 }
 
-/** An empty slot's brief: nothing to investigate, one line to write. */
-export function renderEmptySlotBrief(siteId: string): string {
-  return [
-    `## Slot \`${siteId}\` — no site`,
-    "",
-    "This pull request has fewer review sites than the review has slots, so there is",
-    "nothing for you to investigate. Do not read any code. Write exactly this one line",
-    `to \`${siteFindingsRel(siteId)}\` and stop:`,
-    "",
-    "```",
-    JSON.stringify({ site: siteId, empty: true }),
-    "```",
-    "",
-  ].join("\n");
-}
-
 /**
- * Write `sites/plan.json` and one brief per slot. Clears the directory first: a
- * reused workspace holds the last head's sites. An empty slot's `empty` line is
- * written here too, so its gate is closed before any investigator runs — a
- * fan-out with `skip_satisfied_branches` then starts no session for it.
+ * Write `sites/plan.json`, one brief per slot, and `sites/branches.json` — the
+ * `{ items: [{ id, pair? }] }` manifest `site-review` fans out over, so the
+ * workflow runs exactly as many investigators as there are slots. Clears the
+ * directory first: a reused workspace holds the last head's sites.
  */
 export function writeSitePlan(dir: string, options: SitePlanOptions = {}): SiteReviewPlan {
   const sitesDir = join(dir, "sites");
@@ -264,22 +236,29 @@ export function writeSitePlan(dir: string, options: SitePlanOptions = {}): SiteR
   const set = readHypothesisSet(dir);
   const plan = planSiteSlots(set, readVoterUnits(dir), options);
   for (const slot of plan.slots) {
-    const brief = slot.site
-      ? `${renderSiteBrief({ ...slot.site, id: slot.siteId }, set, { leads: false })}\n${renderSiteAssignment(slot.siteId, slot.noneChecks)}`
-      : renderEmptySlotBrief(slot.siteId);
+    const brief = `${renderSiteBrief({ ...slot.site, id: slot.siteId }, set, { leads: false })}\n${renderSiteAssignment(slot.siteId, slot.noneChecks)}`;
     writeFileSync(join(sitesDir, `${slot.siteId}.md`), brief);
     mkdirSync(join(sitesDir, slot.siteId), { recursive: true });
-    if (!slot.site) writeFileSync(join(sitesDir, `${slot.siteId}.findings.jsonl`), `${JSON.stringify({ site: slot.siteId, empty: true })}\n`);
   }
   writeFileSync(join(sitesDir, "plan.json"), `${JSON.stringify(plan, null, 2)}\n`);
+  const items = plan.slots.map((slot) => ({ id: slot.siteId, ...(slot.pairOf ? { pair: true } : {}) }));
+  writeFileSync(join(sitesDir, "branches.json"), `${JSON.stringify({ items }, null, 2)}\n`);
   return plan;
 }
 
+/**
+ * The plan on disk. A plan written before #423 declared sixteen static slots,
+ * the unused ones with `site: null`; those are dropped here, so every consumer
+ * sees only real slots. The replays read stored eval runs' artifacts
+ * (`micro-select`), and an empty slot never held a finding, so an old run pools
+ * exactly what it pooled when it ran.
+ */
 export function readSitePlan(dir: string): SiteReviewPlan | null {
   const file = join(dir, "sites", "plan.json");
   if (!existsSync(file)) return null;
   try {
-    return JSON.parse(readFileSync(file, "utf8")) as SiteReviewPlan;
+    const plan = JSON.parse(readFileSync(file, "utf8")) as SiteReviewPlan;
+    return Array.isArray(plan.slots) ? { ...plan, slots: plan.slots.filter((s) => s.site != null) } : plan;
   } catch {
     return null;
   }
@@ -291,9 +270,7 @@ export function renderSitePlanSummary(plan: SiteReviewPlan): string {
   ];
   for (const s of plan.slots) {
     lines.push(
-      s.site
-        ? `  ${s.siteId}  ${s.site.path ?? "unanchored"}:${s.site.startLine ?? "?"}–${s.site.endLine ?? "?"}  rows ${s.site.rows.length}  voters ${s.site.voters}  none-checks ${s.noneChecks}${s.pairOf ? `  (pair of ${s.pairOf})` : ""}`
-        : `  ${s.siteId}  (empty slot)`,
+      `  ${s.siteId}  ${s.site.path ?? "unanchored"}:${s.site.startLine ?? "?"}–${s.site.endLine ?? "?"}  rows ${s.site.rows.length}  voters ${s.site.voters}  none-checks ${s.noneChecks}${s.pairOf ? `  (pair of ${s.pairOf})` : ""}`,
     );
   }
   return `${lines.join("\n")}\n`;
@@ -381,12 +358,10 @@ export interface SiteGap {
 export interface SiteFindingsCheck {
   satisfied: boolean;
   gaps: SiteGap[];
-  /** Every parsed finding line (`none`/`empty` excluded), valid or not — what the judge sees. */
+  /** Every parsed finding line (`none` excluded), valid or not — what the judge sees. */
   findings: SiteFinding[];
   /** The investigator wrote the `none` line. */
   none: boolean;
-  /** The investigator wrote the `empty` line (an empty slot). */
-  empty: boolean;
 }
 
 const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.trim() : null);
@@ -535,8 +510,8 @@ function checkNoneLine(opts: { repo: string; prDir: string; line: SiteFindingLin
  * The site-review gate. `repo` is the checkout (the agent's cwd, what a
  * finding's `path` is relative to); `prDir` is `<repo>/.lastlight/pr-review`.
  * `leadCount`, when given, bounds the lead numbers a finding may cite.
- * `emptySlot` says the plan left this slot empty: then (and only then) the
- * single `{"site", "empty": true}` line closes it.
+ * Every slot has a site, so an `{"empty": true}` line (the old empty-slot
+ * answer) is a gap, never an answer.
  */
 export function checkSiteFindings(opts: {
   prDir: string;
@@ -545,13 +520,12 @@ export function checkSiteFindings(opts: {
   leadCount?: number;
   /** The site's row count; sets how many checks a `none` needs ({@link noneChecksRequired}). Unknown → the stricter 2. */
   siteRows?: number;
-  emptySlot?: boolean;
   /** Require {@link SiteFinding.importance} on every finding. The pipeline does; the replay's older prompts did not ask. */
   requireImportance?: boolean;
 }): SiteFindingsCheck {
   const { prDir, repo, siteId } = opts;
   const gaps: SiteGap[] = [];
-  const out: SiteFindingsCheck = { satisfied: false, gaps, findings: [], none: false, empty: false };
+  const out: SiteFindingsCheck = { satisfied: false, gaps, findings: [], none: false };
   const parsed = readSiteFindingLines(prDir, siteId);
   if (!parsed) {
     gaps.push({ kind: "missing-file", detail: `${siteFindingsRel(siteId)} was not written` });
@@ -561,15 +535,8 @@ export function checkSiteFindings(opts: {
   const { lines } = parsed;
   if (!lines.length && !parsed.malformed.length) gaps.push({ kind: "empty", detail: "the file holds no lines — write findings, or one `none` line" });
 
-  const emptyLines = lines.filter((l) => l.empty === true);
-  if (emptyLines.length) {
-    out.empty = true;
-    if (!opts.emptySlot)
-      gaps.push({ kind: "empty-slot", detail: "an `empty` line is only for a slot with no site — this slot has one: investigate it" });
-    else if (lines.length > 1) gaps.push({ kind: "none-mixed", detail: `the \`empty\` line must be the only line (the file has ${lines.length})` });
-  } else if (opts.emptySlot) {
-    gaps.push({ kind: "empty-slot", detail: `this slot has no site — write exactly one line: ${JSON.stringify({ site: siteId, empty: true })}` });
-  }
+  if (lines.some((l) => l.empty === true))
+    gaps.push({ kind: "empty-slot", detail: "an `empty` line is not an answer — this slot has a site: investigate it" });
 
   const noneLines = lines.filter((l) => l.none === true);
   if (noneLines.length) {
@@ -629,11 +596,11 @@ export function checkSiteFindings(opts: {
   });
 
   out.satisfied =
-    gaps.length === 0 && (out.empty || out.none || (findingLines.length >= 1 && findingLines.length <= MAX_SITE_FINDINGS));
+    gaps.length === 0 && (out.none || (findingLines.length >= 1 && findingLines.length <= MAX_SITE_FINDINGS));
   return out;
 }
 
-/** The gate against the plan on disk: the slot's row count and emptiness come from `sites/plan.json`. */
+/** The gate against the plan on disk: the slot's row count comes from `sites/plan.json`. */
 export function checkSiteSlot(opts: { dir: string; repo: string; siteId: string }): SiteFindingsCheck {
   const plan = readSitePlan(opts.dir);
   const slot = plan?.slots.find((s) => s.siteId === opts.siteId);
@@ -641,8 +608,7 @@ export function checkSiteSlot(opts: { dir: string; repo: string; siteId: string 
     prDir: opts.dir,
     repo: opts.repo,
     siteId: opts.siteId,
-    siteRows: slot?.site?.rows.length,
-    emptySlot: slot ? slot.site === null : false,
+    siteRows: slot?.site.rows.length,
     requireImportance: true,
   });
 }
@@ -650,7 +616,7 @@ export function checkSiteSlot(opts: { dir: string; repo: string; siteId: string 
 /** The gate's output — what `on_branch_gate_failure` appends to the retry prompt. */
 export function renderSiteCheck(siteId: string, check: SiteFindingsCheck): string {
   if (check.satisfied) {
-    const what = check.empty ? "empty slot" : check.none ? "none (probe-backed)" : `${check.findings.length} finding(s)`;
+    const what = check.none ? "none (probe-backed)" : `${check.findings.length} finding(s)`;
     return `sites --check ${siteId}: ok — ${what}\n`;
   }
   const lines = [`sites --check ${siteId}: NOT satisfied. Fix exactly these and rewrite ${siteFindingsRel(siteId)}:`];
@@ -688,7 +654,7 @@ export interface SiteMerge {
   /** Candidate duplicate groups, by `F` id — proposals, never decisions. */
   groups: string[][];
   /** Per slot: what the investigator wrote, and whether its gate closed. */
-  slots: { siteId: string; outcome: "findings" | "none" | "empty" | "missing" | "invalid"; findings: number; gateSatisfied: boolean }[];
+  slots: { siteId: string; outcome: "findings" | "none" | "missing" | "invalid"; findings: number; gateSatisfied: boolean }[];
   /** Finding lines that could not be pooled (no real file/line), for the log. */
   unpooled: { ref: string; reason: string }[];
 }
@@ -717,7 +683,7 @@ function excerptAt(lines: string[], line: number): string {
 export function mergeSiteFindings(opts: { dir: string; repo: string }): SiteMerge {
   const { dir, repo } = opts;
   const plan = readSitePlan(dir);
-  const slotIds = plan ? plan.slots.map((s) => s.siteId) : Array.from({ length: SITE_SLOTS }, (_, i) => siteIdForSlot(i + 1));
+  const slotIds = plan ? plan.slots.map((s) => s.siteId) : Array.from({ length: SITE_SLOTS }, (_, i) => siteIdForRank(i + 1));
   const repoReal = realpathSync(repo);
   const findings: PooledFinding[] = [];
   const unpooled: SiteMerge["unpooled"] = [];
@@ -728,13 +694,11 @@ export function mergeSiteFindings(opts: { dir: string; repo: string }): SiteMerg
     const parsed = readSiteFindingLines(dir, siteId);
     const outcome: SiteMerge["slots"][number]["outcome"] = !parsed
       ? "missing"
-      : check.empty
-        ? "empty"
-        : check.none
-          ? "none"
-          : check.findings.length
-            ? "findings"
-            : "invalid";
+      : check.none
+        ? "none"
+        : check.findings.length
+          ? "findings"
+          : "invalid";
     let pooled = 0;
     // The gate's own parse, capped at the per-site maximum in file order —
     // the investigator was told to put its strongest first.
@@ -818,7 +782,7 @@ export function renderSiteMerge(merge: SiteMerge): string {
     : [SITE_MERGE_EMPTY_MARKER, "", "# Site findings to select from", ""];
   const tally = (o: string) => merge.slots.filter((s) => s.outcome === o).length;
   out.push(
-    `${merge.findings.length} finding(s) from ${tally("findings")} site(s); ${tally("none")} site(s) closed \`none\`, ${tally("empty")} empty slot(s), ${tally("missing") + tally("invalid")} site(s) wrote nothing usable.`,
+    `${merge.findings.length} finding(s) from ${tally("findings")} site(s); ${tally("none")} site(s) closed \`none\`, ${tally("missing") + tally("invalid")} site(s) wrote nothing usable.`,
     "",
   );
   if (!merge.findings.length) {
@@ -1074,7 +1038,7 @@ export function finalizeSiteFindings(opts: { dir: string; repo: string }): Final
   const set = readHypothesisSet(dir);
   // A pair slot re-investigates its primary's site: count areas, not investigators.
   const pairSlots = new Set((readSitePlan(dir)?.slots ?? []).filter((s) => s.pairOf).map((s) => s.siteId));
-  const siteCount = merge.slots.filter((s) => s.outcome !== "empty" && !pairSlots.has(s.siteId)).length;
+  const siteCount = merge.slots.filter((s) => !pairSlots.has(s.siteId)).length;
   const summary =
     selection.summary ??
     (posted

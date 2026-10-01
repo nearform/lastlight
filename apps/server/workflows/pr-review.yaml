@@ -385,28 +385,28 @@ phases:
     depends_on: [units-ingest]
     trigger_rule: all_done
     timeout_seconds: { from: seedTimeoutSeconds }
-    # Writes `sites/plan.json` and one brief per slot, `sites/site-001.md` …
-    # `site-016.md` (it clears `sites/` first — a reused workspace holds the
-    # last head's). Slots 1–`siteTop` investigate the ranked sites; with
-    # `models.review-site-pair` set, slots 9–(8+`siteTop`) investigate the
-    # same sites again on that model. Every other slot is empty: its brief
-    # says so and its `empty` line is written here, so `site-review`'s
-    # `skip_satisfied_branches` starts no session for it.
+    # Writes `sites/plan.json`, one brief per slot (`sites/site-001.md` …) and
+    # `sites/branches.json`, the manifest `site-review` fans out over (it
+    # clears `sites/` first — a reused workspace holds the last head's). One
+    # slot per ranked site, up to `siteTop`; with `models.review-site-pair`
+    # set, a second slot per site, `site-00N-b`, on that model. A PR with two
+    # sites plans two investigators, not sixteen.
     command: |
       set -u
       FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
       # Test-then-flag: an absent {{key}} renders EMPTY and would swallow the
       # following flag.
       TOP="{{siteTop}}"
-      set -- --slots 16
+      set --
       [ -n "$TOP" ] && set -- "$@" --top "$TOP"
       {{#if models.review-site-pair}}set -- "$@" --pair{{/if}}
       "$FACTS" sites --plan "$@" --dir .lastlight/pr-review --never-fail
       exit 0
 
-  # One investigator per site, concurrently, in one workspace. The prompt is
-  # slot-generic (a branch has no variables of its own): the attached brief
-  # names the site id, the one file the branch writes
+  # One investigator per site, concurrently, in one workspace. The branch list
+  # is DYNAMIC: `branches_from` reads the manifest `site-plan` just wrote and
+  # renders `branch:` once per item (`{{item.id}}`, `{{item.pair}}`). The prompt
+  # is slot-generic: the attached brief names the site id, the one file the branch writes
   # (`sites/<site id>.findings.jsonl` — disjoint across branches, which is the
   # fan-out's isolation model) and how many probed suspicions a `none` needs.
   # The gate is the one the evals replay graded (`sites --check`), and
@@ -445,101 +445,20 @@ phases:
         Nothing outside the checkout counts.
     on_branch_soft_failure: { retries: 1, then: complete }
     on_branch_gate_failure: { retries: 1 }
-    # `site-plan` wrote every empty slot's `empty` line, so its gate is already
-    # closed: no session for it. Sixteen static branches, of which a PR
-    # typically uses five (top 5, unpaired) to sixteen (top 8, paired).
-    skip_satisfied_branches: true
-    branches:
-      - name: site-001
-        context_file: .lastlight/pr-review/sites/site-001.md
-        until_bash: |
-          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
-          "$FACTS" sites --check site-001 --dir .lastlight/pr-review --repo .
-      - name: site-002
-        context_file: .lastlight/pr-review/sites/site-002.md
-        until_bash: |
-          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
-          "$FACTS" sites --check site-002 --dir .lastlight/pr-review --repo .
-      - name: site-003
-        context_file: .lastlight/pr-review/sites/site-003.md
-        until_bash: |
-          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
-          "$FACTS" sites --check site-003 --dir .lastlight/pr-review --repo .
-      - name: site-004
-        context_file: .lastlight/pr-review/sites/site-004.md
-        until_bash: |
-          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
-          "$FACTS" sites --check site-004 --dir .lastlight/pr-review --repo .
-      - name: site-005
-        context_file: .lastlight/pr-review/sites/site-005.md
-        until_bash: |
-          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
-          "$FACTS" sites --check site-005 --dir .lastlight/pr-review --repo .
-      - name: site-006
-        context_file: .lastlight/pr-review/sites/site-006.md
-        until_bash: |
-          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
-          "$FACTS" sites --check site-006 --dir .lastlight/pr-review --repo .
-      - name: site-007
-        context_file: .lastlight/pr-review/sites/site-007.md
-        until_bash: |
-          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
-          "$FACTS" sites --check site-007 --dir .lastlight/pr-review --repo .
-      - name: site-008
-        context_file: .lastlight/pr-review/sites/site-008.md
-        until_bash: |
-          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
-          "$FACTS" sites --check site-008 --dir .lastlight/pr-review --repo .
-      # Slots 9–16: the second investigator of ranks 1–8, on
-      # `models.review-site-pair`. Empty (and never started) unless it is set.
-      - name: site-009
-        model: "{{models.review-site-pair}}"
-        context_file: .lastlight/pr-review/sites/site-009.md
-        until_bash: |
-          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
-          "$FACTS" sites --check site-009 --dir .lastlight/pr-review --repo .
-      - name: site-010
-        model: "{{models.review-site-pair}}"
-        context_file: .lastlight/pr-review/sites/site-010.md
-        until_bash: |
-          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
-          "$FACTS" sites --check site-010 --dir .lastlight/pr-review --repo .
-      - name: site-011
-        model: "{{models.review-site-pair}}"
-        context_file: .lastlight/pr-review/sites/site-011.md
-        until_bash: |
-          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
-          "$FACTS" sites --check site-011 --dir .lastlight/pr-review --repo .
-      - name: site-012
-        model: "{{models.review-site-pair}}"
-        context_file: .lastlight/pr-review/sites/site-012.md
-        until_bash: |
-          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
-          "$FACTS" sites --check site-012 --dir .lastlight/pr-review --repo .
-      - name: site-013
-        model: "{{models.review-site-pair}}"
-        context_file: .lastlight/pr-review/sites/site-013.md
-        until_bash: |
-          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
-          "$FACTS" sites --check site-013 --dir .lastlight/pr-review --repo .
-      - name: site-014
-        model: "{{models.review-site-pair}}"
-        context_file: .lastlight/pr-review/sites/site-014.md
-        until_bash: |
-          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
-          "$FACTS" sites --check site-014 --dir .lastlight/pr-review --repo .
-      - name: site-015
-        model: "{{models.review-site-pair}}"
-        context_file: .lastlight/pr-review/sites/site-015.md
-        until_bash: |
-          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
-          "$FACTS" sites --check site-015 --dir .lastlight/pr-review --repo .
-      - name: site-016
-        model: "{{models.review-site-pair}}"
-        context_file: .lastlight/pr-review/sites/site-016.md
-        until_bash: |
-          FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
-          "$FACTS" sites --check site-016 --dir .lastlight/pr-review --repo .
+    # `max` is the spend cap: top 8, paired. More items than that are dropped,
+    # loudly — `site-plan` never writes more.
+    branches_from:
+      file: .lastlight/pr-review/sites/branches.json
+      max: 16
+    branch:
+      name: "{{item.id}}"
+      # A pair slot runs on `models.review-site-pair`; a primary renders empty
+      # here and so takes the phase's `model:` above.
+      model: "{{#if item.pair}}{{models.review-site-pair}}{{/if}}"
+      context_file: ".lastlight/pr-review/sites/{{item.id}}.md"
+      until_bash: |
+        FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
+        "$FACTS" sites --check {{item.id}} --dir .lastlight/pr-review --repo .
   # Pool every site's findings for `select`: numbered `F1…Fn`, each with an
   # excerpt, and the duplicate groups line proximity PROPOSES (it cannot decide
   # "same defect"; no rule here reads prose). STDOUT is the delivery mechanism

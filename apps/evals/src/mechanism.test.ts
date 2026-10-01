@@ -756,6 +756,16 @@ describe("modelTemplateForRow — ledger label → YAML model template (phase-mo
     });
   });
 
+  it("a branch row's own modelTemplate wins — a dynamic fan-out has no branch list to look up", () => {
+    // `site-001-b` is in no YAML `branches:`; core stamped the pair model on the row.
+    expect(modelTemplateForRow(phases, "survey_branch_site-001-b", "pair/model")).toEqual({
+      template: "pair/model",
+      fallbackPhase: "survey",
+    });
+    // Absent, the declaration lookup is unchanged.
+    expect(modelTemplateForRow(phases, "survey_branch_tests", undefined).template).toBe("{{models.survey-tests}}");
+  });
+
   it("loop-derived and unknown labels keep the old no-template behaviour", () => {
     expect(modelTemplateForRow(phases, "review_fix_1")).toEqual({ template: undefined, fallbackPhase: undefined });
     expect(modelTemplateForRow(phases, "nonexistent")).toEqual({ template: undefined, fallbackPhase: undefined });

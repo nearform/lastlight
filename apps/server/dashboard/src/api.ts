@@ -311,7 +311,9 @@ export interface WorkflowRun {
    * The run's mutable phase-to-phase state. Present on the single-run detail
    * fetch only (the list query omits the heavy JSON blobs). Carries the fix
    * harvest under `fixMarkers` — the attempt markers, the PR journal, and the
-   * push gate the agent wrote for itself — which `PrStatePanel` renders.
+   * push gate the agent wrote for itself — which `PrStatePanel` renders — and,
+   * under `fanout[<phase>]`, a dynamic fan-out's planned branches (read via
+   * `fanoutPlanOf` in `lib/fanout-group.ts`).
    */
   scratch?: Record<string, unknown>;
   startedAt: string;
@@ -350,7 +352,7 @@ export interface TriggeredByUser {
 export interface WorkflowPhaseDefinition {
   name: string;
   label: string;
-  type: "context" | "agent" | "bash" | "script" | "post-review";
+  type: "context" | "agent" | "bash" | "script" | "post-review" | "fanout" | "survey-units";
   hasLoop?: boolean;
   approvalGate?: string;
 }
@@ -402,7 +404,7 @@ export interface WorkflowSummary {
 export interface WorkflowFullPhase {
   name: string;
   label?: string;
-  type: "context" | "agent" | "bash" | "script" | "post-review";
+  type: "context" | "agent" | "bash" | "script" | "post-review" | "fanout" | "survey-units";
   prompt?: string;
   /** type: bash — deterministic shell command run in the sandbox. */
   command?: string;
@@ -441,6 +443,10 @@ export interface WorkflowFullPhase {
     contains_READY?: { action: string; message?: string; unless_label?: string; unless_title_matches?: string; bypass_message?: string };
   };
   on_success?: { set_phase?: string };
+  /** type: fanout — the static branch list. */
+  branches?: { name: string; model?: string }[];
+  /** type: fanout — a DYNAMIC branch list, read from a workspace manifest at run time (capped at `max`). */
+  branches_from?: { file: string; max: number };
   depends_on?: string[];
   trigger_rule?: "all_success" | "one_success" | "none_failed" | "none_failed_min_one_success" | "all_done";
   output_var?: string;

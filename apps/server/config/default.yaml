@@ -91,7 +91,8 @@ models:
   # `diagnose` reason — a default must be a provider every deployment has a key
   # for — so pin it in your overlay. `review-site-pair` is OFF unless set: it
   # puts a second investigator, on this model, on every selected site
-  # (`review.analysis.siteTop`), and `select` merges what the two agree on.
+  # (`review.analysis.siteTop`; the `site-00N-b` branches), and `select`
+  # merges what the two agree on.
 
 # Provider endpoints. Ships EMPTY — every provider keeps the endpoint baked into
 # the registry (packages/shared/src/providers.ts), which is exactly today's

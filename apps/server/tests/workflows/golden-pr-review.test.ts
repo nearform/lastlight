@@ -12,6 +12,8 @@ import {
   phaseSkipIfExpressions,
   runWorkflowCore,
   PhaseRef,
+  resolveDynamicBranches,
+  type BranchManifest,
 } from "lastlight-workflow-engine";
 import type {
   CommandSpec,
@@ -407,12 +409,27 @@ class RecordingPostReview implements PhaseTypeHandler {
  * under `<phase>_branch_<name>` labels. That is what keeps the call-count
  * assertions below meaningful across the WP11c change instead of quietly
  * dropping six model calls off the tally.
+ *
+ * A `branches_from:` fan-out has no workspace here to read its manifest from,
+ * so the double takes the manifest `site-plan` would have written and resolves
+ * it through the engine's own `resolveDynamicBranches` — the same call the real
+ * handler makes.
  */
+const SITE_MANIFEST: BranchManifest = {
+  items: [{ id: "site-001" }, { id: "site-002" }, { id: "site-001-b", pair: true }, { id: "site-002-b", pair: true }],
+};
+
 class RecordingFanout implements PhaseTypeHandler {
-  constructor(private readonly agent: FakeAgentPort) {}
+  constructor(
+    private readonly agent: FakeAgentPort,
+    private readonly manifest: BranchManifest = SITE_MANIFEST,
+  ) {}
   async execute(phase: PhaseDefinition): Promise<PhaseOutcome> {
+    const branches = phase.branches_from
+      ? resolveDynamicBranches(phase, this.manifest, {} as TemplateContext).branches
+      : (phase.branches ?? []);
     const results = [];
-    for (const branch of phase.branches ?? []) {
+    for (const branch of branches) {
       const label = PhaseRef.branch(phase.name, branch.name).format();
       const r = await this.agent.runAgent(
         `PROMPT:${branch.prompt}`,
@@ -613,21 +630,17 @@ describe("golden — the real scheduler", () => {
     reviewInstallPolicy: "block",
   };
 
-  it("analysis ON: the unit survey once, sixteen investigator slots, one select loop, the floor, then the post", async () => {
+  it("analysis ON: the unit survey once, one investigator per manifest slot, one select loop, the floor, then the post", async () => {
     const { result, agent, postReview, surveyUnits } = await runPrReview(PIPELINE_CTX, undefined, seeded(PIPELINE_CTX));
     const seen = result.phases.map((p) => p.phase);
     expect(surveyUnits.calls).toEqual(["survey-units"]);
     // A node with sub-units reports under the sub-unit's label, never its own
     // name — fan-out branches under `<phase>_branch_<name>`, generic loops
     // under `<phase>_iter_N`.
-    // Sixteen static slots: 1–8 the ranked sites, 9–16 their pair. The real
-    // handler starts no session for a slot `site-plan` closed as empty
-    // (`skip_satisfied_branches`, pinned in fanout.test.ts); this double runs
-    // every declared branch, so the tally below counts all sixteen.
-    for (let n = 1; n <= 16; n++) {
-      const slot = `site-${String(n).padStart(3, "0")}`;
-      expect(seen, slot).toContain(`site-review_branch_${slot}`);
-    }
+    // The branch labels come from the manifest `site-plan` writes — two sites,
+    // each paired — not from a static list in the YAML.
+    const sites = seen.filter((p) => p.startsWith("site-review_branch_"));
+    expect(sites).toEqual(SITE_MANIFEST.items.map((i) => `site-review_branch_${i.id}`));
     expect(seen).toContain("select_iter_1");
     expect(seen).not.toContain("falsify_iter_1");
     // The floor runs after finalize, and before the post.
@@ -635,8 +648,8 @@ describe("golden — the real scheduler", () => {
     expect(seen.indexOf("reconcile")).toBeLessThan(seen.indexOf("post-review"));
     expect(postReview.calls).toEqual(["post-review"]);
     expect(result.phases.every((p) => p.success)).toBe(true);
-    // Sixteen slots + the select call — `review` skipped, nothing else.
-    expect(agent.calls.filter((c) => c.kind === "agent")).toHaveLength(17);
+    // Four investigators + the select call — `review` skipped, nothing else.
+    expect(agent.calls.filter((c) => c.kind === "agent")).toHaveLength(SITE_MANIFEST.items.length + 1);
   });
 
   it("posts the review even when SELECT hard-fails — the money property", async () => {

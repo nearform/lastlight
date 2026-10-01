@@ -230,9 +230,18 @@ Phase kinds the runner recognises:
   (`_regate` row) with the gate's output appended to its prompt, and
   gated again. **`skip_satisfied_branches: true`** runs each branch's
   gate once BEFORE the pool, sequentially: a branch whose gate already
-  closes is reported done and starts no session (`site-review` declares
-  16 branches, and `sites --plan` writes every unused slot's `empty`
-  line). A branch that died on a provider error (`error_agent`) is
+  closes is reported done and starts no session. A **dynamic** fan-out
+  (`branches_from: { file, max }` + a `branch:` template, which is
+  `site-review`'s shape) reads its branch list from a workspace manifest
+  INSIDE the session, before the pre-gate: `resolveManifest` reads it
+  host-side through `hostAgentCwd` and resolves it with the engine's
+  pure `resolveDynamicBranches` (`{{item.*}}` in scope; `until_bash`
+  sees only the item). Zero items is a no-op success; past `max` is
+  truncated with a warn; a bad manifest or name fails the PHASE (a
+  `BranchManifestError`, one row, no branch started) rather than the
+  run. The resolved plan lands in `scratch.fanout[<phase>]` before any
+  branch runs (the dashboard's pending chips), and every branch result
+  row carries `modelTemplate` for the evals recorder. A branch that died on a provider error (`error_agent`) is
   re-run once regardless of the soft policy. The node fails only when
   every branch failed; otherwise its failed branch rows carry
   `tolerated: true`, which the scheduler does not count against the

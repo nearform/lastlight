@@ -603,7 +603,7 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     // template lookup goes through modelTemplateForRow (phase-models.ts), which
     // parses branch rows back to their declaration via core's PhaseRef.
     result.phases = wf.phases.map((p) => {
-      const { template, fallbackPhase } = modelTemplateForRow(def.phases, p.phase);
+      const { template, fallbackPhase } = modelTemplateForRow(def.phases, p.phase, p.modelTemplate);
       return {
         phase: p.phase,
         success: p.success,

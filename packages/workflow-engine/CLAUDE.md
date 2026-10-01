@@ -37,6 +37,15 @@ core/
                      them back. Anything that formats such a label by hand will
                      drift from `parse()`.
   loop-eval.ts       Loop condition evaluation (max_cycles, on_request_changes, …).
+  dynamic-branches.ts  A `type: fanout` whose branch list is a run-time manifest
+                     (`branches_from: { file, max }` + a `branch:` template).
+                     Pure: `parseBranchManifest` validates the JSON (`{ items }`,
+                     scalar values, strings restricted to `[A-Za-z0-9._/-]`
+                     because they render into `until_bash`), and
+                     `resolveDynamicBranches` renders `branch:` once per item
+                     with `{{item.*}}` in scope, re-checks each name against the
+                     schema's `branchNameError`, and truncates to `max`. The app
+                     handler does the file read; evals and tests call it directly.
   templates.ts       The `{{…}}` template engine used for prompts/models/variants.
                      `lookupContextKey` is the one dotted-path walk over a run
                      context; both `{{a.b}}` and the budget resolver below use it.

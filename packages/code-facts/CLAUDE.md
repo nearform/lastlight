@@ -1459,16 +1459,16 @@ signal: where many independent units pointed is where an investigator looks.
   (distinct-unit votes, window 20, `maxSpan` 60; test-file sites rank after
   every other site — `clusterSites`' `demotePath: isTestPath` — so they fill only
   the slots code sites leave free, counted as `testSites`), top 5 →
-  `sites/plan.json` plus one brief per SLOT, `sites/site-001.md` … (`--top`
-  1–8 / `--window` override; `--slots <n>` is the fan-out's branch count, 16 in
-  pr-review, and must hold the slots in use). **`--pair`** puts a second
-  investigator on every selected site: slot 8 + `r` (`PAIR_SLOT_OFFSET`)
-  re-briefs rank `r`, marked `pairOf` in the plan, and the workflow gives slots
-  9–16 `models.review-site-pair`; `--merge`'s proximity groups then propose the
-  two investigators' duplicates. It clears `sites/` first. An unused slot gets a
-  brief saying there is no site, and `--plan` writes its
-  `{"site", "empty": true}` line itself, so the fan-out's
-  `skip_satisfied_branches` pre-gate starts no session for it. Each brief ends with the slot's assignment: the site id, the one
+  `sites/plan.json`, one brief per slot, `sites/site-001.md` … (`--top`
+  1–8 / `--window` override), and **`sites/branches.json`** — the
+  `{ items: [{ id, pair? }] }` manifest `site-review` fans out over through
+  `branches_from:`. Only sites actually formed get a slot, so there are no empty
+  slots and no `empty` line. **`--pair`** puts a second investigator on every
+  selected site: slot `<id>-b` (`pairSiteId`) re-briefs it, marked `pairOf` in
+  the plan and `pair: true` in the manifest, which the workflow's
+  `branch.model` template turns into `models.review-site-pair`; `--merge`'s
+  proximity groups then propose the two investigators' duplicates. It clears
+  `sites/` first. Each brief ends with the slot's assignment: the site id, the one
   file it writes (`sites/<id>.findings.jsonl`) and how many probed suspicions
   a `none` needs (`noneChecksRequired`: 1 for a site of ≤ 3 rows, else 2).
 - **`--check <site-id>`** (each branch's `until_bash`): 1–3 grounded findings,

@@ -40,8 +40,16 @@ export interface PhaseRowModelRef {
   fallbackPhase: string | undefined;
 }
 
-/** Resolve the `model:` template (and fallback task) for one `wf.phases` row. */
-export function modelTemplateForRow(phases: readonly PhaseModelSource[], label: string): PhaseRowModelRef {
+/**
+ * Resolve the `model:` template (and fallback task) for one `wf.phases` row.
+ *
+ * `rowTemplate` is the row's own `PhaseResult.modelTemplate` — core stamps it on
+ * every fan-out branch row. It wins when present: a DYNAMIC fan-out
+ * (`branches_from:`) has no branch list in the YAML to look the branch up in,
+ * so without it a pair investigator (`site-001-b`, on `models.review-site-pair`)
+ * would silently be recorded on the phase model.
+ */
+export function modelTemplateForRow(phases: readonly PhaseModelSource[], label: string, rowTemplate?: string): PhaseRowModelRef {
   // A declared phase name wins outright — even one that happens to look like a
   // generated label — matching the old exact-name map.
   const declared = phases.find((p) => p.name === label);
@@ -50,9 +58,10 @@ export function modelTemplateForRow(phases: readonly PhaseModelSource[], label: 
   const ref = PhaseRef.parse(label);
   if (ref.kind === "branch" || ref.kind === "branchRetry" || ref.kind === "branchCheck" || ref.kind === "branchRegate") {
     const parent = phases.find((p) => p.name === ref.base);
+    if (rowTemplate !== undefined) return { template: rowTemplate, fallbackPhase: ref.base };
     const branch = parent?.branches?.find((b) => b.name === ref.branch);
-    // `branch.model ?? phase.model` — the branch may declare its own override
-    // (none do today, but core honours it, so the recorder must too).
+    // `branch.model ?? phase.model` — the branch may declare its own override,
+    // and core honours it, so the recorder must too.
     return { template: branch?.model ?? parent?.model, fallbackPhase: ref.base };
   }
 

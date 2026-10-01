@@ -106,9 +106,9 @@ Commands:
               phase already reads), plus units/ingest.json. Every obligation
               gets a row even when its unit failed — with unknown evidence
   sites       the \`sites\` review engine's deterministic steps: --plan (rank
-              sites, write one brief per slot; --top <n> sites, --pair for a
-              second investigator per site in slot 8+rank, --slots <n> the
-              fan-out's branch count), --check <site-id> (a site
+              sites, write one brief per slot plus sites/branches.json, the
+              fan-out manifest; --top <n> sites, --pair for a second
+              investigator per site as <site-id>-b), --check <site-id> (a site
               investigator's gate), --merge (pool the findings for \`select\`),
               --check-select (select's gate), --finalize (write findings.json)
   toolchain   print the pinned manifest and what actually resolved
@@ -582,7 +582,6 @@ export function runCli(
             writeSitePlan(dir, {
               ...(numberFlag(flags.top) !== undefined ? { top: numberFlag(flags.top) } : {}),
               ...(numberFlag(flags.window) !== undefined ? { window: numberFlag(flags.window) } : {}),
-              ...(numberFlag(flags.slots) !== undefined ? { slots: numberFlag(flags.slots) } : {}),
               ...(flags.pair === true ? { pair: true } : {}),
             }),
           ),
