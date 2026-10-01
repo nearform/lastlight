@@ -150,6 +150,13 @@ passes; it reads no quote and judges no claim):
                       a unit owning more changed lines than this (default 40)
                       is surveyed once PER FAMILY — one unit per asked family,
                       each carrying only that family's obligations
+  --prior <file>      the prior review's units (default: <dir>/prior-review.json
+                      when it exists). Each unit gets a \`delta\` against it —
+                      new / changed / affected / unchanged — and the re-review
+                      scopes its sites to everything but \`unchanged\`
+  --risk-rules <f>    {"rules":[{glob,tier}]} — the repo's then the operator's
+                      risk rules, matched before the built-in ones. Each unit
+                      gets a \`risk\` tier (low/medium/high/critical)
   --never-fail        exit 0 whatever happened; the document says what did
   Exit 0 = full, or nothing to survey (\`coverage: "none"\`, said why). 3 =
   degraded. 2 = an input is missing — a \`coverage: "none"\` document is still
@@ -521,12 +528,16 @@ export function runCli(
         maxRequestChars: numberFlag(flags["max-chars"]),
         maxUnits: numberFlag(flags["max-units"]),
         familySplitLines: numberFlag(flags["family-split-lines"]),
+        priorPath: stringFlag(flags.prior),
+        riskRulesPath: stringFlag(flags["risk-rules"]),
         log,
       });
       writeDocument(out, result.document);
       const doc = result.document;
+      const deltas = doc.prior ? countBy(doc.units.map((u) => u.delta ?? "?")) : null;
       io.out(
         `units: ${doc.units.length} unit(s), coverage ${doc.coverage}, ${doc.units.filter((u) => u.truncated).length} truncated → ${out}` +
+          (deltas ? `\n  re-review against ${doc.prior!.head?.slice(0, 8) ?? "a prior review"}: ${deltas}` : "") +
           doc.degraded.map((d) => `\n  degraded: ${d.reason}`).join(""),
       );
       return neverFail ? EXIT_OK : result.exitCode;
@@ -858,4 +869,11 @@ if (isMain) {
     }
     process.exitCode = code;
   })();
+}
+
+/** `new 2, changed 1, unchanged 9` — a one-line tally in first-seen order. */
+function countBy(values: readonly string[]): string {
+  const counts = new Map<string, number>();
+  for (const v of values) counts.set(v, (counts.get(v) ?? 0) + 1);
+  return [...counts].map(([k, n]) => `${k} ${n}`).join(", ");
 }

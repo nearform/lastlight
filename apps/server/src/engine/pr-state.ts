@@ -25,6 +25,8 @@ import type { WorkflowRun } from "../state/workflow-run-store.js";
 import type { GitHubClient } from "./github/github.js";
 import type { CiFailureReport, PrDiscussionRead } from "./github/github.js";
 import type { SpecLinkedIssue } from "./review-spec.js";
+import { coerceLedger, REVIEW_LEDGER_SCRATCH_KEY, type ReviewLedger } from "./review-ledger.js";
+import { REVIEW_WORKFLOW } from "./review-check.js";
 import { prFixShapedWorkflows } from "../workflows/target-policy.js";
 import { prScopedWorkflows } from "../workflows/pr-scope.js";
 import { readHarvestedMarkers, type HarvestedFixMarkers } from "./fix-harvest.js";
@@ -420,6 +422,25 @@ export interface PrState {
    */
   notes: PrNote[];
   /**
+   * The PR's review ledger (issue #429, `./review-ledger.ts`): every finding
+   * our reviews of this PR produced and what became of it, plus the units the
+   * last review already had. Null before the first review that recorded one.
+   *
+   * Like {@link notes}, a field of the snapshot rather than a store beside it:
+   * `post-review` folds each review into the ledger the run was dispatched
+   * with and writes the result to that run's `scratch.reviewLedger`, and the
+   * next dispatch reads it back here (`deriveReviewLedger`). Unlike notes it is
+   * never marked stale by a push — a moved head means "re-check each entry
+   * against the new code", which the next fold does, not "distrust it all".
+   *
+   * Read by code, not only rendered: `pr-decisions.ts` projects the units to
+   * code-facts' `prior-review.json` (the re-review's scope) and `post-review`
+   * uses the open fingerprints to keep a finding from posting twice. Its
+   * statuses come only from structured signals (quoted code present at head,
+   * thread resolved), never from comment text.
+   */
+  reviewLedger: ReviewLedger | null;
+  /**
    * The class the IMMEDIATELY PRECEDING run diagnosed, or null.
    *
    * The only prior-run verdict any dispatch decision is allowed to read, and it
@@ -638,6 +659,7 @@ export async function resolvePrState(
     forkNoticedAtSha: null,
     priorAttempts: [],
     notes: [],
+    reviewLedger: null,
     priorDiagnosisClass: null,
     cumulativeCostUsd: 0,
     costBaselineUsd: 0,
@@ -937,6 +959,11 @@ export async function applyDerivedState(state: PrState, deps: PrStateDeps): Prom
   const retried = applyIntervention(state, priorState, priorAnyState, deps);
 
   state.notes = deriveNotes(state, priorAny, priorAnyState, retried);
+  // Off the latest REVIEW run, not the widest PR-scoped one: only review rows
+  // carry the ledger (`prStateForRun`), so a fix run in between must not be
+  // what the chain is read from.
+  const lastReview = await deps.db.runs.latestForTrigger([REVIEW_WORKFLOW], triggerId);
+  state.reviewLedger = deriveReviewLedger(lastReview, priorPrState(lastReview?.context));
 
   // …and an ask still waiting for a run takes the head back off the
   // `already-assessed` dedup, for as many ticks as that takes.
@@ -1251,6 +1278,28 @@ function deriveNotes(
       text: note,
     },
   ]);
+}
+
+/**
+ * The review ledger this dispatch carries: the one the widest prior PR-scoped
+ * run FOLDED (a review that reached `post-review` writes the whole ledger to
+ * its own `scratch`), else the one that run was dispatched with (a review that
+ * failed before posting, or a fix run, changes nothing — so its snapshot's
+ * ledger is still the current one). No fold here: `post-review` already folded
+ * the carried ledger into what it wrote, so taking the newest is the merge.
+ */
+export function deriveReviewLedger(priorRun: WorkflowRun | null | undefined, prior: PersistedPrState | null): ReviewLedger | null {
+  const scratch = priorRun?.scratch as Record<string, unknown> | null | undefined;
+  return coerceLedger(scratch?.[REVIEW_LEDGER_SCRATCH_KEY]) ?? coerceLedger(prior?.reviewLedger);
+}
+
+/**
+ * The snapshot as a run row of `workflowName` persists it. The review ledger
+ * rides only on `pr-review` rows — its only reader — so a fix or merge run on
+ * the same PR does not store up to ~100 KB it never uses (issue #429).
+ */
+export function prStateForRun(state: PrState, workflowName: string): PrState {
+  return workflowName === REVIEW_WORKFLOW || state.reviewLedger === null ? state : { ...state, reviewLedger: null };
 }
 
 /** The four history fields {@link deriveAttemptHistory} produces together. */

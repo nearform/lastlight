@@ -456,3 +456,50 @@ export {
 export type { UnitAnswer, UnitDefect, UnitEvidence, UnitFamily, UnitObjectVia, UnitResponseBody, UnitResponseFile } from "./unit-response.js";
 export { ingestUnits, renderIngest } from "./units-ingest.js";
 export type { DemotedEntry, DemotionReason, IngestDocument, IngestUnitsOptions, IngestUnitsResult, UnitIngestReport, UnitIngestStatus } from "./units-ingest.js";
+/** Issue #429 — risk tiers, the re-review delta, coverage and the convergence gate. */
+export {
+  bumpTier,
+  DEFAULT_RISK_RULES,
+  FAN_IN_BUMP,
+  matchesGlob,
+  maxTier,
+  pathRisk,
+  readRiskRules,
+  RISK_TIERS,
+  RISK_WEIGHT,
+  RiskRuleSchema,
+  RiskRulesFileSchema,
+  RiskTierSchema,
+  unitRisk,
+} from "./risk.js";
+export type { PathRisk, RiskRule, RiskTier, UnitRiskSignals } from "./risk.js";
+export {
+  anchorDelta,
+  baseUnitKey,
+  classifyDelta,
+  contentShaOf,
+  hashSet,
+  inScope,
+  isTrivialLine,
+  LINE_HASH_CHARS,
+  lineHash,
+  lineHashesOf,
+  numberKeys,
+  PRIOR_REVIEW_FILE,
+  PriorReviewSchema,
+  readPriorReview,
+  UNIT_DELTAS,
+  UnitDeltaSchema,
+} from "./review-delta.js";
+export type { AnchorDelta, DeltaInput, PriorReview, UnitDelta } from "./review-delta.js";
+export {
+  buildReviewCoverage,
+  convergenceVerdict,
+  LATE_FINDING_LABEL,
+  locateUnit,
+  renderReviewCoverage,
+  REVIEW_COVERAGE_FILE,
+  REVIEW_COVERAGE_VERSION,
+} from "./review-coverage.js";
+export type { ConvergenceVerdict, CoverageInput, CoverageTotals, CoverageUnit, CoverageUnitInput, ReviewCoverage } from "./review-coverage.js";
+export { readCoverageUnits } from "./site-review.js";

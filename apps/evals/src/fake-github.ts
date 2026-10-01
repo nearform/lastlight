@@ -38,7 +38,22 @@ export interface RecordedCall {
 export interface SubmittedReview {
   body: string;
   event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT" | "PENDING";
-  comments: { path: string; line?: number; side?: "LEFT" | "RIGHT"; body: string }[];
+  comments: { path: string; line?: number; start_line?: number; side?: "LEFT" | "RIGHT"; body: string }[];
+  /** The commit the review was submitted against (`commit_id`, else the PR head at the time). */
+  commitId?: string;
+  submittedAt?: string;
+}
+
+/**
+ * One inline thread as the discussion query sees it, for an
+ * {@link FakeGitHub.setOutdatedResolver} to judge against the current head.
+ */
+export interface ThreadAnchor {
+  path: string;
+  line?: number;
+  start_line?: number;
+  /** The commit the comment was made on; absent on a seeded comment that named none. */
+  commitId?: string;
 }
 
 /**
@@ -120,8 +135,17 @@ interface InlineComment {
    * can see which version a finding is on. */
   side?: "LEFT" | "RIGHT";
   position?: number;
+  /** First line of a multi-line comment (GitHub's `start_line`). */
+  start_line?: number;
   body: string;
   created_at: string;
+  /** The review this comment was submitted with (GitHub's `pull_request_review_id`). */
+  pull_request_review_id?: number;
+  /** The commit the comment was made on — GitHub serves it as both `commit_id` and `original_commit_id`. */
+  commit_id?: string;
+  original_commit_id?: string;
+  /** A seeded thread forced outdated (`ReviewCommentSeed.outdated`). */
+  outdated?: boolean;
 }
 interface Review {
   id: number;
@@ -223,11 +247,46 @@ export interface FakeGitHub {
   issueState: (issueNumber: number) => "open" | "closed" | undefined;
   pulls: () => PullRequest[];
   /** Reviews the workflow submitted on a PR (event + body + inline comments) —
-   * the pr-review grade reads these. */
-  submittedReviews: (prNumber: number) => SubmittedReview[];
+   * the pr-review grade reads these. Since the last {@link FakeGitHub.startRound}
+   * (i.e. all of them, for a single-round case); `{ all: true }` for every round. */
+  submittedReviews: (prNumber: number, opts?: { all?: boolean }) => SubmittedReview[];
+  /**
+   * Start a new review round: from here {@link FakeGitHub.submittedReviews}
+   * (and so every grader that reads it) sees only what is submitted next,
+   * while the discussion query and `GET /reviews` keep serving everything —
+   * an earlier round's review is history the next round reads, not output it
+   * is graded on.
+   *
+   * `round` (1-based, chained cases) also releases the seeded discussion held
+   * for it (`from_round`), stamped with the current clock.
+   */
+  startRound: (round?: number) => void;
   /** Register the changed-file set served at `GET /pulls/:n/files`. Called after
    * the workspace is seeded (the diff isn't known at construction time). */
   setPullFiles: (prNumber: number, files: PullFile[]) => void;
+  /**
+   * Move a PR's head — a multi-round case (`rounds`) pushing the next round's
+   * commit. Reviews submitted from here on default their `commit_id` to it.
+   */
+  setHead: (prNumber: number, sha: string) => void;
+  /** How many reviews the run(s) have submitted on a PR so far — a round's starting index. */
+  submittedCount: (prNumber: number) => number;
+  /**
+   * Advance the clock every later review, comment and thread is stamped with.
+   * The fake starts at a fixed instant and never moves on its own, so a
+   * single-round case is stamped exactly as before; a multi-round case
+   * advances it between rounds so round k+1's reviews are strictly later.
+   */
+  advanceClock: (ms: number) => void;
+  /** The fake's current clock, ISO. */
+  now: () => string;
+  /**
+   * Judge each inline thread's `isOutdated` for the discussion query. Default:
+   * never outdated (a seeded `outdated: true` still is). A multi-round case
+   * installs a resolver that asks whether the commented line still exists at
+   * the round's head.
+   */
+  setOutdatedResolver: (resolve: ((anchor: ThreadAnchor) => boolean) | null) => void;
   /**
    * The `GitHubClient.fetchRepoConfigTree` seam — the repo's committed
    * `.lastlight/` subtree, always "from the default branch" (there is only one
@@ -286,6 +345,14 @@ export interface FakeGitHubOptions {
    * declares and what `fetchRepoConfigTree` reports as `absent`.
    */
   repoConfig?: RepoConfigSeedFile[];
+  /**
+   * A chained re-review case (`rounds`): hold every seeded review, inline
+   * comment and PR issue comment whose `from_round` is above 1 until
+   * {@link FakeGitHub.startRound} reaches that round. Off ⇒ `from_round` is
+   * ignored and everything is served from the start, as a single-round case
+   * always was.
+   */
+  chained?: boolean;
 }
 
 const NOW = "2026-01-01T00:00:00Z";
@@ -323,6 +390,35 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
 
   const pulls: PullRequest[] = [];
   let pullSeq = 1;
+  // Seeded discussion a chained case holds back until its `from_round` starts.
+  const held: { round: number; release: () => void }[] = [];
+  /** Whether a seeded item is served now; else it is queued to `release` at its round. */
+  const servedNow = (fromRound: number | undefined, release: () => void): boolean => {
+    if (!opts.chained || fromRound === undefined || fromRound <= 1) return true;
+    held.push({ round: fromRound, release });
+    return false;
+  };
+  // The clock later writes are stamped with. Starts at NOW and moves only when
+  // a multi-round case advances it — see `advanceClock`.
+  let clockMs = Date.parse(NOW);
+  const now = (): string => (clockMs === Date.parse(NOW) ? NOW : new Date(clockMs).toISOString().replace(/\.\d{3}Z$/, "Z"));
+  let outdatedResolver: ((anchor: ThreadAnchor) => boolean) | null = null;
+  // Per-PR index into `submitted` where the current round began.
+  const roundFloor = new Map<number, number>();
+  const isOutdated = (c: InlineComment): boolean => {
+    if (c.outdated !== undefined) return c.outdated;
+    if (!outdatedResolver) return false;
+    try {
+      return outdatedResolver({
+        path: c.path,
+        ...(c.line !== undefined ? { line: c.line } : {}),
+        ...(c.start_line !== undefined ? { start_line: c.start_line } : {}),
+        ...(c.original_commit_id ? { commitId: c.original_commit_id } : {}),
+      });
+    } catch {
+      return false;
+    }
+  };
   let reviewSeq = 5000;
 
   // Changed files per PR, served at GET /pulls/:n/files. Populated after seeding
@@ -344,7 +440,12 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
       merged: false,
       user: { login: seed.user ?? "contributor" },
       html_url: `https://github.com/${owner}/${repo}/pull/${seed.number}`,
-      reviews: (seed.reviews ?? []).map((r) => ({
+      reviews: [],
+      reviewComments: [],
+      submitted: [],
+    });
+    const pr = pulls[pulls.length - 1]!;
+    const seededReviews = (seed.reviews ?? []).map((r): [Review, number | undefined] => [{
         id: reviewSeq++,
         user: { login: r.user },
         body: r.body,
@@ -358,18 +459,26 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
         commit_id: r.commit_id,
         submitted_at: NOW,
         comments: [],
-      })),
-      reviewComments: (seed.review_comments ?? []).map((c) => ({
+      }, r.from_round]);
+    const seededComments = (seed.review_comments ?? []).map((c): [InlineComment, number | undefined] => [{
         id: commentSeq++,
         user: { login: c.user },
         path: c.path,
         line: c.line,
         body: c.body,
         ...(c.resolved ? { resolved: true } : {}),
+        // Only when seeded: a case that names neither serves the same JSON it
+        // always did.
+        ...(c.commit_id ? { commit_id: c.commit_id, original_commit_id: c.commit_id } : {}),
+        ...(c.outdated !== undefined ? { outdated: c.outdated } : {}),
         created_at: NOW,
-      })),
-      submitted: [],
-    });
+      } as InlineComment, c.from_round]);
+    for (const [r, from] of seededReviews) {
+      if (servedNow(from, () => pr.reviews.push({ ...r, submitted_at: now() }))) pr.reviews.push(r);
+    }
+    for (const [c, from] of seededComments) {
+      if (servedNow(from, () => pr.reviewComments.push({ ...c, created_at: now() }))) pr.reviewComments.push(c);
+    }
     // Shadow issue so /issues/:n[/comments|/labels] serve the PR number.
     if (!issues.has(seed.number)) {
       issues.set(seed.number, {
@@ -379,16 +488,16 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
         state: seed.state ?? "open",
         user: { login: seed.user ?? "contributor" },
         labels: [],
-        comments: (seed.issue_comments ?? []).map((c) => ({
-          id: commentSeq++,
-          user: { login: c.user },
-          body: c.body,
-          created_at: NOW,
-        })),
+        comments: [],
         created_at: NOW,
         updated_at: NOW,
         html_url: `https://github.com/${owner}/${repo}/pull/${seed.number}`,
       });
+      const shadow = issues.get(seed.number)!;
+      for (const c of seed.issue_comments ?? []) {
+        const comment = { id: commentSeq++, user: { login: c.user }, body: c.body, created_at: NOW };
+        if (servedNow(c.from_round, () => shadow.comments.push({ ...comment, created_at: now() }))) shadow.comments.push(comment);
+      }
     }
   }
 
@@ -653,7 +762,7 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
                         path: c.path,
                         line: c.line ?? null,
                         isResolved: c.resolved === true,
-                        isOutdated: false,
+                        isOutdated: isOutdated(c),
                         comments: { nodes: [{ author: author(c.user.login), body: c.body }] },
                       })),
                     },
@@ -780,7 +889,7 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
         }
         if (method === "POST") {
           const b = body as { body: string };
-          const comment: Comment = { id: commentSeq++, user: { login: "last-light[bot]" }, body: b.body, created_at: NOW };
+          const comment: Comment = { id: commentSeq++, user: { login: "last-light[bot]" }, body: b.body, created_at: now() };
           issue.comments.push(comment);
           json(201, comment);
           return true;
@@ -894,24 +1003,33 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
             body?: string;
             event?: string;
             commit_id?: string;
-            comments?: { path: string; line?: number; side?: "LEFT" | "RIGHT"; position?: number; body: string }[];
+            comments?: { path: string; line?: number; start_line?: number; side?: "LEFT" | "RIGHT"; position?: number; body: string }[];
           };
+          const reviewId = reviewSeq++;
+          const commitId = b.commit_id ?? pr.head.sha;
+          const at = now();
           const review: Review = {
-            id: reviewSeq++,
+            id: reviewId,
             user: { login: "last-light[bot]" },
             body: b.body ?? "",
             state: eventToState(b.event),
-            commit_id: b.commit_id ?? pr.head.sha,
-            submitted_at: NOW,
+            commit_id: commitId,
+            submitted_at: at,
+            // Linked to their review and commit as GitHub links them, so a later
+            // round can tell which head a thread was raised on.
             comments: (b.comments ?? []).map((c) => ({
               id: commentSeq++,
               user: { login: "last-light[bot]" },
               path: c.path,
               line: c.line,
+              ...(c.start_line !== undefined ? { start_line: c.start_line } : {}),
               side: c.side,
               position: c.position,
               body: c.body,
-              created_at: NOW,
+              created_at: at,
+              pull_request_review_id: reviewId,
+              commit_id: commitId,
+              original_commit_id: commitId,
             })),
           };
           pr.reviews.push(review);
@@ -998,13 +1116,41 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
     commentsOn: (n) => (issues.get(n)?.comments ?? []).map((c) => c.body),
     issueState: (n) => issues.get(n)?.state,
     pulls: () => pulls,
-    submittedReviews: (n) =>
-      (pulls.find((p) => p.number === n)?.submitted ?? []).map((r) => ({
+    submittedReviews: (n, o) =>
+      (pulls.find((p) => p.number === n)?.submitted ?? []).slice(o?.all ? 0 : roundFloor.get(n) ?? 0).map((r) => ({
         body: r.body,
         event: stateToEvent(r.state),
-        comments: r.comments.map((c) => ({ path: c.path, line: c.line, side: c.side, body: c.body })),
+        comments: r.comments.map((c) => ({
+          path: c.path,
+          line: c.line,
+          ...(c.start_line !== undefined ? { start_line: c.start_line } : {}),
+          side: c.side,
+          body: c.body,
+        })),
+        ...(r.commit_id ? { commitId: r.commit_id } : {}),
+        submittedAt: r.submitted_at,
       })),
     setPullFiles: (n, files) => pullFiles.set(n, files),
+    setHead: (n, sha) => {
+      const pr = pulls.find((p) => p.number === n);
+      if (pr) pr.head = { ...pr.head, sha };
+    },
+    submittedCount: (n) => pulls.find((p) => p.number === n)?.submitted.length ?? 0,
+    startRound: (round) => {
+      for (const p of pulls) roundFloor.set(p.number, p.submitted.length);
+      if (round === undefined) return;
+      for (let i = 0; i < held.length; ) {
+        if (held[i]!.round <= round) held.splice(i, 1)[0]!.release();
+        else i++;
+      }
+    },
+    advanceClock: (ms) => {
+      clockMs += ms;
+    },
+    now,
+    setOutdatedResolver: (resolve) => {
+      outdatedResolver = resolve;
+    },
     fetchRepoConfigTree,
     repoConfigFetches: () => repoConfigFetches,
     mergeOf: (n) => pulls.find((p) => p.number === n)?.mergedBy,

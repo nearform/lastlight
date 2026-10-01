@@ -15,6 +15,8 @@ import { WorkflowPipeline } from "./WorkflowPipeline";
 import { ApprovalBanner } from "./ApprovalBanner";
 import { PhaseDetailPanel } from "./PhaseDetailPanel";
 import { PrStatePanel, hasPrState } from "./PrStatePanel";
+import { ReviewLedgerPanel } from "./ReviewLedgerPanel";
+import { hasReviewLedger } from "../lib/review-ledger";
 import { Split, SplitPane, SplitHandle } from "./Split";
 import { Tabs, TabButton } from "./Tabs";
 import { useIsNarrow } from "../hooks/useIsNarrow";
@@ -129,10 +131,10 @@ function FeedbackBadge({ signals }: { signals: FeedbackSignal[] }) {
  * The panes of the run view, in tab order.
  *
  * Wide, the first two are columns — the run list and the pipeline — and only
- * the rest are tabs. Narrow, all five are tabs in one strip. One vocabulary
+ * the rest are tabs. Narrow, all six are tabs in one strip. One vocabulary
  * either way, so there is no second notion of "which pane" to keep in step.
  */
-export const RUN_PANES = ["runs", "workflow", "transcript", "phase", "prstate"] as const;
+export const RUN_PANES = ["runs", "workflow", "transcript", "phase", "prstate", "review"] as const;
 export type RunPane = (typeof RUN_PANES)[number];
 const PANE_LABEL: Record<RunPane, string> = {
   runs: "Runs",
@@ -140,9 +142,10 @@ const PANE_LABEL: Record<RunPane, string> = {
   transcript: "Transcript",
   phase: "Phase",
   prstate: "PR State",
+  review: "Review",
 };
 /** The tabs the detail panel itself owns — the two column panes are not tabs there. */
-const DETAIL_PANES: RunPane[] = ["transcript", "phase", "prstate"];
+const DETAIL_PANES: RunPane[] = ["transcript", "phase", "prstate", "review"];
 
 interface DetailPanelProps {
   run: WorkflowRun;
@@ -282,7 +285,7 @@ function RunBody({
   );
 
   const sidePanel = (current: RunPane) => {
-    if (!selectedPhase && current !== "prstate") {
+    if (!selectedPhase && current !== "prstate" && current !== "review") {
       return (
         <div className="flex-1 flex items-center justify-center text-faint text-xs p-6 text-center">
           click a phase to inspect it
@@ -293,6 +296,13 @@ function RunBody({
       return (
         <div className="flex-1 overflow-y-auto">
           <PrStatePanel run={run} defaultOpen />
+        </div>
+      );
+    }
+    if (current === "review") {
+      return (
+        <div className="flex-1 overflow-y-auto">
+          <ReviewLedgerPanel run={run} />
         </div>
       );
     }
@@ -1034,11 +1044,16 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
   // in the same strip, and those are not the detail panel's to render.
   const [pane, setPane] = useState<RunPane>("transcript");
   const showPrState = !!selectedRun && hasPrState(selectedRun);
+  // pr-review's coverage + ledger (#429) — only on runs that recorded them.
+  const showReview = !!selectedRun && hasReviewLedger(selectedRun);
   const visiblePanes = useMemo(
-    () => RUN_PANES.filter((p) => p !== "prstate" || showPrState),
-    [showPrState],
+    () =>
+      RUN_PANES.filter(
+        (p) => (p !== "prstate" || showPrState) && (p !== "review" || showReview),
+      ),
+    [showPrState, showReview],
   );
-  // A pane can stop existing under the user — the PR State tab on switching to
+  // A pane can stop existing under the user — the PR State or Review tab on switching to
   // a non-PR run — so fall back rather than render nothing.
   const activePane = visiblePanes.includes(pane) ? pane : "transcript";
 

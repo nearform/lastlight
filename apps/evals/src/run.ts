@@ -705,7 +705,9 @@ async function runEval(): Promise<number> {
       // not exist. `isRealSha` rejects the all-zero placeholder, which is the
       // same discriminator `run-instance.ts` seeds by.
       if (!isRealSha(w.inst.pr.base_commit) || !isRealSha(w.inst.pr.head_commit)) return false;
-      const k = `${w.inst.repo}#${w.inst.pr.number}`;
+      // The round heads are part of the key: two cases on one PR may chain
+      // different rounds, and each needs its own heads mirrored.
+      const k = `${w.inst.repo}#${w.inst.pr.number}@${(w.inst.rounds ?? []).map((r) => r.head_commit).join(",")}`;
       if (seenPr.has(k)) return false;
       seenPr.add(k);
       return true;
@@ -721,6 +723,7 @@ async function runEval(): Promise<number> {
             pullNumber: w.inst.pr!.number,
             baseCommit: w.inst.pr!.base_commit,
             headCommit: w.inst.pr!.head_commit,
+            ...(w.inst.rounds?.length ? { roundCommits: w.inst.rounds.map((r) => r.head_commit) } : {}),
           });
         }
         s.stop(`Cached ${prToFetch.length} PR checkout(s).`);

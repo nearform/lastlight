@@ -700,6 +700,62 @@ export interface ReviewConfig {
   triage: ReviewTriageConfig;
   /** The evidence pipeline. Off by default — see {@link ReviewAnalysisConfig}. */
   analysis: ReviewAnalysisConfig;
+  /** Risk tiers for the evidence pipeline. See {@link ReviewRiskConfig}. */
+  risk: ReviewRiskConfig;
+}
+
+/** How much attention a changed path deserves (issue #429). */
+export const REVIEW_RISK_TIERS = ["low", "medium", "high", "critical"] as const;
+export type ReviewRiskTier = (typeof REVIEW_RISK_TIERS)[number];
+
+/** One rule: a glob (`isGeneratedPath` semantics — no `/` ⇒ a basename anywhere) and its tier. */
+export interface ReviewRiskRule {
+  glob: string;
+  tier: ReviewRiskTier;
+}
+
+/** Rules kept at most, per layer — a bound on the file a repo controls. */
+export const MAX_REVIEW_RISK_RULES = 100;
+
+/**
+ * Risk tiers for the `review.analysis` pipeline (issue #429).
+ *
+ * Code-facts tiers every unit of a PR `low | medium | high | critical` from
+ * its path — first matching rule wins — then raises it at most once for a
+ * `security`/`state` obligation or a widely-called symbol. Its built-in rules
+ * (prose, tests and generated files `low`; migrations, schema, auth, CI
+ * `high`; everything else `medium`) always apply AFTER these, so this list
+ * only ever needs the repo's own exceptions.
+ *
+ * The tier weighs which sites get an investigator, how strict a re-review is
+ * on code the last review already had (a `low` unit never re-opens), and the
+ * risk-weighted coverage figures. It never decides whether a changed unit is
+ * surveyed.
+ *
+ * Settable by BOTH the operator and a repo, and the repo is free: a repo's
+ * `review.risk.rules` are matched BEFORE the operator's (the sanitizer
+ * prepends them), so on a path both name the repo wins. It only reorders
+ * attention inside a review the operator already pays for.
+ */
+export interface ReviewRiskConfig {
+  rules: ReviewRiskRule[];
+}
+
+export function isReviewRiskTier(v: unknown): v is ReviewRiskTier {
+  return typeof v === "string" && (REVIEW_RISK_TIERS as readonly string[]).includes(v);
+}
+
+/** The valid rules of a raw list, trimmed and capped; anything else is dropped. */
+export function coerceReviewRiskRules(raw: unknown): ReviewRiskRule[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ReviewRiskRule[] = [];
+  for (const r of raw) {
+    if (!r || typeof r !== "object") continue;
+    const { glob, tier } = r as { glob?: unknown; tier?: unknown };
+    if (typeof glob !== "string" || !glob.trim() || !isReviewRiskTier(tier)) continue;
+    out.push({ glob: glob.trim(), tier });
+  }
+  return out.slice(0, MAX_REVIEW_RISK_RULES * 2);
 }
 
 /**
@@ -872,5 +928,7 @@ export function defaultReviewPolicy(): ReviewPolicy {
       // field's doc.
       maxBodyComments: 5,
     },
+    // No configured rules: code-facts' built-in tiers apply alone.
+    risk: { rules: [] },
   };
 }

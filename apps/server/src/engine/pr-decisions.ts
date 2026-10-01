@@ -25,6 +25,7 @@
  * mock, no sandbox, no harness.
  */
 
+import { coerceLedger, priorReviewOf, renderLedgerForSelect } from "./review-ledger.js";
 import { renderPriorDiscussion } from "./pr-discussion.js";
 import { renderPrIntent } from "./pr-intent.js";
 import type { DependenciesConfig, FixConfig, ReviewConfig } from "../config/config.js";
@@ -735,6 +736,28 @@ export function reviewCheckPlacement(
  * bounds cap the file that supplies them.
  */
 const globCache = new Map<string, RegExp>();
+
+/**
+ * Issue #429 — the review ledger's two template keys, derived from the run's
+ * persisted snapshot (`context.prState.reviewLedger`) at RUN time by the
+ * runner, never stored in `context` themselves: both are pure functions of the
+ * ledger the snapshot already carries, and `priorReviewJson` alone is up to the
+ * whole units + line-hash payload over again. A resume re-derives them the same
+ * way, from the same snapshot.
+ *
+ * - `priorReviewJson` — one `{{`-safe line of JSON the `units` phase writes to
+ *   `prior-review.json` (QUOTED heredoc, like `specObligationsJson`); code-facts
+ *   scopes the sites and gates the findings against it. `""` on a first review.
+ * - `priorLedger` — the ledger as `select` reads it (`{{#if priorLedger}}`):
+ *   what an earlier review of OURS posted that is still open, and what it found
+ *   but withheld. `""` with nothing to say.
+ */
+export function reviewLedgerContext(prState: unknown): { priorReviewJson: string; priorLedger: string } {
+  const raw = prState && typeof prState === "object" ? (prState as { reviewLedger?: unknown }).reviewLedger : undefined;
+  const ledger = coerceLedger(raw);
+  const prior = priorReviewOf(ledger);
+  return { priorReviewJson: prior ? jsonLine(prior) : "", priorLedger: renderLedgerForSelect(ledger) };
+}
 
 /**
  * One glob pattern as a RegExp, with the segment-aware semantics `*` implies
@@ -1767,7 +1790,17 @@ function renderPathsSinceLastReview(paths: string[] | null): string {
  * test that renders it through a real heredoc.
  */
 export function specObligationsLine(set: SpecObligationSet): string {
-  return JSON.stringify(set).replace(/\{\{/g, "{\\u007b");
+  return jsonLine(set);
+}
+
+/**
+ * Any value as ONE line of JSON with no `{{` in it — the form every heredoc
+ * the `units` node writes takes (spec obligations, the prior review, the risk
+ * rules), because each carries text a PR or a repo controls: a path, a symbol,
+ * a glob. `\u007b` is `{` to any JSON parser and invisible to the guard.
+ */
+export function jsonLine(value: unknown): string {
+  return JSON.stringify(value).replace(/\{\{/g, "{\\u007b");
 }
 
 /**
@@ -1829,6 +1862,13 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      * nobody has said anything (`renderPriorDiscussion`).
      */
     priorDiscussion: renderPriorDiscussion(state.discussion ?? null),
+    /**
+     * Issue #429 — the configured risk rules (the repo's, then the operator's:
+     * the repo sanitizer prepends), as the one line of JSON `units
+     * --risk-rules` reads. Empty with none configured: code-facts' built-in
+     * tiers apply alone.
+     */
+    riskRulesJson: review.risk.rules.length ? jsonLine({ rules: review.risk.rules }) : "",
     /**
      * Phase budgets for `pr-review.yaml`'s deterministic `facts` / `seed` /
      * `reconcile` steps, read as `timeout_seconds: { from: … }` (issue #385).

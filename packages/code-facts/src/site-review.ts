@@ -38,6 +38,17 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { readHypothesisSet, type HypothesisSet } from "./hypotheses.js";
 import { isReadOnlyCommand, transcriptRecordsCommand, type ProbeAnswer } from "./probes.js";
 import { isTestPath } from "./project.js";
+import {
+  buildReviewCoverage,
+  convergenceVerdict,
+  LATE_FINDING_LABEL,
+  locateUnit,
+  REVIEW_COVERAGE_FILE,
+  renderReviewCoverage,
+  type CoverageUnitInput,
+  type ReviewCoverage,
+} from "./review-coverage.js";
+import { anchorDelta, readPriorReview } from "./review-delta.js";
 import { clusterSites, renderSiteBrief, type Site, type SiteVoters, type VoterUnit } from "./site-cluster.js";
 
 // ── layout ──────────────────────────────────────────────────────────────────
@@ -153,6 +164,14 @@ export interface SiteReviewPlan {
    * the gold Martian files against test code.
    */
   testSites: number;
+  /**
+   * Issue #429 — rows a re-review carried: written by units the last review
+   * already had unchanged, so they form no site. `0` on a first review. A
+   * re-review with every unit unchanged plans NO slot: the fan-out is a no-op,
+   * `merge` pools nothing, `select` is skipped, and the post carries the
+   * ledger forward.
+   */
+  carried?: number;
   slots: SiteSlot[];
 }
 
@@ -162,7 +181,12 @@ export function readVoterUnits(dir: string): VoterUnit[] {
   if (!existsSync(file)) return [];
   try {
     const units = (JSON.parse(readFileSync(file, "utf8")) as { units?: VoterUnit[] }).units ?? [];
-    return units.map((u) => ({ id: u.id, ...(u.splitOf ? { splitOf: u.splitOf } : {}) }));
+    return units.map((u) => ({
+      id: u.id,
+      ...(u.splitOf ? { splitOf: u.splitOf } : {}),
+      ...(u.delta ? { delta: u.delta } : {}),
+      ...(u.risk ? { risk: u.risk } : {}),
+    }));
   } catch {
     return [];
   }
@@ -201,6 +225,7 @@ export function planSiteSlots(set: HypothesisSet, units: readonly VoterUnit[], o
     rows: set.records.length,
     sitesFormed: plan.sites.length,
     testSites: plan.sites.filter((s) => s.path !== null && isTestPath(s.path)).length,
+    carried: plan.carried.length,
     slots,
   };
 }
@@ -268,11 +293,15 @@ export function renderSitePlanSummary(plan: SiteReviewPlan): string {
   const lines = [
     `site-plan: ${plan.rows} row(s) → ${plan.sitesFormed} site(s) (${plan.testSites} in test files, ranked last); top ${plan.options.top}${plan.options.pair ? ", paired" : ""}:`,
   ];
+  if (plan.carried) {
+    lines.push(`  re-review: ${plan.carried} row(s) carried — their units are unchanged since the last review, so they form no site`);
+  }
   for (const s of plan.slots) {
     lines.push(
-      `  ${s.siteId}  ${s.site.path ?? "unanchored"}:${s.site.startLine ?? "?"}–${s.site.endLine ?? "?"}  rows ${s.site.rows.length}  voters ${s.site.voters}  none-checks ${s.noneChecks}${s.pairOf ? `  (pair of ${s.pairOf})` : ""}`,
+      `  ${s.siteId}  ${s.site.path ?? "unanchored"}:${s.site.startLine ?? "?"}–${s.site.endLine ?? "?"}  rows ${s.site.rows.length}  voters ${s.site.voters}${s.site.risk ? `  risk ${s.site.risk}` : ""}  none-checks ${s.noneChecks}${s.pairOf ? `  (pair of ${s.pairOf})` : ""}`,
     );
   }
+  if (plan.slots.length === 0) lines.push("  no site to investigate");
   return `${lines.join("\n")}\n`;
 }
 
@@ -952,7 +981,36 @@ export interface FinalizeResult {
   posted: number;
   recorded: number;
   hypotheses: number;
+  /** Issue #429: findings the convergence gate withheld (unchanged code, not must-fix). */
+  converged: number;
+  /** …and must-fix findings on unchanged code it let through, labelled as missed earlier. */
+  late: number;
+  /** `review-coverage.json`, or `null` when it could not be built. */
+  coverage: ReviewCoverage | null;
   notes: string[];
+}
+
+/** `units.json`'s units, read loosely — absent or unreadable ⇒ `[]` (no gate, no unit coverage). */
+export function readCoverageUnits(dir: string): CoverageUnitInput[] {
+  const file = join(dir, "units.json");
+  if (!existsSync(file)) return [];
+  try {
+    const units = (JSON.parse(readFileSync(file, "utf8")) as { units?: CoverageUnitInput[] }).units;
+    return Array.isArray(units) ? units : [];
+  } catch {
+    return [];
+  }
+}
+
+function readIngestStatuses(dir: string): { unitId: string; status: string }[] | null {
+  const file = join(dir, "units", "ingest.json");
+  if (!existsSync(file)) return null;
+  try {
+    const units = (JSON.parse(readFileSync(file, "utf8")) as { units?: { unitId: string; status: string }[] }).units;
+    return Array.isArray(units) ? units : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The one-item-per-finding selection a failed `select` falls back to, in pool order. */
@@ -993,15 +1051,25 @@ export function finalizeSiteFindings(opts: { dir: string; repo: string }): Final
   }
 
   const byId = new Map(merge.findings.map((f) => [f.id, f]));
+  const units = readCoverageUnits(dir);
+  // The prior review's lines: the gate's evidence. Unreadable ⇒ no gate, the
+  // direction that posts — a bad ledger must never silence a review.
+  const prior = readPriorReview(dir).prior;
   const findings: Record<string, unknown>[] = [];
   let posted = 0;
   let recorded = 0;
+  let converged = 0;
+  let late = 0;
   for (const item of selection.items) {
     const primary = byId.get(item.primary ?? item.findings[0]);
     if (!primary) continue;
     const members = item.findings.map((id) => byId.get(id)).filter((f): f is PooledFinding => !!f);
     // Recorded, never posted: trivia, and anything the PR's discussion already raised.
+    const unit = locateUnit(units, primary.path, primary.line);
+    const anchorAge = anchorDelta(prior, primary.path, (primary.rangeText ?? primary.lineText).split("\n"), unit?.delta);
+    const verdict = convergenceVerdict(anchorAge, unit?.risk, item.importance);
     const nit = item.importance === "nit" || !!item.alreadyRaised;
+    const withheld = !nit && verdict === "withhold";
     const text = primary.lineText.trim();
     // A range posts as its whole text: the poster matches it against the diff
     // and derives `start_line` from the match. `anchorLine` is ALWAYS written
@@ -1019,11 +1087,13 @@ export function finalizeSiteFindings(opts: { dir: string; repo: string }): Final
       ...anchor,
       severity: SEVERITY_FOR[item.importance],
       title: item.title,
-      body: findingBody(primary, item),
+      body: verdict === "late" && !nit ? `${LATE_FINDING_LABEL}\n\n${findingBody(primary, item)}` : findingBody(primary, item),
       claim: item.title,
       category: "defect",
       ...(item.fix ? { fix: item.fix } : {}),
-      ...(nit ? { tier: "internal" } : {}),
+      ...(nit || withheld ? { tier: "internal" } : {}),
+      ...(withheld ? { withheld: "converged" } : {}),
+      ...(verdict === "late" && !nit ? { lateDiscovery: true } : {}),
       importance: item.importance,
       ...(item.alreadyRaised ? { alreadyRaised: item.alreadyRaised } : {}),
       investigatorImportance: primary.importance,
@@ -1031,19 +1101,26 @@ export function finalizeSiteFindings(opts: { dir: string; repo: string }): Final
       source: "site-review",
       siteFindings: members.map((f) => f.ref),
     });
-    if (nit) recorded++;
+    if (nit || withheld) recorded++;
     else posted++;
+    if (withheld) converged++;
+    else if (verdict === "late" && !nit) late++;
   }
 
   const set = readHypothesisSet(dir);
   // A pair slot re-investigates its primary's site: count areas, not investigators.
   const pairSlots = new Set((readSitePlan(dir)?.slots ?? []).filter((s) => s.pairOf).map((s) => s.siteId));
   const siteCount = merge.slots.filter((s) => !pairSlots.has(s.siteId)).length;
+  // A re-review whose every unit is unchanged plans no site (issue #429): say
+  // that, not "investigated 0 areas".
+  const rereview = prior !== null || units.some((u) => u.delta !== undefined);
   const summary =
     selection.summary ??
     (posted
       ? `Investigated ${siteCount} area(s) of this change; ${posted} issue(s) worth raising below.`
-      : `Investigated ${siteCount} area(s) of this change and found nothing worth raising.`);
+      : rereview && siteCount === 0
+        ? "Nothing new to investigate: the code this review covers is unchanged since the last review."
+        : `Investigated ${siteCount} area(s) of this change and found nothing worth raising.`);
   const doc = {
     summary,
     event: "COMMENT",
@@ -1055,13 +1132,32 @@ export function finalizeSiteFindings(opts: { dir: string; repo: string }): Final
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, `${JSON.stringify(doc, null, 2)}\n`);
   if (merge.unpooled.length) notes.push(`${merge.unpooled.length} finding line(s) not pooled: ${merge.unpooled.map((u) => `${u.ref} (${u.reason})`).join("; ")}`);
-  return { source, fallbackReason, posted, recorded, hypotheses: set.records.length, notes };
+
+  // Who looked at what — the record core folds into the PR's review ledger.
+  let coverage: ReviewCoverage | null = null;
+  try {
+    coverage = buildReviewCoverage({
+      units,
+      ingest: readIngestStatuses(dir),
+      slots: readSitePlan(dir)?.slots ?? [],
+      outcomes: merge.slots,
+      set,
+    });
+    writeFileSync(join(dir, REVIEW_COVERAGE_FILE), `${JSON.stringify(coverage, null, 2)}\n`);
+  } catch (err) {
+    notes.push(`coverage not written: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return { source, fallbackReason, posted, recorded, hypotheses: set.records.length, converged, late, coverage, notes };
 }
 
 export function renderFinalize(r: FinalizeResult): string {
   const lines = [
-    `sites --finalize: ${r.source === "selection" ? "selection" : `FALLBACK (${r.fallbackReason}) — one item per finding`} → ${r.posted} to post, ${r.recorded} recorded (nit), ${r.hypotheses} hypothesis row(s) filed internal`,
+    `sites --finalize: ${r.source === "selection" ? "selection" : `FALLBACK (${r.fallbackReason}) — one item per finding`} → ${r.posted} to post, ${r.recorded} recorded (nit or converged), ${r.hypotheses} hypothesis row(s) filed internal`,
+    ...(r.converged || r.late
+      ? [`  re-review gate: ${r.converged} withheld on unchanged code, ${r.late} must-fix on unchanged code posted as missed earlier`]
+      : []),
     ...r.notes,
   ];
+  if (r.coverage) lines.push(renderReviewCoverage(r.coverage).trimEnd());
   return `${lines.join("\n")}\n`;
 }

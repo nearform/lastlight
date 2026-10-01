@@ -152,8 +152,19 @@ interface ReviewConfig {                  // when a pr-review run is triggered
   skipDraft: boolean;                     // skip draft PRs
   generatedPaths: string[];               // derived paths — a push touching only these earns no re-review
   skipUnchangedDiff: boolean;             // skip a re-review whose three-dot diff is byte-identical to the reviewed one
-  triage: ReviewTriageConfig;             // the depth-triage phase; ON by default, operator-only
+  triage: ReviewTriageConfig;             // the depth-triage phase; ON by default, operator-only; skipped when `analysis` is on (issue #429)
   analysis: ReviewAnalysisConfig;         // the review evidence pipeline; OFF by default, operator-only
+  risk: ReviewRiskConfig;                 // risk tiers for the pipeline (issue #429); repo-settable, FREE
+}
+
+interface ReviewRiskConfig {              // issue #429 — read by code-facts `units --risk-rules`
+  rules: { glob: string; tier: "low" | "medium" | "high" | "critical" }[];
+                                          // first match wins; `isGeneratedPath` glob semantics (no `/` ⇒ basename anywhere).
+                                          // Built-in rules always apply AFTER these: prose, tests, generated → low;
+                                          // migrations, schema, SQL, auth, crypto, billing, CI → high; else medium.
+                                          // A unit is raised at most one tier by a security/state obligation or
+                                          // ≥5 non-test callers outside the diff. Weighs site ranking, the re-review
+                                          // gate (a `low` unit never re-opens) and coverage — never what is surveyed
 }
 
 interface ReviewTriageConfig {            // issue #378 — how much review a RE-review is owed
@@ -406,6 +417,7 @@ warning; the run proceeds either way.
 | `review.skipDraft` | yes | add-only `true` — a repo may skip drafts, never force reviews onto them |
 | `review.generatedPaths` | yes | **superset**-only — the mirror of `fix.retryableClasses`. A longer list suppresses more re-reviews, which is the conservative direction; dropping one of the operator's patterns buys the repo an extra agent run per lock-file bump on the operator's budget. An omitted operator pattern is restored (arrays replace wholesale on merge, so the clamp keeps the union) and reported as `policy-downgrade` |
 | `review.skipUnchangedDiff` | yes | **downward**-only — the mirror of `generatedPaths` above. Turning the gate **off** buys the repo more review runs on its own attention, which is entirely its call; turning it **on** over an operator who disabled it would suppress reviews the deployment asked to keep, and is reported as `policy-downgrade` |
+| `review.risk` | yes | **free, and prepended** (issue #429): the repo's `rules` are written AHEAD of the operator's, so first-match makes the repo's tier win on a path both name. A tier only reorders attention inside a review the operator already runs. Validated for shape only — `{ rules: [{ glob, tier }] }`, at most 100 rules; a malformed rule is dropped with `invalid-value` |
 | `review.placeholderCheck`, `review.sweepPendingGraceMinutes` | **no** | operator-only — both are about how the deployment presents and paces reviews across every repo it serves, not a per-repo caution dial. Dropped as `key-not-allowed` |
 | `review.triage` | **no** | operator-only, for the same reason `analysis` is, and in both directions: turning triage **on** buys a cheap pass on the operator's budget, and turning it **off** buys the full evidence pipeline on every re-review, which is far more of the same. The second `review:` leaf that NESTS, so its provenance reports under a dotted key (`triage.enabled`) |
 | `review.analysis` | **no** | operator-only — the review evidence pipeline is spend, and there is no "how careful is this repo" direction to clamp it in. Turning it **on** buys extra analysis on the operator's budget; turning it **off** against an operator who enabled it opts the repo out of the review machinery the deployment chose. Neither is the repo's call. It is also the one `review:` leaf that NESTS, so its provenance is reported under a dotted key (`analysis.enabled`), exactly as `notifications.slack.channel` is |

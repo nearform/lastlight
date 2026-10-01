@@ -100,6 +100,7 @@ import {
   sha256,
 } from "../src/phase-replay-node.js";
 import type { GoldComment } from "../src/schema.js";
+import { readStoredRunContext } from "../src/phase-replay-context.js";
 
 // The workspace's `.env` (provider keys), as `lastlight-evals run` loads it.
 loadDotEnv();
@@ -380,7 +381,7 @@ async function runCase(c: Case, repeat: number): Promise<PhaseReplayCase> {
       writeFileSync(join(prDir, "sites", "selected.json"), `${JSON.stringify({ items: [] })}\n`);
 
     if (!recorded && merge.findings.length > 0) {
-      const { text, unrendered } = renderPhasePrompt(promptPath, { ...promptContext(inst), phaseOutputs: { siteMerge: renderSiteMerge(merge) } });
+      const { text, unrendered } = renderPhasePrompt(promptPath, { ...promptContext(inst, readStoredRunContext(c.artifacts)), phaseOutputs: { siteMerge: renderSiteMerge(merge) } });
       if (unrendered) console.warn(`! ${caseKey}: unrendered {{marker}} left in the select prompt`);
       result.session = sessionUrl;
       report.inFlight!.push({ instanceId: c.instanceId, arm: c.run, repeat, startedAt: new Date().toISOString(), session: sessionUrl });

@@ -21,7 +21,9 @@ import {
   type AttentionBoundary,
   type DiffFile,
   type ReviewFindingsDoc,
+  type ReviewFinding,
   type TieredFindings,
+  LEDGER_ALREADY_RAISED,
 } from "../../engine/github/review-poster.js";
 import { getRuntimeConfig } from "../../config/config.js";
 import { defaultReviewPolicy } from "lastlight-shared/config-types";
@@ -33,6 +35,19 @@ import {
 import { logger } from "../../logging/logger.js";
 import { chat, type ChatFunction } from "../../engine/llm.js";
 import { writePostedSummary } from "../../engine/github/review-summary.js";
+import {
+  coerceLedger,
+  findingFingerprint,
+  foldReviewLedger,
+  LEDGER_LINE_HASH_CHARS,
+  openFingerprints,
+  renderLedgerStatus,
+  REVIEW_LEDGER_SCRATCH_KEY,
+  type DispositionRow,
+  type LedgerThread,
+  type LedgerUnit,
+  type ReviewLedger,
+} from "../../engine/review-ledger.js";
 import { resolveHostRepoDir } from "./host-repo-dir.js";
 
 const log = logger("post-review");
@@ -93,8 +108,9 @@ export function isRereview(latest: { sha: string } | null, headSha: string | und
  * Does an earlier review of ours still have an open inline thread on code
  * this head did not change? A clean re-review must not say "good to merge"
  * over one: `select` only marks a prior point `alreadyRaised` when a site
- * re-finds it this round, and the carried ledger is absent on the sites
- * pipeline, so a prior finding nobody re-grounded is otherwise invisible.
+ * re-finds it this round. The PR's review ledger (issue #429) now also says
+ * "Still open" for a posted finding whose quoted code is unchanged, but a
+ * thread is the maintainer's own record, so both are read.
  *
  * An OUTDATED thread does not count: the code it sat on changed, and this
  * review — which read the new code — found nothing to raise there. A failed
@@ -125,6 +141,118 @@ export async function openBotThreads(
   } catch (err: unknown) {
     log.warn("Could not read review threads — not calling the re-review good to merge", { owner, repo, prNumber, err });
     return true;
+  }
+}
+
+/** The run-scratch key the coverage record rides under, beside the ledger (issue #429). */
+export const REVIEW_COVERAGE_SCRATCH_KEY = "reviewCoverage";
+
+/** Every finding with its tier and why — `disposition.json`'s rows, and the ledger fold's input. */
+export function dispositionRows(tiered: TieredFindings): (DispositionRow & { finding: ReviewFinding })[] {
+  return [
+    ...tiered.inline.map((f) => ({ tier: "inline" as const, reason: null, finding: f })),
+    ...tiered.body.map((d) => ({ tier: "body" as const, reason: d.reason as string, finding: d.finding })),
+    // `reason` is the same machine token the body tier carries, not prose:
+    // the sibling eval harness reads this file, and "below the internal
+    // floor" as a sentence made the three causes of a withheld finding
+    // indistinguishable to anything but a human.
+    ...tiered.internal.map((r) => ({ tier: "internal" as const, reason: r.reason as string, finding: r.finding })),
+  ];
+}
+
+/** Code lines trimmed, blank lines dropped — the form a ledger excerpt is stored in. */
+function normalisedCode(text: string): string {
+  return text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+/** The review ledger the run was dispatched with, off the persisted `context.prState`. */
+function dispatchLedger(ctx: TemplateContext): unknown {
+  const state = (ctx as Record<string, unknown>).prState;
+  return state && typeof state === "object" ? (state as Record<string, unknown>).reviewLedger : undefined;
+}
+
+/**
+ * Issue #429 — a finding whose fingerprint (file + quoted code) matches one an
+ * earlier review POSTED and that is still open is withheld as already raised,
+ * DERIVED rather than left to `select` spotting our own comment in the
+ * rendered discussion. Still open, so the summary will not call the PR good to
+ * merge over it.
+ */
+export function markAlreadyRaised(doc: ReviewFindingsDoc, ledger: ReviewLedger): { doc: ReviewFindingsDoc; count: number } {
+  const open = openFingerprints(ledger);
+  if (open.size === 0 || !Array.isArray(doc.findings)) return { doc, count: 0 };
+  let count = 0;
+  const findings = doc.findings.map((f) => {
+    if (f.tier === "internal" || !f.path) return f;
+    if (!open.has(findingFingerprint(f.path, f.existingCode, f.title))) return f;
+    count++;
+    return { ...f, tier: "internal" as const, alreadyRaised: LEDGER_ALREADY_RAISED };
+  });
+  return { doc: { ...doc, findings }, count };
+}
+
+/**
+ * `units.json`'s `{key, contentSha}` per unit (one per key), and per file the
+ * union of its units' line hashes — what the next review scopes and gates
+ * against. `null` when there is no readable document.
+ */
+export function readLedgerUnits(file: string): { units: LedgerUnit[]; lines: Record<string, string> } | null {
+  try {
+    const units = (
+      JSON.parse(readFileSync(file, "utf8")) as { units?: { key?: unknown; contentSha?: unknown; file?: unknown; lineHashes?: unknown }[] }
+    ).units;
+    if (!Array.isArray(units) || units.length === 0) return null;
+    const seen = new Map<string, LedgerUnit>();
+    const byFile = new Map<string, Set<string>>();
+    for (const u of units) {
+      if (typeof u.file === "string" && typeof u.lineHashes === "string") {
+        const set = byFile.get(u.file) ?? new Set<string>();
+        const w = LEDGER_LINE_HASH_CHARS;
+        for (let i = 0; i + w <= u.lineHashes.length; i += w) set.add(u.lineHashes.slice(i, i + w));
+        byFile.set(u.file, set);
+      }
+      if (typeof u.key !== "string" || seen.has(u.key)) continue;
+      seen.set(u.key, { key: u.key, contentSha: typeof u.contentSha === "string" ? u.contentSha : null });
+    }
+    if (!seen.size) return null;
+    return { units: [...seen.values()], lines: Object.fromEntries([...byFile].map(([path, set]) => [path, [...set].join("")])) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `review-coverage.json`, compacted for the run row: the totals, the carried
+ * count, the uninvestigated keys, and per unit only what the dashboard draws.
+ */
+export function readCoverageSummary(file: string): Record<string, unknown> | null {
+  try {
+    const c = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    if (c.version !== 1) return null;
+    const units = Array.isArray(c.units) ? (c.units as Record<string, unknown>[]) : [];
+    return {
+      version: 1,
+      rereview: c.rereview === true,
+      inScope: c.inScope,
+      carried: c.carried,
+      notInvestigated: c.notInvestigated,
+      units: units.slice(0, 160).map((u) => ({
+        key: u.key ?? u.id,
+        file: u.file,
+        lines: u.lines,
+        touched: u.touched,
+        risk: u.risk,
+        delta: u.delta,
+        surveyed: u.surveyed,
+        investigated: u.investigated,
+      })),
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -703,7 +831,28 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       });
       doc = { ...doc, summary: incomplete };
     }
+    // Issue #429 — the PR's review ledger, carried on the dispatch snapshot.
+    // Read only under a boundary: the ledger is the evidence pipeline's, and a
+    // deployment that never opted in must post exactly what it posted before.
+    const priorLedger = boundary ? coerceLedger(dispatchLedger(ctx)) : null;
+    if (priorLedger && incomplete === undefined) {
+      const raised = markAlreadyRaised(doc, priorLedger);
+      if (raised.count > 0) {
+        log.info("Withheld findings an earlier review already posted (same code, still open)", {
+          repo: `${owner}/${repo}`,
+          prNumber,
+          count: raised.count,
+        });
+        doc = raised.doc;
+      }
+    }
     let review = buildReview(doc, commentable, boundary, clean);
+    // …and this review folded into it — before the summary, whose re-review
+    // status lines it renders; persisted only once the review has posted.
+    const ledger =
+      boundary && review.tiered && incomplete === undefined
+        ? await this.foldLedger({ github, owner, repo, prNumber, hostRepoDir, prior: priorLedger, headSha, tiered: review.tiered, localCheckout: !!localHeadSha })
+        : null;
     // Issue #405: under a boundary the summary is written AFTER the caps, from
     // the posted findings only — the adjudicator's summary was written before
     // them and routinely named findings the boundary then withheld, which
@@ -718,6 +867,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
         event: review.event,
         tiered: review.tiered,
         documentSummary: doc.summary,
+        ...(ledger ? { ledgerStatus: renderLedgerStatus(ledger) } : {}),
         prTitle: typeof ctx.prTitle === "string" && ctx.prTitle ? ctx.prTitle : undefined,
         rereview,
         priorOpen: rereview ? await openBotThreads(github, owner, repo, prNumber) : false,
@@ -762,6 +912,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
         prNumber,
         summary: repeat,
       });
+      await this.persistLedger(ledger, hostRepoDir);
       return succeed(repeat);
     }
 
@@ -788,6 +939,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       const withheld = review.tiered
         ? `, ${review.internalCount} recorded-only`
         : "";
+      await this.persistLedger(ledger, hostRepoDir);
       return succeed(
         `posted review: ${review.inlineCount} inline, ${review.demotedCount} in body${withheld}, event=${review.event}${downgraded}`,
       );
@@ -808,6 +960,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
           event: bodyOnly.event,
           commitId: headSha,
         });
+        await this.persistLedger(ledger, hostRepoDir);
         return succeed(
           `posted review (body-only fallback): ${bodyOnly.demotedCount} findings, event=${bodyOnly.event}`,
         );
@@ -1045,27 +1198,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     tiered: TieredFindings,
   ): void {
     try {
-      const rows = [
-        ...tiered.inline.map((f) => ({
-          tier: "inline" as const,
-          reason: null,
-          finding: f,
-        })),
-        ...tiered.body.map((d) => ({
-          tier: "body" as const,
-          reason: d.reason,
-          finding: d.finding,
-        })),
-        // `reason` is the same machine token the body tier carries, not prose:
-        // the sibling eval harness reads this file, and "below the internal
-        // floor" as a sentence made the three causes of a withheld finding
-        // indistinguishable to anything but a human.
-        ...tiered.internal.map((r) => ({
-          tier: "internal" as const,
-          reason: r.reason as string,
-          finding: r.finding,
-        })),
-      ];
+      const rows = dispositionRows(tiered);
       writeFileSync(
         join(repoDir, ".lastlight", "pr-review", "disposition.json"),
         JSON.stringify(
@@ -1076,6 +1209,72 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       );
     } catch (err) {
       log.warn("Could not record the finding disposition", { err });
+    }
+  }
+
+  /**
+   * Fold this review into the PR's review ledger (issue #429). Best-effort:
+   * any failure leaves the ledger the run was dispatched with in place, which
+   * the next dispatch then carries forward unchanged.
+   */
+  private async foldLedger(input: {
+    github: GitHubClient;
+    owner: string;
+    repo: string;
+    prNumber: number;
+    hostRepoDir: string;
+    prior: ReviewLedger | null;
+    headSha: string | undefined;
+    tiered: TieredFindings;
+    localCheckout: boolean;
+  }): Promise<ReviewLedger | null> {
+    try {
+      const botLogin = getRuntimeConfig()?.botLogin ?? "last-light[bot]";
+      // Threads are read only when an earlier finding could be resolved by one.
+      let threads: LedgerThread[] | null = null;
+      if (input.prior?.findings.some((f) => f.status === "open")) {
+        threads = await input.github
+          .getPullRequestDiscussion(input.owner, input.repo, input.prNumber)
+          .then((d) => d.threads)
+          .catch(() => null);
+      }
+      const cut = readLedgerUnits(join(input.hostRepoDir, ".lastlight", "pr-review", "units.json"));
+      return foldReviewLedger({
+        prior: input.prior,
+        head: input.headSha ?? null,
+        units: cut?.units ?? null,
+        lines: cut?.lines ?? null,
+        dispositions: dispositionRows(input.tiered),
+        excerptPresent: (path, excerpt) => {
+          if (!input.localCheckout) return null;
+          const text = this.readHeadFile(input.hostRepoDir, path);
+          return text === null ? false : normalisedCode(text).includes(excerpt);
+        },
+        threads,
+        bot: botLogin.replace(/\[bot\]$/, ""),
+      });
+    } catch (err) {
+      log.warn("Could not fold the review into the PR's review ledger", { err });
+      return null;
+    }
+  }
+
+  /**
+   * Write the folded ledger — and the run's coverage record beside it — to the
+   * run's scratch, where the next dispatch reads it back onto
+   * `PrState.reviewLedger`. Best-effort: a failure costs the next round its
+   * memory, never this review.
+   */
+  private async persistLedger(ledger: ReviewLedger | null, hostRepoDir: string): Promise<void> {
+    if (!ledger || !this.run.store || !this.run.workflowId) return;
+    try {
+      const coverage = readCoverageSummary(join(hostRepoDir, ".lastlight", "pr-review", "review-coverage.json"));
+      await this.run.store.runs.mergeScratch(this.run.workflowId, {
+        [REVIEW_LEDGER_SCRATCH_KEY]: ledger,
+        ...(coverage ? { [REVIEW_COVERAGE_SCRATCH_KEY]: coverage } : {}),
+      });
+    } catch (err) {
+      log.warn("Could not record the PR's review ledger", { err });
     }
   }
 

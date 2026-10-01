@@ -113,6 +113,30 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	</ul>
 
 	<p>
+		With the <code>review.analysis</code> evidence pipeline on, re-reviews
+		<strong>converge</strong> instead of starting from scratch. Last Light keeps
+		a review memory for each pull request — which code each review covered,
+		every finding it made (posted or held back), and what became of each one —
+		and uses it three ways:
+	</p>
+
+	<ul>
+		<li><strong>It looks only where the code moved.</strong> Functions unchanged since the last review, and not calling into or called from changed code, are not investigated again. A small push is a small, cheap review; a push that changed nothing the last review saw plans no investigation at all. (The light pass above is not used with the pipeline on.)</li>
+		<li><strong>It does not raise new points on old code.</strong> A finding on lines the last review already had is held back — recorded, not posted — unless it is must-fix outside low-risk code, in which case it posts, labelled as missed in an earlier review.</li>
+		<li><strong>It reports on what it said before.</strong> The review opens with what was addressed since the last round and what is still open, never posts the same point twice, and only says "good to merge" when nothing it raised is still open.</li>
+	</ul>
+
+	<p>
+		Each changed area also gets a <strong>risk tier</strong> — docs, tests and
+		generated files low; migrations, schemas, auth and CI high — which decides
+		where investigators go first. A repository can set its own tiers in
+		<code>.lastlight/lastlight.yml</code> under <code>review.risk.rules</code>;
+		see <a href="/docs/configuration">configuration</a>. The dashboard's
+		<em>Review</em> tab on each run shows how much of the change was surveyed and
+		investigated, weighted by risk, and the review memory.
+	</p>
+
+	<p>
 		A <strong>first</strong> review of a pull request is never affected by any of
 		this, and an explicit <code>@last-light review</code> always buys the full
 		one.

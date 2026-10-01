@@ -252,9 +252,13 @@ describe("golden — pr-review.yaml is an explicit chain, and the chain is unbro
     // full review. The tier guard is the quoted form, which an absent value
     // never matches, so the phase RUNS. Both failure directions are "review
     // everything".
+    // The third is the pipeline's own (issue #429): with analysis on, a
+    // re-review is scoped in code and never goes light. Bare-boolean `==`, so
+    // an absent key does NOT match and triage runs as before without it.
     expect(phaseSkipIfExpressions(byName.get("triage")!), "triage.skip_if").toEqual([
       "triageEnabled != true",
       "reviewIsRereview != true",
+      "analysisEnabled == true",
     ]);
     for (const name of PIPELINE) {
       expect(phaseSkipIfExpressions(byName.get(name)!), `${name}.skip_if`).toEqual([
@@ -311,7 +315,7 @@ describe("golden — which phases a context resolves to", () => {
   it("probes ON do not run the probe phases — they are not attached", () => {
     const ctx = { ...ON, probesEnabled: "true", ...TRIAGE_ON };
     const { ran, skipped } = simulate(def.phases, ctx, seeded(ctx));
-    expect(ran).toEqual(["triage", ...PIPELINE, "post-review"]);
+    expect(ran).toEqual([...PIPELINE, "post-review"]);
     for (const name of FALSIFY_PHASES) {
       expect(skipped.find((s) => s.name === name)?.reason, name).toBe(`skip_if matched: ${FALSIFY_GUARD}`);
     }
@@ -340,15 +344,21 @@ describe("golden — which phases a context resolves to", () => {
     }
   });
 
-  it("LIGHT depth: `review` runs and posts, pipeline on or off", () => {
+  it("LIGHT depth: `review` runs and posts", () => {
     // What `harvestReviewTriage` writes on `REVIEW_DEPTH: light` — the whole
     // namespace replaced, so `skipReview` is gone with the rest. Every analysis
     // phase skips on the tier guard, so a `review` that skipped too would leave
-    // `post-review` with nothing to read.
-    for (const ctx of [{ ...ON, ...TRIAGE_ON }, TRIAGE_ON]) {
-      const { ran } = simulate(def.phases, ctx, { reviewTriage: { depth: "light", light: true } });
-      expect(ran, JSON.stringify(ctx)).toEqual(["triage", ...LEGACY_PHASES]);
-    }
+    // `post-review` with nothing to read. Pipeline OFF only: with it on,
+    // triage never runs, so nothing writes `light` (next test).
+    const { ran } = simulate(def.phases, TRIAGE_ON, { reviewTriage: { depth: "light", light: true } });
+    expect(ran).toEqual(["triage", ...LEGACY_PHASES]);
+  });
+
+  it("pipeline ON: a re-review never triages — it is scoped in code instead (issue #429)", () => {
+    const ctx = { ...ON, ...TRIAGE_ON };
+    const { ran, skipped } = simulate(def.phases, ctx, seeded(ctx));
+    expect(ran).toEqual([...PIPELINE, "post-review"]);
+    expect(skipped.find((s) => s.name === "triage")?.reason).toBe("skip_if matched: analysisEnabled == true");
   });
 
   it("an UNSEEDED run (no scratch flag) runs the review — the failure direction", () => {

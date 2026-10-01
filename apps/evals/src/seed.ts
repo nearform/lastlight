@@ -20,7 +20,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, cpSync, existsSync, appendFileSync } from "node:fs";
+import { mkdirSync, cpSync, existsSync, appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve, dirname, join } from "node:path";
 
 import type { PullFile } from "./schema.js";
@@ -48,6 +48,20 @@ const FILE_STATUS: Record<string, PullFile["status"]> = { A: "added", D: "remove
  * a delete + add with plain paths — a faithful-enough view for review and far
  * simpler to parse than git's rename-pair path syntax. Binary files carry no
  * `patch`. Returns `[]` if the range can't be diffed (never throws). */
+/**
+ * `git merge-base <base> <head>` — the commit a PR's diff is taken from (what
+ * GitHub's three-dot compare uses). Falls back to `base` when git cannot answer
+ * (unrelated histories, a commit missing), which is the two-dot range every
+ * case used before. Equal to `base` whenever `base` is an ancestor of `head`.
+ */
+export function mergeBaseOf(workDir: string, base: string, head: string): string {
+  try {
+    return git(workDir, ["merge-base", base, head]).trim() || base;
+  } catch {
+    return base;
+  }
+}
+
 export function prFilesFromGit(workDir: string, base: string, head: string): PullFile[] {
   const range = `${base}..${head}`;
   let nameStatus = "";
@@ -169,7 +183,20 @@ export function injectRepoContext(workDir: string, text: string): string | undef
       target = "AGENTS.md";
       created = true;
     }
-    appendFileSync(join(workDir, target), block);
+    // Idempotent: a chained re-review case re-injects after each round's
+    // checkout, and a harness-CREATED file is untracked, so it survives the
+    // checkout with the previous round's block still in it. A file that never
+    // held a block (every single-round case) is appended to exactly as before.
+    const path = join(workDir, target);
+    if (!created) {
+      const prior = readFileSync(path, "utf8");
+      const at = prior.indexOf(`\n${INJECT_BEGIN}\n`);
+      if (at >= 0) {
+        const endAt = prior.indexOf(`${INJECT_END}\n`, at);
+        if (endAt >= 0) writeFileSync(path, prior.slice(0, at) + prior.slice(endAt + INJECT_END.length + 1));
+      }
+    }
+    appendFileSync(path, block);
     if (created) {
       try {
         appendFileSync(join(workDir, ".git", "info", "exclude"), `\n/${target}\n`);
@@ -295,10 +322,18 @@ export function ensurePrCommitsInCache(opts: {
   pullNumber: number;
   baseCommit: string;
   headCommit: string;
+  /**
+   * The earlier review rounds' heads of a multi-round case (`rounds`), oldest
+   * first. Fetched the way the head is (the PR ref, then a bare-SHA want) and
+   * each pinned on its own branch, because a round head is by construction a
+   * commit the PR was later force-pushed or fast-forwarded past.
+   */
+  roundCommits?: string[];
   cacheDir?: string;
 }): string {
   const [owner, name] = opts.repo.split("/");
   if (!owner || !name) throw new Error(`ensurePrCommitsInCache: repo must be "owner/name", got "${opts.repo}"`);
+  const rounds = (opts.roundCommits ?? []).filter((sha) => sha !== opts.headCommit);
   const cacheDir = resolveCacheDir(opts.cacheDir);
   const mirror = resolve(cacheDir, `${owner}__${name}.git`);
 
@@ -312,7 +347,7 @@ export function ensurePrCommitsInCache(opts: {
   }
   // Head may be off-branch (squash/rebase merge) — fetch GitHub's immutable
   // `refs/pull/<n>/head` when the head commit is absent.
-  if (!mirrorHasCommit(mirror, opts.headCommit)) {
+  if ([opts.headCommit, ...rounds].some((sha) => !mirrorHasCommit(mirror, sha))) {
     try {
       git(mirror, ["fetch", "--quiet", "origin", `refs/pull/${opts.pullNumber}/head`]);
     } catch {
@@ -327,7 +362,7 @@ export function ensurePrCommitsInCache(opts: {
   //
   // Last, not first: it costs a round trip, and the two ref fetches above cover
   // every case where the commit is still on a ref.
-  for (const sha of [opts.baseCommit, opts.headCommit]) {
+  for (const sha of [opts.baseCommit, opts.headCommit, ...rounds]) {
     if (mirrorHasCommit(mirror, sha)) continue;
     try {
       git(mirror, ["fetch", "--quiet", "origin", sha]);
@@ -335,7 +370,12 @@ export function ensurePrCommitsInCache(opts: {
       /* fall through — the presence check below reports a clear error */
     }
   }
-  for (const [label, sha] of [["base", opts.baseCommit], ["head", opts.headCommit]] as const) {
+  const wanted: [string, string][] = [
+    ["base", opts.baseCommit],
+    ["head", opts.headCommit],
+    ...rounds.map((sha, i): [string, string] => [`round ${i + 1} head`, sha]),
+  ];
+  for (const [label, sha] of wanted) {
     if (!mirrorHasCommit(mirror, sha)) {
       throw new Error(
         `ensurePrCommitsInCache: ${label} commit ${sha} for PR #${opts.pullNumber} of ${opts.repo} is not reachable ` +
@@ -351,6 +391,7 @@ export function ensurePrCommitsInCache(opts: {
   // dedicated branch guarantees the commit rides along. (Base is already on a
   // fetched head ref; force-pointing head is idempotent when it is too.)
   git(mirror, ["branch", "-f", `eval-pr-${opts.pullNumber}-head`, opts.headCommit]);
+  rounds.forEach((sha) => git(mirror, ["branch", "-f", `eval-pr-${opts.pullNumber}-round-${sha.slice(0, 12)}`, sha]));
   return mirror;
 }
 
@@ -371,6 +412,14 @@ export function seedWorkspacePrReview(opts: {
   headRef: string;
   baseCommit: string;
   headCommit: string;
+  /**
+   * Every round head of a multi-round case, oldest first (the last is the
+   * scored head). The checkout starts at the FIRST; every one is pushed to the
+   * offline origin (`refs/heads/eval-round-<n>`) so a later round's
+   * {@link checkoutRound} — and any `git fetch` the agent makes — finds it
+   * offline. `headCommit` must be the last of them.
+   */
+  roundCommits?: string[];
   cacheDir?: string;
   repoSubdir?: string;
 }): SeedResult {
@@ -379,15 +428,17 @@ export function seedWorkspacePrReview(opts: {
     pullNumber: opts.pullNumber,
     baseCommit: opts.baseCommit,
     headCommit: opts.headCommit,
+    ...(opts.roundCommits?.length ? { roundCommits: opts.roundCommits } : {}),
     cacheDir: opts.cacheDir,
   });
+  const firstHead = opts.roundCommits?.[0] ?? opts.headCommit;
 
   const workDir = workDirFor(opts.stateDir, opts.taskId, opts.repoSubdir);
   mkdirSync(dirname(workDir), { recursive: true });
 
   git(dirname(workDir), ["clone", "--quiet", `file://${mirror}`, workDir]);
   // Check out the PR head on a branch named for the head ref (what the skill sees).
-  git(workDir, ["checkout", "--quiet", "-B", opts.headRef, opts.headCommit]);
+  git(workDir, ["checkout", "--quiet", "-B", opts.headRef, firstHead]);
   ignoreBuildArtifacts(workDir);
 
   // Point origin at a fresh bare repo carrying both the base and head branches,
@@ -403,9 +454,23 @@ export function seedWorkspacePrReview(opts: {
   }
   git(workDir, ["remote", "add", "origin", `file://${originDir}`]);
   git(workDir, ["push", "-q", "origin", `${opts.baseCommit}:refs/heads/${opts.baseRef}`]);
-  git(workDir, ["push", "-q", "origin", `${opts.headCommit}:refs/heads/${opts.headRef}`]);
+  git(workDir, ["push", "-q", "origin", `${firstHead}:refs/heads/${opts.headRef}`]);
+  (opts.roundCommits ?? []).forEach((sha, i) => git(workDir, ["push", "-q", "origin", `${sha}:refs/heads/eval-round-${i + 1}`]));
 
   return { workDir, originDir, baseCommit: opts.baseCommit, branch: opts.headRef };
+}
+
+/**
+ * Move a seeded pr-review workspace to the next review round's head — the
+ * author's push, as the per-PR workspace sees it on its next refresh. Tracked
+ * files are reset (`-f`: the injected repo context and anything a phase
+ * touched go; the caller re-injects), untracked state stays — exactly the
+ * `.lastlight/pr-review/` a reused production workspace carries from one head
+ * to the next. The offline origin's head branch follows.
+ */
+export function checkoutRound(workDir: string, headRef: string, sha: string): void {
+  git(workDir, ["checkout", "--quiet", "-f", "-B", headRef, sha]);
+  git(workDir, ["push", "-q", "-f", "origin", `${sha}:refs/heads/${headRef}`]);
 }
 
 /** Ensure a repo-local bare mirror of `repo` exists and contains `baseCommit`

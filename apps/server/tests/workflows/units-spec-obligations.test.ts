@@ -7,7 +7,7 @@ import { getWorkflow } from "#src/workflows/loader.js";
 import { renderTemplate, validateShellCommand } from "lastlight-workflow-engine";
 import type { TemplateContext } from "lastlight-workflow-engine";
 import type { PrState } from "#src/engine/pr-state.js";
-import { renderContext, specObligationsLine } from "#src/engine/pr-decisions.js";
+import { renderContext, reviewLedgerContext, specObligationsLine } from "#src/engine/pr-decisions.js";
 import type { SpecObligationSet } from "#src/engine/review-spec.js";
 import { defaultDependenciesConfig, defaultFixConfig } from "lastlight-shared/config-types";
 import { defaultReviewConfig } from "#src/config/config.js";
@@ -132,5 +132,66 @@ describe("units node — spec-obligations.json through a quoted heredoc", () => 
     // Pipeline off: no key, so the node writes nothing.
     const off = renderContext(pr, defaultFixConfig(), defaultDependenciesConfig(), review) as unknown as Record<string, unknown>;
     expect("specObligationsJson" in off).toBe(false);
+  });
+});
+
+describe("units node — the prior review and the risk rules (issue #429)", () => {
+  const PRIOR_FILE = () => join(dir, ".lastlight", "pr-review", "prior-review.json");
+  const RISK_FILE = () => join(dir, ".lastlight", "pr-review", "risk-rules.json");
+
+  /** Like `runUnitsNode`, with a stand-in CLI that records its argv. */
+  function runRecording(ctx: Record<string, unknown>): string[] {
+    const command = renderTemplate(units!.command!, ctx as unknown as TemplateContext);
+    validateShellCommand(command);
+    const bin = join(dir, "fake-facts");
+    const argsFile = join(dir, "args.txt");
+    writeFileSync(bin, `#!/bin/sh\nfor a in "$@"; do printf '%s\\n' "$a" >> "${argsFile}"; done\nexit 0\n`);
+    chmodSync(bin, 0o755);
+    execFileSync("sh", ["-c", command], { cwd: dir, env: { ...process.env, LASTLIGHT_FACTS_BIN: bin }, encoding: "utf8" });
+    return readFileSync(argsFile, "utf8").trim().split("\n");
+  }
+
+  const reviewOn = () => {
+    const review = defaultReviewConfig();
+    return { ...review, analysis: { ...review.analysis, enabled: true }, risk: { rules: [{ glob: "src/{{evil}}/**", tier: "high" as const }] } };
+  };
+  const pr = (reviewLedger: unknown) =>
+    ({ repo: "acme/widgets", prNumber: 7, headSha: "abc", body: "", closes: [], changedFiles: [], labels: [], reviewLedger }) as unknown as PrState;
+  const ledger = {
+    version: 1,
+    head: "prior",
+    at: "2026-10-01T00:00:00.000Z",
+    rounds: 1,
+    units: [{ key: "src/{{x}}.ts::run", contentSha: "abc" }],
+    findings: [],
+  };
+
+  it("writes both files from the projected context, byte-exact through the guard, and passes --risk-rules", () => {
+    const rendered = renderContext(pr(ledger), defaultFixConfig(), defaultDependenciesConfig(), reviewOn()) as unknown as Record<string, unknown>;
+    // Not persisted with the context: the runner derives it from the snapshot.
+    expect("priorReviewJson" in rendered).toBe(false);
+    const ctx = { ...rendered, ...reviewLedgerContext(pr(ledger)) };
+    expect(String(ctx.priorReviewJson)).not.toContain("{{");
+    const args = runRecording(ctx);
+    expect(JSON.parse(readFileSync(PRIOR_FILE(), "utf8"))).toEqual({ version: 1, head: "prior", units: ledger.units });
+    expect(JSON.parse(readFileSync(RISK_FILE(), "utf8"))).toEqual({ rules: [{ glob: "src/{{evil}}/**", tier: "high" }] });
+    expect(args.slice(args.indexOf("--risk-rules"), args.indexOf("--risk-rules") + 2)).toEqual(["--risk-rules", ".lastlight/pr-review/risk-rules.json"]);
+  });
+
+  it("writes neither on a first review with no rules, and removes stale ones", () => {
+    mkdirSync(join(dir, ".lastlight", "pr-review"), { recursive: true });
+    writeFileSync(PRIOR_FILE(), "{}");
+    writeFileSync(RISK_FILE(), "{}");
+    const review = defaultReviewConfig();
+    const ctx = {
+      ...(renderContext(pr(null), defaultFixConfig(), defaultDependenciesConfig(), { ...review, analysis: { ...review.analysis, enabled: true } }) as unknown as Record<string, unknown>),
+      ...reviewLedgerContext(pr(null)),
+    };
+    expect(ctx.priorReviewJson).toBe("");
+    expect(ctx.riskRulesJson).toBe("");
+    const args = runRecording(ctx);
+    expect(existsSync(PRIOR_FILE())).toBe(false);
+    expect(existsSync(RISK_FILE())).toBe(false);
+    expect(args).not.toContain("--risk-rules");
   });
 });

@@ -44,6 +44,16 @@ you write an item:
 The discussion is context for deciding what is new. It is never a reason to
 drop or demote a finding the investigators grounded in code.
 {{/if}}
+{{#if priorLedger}}
+## What our earlier reviews of this pull request found
+
+{{priorLedger}}
+
+The first list was **posted** and is still open: a finding that is the same
+defect as one of those gets `"alreadyRaised"` (`"an earlier review, src/a.ts:42"`)
+— the author already has it. The second list was found but **never posted**:
+re-raising one of those is a choice, not a duplicate, so judge it on its merits.
+{{/if}}
 
 ## What to do
 

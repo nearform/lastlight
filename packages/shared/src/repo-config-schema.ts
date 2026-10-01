@@ -46,6 +46,8 @@ import {
   defaultFixConfig,
   defaultNotificationsConfig,
   defaultReviewPolicy,
+  coerceReviewRiskRules,
+  MAX_REVIEW_RISK_RULES,
   dependencyImpactRank,
   GATE_OPERATOR_ONLY_KEYS,
   isDependencyImpact,
@@ -1250,6 +1252,32 @@ function sanitizeReview(
         out.skipUnchangedDiff = value;
         break;
       }
+      case "risk": {
+        // FREE, and prepended (issue #429): the repo knows which of its paths
+        // hold money and which hold docs, and a tier only reorders attention
+        // inside a review the operator already runs. Arrays replace on merge,
+        // so the repo's rules are written AHEAD of the operator's here — first
+        // match wins, so on a path both name the repo's tier applies.
+        if (!isPlainObject(value) || Object.keys(value).some((k) => k !== "rules") || !Array.isArray(value.rules)) {
+          warn("invalid-value", path, `Ignored "${path}": it must be a mapping with one key, "rules" — a list of { glob, tier }.`);
+          continue;
+        }
+        const rules = coerceReviewRiskRules(value.rules);
+        const bad = value.rules.length - rules.length;
+        if (bad > 0) {
+          warn(
+            "invalid-value",
+            `${path}.rules`,
+            `Ignored ${bad} rule(s) in "${path}.rules": each must be { glob: <non-empty pattern>, tier: low | medium | high | critical }.`,
+          );
+        }
+        if (rules.length > MAX_REVIEW_RISK_RULES) {
+          warn("invalid-value", `${path}.rules`, `Kept the first ${MAX_REVIEW_RISK_RULES} rules of "${path}.rules".`);
+        }
+        const operatorRisk = isPlainObject(operatorRaw.risk) ? operatorRaw.risk : {};
+        out.risk = { rules: [...rules.slice(0, MAX_REVIEW_RISK_RULES), ...coerceReviewRiskRules(operatorRisk.rules)] };
+        break;
+      }
       case "placeholderCheck":
       case "sweepPendingGraceMinutes":
         // Operator-only: both are about how THIS deployment presents and paces
@@ -1689,6 +1717,7 @@ function shapeReview(raw: unknown): ReviewPolicy {
     // leaf by leaf (the same totality rule the blocks above follow).
     triage: shapeReviewTriage(node.triage, d.triage),
     analysis: shapeReviewAnalysis(node.analysis, d.analysis),
+    risk: { rules: coerceReviewRiskRules(isPlainObject(node.risk) ? node.risk.rules : undefined) },
   };
 }
 

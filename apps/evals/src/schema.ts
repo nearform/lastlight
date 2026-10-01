@@ -18,6 +18,16 @@ import type { PrStateSeed } from "./pr-context.js";
 export interface IssueCommentSeed {
   user: string;
   body: string;
+  /**
+   * A chained case (`rounds`) only: the first round (1-based) that can see this
+   * item. Real discussion happens BETWEEN reviews, so a human review left on
+   * round 2's head must not be visible to round 1 — served from the start, it
+   * hands the earliest round the very findings later rounds are graded on.
+   * Held back until that round starts, then stamped with the fake's clock so it
+   * sorts after the earlier rounds' own reviews. Absent ⇒ round 1 (visible
+   * throughout). Ignored by a single-round case, which sees everything.
+   */
+  from_round?: number;
 }
 
 /** Seed state for one GitHub issue, served by the fake GitHub. */
@@ -53,6 +63,16 @@ export interface ReviewSeed {
    * because defaulting to the head is precisely the false claim.
    */
   commit_id?: string;
+  /**
+   * A chained case (`rounds`) only: the first round (1-based) that can see this
+   * item. Real discussion happens BETWEEN reviews, so a human review left on
+   * round 2's head must not be visible to round 1 — served from the start, it
+   * hands the earliest round the very findings later rounds are graded on.
+   * Held back until that round starts, then stamped with the fake's clock so it
+   * sorts after the earlier rounds' own reviews. Absent ⇒ round 1 (visible
+   * throughout). Ignored by a single-round case, which sees everything.
+   */
+  from_round?: number;
 }
 
 /** A prior inline review comment to seed (path + line + body). */
@@ -64,6 +84,37 @@ export interface ReviewCommentSeed {
   /** The thread's resolution — GraphQL-only on GitHub (`reviewThreads.isResolved`),
    * so only the discussion query serves it. Default false. */
   resolved?: boolean;
+  /**
+   * The commit the comment was made on (GitHub's `original_commit_id`). With
+   * it, the fake computes the thread's `isOutdated` the way a re-review sees
+   * it: the commented line's text no longer exists in the file at the head
+   * being reviewed (best-effort, text-based). Absent ⇒ never outdated.
+   */
+  commit_id?: string;
+  /** Force the thread's `isOutdated` (GraphQL-only), overriding the computed value. */
+  outdated?: boolean;
+  /**
+   * A chained case (`rounds`) only: the first round (1-based) that can see this
+   * item. Real discussion happens BETWEEN reviews, so a human review left on
+   * round 2's head must not be visible to round 1 — served from the start, it
+   * hands the earliest round the very findings later rounds are graded on.
+   * Held back until that round starts, then stamped with the fake's clock so it
+   * sorts after the earlier rounds' own reviews. Absent ⇒ round 1 (visible
+   * throughout). Ignored by a single-round case, which sees everything.
+   */
+  from_round?: number;
+}
+
+/**
+ * One review ROUND of a multi-round pr-review case (`SweBenchInstance.rounds`):
+ * the head the PR stood at when a review ran. Rounds run in order against one
+ * fake GitHub and one per-PR workspace, so round k+1 sees what round k posted.
+ */
+export interface ReviewRoundSeed {
+  /** The 40-hex head commit this round reviews. The LAST round's must equal `pr.head_commit`. */
+  head_commit: string;
+  /** Free-text provenance (e.g. "after the author's fix push"); shown in the dashboard. */
+  label?: string;
 }
 
 /** Seed state for one pull request, served by the fake GitHub for the
@@ -285,6 +336,18 @@ export interface SweBenchInstance {
    * a smaller version of production but a different one. See `./pr-context.ts`.
    */
   pr_state?: PrStateSeed;
+  /**
+   * A chained RE-REVIEW case (issue #429): the PR's heads in review order,
+   * oldest first. The harness runs the real pr-review workflow once per round,
+   * IN ORDER, against one fake GitHub (round k's review and threads are what
+   * round k+1 reads) and one per-PR workspace, carrying `lastBotReview`,
+   * `pathsSinceLastBotReview` and the review ledger forward exactly as a
+   * dispatch would. The LAST round is the case's scored head and must equal
+   * `pr.head_commit`; every other field of the case (gold, scorecard grade) is
+   * about that round, so a case without `rounds` — or with one round — runs
+   * exactly as before. Per-round results land on `InstanceResult.rereview`.
+   */
+  rounds?: ReviewRoundSeed[];
   /**
    * Assertions on the MARKER LINES the run's phases emitted — the only durable
    * statement a fix or merge run makes about what it concluded. Graded with
@@ -618,6 +681,90 @@ export interface ReviewFamilyStats {
   notMeasured?: boolean;
 }
 
+/**
+ * One review round of a multi-round case, measured. Everything optional is
+ * "not measured" when absent, never zero — a baseline arm writes no
+ * `disposition.json`, so it has no `converged` count at all.
+ */
+export interface RereviewRound {
+  /** 1-based. */
+  round: number;
+  headSha: string;
+  label?: string;
+  workflowSucceeded: boolean;
+  error?: string;
+  /** The review event the round posted, when it posted one. */
+  event?: string;
+  /** Inline comments the round posted (the fake's record). */
+  inlinePosted: number;
+  /** `disposition.json` tiers: findings posted inline / in the body / recorded only. */
+  tiers?: Partial<Record<"inline" | "body" | "internal", number>>;
+  /** Findings the convergence gate withheld (`disposition.json` reason `converged`). */
+  converged?: number;
+  /** Findings withheld as already raised by an earlier round (reason `already-raised`). */
+  alreadyRaised?: number;
+  /** Posted findings the convergence gate let through as must-fix "missed earlier" (`lateDiscovery: true`). */
+  lateLabelled?: number;
+  /**
+   * Round ≥ 2: POSTED findings anchored inside a unit whose `delta` is
+   * `unchanged` — a point the last review could have raised. The issue's
+   * headline metric; {@link lateDiscoveryOf} is its denominator.
+   */
+  lateDiscovery?: number;
+  /** Posted findings with a `path:line` anchor this round — {@link lateDiscovery}'s denominator. */
+  lateDiscoveryOf?: number;
+  /**
+   * Where the unit deltas came from: the round's own `units.json` (an arm
+   * that ran the scoped pipeline), or the harness's own `units --prior` cut
+   * (`oracle`, any arm — the same code-facts CLI over the two heads).
+   */
+  lateDiscoverySource?: "units.json" | "oracle";
+  /** Why {@link lateDiscovery} could not be measured, when it could not. */
+  lateDiscoveryUnavailable?: string;
+  /** Units by delta at this head (round ≥ 2). */
+  delta?: Partial<Record<"new" | "changed" | "affected" | "unchanged", number>>;
+  /** `review-coverage.json`, compacted. */
+  coverage?: {
+    rereview: boolean;
+    units: number;
+    surveyedWeighted: number | null;
+    investigatedWeighted: number | null;
+    carriedUnits: number;
+    notInvestigated: number;
+  };
+  /** The review ledger after this round, by status (what round k+1 is dispatched with). */
+  ledger?: Partial<Record<"open" | "withheld" | "addressed" | "resolved", number>>;
+  /** Gold indices (into `review_gold`) this round's posted review matched. Absent ⇒ ungraded. */
+  goldMatched?: number[];
+  /** Findings the judge extracted from this round's review. */
+  postedFindings?: number;
+  costUsd: number;
+  inputTokens: number;
+  cachedTokens: number;
+  outputTokens: number;
+  durationMs: number;
+  /** Run-relative dir holding this round's artifacts (`pr-review/`, `round.json`, `full.jsonl`). */
+  artifactRel?: string;
+}
+
+/** A multi-round case's per-round record and roll-up — see `SweBenchInstance.rounds`. */
+export interface RereviewResult {
+  rounds: RereviewRound[];
+  /** Gold matched by ANY round's posted review, each credited once. Absent ⇒ no round was graded. */
+  cumulativeMatched?: number;
+  gold?: number;
+  cumulativeRecall?: number;
+  /** Σ over rounds ≥ 2 of {@link RereviewRound.lateDiscovery}, over Σ `lateDiscoveryOf`. */
+  lateDiscovery?: number;
+  lateDiscoveryOf?: number;
+  converged?: number;
+  alreadyRaised?: number;
+  /** Inline comments posted by rounds ≥ 2. */
+  laterInlinePosted: number;
+  /** Σ cost over every round (the case's `costUsd` is the LAST round's, comparable with a single-round case). */
+  costUsd: number;
+}
+
 export interface InstanceResult {
   instance_id: string;
   /** The run arm's axis label: a model id in `models` runs, the config/overlay
@@ -777,4 +924,11 @@ export interface InstanceResult {
    * distinguishable downstream.
    */
   pipelineArtifactError?: string;
+  /**
+   * Multi-round cases only (`SweBenchInstance.rounds`): every round's record,
+   * the scored last round included. Everything else on this result is the
+   * LAST round's — its grade, its cost, its artifacts — so a multi-round case
+   * scores like the single-round case of its final head.
+   */
+  rereview?: RereviewResult;
 }

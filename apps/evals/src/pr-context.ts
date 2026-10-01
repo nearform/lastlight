@@ -56,6 +56,7 @@ import {
   defaultDependenciesConfig,
   defaultFixConfig,
   defaultReviewConfig,
+  coerceLedger,
   renderContext,
   resolveSpecContext,
   type CiFailureReport,
@@ -149,6 +150,27 @@ export interface PrStateSeed {
    * one-ended seed measured WORSE than no seed in IRIS's ablation.
    */
   changed_files?: string[];
+  /**
+   * The bot's most recent posted review at ANY head, with the SHA it was
+   * submitted against (`PrState.lastBotReview`) — the baseline the re-review
+   * gate and the `triage` phase read. Absent ⇒ `null` ⇒ "never reviewed",
+   * which is every single-round case. A multi-round case (`rounds`) has the
+   * harness fill it between rounds from the review round k actually posted.
+   */
+  last_bot_review?: { state: string; sha: string; body?: string | null };
+  /** `PrState.botReviewAtHead` — our review standing on THIS head, if any. */
+  bot_review_at_head?: { state: string; submitted_at?: string | null };
+  /** Paths changed between {@link last_bot_review}'s SHA and this head. Absent ⇒ `null` ("unknown"). */
+  paths_since_last_bot_review?: string[];
+  /** Is the PR's own three-dot diff unchanged since {@link last_bot_review}? Absent ⇒ `null`. */
+  pr_diff_unchanged_since_last_review?: boolean;
+  /**
+   * The PR's review ledger (issue #429, `PrState.reviewLedger`) — JSON as a
+   * run's `scratch.reviewLedger` stores it, read through core's own
+   * `coerceLedger`, so anything not recognisably a ledger is `null` exactly
+   * as it would be off a stale run row.
+   */
+  review_ledger?: unknown;
   /** Overrides on the three policy blocks; anything omitted takes the shipped default. */
   fix?: Partial<FixConfig>;
   dependencies?: Partial<DependenciesConfig>;
@@ -161,6 +183,19 @@ export interface PrStateSeed {
 }
 
 const CHECKS_DEFAULT = "none" as const;
+
+/**
+ * The head SHA a snapshot carries when nothing better is known — a case with
+ * no real `pr.head_commit` (the synthetic fix / dependency-merge fixtures) and
+ * no `pr_state.head_sha`. Never used when the instance names a real head.
+ */
+export const PLACEHOLDER_HEAD_SHA = "e7a1d09";
+
+/** The head a case's snapshot should carry: the seed's, else the PR's real head commit, else the placeholder. */
+export function caseHeadSha(inst: { pr?: { head_commit?: string }; pr_state?: { head_sha?: string } }): string {
+  const head = inst.pr?.head_commit;
+  return inst.pr_state?.head_sha ?? (head && /^[0-9a-f]{40}$/i.test(head) && !/^0+$/.test(head) ? head : PLACEHOLDER_HEAD_SHA);
+}
 
 function toCiReport(seeds: CiJobSeed[] | undefined): CiFailureReport | null {
   if (!seeds || seeds.length === 0) return null;
@@ -208,13 +243,21 @@ export function buildPrState(args: {
    * an `origin/main` that does not exist, and every finding went to the body.
    */
   baseRef?: string;
+  /**
+   * The PR's real head commit (`pr.head_commit`); the case's own
+   * `pr_state.head_sha` beats it. Without it every pr-review prompt rendered
+   * the placeholder `e7a1d09` as the head — no skillspro case seeds
+   * `head_sha` — so a reviewer told to compare against "the head" was handed
+   * a SHA that exists in no repository.
+   */
+  headSha?: string;
 }): PrState {
   const s = args.seed ?? {};
   const at = new Date().toISOString();
   return {
     repo: args.repo,
     prNumber: args.prNumber,
-    headSha: s.head_sha ?? "e7a1d09",
+    headSha: s.head_sha ?? args.headSha ?? PLACEHOLDER_HEAD_SHA,
     // The bot did not author the head unless a case says so — `headIsOurs` only
     // gates attempt bookkeeping, which this harness does not run.
     headAuthor: "dependabot[bot]",
@@ -237,15 +280,20 @@ export function buildPrState(args: {
     settledCheckCount: s.settled_check_count ?? 0,
     checksPendingSince: null,
     baseChecksState: s.base_checks_state ?? CHECKS_DEFAULT,
-    botReviewAtHead: null,
-    // No prior posted review, so the generated-only re-review gate (issue #271)
-    // has no baseline and never fires — an eval case reviews the diff it was
-    // handed, every time.
-    lastBotReview: null,
-    pathsSinceLastBotReview: null,
+    botReviewAtHead: s.bot_review_at_head
+      ? { state: s.bot_review_at_head.state, submittedAt: s.bot_review_at_head.submitted_at ?? null }
+      : null,
+    // Unseeded: no prior posted review, so the generated-only re-review gate
+    // (issue #271) has no baseline and never fires — an eval case reviews the
+    // diff it was handed, every time. A multi-round case seeds all four from
+    // the round before (`rereview-node.ts`).
+    lastBotReview: s.last_bot_review
+      ? { state: s.last_bot_review.state, sha: s.last_bot_review.sha, body: s.last_bot_review.body ?? null }
+      : null,
+    pathsSinceLastBotReview: s.paths_since_last_bot_review ?? null,
     // No prior review, so nothing to compare a diff fingerprint against. `null`
     // is "unknown", which is the value that cannot suppress a review.
-    prDiffUnchangedSinceLastReview: null,
+    prDiffUnchangedSinceLastReview: s.pr_diff_unchanged_since_last_review ?? null,
     ciReport: toCiReport(s.ci_jobs),
     // The `spec` axis's two ends. Both inert unless the case seeds them AND the
     // arm turns `review.analysis` on — with the axis off, `renderContext` omits
@@ -285,6 +333,9 @@ export function buildPrState(args: {
       text: n.text,
       ...(n.stale ? { stale: true } : {}),
     })),
+    // Null unless seeded — the first review of a PR has no ledger, which is
+    // every single-round case.
+    reviewLedger: coerceLedger(s.review_ledger),
     priorDiagnosisClass: (s.prior_diagnosis_class ?? null) as never,
     cumulativeCostUsd: s.cumulative_cost_usd ?? 0,
     costBaselineUsd: s.cost_baseline_usd ?? 0,
@@ -404,6 +455,17 @@ export async function prContextPatch(args: {
    * measure the degraded path.
    */
   changedFiles?: string[];
+  /** The PR's real head commit — see {@link buildPrState}. */
+  headSha?: string;
+  /**
+   * Also project the snapshot itself as `prState`, as `dispatchWorkflow`
+   * does (`extra.prState = prState`). `post-review` reads the review ledger
+   * it was dispatched with off `ctx.prState.reviewLedger`, so a multi-round
+   * case needs it. Off by default: a skill-based phase dumps every context
+   * key into its prompt, and a single-round case must render exactly what it
+   * rendered before rounds existed.
+   */
+  snapshot?: boolean;
 }): Promise<Record<string, unknown>> {
   const state = buildPrState(args);
 
@@ -433,6 +495,7 @@ export async function prContextPatch(args: {
     // `dependencies` are: `build.yaml` already emits `output_var: review`, and a
     // top-level object would shadow it (see `apps/server/CLAUDE.md`).
     ...renderContext(state, fix, dependencies, review),
+    ...(args.snapshot ? { prState: state } : {}),
     prNumber: args.prNumber,
     fix: fix as unknown as Record<string, unknown>,
     dependencies: dependencies as unknown as Record<string, unknown>,

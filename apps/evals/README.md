@@ -516,6 +516,57 @@ findings it extracted, the gold set, the finding↔gold pairing (matched / false
 positive / missed), and its raw replies — so the F1 score is inspectable, not a
 black box.
 
+### Re-review chains (`rounds`)
+
+A pr-review case can replay a PR's whole review history: list the heads it was
+reviewed at, oldest first, and the harness runs the real `pr-review` workflow
+once per head, in order, against one fake GitHub and one workspace — so round 2
+sees round 1's review, threads and review ledger exactly as a production
+re-review would.
+
+```jsonc
+{
+  "instance_id": "prreview__skillspro-1680",
+  "pr": { "number": 1680, "head_commit": "557eb5bc…", /* … */ },
+  "rounds": [
+    { "head_commit": "1d60d667…", "label": "opened" },
+    { "head_commit": "fcfc6296…", "label": "after the first fix push" },
+    { "head_commit": "557eb5bc…" }          // = pr.head_commit — the scored round
+  ]
+}
+```
+
+Full 40-hex SHAs; the last round must be `pr.head_commit`. The case's grade,
+cost and artifacts stay the LAST round's, so it scores like the single-round
+case of its final head; every round's own record lands on the result's
+`rereview` — late discoveries (round ≥ 2 inline comments on lines unchanged
+since the previous head), `converged` / `already-raised` withholds, coverage,
+the ledger, gold matched and cost — shown under **Re-review rounds** and the
+row's **rounds** button in the dashboard. A case with no `rounds` (or one)
+runs exactly as before.
+
+Two things keep an earlier round honest:
+
+- **Its diff is its own.** Each round's changed files are taken from the merge
+  base of `pr.base_commit` and that round's head, as GitHub computes them — a
+  branch that later merged or rebased onto a newer main still shows round 1
+  only its own changes.
+- **It cannot read the future.** Human discussion seeded on the case is served
+  from the start unless it carries `from_round` (on `reviews`,
+  `review_comments` or `issue_comments`): the first round (1-based) that may see
+  it — the round whose real bot review came after it. Without it, round 1 would
+  read the human review later rounds are graded on.
+
+```jsonc
+"reviews": [
+  { "user": "SociableSteve", "state": "CHANGES_REQUESTED", "body": "…", "commit_id": "fcfc6296…", "from_round": 3 }
+]
+```
+
+For the $0 version — no model, just which code each round had already seen —
+run `npx tsx scripts/rereview-delta-replay.ts --repo <checkout> --base <ref>
+--heads <sha1>,<sha2>,… [--comments comments.json]`.
+
 ## Improving an eval — the loop (`lastlight-evals-loop`)
 
 Running an eval gives you a score; the **improvement loop** raises it *without

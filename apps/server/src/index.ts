@@ -65,6 +65,7 @@ import {
   resolveSpecContext,
   prScopedWorkflows,
   type PrState,
+  prStateForRun,
 } from "./engine/pr-state.js";
 import { renderContext, type ReviewTriggerOptions } from "./engine/pr-decisions.js";
 import { applyBuildDispatchGate } from "./engine/build-gate.js";
@@ -861,7 +862,8 @@ async function main() {
           reviewConfig,
         ),
       );
-      extra.prState = prState;
+      // The review ledger rides only on review rows (issue #429, `prStateForRun`).
+      extra.prState = prStateForRun(prState, workflowName);
       // Beside the snapshot, and deliberately not inside it (see the resolution
       // above). Scoped to PR-scoped runs because they are the only ones with a
       // reader — `post-review`, whose `resolveReviewPost` needs to tell a

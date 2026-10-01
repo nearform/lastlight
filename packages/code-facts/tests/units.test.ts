@@ -1943,3 +1943,104 @@ describe("units-v7 — breadth, and code_change defects demoted by the typed fie
     }
   });
 });
+
+// ── identity, risk and the re-review delta (issue #429) ─────────────────────
+
+describe("units — identity, risk and the re-review delta", () => {
+  let fixture: Fixture;
+  beforeAll(() => {
+    fixture = makeUnitsFixture();
+  });
+  afterAll(() => fixture.cleanup());
+
+  const priorOf = (doc: UnitsDocument, edit: (u: { key: string; contentSha: string | null }[]) => void = () => {}) => {
+    const units = doc.units.map((u) => ({ key: u.key!, contentSha: u.contentSha ?? null }));
+    edit(units);
+    return { version: 1, head: "prior-head", units };
+  };
+
+  it("gives every unit a stable key and a content hash; the pr unit has no hash", () => {
+    const dir = workspace(fixture, factsFor(fixture), OBLIGATIONS, "identity");
+    const doc = buildUnits({ dir, repo: fixture.dir }).document;
+    expect(doc.units.map((u) => u.key)).toEqual([
+      "src/limits.ts::(module)",
+      "src/limits.ts::checkUpload",
+      "src/limits.ts::Store.put",
+      "(pr)",
+    ]);
+    expect(doc.units.find((u) => u.kind === "pr")!.contentSha).toBeNull();
+    for (const u of doc.units.filter((u) => u.kind !== "pr")) expect(u.contentSha).toMatch(/^[0-9a-f]{64}$/);
+    // Rebuilt from the same head, identity does not move.
+    const again = buildUnits({ dir, repo: fixture.dir }).document;
+    expect(again.units.map((u) => [u.key, u.contentSha])).toEqual(doc.units.map((u) => [u.key, u.contentSha]));
+    // A first review: no unit carries a delta, and the document names no prior.
+    expect(doc.units.every((u) => u.delta === undefined)).toBe(true);
+    expect(doc.prior).toBeUndefined();
+  });
+
+  it("counts the touched lines each unit owns", () => {
+    const dir = workspace(fixture, factsFor(fixture), OBLIGATIONS, "touched");
+    const doc = buildUnits({ dir, repo: fixture.dir }).document;
+    expect(unitOf(doc, (u) => u.symbol === "checkUpload").touched).toBe(2);
+    expect(unitOf(doc, (u) => u.symbol === "Store.put").touched).toBe(1);
+  });
+
+  it("marks every unit unchanged against a prior review that had exactly this code — except the pr unit", () => {
+    const dir = workspace(fixture, factsFor(fixture), OBLIGATIONS, "delta-same");
+    const first = buildUnits({ dir, repo: fixture.dir }).document;
+    writeFileSync(join(dir, "prior-review.json"), JSON.stringify(priorOf(first)));
+    const doc = buildUnits({ dir, repo: fixture.dir }).document;
+    expect(doc.units.map((u) => [u.key, u.delta])).toEqual([
+      ["src/limits.ts::(module)", "unchanged"],
+      ["src/limits.ts::checkUpload", "unchanged"],
+      ["src/limits.ts::Store.put", "unchanged"],
+      ["(pr)", "changed"],
+    ]);
+    expect(doc.prior).toEqual({ head: "prior-head", units: 4 });
+  });
+
+  it("marks a changed unit, a new one, and the unchanged unit a changed one calls into as affected", () => {
+    const dir = workspace(fixture, factsFor(fixture), OBLIGATIONS, "delta-moved");
+    const first = buildUnits({ dir, repo: fixture.dir }).document;
+    writeFileSync(
+      join(dir, "prior-review.json"),
+      JSON.stringify(
+        priorOf(first, (units) => {
+          units.find((u) => u.key.endsWith("::checkUpload"))!.contentSha = "0".repeat(64);
+          units.splice(units.findIndex((u) => u.key.endsWith("::Store.put")), 1);
+        }),
+      ),
+    );
+    const doc = buildUnits({ dir, repo: fixture.dir }).document;
+    const delta = Object.fromEntries(doc.units.map((u) => [u.key, u.delta]));
+    expect(delta["src/limits.ts::checkUpload"]).toBe("changed");
+    expect(delta["src/limits.ts::Store.put"]).toBe("new");
+    // MAX_UPLOAD (the module unit) is read at limits.ts:8–9, inside the changed checkUpload.
+    expect(delta["src/limits.ts::(module)"]).toBe("affected");
+  });
+
+  it("scopes nothing when the prior review is malformed, and says so", () => {
+    const dir = workspace(fixture, factsFor(fixture), OBLIGATIONS, "delta-bad");
+    writeFileSync(join(dir, "prior-review.json"), "{not json");
+    const doc = buildUnits({ dir, repo: fixture.dir }).document;
+    expect(doc.units.every((u) => u.delta === undefined)).toBe(true);
+    expect(doc.degraded.some((d) => /prior review/.test(d.reason))).toBe(true);
+  });
+
+  it("tiers each unit from the configured rules first, raised once by a state or security obligation", () => {
+    const dir = workspace(fixture, factsFor(fixture), OBLIGATIONS, "risk");
+    const plain = buildUnits({ dir, repo: fixture.dir }).document;
+    expect(unitOf(plain, (u) => u.symbol === "checkUpload").risk).toBe("medium");
+    const rules = join(dir, "risk-rules.json");
+    writeFileSync(rules, JSON.stringify({ rules: [{ glob: "src/limits.ts", tier: "low" }] }));
+    const doc = buildUnits({ dir, repo: fixture.dir, riskRulesPath: rules }).document;
+    const put = unitOf(doc, (u) => u.symbol === "Store.put");
+    const check = unitOf(doc, (u) => u.symbol === "checkUpload");
+    expect(check.risk).toBe("low");
+    expect(check.riskWhy).toContain("src/limits.ts → low");
+    // O-003 (state) rides on Store.put: one tier up, never more.
+    expect(put.obligationIds).toContain("O-003");
+    expect(put.risk).toBe("medium");
+    expect(put.riskWhy).toMatch(/raised: .*state/);
+  });
+});

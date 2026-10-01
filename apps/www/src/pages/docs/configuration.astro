@@ -588,6 +588,12 @@ review:
                                #  independentReview, adjudicate, admit, jevModel,
                                #  jevTimeoutSeconds and surveyPasses, removed
                                #  with the agent survey and the adjudicator)
+  risk:                        # risk tiers for the pipeline — a repo may set
+    rules: []                  # its own in .lastlight/, matched FIRST. e.g.
+                               #   - &#123; glob: "src/billing/**", tier: critical &#125;
+                               #   - &#123; glob: "*.stories.tsx", tier: low &#125;
+                               # built-ins apply after: docs/tests/generated low,
+                               # migrations/schema/auth/CI high, else medium
 
 fix:                           # every PR-fixing workflow: pr-fix, dependabot-ci-fix
   maxAttempts: 3               # attempts ACROSS runs for one PR, then a human is asked
