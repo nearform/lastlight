@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { getWorkflow } from "#src/workflows/loader.js";
-import { AgentWorkflowSchema } from "lastlight-workflow-engine";
+import { AgentWorkflowSchema, resolveDynamicBranches, type TemplateContext } from "lastlight-workflow-engine";
 
 /**
  * The soft-failure policy of the `site-review` fan-out, read off the SHIPPED
@@ -26,9 +26,10 @@ const def = getWorkflow("pr-review");
 const survey = def.phases.find((p) => p.name === "site-review");
 
 describe("the site-review fan-out's soft-failure policy survives parsing", () => {
-  it("is a fanout phase with sixteen branches — one per site slot, pair slots included", () => {
+  it("is a DYNAMIC fanout over site-plan's manifest, capped at sixteen (top 8, paired)", () => {
     expect(survey?.type).toBe("fanout");
-    expect(survey?.branches).toHaveLength(16);
+    expect(survey?.branches).toBeUndefined();
+    expect(survey?.branches_from).toEqual({ file: ".lastlight/pr-review/sites/branches.json", max: 16 });
   });
 
   it("carries `{ retries: 1, then: complete }` AFTER the schema has had it", () => {
@@ -55,12 +56,16 @@ describe("the site-review fan-out's soft-failure policy survives parsing", () =>
     expect(survey?.max_concurrent).toEqual({ from: "siteConcurrency", default: 6 });
   });
 
-  it("starts no session for a slot `site-plan` already closed, and runs the pair slots on their own model", () => {
-    expect(survey?.skip_satisfied_branches).toBe(true);
-    const branches = survey?.branches ?? [];
-    expect(branches).toHaveLength(16);
-    expect(branches.slice(0, 8).every((b) => b.model === undefined)).toBe(true);
-    expect(branches.slice(8).every((b) => b.model === "{{models.review-site-pair}}")).toBe(true);
+  it("runs the pair slots on their own model, and the primaries on the phase's", () => {
+    // The shape `sites --plan --pair` writes: primaries, then `-b` pairs.
+    const manifest = { items: [{ id: "site-001" }, { id: "site-001-b", pair: true }] };
+    const ctx = { models: { "review-site-pair": "pair/model" } } as unknown as TemplateContext;
+    const { branches } = resolveDynamicBranches(survey!, manifest, ctx);
+    expect(branches.map((b) => [b.name, b.model ?? null, b.context_file])).toEqual([
+      ["site-001", null, ".lastlight/pr-review/sites/site-001.md"],
+      ["site-001-b", "pair/model", ".lastlight/pr-review/sites/site-001-b.md"],
+    ]);
+    expect(branches[1].until_bash).toContain("sites --check site-001-b --dir .lastlight/pr-review");
   });
 
   /**

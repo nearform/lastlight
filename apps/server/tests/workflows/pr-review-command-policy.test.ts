@@ -86,9 +86,11 @@ describe("pr-review command policy (#403)", () => {
   });
 
   it("every site-review branch inherits the phase policy — none replaces it", () => {
+    // Dynamic: every branch is rendered from the one `branch:` template, so the
+    // template carrying no policy is what "no branch replaces it" means.
     const sites = phase("site-review");
-    expect(sites.branches?.length).toBeGreaterThan(0);
-    for (const b of sites.branches ?? []) expect(b.command_policy, b.name).toBeUndefined();
+    expect(sites.branch).toBeDefined();
+    expect(sites.branch?.command_policy).toBeUndefined();
   });
 
   it("falsify: repo installs blocked in every mode; tests and scratch installs follow the probe mode", () => {

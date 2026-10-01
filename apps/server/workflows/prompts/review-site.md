@@ -4,8 +4,9 @@ no `findings.json`, and you touch no other pass's files.
 
 <!-- One prompt for every slot of pr-review's `site-review` fan-out
 (`review.analysis.reviewEngine: sites`) and for the evals `micro-site-review`
-replay: a fan-out branch has no per-branch variables, so the attached brief
-names the site id, the output file and the `none` bar
+replay. The prompt stays slot-generic — it is shared with the replay, which has
+no manifest — so the attached brief names the site id, the output file and the
+`none` bar
 (docs/plans/pr-review-units-sites.md, "Act 6"). -->
 
 Reviewing **{{owner}}/{{repo}}#{{prNumber}}**, head `{{headSha}}` against `{{baseBranch}}`.
@@ -34,9 +35,6 @@ wrong. Its **"Your assignment"** section gives your **site id**, the **one file
 you write** (`.lastlight/pr-review/sites/<site id>.findings.jsonl`), your
 scratch directory, and how many probed suspicions a `none` needs. Wherever this
 prompt says `<site id>`, use the id the brief gives.
-
-If the brief says the slot has **no site**, write the single `empty` line it
-shows and stop — read no code.
 
 The brief may list **leads**: short subjects the survey's hypotheses named at
 this site. Treat them exactly as what they are:

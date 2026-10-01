@@ -14,6 +14,8 @@ import {
   validateShellCommand,
   OPENINFERENCE_CHAIN,
   OPENINFERENCE_SPAN_KIND,
+  parseBranchManifest,
+  resolveDynamicBranches,
 } from "lastlight-workflow-engine";
 import type {
   AssetLoader,
@@ -56,7 +58,7 @@ const log = logger("fanout");
  *    argument, and issue #215 made that true *precisely because* concurrent
  *    in-process runs share `process.env`. So N concurrent turns are safe, and
  *    this is the backend the eval harness uses. Its ceiling is 16, the widest
- *    static fan-out (`site-review`, top 8 paired): the branches are model
+ *    fan-out (`site-review`'s `branches_from.max`, top 8 paired): the branches are model
  *    calls plus light probes — installs and the suite are blocked — so a lower
  *    cap only queues them behind the slowest investigator.
  *  - **`docker`** is N `docker exec`s into the one container the phase already
@@ -222,6 +224,9 @@ function branchContextSection(
     ].join("\n"),
   };
 }
+
+/** A `branches_from:` manifest that could not be read or resolved. */
+class BranchManifestError extends Error {}
 
 /** Run-scoped data the `fanout` handler needs. */
 export interface FanoutRunScope {
@@ -410,11 +415,9 @@ export class FanoutHandler implements PhaseTypeHandler {
     outputs: Readonly<Record<string, unknown>>,
   ): Promise<PhaseOutcome> {
     const phaseName = phase.name;
-    const branches = phase.branches ?? [];
     await this.reporter.onStart(phaseName);
     await this.reporter.step(phaseName, "running", phase.messages?.on_start);
 
-    const concurrency = this.resolveConcurrency(phase, branches.length);
     const policy = phase.on_branch_soft_failure ?? DEFAULT_BRANCH_SOFT_POLICY;
 
     let outcomes: BranchOutcome[];
@@ -429,6 +432,10 @@ export class FanoutHandler implements PhaseTypeHandler {
         },
         async (session) => {
           try {
+            // A dynamic fan-out learns its branches only now: the manifest is
+            // in the workspace, which exists only once the session provisioned.
+            const branches = phase.branches_from ? await this.resolveManifest(session, phase) : (phase.branches ?? []);
+            const concurrency = this.resolveConcurrency(phase, branches.length);
             const settled = phase.skip_satisfied_branches ? await this.preGate(session, phase, branches) : new Map<FanoutBranch, BranchOutcome>();
             // The scheduler only sees a cancel between phases, and this whole
             // fan-out is one phase. So it looks for itself before EACH piece of
@@ -465,12 +472,70 @@ export class FanoutHandler implements PhaseTypeHandler {
         },
       );
     } catch (err: unknown) {
+      // A manifest that cannot be read or resolved fails THIS phase, loudly,
+      // rather than the run: it is the producer phase's bug, and the rest of
+      // the DAG (`trigger_rule: all_done` consumers) still has work to do.
+      if (err instanceof BranchManifestError) return this.failPhase(phase, err.message);
       // A provisioning failure, or a mint that could not happen. One error for
       // the whole fan-out, because there was one workspace to fail.
       this.run.observeError(err);
     }
 
     return this.report(phase, outcomes, policy);
+  }
+
+  /**
+   * Read `branches_from.file` host-side (the same base `context_file` uses)
+   * and resolve it through `phase.branch`, then record the plan in
+   * `scratch.fanout[<phase>]` BEFORE any branch starts — the dashboard draws
+   * pending chips from it, and it is the audit record of what a resumed run
+   * re-resolved against. Throws {@link BranchManifestError}.
+   */
+  private async resolveManifest(session: SandboxSession, phase: PhaseDefinition): Promise<FanoutBranch[]> {
+    const from = phase.branches_from!;
+    if (!HOST_READABLE_WORKSPACE[this.run.backend]) {
+      throw new BranchManifestError(`${phase.name}: \`branches_from\` needs a host-readable workspace; backend \`${this.run.backend}\` is not`);
+    }
+    let resolved: ReturnType<typeof resolveDynamicBranches>;
+    try {
+      // The schema already refused absolute and `..` paths.
+      const raw = readFileSync(join(session.hostAgentCwd, from.file), "utf8");
+      resolved = resolveDynamicBranches(phase, parseBranchManifest(raw), this.run.ctx);
+    } catch (err: unknown) {
+      throw new BranchManifestError(`${phase.name}: branches_from \`${from.file}\`: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const { branches, truncated } = resolved;
+    if (truncated > 0) {
+      log.warn("dynamic fan-out manifest exceeds max; extra items dropped", {
+        phase: phase.name,
+        max: from.max,
+        truncated,
+      });
+    }
+    log.info("resolved dynamic fan-out", { phase: phase.name, branches: branches.length, truncated });
+    const { store, workflowId } = this.run;
+    if (store && workflowId) {
+      const planned = branches.map((b) => ({
+        name: b.name,
+        model: this.resolveModelVariant(b.model ?? phase.model, undefined, PhaseRef.branch(phase.name, b.name).format(), phase.name).model ?? null,
+      }));
+      // `mergeScratch` is shallow, so merge the sibling phases' plans by hand.
+      // Safe without a lock: the scheduler runs one node at a time.
+      const prev = ((await store.runs.getRun(workflowId))?.scratch?.fanout ?? {}) as Record<string, unknown>;
+      await store.runs.mergeScratch(workflowId, {
+        fanout: { ...prev, [phase.name]: { dynamic: true, planned, truncated } },
+      });
+    }
+    return branches;
+  }
+
+  /** Fail the fan-out as a whole, with no branch rows. */
+  private async failPhase(phase: PhaseDefinition, error: string): Promise<PhaseOutcome> {
+    log.error("fan-out failed before any branch ran", { phase: phase.name, error });
+    const result: PhaseResult = { phase: phase.name, success: false, output: "", error };
+    await this.reporter.onEnd(phase.name, result);
+    await this.reporter.step(phase.name, "failed", phase.messages?.on_failure);
+    return { results: [result], status: "failed", outputVars: {} };
   }
 
   /** Has the run been cancelled (an admin cancel, or a superseding review)? */
@@ -956,6 +1021,7 @@ export class FanoutHandler implements PhaseTypeHandler {
       success: o.result.success || (isSoftOutcome(o.result) && policy.then === "complete"),
       output: o.result.output ?? "",
       error: o.result.success ? undefined : o.result.error,
+      modelTemplate: o.branch.model ?? phase.model,
     }));
 
     const failed = results.filter((r) => !r.success);

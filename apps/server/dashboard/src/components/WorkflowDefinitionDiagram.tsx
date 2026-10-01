@@ -38,6 +38,24 @@ function phaseTags(phase: WorkflowFullPhase): PhaseTag[] {
   return tags;
 }
 
+/**
+ * What a fan-out card says about its branches: a count for a static list, the
+ * cap for a `branches_from:` one — its real width is only known at run time.
+ */
+export function fanoutSubtitle(phase: WorkflowFullPhase): string | undefined {
+  if (phase.type !== "fanout") return undefined;
+  if (phase.branches_from) return `fan-out · dynamic ≤ ${phase.branches_from.max}`;
+  const n = phase.branches?.length ?? 0;
+  return `fan-out · ${n} branch${n === 1 ? "" : "es"}`;
+}
+
+/** The card's secondary line: the phase id when it differs from the label, and the fan-out shape. */
+function phaseSubtitle(phase: WorkflowFullPhase): string | undefined {
+  const label = phase.label ?? phase.name;
+  const parts = [phase.name !== label ? phase.name : undefined, fanoutSubtitle(phase)].filter(Boolean);
+  return parts.length ? parts.join(" · ") : undefined;
+}
+
 /** Clear space between one card and the next, along the flow. */
 const MAIN_GAP = 34;
 /** Pitch ACROSS it — the sibling rows of one DAG layer. */
@@ -51,8 +69,8 @@ const CROSS_PITCH = NODE_WIDTH + 50;
 function phaseHeight(phase: WorkflowFullPhase): number {
   return cardHeight({
     label: phase.label ?? phase.name,
-    // The phase id, shown whenever it differs from the label.
-    bodyLines: (phase.label ?? phase.name) !== phase.name ? 1 : 0,
+    // The phase id (when it differs from the label) and the fan-out shape share one line.
+    bodyLines: phaseSubtitle(phase) ? 1 : 0,
     tagRows: phaseTags(phase).length,
     loops: !!(phase.loop || phase.generic_loop),
   });
@@ -149,7 +167,7 @@ export function WorkflowDefinitionDiagram({
           label,
           status: "pending" as const,
           accent: "brand" as const,
-          subtitle: phase.name !== label ? phase.name : undefined,
+          subtitle: phaseSubtitle(phase),
           tags: phaseTags(phase),
           phaseType: phase.type,
           hasGate: !!(phase.approval_gate ?? phase.loop?.approval_gate),

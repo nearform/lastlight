@@ -2,6 +2,7 @@ import { Position, Handle, type Node, type NodeProps } from "@xyflow/react";
 import clsx from "clsx";
 import { truncateSummary } from "../lib/phase-outcome";
 import { type FlowDir } from "../lib/graph-axis";
+import type { FanoutChip, FanoutCounts } from "../lib/fanout-group";
 
 /**
  * Shared pipeline node presentation, used by BOTH the workflow-run pipeline
@@ -56,7 +57,7 @@ export type PhaseStatus =
   | "unmet";
 
 /** The phase kinds a workflow YAML may declare. Mirrors `WorkflowFullPhase["type"]`. */
-export type PhaseType = "context" | "agent" | "bash" | "script" | "post-review";
+export type PhaseType = "context" | "agent" | "bash" | "script" | "post-review" | "fanout" | "survey-units";
 
 export interface PhaseTag {
   label: string;
@@ -140,6 +141,19 @@ export interface PipelineNodeData extends Record<string, unknown> {
    * it renders the right thing anyway.
    */
   flow?: FlowDir;
+  /**
+   * Run-view, fan-out containers: draw the COMPACT block — a count strip and a
+   * chip per branch — instead of hosting the branch cards as children.
+   */
+  compact?: boolean;
+  /** A wide fan-out: the header carries a compact ↔ full-cards toggle. */
+  collapsible?: boolean;
+  /** The compact block's chips, in plan order. */
+  chips?: FanoutChip[];
+  counts?: FanoutCounts;
+  /** Open a branch's detail panel — the chip's click target (its ledger name). */
+  onChipClick?: (id: string) => void;
+  onToggle?: () => void;
 }
 
 export function formatDuration(secs: number): string {
@@ -263,6 +277,8 @@ const TYPE_ACCENT: Record<PhaseType, TypeAccent> = {
   bash: { cls: "ll-type-cmd", Icon: TerminalIcon, title: "bash phase — shell command" },
   script: { cls: "ll-type-cmd", Icon: BracesIcon, title: "script phase — inline source" },
   context: { cls: "ll-type-context", Icon: LayersIcon, title: "context phase — gathers facts" },
+  fanout: { cls: "ll-type-agent", Icon: BoltIcon, title: "fan-out phase — concurrent agent branches" },
+  "survey-units": { cls: "ll-type-agent", Icon: BoltIcon, title: "survey-units phase — one model call per unit" },
 };
 
 const GENERIC_ACCENT: TypeAccent = {
@@ -699,6 +715,10 @@ export function ApprovalDiamondNode({ data }: { data: PipelineNodeData }) {
  * It gets the shared header but deliberately NOT the left rail: dashed-plus-
  * rail reads as a mistake, and the dashed border is already the "this is a
  * region, not a card" signal.
+ *
+ * A WIDE fan-out (5+ branches — pr-review's `site-review` runs up to 16) is
+ * drawn `compact` instead: no child cards, just a count strip and a chip per
+ * branch, about two cards wide. The header's toggle swaps between the two.
  */
 export function FanoutGroupNode({ data }: NodeProps<Node<PipelineNodeData>>) {
   const accent = accentFor(data.phaseType);
@@ -717,18 +737,95 @@ export function FanoutGroupNode({ data }: NodeProps<Node<PipelineNodeData>>) {
           the branch children, so nothing here may capture their pointer events. */}
       <div className="cursor-pointer">
         <NodeHeader data={data} accent={accent} divided />
-        <div className="flex flex-col gap-0.5 px-2 py-1.5 bg-base-100/25">
-          <MetaLine timestamp={data.timestamp} duration={data.duration} />
-          {data.subtitle && (
-            <span className="text-2xs text-faint font-mono">{data.subtitle}</span>
+        <div className="flex items-center gap-2 px-2 py-1.5 bg-base-100/25">
+          <div className="flex flex-col gap-0.5 min-w-0">
+            <MetaLine timestamp={data.timestamp} duration={data.duration} />
+            {data.subtitle && (
+              <span className="text-2xs text-faint font-mono">{data.subtitle}</span>
+            )}
+          </div>
+          {data.collapsible && data.onToggle && (
+            <button
+              type="button"
+              className="nopan ml-auto btn btn-ghost btn-xs text-2xs font-mono"
+              title={data.compact ? "Show every branch as a card" : "Fold the branches into chips"}
+              onClick={(e) => {
+                // The node itself opens the phase panel; the toggle must not.
+                e.stopPropagation();
+                data.onToggle?.();
+              }}
+            >
+              {data.compact ? "expand" : "collapse"}
+            </button>
           )}
         </div>
       </div>
+      {data.compact && <FanoutChips data={data} />}
       <Handle type="source" position={Position.Right} id="right" className={handleClass} />
       <Handle type="source" position={Position.Bottom} id="bottom" className={handleClass} />
       {dotSides(data.flow).main.map((side) => (
         <ConnectorDot key={side} side={side} status={data.status} />
       ))}
+    </div>
+  );
+}
+
+const COUNT_GLYPHS: { key: keyof FanoutCounts; glyph: string; cls: string; title: string }[] = [
+  { key: "done", glyph: "✓", cls: "text-success", title: "done" },
+  { key: "active", glyph: "●", cls: "text-info", title: "running" },
+  { key: "failed", glyph: "✗", cls: "text-error", title: "failed" },
+  { key: "unmet", glyph: "◐", cls: "text-muted", title: "gate not met" },
+  { key: "skipped", glyph: "–", cls: "text-faint", title: "skipped" },
+  { key: "pending", glyph: "○", cls: "text-faint", title: "not started" },
+];
+
+/**
+ * The compact block's body: a count strip, then one small status-coloured chip
+ * per branch. A chip opens that branch's detail panel — the same `?phase=`
+ * path a full branch card uses — with `stopPropagation` so the container's own
+ * click (which opens the PHASE) does not fire as well.
+ */
+function FanoutChips({ data }: { data: PipelineNodeData }) {
+  const counts = data.counts;
+  return (
+    <div className="px-2.5 pb-2">
+      {counts && (
+        <div className="flex items-center gap-2.5 h-[22px] text-2xs font-mono tabular-nums">
+          {COUNT_GLYPHS.filter((c) => counts[c.key] > 0 || c.key === "done").map((c) => (
+            <span key={c.key} className={c.cls} title={c.title}>
+              {c.glyph} {counts[c.key]}
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="flex flex-wrap gap-1">
+        {(data.chips ?? []).map((chip) => (
+          <button
+            key={chip.id}
+            type="button"
+            className={clsx(
+              "nopan w-[52px] h-5 rounded border text-2xs font-mono leading-none truncate px-1 cursor-pointer hover:brightness-110",
+              statusSurface(chip.status),
+              chip.status === "active" && "animate-pulse",
+              chip.selected && "ring-2 ring-primary ring-offset-1 ring-offset-base-100",
+            )}
+            title={[
+              chip.id,
+              chip.status,
+              chip.duration !== undefined ? formatDuration(chip.duration) : undefined,
+              chip.model ?? undefined,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+            onClick={(e) => {
+              e.stopPropagation();
+              data.onChipClick?.(chip.id);
+            }}
+          >
+            {chip.label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

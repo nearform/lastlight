@@ -137,18 +137,20 @@ const GenericLoopSchema = z
  * (`survey_contract`). Forbidding `_` in the branch half is what makes the split
  * unambiguous rather than heuristic.
  */
-const FanoutBranchSchema = z
-  .object({
-    /** Branch identity — the ledger key, the skill-bundle key, and the label. */
-    name: z
-      .string()
-      .regex(
-        /^[A-Za-z0-9][A-Za-z0-9-]*$/,
-        "a fanout branch name must be alphanumeric with hyphens (no underscores — see PhaseRef)",
-      )
-      .refine((n) => !/-(retry|check|regate)$/.test(n), {
-        message: "a fanout branch name may not end in `-retry`, `-check` or `-regate` (reserved ledger suffixes)",
-      }),
+/** Why `name` is not a valid fan-out branch name, or `undefined` if it is.
+ * Shared by the schema (static branches) and {@link resolveDynamicBranches}
+ * (names rendered from a runtime manifest), so both refuse the same names. */
+export function branchNameError(name: string): string | undefined {
+  if (!/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(name)) {
+    return "a fanout branch name must be alphanumeric with hyphens (no underscores — see PhaseRef)";
+  }
+  if (/-(retry|check|regate)$/.test(name)) {
+    return "a fanout branch name may not end in `-retry`, `-check` or `-regate` (reserved ledger suffixes)";
+  }
+  return undefined;
+}
+
+const FanoutBranchFields = {
     /** Prompt template for this branch. Falls back to the phase's own `prompt`. */
     prompt: z.string().optional(),
     /** Skill override for this branch. Falls back to the phase's `skill`/`skills`. */
@@ -200,12 +202,63 @@ const FanoutBranchSchema = z
      * "looked and found none".
      */
     context_file: z.string().optional(),
+};
+
+const FanoutBranchSchema = z
+  .object({
+    /** Branch identity — the ledger key, the skill-bundle key, and the label. */
+    name: z.string().superRefine((n, ctx) => {
+      const err = branchNameError(n);
+      if (err) ctx.addIssue({ code: z.ZodIssueCode.custom, message: err });
+    }),
+    ...FanoutBranchFields,
   })
   .refine((b) => !(b.skill && b.skills), {
     message: "a fanout branch cannot specify both `skill` and `skills`",
   });
 
 export type FanoutBranch = z.infer<typeof FanoutBranchSchema>;
+
+/**
+ * The `branch:` template of a dynamic fan-out — a {@link FanoutBranch} whose
+ * string fields are rendered once per manifest item with `{{item.*}}` in scope
+ * (see `dynamic-branches.ts`). `name` is only checked AFTER rendering, so here
+ * it is any non-empty template. `until_bash` may carry `{{item.*}}` for the
+ * same reason: it is literal shell by the time it runs.
+ */
+const FanoutBranchTemplateSchema = z
+  .object({
+    name: z.string().min(1),
+    ...FanoutBranchFields,
+  })
+  .refine((b) => !(b.skill && b.skills), {
+    message: "a fanout `branch:` template cannot specify both `skill` and `skills`",
+  })
+  .refine((b) => (b.until_bash?.match(/\{\{[^}]*\}\}/g) ?? []).every((m) => /^\{\{item\.[\w-]+\}\}$/.test(m)), {
+    message: "a fanout `branch.until_bash` may only use `{{item.<key>}}` placeholders (it is shell — run context never renders into it)",
+  });
+
+export type FanoutBranchTemplate = z.infer<typeof FanoutBranchTemplateSchema>;
+
+/**
+ * Where a dynamic fan-out reads its branch list: a JSON manifest
+ * `{ "items": [ { "id": …, …scalars } ] }`, relative to the agent's working
+ * directory (the same base as `context_file`), written by an earlier phase.
+ * `max` is the spend cap — items past it are dropped, loudly.
+ */
+const BranchesFromSchema = z
+  .object({
+    file: z
+      .string()
+      .min(1)
+      .refine((f) => !f.startsWith("/") && !f.split(/[\\/]/).includes(".."), {
+        message: "`branches_from.file` must be a relative path inside the workspace (no leading `/`, no `..`)",
+      }),
+    max: z.number().int().positive(),
+  })
+  .strict();
+
+export type BranchesFrom = z.infer<typeof BranchesFromSchema>;
 
 // ── Phase definition ──────────────────────────────────────────────────
 
@@ -499,6 +552,16 @@ const PhaseDefinitionSchema = z
      */
     branches: z.array(FanoutBranchSchema).min(1).optional(),
     /**
+     * A DYNAMIC fan-out: read the branch list from a workspace manifest at run
+     * time instead of declaring it. Mutually exclusive with `branches:`, and
+     * requires `branch:` — the template rendered once per manifest item. The
+     * manifest is a FILE, not an upstream output, because `phaseOutputs` is
+     * empty across a resume boundary while the per-PR workspace is not.
+     */
+    branches_from: BranchesFromSchema.optional(),
+    /** The per-item branch template of a `branches_from:` fan-out. */
+    branch: FanoutBranchTemplateSchema.optional(),
+    /**
      * How many fan-out branches may be in flight at once. Accepts the
      * `{ from: <ctx path>, default: N }` form so an operator dials it from
      * config without forking the workflow.
@@ -560,9 +623,9 @@ const PhaseDefinitionSchema = z
      * Run each branch's `until_bash` BEFORE its agent, and start no session
      * for a branch whose gate already closes — it is reported as done, like a
      * resume dedup. For a fan-out whose earlier phase settles some branches in
-     * code: `sites --plan` writes an empty slot's `empty` line itself, so a
-     * PR with two sites does not pay for fourteen agents writing one line
-     * each. Sequential, before any branch starts (a gate is a `spawnSync` on
+     * code (pr-review's `site-review` used it to skip pre-closed empty slots
+     * until it became a `branches_from:` fan-out with no empty slots at all).
+     * Sequential, before any branch starts (a gate is a `spawnSync` on
      * the in-process backends). A branch with no `until_bash` always runs.
      */
     skip_satisfied_branches: z.boolean().optional(),
@@ -628,8 +691,16 @@ const PhaseDefinitionSchema = z
 
     // ── Fan-out ──────────────────────────────────────────────────────────────
     if (type === "fanout") {
-      if (!p.branches?.length) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "phase type `fanout` requires a non-empty `branches:`" });
+      if (p.branches !== undefined && p.branches_from !== undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a fanout declares either `branches:` or `branches_from:`, not both" });
+      } else if (p.branches_from === undefined && !p.branches?.length) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "phase type `fanout` requires a non-empty `branches:` (or `branches_from:` + `branch:`)" });
+      }
+      if (p.branches_from !== undefined && p.branch === undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "`branches_from:` requires a `branch:` template" });
+      }
+      if (p.branch !== undefined && p.branches_from === undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "`branch:` is only valid alongside `branches_from:`" });
       }
       // A fan-out cannot pause. `pauseForApproval` persists the run as `paused`
       // and RETURNS — under N in-flight sessions there is nothing to return to,
@@ -654,14 +725,14 @@ const PhaseDefinitionSchema = z
       // Every branch must be able to build a prompt — `buildPhasePrompt` throws
       // otherwise, and it would throw INSIDE the fan-out where the failure reads
       // as a branch crash rather than as a malformed workflow.
-      for (const b of p.branches ?? []) {
+      for (const b of [...(p.branches ?? []), ...(p.branch ? [p.branch] : [])]) {
         const hasSkills = !!(b.skill || b.skills?.length || p.skill || p.skills?.length);
         if (!b.prompt && !p.prompt && !hasSkills) {
           ctx.addIssue({ code: z.ZodIssueCode.custom, message: `fanout branch \`${b.name}\` has neither \`prompt:\` nor \`skills:\` (and the phase supplies neither)` });
         }
       }
     } else {
-      for (const key of ["branches", "max_concurrent", "on_branch_soft_failure", "on_branch_gate_failure", "skip_satisfied_branches"] as const) {
+      for (const key of ["branches", "branches_from", "branch", "max_concurrent", "on_branch_soft_failure", "on_branch_gate_failure", "skip_satisfied_branches"] as const) {
         if (p[key] !== undefined) {
           ctx.addIssue({ code: z.ZodIssueCode.custom, message: `\`${key}:\` is only valid on type \`fanout\`` });
         }

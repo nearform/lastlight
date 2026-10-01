@@ -210,7 +210,9 @@ router routed nine, which is why the dashboard showed no Slack trigger for
     | "none_failed"                     // no dep FAILED — an all-skipped set passes
     | "none_failed_min_one_success"     // no dep failed AND at least one succeeded
     | "all_done";
-  branches?: FanoutBranch[];            // type: fanout only — required there, rejected elsewhere
+  branches?: FanoutBranch[];            // type: fanout only — this OR branches_from, rejected elsewhere
+  branches_from?: { file: string; max: number };  // fanout only — the branch list is a run-time manifest (see below)
+  branch?: FanoutBranch;                // fanout only, with branches_from — the per-item template ({{item.*}})
   max_concurrent?: number | { from: string; default: number };  // fanout width, clamped by the backend ceiling
   on_branch_soft_failure?: { retries: number; then: "fail" | "complete" };  // per-BRANCH; not generic_loop's key
   on_branch_gate_failure?: { retries: 0 | 1 };  // fanout only — re-run a branch whose until_bash said no, once
@@ -388,17 +390,53 @@ extend when a deployment needs a step the engine should not know about.
   max_concurrent: { from: siteConcurrency, default: 6 }
   on_branch_soft_failure: { retries: 1, then: complete }
   on_branch_gate_failure: { retries: 1 }
-  skip_satisfied_branches: true
-  branches:
-    - name: site-001
-      context_file: .lastlight/pr-review/sites/site-001.md
-      until_bash: lastlight-facts sites --check site-001 --dir .lastlight/pr-review --repo .
-    - name: site-002
-      context_file: .lastlight/pr-review/sites/site-002.md
-      until_bash: lastlight-facts sites --check site-002 --dir .lastlight/pr-review --repo .
-    # … site-008; then site-009 … site-016, each with
-    #   model: "{{models.review-site-pair}}"
+  branches_from:
+    file: .lastlight/pr-review/sites/branches.json   # relative to the agent cwd, like context_file
+    max: 16                                          # the spend cap — required
+  branch:
+    name: "{{item.id}}"
+    model: "{{#if item.pair}}{{models.review-site-pair}}{{/if}}"
+    context_file: ".lastlight/pr-review/sites/{{item.id}}.md"
+    until_bash: lastlight-facts sites --check {{item.id}} --dir .lastlight/pr-review --repo .
 ```
+
+A fan-out declares **either** a static `branches:` list **or**
+`branches_from:` + a `branch:` template (the schema refuses both, neither, and
+a `branch:` alone). A static fan-out's list is fixed in the YAML; a **dynamic**
+one reads its list from a JSON manifest an earlier phase wrote into the
+workspace — `{ "items": [ { "id": "site-001", …scalars } ] }` — and renders
+`branch:` once per item, with the item in scope as `{{item.*}}`. The manifest is
+a **file**, not an upstream output, because `phaseOutputs` is empty across a
+resume boundary while the per-PR workspace survives it.
+
+- **Resolution** is the pure engine helper `resolveDynamicBranches`
+  (`packages/workflow-engine/src/core/dynamic-branches.ts`); the handler reads
+  the file host-side through `hostAgentCwd` inside the session, before any
+  pre-gate, and everything after that runs on the resolved list unchanged.
+  `max_concurrent` then clamps against the resolved count.
+- **Every field but `until_bash`** renders against `{ ...runContext, item }`, so
+  `model:` can mix config and item vars. **`until_bash` renders against
+  `{ item }` alone**, and the schema restricts its placeholders to
+  `{{item.<key>}}`: it is shell, and the run context carries issue titles and
+  comment bodies. For the same reason a manifest string value must match
+  `[A-Za-z0-9._/-]*` — the manifest lives in a workspace the agent can write.
+- **Rendered names** pass the same rule a static name does (below) and must be
+  unique. An empty render of any field means "unset" — so a primary above takes
+  the phase's `model:`.
+- **Edge cases.** Zero items: the phase succeeds as a no-op (`0/0 branches`, no
+  branch rows). More than `max`: the extra items are dropped with a `warn`.
+  An unreadable or invalid manifest, a bad or duplicate name, or an unsafe value
+  fails **the phase** — loudly, with one row naming the error, before any branch
+  starts — never the run. A backend whose workspace the harness cannot read
+  (`kubernetes`) fails it too.
+- **The plan is recorded** before any branch starts, in
+  `scratch.fanout[<phase>] = { dynamic, planned: [{ name, model }], truncated }`.
+  The dashboard draws not-yet-started branches from it; a resumed run
+  re-resolves the same manifest (the per-PR workspace keeps it) and the ledger
+  dedups the finished branches.
+- **Branch result rows carry `modelTemplate`** (`branch.model ?? phase.model`),
+  so a consumer recording per-row models (the evals scorecard) needs no copy of
+  a branch list that exists only at run time.
 
 Each branch inherits the phase's `prompt` / `skills` / `model` /
 `variant` and may override any of them. Branch names are **ledger
@@ -439,19 +477,22 @@ path this process cannot see at all — there the read is not attempted and the
 branch is handed the path to open itself, with the mis-anchoring trap named.
 
 `site-review` (see [Configuration](/spec/02-configuration)) is the case
-`context_file` makes possible: sixteen **static** branches (`site-001` … `site-016`) share one
-slot-generic prompt (`prompts/review-site.md`), and everything that differs per
-branch — the site, its id, its output file — arrives in the brief the
-preceding `site-plan` bash phase wrote for that slot. Slots 1–8 are the ranked
-sites (`review.analysis.siteTop` of them used); slots 9–16 re-investigate
-ranks 1–8 on `models.review-site-pair`, and are used only when that key is set.
-`site-plan` writes every unused slot's `empty` line itself — the one line its
-gate (`lastlight-facts sites --check <site-id>`) accepts — and
-**`skip_satisfied_branches: true`** runs each branch's `until_bash` before any
-agent starts, so a branch whose gate already closes is reported done (like a
-resume dedup) and starts no session. The pre-gates run one at a time, before
-the pool; a branch with no `until_bash` always runs. Without the key, a PR with
-two sites would pay for fourteen agents each writing one line.
+`context_file` and `branches_from` make possible: one branch per site the
+preceding `site-plan` bash phase formed — its manifest,
+`sites/branches.json`, lists only real sites, up to `review.analysis.siteTop`
+(`site-001` …) and, with `models.review-site-pair` set, a second investigator
+per site (`site-001-b` …, `pair: true`). Every branch shares one slot-generic
+prompt (`prompts/review-site.md`), and everything that differs per branch —
+the site, its id, its output file — arrives in the brief `site-plan` wrote for
+it. A PR with two sites runs two investigators, not sixteen.
+
+(Until #423 the fan-out declared sixteen **static** slots and `site-plan`
+pre-wrote an `empty` line for every unused one, which the generic
+**`skip_satisfied_branches: true`** key then pre-gated: it runs each branch's
+`until_bash` before any agent starts, so a branch whose gate already closes is
+reported done, like a resume dedup, and starts no session. The key remains for
+any fan-out whose earlier phase settles some branches in code; `site-review`
+no longer needs it.)
 
 **Why one node instead of N parallel phases.** Real DAG concurrency is
 parked behind four hard blockers, and
@@ -515,7 +556,7 @@ clamp is logged when the host has the last word:
 
 | backend | ceiling | why |
 |---|---:|---|
-| `none` | 16 | in-process `run()`; 16 is the widest static fan-out (`site-review`, top 8 paired) |
+| `none` | 16 | in-process `run()`; 16 is the widest fan-out (`site-review`'s `branches_from.max`, top 8 paired) |
 | `docker` | 6 | N `docker exec` into the one provisioned container — the production backend, memory-capped |
 | `gondolin`, `smol`, `kubernetes` | **1** | a QEMU micro-VM (or equivalent) per branch, in the harness process |
 

@@ -72,6 +72,13 @@ export interface PhaseResult {
    * the review sweep to re-dispatch.
    */
   tolerated?: boolean;
+  /**
+   * The `model:` template that governed a fan-out BRANCH row
+   * (`branch.model ?? phase.model`), so a consumer recording per-row models
+   * (the evals scorecard) needs no copy of the branch list — a dynamic
+   * fan-out's branches exist only in its run-time manifest.
+   */
+  modelTemplate?: string;
 }
 
 export interface WorkflowResult {

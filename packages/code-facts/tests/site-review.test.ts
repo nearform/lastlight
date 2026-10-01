@@ -73,23 +73,31 @@ function writeFindings(dir: string, siteId: string, lines: unknown[]): void {
 }
 
 describe("sites --plan", () => {
-  it("writes one brief per slot, ranks by voters, and marks the slots past the last site empty", () => {
+  it("writes one brief per real site, ranked by voters — no slot past the last site", () => {
     const { dir } = workspace();
     const plan = writeSitePlan(dir);
-    expect(plan.slots.map((s) => [s.siteId, s.site?.startLine ?? null, s.noneChecks])).toEqual([
+    expect(plan.slots.map((s) => [s.siteId, s.site.startLine, s.noneChecks])).toEqual([
       ["site-001", 10, 1],
       ["site-002", 150, 1],
-      ["site-003", null, 0],
-      ["site-004", null, 0],
-      ["site-005", null, 0],
     ]);
     const brief = readFileSync(join(dir, "sites", "site-001.md"), "utf8");
     expect(brief).toContain("site-001");
     expect(brief).toContain(".lastlight/pr-review/sites/site-001.findings.jsonl");
     // No leads: the graded arm A.
     expect(brief).toContain("No leads are given");
-    expect(readFileSync(join(dir, "sites", "site-004.md"), "utf8")).toContain('{"site":"site-004","empty":true}');
-    expect(readSitePlan(dir)?.slots).toHaveLength(5);
+    expect(existsSync(join(dir, "sites", "site-003.md"))).toBe(false);
+    expect(readSitePlan(dir)?.slots).toHaveLength(2);
+  });
+
+  it("writes branches.json — the manifest site-review fans out over — listing only real slots", () => {
+    const { dir } = workspace();
+    writeSitePlan(dir);
+    expect(JSON.parse(readFileSync(join(dir, "sites", "branches.json"), "utf8"))).toEqual({
+      items: [{ id: "site-001" }, { id: "site-002" }],
+    });
+    // Nothing is pre-written: every slot waits for its investigator.
+    expect(existsSync(join(dir, "sites", "site-001.findings.jsonl"))).toBe(false);
+    expect(existsSync(join(dir, "sites", "site-002.findings.jsonl"))).toBe(false);
   });
 
   it("fills the slots the code sites leave free with test-file sites, and never lets one displace a code site", () => {
@@ -98,48 +106,55 @@ describe("sites --plan", () => {
     const testRows = [at("src/a.test.ts", 5, "u5"), at("src/a.test.ts", 6, "u6"), at("src/a.test.ts", 7, "u7")];
     writeFileSync(join(dir, "hypotheses", "tests.jsonl"), `${testRows.map((r) => JSON.stringify(r)).join("\n")}\n`);
     const plan = writeSitePlan(dir);
-    expect(plan.slots.slice(0, 3).map((s) => s.site?.path ?? null)).toEqual(["src/a.ts", "src/a.ts", "src/a.test.ts"]);
+    expect(plan.slots.slice(0, 3).map((s) => s.site.path)).toEqual(["src/a.ts", "src/a.ts", "src/a.test.ts"]);
     expect(plan.testSites).toBe(1);
     // At top 2 the code sites keep both slots.
-    expect(writeSitePlan(dir, { top: 2 }).slots.map((s) => s.site?.path)).toEqual(["src/a.ts", "src/a.ts"]);
+    expect(writeSitePlan(dir, { top: 2 }).slots.map((s) => s.site.path)).toEqual(["src/a.ts", "src/a.ts"]);
   });
 
-  it("closes an empty slot's gate up front, so no investigator has to write it", () => {
-    const { dir, repo } = workspace();
-    writeSitePlan(dir);
-    expect(checkSiteSlot({ dir, repo, siteId: "site-004" }).satisfied).toBe(true);
-    // A slot WITH a site still waits for its investigator.
-    expect(existsSync(join(dir, "sites", "site-001.findings.jsonl"))).toBe(false);
-  });
-
-  it("pairs: a second investigator on every selected site, in slot 8 + rank", () => {
+  it("pairs: a second investigator on every real site, as `<site-id>-b`", () => {
     const { dir } = workspace();
-    const plan = writeSitePlan(dir, { top: 3, pair: true, slots: 16 });
-    const bySlot = new Map(plan.slots.map((s) => [s.slot, s]));
-    expect(plan.slots).toHaveLength(16);
-    expect([1, 2, 3, 4, 8].map((n) => bySlot.get(n)?.site?.startLine ?? null)).toEqual([10, 150, null, null, null]);
-    expect(bySlot.get(9)).toMatchObject({ siteId: "site-009", pairOf: "site-001", site: { startLine: 10 } });
-    expect(bySlot.get(10)).toMatchObject({ siteId: "site-010", pairOf: "site-002", site: { startLine: 150 } });
-    // Rank 3 has no site, so neither does its pair; past top, nothing.
-    expect([11, 12, 16].map((n) => bySlot.get(n)?.site ?? null)).toEqual([null, null, null]);
-    expect(bySlot.get(11)?.pairOf).toBeUndefined();
+    const plan = writeSitePlan(dir, { top: 3, pair: true });
+    expect(plan.slots.map((s) => [s.slot, s.siteId, s.site.startLine, s.pairOf ?? null])).toEqual([
+      [1, "site-001", 10, null],
+      [2, "site-002", 150, null],
+      [3, "site-001-b", 10, "site-001"],
+      [4, "site-002-b", 150, "site-002"],
+    ]);
+    expect(JSON.parse(readFileSync(join(dir, "sites", "branches.json"), "utf8")).items).toEqual([
+      { id: "site-001" },
+      { id: "site-002" },
+      { id: "site-001-b", pair: true },
+      { id: "site-002-b", pair: true },
+    ]);
     // The pair gets the same site under its own id, output file and scratch dir.
-    const brief = readFileSync(join(dir, "sites", "site-009.md"), "utf8");
-    expect(brief).toContain(".lastlight/pr-review/sites/site-009.findings.jsonl");
-    expect(brief).toContain(".lastlight/pr-review/sites/site-009/");
+    const brief = readFileSync(join(dir, "sites", "site-001-b.md"), "utf8");
+    expect(brief).toContain(".lastlight/pr-review/sites/site-001-b.findings.jsonl");
+    expect(brief).toContain(".lastlight/pr-review/sites/site-001-b/");
   });
 
-  it("without pair, plans every slot the fan-out declares and leaves the pair range empty", () => {
-    const { dir } = workspace();
-    const plan = writeSitePlan(dir, { top: 8, slots: 16 });
-    expect(plan.slots.filter((s) => s.site).map((s) => s.siteId)).toEqual(["site-001", "site-002"]);
-    expect(plan.slots.some((s) => s.pairOf)).toBe(false);
+  it("reads a pre-#423 plan (sixteen static slots, empties `site: null`) as its real slots only", () => {
+    // Stored eval runs hold this shape, and `micro-select` replays their merge.
+    const { dir, repo } = workspace();
+    const plan = writeSitePlan(dir);
+    const legacy = {
+      ...plan,
+      slots: [
+        ...plan.slots,
+        { slot: 3, siteId: "site-003", site: null, noneChecks: 0 },
+        { slot: 9, siteId: "site-009", site: null, noneChecks: 0 },
+      ],
+    };
+    writeFileSync(join(dir, "sites", "plan.json"), JSON.stringify(legacy));
+    writeFindings(dir, "site-003", [{ site: "site-003", empty: true }]);
+    expect(readSitePlan(dir)?.slots.map((s) => s.siteId)).toEqual(["site-001", "site-002"]);
+    writeFindings(dir, "site-001", [finding("site-001", 12)]);
+    expect(mergeSiteFindings({ dir, repo }).slots.map((s) => s.siteId)).toEqual(["site-001", "site-002"]);
   });
 
-  it("refuses a top past the maximum, or slots that cannot hold the plan", () => {
+  it("refuses a top past the maximum", () => {
     const { dir } = workspace();
     expect(() => writeSitePlan(dir, { top: 9 })).toThrow(/top must be 1…8/);
-    expect(() => writeSitePlan(dir, { top: 5, pair: true, slots: 10 })).toThrow(/needs 13/);
   });
 
   it("clears the last head's sites first", () => {
@@ -152,11 +167,9 @@ describe("sites --plan", () => {
 });
 
 describe("sites --check", () => {
-  it("accepts an `empty` line only on a slot the plan left empty", () => {
+  it("never accepts an `empty` line — every slot has a site", () => {
     const { repo, dir } = workspace();
     writeSitePlan(dir);
-    writeFindings(dir, "site-004", [{ site: "site-004", empty: true }]);
-    expect(checkSiteSlot({ dir, repo, siteId: "site-004" }).satisfied).toBe(true);
     writeFindings(dir, "site-001", [{ site: "site-001", empty: true }]);
     const real = checkSiteSlot({ dir, repo, siteId: "site-001" });
     expect(real.satisfied).toBe(false);
@@ -191,7 +204,7 @@ describe("sites --merge", () => {
     expect(merge.groups).toEqual([["F1", "F2", "F3"]]);
     expect(merge.findings[0].excerpt).toContain(">");
     expect(merge.findings[0].lineText).toBe("const line12 = 12;");
-    expect(merge.slots.map((s) => s.outcome)).toEqual(["findings", "findings", "empty", "empty", "empty"]);
+    expect(merge.slots.map((s) => s.outcome)).toEqual(["findings", "findings"]);
     expect(renderSiteMerge(merge)).toContain("## F4");
     expect(renderSiteMerge(merge)).not.toContain(SITE_MERGE_EMPTY_MARKER);
   });
