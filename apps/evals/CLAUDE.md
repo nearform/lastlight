@@ -331,7 +331,14 @@ human's own label.
   workspace (`checkoutRound`: tracked files reset, `.lastlight/pr-review/`
   carried; repo context re-injected idempotently), and one in-memory run store
   so post-review's `mergeScratch(reviewLedger, reviewCoverage)` lands
-  somewhere. Between rounds, `carryForward` sets `last_bot_review` /
+  somewhere. Each round's `GET /pulls/:n/files` is taken from
+  `mergeBaseOf(pr.base_commit, round head)` (GitHub's three-dot base — an
+  earlier head forked from an older main; equal to `base_commit` for every
+  single-round case). Seeded human discussion that happened BETWEEN reviews
+  carries `from_round` (reviews, review_comments, issue_comments): the fake
+  (`chained: true`) holds it until `startRound(k)` and stamps it with the clock,
+  so round 1 never reads the review later rounds are graded on; `planRounds`
+  rejects a `from_round` outside `1..rounds.length`. Between rounds, `carryForward` sets `last_bot_review` /
   `bot_review_at_head` / `paths_since_last_bot_review` /
   `pr_diff_unchanged_since_last_review` / `review_ledger` on the next round's
   `pr_state` (the last via core's `deriveReviewLedger(run, priorState)` — no

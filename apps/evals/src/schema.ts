@@ -18,6 +18,16 @@ import type { PrStateSeed } from "./pr-context.js";
 export interface IssueCommentSeed {
   user: string;
   body: string;
+  /**
+   * A chained case (`rounds`) only: the first round (1-based) that can see this
+   * item. Real discussion happens BETWEEN reviews, so a human review left on
+   * round 2's head must not be visible to round 1 — served from the start, it
+   * hands the earliest round the very findings later rounds are graded on.
+   * Held back until that round starts, then stamped with the fake's clock so it
+   * sorts after the earlier rounds' own reviews. Absent ⇒ round 1 (visible
+   * throughout). Ignored by a single-round case, which sees everything.
+   */
+  from_round?: number;
 }
 
 /** Seed state for one GitHub issue, served by the fake GitHub. */
@@ -53,6 +63,16 @@ export interface ReviewSeed {
    * because defaulting to the head is precisely the false claim.
    */
   commit_id?: string;
+  /**
+   * A chained case (`rounds`) only: the first round (1-based) that can see this
+   * item. Real discussion happens BETWEEN reviews, so a human review left on
+   * round 2's head must not be visible to round 1 — served from the start, it
+   * hands the earliest round the very findings later rounds are graded on.
+   * Held back until that round starts, then stamped with the fake's clock so it
+   * sorts after the earlier rounds' own reviews. Absent ⇒ round 1 (visible
+   * throughout). Ignored by a single-round case, which sees everything.
+   */
+  from_round?: number;
 }
 
 /** A prior inline review comment to seed (path + line + body). */
@@ -73,6 +93,16 @@ export interface ReviewCommentSeed {
   commit_id?: string;
   /** Force the thread's `isOutdated` (GraphQL-only), overriding the computed value. */
   outdated?: boolean;
+  /**
+   * A chained case (`rounds`) only: the first round (1-based) that can see this
+   * item. Real discussion happens BETWEEN reviews, so a human review left on
+   * round 2's head must not be visible to round 1 — served from the start, it
+   * hands the earliest round the very findings later rounds are graded on.
+   * Held back until that round starts, then stamped with the fake's clock so it
+   * sorts after the earlier rounds' own reviews. Absent ⇒ round 1 (visible
+   * throughout). Ignored by a single-round case, which sees everything.
+   */
+  from_round?: number;
 }
 
 /**

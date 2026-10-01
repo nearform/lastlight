@@ -48,6 +48,20 @@ const FILE_STATUS: Record<string, PullFile["status"]> = { A: "added", D: "remove
  * a delete + add with plain paths — a faithful-enough view for review and far
  * simpler to parse than git's rename-pair path syntax. Binary files carry no
  * `patch`. Returns `[]` if the range can't be diffed (never throws). */
+/**
+ * `git merge-base <base> <head>` — the commit a PR's diff is taken from (what
+ * GitHub's three-dot compare uses). Falls back to `base` when git cannot answer
+ * (unrelated histories, a commit missing), which is the two-dot range every
+ * case used before. Equal to `base` whenever `base` is an ancestor of `head`.
+ */
+export function mergeBaseOf(workDir: string, base: string, head: string): string {
+  try {
+    return git(workDir, ["merge-base", base, head]).trim() || base;
+  } catch {
+    return base;
+  }
+}
+
 export function prFilesFromGit(workDir: string, base: string, head: string): PullFile[] {
   const range = `${base}..${head}`;
   let nameStatus = "";

@@ -38,7 +38,7 @@ import type { Arm } from "./arm.js";
 import { modelTemplateForRow } from "./phase-models.js";
 import { startFakeGitHub } from "./fake-github.js";
 import { appliedRepoConfigKeys, loadRepoConfigFixture, resolveEvalRepoConfig, type RepoConfigClient } from "./repo-config.js";
-import { seedWorkspace, seedWorkspaceFromGit, seedWorkspacePrReview, prFilesFromGit, isRealSha, injectRepoContext, checkoutRound, type SeedResult } from "./seed.js";
+import { seedWorkspace, seedWorkspaceFromGit, seedWorkspacePrReview, prFilesFromGit, mergeBaseOf, isRealSha, injectRepoContext, checkoutRound, type SeedResult } from "./seed.js";
 import {
   collectMetrics,
   collectMetricsFromFiles,
@@ -263,6 +263,8 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     // the first end of the `spec` axis. Content here, linkage in the fake.
     issues: [...(inst.issue ? [inst.issue] : []), ...(inst.pr?.linked_issues ?? [])],
     pulls: inst.pr ? [inst.pr] : [],
+    // A chained case releases seeded discussion round by round (`from_round`).
+    chained: !!rounds,
     // The CI-read tools (`github_list_workflow_runs` / `..._run_jobs` /
     // `github_get_job_logs`) served from the SAME seed that produces the
     // prompt's `{{ciSection}}`, so digging into the logs corroborates what the
@@ -397,7 +399,11 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
       // two ends from drifting apart and covers every case for free.
       let prFilePaths: string[] | undefined;
       if (isPrReview && inst.pr && seed) {
-        const files = prFilesFromGit(repoDir, inst.pr.base_commit, round.head);
+        // Against the merge base, as GitHub computes a PR's files: a chained
+        // case's earlier heads forked from an older base than the case's (the
+        // branch merged or rebased onto main since), and a two-dot diff from
+        // the newer base would list main's later changes as the PR's.
+        const files = prFilesFromGit(repoDir, mergeBaseOf(repoDir, inst.pr.base_commit, round.head), round.head);
         fake.setPullFiles(inst.pr.number, files);
         prFilePaths = files.map((f) => f.filename);
       } else if (inst.pr?.files?.length) {
@@ -812,7 +818,7 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
         }
         currentHead = head;
         fake.setHead(inst.pr.number, head);
-        fake.startRound();
+        fake.startRound(k + 1);
         const sessionsDirK = join(stateDir, `agent-sessions-round-${k + 1}`);
         mkdirSync(join(sessionsDirK, "projects"), { recursive: true });
         const before = snapshotMtimes(prDir, ROUND_ARTIFACTS);
@@ -870,7 +876,7 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
       fake.advanceClock(ROUND_GAP_MS);
       currentHead = inst.pr.head_commit;
       fake.setHead(inst.pr.number, inst.pr.head_commit);
-      fake.startRound();
+      fake.startRound(rounds.length);
     }
     const finalBefore = rounds ? snapshotMtimes(prDir, ROUND_ARTIFACTS) : undefined;
     const finalStartedAt = Date.now();

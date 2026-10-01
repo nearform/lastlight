@@ -42,7 +42,7 @@ import {
   UnitsOracle,
   type RoundUnit,
 } from "./rereview-node.js";
-import { checkoutRound, injectRepoContext } from "./seed.js";
+import { checkoutRound, injectRepoContext, mergeBaseOf, prFilesFromGit } from "./seed.js";
 import { resolveFactsBin } from "./paths.js";
 import type { InstanceResult, RereviewRound } from "./schema.js";
 
@@ -111,6 +111,12 @@ describe("planRounds", () => {
     expect(() => planRounds({ instance_id: "x", pr, rounds: [{ head_commit: "1d60d667" }, { head_commit: C }] })).toThrow(/40-hex/);
     expect(() => planRounds({ instance_id: "x", rounds: [{ head_commit: B }, { head_commit: C }] })).toThrow(/needs `pr`/);
     expect(() => planRounds({ instance_id: "x", pr, rounds: [{ head_commit: B }] })).toThrow(/must equal pr.head_commit/);
+  });
+  it("refuses seeded discussion held for a round the chain never reaches", () => {
+    const rounds = [{ head_commit: B }, { head_commit: C }];
+    expect(planRounds({ instance_id: "x", pr: { ...pr, reviews: [{ from_round: 2 }] }, rounds })).toHaveLength(2);
+    expect(() => planRounds({ instance_id: "x", pr: { ...pr, reviews: [{ from_round: 3 }] }, rounds })).toThrow(/reviews\[0\]\.from_round/);
+    expect(() => planRounds({ instance_id: "x", pr: { ...pr, issue_comments: [{ from_round: 0 }] }, rounds })).toThrow(/issue_comments/);
   });
 });
 
@@ -204,6 +210,47 @@ describe("fake GitHub — rounds", () => {
     }
   });
 
+  it("holds seeded discussion until its from_round starts on a chained case, and serves it all otherwise", async () => {
+    const seeded = {
+      ...pr,
+      reviews: [
+        { user: "human", body: "early", state: "COMMENTED" as const },
+        { user: "human", body: "late", state: "CHANGES_REQUESTED" as const, from_round: 2 },
+      ],
+      review_comments: [{ user: "human", path: "src/a.ts", line: 1, body: "late thread", from_round: 2 }],
+      issue_comments: [{ user: "human", body: "late note", from_round: 2 }],
+    };
+    const bodies = async (url: string, path: string) => ((await (await fetch(`${url}${path}`)).json()) as { body: string }[]).map((r) => r.body);
+
+    const chained = await startFakeGitHub({ owner: "acme", repo: "widgets", pulls: [seeded], chained: true });
+    try {
+      chained.startRound(1);
+      expect(await bodies(chained.url, "/repos/acme/widgets/pulls/7/reviews")).toEqual(["early"]);
+      expect(await bodies(chained.url, "/repos/acme/widgets/pulls/7/comments")).toEqual([]);
+      expect(await bodies(chained.url, "/repos/acme/widgets/issues/7/comments")).toEqual([]);
+      await fetch(`${chained.url}/repos/acme/widgets/pulls/7/reviews`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ event: "APPROVE", body: "bot r1" }) });
+
+      chained.advanceClock(60 * 60 * 1000);
+      chained.startRound(2);
+      // Released in time order: after round 1's own review, stamped with the clock.
+      const reviews = (await (await fetch(`${chained.url}/repos/acme/widgets/pulls/7/reviews`)).json()) as { body: string; submitted_at: string }[];
+      expect(reviews.map((r) => r.body)).toEqual(["early", "bot r1", "late"]);
+      expect(Date.parse(reviews[2]!.submitted_at)).toBeGreaterThan(Date.parse(reviews[1]!.submitted_at));
+      expect(await bodies(chained.url, "/repos/acme/widgets/pulls/7/comments")).toEqual(["late thread"]);
+      expect(await bodies(chained.url, "/repos/acme/widgets/issues/7/comments")).toEqual(["late note"]);
+    } finally {
+      await chained.close();
+    }
+
+    const single = await startFakeGitHub({ owner: "acme", repo: "widgets", pulls: [seeded] });
+    try {
+      expect(await bodies(single.url, "/repos/acme/widgets/pulls/7/reviews")).toEqual(["early", "late"]);
+      expect(await bodies(single.url, "/repos/acme/widgets/issues/7/comments")).toEqual(["late note"]);
+    } finally {
+      await single.close();
+    }
+  });
+
   it("computes isOutdated through the resolver, honours a seeded flag, and is never outdated by default", async () => {
     const fake = await startFakeGitHub({
       owner: "acme",
@@ -231,6 +278,30 @@ describe("fake GitHub — rounds", () => {
 });
 
 // ── the next round's dispatch ───────────────────────────────────────────────
+
+describe("mergeBaseOf — a round's PR files when the base moved", () => {
+  it("diffs an earlier head from where it forked, not from the case's newer base", () => {
+    const { dir, shas } = repoWith([{ "a.ts": "base\n" }]);
+    const fork = shas[0]!;
+    git(dir, ["checkout", "-q", "-b", "feat"]);
+    writeFileSync(join(dir, "feat.ts"), "feature\n");
+    git(dir, ["add", "-A"]);
+    git(dir, ["commit", "-q", "-m", "feat"]);
+    const head1 = git(dir, ["rev-parse", "HEAD"]);
+    git(dir, ["checkout", "-q", "main"]);
+    writeFileSync(join(dir, "main-later.ts"), "later\n");
+    git(dir, ["add", "-A"]);
+    git(dir, ["commit", "-q", "-m", "main moves"]);
+    const newerBase = git(dir, ["rev-parse", "HEAD"]);
+
+    expect(mergeBaseOf(dir, newerBase, head1)).toBe(fork);
+    expect(prFilesFromGit(dir, mergeBaseOf(dir, newerBase, head1), head1).map((f) => f.filename)).toEqual(["feat.ts"]);
+    // The old two-dot range lists main's later file as a deletion in the PR.
+    expect(prFilesFromGit(dir, newerBase, head1).map((f) => f.filename).sort()).toEqual(["feat.ts", "main-later.ts"]);
+    // An ancestor base is its own merge base — every single-round case is unchanged.
+    expect(mergeBaseOf(dir, fork, head1)).toBe(fork);
+  });
+});
 
 describe("carryForward / outdatedResolver", () => {
   const { dir, shas } = repoWith([

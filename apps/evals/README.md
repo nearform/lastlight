@@ -545,6 +545,24 @@ the ledger, gold matched and cost — shown under **Re-review rounds** and the
 row's **rounds** button in the dashboard. A case with no `rounds` (or one)
 runs exactly as before.
 
+Two things keep an earlier round honest:
+
+- **Its diff is its own.** Each round's changed files are taken from the merge
+  base of `pr.base_commit` and that round's head, as GitHub computes them — a
+  branch that later merged or rebased onto a newer main still shows round 1
+  only its own changes.
+- **It cannot read the future.** Human discussion seeded on the case is served
+  from the start unless it carries `from_round` (on `reviews`,
+  `review_comments` or `issue_comments`): the first round (1-based) that may see
+  it — the round whose real bot review came after it. Without it, round 1 would
+  read the human review later rounds are graded on.
+
+```jsonc
+"reviews": [
+  { "user": "SociableSteve", "state": "CHANGES_REQUESTED", "body": "…", "commit_id": "fcfc6296…", "from_round": 3 }
+]
+```
+
 For the $0 version — no model, just which code each round had already seen —
 run `npx tsx scripts/rereview-delta-replay.ts --repo <checkout> --base <ref>
 --heads <sha1>,<sha2>,… [--comments comments.json]`.

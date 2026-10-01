@@ -32,7 +32,16 @@ const REAL_SHA = /^[0-9a-f]{40}$/i;
  * run byte-identically to it). Throws on a malformed declaration: a chained
  * case that silently ran one round would report a re-review it never did.
  */
-export function planRounds(inst: { instance_id: string; rounds?: ReviewRoundSeed[]; pr?: { head_commit: string } }): ReviewRoundSeed[] | null {
+export function planRounds(inst: {
+  instance_id: string;
+  rounds?: ReviewRoundSeed[];
+  pr?: {
+    head_commit: string;
+    reviews?: { from_round?: number }[];
+    review_comments?: { from_round?: number }[];
+    issue_comments?: { from_round?: number }[];
+  };
+}): ReviewRoundSeed[] | null {
   const rounds = inst.rounds;
   if (!rounds || rounds.length <= 1) {
     if (rounds?.length === 1 && inst.pr && rounds[0]!.head_commit !== inst.pr.head_commit) {
@@ -51,6 +60,16 @@ export function planRounds(inst: { instance_id: string; rounds?: ReviewRoundSeed
     throw new Error(
       `${inst.instance_id}: the last round's head_commit (${last.head_commit.slice(0, 12)}) must equal pr.head_commit (${inst.pr.head_commit.slice(0, 12)}) — the last round is the scored head`,
     );
+  }
+  // A seeded item held for a round the chain never reaches would silently
+  // vanish from the scored round's discussion.
+  for (const field of ["reviews", "review_comments", "issue_comments"] as const) {
+    (inst.pr[field] ?? []).forEach((item, i) => {
+      const r = item.from_round;
+      if (r !== undefined && !(Number.isInteger(r) && r >= 1 && r <= rounds.length)) {
+        throw new Error(`${inst.instance_id}: pr.${field}[${i}].from_round must be an integer in 1..${rounds.length} (got ${JSON.stringify(r)})`);
+      }
+    });
   }
   return rounds;
 }
