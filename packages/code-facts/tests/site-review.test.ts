@@ -445,6 +445,25 @@ describe("re-review: scoping, the convergence gate and coverage", () => {
     expect(JSON.parse(readFileSync(join(dir, "sites", "branches.json"), "utf8"))).toEqual({ items: [{ id: "site-001" }] });
   });
 
+  it("carries a row with neither a unit nor a path on a re-review, and keeps it on a first review", () => {
+    // units-ingest's family placeholder: no unit, no anchor — nothing to scope or look at.
+    const placeholder = { family: "enforcement", claim: "no enforcement hypothesis — 4 of 4 unit(s) answered, and none recorded one", bothEnds: { introducedAt: null, enforcedAt: null }, quotes: [], source: "units", unitId: null };
+    const withPlaceholder = () => {
+      const ws = workspace();
+      writeFileSync(join(ws.dir, "hypotheses", "enforcement.jsonl"), `${JSON.stringify(placeholder)}\n`);
+      return ws;
+    };
+    const first = withPlaceholder();
+    writeUnits(first.dir, [{ id: "u1", lines: [5, 25] }, { id: "u4", lines: [140, 160] }]);
+    expect(writeSitePlan(first.dir).slots.some((s) => s.site.path === null)).toBe(true);
+
+    const again = withPlaceholder();
+    writeUnits(again.dir, [...site1Units("unchanged"), { id: "u4", lines: [140, 160], delta: "changed" }]);
+    const plan = writeSitePlan(again.dir);
+    expect(plan.carried).toBe(4);
+    expect(plan.slots.map((s) => s.site.path)).toEqual(["src/a.ts"]);
+  });
+
   it("keeps affected and new units in scope", () => {
     const { dir } = workspace();
     writeUnits(dir, [...site1Units("affected"), { id: "u4", lines: [140, 160], delta: "new" }]);

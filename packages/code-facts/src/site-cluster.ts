@@ -104,7 +104,8 @@ export interface SitePlan {
   skipped: string[];
   /**
    * Row ids a re-review carried (issue #429): rows written by a unit whose
-   * `delta` is `unchanged`, so the last review already had their code. They
+   * `delta` is `unchanged`, so the last review already had their code, and
+   * rows with neither a unit nor a path (nothing to scope or look at). They
    * form no site; the ledger keeps what the last review found there.
    */
   carried: string[];
@@ -195,6 +196,8 @@ export function clusterSites(set: HypothesisSet, options: ClusterOptions = {}): 
   const maxSpan = options.maxSpan == null ? null : Math.max(0, Math.floor(options.maxSpan));
   const voterOf = new Map((options.units ?? []).map((u) => [u.id, u.splitOf ?? u.id]));
   const unitOf = new Map((options.units ?? []).map((u) => [u.id, u]));
+  // A re-review: the units carry a delta against the last review's.
+  const rereview = (options.units ?? []).some((u) => u.delta !== undefined);
 
   const anchored: Anchored[] = set.records.map((record, position) => {
     const row = record.row as Record<string, unknown>;
@@ -212,7 +215,11 @@ export function clusterSites(set: HypothesisSet, options: ClusterOptions = {}): 
       severity: severityOf(row),
       voter,
       risk: unit?.risk ?? null,
-      carried: unit?.delta !== undefined && !inScope(unit.delta),
+      // On a re-review a row with neither a unit nor a path is carried too: it
+      // cannot be scoped to the delta and names no code to look at — in
+      // practice units-ingest's "no <family> hypothesis" placeholder, which
+      // otherwise formed a pathless site (two investigators) on every re-review.
+      carried: unit?.delta !== undefined ? !inScope(unit.delta) : rereview && unit === undefined && path === null,
     };
   });
 

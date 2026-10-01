@@ -1509,7 +1509,10 @@ signal: where many independent units pointed is where an investigator looks.
   caller or callee sits in new/changed code) / `unchanged` — and the doc a
   `prior` stamp. No line-translation engine: identity is the key and the hash,
   so it survives a force-push.
-- `sites --plan` **carries** the rows of `unchanged` units (`SitePlan.carried`;
+- `sites --plan` **carries** the rows of `unchanged` units — and, on a
+  re-review, rows with neither a unit nor a path (units-ingest's "no <family>
+  hypothesis" placeholder, which otherwise formed a pathless site every round)
+  (`SitePlan.carried`;
   `sites` ∪ `skipped` ∪ `carried` = every row) and weighs each site's vote by
   `RISK_WEIGHT` of its highest tier. Pair slots derive from primaries, so a
   carried site's pair goes with it.
