@@ -25,6 +25,7 @@
  * mock, no sandbox, no harness.
  */
 
+import { priorReviewOf, renderLedgerForSelect, type ReviewLedger } from "./review-ledger.js";
 import { renderPriorDiscussion } from "./pr-discussion.js";
 import { renderPrIntent } from "./pr-intent.js";
 import type { DependenciesConfig, FixConfig, ReviewConfig } from "../config/config.js";
@@ -735,6 +736,12 @@ export function reviewCheckPlacement(
  * bounds cap the file that supplies them.
  */
 const globCache = new Map<string, RegExp>();
+
+/** `prior-review.json`'s one line, or `""` when the ledger holds no units to compare against. */
+function priorReviewJson(ledger: ReviewLedger | null): string {
+  const prior = priorReviewOf(ledger);
+  return prior ? jsonLine(prior) : "";
+}
 
 /**
  * One glob pattern as a RegExp, with the segment-aware semantics `*` implies
@@ -1767,7 +1774,17 @@ function renderPathsSinceLastReview(paths: string[] | null): string {
  * test that renders it through a real heredoc.
  */
 export function specObligationsLine(set: SpecObligationSet): string {
-  return JSON.stringify(set).replace(/\{\{/g, "{\\u007b");
+  return jsonLine(set);
+}
+
+/**
+ * Any value as ONE line of JSON with no `{{` in it — the form every heredoc
+ * the `units` node writes takes (spec obligations, the prior review, the risk
+ * rules), because each carries text a PR or a repo controls: a path, a symbol,
+ * a glob. `\u007b` is `{` to any JSON parser and invisible to the guard.
+ */
+export function jsonLine(value: unknown): string {
+  return JSON.stringify(value).replace(/\{\{/g, "{\\u007b");
 }
 
 /**
@@ -1829,6 +1846,29 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      * nobody has said anything (`renderPriorDiscussion`).
      */
     priorDiscussion: renderPriorDiscussion(state.discussion ?? null),
+    /**
+     * Issue #429 — the PR's review ledger, for `select` (`{{#if priorLedger}}`
+     * in `review-select.md`): what an earlier review of OURS posted that is
+     * still open, and what it found but withheld. Code-derived, so unlike
+     * `priorDiscussion` it does not depend on the model spotting our own
+     * comments in the rendered thread. Empty on a first review.
+     */
+    priorLedger: renderLedgerForSelect(state.reviewLedger),
+    /**
+     * Issue #429 — the units the last review already had, as one line of JSON
+     * the `units` phase writes to `prior-review.json` (QUOTED heredoc, like
+     * `specObligationsJson`). code-facts compares each unit's key and content
+     * hash against it, and the re-review scopes its sites to what is new,
+     * changed or affected. Empty on a first review — nothing is scoped.
+     */
+    priorReviewJson: priorReviewJson(state.reviewLedger),
+    /**
+     * Issue #429 — the configured risk rules (the repo's, then the operator's:
+     * the repo sanitizer prepends), as the one line of JSON `units
+     * --risk-rules` reads. Empty with none configured: code-facts' built-in
+     * tiers apply alone.
+     */
+    riskRulesJson: review.risk.rules.length ? jsonLine({ rules: review.risk.rules }) : "",
     /**
      * Phase budgets for `pr-review.yaml`'s deterministic `facts` / `seed` /
      * `reconcile` steps, read as `timeout_seconds: { from: … }` (issue #385).

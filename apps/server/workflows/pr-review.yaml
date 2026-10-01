@@ -37,6 +37,15 @@ phases:
   # matches the guard and the phase skips — leaving a full review. The
   # quoted-string form has the opposite behaviour and must not be used here.
   #
+  # NOT with the evidence pipeline on (issue #429): a light run is one
+  # agent pass over the diff with no ledger and no convergence gate — exactly
+  # the unbounded re-review that re-opens code the last review already had.
+  # The pipeline scopes a re-review in code instead (`units --prior`): a
+  # small push is a few changed units, so few sites, and a push that changed
+  # nothing the last review had plans no site at all. `analysisEnabled == true`
+  # is the bare-boolean form, so an absent key does NOT match and triage runs
+  # as before on a deployment without the pipeline.
+  #
   # The phase ends with one `REVIEW_DEPTH: full|light` line, which
   # `engine/review-triage.ts` harvests onto `scratch.reviewTriage` from the same
   # `onPhaseEnd` hook the fix markers ride. On `light`, the seven phases below
@@ -50,6 +59,7 @@ phases:
     skip_if:
       - "triageEnabled != true"
       - "reviewIsRereview != true"
+      - "analysisEnabled == true"
     timeout_seconds: { from: triageTimeoutSeconds }
     # NO `on_output.requires_marker`, deliberately — see AC2 in
     # `tests/workflows/pr-review-probes.test.ts`: nothing in this workflow may
@@ -244,11 +254,33 @@ phases:
       FACTS="${LASTLIGHT_FACTS_BIN:-$(command -v lastlight-facts || echo /opt/lastlight/bin/lastlight-facts)}"
       OUT=.lastlight/pr-review/units.json
       SPEC=.lastlight/pr-review/spec-obligations.json
+      PRIOR=.lastlight/pr-review/prior-review.json
+      RISK=.lastlight/pr-review/risk-rules.json
       mkdir -p .lastlight/pr-review
       # A reused per-PR workspace still holds the LAST head's document. Remove
       # it first, so a process that dies before writing leaves no stale units
-      # for `survey-units` to spend money on.
-      rm -f "$OUT" "$SPEC"
+      # for `survey-units` to spend money on — and no stale prior review or
+      # risk rules for this run to scope by.
+      rm -f "$OUT" "$SPEC" "$PRIOR" "$RISK"
+
+      # Issue #429 — the units the LAST review had (the PR's review ledger),
+      # so each unit gets a `delta` (new / changed / affected / unchanged) and
+      # the sites skip what is unchanged. Absent on a first review: nothing is
+      # scoped. Same QUOTED heredoc as the spec obligations below.
+      {{#if priorReviewJson}}
+      cat > "$PRIOR" <<'LASTLIGHT_PRIOR_EOF'
+      {{priorReviewJson}}
+      LASTLIGHT_PRIOR_EOF
+      {{/if}}
+      # …and the configured risk rules (the repo's, then the operator's).
+      {{#if riskRulesJson}}
+      cat > "$RISK" <<'LASTLIGHT_RISK_EOF'
+      {{riskRulesJson}}
+      LASTLIGHT_RISK_EOF
+      {{/if}}
+      set --
+      [ -s "$RISK" ] && set -- --risk-rules "$RISK"
+      if [ -s "$PRIOR" ]; then echo "units: re-review — scoping against the last review's units"; fi
 
       # The spec obligations are built HARNESS-side (the PR body and the issues
       # it closes; `review-spec.ts`), so they reach the sandbox only through
@@ -280,7 +312,7 @@ phases:
       # that DIES (OOM, a segfault in the native parser). The fallback is
       # written only when nothing was — a document the CLI wrote on its way to
       # a non-zero exit carries more than this one can.
-      "$FACTS" units --dir .lastlight/pr-review --repo . --never-fail
+      "$FACTS" units --dir .lastlight/pr-review --repo . "$@" --never-fail
       CODE=$?
       if [ ! -s "$OUT" ]; then
         fallback "the units process exited $CODE without writing units.json (OOM, a segfault in the native parser, or a CLI that could not be executed) — NOTHING here may be read as 'no findings'"

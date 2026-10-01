@@ -136,6 +136,7 @@ export type { DisabledConfig, RouteConfig } from "lastlight-shared/config-types"
 import {
   DIAGNOSIS_CLASSES,
   coerceProbeMode,
+  coerceReviewRiskRules,
   defaultDependenciesConfig,
   defaultFixConfig,
   defaultNotificationsConfig,
@@ -1273,6 +1274,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const analysisRaw = isPlainObject(reviewRaw.analysis) ? reviewRaw.analysis : {};
   warnRemovedAnalysisKeys(analysisRaw);
   const triageRaw = isPlainObject(reviewRaw.triage) ? reviewRaw.triage : {};
+  const riskRaw = isPlainObject(reviewRaw.risk) ? reviewRaw.risk : {};
   const autonomyRaw = isPlainObject(raw.autonomy) ? raw.autonomy : {};
   const fixRaw = isPlainObject(raw.fix) ? raw.fix : {};
   const gateRaw = isPlainObject(raw.gate) ? raw.gate : {};
@@ -1531,6 +1533,9 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
           ? null
           : nonNegativeNumber(analysisRaw.maxBodyComments) ?? reviewDefaults.analysis.maxBodyComments,
     },
+    // Issue #429. Invalid rules are dropped rather than failing the load: a
+    // bad tier costs a ranking nuance, never the review.
+    risk: { rules: coerceReviewRiskRules(riskRaw.rules) },
   };
 
   // The autonomy pipeline (issue: the software factory). Lenient like every

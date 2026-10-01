@@ -78,7 +78,23 @@ export type { CiFailureReport, CiJobFailure } from "./engine/github/github.js";
 // does at the choke point. The fake grows the GraphQL route rather than the
 // harness growing a copy of the resolver — its stated convention, and the same
 // call it already made for `enablePullRequestAutoMerge`.
-export { resolveSpecContext } from "./engine/pr-state.js";
+export { resolveSpecContext, deriveReviewLedger } from "./engine/pr-state.js";
+// Issue #429 — the PR's review ledger. A multi-round eval case carries it
+// from one round to the next exactly as production does: the run's
+// `scratch.reviewLedger` (written by `post-review`) becomes the next round's
+// `PrState.reviewLedger`, through the same derivation.
+export {
+  coerceLedger,
+  carriedOpen,
+  findingFingerprint,
+  foldReviewLedger,
+  priorReviewOf,
+  renderLedgerForSelect,
+  renderLedgerStatus,
+  REVIEW_LEDGER_SCRATCH_KEY,
+} from "./engine/review-ledger.js";
+export type { LedgerFinding, LedgerStatus, LedgerUnit, ReviewLedger } from "./engine/review-ledger.js";
+export { REVIEW_COVERAGE_SCRATCH_KEY } from "./workflows/handlers/post-review.js";
 export { resolveReviewGitHubClient } from "./workflows/handlers/post-review.js";
 export type { GitHubClient } from "./engine/github/github.js";
 export {

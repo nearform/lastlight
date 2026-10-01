@@ -51,6 +51,8 @@
  * `evidence.subject` only.
  */
 import { pathOfRow, type HypothesisSet } from "./hypotheses.js";
+import { inScope, type UnitDelta } from "./review-delta.js";
+import { maxTier, RISK_WEIGHT, type RiskTier } from "./risk.js";
 import { plannedProbe, planProbes, PROBE_PLAN_VERSION, type ProbePlan } from "./probe-plan.js";
 import { severityOf, type SurveyEvidence } from "./survey-verdict.js";
 
@@ -82,6 +84,11 @@ export interface Site {
   severity: string | null;
   /** Canonical `<family>-NNN` ids, in declaration order. */
   rows: string[];
+  /**
+   * The highest risk tier among the units whose rows formed the site
+   * (`risk.ts`); absent when no row's unit carries one. Weighs the vote.
+   */
+  risk?: RiskTier;
 }
 
 export interface SitePlan {
@@ -93,17 +100,27 @@ export interface SitePlan {
   /** Every hypothesis row read. */
   rows: number;
   sites: Site[];
-  /** Row ids `skipPath` left out of ranking, declaration order. `sites` ∪ `skipped` = every row, once. */
+  /** Row ids `skipPath` left out of ranking, declaration order. `sites` ∪ `skipped` ∪ `carried` = every row, once. */
   skipped: string[];
+  /**
+   * Row ids a re-review carried (issue #429): rows written by a unit whose
+   * `delta` is `unchanged`, so the last review already had their code. They
+   * form no site; the ledger keeps what the last review found there.
+   */
+  carried: string[];
 }
 
 /** What a site's vote counts: every row, or distinct units. */
 export type SiteVoters = "row" | "unit";
 
-/** The two `Unit` fields the voter key needs (`units.json` carries them). */
+/** The `Unit` fields site planning reads (`units.json` carries them). */
 export interface VoterUnit {
   id: string;
   splitOf?: string;
+  /** Issue #429: rows of an `unchanged` unit are carried, not clustered. */
+  delta?: UnitDelta;
+  /** Weighs the vote of every site the unit's rows form. */
+  risk?: RiskTier;
 }
 
 export interface ClusterOptions {
@@ -143,6 +160,8 @@ interface Anchored {
   line: number | null;
   severity: string | null;
   voter: string;
+  risk: RiskTier | null;
+  carried: boolean;
 }
 
 function lineAt(row: Record<string, unknown>, path: string | null): number | null {
@@ -175,6 +194,7 @@ export function clusterSites(set: HypothesisSet, options: ClusterOptions = {}): 
   const voters: SiteVoters = options.voters ?? "row";
   const maxSpan = options.maxSpan == null ? null : Math.max(0, Math.floor(options.maxSpan));
   const voterOf = new Map((options.units ?? []).map((u) => [u.id, u.splitOf ?? u.id]));
+  const unitOf = new Map((options.units ?? []).map((u) => [u.id, u]));
 
   const anchored: Anchored[] = set.records.map((record, position) => {
     const row = record.row as Record<string, unknown>;
@@ -182,13 +202,29 @@ export function clusterSites(set: HypothesisSet, options: ClusterOptions = {}): 
     const line = path === null ? null : lineAt(row, path);
     const unitId = row.unitId;
     const voter = typeof unitId === "string" && unitId ? `unit:${voterOf.get(unitId) ?? unitId}` : `row:${record.id}`;
-    return { id: record.id, family: record.family, position, path, line, severity: severityOf(row), voter };
+    const unit = typeof unitId === "string" ? unitOf.get(unitId) : undefined;
+    return {
+      id: record.id,
+      family: record.family,
+      position,
+      path,
+      line,
+      severity: severityOf(row),
+      voter,
+      risk: unit?.risk ?? null,
+      carried: unit?.delta !== undefined && !inScope(unit.delta),
+    };
   });
 
   const groups = new Map<string, Anchored[]>();
   const runs: Anchored[][] = [];
   const skipped: string[] = [];
+  const carried: string[] = [];
   for (const a of anchored) {
+    if (a.carried) {
+      carried.push(a.id);
+      continue;
+    }
     if (a.path !== null && options.skipPath?.(a.path)) {
       skipped.push(a.id);
       continue;
@@ -224,17 +260,25 @@ export function clusterSites(set: HypothesisSet, options: ClusterOptions = {}): 
       (best, a) => (severityRank(a.severity) < severityRank(best) ? a.severity : best),
       null,
     );
+    const risk = run.reduce<RiskTier | null>((best, a) => (a.risk === null ? best : best === null ? a.risk : maxTier(best, a.risk)), null);
+    const voterCount = new Set(run.map((a) => a.voter)).size;
+    const weight = risk === null ? 1 : RISK_WEIGHT[risk];
     return {
       path: run[0].path,
       startLine: lines.length ? Math.min(...lines) : null,
       endLine: lines.length ? Math.max(...lines) : null,
       support: run.length,
-      voters: new Set(run.map((a) => a.voter)).size,
+      voters: voterCount,
       families: [...new Set(run.map((a) => a.family))].sort(),
       severity,
       rows: rows.map((a) => a.id),
+      ...(risk !== null ? { risk } : {}),
       first: rows[0].position,
       demoted: run[0].path !== null && !!options.demotePath?.(run[0].path),
+      // The vote, weighed by risk (issue #429). `medium` weighs 1, so a plan
+      // with no risk anywhere ranks exactly as the screened plan did.
+      weighedVoters: voterCount * weight,
+      weighedSupport: run.length * weight,
     };
   });
 
@@ -244,8 +288,8 @@ export function clusterSites(set: HypothesisSet, options: ClusterOptions = {}): 
   drafts.sort((a, b) =>
     Number(a.demoted) - Number(b.demoted) ||
     (voters === "unit"
-      ? b.voters - a.voters || b.support - a.support || severityRank(a.severity) - severityRank(b.severity) || a.first - b.first
-      : b.support - a.support || severityRank(a.severity) - severityRank(b.severity) || a.first - b.first),
+      ? b.weighedVoters - a.weighedVoters || b.support - a.support || severityRank(a.severity) - severityRank(b.severity) || a.first - b.first
+      : b.weighedSupport - a.weighedSupport || severityRank(a.severity) - severityRank(b.severity) || a.first - b.first),
   );
 
   return {
@@ -256,7 +300,8 @@ export function clusterSites(set: HypothesisSet, options: ClusterOptions = {}): 
     maxSpan,
     rows: set.records.length,
     skipped,
-    sites: drafts.map(({ first: _first, demoted: _demoted, ...d }, i) => ({
+    carried,
+    sites: drafts.map(({ first: _first, demoted: _demoted, weighedVoters: _wv, weighedSupport: _ws, ...d }, i) => ({
       id: `site-${String(i + 1).padStart(3, "0")}`,
       rank: i + 1,
       ...d,

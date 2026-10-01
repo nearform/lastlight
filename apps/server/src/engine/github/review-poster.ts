@@ -19,6 +19,13 @@
 export type ReviewEvent = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
 export type ReviewSide = "LEFT" | "RIGHT";
 
+/**
+ * The `alreadyRaised` value `post-review` writes when the PR's review ledger
+ * (issue #429) — not the select agent — recognised a finding as one an earlier
+ * review already posted.
+ */
+export const LEDGER_ALREADY_RAISED = "an earlier review of this PR (same code, still open)";
+
 /** One finding as written by the `pr-review` skill into findings.json. */
 export interface ReviewFinding {
   path: string;
@@ -98,6 +105,14 @@ export interface ReviewFinding {
    */
   importance?: string;
   alreadyRaised?: string;
+  /**
+   * Issue #429 — `sites --finalize`'s convergence gate withheld this finding:
+   * it sits in code the last review already had unchanged and is not a
+   * must-fix above low risk. Recorded `internal` with reason `converged`.
+   */
+  withheld?: "converged";
+  /** …or let it through as a must-fix on unchanged code, labelled as missed earlier. */
+  lateDiscovery?: boolean;
   /**
    * #399's typed attributes, written INSTEAD of `tier` (by the removed
    * adjudicator's `dossier` mode; `site-finalize` writes a `category`).
@@ -793,7 +808,19 @@ export type InternalReason =
    * did the impact rule withhold, and was any of it gold?" is the question the
    * next measurement asks.
    */
-  | "no-impact";
+  | "no-impact"
+  /**
+   * Issue #429: the re-review convergence gate — the finding sits in code the
+   * last review already had, unchanged, and is not a must-fix above low risk.
+   * Its own token because "late discoveries withheld" is the issue's metric.
+   */
+  | "converged"
+  /**
+   * Issue #429: the PR's review ledger already holds this finding (same file,
+   * same quoted code), still open from an earlier review. Withheld so the
+   * point is not posted twice; still open, so the summary stays honest.
+   */
+  | "already-raised";
 
 /** One recorded-not-posted finding, carrying the reason it was withheld. */
 export interface InternalFinding {
@@ -1239,7 +1266,9 @@ export function tierFindings(
     // one of them — turning "we recorded what we could not adjudicate" into
     // "we published what we could not adjudicate".
     if (f.tier === "internal") {
-      internal.push({ finding: f, reason: derived ? "computed" : "adjudicated" });
+      const reason: InternalReason =
+        f.withheld === "converged" ? "converged" : f.alreadyRaised === LEDGER_ALREADY_RAISED ? "already-raised" : derived ? "computed" : "adjudicated";
+      internal.push({ finding: f, reason });
       continue;
     }
     if (allHypothesesClean(f, clean)) {

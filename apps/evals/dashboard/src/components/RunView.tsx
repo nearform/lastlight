@@ -6,6 +6,7 @@ import { fmtDate, fmtDuration, isPrReviewTier, modelLabel } from "../lib/format"
 import { summarizeModels } from "../lib/summarize";
 import { CompareTable } from "./CompareTable";
 import { InstanceTable } from "./InstanceTable";
+import { RereviewPanel } from "./Rereview";
 import { MetaStrip } from "./MetaStrip";
 import { MicroPanel } from "./MicroPanel";
 import { LiveBadge, RunTypeBadge } from "./ui";
@@ -177,6 +178,8 @@ export function RunView({ run, onShowRepeats }: { run: IndexRun; onShowRepeats?:
           {isPrReviewTier(tier) && (
             <MicroPanel models={models} labels={labels} results={tierResults} scorecardUrl={run.scorecard} />
           )}
+
+          {isPrReviewTier(tier) && <RereviewPanel results={tierResults} labels={labels} />}
 
           {isConfig && <PhaseModelPanel results={tierResults} labels={labels} />}
 

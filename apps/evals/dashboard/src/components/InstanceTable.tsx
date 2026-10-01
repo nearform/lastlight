@@ -6,6 +6,8 @@ import { Chip, Frac, Pill } from "./ui";
 import { SessionModal, type SessionSource } from "./SessionModal";
 import { DiffModal } from "./DiffModal";
 import { JudgeModal } from "./JudgeModal";
+import { RereviewModal, rereviewChip } from "./Rereview";
+import type { RereviewResult } from "../types";
 
 /** Hover text listing the review's false positives + missed gold comments, for
  * eyeballing where a case lost precision/recall (Martian's gold set is known to
@@ -55,6 +57,8 @@ export function InstanceTable({
   // The open judge viewer (pr-review trace: findings ↔ gold + raw judge replies),
   // or null. Reads the trace embedded in the scorecard — no fetch.
   const [openJudge, setOpenJudge] = useState<{ title: string; trace: ReviewTrace } | null>(null);
+  // The open per-round view of a chained re-review case (issue #429), or null.
+  const [openRounds, setOpenRounds] = useState<{ title: string; rereview: RereviewResult } | null>(null);
   const sessionUrl = (rel: string) => (scorecardUrl ? scorecardUrl.replace(/scorecard\.json$/, rel) : rel);
   const titleFor = (id: string, model: string) => `${id} · ${modelLabel(labels, model)}`;
   const hasDiff = (r: InstanceResult) => !!r.modelPatchFile;
@@ -173,6 +177,15 @@ export function InstanceTable({
                             judge
                           </button>
                         )}
+                        {r.rereview && (
+                          <button
+                            onClick={() => setOpenRounds({ title: `${titleFor(r.instance_id, r.model)} · re-review rounds`, rereview: r.rereview! })}
+                            className="btn btn-ghost btn-xs h-5 min-h-0 px-1.5 font-mono text-2xs text-info"
+                            title="Every review round of this chained case: late discoveries, converged / already-raised, coverage, ledger, gold per round"
+                          >
+                            {rereviewChip(r.rereview)}
+                          </button>
+                        )}
                       </span>
                     ) : (
                       <Pill kind="na">—</Pill>
@@ -266,6 +279,9 @@ export function InstanceTable({
     {openLog && <SessionModal source={openLog} onClose={() => setOpenLog(null)} />}
     {openDiff && <DiffModal title={openDiff.title} url={openDiff.url} onClose={() => setOpenDiff(null)} />}
     {openJudge && <JudgeModal title={openJudge.title} trace={openJudge.trace} onClose={() => setOpenJudge(null)} />}
+    {openRounds && (
+      <RereviewModal title={openRounds.title} rereview={openRounds.rereview} artifactUrl={sessionUrl} onClose={() => setOpenRounds(null)} />
+    )}
     </>
   );
 }

@@ -111,7 +111,7 @@ Scheduler-level DAG concurrency stays parked (D5): the survey fan-out shipped in
 
 ## Review memory (WP7)
 
-Not started. D10 splits it in three, with disposition recording already live (`recordDisposition` in `post-review.ts` → `review_findings`), so a future memory has data from day one.
+**Built, PR-scoped (issue #429): `PrState.reviewLedger`, not a table.** There never was a `review_findings` table — `recordDisposition` writes `disposition.json` into the run's workspace, which the next run overwrote. The ledger is a field of the snapshot like the PR journal: `post-review` folds each review's dispositions into the ledger the run was dispatched with and writes it to `scratch.reviewLedger`; `deriveReviewLedger` reads it back at the next dispatch. It carries the units the review cut (`key` + `contentSha`), per-file line hashes, and every finding — posted or withheld — by a file + quoted-code fingerprint, with `open` / `withheld` / `addressed` / `resolved` derived from structured signals only. Three consumers: code-facts scopes a re-review's sites to units that are new, changed or affected (`units --prior`, `sites --plan` carries the rest), `sites --finalize` withholds a finding on lines the last review already had unless it is must-fix above low risk (the per-LINE convergence gate — a unit-level gate posted 12 of #424's 16 late Minors, the line gate withholds all 16), and `post-review` withholds a re-found open finding and renders "Addressed / Still open" status lines. Cross-PR recall ("why was this rejected", #177) is still open — that is the point at which a table, filled from ledger entries, earns its place.
 
 ## The instrument (WP8)
 
@@ -198,7 +198,7 @@ The remaining inventory, ordered roughly by expected value per dollar:
 | H-A5 making confidence real | **KILLED 2026-09-21** | AUROC 0.228 over 516 findings, CI [0.171, 0.299] — not decorative, INVERTED, and structurally so: the best-evidenced claim in this pipeline is the one confirming nothing is wrong. Every grounding axis inverts with it (quote count 0.341, both-ends-named 0.320, provenance count 0.438). `1 − confidence` scores 0.772 and is deliberately NOT shipped — a rule that says "post what the model is least sure of" inverts the moment someone fixes the prompt that made it true |
 | WP1c non-TS grammars | Not started | The generality lever (2/73 → 23/73 EC-strict prescription) |
 | WP9 tier 2 fresh blind gold | Not started | The credibility lever — decontaminates the blind split |
-| WP7 review memory | Not started | Disposition recording is already live |
+| WP7 review memory | PR-scoped ledger built (#429) | `PrState.reviewLedger`; cross-PR recall (#177) open |
 
 ## This pass (2026-08-25)
 

@@ -601,6 +601,28 @@ it would make it read as having served the ask it was written to defer.
   note may tell an agent something; it can never make a code path
   reachable, stand in for the local push gate, or cause a push.
 
+- **`reviewLedger`** is the PR's **review memory** (issue #429,
+  `src/engine/review-ledger.ts`) — and unlike `notes` it is written by code,
+  not by an agent, and read by code. `post-review` folds each review (only
+  with `review.analysis` on) into the ledger the run was dispatched with and
+  writes the whole result to that run's `scratch.reviewLedger`;
+  `deriveReviewLedger` reads it back at the next dispatch off the widest prior
+  PR-scoped run (its folded `scratch`, else the ledger its snapshot carried —
+  a fix run or a review that died before posting changes nothing). No table.
+  It holds the units the last review cut (`{key, contentSha}`), per file the
+  hashes of the lines those units covered, and every finding a review
+  produced — posted or withheld — keyed by a fingerprint of its file and
+  quoted code. Statuses come only from structured signals: `addressed` when
+  the quoted code is gone at the new head, `resolved` when a maintainer
+  resolved our thread (matched by file and our own first comment's title,
+  never a reply). Closed entries survive exactly the round that closed them;
+  open and withheld ones are never aged out (a hard cap drops withheld first
+  and sets `truncated`). It is not marked stale by a push: a moved head means
+  "re-check each entry", which the next fold does. `pr-decisions.ts` projects
+  it three ways — `priorReviewJson` (the units and line hashes code-facts
+  scopes and gates against), `priorLedger` (for `select`), and the
+  "Addressed / Still open" lines `post-review` opens the summary with.
+
 - **`closes` and `changedFiles`** are the two fields that are *not* resolved
   with the rest of the snapshot, and the exception is deliberate. They feed
   the `spec` axis of the review evidence pipeline — the issues a PR says it

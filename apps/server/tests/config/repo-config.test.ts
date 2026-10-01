@@ -705,6 +705,37 @@ describe("resolveRepoConfig — review policy", () => {
     expect(result.warnings[0]?.message).toMatch(/pnpm-lock\.yaml/);
   });
 
+  // `risk` is FREE and PREPENDED (issue #429): the repo's rules are matched
+  // before the operator's, so on a path both name the repo's tier applies.
+  it("puts a repo's risk rules ahead of the operator's", () => {
+    const result = resolveRepoConfig(
+      policyBase({ review: { ...defaultReviewConfig(), risk: { rules: [{ glob: "src/**", tier: "high" }] } } }),
+      policyBlocks(),
+      layerWith({ review: { risk: { rules: [{ glob: "src/billing/**", tier: "critical" }, { glob: "*.stories.tsx", tier: "low" }] } } }),
+    );
+
+    expect(result.merged.review.risk.rules).toEqual([
+      { glob: "src/billing/**", tier: "critical" },
+      { glob: "*.stories.tsx", tier: "low" },
+      { glob: "src/**", tier: "high" },
+    ]);
+    expect(codes(result.warnings)).toEqual([]);
+  });
+
+  it("drops a malformed risk rule, and a risk block that is not { rules }, with a warning", () => {
+    const bad = resolveRepoConfig(
+      policyBase(),
+      policyBlocks(),
+      layerWith({ review: { risk: { rules: [{ glob: "docs/**", tier: "low" }, { glob: "x", tier: "extreme" }, { tier: "low" }] } } }),
+    );
+    expect(bad.merged.review.risk.rules).toEqual([{ glob: "docs/**", tier: "low" }]);
+    expect(codes(bad.warnings)).toEqual(["invalid-value"]);
+
+    const shape = resolveRepoConfig(policyBase(), policyBlocks(), layerWith({ review: { risk: [{ glob: "a", tier: "low" }] } }));
+    expect(shape.merged.review.risk.rules).toEqual([]);
+    expect(codes(shape.warnings)).toEqual(["invalid-value"]);
+  });
+
   it("is dropped wholesale when the operator narrows it out of allowKeys", () => {
     const result = resolveRepoConfig(
       policyBase(),

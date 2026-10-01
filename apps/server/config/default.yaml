@@ -735,6 +735,26 @@ review:
     # They also cost nothing: across the preserved archive not one gold finding
     # was ever lost to `below-floor` or `below-threshold`. An overlay that
     # still pins either key is accepted and ignored, with a warning in the log.
+  # Risk tiers for the `analysis` pipeline (issue #429). Every unit of a PR gets
+  # `low | medium | high | critical` from its path — the FIRST matching rule
+  # wins — raised at most once for a security/state obligation or a widely
+  # called symbol. Built-in rules always apply after these (prose, tests and
+  # generated files `low`; migrations, schema, auth, CI `high`; everything else
+  # `medium`), so list only exceptions. A glob with no `/` matches a basename
+  # anywhere, like `generatedPaths`.
+  #
+  # The tier weighs which sites get an investigator, how strict a re-review is
+  # on code the last review already had (a `low` unit never re-opens there),
+  # and the risk-weighted coverage figures. It never decides whether a changed
+  # unit is surveyed.
+  #
+  # Repo-settable, and FREE: a repo's `.lastlight/` rules are matched before
+  # these, so on a path both name the repo wins. e.g.
+  #   rules:
+  #     - { glob: "src/billing/**", tier: critical }
+  #     - { glob: "*.stories.tsx", tier: low }
+  risk:
+    rules: []
 
 # The software-factory pipeline (label-driven autonomy).
 #

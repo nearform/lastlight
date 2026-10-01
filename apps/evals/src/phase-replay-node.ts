@@ -136,17 +136,26 @@ export function goldRefs(gold: GoldComment[]): PhaseReplayGold[] {
   }));
 }
 
-/** The PR fields both prompts render. */
-export function promptContext(inst: Instance | undefined): Record<string, unknown> {
+/**
+ * The PR fields both prompts render — plus, when the run recorded them
+ * (`run-context.json`, see `phase-replay-context.ts`), the `priorDiscussion`
+ * and `priorLedger` blocks its `select` was rendered with, so a replay of a
+ * RE-review is told what the run was told about earlier reviews. Pass
+ * `readStoredRunContext(<artifacts dir>)`; a run recorded before the file
+ * existed passes `{}` and renders exactly as before.
+ */
+export function promptContext(inst: Instance | undefined, stored: Record<string, string> = {}): Record<string, unknown> {
   const pr = (inst?.pr ?? {}) as Record<string, string | number>;
   const [owner, repo] = (inst?.repo ?? "owner/repo").split("/");
   return {
     owner,
     repo,
     prNumber: pr.number ?? 0,
-    headSha: pr.head_commit ?? "HEAD",
+    headSha: stored.headSha ?? pr.head_commit ?? "HEAD",
     baseBranch: pr.base_ref ?? "main",
     prTitle: pr.title ?? "",
+    ...(stored.priorDiscussion ? { priorDiscussion: stored.priorDiscussion } : {}),
+    ...(stored.priorLedger ? { priorLedger: stored.priorLedger } : {}),
   };
 }
 

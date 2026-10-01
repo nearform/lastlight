@@ -21,6 +21,8 @@ import type {
   InstanceResult,
   PhaseMetric,
   PhaseSession,
+  RereviewResult,
+  RereviewRound,
   ReviewGradeResult,
   TrialSession,
 } from "../../src/schema.js";
@@ -76,6 +78,8 @@ export type {
   InstanceResult,
   PhaseMetric,
   PhaseSession,
+  RereviewResult,
+  RereviewRound,
   ReviewGradeResult,
   TrialSession,
   BoundaryMetrics,

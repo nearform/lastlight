@@ -1449,7 +1449,7 @@ investigator gets the site plus short leads and writes the findings.
 ### `sites` — the sites review engine's deterministic steps
 
 `src/site-review.ts`, exported from `index.ts`. With `review.analysis` on,
-pr-review runs `site-plan` → `site-review` (a static 16-branch fan-out) → `merge` →
+pr-review runs `site-plan` → `site-review` (a dynamic fan-out over `sites/branches.json`) → `merge` →
 `select` → `site-finalize` after the unit survey — the only review engine
 (docs/plans/pr-review-units-sites.md). Every step but the investigators and `select` is this
 command. The rows stop being the items the review weighs and become a VOLUME
@@ -1496,6 +1496,30 @@ signal: where many independent units pointed is where an investigator looks.
   conservation holds. A missing or invalid `selected.json` falls back to one
   item per pooled finding at the investigator's own importance, so a failed
   `select` still posts.
+
+**Re-reviews (issue #429) — identity, risk, scope, gate, coverage.**
+
+- `units` stamps every unit with `key` (`path::symbol`, `path::(module)`,
+  `(pr)` — shared by passes and family siblings), `contentSha` (its own lines,
+  never their numbers), `lineHashes`, `touched`, and a `risk` tier
+  (`src/risk.ts`: `--risk-rules` first, then test paths `low`, then the
+  built-in globs, then `medium`; raised at most once by a security/state
+  obligation or fan-in ≥ 5). With `--prior` (default `prior-review.json` when
+  present) each unit also gets a `delta` — `new` / `changed` / `affected` (a
+  caller or callee sits in new/changed code) / `unchanged` — and the doc a
+  `prior` stamp. No line-translation engine: identity is the key and the hash,
+  so it survives a force-push.
+- `sites --plan` **carries** the rows of `unchanged` units (`SitePlan.carried`;
+  `sites` ∪ `skipped` ∪ `carried` = every row) and weighs each site's vote by
+  `RISK_WEIGHT` of its highest tier. Pair slots derive from primaries, so a
+  carried site's pair goes with it.
+- `sites --finalize` applies the gate per LINE (`anchorDelta` in
+  `review-delta.ts`), not per unit: the unit delta only decides where to look.
+  Measured on lastlight#424's real heads, a unit gate would have posted 12 of
+  16 late Minors (new files are one module unit; fix-induced findings come
+  through cross-file data flow); the line gate withholds all 16, and the lines
+  it calls new per push track git's added lines. It also writes
+  `review-coverage.json` (`src/review-coverage.ts`).
 
 Exit codes: the two gates are loop conditions — 0 satisfied, 3 iterate again,
 never flattened by `--never-fail`. The three steps are 0, or 2 on a thrown

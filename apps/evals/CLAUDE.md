@@ -154,7 +154,10 @@ The release commit is conventionally just the two version-file lines
 | `src/add-case.ts` | `add-case` — author an instance from a real GitHub PR/issue (`gh`+`git`: base/head SHAs, `test_patch`, red→green verdicts). |
 | `src/fake-github.ts` | In-process fake GitHub REST API (seeds fixtures, records mutations) **plus** the non-REST `fetchRepoConfigTree` seam for a repo's `.lastlight/`. |
 | `src/repo-config.ts` | Per-repo config layer (#180): reads a case's fixture tree and drives core's OWN resolver over it. The one file with deep `lastlight-core/dist/...` imports — see below. |
-| `src/pr-context.ts` | PR state machine (#251/#252): builds the `PrState` snapshot a case seeds and hands it to core's OWN `renderContext`. Same shape as `repo-config.ts` — the harness supplies what core normally reads from live GitHub, core does the projection. No second copy of it here. |
+| `src/pr-context.ts` | PR state machine (#251/#252): builds the `PrState` snapshot a case seeds and hands it to core's OWN `renderContext`. The head is the case's real `pr.head_commit` (`caseHeadSha`; the `e7a1d09` placeholder only when the case names no real head). A seed may set the re-review fields (`last_bot_review`, `bot_review_at_head`, `paths_since_last_bot_review`, `pr_diff_unchanged_since_last_review`, `review_ledger` — coerced by core's `coerceLedger`); `snapshot: true` also projects `prState` (chained cases only). Same shape as `repo-config.ts` — the harness supplies what core normally reads from live GitHub, core does the projection. No second copy of it here. |
+| `src/rereview.ts` / `src/rereview-node.ts` | **Chained re-review cases** (issue #429, a case's `rounds`). `rereview.ts` is node-free (the dashboard bundles it): `planRounds` (the case contract — validated, `null` for a one-round case), the per-round counts (`dispositionCounts`, `deltaCounts`, `ledgerCounts`, `coverageSummary`, `goldMatchedOf`) and the roll-ups (`rollupRereview` → `InstanceResult.rereview`, `summarizeRereview` → the dashboard's per-arm panel). `rereview-node.ts` is the Node half: the in-memory run store a chained case dispatches through (`createRoundStore`), `carryForward` (round k+1's `pr_state` from round k's posted review, local git and its run scratch via core's `deriveReviewLedger`), the mtime-based artifact freshness check for the reused workspace, the fake's `outdatedResolver`, and the `units` ORACLE (`cutUnits` / `UnitsOracle`: code-facts `all` + `units --prior` in a throwaway worktree, no model) plus `judgeComments` (code-facts' `anchorDelta` per posted comment — the late-discovery test). |
+| `scripts/rereview-delta-replay.ts` | **The $0 re-review replay** (issue #429): given a checkout, a base and ordered round heads, cuts units at each head (`UnitsOracle`), deltas each against the previous round (new / changed / affected / unchanged; prints the unchanged units), and — with `--comments <json>` / `--comment <round>:<path>:<line>[-<end>]` — judges each real comment with `anchorDelta` (`unchanged` = a late discovery). `--json` writes the result, `--keep <dir>` keeps the per-round facts/units. Never fetches; the checkout must hold every head. |
+| `src/phase-replay-context.ts` | `run-context.json` — the `priorDiscussion` / `priorLedger` / `headSha` a pr-review run's `select` was rendered with, written beside the run's `pr-review/` artifact dir, read back by `micro-select` through `promptContext(inst, readStoredRunContext(artifacts))` so a replay of a RE-review is told what the run was told. Runs recorded before it existed read `{}` and render as before. |
 | `src/seed.ts` / `src/grade.ts` / `src/metrics.ts` | Workspace seeding (vendored fixture, git-source `base_commit` checkout, OR pr-review PR-head checkout — all from the `./.eval-cache/` mirror) / grading (execution TAP, behavioral, + `gradeReview` judge) / token-cost roll-up. |
 | `src/judge.ts` | One-shot LLM client for `gradeReview` (pr-review only) — direct provider `fetch`, temp 0. `EVAL_JUDGE_MODEL` overrides `defaultJudgeModel()`. `complete()` is the same call returning token usage too (site review's summary arm). |
 | `scripts/import-martian.ts` | Import Martian's Code Review Bench offline set (50 PRs) into the `pr-review` tier (`gh`+`git`: resolves base/head, pins SHAs). |
@@ -316,6 +319,32 @@ human's own label.
 - **Add a tier:** drop a dir with `instances.json` + `tier.json`
   (`{ name, defaultWorkflow, description }`). No code change — `discovery.ts`
   finds it. The workflow must be resolvable by core's `getWorkflow`.
+- **Chain a pr-review case over its review rounds (issue #429):** add
+  `rounds: [{ head_commit, label? }, …]` — every head the PR was reviewed at,
+  oldest first, full SHAs, the LAST equal to `pr.head_commit`. The runner
+  (`run-instance.ts`) seeds and pins every round head (`ensurePrCommitsInCache`
+  `roundCommits`, pushed to the offline origin as `eval-round-<n>`), then runs
+  the REAL workflow once per head IN ORDER: same fake GitHub (round k's review
+  and threads — `isOutdated` computed against the round's head — are what round
+  k+1 reads; the fake's clock advances an hour per round; `startRound` scopes
+  `submittedReviews` and so every grader to the current round), same per-PR
+  workspace (`checkoutRound`: tracked files reset, `.lastlight/pr-review/`
+  carried; repo context re-injected idempotently), and one in-memory run store
+  so post-review's `mergeScratch(reviewLedger, reviewCoverage)` lands
+  somewhere. Between rounds, `carryForward` sets `last_bot_review` /
+  `bot_review_at_head` / `paths_since_last_bot_review` /
+  `pr_diff_unchanged_since_last_review` / `review_ledger` on the next round's
+  `pr_state` (the last via core's `deriveReviewLedger(run, priorState)` — no
+  copy of the fold), and the context carries `prState` as `dispatchWorkflow`
+  does. Everything on the result is the LAST round's; `result.rereview` holds
+  every round (`round-<n>/round.json` + artifacts + `full.jsonl` beside the
+  trial's logs) and the roll-up — late discoveries (rounds ≥ 2, `anchorDelta`
+  against the round's own `prior-review.json`/`units.json`, else the oracle),
+  converged / already-raised, coverage, ledger, cumulative gold (each gold once,
+  across every round's judged review — one judge grade per earlier round), cost.
+  The dashboard shows it in the **Re-review rounds** panel and each row's
+  **rounds** button. `--runs N` keeps trial 1's `rereview`. A case with no
+  `rounds`, or one, runs exactly as before.
 - **Add a PR-scoped case (fix / dependency-merge):** give it a `pr_state` block.
   The harness projects it through **core's own** `renderContext`
   (`src/pr-context.ts`), which is where `{{ciSection}}`, `{{attempt}}`,
@@ -406,7 +435,13 @@ the whole point is to test what ships.
   `prePopulateBranch`, the runner will try to clone real GitHub.
 - **Gates need a DB.** A phase only pauses when `db && workflowId && the gate is
   enabled`. The eval passes **no `db`** and an **empty `approvalConfig`**, so
-  every gate is a no-op. Don't add a db just for metrics (see below).
+  every gate is a no-op. Don't add a db just for metrics (see below). The one
+  exception is a chained re-review case (`rounds`): it passes the engine's own
+  `InMemoryStateStore` (`lastlight-workflow-engine/test-support`) and a
+  per-round workflow id, because the review ledger rides in the RUN's scratch
+  (`post-review` → `store.runs.mergeScratch`) and the next round must read it
+  back the way a dispatch does. `approvalConfig` stays empty, so gates are
+  still inert.
 - **The per-repo config layer is NOT a REST route (issue #180).** A managed repo's
   committed `.lastlight/` is read by the HARNESS, not by an agent tool, through
   `GitHubClient.fetchRepoConfigTree` — core's own seam for exactly this ("lives on

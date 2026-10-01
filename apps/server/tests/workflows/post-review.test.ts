@@ -27,6 +27,7 @@ import { setRuntimeConfig, resetRuntimeConfigForTests } from "#src/config/config
 import type { ReviewConfig } from "lastlight-shared/config-types";
 // The COMPLETE review block (durations included) is derived from config/default.yaml by core (#385).
 import { defaultReviewConfig } from "#src/config/config.js";
+import { findingFingerprint } from "#src/engine/review-ledger.js";
 
 /**
  * Integration test for the first-class `post-review` action
@@ -211,7 +212,7 @@ describe("post-review action (runPostReview)", () => {
   function makeExecutor(
     taskId: string,
     ctxOverrides: Partial<TemplateContext> = {},
-    scope: Pick<PostReviewRunScope, "modelFor" | "chat"> = {},
+    scope: Pick<PostReviewRunScope, "modelFor" | "chat" | "store" | "workflowId"> = {},
   ) {
     const ctx: TemplateContext = {
       owner: "acme",
@@ -925,6 +926,92 @@ describe("post-review action (runPostReview)", () => {
         // the ledger line is exactly the one it has always been.
         expect(outcome.results[0]!.output).not.toContain("recorded-only");
         expect(existsSync(dispositionPath(taskId))).toBe(false);
+      });
+    });
+
+    describe("the review ledger — issue #429", () => {
+      const HEAD = HEAD_SHA;
+      const ledgerWithOpen = () => ({
+        version: 1,
+        head: "prior000",
+        at: "2026-09-01T00:00:00.000Z",
+        rounds: 1,
+        units: [{ key: "src/foo.ts::(module)", contentSha: "old" }],
+        findings: [
+          {
+            fp: findingFingerprint("src/foo.ts", "line9", "Old point"),
+            path: "src/foo.ts",
+            line: 9,
+            excerpt: "line9",
+            title: "Old point",
+            severity: "Minor",
+            importance: "worth-mentioning",
+            tier: "inline",
+            reason: null,
+            status: "open",
+            foundAt: "prior000",
+            lastSeenAt: "prior000",
+          },
+        ],
+      });
+
+      it("withholds a finding the ledger already holds open, says it is still open, and writes the folded ledger to scratch", async () => {
+        withReviewConfig({ trigger: "on-request", analysis: { ...defaultReviewConfig().analysis, enabled: false, maxBodyComments: null } });
+        const taskId = "widget-42-ledger";
+        seedFindings(taskId, "widget", {
+          summary: "ok",
+          event: "COMMENT",
+          findings: [
+            { path: "src/foo.ts", line: 9, existingCode: "line9", severity: "Minor", title: "Same point, new words", body: "b" },
+            { path: "src/foo.ts", line: 10, existingCode: "line10-added", severity: "Important", title: "New point", body: "b" },
+          ],
+        });
+        const dir = join(stateDir, "sandboxes", taskId, "widget", ".lastlight", "pr-review");
+        writeFileSync(
+          join(dir, "units.json"),
+          JSON.stringify({ units: [{ id: "u-001", key: "src/foo.ts::(module)", contentSha: "new" }, { id: "u-002", key: "(pr)", contentSha: null }] }),
+        );
+        const mergeScratch = vi.fn(async () => {});
+        const store = { runs: { mergeScratch, appendPhase: vi.fn(async () => {}) } } as unknown as PostReviewRunScope["store"];
+        const { executor } = makeExecutor(
+          taskId,
+          { analysisEnabled: "true", prState: { reviewLedger: ledgerWithOpen() } } as Partial<TemplateContext>,
+          { store, workflowId: "run-2" },
+        );
+        expect((await executor.execute(NODE, {})).status).toBe("succeeded");
+
+        const posted = reviews[0]!.body as { comments: { line: number }[]; body: string };
+        expect(posted.comments.map((c) => c.line)).toEqual([10]);
+        expect(posted.body).toContain("**Still open:** Old point");
+        expect(posted.body).not.toContain("Good to merge");
+        const disposition = JSON.parse(readFileSync(join(dir, "disposition.json"), "utf8")) as { findings: { reason: string | null; finding: { title: string } }[] };
+        expect(disposition.findings.find((f) => f.finding.title === "Same point, new words")?.reason).toBe("already-raised");
+
+        expect(mergeScratch).toHaveBeenCalledTimes(1);
+        const [runId, patch] = mergeScratch.mock.calls[0] as unknown as [string, { reviewLedger: { head: string; rounds: number; units: unknown[]; findings: { title: string; status: string; lastSeenAt: string }[] } }];
+        expect(runId).toBe("run-2");
+        expect(patch.reviewLedger).toMatchObject({ head: HEAD, rounds: 2, units: [{ key: "src/foo.ts::(module)", contentSha: "new" }, { key: "(pr)", contentSha: null }] });
+        expect(patch.reviewLedger.findings.map((f) => [f.title, f.status, f.lastSeenAt])).toEqual([
+          ["Old point", "open", HEAD],
+          ["New point", "open", HEAD],
+        ]);
+      });
+
+      it("keeps no ledger when the pipeline is off", async () => {
+        withReviewConfig({ trigger: "on-request", analysis: { ...defaultReviewConfig().analysis, enabled: false } });
+        const taskId = "widget-42-ledger-off";
+        seedFindings(taskId, "widget", {
+          summary: "ok",
+          event: "COMMENT",
+          findings: [{ path: "src/foo.ts", line: 9, existingCode: "line9", severity: "Minor", title: "Same point", body: "b" }],
+        });
+        const mergeScratch = vi.fn(async () => {});
+        const store = { runs: { mergeScratch, appendPhase: vi.fn(async () => {}) } } as unknown as PostReviewRunScope["store"];
+        const { executor } = makeExecutor(taskId, { prState: { reviewLedger: ledgerWithOpen() } } as Partial<TemplateContext>, { store, workflowId: "run-3" });
+        expect((await executor.execute(NODE, {})).status).toBe("succeeded");
+        // Posted as before: the ledger is the evidence pipeline's, and nothing reads it here.
+        expect((reviews[0]!.body as { comments: unknown[] }).comments).toHaveLength(1);
+        expect(mergeScratch).not.toHaveBeenCalled();
       });
     });
   });

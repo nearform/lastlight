@@ -38,7 +38,7 @@ import type { Arm } from "./arm.js";
 import { modelTemplateForRow } from "./phase-models.js";
 import { startFakeGitHub } from "./fake-github.js";
 import { appliedRepoConfigKeys, loadRepoConfigFixture, resolveEvalRepoConfig, type RepoConfigClient } from "./repo-config.js";
-import { seedWorkspace, seedWorkspaceFromGit, seedWorkspacePrReview, prFilesFromGit, isRealSha, injectRepoContext, type SeedResult } from "./seed.js";
+import { seedWorkspace, seedWorkspaceFromGit, seedWorkspacePrReview, prFilesFromGit, isRealSha, injectRepoContext, checkoutRound, type SeedResult } from "./seed.js";
 import {
   collectMetrics,
   collectMetricsFromFiles,
@@ -51,8 +51,44 @@ import {
 import { modelCost } from "./env.js";
 import { gradeBehavioral, gradeExecution, gradeTriage, gradeReview, gradeInternalRecall, gradeMarkers } from "./grade.js";
 import { readPipelineStats, persistPipelineArtifacts, internalJudgeInputs, withInternalRecall } from "./review-pipeline-stats.js";
-import { prContextPatch, type ReviewOverride } from "./pr-context.js";
+import { writeStoredRunContext } from "./phase-replay-context.js";
+import { caseHeadSha, prContextPatch, type PrStateSeed, type ReviewOverride } from "./pr-context.js";
 import { resolveFactsBin } from "./paths.js";
+import type { RereviewRound } from "./schema.js";
+import type { PriorReview } from "lastlight-code-facts";
+import type { InMemoryStateStore } from "lastlight-workflow-engine/test-support";
+import {
+  coverageSummary,
+  deltaCounts,
+  dispositionCounts,
+  goldMatchedOf,
+  ledgerCounts,
+  planRounds,
+  rollupRereview,
+  type DispositionRowLike,
+} from "./rereview.js";
+import {
+  carryForward,
+  createRoundStore,
+  fileAt,
+  judgeComments,
+  outdatedResolver,
+  readFreshJson,
+  ROUND_ARTIFACTS,
+  roundScratch,
+  scratchCoverage,
+  scratchLedger,
+  snapshotMtimes,
+  UnitsOracle,
+  type RoundUnit,
+} from "./rereview-node.js";
+
+/**
+ * How far the fake's clock moves between two review rounds of a chained case,
+ * so round k+1's reviews and threads are strictly later than round k's — the
+ * order `lastBotReview` and every "latest review" read depends on.
+ */
+const ROUND_GAP_MS = 60 * 60 * 1000;
 
 export interface RunInstanceOptions {
   /**
@@ -188,6 +224,16 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
   // workspace would be inventing a code path it does not have.
   const NO_WORKSPACE = new Set(["issue-triage", "dependabot-pr-merge"]);
   const isCodeFix = !isPrReview && !NO_WORKSPACE.has(workflowName);
+  // A chained re-review case (issue #429) — `null` for every case that runs
+  // once, which then takes exactly the path it always took. Validated before
+  // anything starts: a malformed chain is a case error, not a silent one-round run.
+  let rounds: ReturnType<typeof planRounds> = null;
+  let roundsError: string | undefined;
+  try {
+    rounds = isPrReview ? planRounds(inst) : null;
+  } catch (err) {
+    roundsError = (err as Error).message;
+  }
 
   const stateDir = opts.stateDir ?? mkdtempSync(join(tmpdir(), "ll-eval-"));
   const sessionsDir = join(stateDir, "agent-sessions");
@@ -225,7 +271,7 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     ...(inst.pr_state?.ci_jobs?.length
       ? {
           actions: {
-            headSha: inst.pr_state.head_sha ?? "e7a1d09",
+            headSha: caseHeadSha(inst),
             headBranch: inst.pr_state.head_ref,
             jobs: inst.pr_state.ci_jobs.map((j) => ({
               name: j.name,
@@ -260,6 +306,7 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
   };
 
   try {
+    if (roundsError) throw new Error(roundsError);
     // 2. Seed the workspace for code-fix (triage needs no repo). A vendored
     //    fixture dir wins; otherwise a git-source case (real base SHA + real
     //    repo) is checked out from the repo-local cache. Either way the agent
@@ -308,6 +355,7 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
         headRef: inst.pr.head_ref,
         baseCommit: inst.pr.base_commit,
         headCommit: inst.pr.head_commit,
+        ...(rounds ? { roundCommits: rounds.map((r) => r.head_commit) } : {}),
         repoSubdir,
       });
     }
@@ -315,285 +363,527 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     // the diff run. Falls back to the workspace root if nothing was seeded.
     const repoDir = seed?.workDir ?? join(stateDir, "sandboxes", taskId);
 
-    // Serve the PR's changed files at GET /pulls/:n/files (pr-review): computed
-    // from base..head in the just-seeded workspace, so a review agent that lists
-    // files via the API gets the real changed set instead of a 404.
-    //
-    // KEPT, not discarded: this same set is the SECOND END of every `spec`
-    // obligation, and in production `resolveSpecContext` reads it from
-    // `listPullRequestFilePaths` at the dispatch choke point. The eval never
-    // calls that (it builds the snapshot itself), so without threading it into
-    // `prContextPatch` below `changedFiles` stays `null`, `buildSpecObligations`
-    // correctly refuses to emit a one-ended seed, and the whole spec family —
-    // the one axis nothing else has tried — spends a model call reporting that
-    // it cannot work. Deriving it here rather than seeding it per case keeps the
-    // two ends from drifting apart and covers every case for free.
-    let prFilePaths: string[] | undefined;
-    if (isPrReview && inst.pr && seed) {
-      const files = prFilesFromGit(repoDir, inst.pr.base_commit, inst.pr.head_commit);
-      fake.setPullFiles(inst.pr.number, files);
-      prFilePaths = files.map((f) => f.filename);
-    } else if (inst.pr?.files?.length) {
-      // A tier with no checkout (dependency-merge) states its diff in the case
-      // instead. Same registration, so `GET /pulls/:n/files` and the patch
-      // `github_get_pull_request_diff` returns come from one source.
-      fake.setPullFiles(inst.pr.number, inst.pr.files);
-      prFilePaths = inst.pr.files.map((f) => f.filename);
-    }
+    // Every round of a case runs the same workflow definition.
+    const def = getWorkflow(workflowName);
+    const trialDir = opts.sessionTrialDir;
 
-    // 2b. Inject synthetic repo-context into the pr-review checkout so the
-    //     reviewing agent reads it — a GENERIC block from the overlay (applies to
-    //     every repo) + a PER-REPO block from the tier dataset. The Pi runtime
-    //     auto-loads AGENTS.md/CLAUDE.md walking up from the agent cwd (= the repo
-    //     dir), so this reaches the model with no prompt change. Faithful to what a
-    //     maintainer could commit, so a kept improvement is a portable "add this to
-    //     your repo" recommendation. Records provenance for inspectability.
-    if (isPrReview && seed && (opts.injectContext ?? true)) {
-      const sources = resolveInjectedContext({
-        overlayDir: opts.overlayDir,
-        datasetDir: opts.datasetDir,
-        instanceId: inst.instance_id,
-      });
-      if (sources.length) {
-        const combined = sources.map((s) => s.text.trim()).filter(Boolean).join("\n\n");
-        if (injectRepoContext(seed.workDir, combined)) {
-          result.injectedContext = sources.map((s) => ({
-            source: s.source,
-            path: s.path,
-            bytes: Buffer.byteLength(s.text, "utf8"),
-          }));
+    /**
+     * One dispatch of the workflow: serve the head's changed files, inject the
+     * repo context, build the context from the snapshot, resolve the repo layer
+     * and run. A single-round case calls it once; a chained case
+     * (`inst.rounds`) once per round head, in order (see below).
+     */
+    const executeRound = async (round: {
+      /** The head this dispatch reviews. */
+      head: string;
+      /** The `pr_state` seed: the case's, with a chained round's carried fields over it. */
+      seed: PrStateSeed | undefined;
+      sessionsDir: string;
+      store?: InMemoryStateStore;
+      workflowId?: string;
+    }) => {
+      // Serve the PR's changed files at GET /pulls/:n/files (pr-review): computed
+      // from base..head in the just-seeded workspace, so a review agent that lists
+      // files via the API gets the real changed set instead of a 404.
+      //
+      // KEPT, not discarded: this same set is the SECOND END of every `spec`
+      // obligation, and in production `resolveSpecContext` reads it from
+      // `listPullRequestFilePaths` at the dispatch choke point. The eval never
+      // calls that (it builds the snapshot itself), so without threading it into
+      // `prContextPatch` below `changedFiles` stays `null`, `buildSpecObligations`
+      // correctly refuses to emit a one-ended seed, and the whole spec family —
+      // the one axis nothing else has tried — spends a model call reporting that
+      // it cannot work. Deriving it here rather than seeding it per case keeps the
+      // two ends from drifting apart and covers every case for free.
+      let prFilePaths: string[] | undefined;
+      if (isPrReview && inst.pr && seed) {
+        const files = prFilesFromGit(repoDir, inst.pr.base_commit, round.head);
+        fake.setPullFiles(inst.pr.number, files);
+        prFilePaths = files.map((f) => f.filename);
+      } else if (inst.pr?.files?.length) {
+        // A tier with no checkout (dependency-merge) states its diff in the case
+        // instead. Same registration, so `GET /pulls/:n/files` and the patch
+        // `github_get_pull_request_diff` returns come from one source.
+        fake.setPullFiles(inst.pr.number, inst.pr.files);
+        prFilePaths = inst.pr.files.map((f) => f.filename);
+      }
+
+      // 2b. Inject synthetic repo-context into the pr-review checkout so the
+      //     reviewing agent reads it — a GENERIC block from the overlay (applies to
+      //     every repo) + a PER-REPO block from the tier dataset. The Pi runtime
+      //     auto-loads AGENTS.md/CLAUDE.md walking up from the agent cwd (= the repo
+      //     dir), so this reaches the model with no prompt change. Faithful to what a
+      //     maintainer could commit, so a kept improvement is a portable "add this to
+      //     your repo" recommendation. Records provenance for inspectability.
+      if (isPrReview && seed && (opts.injectContext ?? true)) {
+        const sources = resolveInjectedContext({
+          overlayDir: opts.overlayDir,
+          datasetDir: opts.datasetDir,
+          instanceId: inst.instance_id,
+        });
+        if (sources.length) {
+          const combined = sources.map((s) => s.text.trim()).filter(Boolean).join("\n\n");
+          if (injectRepoContext(seed.workDir, combined)) {
+            result.injectedContext = sources.map((s) => ({
+              source: s.source,
+              path: s.path,
+              bytes: Buffer.byteLength(s.text, "utf8"),
+            }));
+          }
         }
       }
-    }
 
-    // 3. Real workflow definition + run context.
-    const def = getWorkflow(workflowName);
-    const ctx: TemplateContext = {
-      owner,
-      repo: name,
-      issueNumber,
-      issueTitle: (isPrReview ? inst.pr?.title : inst.issue?.title) ?? inst.instance_id,
-      issueBody: (isPrReview ? inst.pr?.body : inst.issue?.body) ?? inst.problem_statement,
-      issueLabels: inst.issue?.labels ?? [],
-      commentBody: "",
-      sender: "eval",
-      branch,
-      taskId,
-      issueDir: `.lastlight/issue-${issueNumber}`,
-      bootstrapLabel: "lastlight:bootstrap",
-      // pr-review's Context block keys off `prNumber` — the skill goes straight
-      // to github_get_pull_request when it's set (buildPhasePrompt dumps every
-      // defined ctx field into the "Context:" block). `baseBranch` is what the
-      // deterministic `post-review` phase reads to compute the commentable diff
-      // (`git diff origin/<baseBranch>...HEAD`) — WITHOUT it every finding is
-      // demoted to the review body and the line-anchored inline-comment path
-      // (the point of the tier) never fires. Prod sets it from the PR's base ref;
-      // the eval must too, or it diverges from what ships.
-      ...(isPrReview && inst.pr
-        ? { prNumber: inst.pr.number, prTitle: inst.pr.title, baseBranch: inst.pr.base_ref }
-        : {}),
-      // No prePopulateBranch → the runner never clones from GitHub; the agent
-      // works in the dir we seeded above (or an empty dir for triage).
-    };
-
-    // 3a. The PR state machine's projection (issues #251, #252).
-    //
-    // A PR-scoped workflow is dispatched in production, never called: the
-    // dispatcher resolves one `PrState` snapshot and `renderContext` projects it
-    // into the context. That projection IS what the fix and merge prompts reason
-    // with — `{{ciSection}}`, `{{attempt}}`, `{{mayMerge}}`, `{{priorNotes}}`,
-    // `{{verifyScript}}` — so running them off a hand-built context measures a
-    // workflow production does not have. `./pr-context.ts` builds the snapshot a
-    // case seeds and hands it to CORE's projection, unmodified.
-    //
-    // Gated on the workflow's own `pr_scoped: true` metadata rather than a name
-    // list here — the same fact core derives `prScopedWorkflows()` from, so an
-    // overlay's forked fix workflow is covered without a change to this file.
-    //
-    // `pr-review` USED TO BE excluded here, and the exclusion was about scores,
-    // not about correctness: pr-review is judge-scored and its numbers are
-    // compared across runs and against Martian's leaderboard, so enriching its
-    // context would move every historical figure as a side effect of a change
-    // that was not about them.
-    //
-    // The exclusion was LIFTED DELIBERATELY on 2026-08-22. It had made the
-    // review evidence pipeline unmeasurable on the only tier its gates are read
-    // on: with no `prContextPatch`, core's `renderContext` never runs, the
-    // context never gets `analysisEnabled`, and every WP3 phase in
-    // `pr-review.yaml` matches `skip_if: "analysisEnabled != true"` and skips.
-    // WP0's `{{specObligations}}` was unmeasurable there for the same reason.
-    // The choice was between a pipeline that cannot be measured and a baseline
-    // that has to be re-run; the baseline is being re-run.
-    //
-    // THEREFORE: every pr-review number produced BEFORE 2026-08-22 was measured
-    // on a different template context and must NOT be compared across that
-    // boundary — not in `diff-runs.ts`, not against `2026-08-20_074355`, not
-    // against the leaderboard entry that run backed. Re-baseline instead.
-    const wantsPrContext = (def as { pr_scoped?: boolean }).pr_scoped === true || !!inst.pr_state;
-    if (wantsPrContext) {
-      Object.assign(
-        ctx,
-        await prContextPatch({
-          repo: `${owner}/${name}`,
-          prNumber: inst.pr?.number ?? issueNumber,
-          title: inst.pr?.title ?? inst.issue?.title ?? inst.instance_id,
-          body: inst.pr?.body ?? inst.issue?.body ?? inst.problem_statement,
-          branch,
-          seed: inst.pr_state,
-          baseRef: inst.pr?.base_ref,
-          // A REAL `GitHubClient` pointed at the fake — the same construction
-          // `post-review` already uses against the mock. Core's own
-          // `resolveSpecContext` then reads BOTH ends of the spec axis through
-          // it, so the eval exercises the production code path (GraphQL
-          // `closingIssuesReferences` + `GET /pulls/:n/files`) rather than a
-          // harness copy of it. `setPullFiles` above is what the second read
-          // hits, so it must already have run — it has.
-          github: resolveReviewGitHubClient({ githubApiBaseUrl: fake.url }),
-          // Retained as the fallback for a tier with no live client: a case that
-          // seeds `pr_state.changed_files` still wins — including seeding `[]`,
-          // which asserts "this PR changes nothing" rather than "we could not
-          // read it". Those must stay distinguishable (locked decision 6).
-          changedFiles: prFilePaths,
-          // The arm's own `review:` policy — the overlay's, never gold's. This
-          // is the seam that turns the evidence pipeline on for the `wp3` arm
-          // and leaves it off for `baseline`, with no per-case special-casing:
-          // `baseline/config.yaml` simply declares no `analysis` block.
-          review: opts.arm.review as ReviewOverride | undefined,
-        }),
-      );
-    }
-
-    // The arm supplies model selection in one shot: it patches `ctx.models`/
-    // `ctx.variants` (config arms — EXACTLY as production's `simple.js`, so phase
-    // `model: "{{models.X}}"` templates resolve) and returns the executor model
-    // plus the `runWorkflow` `models`/`variants` args. `models` arms leave the
-    // context untouched and return just their forced id.
-    const prepared = opts.arm.prepare(ctx as Record<string, unknown>);
-
-    // 3b. The target repo's `.lastlight/` config layer (issue #180), resolved
-    //     through core's OWN dispatch-time resolver against the mock — fetch →
-    //     sanitize → unpack → merge, unmodified. Undefined for a repo with no
-    //     `.lastlight/`, in which case `runWorkflow` below is called exactly as
-    //     it was before the feature existed. Never throws: the resolver's whole
-    //     contract is "warn, drop the bad bits, run anyway".
-    const repoRun = await resolveEvalRepoConfig({
-      repo: `${owner}/${name}`,
-      workflowName,
-      client: fake as unknown as RepoConfigClient,
-      models: prepared.models,
-      variants: prepared.variants,
-      defaultModel: prepared.model,
-      cacheRoot: join(stateDir, "repo-config"),
-    });
-    if (repoRun.repoConfig) {
-      result.repoLayer = {
-        repo: repoRun.repoConfig.repo,
-        defaultBranch: repoRun.repoConfig.defaultBranch,
-        treeSha: repoRun.repoConfig.treeSha,
-        assets: [...repoRun.repoConfig.assets],
-        applied: appliedRepoConfigKeys(repoRun.repoConfig),
-        warnings: repoRun.repoConfig.warnings.map((w) => `${w.code}: ${w.message}`),
+      // 3. The run context (the workflow definition is resolved once, above).
+      const ctx: TemplateContext = {
+        owner,
+        repo: name,
+        issueNumber,
+        issueTitle: (isPrReview ? inst.pr?.title : inst.issue?.title) ?? inst.instance_id,
+        issueBody: (isPrReview ? inst.pr?.body : inst.issue?.body) ?? inst.problem_statement,
+        issueLabels: inst.issue?.labels ?? [],
+        commentBody: "",
+        sender: "eval",
+        branch,
+        taskId,
+        issueDir: `.lastlight/issue-${issueNumber}`,
+        bootstrapLabel: "lastlight:bootstrap",
+        // pr-review's Context block keys off `prNumber` — the skill goes straight
+        // to github_get_pull_request when it's set (buildPhasePrompt dumps every
+        // defined ctx field into the "Context:" block). `baseBranch` is what the
+        // deterministic `post-review` phase reads to compute the commentable diff
+        // (`git diff origin/<baseBranch>...HEAD`) — WITHOUT it every finding is
+        // demoted to the review body and the line-anchored inline-comment path
+        // (the point of the tier) never fires. Prod sets it from the PR's base ref;
+        // the eval must too, or it diverges from what ships.
+        ...(isPrReview && inst.pr
+          ? { prNumber: inst.pr.number, prTitle: inst.pr.title, baseBranch: inst.pr.base_ref }
+          : {}),
+        // No prePopulateBranch → the runner never clones from GitHub; the agent
+        // works in the dir we seeded above (or an empty dir for triage).
       };
-    }
-    // The repo opting ITSELF out of this workflow in `.lastlight/lastlight.yml`.
-    // Production abandons the dispatch here — no run, no agent call — so the
-    // case is `blocked` (a deliberate measured outcome), not an error.
-    if (repoRun.refusal) {
-      result.blocked = true;
-      result.repoLayer = { ...(result.repoLayer ?? { repo: `${owner}/${name}` }), refused: repoRun.refusal };
-      result.behavioral = gradeBehavioral(inst.expect_github, fake, { issueNumber, branch });
-      result.githubMutations = fake.calls.length;
-      return result;
-    }
 
-    const config: ExecutorConfig = {
-      sandbox: opts.sandbox ?? "none",
-      stateDir,
-      sessionsDir,
-      // Run the agent inside the pre-seeded `<workspace>/<repo>/` checkout (only
-      // when we actually seeded one), matching production's nested layout. Core
-      // nests `agentCwd` here without a clone; AGENTS.md/.lastlight-skills stay
-      // at the workspace root, siblings outside the repo.
-      repoSubdir: seed ? repoSubdir : undefined,
-      // `config` arms let core pick per phase (this is only the fallback for
-      // phases that resolve to nothing — the merged config's `default`); `models`
-      // arms force their one id across every step.
-      model: prepared.model,
-      githubApiBaseUrl: fake.url,
-      // Eval workflows shouldn't reach the network beyond the model + fake GH.
-      webSearch: false,
-    };
+      // 3a. The PR state machine's projection (issues #251, #252).
+      //
+      // A PR-scoped workflow is dispatched in production, never called: the
+      // dispatcher resolves one `PrState` snapshot and `renderContext` projects it
+      // into the context. That projection IS what the fix and merge prompts reason
+      // with — `{{ciSection}}`, `{{attempt}}`, `{{mayMerge}}`, `{{priorNotes}}`,
+      // `{{verifyScript}}` — so running them off a hand-built context measures a
+      // workflow production does not have. `./pr-context.ts` builds the snapshot a
+      // case seeds and hands it to CORE's projection, unmodified.
+      //
+      // Gated on the workflow's own `pr_scoped: true` metadata rather than a name
+      // list here — the same fact core derives `prScopedWorkflows()` from, so an
+      // overlay's forked fix workflow is covered without a change to this file.
+      //
+      // `pr-review` USED TO BE excluded here, and the exclusion was about scores,
+      // not about correctness: pr-review is judge-scored and its numbers are
+      // compared across runs and against Martian's leaderboard, so enriching its
+      // context would move every historical figure as a side effect of a change
+      // that was not about them.
+      //
+      // The exclusion was LIFTED DELIBERATELY on 2026-08-22. It had made the
+      // review evidence pipeline unmeasurable on the only tier its gates are read
+      // on: with no `prContextPatch`, core's `renderContext` never runs, the
+      // context never gets `analysisEnabled`, and every WP3 phase in
+      // `pr-review.yaml` matches `skip_if: "analysisEnabled != true"` and skips.
+      // WP0's `{{specObligations}}` was unmeasurable there for the same reason.
+      // The choice was between a pipeline that cannot be measured and a baseline
+      // that has to be re-run; the baseline is being re-run.
+      //
+      // THEREFORE: every pr-review number produced BEFORE 2026-08-22 was measured
+      // on a different template context and must NOT be compared across that
+      // boundary — not in `diff-runs.ts`, not against `2026-08-20_074355`, not
+      // against the leaderboard entry that run backed. Re-baseline instead.
+      const wantsPrContext = (def as { pr_scoped?: boolean }).pr_scoped === true || !!inst.pr_state;
+      if (wantsPrContext) {
+        Object.assign(
+          ctx,
+          await prContextPatch({
+            repo: `${owner}/${name}`,
+            prNumber: inst.pr?.number ?? issueNumber,
+            title: inst.pr?.title ?? inst.issue?.title ?? inst.instance_id,
+            body: inst.pr?.body ?? inst.issue?.body ?? inst.problem_statement,
+            branch,
+            seed: round.seed,
+            baseRef: inst.pr?.base_ref,
+            // The real head — the round's, or the PR's (`caseHeadSha`): never the
+            // placeholder when the case names a real commit.
+            ...(isRealSha(round.head) ? { headSha: round.head } : {}),
+            // A chained case projects the snapshot itself too (`ctx.prState`), as
+            // `dispatchWorkflow` does: post-review reads the ledger it was
+            // dispatched with off it. Single-round cases keep the old context.
+            snapshot: !!rounds,
+            // A REAL `GitHubClient` pointed at the fake — the same construction
+            // `post-review` already uses against the mock. Core's own
+            // `resolveSpecContext` then reads BOTH ends of the spec axis through
+            // it, so the eval exercises the production code path (GraphQL
+            // `closingIssuesReferences` + `GET /pulls/:n/files`) rather than a
+            // harness copy of it. `setPullFiles` above is what the second read
+            // hits, so it must already have run — it has.
+            github: resolveReviewGitHubClient({ githubApiBaseUrl: fake.url }),
+            // Retained as the fallback for a tier with no live client: a case that
+            // seeds `pr_state.changed_files` still wins — including seeding `[]`,
+            // which asserts "this PR changes nothing" rather than "we could not
+            // read it". Those must stay distinguishable (locked decision 6).
+            changedFiles: prFilePaths,
+            // The arm's own `review:` policy — the overlay's, never gold's. This
+            // is the seam that turns the evidence pipeline on for the `wp3` arm
+            // and leaves it off for `baseline`, with no per-case special-casing:
+            // `baseline/config.yaml` simply declares no `analysis` block.
+            review: opts.arm.review as ReviewOverride | undefined,
+          }),
+        );
+      }
 
-    // Phase windows: `onPhaseStart`/`onPhaseEnd` bracket each phase, and the
-    // pair is what makes a phase's duration MEASURED rather than inferred from
-    // the next phase's start — which would silently bill the gap between phases
-    // (workspace refresh, the `until_bash` container spin-up) to whichever phase
-    // happened to precede it.
-    //
-    // `phaseStarts` additionally backs the FALLBACK attribution rule in
-    // `bucketSessionsByPhase`. Sessions now carry their owning phase as a stamp,
-    // so the windows are only consulted for jsonl archived before that stamp
-    // existed; see that function for why a start-time lookup cannot attribute a
-    // fan-out at all.
-    const phaseStarts: { phase: string; start: number }[] = [];
-    const phaseWindows = new Map<string, { start: number; end?: number }>();
-    const callbacks: RunnerCallbacks = {
-      onPhaseStart: async (phase) => {
-        const now = Date.now();
-        phaseStarts.push({ phase, start: now });
-        // First start wins: a label the engine re-announces (a loop node whose
-        // condition-met entry repeats it) must not restart its own clock.
-        if (!phaseWindows.has(phase)) phaseWindows.set(phase, { start: now });
-      },
-      onPhaseEnd: async (phase) => {
-        const w = phaseWindows.get(phase);
-        if (w) w.end = Date.now();
-      },
-    };
+      // The arm supplies model selection in one shot: it patches `ctx.models`/
+      // `ctx.variants` (config arms — EXACTLY as production's `simple.js`, so phase
+      // `model: "{{models.X}}"` templates resolve) and returns the executor model
+      // plus the `runWorkflow` `models`/`variants` args. `models` arms leave the
+      // context untouched and return just their forced id.
+      const prepared = opts.arm.prepare(ctx as Record<string, unknown>);
 
-    const trialDir = opts.sessionTrialDir;
-    const fullFile = trialDir ? join(trialDir, "full.jsonl") : undefined;
-    // Flush the consolidated transcript atomically (so a polling dashboard never
-    // reads a half-written file): on a timer while running (follow-along), and
-    // once at the end. Best-effort — a flush failure must never affect the run.
-    const flushFull = () => {
-      if (!fullFile || !trialDir) return;
+      // 3b. The target repo's `.lastlight/` config layer (issue #180), resolved
+      //     through core's OWN dispatch-time resolver against the mock — fetch →
+      //     sanitize → unpack → merge, unmodified. Undefined for a repo with no
+      //     `.lastlight/`, in which case `runWorkflow` below is called exactly as
+      //     it was before the feature existed. Never throws: the resolver's whole
+      //     contract is "warn, drop the bad bits, run anyway".
+      const repoRun = await resolveEvalRepoConfig({
+        repo: `${owner}/${name}`,
+        workflowName,
+        client: fake as unknown as RepoConfigClient,
+        models: prepared.models,
+        variants: prepared.variants,
+        defaultModel: prepared.model,
+        cacheRoot: join(stateDir, "repo-config"),
+      });
+      if (repoRun.repoConfig) {
+        result.repoLayer = {
+          repo: repoRun.repoConfig.repo,
+          defaultBranch: repoRun.repoConfig.defaultBranch,
+          treeSha: repoRun.repoConfig.treeSha,
+          assets: [...repoRun.repoConfig.assets],
+          applied: appliedRepoConfigKeys(repoRun.repoConfig),
+          warnings: repoRun.repoConfig.warnings.map((w) => `${w.code}: ${w.message}`),
+        };
+      }
+      // The repo opting ITSELF out of this workflow in `.lastlight/lastlight.yml`.
+      // Production abandons the dispatch here — no run, no agent call — so the
+      // case is `blocked` (a deliberate measured outcome), not an error.
+      if (repoRun.refusal) {
+        result.blocked = true;
+        result.repoLayer = { ...(result.repoLayer ?? { repo: `${owner}/${name}` }), refused: repoRun.refusal };
+        result.behavioral = gradeBehavioral(inst.expect_github, fake, { issueNumber, branch });
+        result.githubMutations = fake.calls.length;
+        return { refused: true as const };
+      }
+
+      const config: ExecutorConfig = {
+        sandbox: opts.sandbox ?? "none",
+        stateDir,
+        sessionsDir: round.sessionsDir,
+        // Run the agent inside the pre-seeded `<workspace>/<repo>/` checkout (only
+        // when we actually seeded one), matching production's nested layout. Core
+        // nests `agentCwd` here without a clone; AGENTS.md/.lastlight-skills stay
+        // at the workspace root, siblings outside the repo.
+        repoSubdir: seed ? repoSubdir : undefined,
+        // `config` arms let core pick per phase (this is only the fallback for
+        // phases that resolve to nothing — the merged config's `default`); `models`
+        // arms force their one id across every step.
+        model: prepared.model,
+        githubApiBaseUrl: fake.url,
+        // Eval workflows shouldn't reach the network beyond the model + fake GH.
+        webSearch: false,
+      };
+
+      // Phase windows: `onPhaseStart`/`onPhaseEnd` bracket each phase, and the
+      // pair is what makes a phase's duration MEASURED rather than inferred from
+      // the next phase's start — which would silently bill the gap between phases
+      // (workspace refresh, the `until_bash` container spin-up) to whichever phase
+      // happened to precede it.
+      //
+      // `phaseStarts` additionally backs the FALLBACK attribution rule in
+      // `bucketSessionsByPhase`. Sessions now carry their owning phase as a stamp,
+      // so the windows are only consulted for jsonl archived before that stamp
+      // existed; see that function for why a start-time lookup cannot attribute a
+      // fan-out at all.
+      const phaseStarts: { phase: string; start: number }[] = [];
+      const phaseWindows = new Map<string, { start: number; end?: number }>();
+      const callbacks: RunnerCallbacks = {
+        onPhaseStart: async (phase) => {
+          const now = Date.now();
+          phaseStarts.push({ phase, start: now });
+          // First start wins: a label the engine re-announces (a loop node whose
+          // condition-met entry repeats it) must not restart its own clock.
+          if (!phaseWindows.has(phase)) phaseWindows.set(phase, { start: now });
+        },
+        onPhaseEnd: async (phase) => {
+          const w = phaseWindows.get(phase);
+          if (w) w.end = Date.now();
+        },
+      };
+
+      const fullFile = trialDir ? join(trialDir, "full.jsonl") : undefined;
+      // Flush the consolidated transcript atomically (so a polling dashboard never
+      // reads a half-written file): on a timer while running (follow-along), and
+      // once at the end. Best-effort — a flush failure must never affect the run.
+      const flushFull = () => {
+        if (!fullFile || !trialDir) return;
+        try {
+          const log = readSessionLog(round.sessionsDir);
+          if (!log) return;
+          mkdirSync(trialDir, { recursive: true });
+          const tmp = `${fullFile}.tmp`;
+          writeFileSync(tmp, log);
+          renameSync(tmp, fullFile);
+        } catch {
+          /* best-effort */
+        }
+      };
+
+      // 4. Run. Empty approvalConfig (7th arg) → every approval gate is disabled.
+      // The arm's prepared maps go to args 6 (models) and 9 (variants), matching
+      // prod's runWorkflow call; `models` arms leave both undefined so every phase
+      // falls back to config.model (one model everywhere). The 10th arg is the
+      // repo layer — `undefined` for a repo with no `.lastlight/`, which is the
+      // pre-#180 call byte-for-byte. The 5th/8th (store, workflow id) are unset
+      // for a single-round case — no db, so every gate is inert — and, for a
+      // chained case, the in-memory run store post-review persists the review
+      // ledger to (`rereview-node.ts`); `approvalConfig` stays empty either way.
+      const flushTimer = fullFile ? setInterval(flushFull, 1000) : undefined;
+      let wf;
       try {
-        const log = readSessionLog(sessionsDir);
-        if (!log) return;
-        mkdirSync(trialDir, { recursive: true });
-        const tmp = `${fullFile}.tmp`;
-        writeFileSync(tmp, log);
-        renameSync(tmp, fullFile);
+        wf = await runWorkflow(
+          def,
+          ctx,
+          config,
+          callbacks,
+          round.store as never,
+          prepared.models,
+          {},
+          round.workflowId,
+          prepared.variants,
+          repoRun.repoConfig,
+        );
+      } finally {
+        if (flushTimer) clearInterval(flushTimer);
+      }
+      return { wf, ctx, prepared, phaseStarts, phaseWindows, flushFull, fullFile };
+    };
+
+    // ── Chained re-review rounds (issue #429) ──────────────────────────────
+    //
+    // A case with `rounds` runs the real workflow once per earlier head, in
+    // order, before the scored last round below — one fake GitHub (round k's
+    // review and threads are what round k+1 reads), one per-PR workspace
+    // (checked out to each head, its `.lastlight/pr-review/` carried as a
+    // reused production workspace carries it), and one in-memory run store, so
+    // post-review persists the review ledger to the round's run scratch and the
+    // next round is dispatched with it through core's `deriveReviewLedger`.
+    const store = rounds ? createRoundStore() : undefined;
+    const roundRecords: RereviewRound[] = [];
+    let roundSeed: PrStateSeed | undefined = inst.pr_state;
+    let currentHead = rounds ? rounds[0]!.head_commit : caseHeadSha(inst);
+    const prDir = join(repoDir, ".lastlight", "pr-review");
+    const heads = rounds?.map((r) => r.head_commit) ?? [];
+    const factsBin = rounds ? resolveFactsBin() : null;
+    const oracle =
+      rounds && factsBin && inst.pr
+        ? new UnitsOracle({ repoDir, base: inst.pr.base_commit, factsBin, root: join(stateDir, "rereview-oracle") })
+        : undefined;
+    if (rounds && inst.pr && seed) {
+      fake.setOutdatedResolver(outdatedResolver(repoDir, () => currentHead));
+    }
+
+    /**
+     * What one finished round measured — everything but the grade and the
+     * spend, which the caller adds (the last round's come from the case's own).
+     */
+    const measureRound = async (k: number, before: Map<string, number | null>, wfOk: { success: boolean; error?: string }) => {
+      const head = heads[k]!;
+      const reviews = fake.submittedReviews(inst.pr!.number);
+      const inline = reviews.flatMap((r) => r.comments);
+      const disposition = readFreshJson(prDir, "disposition.json", before) as { findings?: DispositionRowLike[] } | undefined;
+      const scratch = store ? await roundScratch(store, roundWorkflowId(k)) : {};
+      const record: RereviewRound = {
+        round: k + 1,
+        headSha: head,
+        ...(rounds![k]!.label ? { label: rounds![k]!.label } : {}),
+        workflowSucceeded: wfOk.success,
+        ...(wfOk.error ? { error: wfOk.error } : {}),
+        ...(reviews.length ? { event: reviews.at(-1)!.event } : {}),
+        inlinePosted: inline.length,
+        ...(disposition?.findings ? dispositionCounts(disposition.findings) : {}),
+        costUsd: 0,
+        inputTokens: 0,
+        cachedTokens: 0,
+        outputTokens: 0,
+        durationMs: 0,
+      };
+      const coverage = coverageSummary(scratchCoverage(scratch) ?? readFreshJson(prDir, "review-coverage.json", before));
+      if (coverage) record.coverage = coverage;
+      const ledger = ledgerCounts(scratchLedger(scratch) as never);
+      if (ledger) record.ledger = ledger;
+
+      // Late discoveries: round ≥ 2 only. The round's OWN units and prior
+      // review when its pipeline cut them (what its convergence gate saw);
+      // otherwise the harness's oracle cut over the same two heads, so an arm
+      // that runs no pipeline is measured on the same instrument.
+      if (k >= 1) {
+        const ownUnits = readFreshJson(prDir, "units.json", before) as { units?: RoundUnit[] } | undefined;
+        const ownPrior = readFreshJson(prDir, "prior-review.json", before) as PriorReview | undefined;
+        let units: RoundUnit[] | undefined;
+        let prior: PriorReview | null | undefined;
+        if (ownUnits?.units?.length && ownPrior) {
+          units = ownUnits.units;
+          prior = ownPrior;
+          record.lateDiscoverySource = "units.json";
+        } else if (oracle) {
+          try {
+            units = oracle.at(heads, k).units;
+            prior = oracle.priorFor(heads, k);
+            record.lateDiscoverySource = "oracle";
+          } catch (err) {
+            record.lateDiscoveryUnavailable = `oracle units cut failed: ${(err as Error).message.slice(0, 200)}`;
+          }
+        } else {
+          record.lateDiscoveryUnavailable = "no units.json/prior-review.json this round and no lastlight-facts binary for the oracle";
+        }
+        if (units && prior !== undefined) {
+          const verdicts = judgeComments({
+            comments: inline.map((c) => ({ path: c.path, ...(c.line !== undefined ? { line: c.line } : {}), ...(c.start_line !== undefined ? { start_line: c.start_line } : {}) })),
+            prior,
+            units,
+            fileText: (path) => fileAt(repoDir, head, path),
+          });
+          record.lateDiscovery = verdicts.filter((v) => v.verdict === "unchanged").length;
+          record.lateDiscoveryOf = verdicts.filter((v) => v.verdict !== null).length;
+          const delta = deltaCounts(units);
+          if (delta) record.delta = delta;
+          roundVerdicts.set(k, verdicts);
+        }
+      }
+      return { record, reviews, scratch, disposition };
+    };
+    const roundWorkflowId = (k: number) => `${taskId}:round-${k + 1}`;
+    const roundVerdicts = new Map<number, unknown[]>();
+
+    /** A round's evidence, beside its artifacts: what it posted, its dispositions, the ledger it left, the late-discovery verdicts. */
+    const archiveRound = (k: number, m: Awaited<ReturnType<typeof measureRound>>, extra: { sessionsDir?: string } = {}): string | undefined => {
+      if (!trialDir) return undefined;
+      const dir = join(trialDir, `round-${k + 1}`);
+      try {
+        mkdirSync(dir, { recursive: true });
+        if (extra.sessionsDir) {
+          const log = readSessionLog(extra.sessionsDir);
+          if (log) writeFileSync(join(dir, "full.jsonl"), log);
+          persistPipelineArtifacts(repoDir, dir);
+        }
+        writeFileSync(
+          join(dir, "round.json"),
+          `${JSON.stringify(
+            {
+              round: k + 1,
+              head: heads[k],
+              reviews: m.reviews,
+              disposition: m.disposition ?? null,
+              reviewLedger: scratchLedger(m.scratch) ?? null,
+              reviewCoverage: scratchCoverage(m.scratch) ?? null,
+              lateDiscovery: roundVerdicts.get(k) ?? null,
+              dispatched: roundSeed ?? null,
+            },
+            null,
+            2,
+          )}\n`,
+        );
+        return `${opts.sessionTrialRel ?? trialDir}/round-${k + 1}`;
       } catch {
-        /* best-effort */
+        return undefined;
       }
     };
 
-    // 4. Run. Empty approvalConfig (7th arg) → every approval gate is disabled.
-    // The arm's prepared maps go to args 6 (models) and 9 (variants), matching
-    // prod's runWorkflow call; `models` arms leave both undefined so every phase
-    // falls back to config.model (one model everywhere). The 10th arg is the
-    // repo layer — `undefined` for a repo with no `.lastlight/`, which is the
-    // pre-#180 call byte-for-byte.
-    const flushTimer = fullFile ? setInterval(flushFull, 1000) : undefined;
-    let wf;
-    try {
-      wf = await runWorkflow(
-        def,
-        ctx,
-        config,
-        callbacks,
-        undefined,
-        prepared.models,
-        {},
-        undefined,
-        prepared.variants,
-        repoRun.repoConfig,
-      );
-    } finally {
-      if (flushTimer) clearInterval(flushTimer);
+    if (rounds && inst.pr && seed) {
+      for (let k = 0; k < rounds.length - 1; k++) {
+        const head = heads[k]!;
+        if (k > 0) {
+          checkoutRound(repoDir, seed.branch, head);
+          fake.advanceClock(ROUND_GAP_MS);
+        }
+        currentHead = head;
+        fake.setHead(inst.pr.number, head);
+        fake.startRound();
+        const sessionsDirK = join(stateDir, `agent-sessions-round-${k + 1}`);
+        mkdirSync(join(sessionsDirK, "projects"), { recursive: true });
+        const before = snapshotMtimes(prDir, ROUND_ARTIFACTS);
+        const startedAt = Date.now();
+        const seedK: PrStateSeed = { ...(roundSeed ?? {}), head_sha: head };
+        roundSeed = seedK;
+        const ran = await executeRound({ head, seed: seedK, sessionsDir: sessionsDirK, store, workflowId: roundWorkflowId(k) });
+        if ("refused" in ran) return result;
+        await drainSessions(sessionsDirK);
+        const failed = ran.wf.phases.find((p) => !p.success && p.error);
+        const m = await measureRound(k, before, {
+          success: ran.wf.success,
+          ...(failed?.error ? { error: `${failed.phase}: ${failed.error}`.slice(0, 300) } : {}),
+        });
+        const cost = collectMetrics(sessionsDirK, modelCost(ran.prepared.model));
+        Object.assign(m.record, {
+          costUsd: cost.costUsd,
+          inputTokens: cost.inputTokens,
+          cachedTokens: cost.cachedTokens,
+          outputTokens: cost.outputTokens,
+          durationMs: Date.now() - startedAt,
+        });
+        // The round's own grade, for cumulative recall — the same judge and
+        // gold as the scored round, over the review THIS round posted.
+        if (inst.review_gold) {
+          const rg = await gradeReview({ gold: inst.review_gold, reviews: m.reviews, beta: opts.judge?.beta, neutralGold: inst.review_gold_neutral });
+          const matched = goldMatchedOf(rg.trace);
+          if (!rg.error && matched) {
+            m.record.goldMatched = matched;
+            m.record.postedFindings = rg.posted;
+          }
+        }
+        const rel = archiveRound(k, m, { sessionsDir: sessionsDirK });
+        if (rel) m.record.artifactRel = rel;
+        roundRecords.push(m.record);
+        // Recorded as it goes, so a later round that throws still leaves the
+        // rounds that ran on the result (re-rolled with the last round below).
+        result.rereview = rollupRereview(roundRecords, inst.review_gold?.length);
+        // What the next round is dispatched with.
+        roundSeed = {
+          ...(inst.pr_state ?? {}),
+          ...carryForward({
+            repoDir,
+            baseCommit: inst.pr.base_commit,
+            prevHead: head,
+            nextHead: heads[k + 1]!,
+            reviews: m.reviews,
+            prev: seedK,
+            scratch: m.scratch,
+          }),
+        };
+      }
+      // The scored round: the PR's own head.
+      checkoutRound(repoDir, seed.branch, inst.pr.head_commit);
+      fake.advanceClock(ROUND_GAP_MS);
+      currentHead = inst.pr.head_commit;
+      fake.setHead(inst.pr.number, inst.pr.head_commit);
+      fake.startRound();
     }
+    const finalBefore = rounds ? snapshotMtimes(prDir, ROUND_ARTIFACTS) : undefined;
+    const finalStartedAt = Date.now();
+    const ran = await executeRound({
+      // Single-round: the PR's own head (its files are what GET /pulls/:n/files
+      // always served), else the snapshot's head for a PR-less case.
+      head: inst.pr?.head_commit ?? caseHeadSha(inst),
+      seed: roundSeed,
+      sessionsDir,
+      ...(store ? { store, workflowId: roundWorkflowId(rounds!.length - 1) } : {}),
+    });
+    if ("refused" in ran) return result;
+    const { wf, ctx, prepared, phaseStarts, phaseWindows, flushFull, fullFile } = ran;
 
     result.workflowSucceeded = wf.success;
     // Record the model each phase resolved to — the arm forced id in `models`
@@ -705,6 +995,12 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
         try {
           if (persistPipelineArtifacts(repoDir, opts.sessionTrialDir) && opts.sessionTrialRel)
             result.pipelineArtifactRel = `${opts.sessionTrialRel}/pr-review`;
+          // The prompt context a phase REPLAY needs and cannot rebuild from
+          // the artifacts: what `select` was told about the PR's earlier
+          // conversation and review ledger (`phase-replay-node.ts`'s
+          // `readStoredRunContext`). Beside `pr-review/`, never inside it — a
+          // replay copies that dir into the checkout the agent works in.
+          writeStoredRunContext(opts.sessionTrialDir, ctx as Record<string, unknown>);
         } catch (err) {
           // Never fail a measured run over its own bookkeeping — but a warning
           // on a background process IS functionally silent, which is the bug
@@ -857,6 +1153,29 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
       } catch {
         /* leave sessionTrial unset */
       }
+    }
+
+    // 5e. The chained case's last round, measured like the others, and the
+    // roll-up. Its grade, spend and artifacts are the case's own (above).
+    if (rounds && finalBefore) {
+      const k = rounds.length - 1;
+      const m = await measureRound(k, finalBefore, { success: wf.success, ...(result.error ? { error: result.error } : {}) });
+      Object.assign(m.record, {
+        costUsd: result.costUsd,
+        inputTokens: result.inputTokens,
+        cachedTokens: result.cachedTokens,
+        outputTokens: result.outputTokens,
+        durationMs: Date.now() - finalStartedAt,
+      });
+      const matched = result.review && !result.error?.startsWith("review judge") ? goldMatchedOf(result.review.trace) : null;
+      if (matched) {
+        m.record.goldMatched = matched;
+        m.record.postedFindings = result.review!.posted;
+      }
+      const rel = archiveRound(k, m);
+      if (rel) m.record.artifactRel = rel;
+      roundRecords.push(m.record);
+      result.rereview = rollupRereview(roundRecords, inst.review_gold?.length);
     }
   } catch (err) {
     result.error = err instanceof Error ? err.message : String(err);

@@ -28,8 +28,12 @@
 import type { ChatFunction } from "../llm.js";
 import type { ReviewEvent, ReviewFinding, TieredFindings } from "./review-poster.js";
 
-/** A ledger line: an optional bullet/bold, then one of the four bucket names. */
-const LEDGER_LINE = /^\s*(?:[-*]\s*)?(?:\*\*)?(?:Fixed|Still open|Pinned by a test|Withdrawn)\b/i;
+/**
+ * A ledger line: an optional bullet/bold, then one of the bucket names —
+ * the four the adjudicator wrote, plus `Addressed` from the code-rendered
+ * ledger (issue #429, `renderLedgerStatus`).
+ */
+const LEDGER_LINE = /^\s*(?:[-*]\s*)?(?:\*\*)?(?:Fixed|Still open|Pinned by a test|Withdrawn|Addressed)\b/i;
 
 /**
  * The leading re-review ledger of an adjudicator summary, verbatim, or `""`.
@@ -146,6 +150,13 @@ export interface PostedSummaryInput {
   tiered: TieredFindings;
   /** `findings.json`'s own summary — read ONLY for its leading re-review ledger. */
   documentSummary?: string | null;
+  /**
+   * Issue #429 — the re-review status lines rendered in code from the PR's
+   * review ledger (`renderLedgerStatus`). When present — even empty — it
+   * REPLACES the ledger lines read off `documentSummary`: the code ledger is
+   * the record, and a model's recollection of it is not.
+   */
+  ledgerStatus?: string;
   prTitle?: string;
   /** We reviewed an earlier head of this PR — the author has pushed since. */
   rereview?: boolean;
@@ -159,7 +170,7 @@ export interface PostedSummaryInput {
 /** Write the review summary from the posted findings only. Never throws. */
 export async function writePostedSummary(input: PostedSummaryInput): Promise<PostedSummary> {
   const posted = postedFindings(input.tiered);
-  const ledger = extractPriorLedger(input.documentSummary);
+  const ledger = input.ledgerStatus !== undefined ? input.ledgerStatus : extractPriorLedger(input.documentSummary);
   const withLedger = (text: string) => (ledger ? `${ledger}\n\n${text}` : text);
   const history: ReviewHistoryContext = {
     rereview: input.rereview,

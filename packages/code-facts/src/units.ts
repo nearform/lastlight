@@ -60,6 +60,8 @@ import { changedPaths, isGitRepo, showFile, tryGit, unifiedDiff, type ChangedPat
 import { asSyntaxNode, grammarAvailable, type SyntaxNode } from "./langs/descriptor.js";
 import { descriptorForPath, TSJS_FAMILY } from "./langs/register.js";
 import { noopLogger, type LoggerPort } from "./log.js";
+import { baseUnitKey, classifyDelta, contentShaOf, lineHashesOf, numberKeys, readPriorReview, UnitDeltaSchema, type UnitDelta } from "./review-delta.js";
+import { readRiskRules, RiskTierSchema, unitRisk, type RiskRule, type RiskTier } from "./risk.js";
 import { astGrepLangFor, languageIdOf, looksMinified, MAX_SCANNED_FILE_BYTES } from "./project.js";
 import { AllDocumentSchema, DegradedEntrySchema, type AllDocument, type DegradedEntry, type SymbolFact } from "./schema.js";
 import type { Obligation, ObligationsDocument } from "./seed.js";
@@ -191,6 +193,26 @@ export const UnitSchema = z.object({
   family: z.string().optional(),
   /** Set only on a unit split by family: the id its unsplit form would have had, shared by its siblings. */
   splitOf: z.string().optional(),
+  /**
+   * Issue #429 — the unit's identity across heads (`review-delta.ts`): `key`
+   * is `path::symbol`, shared by every pass and family sibling of one piece of
+   * code; `contentSha` hashes its own lines, never their numbers (`null` for
+   * the `pr` unit). Optional only so a document written before them parses.
+   */
+  key: z.string().optional(),
+  contentSha: z.string().nullable().optional(),
+  /** Touched lines (changed lines plus removal points) the unit owns — the coverage denominator. */
+  touched: z.number().int().optional(),
+  /**
+   * The `lineHash`es of the non-trivial lines the unit owns, concatenated —
+   * what the NEXT review's convergence gate tests a finding's anchor against.
+   */
+  lineHashes: z.string().optional(),
+  /** `risk.ts`: the path's tier, raised at most once by the unit's signals, and why. */
+  risk: RiskTierSchema.optional(),
+  riskWhy: z.string().optional(),
+  /** Against the prior review's units; absent on a first review (nothing is scoped). */
+  delta: UnitDeltaSchema.optional(),
 });
 export type Unit = z.infer<typeof UnitSchema>;
 
@@ -253,6 +275,11 @@ export const FullUnitsDocumentSchema = z.object({
    * reached the workspace; `[]` when the file was read and held none.
    */
   specObligations: z.array(UnitSpecObligationSchema).optional(),
+  /**
+   * The prior review each unit's `delta` was taken against (issue #429):
+   * its head, and how many units it had. Absent on a first review.
+   */
+  prior: z.object({ head: z.string().nullable(), units: z.number().int() }).optional(),
   units: z.array(UnitSchema),
 });
 export type UnitsDocument = z.infer<typeof FullUnitsDocumentSchema>;
@@ -347,6 +374,14 @@ export interface BuildUnitsOptions {
   maxUnits?: number;
   /** Defaults to {@link FAMILY_SPLIT_CHANGED_LINES}. */
   familySplitLines?: number;
+  /**
+   * The prior review's units (`review-delta.ts`). Defaults to
+   * `<dir>/prior-review.json` when that exists; absent ⇒ a first review, and
+   * no unit carries a `delta`.
+   */
+  priorPath?: string;
+  /** The configured risk rules (`risk.ts`), repo's then operator's. Absent ⇒ the built-in rules alone. */
+  riskRulesPath?: string;
   log?: LoggerPort;
 }
 
@@ -1245,6 +1280,60 @@ export function emptyUnitsDocument(reason: string, shas: { baseSha?: string; hea
   };
 }
 
+/** A draft's identity, risk and delta (issue #429) — shared by every piece split off it. */
+interface Identity {
+  key: string;
+  contentSha: string;
+  lineHashes: string;
+  touched: number;
+  risk: RiskTier;
+  riskWhy: string;
+  delta?: UnitDelta;
+}
+
+/**
+ * The largest count of non-test references outside the diff among the facts
+ * symbols DECLARED inside the draft's cores — how load-bearing the changed
+ * code is to everything the PR did not touch.
+ */
+function fanInOf(draft: Draft, symbols: SymbolFact[]): number {
+  if (!draft.ctx) return 0;
+  const path = draft.ctx.path;
+  let best = 0;
+  for (const s of symbols) {
+    const site = splitSite(s.declaredAt);
+    if (!site || site.path !== path || !holds(draft, site.line)) continue;
+    best = Math.max(best, s.references.filter((r) => !r.inDiff && !r.isTest).length);
+  }
+  return best;
+}
+
+/**
+ * The fields a unit carries for its identity. The `pr` unit is always in
+ * scope on a re-review: its content is a set of obligations whose ids are
+ * minted per run, so there is nothing stable to hash.
+ */
+function identityFields(d: Draft, id: Identity | undefined, rereview: boolean): Partial<Unit> {
+  if (d.kind === "pr" || !id) {
+    return { key: "(pr)", contentSha: null, touched: 0, risk: "medium", riskWhy: "pr-level obligations", ...(rereview ? { delta: "changed" as const } : {}) };
+  }
+  return {
+    key: id.key,
+    contentSha: id.contentSha,
+    lineHashes: id.lineHashes,
+    touched: id.touched,
+    risk: id.risk,
+    riskWhy: id.riskWhy,
+    ...(id.delta ? { delta: id.delta } : {}),
+  };
+}
+
+function countDeltas(units: Unit[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const u of units) if (u.delta) counts.set(u.delta, (counts.get(u.delta) ?? 0) + 1);
+  return counts;
+}
+
 /**
  * Assemble `units.json`. Throws `FactsError` when an INPUT is missing (no
  * facts.json, no git history for its shas) — the CLI turns that into a
@@ -1421,6 +1510,56 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
     return n;
   };
 
+  // Issue #429: identity, risk and the re-review delta, decided on the WHOLE
+  // drafts — before any split into passes or by family, whose pieces all
+  // inherit their parent's (one piece of code, several requests).
+  let riskRules: RiskRule[] = [];
+  if (options.riskRulesPath) {
+    const read = readRiskRules(options.riskRulesPath);
+    if (read.rules) riskRules = read.rules;
+    else if (read.reason) note(read.reason);
+  }
+  const { prior, reason: priorReason } = readPriorReview(options.dir, options.priorPath);
+  if (priorReason) note(priorReason);
+  const identityOf = new Map<Draft, Identity>();
+  {
+    const ordered = [...drafts].sort(
+      (a, b) => a.ctx!.path.localeCompare(b.ctx!.path) || a.lines![0] - b.lines![0] || a.lines![1] - b.lines![1],
+    );
+    const keys = numberKeys(ordered.map((d) => baseUnitKey(d.kind, d.ctx?.path ?? null, d.symbol)));
+    const cores = (d: Draft): [number, number][] => d.regions.flatMap((r) => r.cores);
+    const identities: Identity[] = ordered.map((d, i) => {
+      const risk = unitRisk(d.ctx!.path, { families: d.obligations.map((o) => o.family as string), fanIn: fanInOf(d, symbols) }, riskRules);
+      return {
+        key: keys[i]!,
+        contentSha: contentShaOf(d.ctx!.lines, cores(d)),
+        lineHashes: lineHashesOf(d.ctx!.lines, cores(d)),
+        touched: touchedIn(d.ctx!, d.regions),
+        risk: risk.tier,
+        riskWhy: risk.why,
+      };
+    });
+    if (prior) {
+      const deltas = classifyDelta(
+        ordered.map((d, i) => {
+          const n = neighboursFor(d);
+          return {
+            key: identities[i]!.key,
+            contentSha: identities[i]!.contentSha,
+            file: d.ctx!.path,
+            cores: cores(d),
+            neighbourSites: [...n.callers.map((c) => c.at), ...n.callees.map((c) => c.declaredAt).filter((at): at is string => !!at)],
+          };
+        }),
+        prior,
+      );
+      deltas.forEach((delta, i) => {
+        identities[i]!.delta = delta;
+      });
+    }
+    ordered.forEach((d, i) => identityOf.set(d, identities[i]!));
+  }
+
   // Placeholder id of the final width, so a size decision made now holds later.
   const PLACEHOLDER = "u-000";
   const inputFor = (d: Draft) => ({ unitId: PLACEHOLDER, draft: d, neighbours: neighboursFor(d), head, overview: [] as string[] });
@@ -1444,6 +1583,7 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
       for (const p of passes) if (p !== g) neighboursByDraft.set(p, neighboursFor(g));
       pieces.push(...passes);
     }
+    for (const p of pieces) if (p !== d) identityOf.set(p, identityOf.get(d)!);
     if (pieces.length > 1) {
       pieces.forEach((p, i) => {
         p.part = { index: i + 1, of: pieces.length, how: p.part?.how ?? "regions" };
@@ -1492,6 +1632,7 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
         split: { family, families, threshold: splitAt },
       };
       neighboursByDraft.set(child, neighbours);
+      identityOf.set(child, identityOf.get(d)!);
       return child;
     });
   });
@@ -1583,6 +1724,7 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
       requestSha256: sha256(request),
       truncated,
       ...(d.split ? { family: d.split.family, splitOf: splitOf[i]! } : {}),
+      ...identityFields(d, identityOf.get(d), prior !== null),
     };
   });
 
@@ -1607,6 +1749,7 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
     responseSchema: unitResponseJsonSchema(),
     skipped,
     ...(spec.obligations !== null ? { specObligations: spec.obligations } : {}),
+    ...(prior ? { prior: { head: prior.head, units: prior.units.length } } : {}),
     units,
   });
 
@@ -1618,6 +1761,7 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
     truncated: units.filter((u) => u.truncated).length,
     coverage: document.coverage,
     seeded: obligationsDoc !== null,
+    ...(prior ? { delta: Object.fromEntries(countDeltas(units)) } : {}),
   });
 
   // Nothing to survey is a trustworthy answer, not a failure.

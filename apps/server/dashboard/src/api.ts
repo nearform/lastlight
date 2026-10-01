@@ -294,6 +294,92 @@ export interface RepoConfigBundle {
   defaultBranch: string | null;
 }
 
+/**
+ * Hand-mirrored from core (issue #429) — there is no import edge to core.
+ * `apps/server/tests/admin/dashboard-review-ledger-mirror.test.ts` pins the
+ * field lists against `ReviewLedger` / `LedgerFinding` in
+ * `src/engine/review-ledger.ts` and `readCoverageSummary` in
+ * `src/workflows/handlers/post-review.ts`. Read via `lib/review-ledger.ts`,
+ * which validates the shape rather than trusting the cast.
+ */
+export type ReviewRisk = "low" | "medium" | "high" | "critical";
+export type ReviewDelta = "new" | "changed" | "affected" | "unchanged";
+
+/** One unit's row of `scratch.reviewCoverage.units`. */
+export interface ReviewCoverageUnit {
+  key: string;
+  /** Null for a unit with no file (the whole-PR unit). */
+  file: string | null;
+  /** `[start, end]`, or null for a unit with no line span (the `pr` unit). */
+  lines: [number, number] | null;
+  /** Touched (changed) lines in the unit. */
+  touched: number;
+  risk: ReviewRisk;
+  /** Null on a first review — there is no prior round to diff against. */
+  delta: ReviewDelta | null;
+  /** A unit-survey model call answered for this unit. */
+  surveyed: boolean;
+  /** A site investigator worked a site holding this unit's rows; null = not investigated. */
+  investigated: "findings" | "none" | null;
+}
+
+/** `scratch.reviewCoverage` — written by `post-review` when `review.analysis` is on. */
+export interface ReviewCoverage {
+  version: 1;
+  /** A re-review: `unchanged` units are carried and percentages are over the in-scope rest. */
+  rereview: boolean;
+  inScope: {
+    units: number;
+    touched: number;
+    surveyedUnits: number;
+    surveyedTouched: number;
+    investigatedUnits: number;
+    investigatedTouched: number;
+    /** 0–100, risk-weighted; null when there is nothing to weigh. */
+    surveyedWeighted: number | null;
+    investigatedWeighted: number | null;
+  };
+  carried: { units: number; touched: number };
+  /** Unit keys, highest risk first. */
+  notInvestigated: string[];
+  units: ReviewCoverageUnit[];
+}
+
+export type LedgerStatus = "open" | "withheld" | "addressed" | "resolved";
+export type LedgerTier = "inline" | "body" | "internal";
+
+export interface LedgerFinding {
+  fp: string;
+  path: string;
+  line: number | null;
+  excerpt: string;
+  title: string;
+  severity: string | null;
+  importance: string | null;
+  tier: LedgerTier;
+  reason: string | null;
+  status: LedgerStatus;
+  foundAt: string | null;
+  lastSeenAt: string | null;
+  closedAt?: string | null;
+}
+
+export interface LedgerUnit {
+  key: string;
+  contentSha: string | null;
+}
+
+/** `scratch.reviewLedger` (and `context.prState.reviewLedger`, the previous round's). */
+export interface ReviewLedger {
+  version: 1;
+  head: string | null;
+  at: string;
+  rounds: number;
+  units: LedgerUnit[];
+  findings: LedgerFinding[];
+  truncated?: boolean;
+}
+
 export interface WorkflowRun {
   id: string;
   workflowName: string;
@@ -313,7 +399,8 @@ export interface WorkflowRun {
    * harvest under `fixMarkers` — the attempt markers, the PR journal, and the
    * push gate the agent wrote for itself — which `PrStatePanel` renders — and,
    * under `fanout[<phase>]`, a dynamic fan-out's planned branches (read via
-   * `fanoutPlanOf` in `lib/fanout-group.ts`).
+   * `fanoutPlanOf` in `lib/fanout-group.ts`), and pr-review's
+   * `reviewCoverage` / `reviewLedger` (read via `lib/review-ledger.ts`).
    */
   scratch?: Record<string, unknown>;
   startedAt: string;
