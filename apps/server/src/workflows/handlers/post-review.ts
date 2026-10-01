@@ -39,6 +39,7 @@ import {
   coerceLedger,
   findingFingerprint,
   foldReviewLedger,
+  LEDGER_LINE_HASH_CHARS,
   openFingerprints,
   renderLedgerStatus,
   REVIEW_LEDGER_SCRATCH_KEY,
@@ -210,7 +211,8 @@ export function readLedgerUnits(file: string): { units: LedgerUnit[]; lines: Rec
     for (const u of units) {
       if (typeof u.file === "string" && typeof u.lineHashes === "string") {
         const set = byFile.get(u.file) ?? new Set<string>();
-        for (let i = 0; i + 8 <= u.lineHashes.length; i += 8) set.add(u.lineHashes.slice(i, i + 8));
+        const w = LEDGER_LINE_HASH_CHARS;
+        for (let i = 0; i + w <= u.lineHashes.length; i += w) set.add(u.lineHashes.slice(i, i + w));
         byFile.set(u.file, set);
       }
       if (typeof u.key !== "string" || seen.has(u.key)) continue;

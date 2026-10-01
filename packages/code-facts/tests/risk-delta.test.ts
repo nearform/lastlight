@@ -45,6 +45,11 @@ describe("the re-review delta", () => {
     expect(contentShaOf(lines, [[2, 3]])).not.toBe(contentShaOf(lines, [[2, 4]]));
   });
 
+  it("hashes a line to 6 base64url characters, position- and indent-free", () => {
+    expect(lineHash("  const total = sum(xs);")).toMatch(/^[A-Za-z0-9_-]{6}$/);
+    expect(lineHash("const total = sum(xs);")).toBe(lineHash("    const total = sum(xs);  "));
+  });
+
   it("numbers colliding keys in order, and leaves unique keys alone", () => {
     expect(numberKeys(["a::f", "a::g", "a::f", "a::f"])).toEqual(["a::f", "a::g", "a::f#2", "a::f#3"]);
   });

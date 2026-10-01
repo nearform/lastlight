@@ -25,7 +25,7 @@
  * mock, no sandbox, no harness.
  */
 
-import { priorReviewOf, renderLedgerForSelect, type ReviewLedger } from "./review-ledger.js";
+import { coerceLedger, priorReviewOf, renderLedgerForSelect } from "./review-ledger.js";
 import { renderPriorDiscussion } from "./pr-discussion.js";
 import { renderPrIntent } from "./pr-intent.js";
 import type { DependenciesConfig, FixConfig, ReviewConfig } from "../config/config.js";
@@ -737,10 +737,26 @@ export function reviewCheckPlacement(
  */
 const globCache = new Map<string, RegExp>();
 
-/** `prior-review.json`'s one line, or `""` when the ledger holds no units to compare against. */
-function priorReviewJson(ledger: ReviewLedger | null): string {
+/**
+ * Issue #429 — the review ledger's two template keys, derived from the run's
+ * persisted snapshot (`context.prState.reviewLedger`) at RUN time by the
+ * runner, never stored in `context` themselves: both are pure functions of the
+ * ledger the snapshot already carries, and `priorReviewJson` alone is up to the
+ * whole units + line-hash payload over again. A resume re-derives them the same
+ * way, from the same snapshot.
+ *
+ * - `priorReviewJson` — one `{{`-safe line of JSON the `units` phase writes to
+ *   `prior-review.json` (QUOTED heredoc, like `specObligationsJson`); code-facts
+ *   scopes the sites and gates the findings against it. `""` on a first review.
+ * - `priorLedger` — the ledger as `select` reads it (`{{#if priorLedger}}`):
+ *   what an earlier review of OURS posted that is still open, and what it found
+ *   but withheld. `""` with nothing to say.
+ */
+export function reviewLedgerContext(prState: unknown): { priorReviewJson: string; priorLedger: string } {
+  const raw = prState && typeof prState === "object" ? (prState as { reviewLedger?: unknown }).reviewLedger : undefined;
+  const ledger = coerceLedger(raw);
   const prior = priorReviewOf(ledger);
-  return prior ? jsonLine(prior) : "";
+  return { priorReviewJson: prior ? jsonLine(prior) : "", priorLedger: renderLedgerForSelect(ledger) };
 }
 
 /**
@@ -1846,22 +1862,6 @@ function specContext(state: PrState, review?: ReviewConfig): Record<string, unkn
      * nobody has said anything (`renderPriorDiscussion`).
      */
     priorDiscussion: renderPriorDiscussion(state.discussion ?? null),
-    /**
-     * Issue #429 — the PR's review ledger, for `select` (`{{#if priorLedger}}`
-     * in `review-select.md`): what an earlier review of OURS posted that is
-     * still open, and what it found but withheld. Code-derived, so unlike
-     * `priorDiscussion` it does not depend on the model spotting our own
-     * comments in the rendered thread. Empty on a first review.
-     */
-    priorLedger: renderLedgerForSelect(state.reviewLedger),
-    /**
-     * Issue #429 — the units the last review already had, as one line of JSON
-     * the `units` phase writes to `prior-review.json` (QUOTED heredoc, like
-     * `specObligationsJson`). code-facts compares each unit's key and content
-     * hash against it, and the re-review scopes its sites to what is new,
-     * changed or affected. Empty on a first review — nothing is scoped.
-     */
-    priorReviewJson: priorReviewJson(state.reviewLedger),
     /**
      * Issue #429 — the configured risk rules (the repo's, then the operator's:
      * the repo sanitizer prepends), as the one line of JSON `units

@@ -50,11 +50,17 @@ export const MAX_LEDGER_FINDINGS = 80;
 /** Units kept at most — `units.json`'s own ceiling, plus the `pr` unit. */
 export const MAX_LEDGER_UNITS = 151;
 /**
- * Line-hash characters kept at most (8 per line, so 8,000 lines). Measured on
- * lastlight#424, a 2,000-line PR: ~6 KB. Over it the LARGEST files go first —
- * a file with no recorded lines is judged by its unit's delta instead.
+ * Width of one line hash — code-facts' `LINE_HASH_CHARS` (6 base64url chars),
+ * restated because core does not depend on code-facts.
  */
-export const MAX_LEDGER_LINE_CHARS = 64_000;
+export const LEDGER_LINE_HASH_CHARS = 6;
+/**
+ * Line-hash characters kept at most (5,000 lines). Measured on lastlight#424,
+ * a 2,000-line PR: ~4.5 KB. Over it the LARGEST files go first — a file with
+ * no recorded lines is judged by its unit's delta instead (a softer gate,
+ * never a missing one).
+ */
+export const MAX_LEDGER_LINE_CHARS = 30_000;
 const MAX_EXCERPT = 160;
 const MAX_TITLE = 160;
 
@@ -96,7 +102,7 @@ export interface ReviewLedger {
   rounds: number;
   units: LedgerUnit[];
   /**
-   * Per file, the line hashes (code-facts' `lineHash`, 8 hex chars each,
+   * Per file, the line hashes (code-facts' `lineHash`, 6 base64url chars each,
    * concatenated) of every non-trivial line the last review's units covered —
    * the convergence gate's evidence that a finding's code was already there.
    * Replaced with `units`. Absent on a ledger written before it.

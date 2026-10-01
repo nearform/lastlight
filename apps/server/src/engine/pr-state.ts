@@ -26,6 +26,7 @@ import type { GitHubClient } from "./github/github.js";
 import type { CiFailureReport, PrDiscussionRead } from "./github/github.js";
 import type { SpecLinkedIssue } from "./review-spec.js";
 import { coerceLedger, REVIEW_LEDGER_SCRATCH_KEY, type ReviewLedger } from "./review-ledger.js";
+import { REVIEW_WORKFLOW } from "./review-check.js";
 import { prFixShapedWorkflows } from "../workflows/target-policy.js";
 import { prScopedWorkflows } from "../workflows/pr-scope.js";
 import { readHarvestedMarkers, type HarvestedFixMarkers } from "./fix-harvest.js";
@@ -958,7 +959,11 @@ export async function applyDerivedState(state: PrState, deps: PrStateDeps): Prom
   const retried = applyIntervention(state, priorState, priorAnyState, deps);
 
   state.notes = deriveNotes(state, priorAny, priorAnyState, retried);
-  state.reviewLedger = deriveReviewLedger(priorAny, priorAnyState);
+  // Off the latest REVIEW run, not the widest PR-scoped one: only review rows
+  // carry the ledger (`prStateForRun`), so a fix run in between must not be
+  // what the chain is read from.
+  const lastReview = await deps.db.runs.latestForTrigger([REVIEW_WORKFLOW], triggerId);
+  state.reviewLedger = deriveReviewLedger(lastReview, priorPrState(lastReview?.context));
 
   // …and an ask still waiting for a run takes the head back off the
   // `already-assessed` dedup, for as many ticks as that takes.
@@ -1286,6 +1291,15 @@ function deriveNotes(
 export function deriveReviewLedger(priorRun: WorkflowRun | null | undefined, prior: PersistedPrState | null): ReviewLedger | null {
   const scratch = priorRun?.scratch as Record<string, unknown> | null | undefined;
   return coerceLedger(scratch?.[REVIEW_LEDGER_SCRATCH_KEY]) ?? coerceLedger(prior?.reviewLedger);
+}
+
+/**
+ * The snapshot as a run row of `workflowName` persists it. The review ledger
+ * rides only on `pr-review` rows — its only reader — so a fix or merge run on
+ * the same PR does not store up to ~100 KB it never uses (issue #429).
+ */
+export function prStateForRun(state: PrState, workflowName: string): PrState {
+  return workflowName === REVIEW_WORKFLOW || state.reviewLedger === null ? state : { ...state, reviewLedger: null };
 }
 
 /** The four history fields {@link deriveAttemptHistory} produces together. */

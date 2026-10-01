@@ -7,7 +7,7 @@ import { getWorkflow } from "#src/workflows/loader.js";
 import { renderTemplate, validateShellCommand } from "lastlight-workflow-engine";
 import type { TemplateContext } from "lastlight-workflow-engine";
 import type { PrState } from "#src/engine/pr-state.js";
-import { renderContext, specObligationsLine } from "#src/engine/pr-decisions.js";
+import { renderContext, reviewLedgerContext, specObligationsLine } from "#src/engine/pr-decisions.js";
 import type { SpecObligationSet } from "#src/engine/review-spec.js";
 import { defaultDependenciesConfig, defaultFixConfig } from "lastlight-shared/config-types";
 import { defaultReviewConfig } from "#src/config/config.js";
@@ -167,7 +167,10 @@ describe("units node — the prior review and the risk rules (issue #429)", () =
   };
 
   it("writes both files from the projected context, byte-exact through the guard, and passes --risk-rules", () => {
-    const ctx = renderContext(pr(ledger), defaultFixConfig(), defaultDependenciesConfig(), reviewOn()) as unknown as Record<string, unknown>;
+    const rendered = renderContext(pr(ledger), defaultFixConfig(), defaultDependenciesConfig(), reviewOn()) as unknown as Record<string, unknown>;
+    // Not persisted with the context: the runner derives it from the snapshot.
+    expect("priorReviewJson" in rendered).toBe(false);
+    const ctx = { ...rendered, ...reviewLedgerContext(pr(ledger)) };
     expect(String(ctx.priorReviewJson)).not.toContain("{{");
     const args = runRecording(ctx);
     expect(JSON.parse(readFileSync(PRIOR_FILE(), "utf8"))).toEqual({ version: 1, head: "prior", units: ledger.units });
@@ -180,7 +183,10 @@ describe("units node — the prior review and the risk rules (issue #429)", () =
     writeFileSync(PRIOR_FILE(), "{}");
     writeFileSync(RISK_FILE(), "{}");
     const review = defaultReviewConfig();
-    const ctx = renderContext(pr(null), defaultFixConfig(), defaultDependenciesConfig(), { ...review, analysis: { ...review.analysis, enabled: true } }) as unknown as Record<string, unknown>;
+    const ctx = {
+      ...(renderContext(pr(null), defaultFixConfig(), defaultDependenciesConfig(), { ...review, analysis: { ...review.analysis, enabled: true } }) as unknown as Record<string, unknown>),
+      ...reviewLedgerContext(pr(null)),
+    };
     expect(ctx.priorReviewJson).toBe("");
     expect(ctx.riskRulesJson).toBe("");
     const args = runRecording(ctx);

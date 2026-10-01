@@ -11,8 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterAll, describe, expect, it } from "vitest";
-import { lineHash } from "lastlight-code-facts";
-import { coerceLedger, foldReviewLedger, resolveReviewGitHubClient, type ReviewLedger } from "lastlight-core/evals";
+import { LINE_HASH_CHARS, lineHash } from "lastlight-code-facts";
+import { reviewLedgerContext, coerceLedger, foldReviewLedger, resolveReviewGitHubClient, type ReviewLedger } from "lastlight-core/evals";
 
 import { startFakeGitHub } from "./fake-github.js";
 import { buildPrState, caseHeadSha, PLACEHOLDER_HEAD_SHA, prContextPatch } from "./pr-context.js";
@@ -160,8 +160,10 @@ describe("PR snapshot — head SHA and the re-review fields", () => {
     expect(off.prState).toBeUndefined();
     expect(off.priorLedger ?? "").toBe("");
     const on = await prContextPatch({ ...args, seed, review: { analysis: { enabled: true } }, snapshot: true, headSha: C });
-    expect(String(on.priorLedger)).toContain("Unchecked compute");
-    expect(String(on.priorReviewJson)).toContain("src/a.ts::f");
+    // The two keys are derived by core's runner from the snapshot, at run time.
+    const derived = reviewLedgerContext(on.prState);
+    expect(derived.priorLedger).toContain("Unchecked compute");
+    expect(derived.priorReviewJson).toContain("src/a.ts::f");
     expect((on.prState as { reviewLedger: unknown; headSha: string }).headSha).toBe(C);
     expect((on.prState as { reviewLedger: ReviewLedger }).reviewLedger.findings[0]!.title).toBe("Unchecked compute");
   });
@@ -360,7 +362,7 @@ describe("late discovery — the convergence gate's own test, per posted comment
       "h1",
     );
     expect(prior.units).toEqual([{ key: "src/a.ts::f", contentSha: "x" }]);
-    expect(prior.files!["src/a.ts"]).toHaveLength(16);
+    expect(prior.files!["src/a.ts"]).toHaveLength(2 * LINE_HASH_CHARS);
   });
 
   it("is `unchanged` only when every anchored line was already there", () => {

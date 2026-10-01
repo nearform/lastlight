@@ -63,7 +63,7 @@ export const PriorReviewSchema = z.object({
   units: z.array(z.object({ key: z.string(), contentSha: z.string().nullable() })),
   /**
    * Per file, the {@link lineHash}es of every non-trivial line the prior
-   * review's units covered, concatenated (8 hex chars each). The convergence
+   * review's units covered, concatenated ({@link LINE_HASH_CHARS} chars each). The convergence
    * gate's evidence: a finding whose anchored lines all hash in here sits on
    * code the last review already had. Optional — a ledger written before it,
    * or a file the cap dropped, falls back to the unit's `delta`.
@@ -113,15 +113,21 @@ export function contentShaOf(lines: readonly string[], cores: readonly (readonly
  * so their presence says nothing about whether a finding's code is old.
  */
 export const MIN_LINE_SIGNAL = 4;
-export const LINE_HASH_CHARS = 8;
+/**
+ * 6 base64url characters = 36 bits per line. Matching is exact and only
+ * WITHIN one file's few thousand lines, so a collision is a ~1e-7 event per
+ * lookup; the width is what the run row pays for on every line a review
+ * covered (issue #429 — 25% smaller than 8 hex).
+ */
+export const LINE_HASH_CHARS = 6;
 
 export function isTrivialLine(text: string): boolean {
   return text.replace(/\W/g, "").length < MIN_LINE_SIGNAL;
 }
 
-/** A line's identity, position-free: sha1 of its trimmed text, first {@link LINE_HASH_CHARS} hex chars. */
+/** A line's identity, position-free: sha1 of its trimmed text, first {@link LINE_HASH_CHARS} base64url chars. */
 export function lineHash(text: string): string {
-  return createHash("sha1").update(text.trim()).digest("hex").slice(0, LINE_HASH_CHARS);
+  return createHash("sha1").update(text.trim()).digest("base64url").slice(0, LINE_HASH_CHARS);
 }
 
 /** The {@link lineHash}es of the non-trivial lines inside `cores`, concatenated. */

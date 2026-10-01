@@ -74,6 +74,7 @@ import {
   prTriggerId,
   type PrIntervention,
   type PrState,
+  prStateForRun,
 } from "./pr-state.js";
 import { HOLD_LABEL, REQUIRES_HUMAN_LABEL } from "../cron/dependabot-discovery.js";
 import { logger } from "../logging/logger.js";
@@ -196,7 +197,7 @@ export async function escalatePr(
       context: {
         // The snapshot the NEXT dispatch reads back — `escalatedAtSha` above is
         // the whole point of the row.
-        prState: recorded,
+        prState: prStateForRun(recorded, workflowName),
         // …and the human-readable half of the same fact, for the detail panel.
         escalation: { case: kase, reason: decision.reason, at: new Date().toISOString() },
       },
@@ -330,7 +331,7 @@ export async function noticeForkPr(
       status: "running",
       triggeredBy: "last-light",
       triggerActorType: "system",
-      context: { prState: recorded },
+      context: { prState: prStateForRun(recorded, workflowName) },
       startedAt: new Date().toISOString(),
     });
     await deps.db.runs.finishRun(runId, "succeeded", {
@@ -583,7 +584,7 @@ export async function recordIntervention(
       // fact, not a person's run. WHO asked is on the record itself, which is
       // the one place it is allowed to be read from — for display.
       triggerActorType: "system",
-      context: { prState: state, intervention },
+      context: { prState: prStateForRun(state, workflowName), intervention },
       startedAt: new Date().toISOString(),
     });
     await deps.db.runs.finishRun(runId, "succeeded", {

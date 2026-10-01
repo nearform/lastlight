@@ -29,7 +29,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 
 import { InMemoryStateStore } from "lastlight-workflow-engine/test-support";
-import { anchorDelta, locateUnit, type PriorReview, type UnitDelta } from "lastlight-code-facts";
+import { anchorDelta, LINE_HASH_CHARS, locateUnit, type PriorReview, type UnitDelta } from "lastlight-code-facts";
 import { deriveReviewLedger, REVIEW_COVERAGE_SCRATCH_KEY, REVIEW_LEDGER_SCRATCH_KEY, type ReviewLedger } from "lastlight-core/evals";
 
 import type { SubmittedReview, ThreadAnchor } from "./fake-github.js";
@@ -237,7 +237,7 @@ export function priorReviewFromUnits(units: readonly RoundUnit[], head: string |
     if (typeof u.key === "string" && !keys.has(u.key)) keys.set(u.key, u.contentSha ?? null);
     if (typeof u.file === "string" && typeof u.lineHashes === "string") {
       const set = byFile.get(u.file) ?? byFile.set(u.file, new Set()).get(u.file)!;
-      for (let i = 0; i + 8 <= u.lineHashes.length; i += 8) set.add(u.lineHashes.slice(i, i + 8));
+      for (let i = 0; i + LINE_HASH_CHARS <= u.lineHashes.length; i += LINE_HASH_CHARS) set.add(u.lineHashes.slice(i, i + LINE_HASH_CHARS));
     }
   }
   return {

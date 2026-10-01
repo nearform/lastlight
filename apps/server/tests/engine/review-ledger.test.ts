@@ -13,6 +13,7 @@ import {
   findingFingerprint,
   foldReviewLedger,
   MAX_LEDGER_FINDINGS,
+  MAX_LEDGER_LINE_CHARS,
   priorReviewOf,
   renderLedgerForSelect,
   renderLedgerStatus,
@@ -20,7 +21,8 @@ import {
   type FoldInput,
   type ReviewLedger,
 } from "#src/engine/review-ledger.js";
-import { deriveReviewLedger } from "#src/engine/pr-state.js";
+import { deriveReviewLedger, prStateForRun, type PrState } from "#src/engine/pr-state.js";
+import { reviewLedgerContext } from "#src/engine/pr-decisions.js";
 import type { WorkflowRun } from "#src/state/db.js";
 
 const row = (tier: DispositionRow["tier"], path: string, code: string, title: string, extra: Partial<DispositionRow["finding"]> = {}, reason: string | null = null): DispositionRow => ({
@@ -162,5 +164,30 @@ describe("deriveReviewLedger", () => {
     expect(deriveReviewLedger(run({ reviewLedger: ledger }), { reviewLedger: older })?.head).toBe("h1");
     expect(deriveReviewLedger(run(null), { reviewLedger: older })?.head).toBe("h0");
     expect(deriveReviewLedger(null, null)).toBeNull();
+  });
+});
+
+describe("storage — the ledger rides only where it is read (issue #429)", () => {
+  const ledger = fold({ head: "h1", units: [{ key: "a::f", contentSha: "1" }], lines: { "src/a.ts": "AbCdEf" }, dispositions: [row("inline", "src/a.ts", "a()", "Posted")] });
+  const state = { headSha: "h1", reviewLedger: ledger } as unknown as PrState;
+
+  it("keeps the ledger on a pr-review row and drops it from every other workflow's", () => {
+    expect(prStateForRun(state, "pr-review").reviewLedger).toBe(ledger);
+    expect(prStateForRun(state, "pr-fix").reviewLedger).toBeNull();
+    expect(prStateForRun(state, "pr-fix").headSha).toBe("h1");
+  });
+
+  it("derives the template keys from the persisted snapshot, so none is stored in context", () => {
+    const keys = reviewLedgerContext(state);
+    expect(JSON.parse(keys.priorReviewJson)).toEqual({ version: 1, head: "h1", units: ledger.units, files: { "src/a.ts": "AbCdEf" } });
+    expect(keys.priorLedger).toContain("Posted");
+    expect(reviewLedgerContext(undefined)).toEqual({ priorReviewJson: "", priorLedger: "" });
+  });
+
+  it("caps the line hashes, dropping the largest files first", () => {
+    const big = "x".repeat(MAX_LEDGER_LINE_CHARS);
+    const l = fold({ units: [{ key: "a::f", contentSha: "1" }], lines: { "big.ts": big, "small.ts": "AbCdEf" } });
+    expect(Object.keys(l.lines ?? {})).toEqual(["small.ts"]);
+    expect(l.truncated).toBe(true);
   });
 });

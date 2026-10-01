@@ -481,6 +481,7 @@ export {
   hashSet,
   inScope,
   isTrivialLine,
+  LINE_HASH_CHARS,
   lineHash,
   lineHashesOf,
   numberKeys,

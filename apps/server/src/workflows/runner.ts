@@ -1,3 +1,4 @@
+import { reviewLedgerContext } from "../engine/pr-decisions.js";
 import type {
   ExecutorConfig,
   GitAccessProfile,
@@ -411,6 +412,13 @@ async function runWorkflowBody(
   ctx.scratch = scratch;
 
   await seedReviewTriage(definition, ctx, scratch, db, workflowId);
+
+  // Issue #429 — the review ledger's template keys, derived here (in memory,
+  // for the fresh run and a resume alike) from the snapshot the run row
+  // already persists, rather than stored in `context` a second time.
+  if (ctx.analysisEnabled === "true" && ctx.priorReviewJson === undefined) {
+    Object.assign(ctx, reviewLedgerContext(ctx.prState));
+  }
 
   const prePopulateBranch = typeof ctx.prePopulateBranch === "string"
     ? ctx.prePopulateBranch

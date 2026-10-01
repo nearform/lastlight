@@ -56,7 +56,7 @@ export { invalidateRepoLayer } from "./config/repo-config.js";
 // and what a run CONCLUDED is a marker line in the phase output, which only
 // these parsers read correctly (`lastMarkerLine` recognises `<TAG>:`, not a
 // bare mention — see `fix-markers.ts`).
-export { renderContext, mayMerge } from "./engine/pr-decisions.js";
+export { renderContext, mayMerge, reviewLedgerContext } from "./engine/pr-decisions.js";
 export type { PrState } from "./engine/pr-state.js";
 export type { CiFailureReport, CiJobFailure } from "./engine/github/github.js";
 
