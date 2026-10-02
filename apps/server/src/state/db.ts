@@ -1,4 +1,3 @@
-import { createClient } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
 import { migrate } from "drizzle-orm/libsql/migrator";
 import { eq } from "drizzle-orm";
@@ -6,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import * as sqliteSchema from "./schema/sqlite.js";
 import { applyLegacySqliteCompat } from "./legacy-sqlite.js";
-import { withSqliteWriteLock } from "./sqlite-write-lock.js";
+import { openSqliteClient, withSqliteWriteLock } from "./sqlite-write-lock.js";
 import { isPostgresUrl, type PgDriver } from "lastlight-shared/database-url";
 import {
   makeOpSerializer,
@@ -190,14 +189,14 @@ export class StateDb {
    * `:memory:` passes through, `file:` URLs pass through, and anything else is
    * treated as a filesystem path.
    *
-   * **`:memory:` is only safe for a caller that never opens a transaction.**
-   * The libsql client lazily opens a NEW connection after every
-   * `client.transaction()`, and for `:memory:` a new connection is a new, EMPTY
-   * database — so the first committed transaction silently discards the schema
-   * and every subsequent query fails with `no such table`. Verified on
-   * @libsql/client 0.17. Nothing in production uses `:memory:`; a test that
-   * touches `WorkflowRunStore`'s named ops or any `TeamStore` write must use a
-   * temp FILE instead.
+   * **`:memory:` is only safe for a caller that never reads while a
+   * transaction is open.** An in-memory database exists only on the connection
+   * that opened it, so libsql caps its pool at ONE connection, and an open
+   * transaction holds it: any read issued meanwhile fails at once with
+   * `TRANSACTION_ACTIVE` (writes queue on the write lock instead). Verified on
+   * @libsql/client 0.18. Nothing in production uses `:memory:`; a test that
+   * touches `WorkflowRunStore`'s named ops or any `TeamStore` write should use
+   * a temp FILE instead.
    */
   static async open(pathOrUrl?: string, opts?: StateDbOpenOptions): Promise<StateDb> {
     const input = pathOrUrl || DEFAULT_DB_PATH;
@@ -206,11 +205,10 @@ export class StateDb {
     if (isPostgresUrl(input)) return StateDb.openPostgres(input, opts);
     const url =
       input === ":memory:" || input.startsWith("file:") ? input : `file:${resolve(input)}`;
-    const raw = createClient({ url });
+    const raw = openSqliteClient(url);
     await raw.execute("PRAGMA journal_mode = WAL");
-    // Every write — plain or transactional — takes the in-process write lock,
-    // which also re-arms busy_timeout on each connection libsql swaps in. See
-    // sqlite-write-lock.ts for the SQLITE_BUSY failure this closes.
+    // Every write — plain or transactional — takes the in-process write lock.
+    // See sqlite-write-lock.ts for the SQLITE_BUSY failure this closes.
     const locked = withSqliteWriteLock(raw);
     await applyLegacySqliteCompat(locked);
     const client = drizzle(locked, { schema: sqliteSchema });

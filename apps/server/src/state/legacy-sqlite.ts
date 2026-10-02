@@ -105,46 +105,39 @@ async function rebuildMessagingIfLegacyUnique(client: Client): Promise<void> {
   if (!tableSql.includes("UNIQUE(platform")) return;
 
   log.info("legacy compat: rebuilding messaging_sessions without the table-level UNIQUE");
-  const fkRow = await client.execute("PRAGMA foreign_keys");
-  const fkWasOn = Number(fkRow.rows[0]?.foreign_keys ?? 0) === 1;
-  await client.execute("PRAGMA foreign_keys = OFF");
-  try {
-    // One execute() per statement — executeMultiple() force-rolls-back any open
-    // transaction in its `finally`, so BEGIN → executeMultiple → COMMIT
-    // silently undoes the rebuild and then throws "no transaction is active".
-    // Boot would fail on exactly the legacy databases this exists for.
-    await client.execute("BEGIN");
-    try {
-      await client.execute(`CREATE TABLE messaging_sessions__new (
-        id TEXT PRIMARY KEY, platform TEXT NOT NULL, channel_id TEXT NOT NULL,
-        thread_id TEXT, user_id TEXT NOT NULL, agent_session_id TEXT,
-        created_at TEXT NOT NULL, last_activity_at TEXT NOT NULL,
-        message_count INTEGER DEFAULT 0, active INTEGER DEFAULT 1
-      )`);
-      await client.execute(`INSERT INTO messaging_sessions__new
-        SELECT id, platform, channel_id, thread_id, user_id, agent_session_id,
-               created_at, last_activity_at, message_count, active
-        FROM messaging_sessions`);
-      await client.execute("DROP TABLE messaging_sessions");
-      await client.execute("ALTER TABLE messaging_sessions__new RENAME TO messaging_sessions");
-      await client.execute(`CREATE INDEX IF NOT EXISTS idx_msg_sessions_lookup
-        ON messaging_sessions(platform, channel_id, thread_id, user_id)`);
-      // Belt-and-braces: if the copy missed rows the messages reference, fail
-      // the migration loudly rather than commit a half-broken schema.
-      const violations = await client.execute("PRAGMA foreign_key_check");
-      if (violations.rows.length > 0) {
-        throw new Error(
-          `FK check failed after messaging rebuild: ${JSON.stringify(violations.rows)}`,
-        );
-      }
-      await client.execute("COMMIT");
-    } catch (err) {
-      await client.execute("ROLLBACK").catch(() => {});
-      throw err;
-    }
-  } finally {
-    if (fkWasOn) await client.execute("PRAGMA foreign_keys = ON");
-  }
+  // One migrate() call, because it is the only client operation that holds a
+  // single connection across statements: plain execute() borrows a pooled
+  // connection per call and rolls back anything left open when it is returned,
+  // so BEGIN → execute → COMMIT silently undoes the rebuild and then throws "no
+  // transaction is active", and a `PRAGMA foreign_keys` set that way lands on
+  // whichever connection served it. migrate() turns foreign_keys off on its
+  // connection before BEGIN and back on after.
+  //
+  // The FK check has to fail INSIDE the transaction, before COMMIT. The
+  // `no_fk_violations` CHECK makes a non-empty foreign_key_check a statement
+  // error, which rolls the whole rebuild back.
+  await client.migrate([
+    `CREATE TABLE messaging_sessions__new (
+      id TEXT PRIMARY KEY, platform TEXT NOT NULL, channel_id TEXT NOT NULL,
+      thread_id TEXT, user_id TEXT NOT NULL, agent_session_id TEXT,
+      created_at TEXT NOT NULL, last_activity_at TEXT NOT NULL,
+      message_count INTEGER DEFAULT 0, active INTEGER DEFAULT 1
+    )`,
+    `INSERT INTO messaging_sessions__new
+      SELECT id, platform, channel_id, thread_id, user_id, agent_session_id,
+             created_at, last_activity_at, message_count, active
+      FROM messaging_sessions`,
+    "DROP TABLE messaging_sessions",
+    "ALTER TABLE messaging_sessions__new RENAME TO messaging_sessions",
+    `CREATE INDEX IF NOT EXISTS idx_msg_sessions_lookup
+      ON messaging_sessions(platform, channel_id, thread_id, user_id)`,
+    `CREATE TEMP TABLE messaging_rebuild_fk_guard (
+      violations INTEGER CONSTRAINT no_fk_violations CHECK (violations = 0)
+    )`,
+    `INSERT INTO messaging_rebuild_fk_guard
+      SELECT COUNT(*) FROM pragma_foreign_key_check`,
+    "DROP TABLE messaging_rebuild_fk_guard",
+  ]);
   // The partial unique index is deliberately NOT recreated here — the baseline
   // migrator runs immediately after, same boot, before any writes.
 }

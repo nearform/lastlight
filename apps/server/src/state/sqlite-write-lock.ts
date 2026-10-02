@@ -1,22 +1,23 @@
 /**
  * The in-process single-writer lock for the libsql LOCAL client.
  *
- * The libsql local client is not one connection, it is a relay of them:
- * `client.transaction()` hands the client's current connection to the
- * transaction and lazily opens a NEW one for everything issued afterwards. So a
+ * The libsql local client is a pool of connections (up to `concurrency`, 20 by
+ * default): every `execute()` / `batch()` borrows one for the call, and
+ * `client.transaction()` borrows one for the transaction's lifetime. So a
  * plain write (`mergeScratch`, `finishRun`, …) racing an open transaction is
  * two connections in one process contending for SQLite's write lock:
  *
- * 1. the plain write fails at once with `SQLITE_BUSY: database is locked` —
- *    the fresh connection never got `busy_timeout`, and even if it had, the
- *    native call blocks the event loop so the lock holder could never commit;
+ * 1. the plain write waits out `busy_timeout` and then fails with
+ *    `SQLITE_BUSY: database is locked` — it can never succeed, because the
+ *    native busy wait blocks the event loop, so the lock holder can't commit;
  * 2. libsql does not reset a statement that failed with BUSY, so that
  *    connection now carries an "active" statement — and the NEXT transaction
  *    to be handed it fails its COMMIT with `SQLITE_BUSY: cannot commit
  *    transaction - SQL statements in progress`.
  *
- * Seen on nearform at boot, when the resume sweep re-dispatched two orphaned
- * runs at once (`tests/state/sqlite-write-lock.test.ts` reproduces both).
+ * Seen on nearform at boot (on @libsql/client 0.17, whose connection relay
+ * failed the same way), when the resume sweep re-dispatched two orphaned runs
+ * at once (`tests/state/sqlite-write-lock.test.ts` reproduces both).
  *
  * The fix is the single-writer discipline the stores always assumed: every
  * write — a transaction from BEGIN to COMMIT/ROLLBACK, or one plain statement —
@@ -26,19 +27,40 @@
  * the `tx` handle, never the root client. A root-client write there waits for
  * the lock its own enclosing transaction holds, forever. (Before this lock that
  * same write failed with "database is locked", so it was already a bug.)
+ *
+ * **Open the raw client with {@link openSqliteClient}.** `busy_timeout` is
+ * connection-scoped and the pool opens connections lazily, so a PRAGMA reaches
+ * only whichever connection served it; the `timeout` option is applied to
+ * every connection as the pool opens it.
  */
-import type {
-  Client,
-  InArgs,
-  InStatement,
-  ResultSet,
-  Transaction,
-  TransactionMode,
+import {
+  createClient,
+  type Client,
+  type InArgs,
+  type InStatement,
+  type ResultSet,
+  type Transaction,
+  type TransactionMode,
 } from "@libsql/client";
 import { makeOpSerializer } from "./client.js";
 
-/** Applied to every connection the client opens, not just the first. */
+/**
+ * How long a write waits on ANOTHER process's write lock (the `lastlight
+ * state` CLI, a backup) before failing. In-process contention never reaches
+ * it — the lock below serializes that.
+ */
 export const SQLITE_BUSY_TIMEOUT_MS = 5000;
+
+/**
+ * The libsql local client every SQLite `StateDb` runs on, with `busy_timeout`
+ * set on every connection its pool opens.
+ */
+export function openSqliteClient(
+  url: string,
+  opts: { busyTimeoutMs?: number } = {},
+): Client {
+  return createClient({ url, timeout: opts.busyTimeoutMs ?? SQLITE_BUSY_TIMEOUT_MS });
+}
 
 /**
  * Plain reads skip the lock. Anything else — including `WITH …` (a CTE may
@@ -62,11 +84,7 @@ function isBusy(err: unknown): boolean {
  * a `Client` the Drizzle instance is built over; the raw client stays the
  * caller's to close (closing either closes the same connections).
  */
-export function withSqliteWriteLock(
-  raw: Client,
-  opts: { busyTimeoutMs?: number } = {},
-): Client {
-  const busyTimeoutMs = opts.busyTimeoutMs ?? SQLITE_BUSY_TIMEOUT_MS;
+export function withSqliteWriteLock(raw: Client): Client {
   // A lock is a serializer whose op is "hold until released", not "run fn".
   const serialize = makeOpSerializer();
   const acquire = (): Promise<() => void> =>
@@ -85,34 +103,21 @@ export function withSqliteWriteLock(
       );
     });
 
-  // `busy_timeout` is connection-scoped and libsql swaps connections after
-  // every transaction, so re-arm it before the next statement reaches the new
-  // one. In-process contention is now impossible; this is for OTHER processes
-  // (the `lastlight state` CLI, a backup) briefly holding the write lock.
-  let freshConnection = true;
-  const arm = async (): Promise<void> => {
-    if (!freshConnection) return;
-    freshConnection = false;
-    await raw.execute(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
-  };
-
   /**
    * A BUSY failure leaves the statement un-reset on the connection, which
    * poisons the next transaction handed it (see module comment, step 2).
-   * Throw the connection away rather than let that happen.
+   * Throw the pool's connections away rather than let that happen. Safe under
+   * the lock: no transaction can be holding one, and a read borrows its
+   * connection only for a synchronous call.
    */
   const discardIfBusy = (err: unknown): never => {
-    if (isBusy(err)) {
-      raw.reconnect();
-      freshConnection = true;
-    }
+    if (isBusy(err)) raw.reconnect();
     throw err;
   };
 
   const locked = async <T>(fn: () => Promise<T>): Promise<T> => {
     const release = await acquire();
     try {
-      await arm();
       return await fn().catch(discardIfBusy);
     } finally {
       release();
@@ -156,9 +161,7 @@ export function withSqliteWriteLock(
   function execute(stmtOrSql: InStatement, args?: InArgs): Promise<ResultSet> {
     const stmt: InStatement =
       typeof stmtOrSql === "string" && args !== undefined ? { sql: stmtOrSql, args } : stmtOrSql;
-    if (isReadOnlySql(sqlOf(stmt))) {
-      return arm().then(() => raw.execute(stmt));
-    }
+    if (isReadOnlySql(sqlOf(stmt))) return raw.execute(stmt);
     return locked(() => raw.execute(stmt));
   }
 
@@ -170,10 +173,7 @@ export function withSqliteWriteLock(
     transaction: async (mode?: TransactionMode) => {
       const release = await acquire();
       try {
-        await arm();
         const tx = await raw.transaction(mode).catch(discardIfBusy);
-        // The client just gave this connection away; the next one is new.
-        freshConnection = true;
         return wrapTransaction(tx, release);
       } catch (err) {
         release();
@@ -182,10 +182,7 @@ export function withSqliteWriteLock(
     },
     sync: () => raw.sync(),
     close: () => raw.close(),
-    reconnect: () => {
-      raw.reconnect();
-      freshConnection = true;
-    },
+    reconnect: () => raw.reconnect(),
     get closed() {
       return raw.closed;
     },

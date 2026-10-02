@@ -102,8 +102,8 @@ export function tablesOf(client: StateClient): StateTables {
  * same libsql client; a store-scoped chain would leave run-op-vs-team-op races
  * completely unguarded. Overlapping libsql interactive transactions fail in
  * ways beyond SQLITE_BUSY (nested BEGIN, shared-handle interleaving), and
- * `busy_timeout` cannot help because it is connection-scoped and the client
- * swaps connections after each transaction.
+ * `busy_timeout` cannot help: the native busy wait blocks the event loop, so
+ * the transaction holding the lock can never commit while another waits.
  *
  * On SQLite this orders transactions only; it does NOT cover a plain write
  * racing an open transaction. That is `withSqliteWriteLock`'s job (the

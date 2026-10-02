@@ -12,17 +12,17 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { createClient, type Client } from "@libsql/client";
-import { isReadOnlySql, withSqliteWriteLock } from "#src/state/sqlite-write-lock.js";
+import { isReadOnlySql, openSqliteClient, withSqliteWriteLock } from "#src/state/sqlite-write-lock.js";
 import { makeTestDb } from "../helpers/state-db.js";
 
 const dirs: string[] = [];
 const clients: Client[] = [];
 
-async function tempDb(): Promise<{ url: string; raw: Client }> {
+async function tempDb(busyTimeoutMs?: number): Promise<{ url: string; raw: Client }> {
   const dir = mkdtempSync(join(tmpdir(), "lastlight-write-lock-"));
   dirs.push(dir);
   const url = `file:${join(dir, "t.db")}`;
-  const raw = createClient({ url });
+  const raw = openSqliteClient(url, { busyTimeoutMs });
   clients.push(raw);
   await raw.execute("PRAGMA journal_mode = WAL");
   await raw.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");
@@ -91,19 +91,32 @@ describe("withSqliteWriteLock", () => {
     expect(await valueOf(client)).toBe("after");
   });
 
-  it("re-arms busy_timeout on the connection libsql swaps in after a transaction", async () => {
-    const { raw } = await tempDb();
-    const client = withSqliteWriteLock(raw, { busyTimeoutMs: 1234 });
+  it("every pooled connection waits out another process's write lock", async () => {
+    const busyTimeoutMs = 300;
+    const { url, raw } = await tempDb(busyTimeoutMs);
+    const client = withSqliteWriteLock(raw);
 
-    const tx = await client.transaction("write");
-    await tx.commit();
-    const rows = (await client.execute("PRAGMA busy_timeout")).rows;
-    expect(Object.values(rows[0] ?? {})[0]).toBe(1234);
+    // Concurrent reads make the client's pool open several connections, so the
+    // write below can land on one that was never handed a busy_timeout PRAGMA.
+    await Promise.all([1, 2, 3, 4].map(() => client.execute("SELECT v FROM t")));
+
+    const other = createClient({ url });
+    clients.push(other);
+    const held = await other.transaction("write");
+    await held.execute("UPDATE t SET v = 'other' WHERE id = 1");
+    // The native busy wait blocks the event loop, so this timer only fires once
+    // the write has given up: it measures that the write waited at all.
+    const t0 = Date.now();
+    await expect(client.execute("UPDATE t SET v = 'blocked' WHERE id = 1")).rejects.toMatchObject({
+      code: "SQLITE_BUSY",
+    });
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(busyTimeoutMs);
+    await held.rollback();
   });
 
   it("drops a connection a cross-process BUSY failure left poisoned", async () => {
-    const { url, raw } = await tempDb();
-    const client = withSqliteWriteLock(raw, { busyTimeoutMs: 20 });
+    const { url, raw } = await tempDb(20);
+    const client = withSqliteWriteLock(raw);
 
     // Another process holds the write lock.
     const other = createClient({ url });

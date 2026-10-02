@@ -435,6 +435,46 @@ describe("the legacy compat pre-step", () => {
     }
   });
 
+  it("rolls the messaging rebuild back when the FK check finds a violation", async () => {
+    const client = createClient({ url: ":memory:" });
+    try {
+      // An orphaned message (inserted with enforcement off) must abort the
+      // rebuild BEFORE COMMIT: the old table stays exactly as it was.
+      await client.executeMultiple(`
+        PRAGMA foreign_keys = OFF;
+        CREATE TABLE messaging_sessions (
+          id TEXT PRIMARY KEY, platform TEXT NOT NULL, channel_id TEXT NOT NULL,
+          thread_id TEXT, user_id TEXT NOT NULL, agent_session_id TEXT,
+          created_at TEXT NOT NULL, last_activity_at TEXT NOT NULL,
+          message_count INTEGER DEFAULT 0, active INTEGER DEFAULT 1,
+          UNIQUE(platform, channel_id, thread_id, user_id)
+        );
+        CREATE TABLE messaging_messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT NOT NULL REFERENCES messaging_sessions(id),
+          role TEXT NOT NULL, content TEXT NOT NULL, timestamp TEXT NOT NULL,
+          platform_message_id TEXT
+        );
+        INSERT INTO messaging_messages (session_id, role, content, timestamp)
+          VALUES ('gone', 'user', 'hello', '2026-01-01T00:00:00Z');
+        PRAGMA foreign_keys = ON;
+      `);
+
+      await expect(applyLegacySqliteCompat(client)).rejects.toThrow(/no_fk_violations/);
+
+      const master = await client.execute(
+        `SELECT name, sql FROM sqlite_master WHERE type='table' AND name LIKE 'messaging_%'`,
+      );
+      const tables = Object.fromEntries(master.rows.map((r) => [r.name, String(r.sql)]));
+      expect(Object.keys(tables).sort()).toEqual(["messaging_messages", "messaging_sessions"]);
+      expect(tables.messaging_sessions).toContain("UNIQUE(platform");
+      const fk = await client.execute("PRAGMA foreign_keys");
+      expect(Number(fk.rows[0].foreign_keys)).toBe(1);
+    } finally {
+      client.close();
+    }
+  });
+
   it("rebuilds messaging_sessions when the legacy table-level UNIQUE is present", async () => {
     const client = createClient({ url: ":memory:" });
     try {
