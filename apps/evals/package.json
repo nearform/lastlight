@@ -42,12 +42,12 @@
   "author": "Clifton Cunningham",
   "license": "MIT",
   "dependencies": {
-    "@clack/prompts": "^1.7.0",
+    "@clack/prompts": "^1.8.1",
     "chalk": "^6.0.0",
     "lastlight-code-facts": "workspace:*",
     "lastlight-core": "workspace:*",
     "lastlight-workflow-engine": "workspace:*",
-    "yaml": "^2.5.0"
+    "yaml": "^2.9.1"
   },
   "peerDependencies": {
     "agentic-pi": "^0.7.0"
@@ -57,7 +57,7 @@
     "agentic-pi": "workspace:*",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.11",
-    "wrangler": "^4.140.0"
+    "vitest": "^5.0.2",
+    "wrangler": "^4.139.0"
   }
 }
