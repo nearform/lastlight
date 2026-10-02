@@ -496,8 +496,8 @@ export const messagingMessages = sqliteTable(
     // DELETE), and it is LIVE. Nothing sets `PRAGMA foreign_keys` explicitly,
     // which used to be read as "so it is declared-but-unenforced" — that was
     // wrong: better-sqlite3 and libsql BOTH default it on (verified on
-    // @libsql/client 0.17 and better-sqlite3 13 — an orphan insert is rejected
-    // by each). So it has always bitten in production, and it still does. The
+    // @libsql/client 0.17 and 0.18 and better-sqlite3 13 — an orphan insert is
+    // rejected by each). So it has always bitten in production, and it still does. The
     // legacy messaging rebuild toggles it off around the table swap precisely
     // because it is enforced (see `state/legacy-sqlite.ts`).
     sessionId: text("session_id")

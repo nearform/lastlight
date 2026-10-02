@@ -988,9 +988,11 @@ const db = StateDb.fromClient(client, "postgres"); // tests, DI
 through, a `file:` URL passes through, `postgres(ql)://` takes the Postgres
 branch, and anything else is treated as a filesystem path (resolved, then
 `file:`-prefixed). Callers never build `file:` URLs themselves. On the sqlite
-path it then sets `journal_mode=WAL`, wraps the client in the in-process write
-lock (`withSqliteWriteLock`, which also applies `busy_timeout=5000` to every
-connection libsql opens), runs the legacy pre-step, and applies `drizzle/sqlite`; on the Postgres path it
+path it opens the client with `openSqliteClient()` (which sets `busy_timeout`
+to 5000 ms on every connection the libsql pool opens), sets
+`journal_mode=WAL`, wraps the client in the in-process write lock
+(`withSqliteWriteLock`), runs the legacy pre-step, and applies
+`drizzle/sqlite`; on the Postgres path it
 resolves the driver, builds a pool and applies `drizzle/pg`. `close()` is async
 too, and on Postgres it is load-bearing — it drains the pool.
 
@@ -1071,14 +1073,14 @@ Two consequences worth stating, because they are not local to this page:
   satisfies them structurally, fenced by
   `tests/workflows/state-store-contract.test.ts`.
 - **`:memory:` is unsafe for anything that transacts.** The libsql local client
-  hands its single connection to each `client.transaction()` and lazily opens a
-  *new* one for the next query — against `:memory:` that new connection is a
-  fresh, empty database, so the whole store silently vanishes after the first
-  commit. Tests use `makeTestDb()` (`tests/helpers/state-db.ts`), a per-test
-  temp file. Same root cause: a plain write racing an open transaction runs on
-  a second connection, fails `SQLITE_BUSY: database is locked`, and leaves an
-  un-reset statement that fails the next commit on that connection (`cannot
-  commit transaction - SQL statements in progress`). So every SQLite write —
+  is a connection pool, but an in-memory database exists only on the connection
+  that opened it, so its pool is capped at one — and an open transaction holds
+  that one, so a read issued meanwhile fails at once with `TRANSACTION_ACTIVE`.
+  Tests use `makeTestDb()` (`tests/helpers/state-db.ts`), a per-test temp file.
+  On a file database the pool has several connections, so a plain write racing
+  an open transaction runs on a second one, fails `SQLITE_BUSY: database is
+  locked`, and leaves an un-reset statement that fails the next commit on that
+  connection (`cannot commit transaction - SQL statements in progress`). So every SQLite write —
   one statement, or a whole transaction — holds one in-process lock
   (`withSqliteWriteLock`, `src/state/sqlite-write-lock.ts`); reads skip it. The
   op serializer in `src/state/client.ts` still orders the nine transaction
