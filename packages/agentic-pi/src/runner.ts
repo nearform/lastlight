@@ -44,6 +44,7 @@ import { resolveRetrySettings } from "./retry.js";
 import { cacheWarmingVeto } from "./cache-warming.js";
 import { applyGateTimeout } from "./gate-timeout.js";
 import { commandPolicyGate } from "./command-policy-gate.js";
+import { ApprovalBroker, approvalGate, approvalMatcher, pumpControl, type ControlCommand } from "./control.js";
 import { GUEST_WORKSPACE } from "./sandbox/gondolin.js";
 import { buildSandbox, type ImageDescriptor, type SandboxResult } from "./sandbox/index.js";
 import { ensureImage, ImageLoaderError } from "./sandbox/images/loader.js";
@@ -54,6 +55,11 @@ export interface RunOnceDeps {
   sink: EmitterSink;
   /** Called with human-readable warning text. Default: no-op. */
   onWarn?: (message: string) => void;
+  /**
+   * Live-session control commands (SPIKE). When set, the session can be
+   * steered / aborted / asked for approvals while it runs — see control.ts.
+   */
+  control?: AsyncIterable<ControlCommand | { error: string }>;
 }
 
 export type RunOnceExitCode = 0 | 1 | 2;
@@ -63,6 +69,10 @@ export async function runOnce(
   prompt: string,
   deps: RunOnceDeps,
 ): Promise<RunOnceExitCode> {
+  if (config.runtime && config.runtime !== "pi") {
+    const { runAcpOnce } = await import("./acp-runner.js");
+    return runAcpOnce(config, prompt, deps);
+  }
   const warn = deps.onWarn ?? (() => undefined);
 
   // Resolved up front so the telemetry extension_status can be emitted in the
@@ -283,11 +293,21 @@ export async function runOnce(
     // guest mount is workspace.
     sandbox.backend === "gondolin" ? { hostRoot: GUEST_WORKSPACE } : {},
   );
+  // Approval gate: late-bound emit like the policy gate. Without a control
+  // channel nobody could answer, so the gate is not registered at all.
+  let emitControlEvent: ((e: EmitterRecord) => void) | undefined;
+  const broker = new ApprovalBroker((config.approvalTimeoutSeconds ?? 120) * 1000);
+  if (config.approveTools?.length && !deps.control) {
+    warn("--approve-tools ignored: no control channel (pass --control stdin)");
+  }
+  const approvals = deps.control
+    ? approvalGate(approvalMatcher(config.approveTools), broker, (e) => emitControlEvent?.(e))
+    : undefined;
   const resourceLoader = new DefaultResourceLoader({
     cwd: config.cwd,
     agentDir,
     additionalExtensionPaths: fileSearch.packageDir ? [fileSearch.packageDir] : [],
-    extensionFactories: [warmingVeto, policyGate].filter((f) => f !== undefined),
+    extensionFactories: [warmingVeto, policyGate, approvals].filter((f) => f !== undefined),
     // Operator-mapped skill folders (e.g. --skill ~/.claude/skills). Additive
     // even when noSkills is true (Pi semantics): --skill X --no-skills loads
     // exactly X and nothing from default discovery.
@@ -364,6 +384,13 @@ export async function runOnce(
 
   emitter.sessionHeader();
   emitPolicyEvent = (e) => emitter.event(e);
+  emitControlEvent = (e) => emitter.event(e);
+  // Not awaited: the pump runs alongside prompt() and ends with the source.
+  const controlDone = deps.control
+    ? pumpControl(deps.control, session, broker, (e) => emitter.event(e)).catch((err) =>
+        warn(`control channel error: ${(err as Error).message}`),
+      )
+    : undefined;
   emitter.event({
     type: "sandbox_status",
     backend: sandbox.backend,
@@ -504,7 +531,11 @@ export async function runOnce(
 
   try {
     await session.prompt(prompt, { expandPromptTemplates: false });
+    // The run is over; anything still waiting on a decision is denied.
+    broker.close("session ended");
+    void controlDone;
   } catch (err) {
+    broker.close("session ended");
     emitter.event({
       type: "fatal_error",
       error: { name: (err as Error).name, message: (err as Error).message },

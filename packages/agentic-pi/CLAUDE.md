@@ -145,10 +145,15 @@ SPIKE-gondolin.md         Spike write-up: why sandbox is native-only.
 
 ## Hard rules — non-negotiable
 
-1. **No `mcp-github-app` re-introduction.** Pi has no MCP support and we
-   deliberately don't add it. GitHub tools are native Pi tools registered
-   via `defineTool()`. If you find yourself reaching for `@modelcontextprotocol/sdk`,
-   stop and check with the user first.
+1. **The Pi path never uses MCP.** On `--runtime pi` (the default) the
+   GitHub tools are native Pi tools registered via `defineTool()` — no MCP,
+   no `mcp-github-app`. MCP exists only for the ACP runtimes
+   (`--runtime claude|codex|opencode`, `src/acp-runner.ts`), which can take
+   extra tools no other way: they get the SAME tool definitions served by
+   `agentic-pi mcp-github` (`src/mcp-github.ts`, a generic adapter over Pi
+   `ToolDefinition`s). Never fork the tool code per runtime, and never route
+   the Pi path through MCP. (Relaxed 2026-10-05 — see
+   `docs/plans/agent-runtimes/10-live-sessions.md`.)
 
 2. **Don't touch the JSONL event shape without a fixture update.**
    `test/fixtures/*.jsonl` are contract evidence. If you change emit

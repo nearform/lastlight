@@ -361,6 +361,18 @@ export class DockerSandbox {
       skillDirs?: string[];
       /** Called for each newline-terminated stdout line as it arrives. */
       onLine?: (line: string) => void;
+      /**
+       * SPIKE (spike/live-sessions): a live control channel. When set, the
+       * prompt goes in as a `{"type":"prompt"}` JSONL line, stdin stays open,
+       * and `attach` receives a `send` for steer / follow_up / abort / decide
+       * commands (agentic-pi `--control stdin`). `approveTools` pauses those
+       * tools on `approval_requested` until a `decide` arrives (fail closed).
+       */
+      control?: {
+        attach: (send: (cmd: Record<string, unknown>) => void) => void;
+        approveTools?: string[];
+        approvalTimeoutSeconds?: number;
+      };
     },
   ): Promise<void> {
     const info = this.activeContainers.get(taskId);
@@ -444,6 +456,20 @@ export class DockerSandbox {
       envFlags.push("-e", `${k}=${v}`);
     }
 
+    if (opts.control) {
+      extraArgs.push("--control", "stdin");
+      const tools = opts.control.approveTools ?? [];
+      if (tools.length) {
+        if (!tools.every((t) => /^([A-Za-z0-9_-]+|\*)$/.test(t))) {
+          throw new Error(`Refusing approveTools ${JSON.stringify(tools)} — bad charset`);
+        }
+        // Quoted: `*` must not glob inside `sh -c`.
+        extraArgs.push("--approve-tools", `'${tools.join(",")}'`);
+      }
+      if (opts.control.approvalTimeoutSeconds) {
+        extraArgs.push("--approval-timeout", String(Math.ceil(requirePositiveSeconds(opts.control.approvalTimeoutSeconds, "approvalTimeoutSeconds"))));
+      }
+    }
     const cmd = [
       "agentic-pi", "run",
       "--model", model,
@@ -476,8 +502,17 @@ export class DockerSandbox {
     const STDERR_TAIL_BYTES = 8 * 1024;
     return await new Promise<void>((resolvePromise, reject) => {
       const child = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] });
-      child.stdin.write(prompt);
-      child.stdin.end();
+      if (opts.control) {
+        // Live session: stdin stays open until the process exits.
+        child.stdin.write(`${JSON.stringify({ type: "prompt", message: prompt })}\n`);
+        child.stdin.on("error", () => undefined); // EPIPE after exit is expected
+        opts.control.attach((c) => {
+          if (child.stdin.writable) child.stdin.write(`${JSON.stringify(c)}\n`);
+        });
+      } else {
+        child.stdin.write(prompt);
+        child.stdin.end();
+      }
       let stderrTail = "";
       let buf = "";
 

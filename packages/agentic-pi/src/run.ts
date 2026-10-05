@@ -26,6 +26,8 @@ import type { GitHubAuthEnv } from "./extensions/github/auth.js";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 import { CollectorSink, TeeSink, type EmitterRecord, type EmitterSink } from "./emitter.js";
 import { runOnce, type RunOnceExitCode } from "./runner.js";
+import type { ControlCommand } from "./control.js";
+export type { ControlCommand } from "./control.js";
 
 export interface RunOptions {
   // ── Required ────────────────────────────────────────────────────
@@ -255,6 +257,20 @@ export interface RunOptions {
    * the shim jsonl directly without buffering through onEvent.
    */
   extraSink?: EmitterSink;
+
+  // ── Live session (SPIKE) ────────────────────────────────────────
+  /**
+   * Control commands for the running session — steer / follow_up / abort /
+   * decide (see control.ts). The run ends when the agent finishes, not when
+   * this source ends; an ended source denies pending approvals.
+   */
+  control?: AsyncIterable<ControlCommand>;
+  /** Tool names that pause for a `decide` (`*` = all). Needs `control`. */
+  approveTools?: string[];
+  /** Seconds before an undecided approval is denied. Default 120. */
+  approvalTimeoutSeconds?: number;
+  /** `pi` (default) or an ACP runtime run via acpx — see acp-runner.ts. */
+  runtime?: RunConfig["runtime"];
 }
 
 /** Outcome of one agentic-pi run. */
@@ -421,6 +437,9 @@ export async function run(options: RunOptions): Promise<RunResult> {
     otelServiceName: options.otelServiceName,
     otelEndpoint: options.otelEndpoint,
     providers: options.providers,
+    approveTools: options.approveTools,
+    approvalTimeoutSeconds: options.approvalTimeoutSeconds,
+    runtime: options.runtime,
   };
 
   const collector = new CollectorSink(options.onEvent);
@@ -434,7 +453,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
     options.onWarn?.(msg);
   };
 
-  const exitCode = await runOnce(config, options.prompt, { sink, onWarn });
+  const exitCode = await runOnce(config, options.prompt, { sink, onWarn, control: options.control });
 
   return buildResult(exitCode, collector.records, warnings);
 }

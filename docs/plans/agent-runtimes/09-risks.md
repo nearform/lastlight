@@ -51,4 +51,7 @@
 14. **Option noted, not planned: agentic-pi via `pi-acp`.** It would put every
     runtime on one path. Rejected for now: agentic-pi's native GitHub tools,
     gondolin and the in-process mode would be lost or need re-plumbing. Revisit
-    after P4, once the bridge is proven.
+    after P4, once the bridge is proven. **2026-10-05: closed as no.** The
+    live-sessions spike measured `pi-acp` running vanilla `pi --mode rpc` with
+    no permission requests, no cost, no MCP and queue-only steering — strictly
+    weaker than agentic-pi's native control ([`10`](10-live-sessions.md)).

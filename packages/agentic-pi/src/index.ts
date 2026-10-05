@@ -29,6 +29,8 @@
 
 export { run } from "./run.js";
 export type { RunOptions, RunResult, ThinkingLevel } from "./run.js";
+export { parseControlLine } from "./control.js";
+export type { ControlCommand } from "./control.js";
 
 export { runOnce } from "./runner.js";
 export type { RunOnceDeps, RunOnceExitCode } from "./runner.js";

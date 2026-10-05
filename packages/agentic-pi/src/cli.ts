@@ -11,6 +11,7 @@ import { readStdin } from "./stdin.js";
 import { parseArgs, printHelp, type RunConfig } from "./args.js";
 import { runOnce } from "./runner.js";
 import { StdoutSink } from "./emitter.js";
+import { readControlPrompt } from "./control.js";
 
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
@@ -21,6 +22,10 @@ async function main(): Promise<number> {
   }
 
   const command = argv[0];
+  if (command === "mcp-github") {
+    const { mcpGithubMain } = await import("./mcp-github.js");
+    return await mcpGithubMain(argv.slice(1));
+  }
   if (command !== "run") {
     process.stderr.write(`agentic-pi: unknown command '${command}'\n`);
     printHelp();
@@ -35,7 +40,18 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const prompt = await readStdin();
+  let prompt: string;
+  let control: Awaited<ReturnType<typeof readControlPrompt>>["rest"] | undefined;
+  if (config.control === "stdin") {
+    try {
+      ({ prompt, rest: control } = await readControlPrompt(process.stdin));
+    } catch (err) {
+      process.stderr.write(`agentic-pi: ${(err as Error).message}\n`);
+      return 2;
+    }
+  } else {
+    prompt = await readStdin();
+  }
   if (!prompt.trim()) {
     process.stderr.write("agentic-pi: empty prompt on stdin\n");
     return 2;
@@ -43,6 +59,7 @@ async function main(): Promise<number> {
 
   return await runOnce(config, prompt, {
     sink: new StdoutSink(),
+    control,
     onWarn: (msg: string) => process.stderr.write(`agentic-pi: ${msg}\n`),
   });
 }

@@ -31,6 +31,15 @@ that our own bridge can be thin.**
 | OpenHands SDK, any-agent, Goose, Crystal, Sculptor, Omnara, claude-code-router | various | — | — | — | — | Out of scope (Python frameworks, full apps, model proxies) |
 | Vendor SDKs (`@anthropic-ai/claude-agent-sdk`, `@openai/codex-sdk`, `@opencode-ai/sdk`) | proprietary / Apache-2.0 / MIT | one each | native | full | full | Fallback only: three adapters and three schemas to maintain |
 
+### Added 2026-10-05 (two-way constraint dropped — see [`10`](10-live-sessions.md))
+
+| Candidate | Verdict |
+|---|---|
+| [omnigent-ai/omnigent](https://github.com/omnigent-ai/omnigent) (Databricks, Apache-2.0, Python, ~505K LOC, alpha) | A platform (server + DB + UI + per-session runner), not an engine. No TS SDK, no JSONL one-shot; its Pi path drops cost and its tool gate fails open. **Borrow** the dial-out runner, the `message/interrupt/stop/function_call_output` vocabulary and ALLOW/DENY/ASK — don't adopt |
+| [herdrdev/herdr](https://github.com/herdrdev/herdr) (Rust, ~42k★) | Terminal multiplexer; agent state by screen scraping. No structured tool events/cost/approvals — wrong layer |
+| acpx as an embedded host client | Spiked: works for Claude Code (cost ✔, MCP ✔, cancel ✔) but `steer` only queues, rejects carry no reason, edits aren't permission-gated; `pi-acp` runs vanilla Pi with no permissions/cost |
+| rivet sandbox-agent | No longer disqualified by two-way traffic; still slow-moving (0.5.0 RCs). Revisit only if in-sandbox ACP over exec gets fragile |
+
 ## Decision
 
 **Build our own thin bridge on `@agentclientprotocol/sdk`**, and borrow:

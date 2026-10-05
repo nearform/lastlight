@@ -33,7 +33,8 @@ or via an adapter), so **one client replaces N bespoke integrations**.
 
 ## Locked decisions
 
-1. **Wire: ACP via an in-sandbox bridge.** A new `lastlight-agent-bridge` runs
+1. **Wire: ACP via an in-sandbox bridge.** *(2026-10-05: the "one-way" half
+   of this is dropped — see [`10-live-sessions.md`](10-live-sessions.md).)* A new `lastlight-agent-bridge` runs
    *inside* the sandbox as the ACP client and emits Last Light's normalized
    JSONL on stdout. Sandbox transports stay one-way (prompt on stdin → JSONL on
    stdout), which k8s requires — it only has the pod log stream.
@@ -46,6 +47,11 @@ or via an adapter), so **one client replaces N bespoke integrations**.
 4. **Every runtime is usable from `apps/evals`.** Runtime is a first-class arm
    axis next to model, and a harness comparison is the acceptance gate for
    each new runtime — not an afterthought.
+
+> **2026-10-05 — superseded in part.** The ACP client now lives *inside*
+> agentic-pi (`agentic-pi run --runtime claude|codex|opencode`) instead of a
+> separate `lastlight-agent-bridge`, and emits Pi-shaped records, so core keeps
+> one seam. See [`10-live-sessions.md`](10-live-sessions.md) S3.
 
 ## Architecture
 
@@ -90,6 +96,7 @@ workflow phase
 | [`07-evals-harness-comparison.md`](07-evals-harness-comparison.md) | Runtimes in `apps/evals`: arm axis, mock + metric parity, fairness |
 | [`08-rollout.md`](08-rollout.md) | Phases P0–P6 with acceptance criteria |
 | [`09-risks.md`](09-risks.md) | Risks and open questions |
+| [`10-live-sessions.md`](10-live-sessions.md) | **Two-way sessions** — steering, approvals, guardian agents; spike results (supersedes "one-way" in locked decision 1) |
 
 ## Glossary
 

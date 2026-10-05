@@ -165,6 +165,22 @@ export interface RunConfig {
    */
   maxSteps?: number;
   /**
+   * Live-session control channel (SPIKE). `stdin`: line 1 of stdin is a
+   * `{"type":"prompt",…}` JSONL record and stdin stays open for control
+   * commands (steer / follow_up / abort / decide) — see control.ts.
+   */
+  control?: "stdin";
+  /**
+   * Which agent runs behind this seam (SPIKE). `pi` (default) is the native
+   * Pi SDK path; `claude` / `codex` / `opencode` run over ACP via embedded acpx
+   * and emit the same record shapes (acp-runner.ts).
+   */
+  runtime?: "pi" | "claude" | "codex" | "opencode";
+  /** Tool names that pause on `approval_requested` (`*` = all). Needs a control channel. */
+  approveTools?: string[];
+  /** Seconds to wait for a `decide` before denying (fail closed). Default 120. */
+  approvalTimeoutSeconds?: number;
+  /**
    * Timeout (seconds) for gate commands — installs, builds, full test suites.
    * Set via `--gate-timeout`. When set, the bash tool gains one guideline
    * telling the model to pass this timeout and judge gates by exit code, and a
@@ -273,6 +289,11 @@ Flags:
                               Overrides retry.maxRetries from Pi settings.json.
   --retry-base-delay-ms <n>  Base backoff delay in ms: delay = base*2^(attempt-1).
                               Overrides retry.baseDelayMs from Pi settings.json.
+  --runtime <id>             pi (default) | claude | codex | opencode (ACP via acpx)
+  --control stdin            Live session: stdin line 1 is {"type":"prompt",...},
+                             then steer/follow_up/abort/decide JSONL commands
+  --approve-tools <a,b|*>    Pause these tool calls for a 'decide' (needs --control)
+  --approval-timeout <s>     Deny an undecided approval after <s> seconds (default 120)
   --max-steps <n>            Hard cap on agent steps (one LLM turn + its tool
                               calls). When reached while the agent still wants to
                               continue, the run stops and emits a
@@ -485,6 +506,33 @@ export function parseArgs(argv: string[]): RunConfig {
           throw new Error(`--max-steps must be a positive integer (got '${v}')`);
         }
         config.maxSteps = n;
+        break;
+      }
+      case "--runtime": {
+        const v = next();
+        if (!["pi", "claude", "codex", "opencode"].includes(v)) {
+          throw new Error(`--runtime must be one of pi|claude|codex|opencode (got '${v}')`);
+        }
+        config.runtime = v as RunConfig["runtime"];
+        break;
+      }
+      case "--control": {
+        const v = next();
+        if (v !== "stdin") throw new Error(`--control must be 'stdin' (got '${v}')`);
+        config.control = "stdin";
+        break;
+      }
+      case "--approve-tools": {
+        config.approveTools = next().split(",").map((t) => t.trim()).filter(Boolean);
+        break;
+      }
+      case "--approval-timeout": {
+        const v = next();
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 1) {
+          throw new Error(`--approval-timeout must be a positive integer (got '${v}')`);
+        }
+        config.approvalTimeoutSeconds = n;
         break;
       }
       case "--gate-timeout": {

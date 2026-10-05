@@ -3,6 +3,15 @@
 Each phase ships independently and leaves `main` releasable. Evals support is
 built **into** each phase, never deferred.
 
+> **2026-10-05 — restructured by the single-seam decision
+> ([`10`](10-live-sessions.md) S3).** The ACP runtimes live *inside*
+> agentic-pi (`--runtime`), so core needs no runtime seam, decoder or
+> `AgentEvent` schema: it keeps consuming Pi-shaped JSONL and only passes
+> `--runtime`. The bridge package (P3) and the core `Sandbox.execAgent` split
+> (P1) shrink to "agentic-pi grows `acp-runner.ts` + `mcp-github`" and "core
+> passes `--runtime` + persists it". The phases below are kept for history;
+> read them through that lens.
+
 ## P0 — Spike (about a week, throwaway branch)
 
 - Run each adapter (`claude-agent-acp`, `codex-acp`, `opencode acp`) in the
@@ -39,6 +48,16 @@ filled in, both choices are written down, and there is a licensing decision.
   and new paths;
 - one pr-review eval run on agentic-pi lands inside the existing repeat band
   (`scripts/band.ts`).
+
+## P1.5 — Live sessions on agentic-pi
+
+See [`10-live-sessions.md`](10-live-sessions.md). `SessionControl` on the
+runtime seam (stdin for docker/smol/none), `approval_*` / `control_*` in the
+shim, aborted-run classification, a `guardian:` phase config, and a
+maintainer steer/abort control in the dashboard.
+
+**Accept when:** the spike's steer / deny-with-reason / abort / fail-closed
+scenarios pass as an AI-free mechanism test plus one live docker run.
 
 ## P2 — GitHub core + MCP server
 
