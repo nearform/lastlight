@@ -259,7 +259,7 @@ export const PROVIDERS: readonly ProviderSpec[] = [
     baseUrl: "https://opencode.ai/zen/v1",
     api: "openai-completions",
     host: "opencode.ai",
-    fastModel: "deepseek-v4-flash",
+    fastModel: "deepseek-v4.1-flash",
     sampleModel: "kimi-k2.6",
   },
   // ── OpenRouter — aggregator (take any pi.dev-listed model via one key) ──
