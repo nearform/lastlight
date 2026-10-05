@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  approvalHeldBack,
   parseDiff,
   splitFindings,
   buildReview,
@@ -221,5 +222,15 @@ describe("buildBodyOnlyReview", () => {
     expect(review.body).toContain("### Additional findings");
     expect(review.body).toContain("a");
     expect(review.body).toContain("b");
+  });
+});
+
+describe("approvalHeldBack — the floor under an APPROVE", () => {
+  it("holds back an APPROVE over a still-open earlier finding or a standing change request, and nothing else", () => {
+    expect(approvalHeldBack("APPROVE", { stillOpen: 0, changesRequestedBy: [] })).toBeNull();
+    expect(approvalHeldBack("APPROVE", { stillOpen: 2, changesRequestedBy: [] })).toMatch(/2 finding/);
+    expect(approvalHeldBack("APPROVE", { stillOpen: 0, changesRequestedBy: ["alice"] })).toMatch(/@alice/);
+    // Only an APPROVE is ever held back.
+    expect(approvalHeldBack("COMMENT", { stillOpen: 2, changesRequestedBy: ["alice"] })).toBeNull();
   });
 });

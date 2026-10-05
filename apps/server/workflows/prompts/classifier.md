@@ -3,7 +3,7 @@ Classify the user's message into exactly one category, and extract any repositor
 
 Categories:
 {{categories}}
-APPROVE — The user is approving a pending gate: "approve", "go ahead", "looks good, continue", "yes proceed".
+APPROVE — The user is approving a pending gate: "approve", "go ahead", "looks good, continue", "yes proceed". NOT a request for the bot to approve a pull request: on a PR, "can you approve this?" / "approve this PR" / "sign this off" asks the bot to review the PR and approve it if clean, which is REVIEW.
 REJECT — The user is rejecting a pending gate: "reject", "abort", "cancel this", "no don't proceed". Extract any reason given.
 STATUS — The user wants to know what's running: "status", "what's running", "any tasks active?".
 RESET — The user wants to start a fresh session: "new", "reset", "start over", "fresh session".
@@ -37,6 +37,9 @@ a clear command directed at the issue's subject:
 - "review this", "can you review this", "please review", "take a look",
   "give this a review" → REVIEW (do a real code review now; on a PR this means
   review the current PR's diff).
+- On a PR: "approve", "can you approve this?", "approve this PR", "please
+  approve", "sign this off", "LGTM it" → REVIEW (the bot approves a PR only
+  through a review, which approves when it finds nothing to raise).
 A bare command word ("explore", "build", "review") on an existing issue/PR is a
 clear command, NOT ambiguous chat.
 This verb rule is for IMPERATIVE requests only. A PR/issue reply that REPORTS

@@ -11,11 +11,12 @@ prepopulate_pr_head_ref: true
 classification:
   intent: review
   description: |
-    REVIEW — The user wants a code review. Either repo-wide ("review cliftonc/repo", "check PRs", "can you review PRs on <repo>?") OR, when the comment is a reply on a PR (ISSUE TITLE present), a request to review THIS PR: "review this", "can you review this?", "please review", "take a look at this PR", "give this a review". The deliverable is a formal PR review (inline comments on the diff). Prefer REVIEW over CHAT whenever there's a clear "review"/"take a look" request on a PR.
+    REVIEW — The user wants a code review. Either repo-wide ("review cliftonc/repo", "check PRs", "can you review PRs on <repo>?") OR, when the comment is a reply on a PR (ISSUE TITLE present), a request to review THIS PR: "review this", "can you review this?", "please review", "take a look at this PR", "give this a review". Asking the bot to APPROVE or sign off THIS PR is also REVIEW — "can you approve this?", "approve this PR", "please approve", "can you sign this off?", "give it a green tick" — because a review is the only way the bot approves a PR (it approves when the review finds nothing to raise). The deliverable is a formal PR review (inline comments on the diff). Prefer REVIEW over CHAT whenever there's a clear "review"/"take a look"/"approve this PR" request on a PR.
   examples:
     - '"please review https://github.com/foo/bar/pull/42" → INTENT: REVIEW, REPO: foo/bar, ISSUE: 42, REASON: NONE'
     - '"can you review this?" with ISSUE TITLE "Add HTML sanitizer for messages" → INTENT: REVIEW, REPO: NONE, ISSUE: NONE, REASON: NONE'
     - '"take a look at this PR when you get a chance" with ISSUE TITLE "Port fastify adapter" → INTENT: REVIEW, REPO: NONE, ISSUE: NONE, REASON: NONE'
+    - '"can you approve this?" replying on an existing PR with ISSUE TITLE "fix(backend): stop formSync reverting saves" → INTENT: REVIEW, REPO: NONE, ISSUE: NONE, REASON: NONE'
 chat:
   trigger: review PRs on owner/repo
   summary: Review the open PRs on a repo

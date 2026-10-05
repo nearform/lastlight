@@ -1048,6 +1048,44 @@ describe('routeEvent — approval commands in comment.created', () => {
     }
   });
 
+  it('on a PR with no pending gate, @bot approve is classified (a request to approve the PR), not a gate command', async () => {
+    mockClassifyComment.mockResolvedValue({ intent: 'review' });
+    const getPendingByTrigger = vi.fn().mockResolvedValue(null);
+    const deps = {
+      db: { approvals: { getPendingReplyGateByTrigger: vi.fn().mockReturnValue(null), getPendingByTrigger } },
+    } as unknown as RouterDeps;
+    const result = await routeEvent(makeEnvelope({
+      type: 'comment.created',
+      body: '@last-light approve',
+      authorAssociation: 'MEMBER',
+      issueNumber: 2110,
+      prNumber: 2110,
+    }), deps);
+    expect(getPendingByTrigger).toHaveBeenCalledWith('cliftonc/drizzle-cube#2110');
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') expect(result.handler).toBe('pr-review');
+  });
+
+  it('on a PR with a pending gate, @bot approve still resolves the gate', async () => {
+    const deps = {
+      db: {
+        approvals: {
+          getPendingReplyGateByTrigger: vi.fn().mockReturnValue(null),
+          getPendingByTrigger: vi.fn().mockResolvedValue({ workflowRunId: 'r1' }),
+        },
+      },
+    } as unknown as RouterDeps;
+    const result = await routeEvent(makeEnvelope({
+      type: 'comment.created',
+      body: '@last-light approve',
+      authorAssociation: 'MEMBER',
+      issueNumber: 2110,
+      prNumber: 2110,
+    }), deps);
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') expect(result.handler).toBe('approval-response');
+  });
+
   it('does not route approval for non-maintainer — falls through to reply', async () => {
     const result = await routeEvent(makeEnvelope({
       type: 'comment.created',

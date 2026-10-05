@@ -260,6 +260,28 @@ describe("post-review action (runPostReview)", () => {
     expect(body.body).toContain("Looks good.");
   });
 
+  it("never APPROVEs over a human's standing CHANGES_REQUESTED — posts a COMMENT instead", async () => {
+    const human = (state: string, at: string) => ({ user: { login: "alice", type: "User" }, state, commit_id: "old", submitted_at: at, body: "" });
+    // A later COMMENTED review does not lift the change request.
+    setPriorReviews([human("CHANGES_REQUESTED", "2026-01-01T00:00:00Z"), human("COMMENTED", "2026-01-02T00:00:00Z")]);
+    const taskId = "widget-42-pr-review";
+    seedFindings(taskId, "widget", { summary: "Looks good.", event: "APPROVE", findings: [] });
+    const { executor } = makeExecutor(taskId);
+    const outcome = await executor.execute(NODE, {});
+    expect(outcome.status).toBe("succeeded");
+    expect((reviews[0]!.body as { event: string }).event).toBe("COMMENT");
+  });
+
+  it("APPROVEs once that human's later review approved", async () => {
+    const human = (state: string, at: string) => ({ user: { login: "alice", type: "User" }, state, commit_id: "old", submitted_at: at, body: "" });
+    setPriorReviews([human("CHANGES_REQUESTED", "2026-01-01T00:00:00Z"), human("APPROVED", "2026-01-02T00:00:00Z")]);
+    const taskId = "widget-42-pr-review";
+    seedFindings(taskId, "widget", { summary: "Looks good.", event: "APPROVE", findings: [] });
+    const { executor } = makeExecutor(taskId);
+    await executor.execute(NODE, {});
+    expect((reviews[0]!.body as { event: string }).event).toBe("APPROVE");
+  });
+
   it("posts from prNumber alone when issueNumber is absent (real PR webhook ctx)", async () => {
     // A `pr.opened`/`synchronize`/`reopened` webhook routes with only prNumber
     // (router drops the issue mirror), so simple.ts builds a ctx with

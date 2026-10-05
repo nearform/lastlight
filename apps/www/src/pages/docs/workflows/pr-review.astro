@@ -32,7 +32,10 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		posted — each with a concrete impact (what breaks, for which input) and
 		put through a self-refutation confidence gate — while lower-value
 		suggestions and nits are dropped, because a noisy reviewer gets muted. A
-		clean PR is approved with few or no comments.
+		clean PR is approved with few or no comments — unless a finding from an
+		earlier review is still open or a maintainer has requested changes, when
+		the review is a comment instead. Asking the bot on a PR to review it, or
+		to approve it, runs a fresh review.
 	</p>
 
 	<div class="docs-callout tip">

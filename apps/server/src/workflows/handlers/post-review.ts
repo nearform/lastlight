@@ -9,6 +9,7 @@ import { basename, join, resolve, sep } from "node:path";
 import { GitHubClient } from "../../engine/github/github.js";
 import {
   anchorFindings,
+  approvalHeldBack,
   buildReview,
   withSummary,
   buildBodyOnlyReview,
@@ -36,6 +37,7 @@ import { logger } from "../../logging/logger.js";
 import { chat, type ChatFunction } from "../../engine/llm.js";
 import { writePostedSummary } from "../../engine/github/review-summary.js";
 import {
+  carriedOpen,
   coerceLedger,
   findingFingerprint,
   foldReviewLedger,
@@ -651,6 +653,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     let history: Awaited<ReturnType<GitHubClient["getBotReviewHistory"]>> = {
       atHead: null,
       latest: null,
+      changesRequestedBy: [],
     };
     if (headSha) {
       // Best-effort: a failed read leaves both null, which posts.
@@ -662,7 +665,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
           headSha,
           getRuntimeConfig()?.botLogin,
         )
-        .catch(() => ({ atHead: null, latest: null }));
+        .catch(() => ({ atHead: null, latest: null, changesRequestedBy: [] }));
 
       // "We already reviewed this head" — decided ONCE, by the same module the
       // dispatch gate asks. Two things are being told apart here and they used
@@ -853,6 +856,18 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       boundary && review.tiered && incomplete === undefined
         ? await this.foldLedger({ github, owner, repo, prNumber, hostRepoDir, prior: priorLedger, headSha, tiered: review.tiered, localCheckout: !!localHeadSha })
         : null;
+    // The APPROVE floor only the PR's history can supply — after the fold, so
+    // an earlier finding THIS head addressed no longer holds it back. Applied
+    // to `doc` too, because the body-only retry re-derives its event from it.
+    const heldBack = approvalHeldBack(review.event, {
+      stillOpen: carriedOpen(ledger ?? priorLedger).length,
+      changesRequestedBy: history.changesRequestedBy ?? [],
+    });
+    if (heldBack) {
+      log.info("Not approving", { repo: `${owner}/${repo}`, prNumber, reason: heldBack });
+      review = { ...review, event: "COMMENT" };
+      doc = { ...doc, event: "COMMENT" };
+    }
     // Issue #405: under a boundary the summary is written AFTER the caps, from
     // the posted findings only — the adjudicator's summary was written before
     // them and routinely named findings the boundary then withheld, which
@@ -941,7 +956,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
         : "";
       await this.persistLedger(ledger, hostRepoDir);
       return succeed(
-        `posted review: ${review.inlineCount} inline, ${review.demotedCount} in body${withheld}, event=${review.event}${downgraded}`,
+        `posted review: ${review.inlineCount} inline, ${review.demotedCount} in body${withheld}, event=${review.event}${downgraded}${heldBack ? `, not approving: ${heldBack}` : ""}`,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

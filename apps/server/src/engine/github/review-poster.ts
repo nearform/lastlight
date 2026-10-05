@@ -1518,6 +1518,29 @@ export function resolveEvent(doc: ReviewFindingsDoc): ReviewEvent {
 }
 
 /**
+ * The floor under an `APPROVE` that only GitHub and the review ledger can see:
+ * findings an earlier review posted that are still open, and a human's
+ * standing CHANGES_REQUESTED. Either turns the APPROVE into a `COMMENT` (never
+ * a REQUEST_CHANGES — the bot is not escalating, it is declining to sign off).
+ * A finalizer can only say "this run found nothing"; it cannot see what the
+ * PR's history already holds against the change, and a bot APPROVE on top of
+ * an unaddressed finding or a maintainer's change request reads as the bot
+ * overruling both.
+ *
+ * Returns the reason when it holds the approval back, `null` otherwise.
+ */
+export function approvalHeldBack(
+  event: ReviewEvent,
+  facts: { stillOpen: number; changesRequestedBy: readonly string[] },
+): string | null {
+  if (event !== "APPROVE") return null;
+  if (facts.changesRequestedBy.length)
+    return `changes requested by ${facts.changesRequestedBy.map((l) => `@${l}`).join(", ")}`;
+  if (facts.stillOpen > 0) return `${facts.stillOpen} finding(s) from an earlier review still open`;
+  return null;
+}
+
+/**
  * Compose the full review payload. Pass `commentable = null` to force every
  * finding into the body (the diff-unavailable fallback).
  */

@@ -1877,6 +1877,13 @@ export class GitHubClient {
   ): Promise<{
     atHead: { state: string; body: string | null; submittedAt: string | null } | null;
     latest: { state: string; sha: string; body: string | null; submittedAt: string | null } | null;
+    /**
+     * Humans whose standing verdict is CHANGES_REQUESTED — their latest
+     * APPROVED / CHANGES_REQUESTED / DISMISSED review, which is how GitHub
+     * itself reads it (a later COMMENTED review does not lift a change
+     * request). `post-review` never APPROVEs over one of these.
+     */
+    changesRequestedBy: string[];
   }> {
     const kit = await this.kit(owner);
     const reviews = await kit.paginate(kit.rest.pulls.listReviews, {
@@ -1885,6 +1892,13 @@ export class GitHubClient {
       pull_number: pullNumber,
       per_page: 100,
     });
+    const standing = new Map<string, string>();
+    for (const r of reviews) {
+      const login = r.user?.login;
+      if (!login || login === botLogin || r.user?.type === "Bot") continue;
+      if (r.state === "APPROVED" || r.state === "CHANGES_REQUESTED" || r.state === "DISMISSED") standing.set(login, r.state);
+    }
+    const changesRequestedBy = [...standing].filter(([, state]) => state === "CHANGES_REQUESTED").map(([login]) => login);
     // Reviews are returned oldest-first; iterate newest-first to pick the most
     // recent one tied to this SHA. `commit_id` on a review is the head sha at
     // the time the review was submitted, which is exactly the discriminator
@@ -1907,7 +1921,7 @@ export class GitHubClient {
       }
       if (atHead && latest) break;
     }
-    return { atHead, latest };
+    return { atHead, latest, changesRequestedBy };
   }
 
   /**

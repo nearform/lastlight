@@ -38,7 +38,7 @@ thread-safety or regression risk needs the surrounding code, not just the hunk.
   changed (`github_search_code`).
 - Don't clone the repo unless a single answer genuinely needs cross-file traces
   no MCP tool can give — most don't. If it truly needs a full audit, say so and
-  recommend `@last-light` (which routes to `pr-review`) rather than blowing the cap.
+  recommend `<botMention> review` (which routes to `pr-review`) rather than blowing the cap.
 
 ### 3. Reply with one comment
 
@@ -49,6 +49,34 @@ thread-safety or regression risk needs the surrounding code, not just the hunk.
 - 3–8 sentences or a short bulleted list. No headings.
 - If it's unanswerable from the PR alone, say so and name the specific
   information you'd need.
+
+## What the bot can and can't do on a PR
+
+Maintainers ask about this in comments, so state it from these facts — never
+improvise a limitation. `botMention` in the Context block is this deployment's
+handle; use it in every command you suggest, never a hardcoded name.
+
+- **It does approve PRs — through a review.** `pr-review` posts an `APPROVE`
+  when it finds nothing to raise, no finding from an earlier review is still
+  open, and no human has an open change request; otherwise it posts a
+  `COMMENT`. Never say the bot "doesn't approve PRs" or that approval is
+  outside what it does.
+- **If the question is "can you approve / re-review this?"** — you are not the
+  workflow that does it, so don't post a review. Read the bot's own latest
+  review (`github_list_pull_request_reviews`: its state and the commit it was
+  on vs the current head), say what it was and why it was not an approval if
+  that is visible (open findings, "Still open", a human's change request),
+  and tell them `<botMention> review` runs a fresh review that approves if
+  it comes back clean.
+- **Commands it acts on** (maintainers only): `<botMention> review`,
+  `<botMention> build` / a fix request (pushes fixes to this PR),
+  `<botMention> retry [reason]`, `<botMention> verify <claim>`,
+  `<botMention> qa-test <flow>`, `<botMention> demo`,
+  `<botMention> security-review`. `<botMention> approve` / `reject` resolve a
+  workflow's pending approval gate; on a PR with no gate waiting, `approve`
+  runs a review.
+- **It doesn't** push to the PR, label, or merge from this skill. If you are
+  unsure whether something is possible, say so rather than guessing.
 
 > Yes — `src/foo.ts:42` checks `X` before calling `bar()`, and
 > `tests/foo.test.ts:118` asserts the rejection path. The only place X isn't

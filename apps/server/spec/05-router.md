@@ -70,7 +70,7 @@ instead. Only the configured handle matches — there is no legacy fallback (see
 | `comment.created` on a pre-build issue, plain (no `@last-light`) | `skill: issue-triage` (`mode: retriage`) | Reporter-driven re-triage — see below |
 | `comment.created` without `@last-light` | `ignore` | reason: "no bot mention" |
 | `comment.created` from non-maintainer | `reply: "only maintainers can trigger builds"` | `authorAssociation` not in `MAINTAINER_ROLES` |
-| `comment.created` matching `@last-light approve\|reject [reason]` | `skill: approval-response` | Regex parse, no classifier |
+| `comment.created` matching `@last-light approve\|reject [reason]` | `skill: approval-response` | Regex parse, no classifier. **Exception:** `approve` on a **PR** with no pending gate (`approvals.getPendingByTrigger`) falls through to the classifier — it is a request to approve the PR, which classifies REVIEW → `pr-review` |
 | `comment.created` matching `@last-light retry [reason]` on a **PR** | `dependabot-ci-fix` (dependency PR) / `pr-fix` (anything else) | The recorded "go again" — regex parse, above classification, because a retry has to be an exact instruction rather than an LLM guess. Free text after the command becomes the intervention's `note`. Carries `_retry` down to the dispatch gate, which hands it to `resolvePrState`; see [Un-sticking an escalated PR](#un-sticking-an-escalated-pr--the-three-retry-surfaces). On an issue it means nothing and falls through to the classifier |
 | `comment.created` matching `@last-light security-review` | `skill: security-review` | |
 | `comment.created` matching `@last-light verify <claim>` | `skill: verify` | Text after the keyword becomes `commentBody`; works on issues + PRs |
@@ -270,7 +270,11 @@ Heuristics worth knowing:
 - **EXPLORE requires brainstorm/spec/design language.** "Let's think
   about" / "what would it look like if". Otherwise BUILD or CHAT.
 - **APPROVE/REJECT only matter if a gate is pending** — they're emitted
-  but the harness verifies the gate before acting.
+  but the harness verifies the gate before acting. Asking the bot to approve
+  **a PR** ("can you approve this?") is REVIEW, not APPROVE: the bot approves a
+  PR only through `pr-review`. A PR mention that still lands on `pr-comment`
+  gets the skill's "what the bot can and can't do" facts, never an improvised
+  limitation.
 - **Ambiguous → CHAT.** The default bias is conservative.
 
 Failure modes:

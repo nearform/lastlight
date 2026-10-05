@@ -337,6 +337,13 @@ extend when a deployment needs a step the engine should not know about.
   hand-writing `pr_number`/`base_ref`/`head_sha` into the JSON and silently
   `exit 0`'d on any mismatch.
 
+  **The APPROVE floor** (`approvalHeldBack`), applied after the ledger fold:
+  an `APPROVE` becomes a `COMMENT` while a human's standing review is
+  `CHANGES_REQUESTED` (their latest APPROVED / CHANGES_REQUESTED / DISMISSED —
+  a later COMMENTED does not lift it; read in the same `listReviews` pass as
+  the bot's history) or a finding an earlier review posted is still open in the
+  ledger. Without an APPROVE the `last-light/review` check concludes `neutral`.
+
   The document may also carry an optional **split verdict** (issue #271's fix
   7) — `verdict: { spec, standards }`, each `pass` / `fail` / `unknown`. A
   `fail` on **either** axis stops the review being an `APPROVE`; it becomes a

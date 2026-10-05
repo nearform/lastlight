@@ -731,7 +731,18 @@ export async function routeEvent(
       // Check for approval commands before LLM classification
       const approveMatch = envelope.body.match(bot.command("approve\\b"));
       const rejectMatch = envelope.body.match(bot.command("reject\\b(.*)"));
-      if (approveMatch || rejectMatch) {
+      // On a PR, `@bot approve` is only a GATE command when a gate is actually
+      // waiting. With none, it is a request to approve the PR itself — which
+      // the classifier routes to `pr-review`, the one workflow that can post
+      // an APPROVE. Answering "No pending approval found." would tell a
+      // maintainer the bot cannot do the thing it does on every clean review.
+      const prWithoutGate =
+        !!envelope.prNumber &&
+        !!approveMatch &&
+        !!deps.db &&
+        !!envelope.issueNumber &&
+        !(await deps.db.approvals.getPendingByTrigger(`${envelope.repo}#${envelope.issueNumber}`));
+      if ((approveMatch || rejectMatch) && !prWithoutGate) {
         return {
           action: "handler",
           handler: gh.approval_response || "approval-response",
