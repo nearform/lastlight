@@ -214,6 +214,9 @@ importers:
       octokit:
         specifier: ^5.0.5
         version: 5.0.5
+      openworkflow:
+        specifier: 0.10.1
+        version: 0.10.1(@opentelemetry/api@1.9.1)
       pg:
         specifier: ^8.23.0
         version: 8.23.0
@@ -1878,11 +1881,13 @@ packages:
   '@ff-labs/fff-bun@0.11.0':
     resolution: {integrity: sha512-IWN7pKGcYYX/g0KxZkPp2fuLrLydbKstnFswb1RfRxr0lXaw7WBchefMKUFvpfbxCWOAi3sUXHIlbfDA/Vpo4Q==}
     engines: {bun: '>=1.0.0'}
+    cpu: [x64, arm64]
     os: [darwin, linux, win32, android]
 
   '@ff-labs/fff-node@0.11.0':
     resolution: {integrity: sha512-/7fX4kgy28pFZghxuXCAcIPQKb2+VqVirpFcDqMKgrFLTz56tVzHjOkFSdKGq7fa6wRb6eS5Dg9SaX1qyCcKxQ==}
     engines: {node: '>=18.0.0'}
+    cpu: [x64, arm64]
     os: [darwin, linux, win32, android]
 
   '@ff-labs/pi-fff@0.11.0':
@@ -5787,6 +5792,18 @@ packages:
 
   openid-client@6.8.4:
     resolution: {integrity: sha512-QSw0BA08piujetEwfZsHoTrDpMEha7GDZDicQqVwX4u0ChCjefvjDB++TZ8BTg76UpwhzIQgdvvfgfl3HpCSAw==}
+
+  openworkflow@0.10.1:
+    resolution: {integrity: sha512-BdgEjoaazhL26JgQ/SehD/tLVEUYsHD6oZWU79+04jnxc+hPlxmRRfVfaAGeUdS2YEPFr/53C0kcRNodzAdNnA==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      '@opentelemetry/api': '1'
+      postgres: ^3.4.9
+    peerDependenciesMeta:
+      '@opentelemetry/api':
+        optional: true
+      postgres:
+        optional: true
 
   p-finally@1.0.0:
     resolution: {integrity: sha512-LICb2p9CB7FS+0eR1oqWnHhp0FljGLZCWBE9aix0Uye9W8LTQPwMTYVGWQWIw9RdQiDg4+epXQODwIYJtSJaow==}
@@ -12672,6 +12689,10 @@ snapshots:
     dependencies:
       jose: 6.2.4
       oauth4webapi: 3.8.6
+
+  openworkflow@0.10.1(@opentelemetry/api@1.9.1):
+    optionalDependencies:
+      '@opentelemetry/api': 1.9.1
 
   p-finally@1.0.0: {}
 

@@ -6,7 +6,7 @@
     "url": "git+https://github.com/nearform/lastlight.git",
     "directory": "packages/workflow-engine"
   },
-  "description": "Port-driven workflow engine extracted from Last Light — DAG scheduler, phase executor, DSL/schema, template + loop constructs.",
+  "description": "Port-driven workflow engine extracted from Last Light \u2014 DAG scheduler, phase executor, DSL/schema, template + loop constructs.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -18,6 +18,10 @@
     "./test-support": {
       "types": "./dist/test-support/fakes.d.ts",
       "import": "./dist/test-support/fakes.js"
+    },
+    "./durable": {
+      "types": "./dist/durable/index.d.ts",
+      "import": "./dist/durable/index.js"
     },
     "./package.json": "./package.json"
   },
