@@ -1,5 +1,9 @@
 # 09 — Risks and open questions
 
+> **Updated 2026-10-05.** Item 1 is decided, item 14 is closed, and the
+> design review added items 15–17. Decisions are numbered as in the
+> [README](README.md).
+
 1. **Licensing (highest).** Every route to Claude (`claude-agent-acp` →
    Claude Agent SDK) ships Anthropic's proprietary Claude Code binary under its
    Commercial Terms. Redistributing it in **public** GHCR images is unverified
@@ -9,6 +13,11 @@
    - keeping Claude to `--sandbox none` (evals) until resolved.
 
    Codex (Apache-2.0), OpenCode (MIT) and Pi are permissive.
+
+   **Decided 2026-10-05 (decision 19):** a host-side derived image. When an
+   instance enables Claude, `server update` builds a thin image `FROM` the
+   public sandbox image with the lockfile-pinned adapter. Nothing proprietary
+   goes into the public images.
 2. **Image size.** Three native agent binaries likely add hundreds of MB
    [estimate]. Choose between the default image, a build arg, or a separate
    variant (like `sandbox-qa`).
@@ -51,4 +60,20 @@
 14. **Option noted, not planned: agentic-pi via `pi-acp`.** It would put every
     runtime on one path. Rejected for now: agentic-pi's native GitHub tools,
     gondolin and the in-process mode would be lost or need re-plumbing. Revisit
-    after P4, once the bridge is proven.
+    after P4, once the bridge is proven. **2026-10-05: closed as no.** The
+    live-sessions spike measured `pi-acp` running vanilla `pi --mode rpc` with
+    no permission requests, no cost, no MCP and queue-only steering, which is
+    strictly weaker than agentic-pi's native control ([`10`](10-live-sessions.md)).
+15. **Steers land late.** A steer arrives at the next turn boundary, after a
+    batch that may already have done the damage (spike S1: README shipped in
+    the same batch). Mitigation: steer is advisory only, prevention is a static
+    sandbox rule (decision 2), and the UI shows where each steer landed.
+16. **Per-phase runtime fallback hides a mix.** With decision 18, a repo on
+    Claude can have some phases on Pi. Mitigation: the
+    `runtime-model-mismatch` warning, `executions.runtime`, and a per-phase
+    badge with the fallback reason. Never a silent model swap.
+17. **Synthesised fields read as real.** ACP runtimes report cumulative usage
+    and synthesised turns in Pi-shaped records. Mitigation: per-record marks,
+    and cross-runtime numbers use only fields every runtime reports for real
+    (decision 1). Cancelled ACP turns report 0 usage, so cost accuracy is a
+    conformance gate.

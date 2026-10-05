@@ -1,5 +1,14 @@
 # 06 — Config surface and capability matrix
 
+> **2026-10-05: config superseded.** The instance declares
+> `runtimes.available` / `runtimes.default`; a repo picks one via a
+> `.lastlight/` `runtime` key and sets models through the existing `models.*`
+> key; YAML can pin a phase to `pi` only; a runtime/model mismatch falls back
+> per phase with a `runtime-model-mismatch` warning ([README](README.md)
+> decisions 16–18). The model translation, thinking ladder and capability
+> matrix below are still the working reference; add the rows `steer`,
+> `approval.reason`, `approval.patch` and `policy.coverage`.
+
 ## Config
 
 ```yaml

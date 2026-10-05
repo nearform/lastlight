@@ -1,5 +1,11 @@
 # 04 — `lastlight-agent-bridge`
 
+> **2026-10-05: no separate package.** The ACP client lives inside agentic-pi
+> (`src/acp-runner.ts`, embedded acpx), along with `agentic-pi mcp-github` and
+> `agentic-pi hook claude-pretool`. Read "bridge" below as "agentic-pi's ACP
+> path". The run flow, isolation and cost notes still apply. Claude images:
+> a host-side derived image ([README](README.md) decision 19).
+
 ## Identity and boundaries
 
 - `packages/agent-bridge`, npm `lastlight-agent-bridge`, bin

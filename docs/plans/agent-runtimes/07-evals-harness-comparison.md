@@ -1,5 +1,12 @@
 # 07 — Runtimes in the evals harness (comparing harnesses)
 
+> **2026-10-05: the gate changed.** Runtime choice is a team decision, so a
+> runtime is gated on **conformance**, not on beating agentic-pi. Human grades
+> (first) and cost are reported per runtime in the evals dashboard but never
+> block ([README](README.md) decision 15). Claude runs "as itself" within the
+> parity contracts (decision 12). The arm-axis and fairness mechanics below
+> still apply; runtime ids are `pi|claude|codex|opencode`.
+
 **Goal:** answer "is Claude Code (or Codex, or OpenCode) a better harness than
 agentic-pi for this workflow, on this model?" with the same rigour we already
 apply to models: same cases, same mock, same graders, repeat bands, human

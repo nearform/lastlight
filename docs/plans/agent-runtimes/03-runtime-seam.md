@@ -1,5 +1,11 @@
 # 03 — The runtime seam in core
 
+> **2026-10-05: not built.** agentic-pi is the single seam: core only runs
+> `agentic-pi run [--runtime X]`, so there is no `AgentRuntime` interface or
+> `Sandbox.execAgent` split in core. The live-session seam that *is* built is
+> `SessionControl` ([`10`](10-live-sessions.md)). Kept for the coupling
+> analysis.
+
 ## Principle
 
 The engine's `AgentPort` stays exactly as it is. The seam goes **between

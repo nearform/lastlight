@@ -1,5 +1,11 @@
 # 02 — The normalized AgentEvent schema (v1)
 
+> **2026-10-05: not built.** The event contract stays agentic-pi's Pi-shaped
+> `EmitterRecord` JSONL for every runtime, with synthesised fields marked on
+> the record itself ([README](README.md) decision 1). This schema is kept as a
+> reference for the ACP→Pi mapping and for a possible later move of the types
+> into `lastlight-workflow-engine`.
+
 One JSONL record per line, runtime-neutral, modelled on Fabro's run events and
 kept field-compatible with Harbor's ATIF trajectory where it costs nothing.
 

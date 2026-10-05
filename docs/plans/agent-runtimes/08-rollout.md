@@ -1,105 +1,120 @@
 # 08 — Rollout
 
-Each phase ships independently and leaves `main` releasable. Evals support is
-built **into** each phase, never deferred.
+> **Rewritten 2026-10-05** after the design review recorded in the
+> [README](README.md). The earlier P0–P6 phases assumed a core runtime seam, an
+> `AgentEvent` decoder and a separate bridge package; none of those is built
+> (single seam: everything goes through `agentic-pi run`). P0, the spike, is
+> done (`spike/live-sessions`, results in [`10`](10-live-sessions.md)).
 
-## P0 — Spike (about a week, throwaway branch)
+Each item is its own issue, linked from the umbrella
+[#434](https://github.com/nearform/lastlight/issues/434). Each ships
+independently and leaves `main` releasable. Evals support is built into each
+item, never deferred.
 
-- Run each adapter (`claude-agent-acp`, `codex-acp`, `opencode acp`) in the
-  sandbox image **and** on the host. Give each a scripted task: read a file,
-  run bash, edit, call a stub MCP tool, end with `VERDICT:`.
-- Capture raw ACP transcripts as fixtures.
-- Settle every **[UNVERIFIED]** in [`01`](01-acp-and-adapters.md) and
-  [`06`](06-config-and-capabilities.md).
-- **Bridge client choice:** embed `acpx`'s runtime vs a hand-rolled client on
-  the ACP SDK ([`01b`](01b-prior-art.md)).
-- **Clamp choice:** does a `bash` wrapper on PATH catch every shell each agent
-  spawns?
-- **Licensing go/no-go** for Claude in images ([`09`](09-risks.md) item 1).
+```
+1 static run limits ──┐
+                      ├──► 3 Claude Code runtime (evals-first) ──► 4 runtimes in production
+2 live sessions ──────┘       (needs 1 for policy parity)
+5 guardian + approvals: parked until an LLM-judge use case exists (builds on 2)
+```
 
-**Accept when:** a fixture is committed per adapter, the verification table is
-filled in, both choices are written down, and there is a licensing decision.
+## 1 — agentic-pi static run limits ([#437](https://github.com/nearform/lastlight/issues/437))
 
-## P1 — Seam, Pi only, no behaviour change
+Static rules run in the sandbox (README decision 2).
 
-- `AgentEvent` + the Pi decoder (in a new `packages/agent-bridge`, events
-  module only).
-- `AgentRuntime` with `PiRuntime`; `Sandbox.execAgent`; argv instead of
-  `sh -c`; the generic k8s script; core-owned `AgentRunSummary`.
-- Accumulator, shim and spans consume `AgentEvent`.
-- `runtime` on `ExecutorConfig` / `ExecutionResult`; the `executions.runtime`
-  column on **both dialects**.
-- Evals: `Arm` carries `runtime` (agentic-pi only), and scorecard provenance
-  stamps it.
+- `--max-cost-usd`: a per-phase spend ceiling from agentic-pi's per-message
+  cost.
+- A repeated-failure breaker: the same failing tool call N times ends the run.
+- `edit_scope`: a command-policy glob that blocks write/edit outside it, with
+  a reason.
+- A new stop reason (e.g. `budget_exceeded`) that core classifies as a
+  failure, never success. Phase config passes the limits through.
 
-**Accept when:**
-- full CI is green;
-- a **golden test** shows agentic-pi's `test/fixtures/*.jsonl` produce
-  byte-identical transcripts and an identical `ExecutionResult` through the old
-  and new paths;
-- one pr-review eval run on agentic-pi lands inside the existing repeat band
-  (`scripts/band.ts`).
+**Accept when:** each limit has an AI-free test and a JSONL fixture (hard
+rule 2), core classifies each stop reason correctly, and default runs with no
+limit set are byte-identical.
 
-## P2 — GitHub core + MCP server
+## 2 — Live sessions: graceful cancel and admin-UI steer ([#438](https://github.com/nearform/lastlight/issues/438))
 
-- The `github/core.ts` refactor and the `exports` map in agentic-pi.
-- `lastlight-agent-bridge mcp-github`.
+[`10`](10-live-sessions.md) has the design.
 
-**Accept when:**
-- agentic-pi fixtures are unchanged;
-- `tools/list` names equal `PROFILE_TOOLS[p]` for all four profiles, with a
-  schema parity test;
-- the AI-free `mechanism.test.ts` fake-ACP case passes against fake-github.
+- agentic-pi: harden `--control stdin` from the spike, with `ControlCommand`
+  and the control records in `EmitterRecord`; port `test/control.test.ts`; a
+  fixture per new record type.
+- `SessionControl` / `SessionObserver` ports in `lastlight-workflow-engine`;
+  adapters for docker, smol, in-process and Fake; k8s reports
+  `control: false`.
+- Core always passes control; an in-memory `executionId → SessionControl`
+  registry; observers set from code only.
+- Cancel = abort → 10 s grace → kill; the phase records `cancelled` with its
+  real cost; the run is `cancelled`.
+- Admin UI "Send message" (steer only) with sent/acked/landed state and the
+  actor; the shim renders control records.
+- The seam documented in `apps/server/src/workflows/CLAUDE.md` and the spec.
 
-## P3 — Bridge + Claude Code (`none` + docker)
+**Accept when:** an AI-free mechanism test drives steer, abort and steer after
+the end through the Fake sandbox; one live docker run shows a steer landing
+and a graceful cancel with cost recorded; cancel works on in-process and smol,
+not only docker.
 
-- The ACP client, isolated config home, `hook claude-pretool` (plus the wrapper
-  if P0 chose it), file tracking and cost.
-- The `claude-code` runtime, the `--runtime` evals flag, `runAgentOnce` in the
-  barrel, and the evals dashboard runtime column.
-- The `lastlight-evals` skill updated.
+## 3 — Claude Code runtime, evals-first ([#439](https://github.com/nearform/lastlight/issues/439))
 
-**Accept when:**
-- the **runtime conformance suite** (cheap, deterministic, Haiku-class) passes:
-  - an artifact is written and `VERDICT` is parsed;
-  - a blocked `npm install` returns the reason;
-  - `sleep 99999` is killed at the gate;
-  - tool names are canonical, `cost > 0`, and `files.changed` is correct;
-  - cancel / timeout gives a clean `run.error`;
-  - the AGENTS.md canary rule is obeyed;
-  - the ambient-skill canary is **not** visible;
-- the **harness comparison gate** passes: pr-review `agentic-pi × sonnet` vs
-  `claude-code × sonnet`, `--repeats 4`, train + blind split. It is scored on
-  human grades first. The F1 bands must overlap or better, post-review
-  artifacts must be present in 100% of cases, and tool-not-found errors must be
-  counted and reported.
+- agentic-pi: `acp-runner.ts` (embedded acpx) and `mcp-github`, marked
+  experimental in its CLAUDE.md and `--help`. Pi-shaped records with
+  synthesised fields marked per record (README decision 1). Hard rule 1
+  relaxed to "the Pi path never uses MCP".
+- The GitHub tools refactored into a Pi-free core (see
+  [`05`](05-github-mcp.md)), with a schema-parity test against
+  `PROFILE_TOOLS`; an `exports` map replacing the deep `agentic-pi/dist/*`
+  imports.
+- Parity contracts: isolated config home, the same egress/web policy, the same
+  limits; the `PreToolUse` hook (`agentic-pi hook claude-pretool`); declared
+  `policy.coverage`; native skill staging; the generated tool-name line;
+  `thinking`, `--gate-timeout` and `--max-steps` mapped; subagent cost rolled
+  up.
+- Core: `runtime` on `ExecutorConfig`, set only by the evals barrel; the
+  config loader rejects `runtime:` in workflow YAML and instance config.
+- Evals: a `--runtime` arm axis with scorecard provenance, shown in the evals
+  dashboard.
 
-## P4 — Codex + OpenCode
+**Accept when:** the $0 conformance suite passes: artifact written and
+`VERDICT` parsed; a blocked command returns its reason; an out-of-scope edit
+is prevented; `cost > 0` and matches provider usage (subagents and cancelled
+turns included); tool names canonical; zero tool-not-found; the AGENTS.md
+canary is obeyed; the ambient-skill canary is **not** visible. Then the
+reported (non-gating) comparison: pr-review `pi × sonnet` vs
+`claude × sonnet`, `--repeats 4`, train + blind, human grades first, with cost
+per case, shared with Nearform.
 
-- Runtime configs, the permission tier, estimated cost.
+## 4 — Runtimes in production ([#440](https://github.com/nearform/lastlight/issues/440))
 
-**Accept when:**
-- the conformance suite passes, with each runtime's documented degradations
-  asserted as expected (not skipped);
-- comparison arms run: `codex × gpt-5.x` vs `agentic-pi × same model`, and
-  `opencode × X` vs `agentic-pi × X`.
+- Config: `runtimes.available` / `runtimes.default` in instance config; a repo
+  `runtime` key in `.lastlight/` (schema in `packages/shared`), validated
+  against `available`; workflow YAML can pin a phase to `pi` only.
+- A per-phase fallback on runtime/model mismatch with a
+  `runtime-model-mismatch` warning; `executions.runtime` on **both** dialects;
+  a phase runtime badge with the fallback reason.
+- The Claude image: `server update` builds a host-side derived image with the
+  lockfile-pinned `claude-agent-acp` when an instance enables Claude.
+- Codex and OpenCode, in the public images, each with its own declared
+  degradations asserted by the conformance suite.
 
-## P5 — Breadth
+**Accept when:** a Nearform repo runs pr-review on Claude in production end to
+end; a mismatch shows the warning and the badge; the conformance suite passes
+per runtime with degradations asserted, not skipped.
 
-- k8s and smol `execAgent` for ACP runtimes.
-- Fan-out concurrency caps per (backend × runtime).
-- OpenInference spans from `AgentEvent`.
-- The prod dashboard `PhaseDetailPanel` runtime badge.
-- `doctor` wired into `sandbox-preflight`.
-- `docs-sync`: `apps/server/spec/*.md`, `apps/www`, and the CLAUDE.md fixes
-  from [`00`](00-current-coupling.md).
+## 5 — Guardian agents and tool approvals, parked ([#441](https://github.com/nearform/lastlight/issues/441))
 
-**Accept when:** a k8s e2e run passes per runtime, a fan-out of 6 passes on
-docker, and a Phoenix trace shows AGENT → TOOL with totals.
+Builds on item 2's seam: a `guardian:` phase config, `decide()` on
+`SessionControl`, approvals that fail closed, and dispatch-time refusal on
+backends without control. Opened when there's a concrete LLM-judge use case
+with an eval behind it.
 
-## P6 — Later
+## Later / not planned
 
-- The repo-level `runtimes` allowlist.
-- Subscription OAuth (Claude Max, ChatGPT).
+- k8s control (a dial-out `/internal/sandbox-control` WebSocket) and k8s
+  execution for ACP runtimes, once production runs on k8s.
+- Steering from issue/PR comments and Slack.
+- Subscription login for ACP runtimes: follows
+  [#401](https://github.com/nearform/lastlight/issues/401).
 - `session/load` resume.
-- Revisit routing agentic-pi through `pi-acp` ([`09`](09-risks.md) item 14).

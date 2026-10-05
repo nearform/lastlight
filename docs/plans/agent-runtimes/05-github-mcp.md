@@ -1,5 +1,11 @@
 # 05 — Extracting the GitHub tools to an MCP server
 
+> **2026-10-05: applies,** with the MCP server shipped as `agentic-pi
+> mcp-github` (no bridge package). agentic-pi hard rule 1 becomes "the Pi path
+> never uses MCP". Prompts are not forked per runtime; a generated
+> system-prompt line maps `github_*` to the prefixed names ([README](README.md)
+> decision 14).
+
 ## Constraints
 
 - **agentic-pi is a leaf** with no workspace deps and its own npm stream.
