@@ -1061,6 +1061,7 @@ export function finalizeSiteFindings(opts: { dir: string; repo: string }): Final
   let posted = 0;
   let recorded = 0;
   let converged = 0;
+  let convergedMustFix = 0;
   let late = 0;
   for (const item of selection.items) {
     const primary = byId.get(item.primary ?? item.findings[0]);
@@ -1106,6 +1107,7 @@ export function finalizeSiteFindings(opts: { dir: string; repo: string }): Final
     if (nit || withheld) recorded++;
     else posted++;
     if (withheld) converged++;
+    if (withheld && item.importance === "must-fix") convergedMustFix++;
     else if (verdict === "late" && !nit) late++;
   }
 
@@ -1127,18 +1129,21 @@ export function finalizeSiteFindings(opts: { dir: string; repo: string }): Final
   // area must have answered — a slot that wrote nothing (or a `none` that
   // failed its checks) is an area nobody looked at, and "nothing found" over
   // it is a claim the run cannot make. Pair slots are second opinions and do
-  // not gate. A converged finding is one an earlier review raised on code that
-  // has not changed, so it is not a clean bill either. The rest of the floor
-  // (still-open findings from an earlier review, a human's open
-  // CHANGES_REQUESTED) needs GitHub and is applied by core's `post-review`.
+  // not gate. A converged finding is NEW — found late on code an earlier
+  // review already passed — and the gate chose not to post it; approving over
+  // a worth-mentioning one is that same decision, and nearly every re-review
+  // has some (nearform/skillspro#2113: 3, so it never approved). Only a
+  // withheld MUST-FIX (the gate withholds one on a low-risk unit) holds it
+  // back. Findings an earlier review POSTED and are still open, and a human's
+  // open CHANGES_REQUESTED, need GitHub and are core's `post-review` floor.
   const unanswered = merge.slots.filter(
     (s) => !pairSlots.has(s.siteId) && !(s.outcome === "findings" || (s.outcome === "none" && s.gateSatisfied)),
   );
   const approvalHeld =
     posted > 0
       ? null
-      : converged > 0
-        ? `${converged} finding(s) withheld on unchanged code`
+      : convergedMustFix > 0
+        ? `${convergedMustFix} must-fix finding(s) withheld on unchanged code`
         : unanswered.length
           ? `area(s) not investigated: ${unanswered.map((s) => `${s.siteId} (${s.outcome})`).join(", ")}`
           : null;

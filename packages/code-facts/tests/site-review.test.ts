@@ -612,6 +612,25 @@ describe("re-review: scoping, the convergence gate and coverage", () => {
     expect(at12).toMatchObject({ tier: "internal", withheld: "converged" });
   });
 
+  it("approves a re-review whose only finding is withheld on unchanged code — unless it is a must-fix", () => {
+    const only = (importance: string, risk: string) => {
+      const ws = workspace();
+      writeUnits(ws.dir, reached().map((u) => ({ ...u, risk })));
+      const lines = Array.from({ length: 100 }, (_, i) => lineHash(`const line${i + 1} = ${i + 1};`)).join("");
+      writeFileSync(join(ws.dir, "prior-review.json"), JSON.stringify({ version: 1, head: "prior", units: [], files: { "src/a.ts": lines } }));
+      writePlan(ws.dir);
+      writeFindings(ws.dir, "site-001", [finding("site-001", 12, { importance })]);
+      writeFindings(ws.dir, "site-002", [provenNone(ws.dir, "site-002")]);
+      writeSiteMerge(ws.dir, ws.repo);
+      writeFileSync(join(ws.dir, "sites", "selected.json"), JSON.stringify({ items: [{ findings: ["F1"], title: "Late", importance }] }));
+      return finalizeSiteFindings({ dir: ws.dir, repo: ws.repo });
+    };
+    // nearform/skillspro#2113: worth-mentioning findings withheld on code the last review passed.
+    expect(only("worth-mentioning", "medium")).toMatchObject({ converged: 1, posted: 0, event: "APPROVE" });
+    // A must-fix the gate withheld (low-risk unit) is not a clean bill.
+    expect(only("must-fix", "low")).toMatchObject({ converged: 1, posted: 0, event: "COMMENT" });
+  });
+
   it("gates nothing on a first review", () => {
     const firstReview: U[] = [
       ...["u1", "u2", "u3"].map((id) => ({ id, lines: [5, 25] as [number, number] })),
