@@ -429,6 +429,82 @@ describe("github_publish", () => {
     }
   });
 
+// Issue #442 — the bot OWNS the branch. A non-bot commit on a
+  // `dependabot/*` or `renovate/*` ref makes the bot abandon the PR on its
+  // next sync ("edited by someone other than Dependabot"), so the tool's job is
+  // to refuse BEFORE any GraphQL mutation runs (issue #442).
+  test("refuses a publish to a dependabot/* branch — issue #442", async () => {
+    const r = repo();
+    const fake = await fakeGitHub(r.base);
+    try {
+      writeFileSync(join(r.dir, "a.txt"), "two\n");
+      for (const [branch, prefix] of [
+        ["dependabot/npm_and_yarn/lodash-4.17.21", "dependabot/"],
+        ["dependabot/pip/twine-5.0.0", "dependabot/"],
+        ["renovate/lodash-4.x", "renovate/"],
+      ] as const) {
+        const out = await callPublish(fake.url, {
+          owner: "o",
+          repo: "r",
+          message: "m",
+          branch,
+          path: r.dir,
+        });
+        assert.ok(out.error, `expected a refusal for ${prefix}*`);
+        assert.match(
+          out.error,
+          new RegExp(`branch \`${branch}\``),
+          "the refusal must name the rejected branch so the agent can read it",
+        );
+        assert.match(
+          out.error,
+          // Just the prefix name — the forbidding line names it (`dependabot/*`
+          // and `renovate/*` in the refusal body), not the slash prefix itself.
+          new RegExp(`\\b${prefix.replace(/\//g, "")}\\b`),
+          "the refusal must name the rejected bot-owner prefix",
+        );
+        assert.match(out.error, /Nothing was published/);
+        assert.match(out.error, /@dependabot rebase/);
+        assert.match(out.error, /@dependabot recreate/);
+        assert.match(
+          out.error,
+          /do not .*(fall back to|work around).*git push/i,
+          "the refusal must forbid the git-push workaround",
+        );
+      }
+      assert.equal(fake.mutations.length, 0, "no write may reach GitHub");
+    } finally {
+      await fake.close();
+      r.cleanup();
+    }
+  });
+
+  test("refuses a dependabot/* publish even when the checkout branch is different", async () => {
+    // The branch argument names the TARGET — it does not have to match the
+    // checkout's current branch. A bot that slipped an explicit `branch:`
+    // through must still hit the same refusal.
+    const r = repo();
+    const fake = await fakeGitHub(r.base);
+    try {
+      writeFileSync(join(r.dir, "a.txt"), "two\n");
+      const out = await callPublish(fake.url, {
+        owner: "o",
+        repo: "r",
+        message: "m",
+        branch: "dependabot/npm_and_yarn/typescript-eslint-parser-8.71.0",
+        path: r.dir,
+      });
+      assert.ok(out.error);
+      assert.match(out.error, /dependabot\/npm_and_yarn\/typescript-eslint-parser-8\.71\.0/);
+      assert.equal(fake.mutations.length, 0);
+    } finally {
+      await fake.close();
+      r.cleanup();
+    }
+  });
+
+
+
   test("refuses before creating a branch that doesn't exist yet — no remote write happens", async () => {
     // This is the scenario Important 1 in review got wrong: when the target
     // branch is missing, createBranch used to run BEFORE the refusal checks,

@@ -59,6 +59,58 @@ publish a speculative fix.
 {{/if}}
 
 INSTRUCTIONS:
+IF `{{branch}}` STARTS WITH `dependabot/` OR `renovate/` — STOP, READ THIS,
+THEN SKIP STEPS 1-5 AND `github_publish` ENTIRELY.
+
+The bot OWNS that head. The moment any non-bot commit lands on a
+`dependabot/*` or `renovate/*` branch, the bot abandons the PR on its next
+sync with a comment about the branch having been "edited by someone other
+than Dependabot", force-pushes the head back to its own tip, and any
+reviewer who saw your commit watches it disappear. `github_publish` itself
+hard-refuses these branches for the same reason (its refusal error names the
+prefix), so even by accident you cannot push there — but the prompt is the
+real explanation, because the failure modes the refusal protects against
+are exactly the ones that follow a successful push on these branches.
+
+ → Do NOT work around the `github_publish` refusal with `git push`: a
+   non-bot commit (unsigned too) would still block or be force-pushed
+   away regardless. The PR comment IS the entire fix for a bot-owned
+   branch.
+
+What you DO instead — a SINGLE PR comment via `github_add_issue_comment`,
+whose body is exactly one bare command (no prose around it; Dependabot
+parses it as a slash command):
+
+  - `behind` (base moved past the PR's base) → `@dependabot rebase`. The
+    common case. Bot regenerates the lockfile against current `main` and
+    rewrites the PR head onto a fresh base SHA.
+  - `dirty` (merge conflict, almost always the lockfile) → `@dependabot
+    recreate`. A rebase cannot resolve a conflict that already exists on the
+    branch; recreate regenerates from scratch and the new head is clean.
+  - `checks-failing` (genuine red on the head, no conflict) → `@dependabot
+    recreate`. A bump whose own lockfile doesn't match what the test suite
+    expects after `main` moved is exactly what recreate's fresh re-lock
+    fixes. If recreate still goes red on the new head, a maintainer has to
+    look and the escalation below handles it.
+  - `blocked` → DO NOT post a rebase command (auto-merge has no
+    `behind`/`dirty` to clear). Use the standard STOP / `requires-human`
+    path below; a bot-managed branch that needs a human review is not
+    anything this loop can settle.
+
+Then EMIT `CI_FIX_COMPLETE: … outcome=gave-up` on its own final line so the
+run closes cleanly and the bot-managed PR does not loop on the same head
+SHA. The next dispatch will see Dependabot's NEW head SHA (it is on a fresh
+SHA after every recreate), with the appropriate check state.
+
+Note for the rare Dependabot-managed branch whose PR was authored by
+someone ELSE (a maintainer's hand-written patch on top of a `dependabot/*`
+branch): the gate above is the branch prefix, not the author. The branch
+prefix is what makes the bot the lifecycle owner, so the same rule applies.
+
+Below this block, **the rest of the instructions apply only to branches
+that are NOT `dependabot/*` or `renovate/*`** (e.g. a manually-opened PR with
+a dependency bump that ended up failing CI).
+
 Work efficiently and stay focused — you are on a time budget, so spend it on the
 change that lands this PR. Make the smallest fix that works, don't refactor or
 chase failures unrelated to the dependency bump, and don't sink your budget into

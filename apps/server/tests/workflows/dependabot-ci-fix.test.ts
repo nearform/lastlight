@@ -149,3 +149,90 @@ describe("dependabot-ci-fix — the publish step", () => {
     expect(withoutMarker).not.toMatch(/\bpush(ed|es|ing)?\b/i);
   });
 });
+// Issue #442 — `cron-dependabot-ci-fix` was pushing commits onto
+// `dependabot/*` branches owned by Dependabot / Renovate, which the bot then
+// force-pushed away on its next sync, cancelling any review that saw the fix
+// and forcing a maintainer to manually run `@dependabot rebase`. The whole
+// loop must instead drive the bot by PR comment on those branches — and a
+// hard guard in `github_publish` refuses the write so even an accidental
+// push cannot land there.
+describe("dependabot-ci-fix — bot-owned branch routing (issue #442)", () => {
+  const prompt = loadPromptTemplate("prompts/dependabot-ci-fix.md");
+
+  it("intercepts bot-owned branches BEFORE step 1 with the @dependabot commands", () => {
+    // The interceptor must name both prefixes (Dependabot and Renovate) — the
+    // prompt covers the family, not just one vendor — and route ALL four
+    // reasons (behind / dirty / checks-failing / blocked) to either a bare
+    // rebase/recreate command or to the human path.
+    expect(prompt).toMatch(/`dependabot\/`\s+OR\s+`renovate\/`/);
+    // Same soft-wrap problem as the second test below — collapse whitespace
+    // before substring-matching.
+    const flatPrompt = prompt.replace(/\s+/g, " ");
+    expect(flatPrompt).toMatch(/@dependabot rebase/);
+    expect(flatPrompt).toMatch(/@dependabot recreate/);
+
+    // Place the block BEFORE the existing step 1: dependabot-ci-fix.md orders
+    // it as the first thing after `INSTRUCTIONS:`, before the `git fetch` /
+    // `git merge FETCH_HEAD` step. A literal copy/paster following the
+    // numbered steps could not reach `github_publish` from here.
+    // Soft-wrap aware: `indexOf` on the literal substring misses the
+    // `\n    recreate` line break, so normalize whitespace first.
+    const flat = prompt.replace(/\s+/g, " ");
+    const interceptorEnd = flat.indexOf("@dependabot recreate");
+    const step1Index = flat.indexOf("FIRST bring the branch up to date");
+    expect(interceptorEnd).toBeGreaterThan(0);
+    expect(step1Index).toBeGreaterThan(0);
+    expect(interceptorEnd).toBeLessThan(step1Index);
+  });
+
+  it("instructs a SINGLE PR comment, not a push, on bot-owned branches", () => {
+    // `github_add_issue_comment` is the only branch-mutation primitive on a
+    // bot-owned branch — the language test pins that, and so does the absence
+    // of any `git push` instruction outside the AFTER FIXING block. The
+    // helpful refresher: the bot-mode block never references step 5, the gate
+    // runner, or `github_publish` — it routes around them entirely.
+    expect(prompt).toContain("github_add_issue_comment");
+    expect(prompt).toContain("@dependabot rebase");
+    // The prompt soft-wraps `@dependabot recreate` across two lines, so
+    // collapse whitespace before checking.
+    const flatPrompt = prompt.replace(/\s+/g, " ");
+    expect(flatPrompt).toContain("@dependabot recreate");
+  });
+
+  it("tells the agent NOT to fall back to git push on bot-owned branches", () => {
+    // The same prohibition the rest of this prompt carries for the signed-
+    // publish path, repeated here so the bot-mode block stands alone when an
+    // agent reads only it.
+    const interceptor = prompt.match(
+      /IF `\{\{branch\}\}` STARTS WITH `dependabot\/`[\s\S]*?(?=\n\nBelow this block)/,
+    );
+    expect(interceptor).not.toBeNull();
+    expect(interceptor![0]).toMatch(/do NOT (push|fall back|work around)/i);
+    expect(interceptor![0]).toMatch(/git push/);
+  });
+
+  it("branches the four `reason` values into the four correct commands", () => {
+    // The four reasons a runner can summon this workflow on a dependency PR,
+    // each mapped to either a Dependabot command OR the human escalation.
+    // `behind` rebase, `dirty` recreate, `checks-failing` recreate (the
+    // common fitter when recreate's fresh re-lock resolves it), `blocked`
+    // routes to `requires-human` because no comment can clear a reviewer
+    // gate.
+    expect(prompt).toMatch(/`behind`[\s\S]*?@dependabot rebase/);
+    expect(prompt).toMatch(/`dirty`[\s\S]*?@dependabot\s+recreate/);
+    expect(prompt).toMatch(/`checks-failing`[\s\S]*?@dependabot\s+recreate/);
+    expect(prompt).toMatch(/`blocked`[\s\S]*?(requires-human|STOP)/);
+  });
+
+  it("leaves the non-bot branch path untouched (steps 1-5 still apply)", () => {
+    // The interceptor only routes bot branches; the numbered steps still own
+    // the human-authored dependency PR repair. The contract test pins that,
+    // because a future "simpler" rewrite that drops steps out for everyone
+    // would break the open-source case where a maintainer's hand-written
+    // bump PR needs the same fix-loop Lat Light already runs on green-bumps.
+    expect(prompt).toContain("FIRST bring the branch up to date with its base");
+    expect(prompt).toContain("git merge --no-edit FETCH_HEAD");
+    expect(prompt).toContain("Publish with `github_publish`");
+    expect(prompt).toContain('message: "chore(deps): make #{{prNumber}} mergeable"');
+  });
+});

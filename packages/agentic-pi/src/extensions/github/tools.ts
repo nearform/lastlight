@@ -119,6 +119,25 @@ function firstLineOfFailure(err: unknown): string {
 }
 
 /**
+ * Refuse a publish whose target branch belongs to a dependency-update bot
+ * (Dependabot, Renovate). These bots own their heads: once anyone else commits
+ * to `dependabot/*` or `renovate/*`, the bot abandons the PR on its next sync
+ * ("edited by someone other than Dependabot"), the maintainer has to manually
+ * run `@dependabot rebase` / `@dependabot recreate`, and any reviewer who saw
+ * the bot's commit watches the force-push revert it on the next pass. So the
+ * last-line rule is structural: this tool refuses the write before any GraphQL
+ * mutation runs, and surfaces the refusal as an error the agent can read and
+ * route around. The prompt for `dependabot-ci-fix` instructs the agent to post
+ * `@dependabot rebase` / `@dependabot recreate` on the PR instead
+ * (issue #442).
+ */
+const BOT_BRANCH_PREFIXES = [/^dependabot\//, /^renovate\//] as const;
+
+function isBotOwnedBranch(branch: string): boolean {
+  return BOT_BRANCH_PREFIXES.some((re) => re.test(branch));
+}
+
+/**
  * Local HEAD is now behind the branch we just wrote. `reset --mixed` moves the
  * branch ref and the index onto the published commit and leaves every file
  * untouched.
@@ -484,6 +503,20 @@ export function buildGitHubTools(
       async ({ owner, repo, message, branch, base_branch, path: repoPath, exclude, include }) => {
         const cwd = repoPath || process.cwd();
         const target = branch || currentBranch(cwd);
+        if (isBotOwnedBranch(target)) {
+          throw new Error(
+            `refusing to publish — branch \`${target}\` is owned by a dependency-update bot ` +
+              `(\`dependabot/*\`, \`renovate/*\`). A non-bot commit on that branch ` +
+              `forces the bot to abandon the PR on its next sync with a comment about ` +
+              `the branch having been edited by someone other than the bot itself, and ` +
+              `the fix commit gets force-pushed away. Nothing was published. Drive the ` +
+              `bot by PR comment instead — \`@dependabot rebase\` when the PR is ` +
+              `\`behind\` its base, or \`@dependabot recreate\` when it has a merge ` +
+              `conflict or has been edited — via \`github_add_issue_comment\`. Do not ` +
+              `fall back to \`git push\`; an unsigned commit would still block the PR ` +
+              `wherever the bot's own rebase succeeds (issue #442).`,
+          );
+        }
         const { tip, createFrom } = await resolveDiffBase({
           gh,
           auth,
