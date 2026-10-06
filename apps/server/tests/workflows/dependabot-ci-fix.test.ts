@@ -307,16 +307,42 @@ it("routes Renovate `checks-failing` through the `rebase` label, not STOP / requ
     expect(gateIdx).toBeLessThan(dependabotStep);
     expect(gateIdx).toBeLessThan(renameStep);
   });
+it("resolves the rebase label from Renovate config at run time, defaulting to `rebase`", () => {
+    // `rebase` is Renovate's *default* rebase-trigger value, not the only one:
+    // the `rebaseLabel` option overrides it, and a repo that sets it to
+    // anything else (`rebase-now`, `renovate-rebase`, …) ignores a literal
+    // `rebase` post — the bug the review comment flagged. The prompt must
+    // teach the agent to read it from the repo's Renovate config and use the
+    // configured value, with a hard-coded fallback so a repo that hasn't
+    // customised anything still gets the same behaviour it did before.
+    const renovateBlock = prompt.match(
+      /\*\*`renovate\/`[\s\S]*?(?=\n\nThen \(for both families\))/,
+    );
+    expect(renovateBlock).not.toBeNull();
+    const flat = renovateBlock![0].replace(/\s+/g, " ");
+    // The block must name the configurable option …
+    expect(flat).toMatch(/rebaseLabel/);
+    // … show the agent how to read it (jq + the standard Renovate config
+    // paths) …
+    expect(flat).toMatch(/jq/);
+    expect(flat).toMatch(/renovate\.json/);
+// … keep the previous default behaviour: when the field is missing /
+    // the config is absent, the agent uses the literal `rebase` …
+    expect(flat).toMatch(/default[^.]*`rebase`/);
+    // not a baked string. `["$REBASE_LABEL"]` is the bind point.
+    expect(flat).toMatch(/labels:\s*\["\$REBASE_LABEL"\]/);
+});
 
-  it("leaves the non-bot branch path untouched (steps 1-5 still apply)", () => {
-    // The interceptor only routes bot branches; the numbered steps still own
-    // the human-authored dependency PR repair. The contract test pins that,
-    // because a future "simpler" rewrite that drops steps out for everyone
-    // would break the open-source case where a maintainer's hand-written
-    // bump PR needs the same fix-loop Lat Light already runs on green-bumps.
-    expect(prompt).toContain("FIRST bring the branch up to date with its base");
-    expect(prompt).toContain("git merge --no-edit FETCH_HEAD");
-    expect(prompt).toContain("Publish with `github_publish`");
-    expect(prompt).toContain('message: "chore(deps): make #{{prNumber}} mergeable"');
-  });
+it("leaves the non-bot branch path untouched (steps 1-5 still apply)", () => {
+  // The interceptor only routes bot branches; the numbered steps still own
+  // the human-authored dependency PR repair. The contract test pins that,
+  // because a future "simpler" rewrite that drops steps out for everyone
+  // would break the open-source case where a maintainer's hand-written
+  // bump PR needs the same fix-loop Lat Light already runs on green-bumps.
+  expect(prompt).toContain("FIRST bring the branch up to date with its base");
+  expect(prompt).toContain("git merge --no-edit FETCH_HEAD");
+  expect(prompt).toContain("Publish with `github_publish`");
+  expect(prompt).toContain('message: "chore(deps): make #{{prNumber}} mergeable"');
+});
+
 });

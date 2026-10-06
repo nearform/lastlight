@@ -128,15 +128,37 @@ error (e.g. lockfile generation) the user wants Renovate to try again.
 
 Drive Renovate with the same primitive the existing
 `dependabot-pr-merge.md` uses on green-then-blocked Renovate PRs:
-add the `rebase` label via `github_add_labels`
-(`{ owner: "{{owner}}", repo: "{{repo}}", issue_number: {{prNumber}},
-labels: ["rebase"] }`) and post a brief comment via
-`github_add_issue_comment` naming the request. The label itself is
-silent on Renovate's UI, so the comment IS the visible signal — a
-maintainer sees the request, knows it's expected, and notices if
-nothing happens on the bot's next sync. The label's documented
-reach covers all three remediation cases for us:
+add the rebase label via `github_add_labels` and post a brief
+comment via `github_add_issue_comment` naming the request. The
+label itself is silent on Renovate's UI, so the comment IS the
+visible signal — a maintainer sees the request, knows it's
+expected, and notices if nothing happens on the bot's next sync.
 
+`rebase` is Renovate's *default* rebase-trigger label
+(`rebaseLabel`); a repo that sets a different value ignores the
+literal `rebase` post — the agent must read the configured value
+before posting it. Resolve it once, before the tool call:
+
+```
+REBASE_LABEL="$(
+  for f in renovate.json .github/renovate.json .renovaterc.json .github/.renovaterc.json; do
+    if [ -f "$f" ]; then
+      v=$(jq -r '.rebaseLabel // empty' "$f" 2>/dev/null || true)
+      if [ -n "$v" ]; then printf '%s' "$v"; exit 0; fi
+    fi
+  done
+  printf 'rebase'
+)"
+```
+
+Then call `github_add_labels` with
+`{ owner: "{{owner}}", repo: "{{repo}}", issue_number: {{prNumber}},
+labels: ["$REBASE_LABEL"] }`. JSON5 configs (`renovate.json5`,
+`.renovaterc.json5`) are not parseable by `jq`; if the repo uses
+one, default to `rebase` and call it out in the comment so a
+maintainer notices the wiring isn't being read instead of guessing
+at an override that may not exist. The label's documented reach
+covers all three remediation cases for us:
   - `behind` (base moved past the PR's base) → rebase label +
     comment. Documented case 1: a branch behind base. Renovate
     regenerates against current `main` on its next sync.
