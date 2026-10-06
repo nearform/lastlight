@@ -211,17 +211,70 @@ describe("dependabot-ci-fix — bot-owned branch routing (issue #442)", () => {
     expect(interceptor![0]).toMatch(/git push/);
   });
 
-  it("branches the four `reason` values into the four correct commands", () => {
+it("branches the four `reason` values into the four correct commands", () => {
     // The four reasons a runner can summon this workflow on a dependency PR,
     // each mapped to either a Dependabot command OR the human escalation.
     // `behind` rebase, `dirty` recreate, `checks-failing` recreate (the
     // common fitter when recreate's fresh re-lock resolves it), `blocked`
     // routes to `requires-human` because no comment can clear a reviewer
-    // gate.
+    // gate. The Dependabot half is the @dependabot slash commands; the
+    // Renovate half is the `rebase` label via `github_add_labels` (Renovate
+    // does NOT parse @dependabot commands).
+    const flatPrompt = prompt.replace(/\s+/g, " ");
+
     expect(prompt).toMatch(/`behind`[\s\S]*?@dependabot rebase/);
     expect(prompt).toMatch(/`dirty`[\s\S]*?@dependabot\s+recreate/);
     expect(prompt).toMatch(/`checks-failing`[\s\S]*?@dependabot\s+recreate/);
     expect(prompt).toMatch(/`blocked`[\s\S]*?(requires-human|STOP)/);
+
+    expect(flatPrompt).toMatch(/`renovate\/`[\s\S]*?rebase/i);
+    expect(flatPrompt).toMatch(/`github_add_labels`/);
+    expect(prompt).toMatch(/Renovate does NOT parse/i);
+  });
+
+  it("routes Renovate to `github_add_labels` with the `rebase` label, not @dependabot slash commands", () => {
+    // Renovate's rebase trigger is the `rebase` label, exactly what
+    // `dependabot-pr-merge.md` uses on green-then-blocked Renovate PRs. The
+    // prompt must NOT tell the agent to post `@dependabot` comments on a
+    // `renovate/*` branch — Renovate ignores those entirely.
+    const renovateBlock = prompt.match(
+      /\*\*`renovate\/`[\s\S]*?(?=\n\nThen \(for both families\))/,
+    );
+    expect(renovateBlock).not.toBeNull();
+    expect(renovateBlock![0]).toContain("`github_add_labels`");
+    expect(renovateBlock![0]).toContain("rebase");
+    expect(renovateBlock![0]).toMatch(/requires-human/);
+    expect(renovateBlock![0]).not.toMatch(/@dependabot rebase/);
+    expect(renovateBlock![0]).not.toMatch(/@dependabot recreate/);
+  });
+
+  it("writes a no-op gate as the first bot-branch step, so the loop closes after one iteration", () => {
+    // The fix phase's `generic_loop` runs `bash .git/lastlight-verify.sh`
+    // after every iteration; without a script (or with a red one) it exits 1
+    // and the prompt is re-rendered, posting the bot nudge a second time. The
+    // bot-branch path MUST write `exit 0` as the ENTIRE contents of the
+    // verify script FIRST, before posting the comment, so `until_bash`
+    // closes the loop after exactly one iteration — single comment, no
+    // duplicate on re-render (issue #442, contractually closes a fixed
+    // duplicate-comment bug the placeholder prompt left open).
+    const flatPrompt = prompt.replace(/\s+/g, " ");
+    // The very first thing the interceptor asks the agent to do — before
+    // any comment or label work — is the no-op gate. Place matches a
+    // leading "FIRST: write the no-op gate" / "exit 0" pair close to the
+    // `INSTRUCTIONS:` line, BEFORE the Dependabot / Renovate branching.
+    const gateStep = prompt.match(
+      /INSTRUCTIONS:[\s\S]*?FIRST: write the no-op gate\.?[\s\S]*?exit 0/,
+    );
+    expect(gateStep).not.toBeNull();
+    const dependabotStep = flatPrompt.indexOf("Dependabot parses a");
+    const renameStep = flatPrompt.indexOf("Renovate does NOT parse");
+    expect(dependabotStep).toBeGreaterThan(0);
+    expect(renameStep).toBeGreaterThan(0);
+    // Gate step exists within the interceptor block and precedes the
+    // Dependabot/Renovate branching.
+    const gateIdx = flatPrompt.indexOf("exit 0");
+    expect(gateIdx).toBeLessThan(dependabotStep);
+    expect(gateIdx).toBeLessThan(renameStep);
   });
 
   it("leaves the non-bot branch path untouched (steps 1-5 still apply)", () => {

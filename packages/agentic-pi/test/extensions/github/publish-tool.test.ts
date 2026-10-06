@@ -458,21 +458,91 @@ describe("github_publish", () => {
         );
         assert.match(
           out.error,
-          // Just the prefix name — the forbidding line names it (`dependabot/*`
-          // and `renovate/*` in the refusal body), not the slash prefix itself.
           new RegExp(`\\b${prefix.replace(/\//g, "")}\\b`),
           "the refusal must name the rejected bot-owner prefix",
         );
         assert.match(out.error, /Nothing was published/);
-        assert.match(out.error, /@dependabot rebase/);
-        assert.match(out.error, /@dependabot recreate/);
         assert.match(
           out.error,
           /do not .*(fall back to|work around).*git push/i,
           "the refusal must forbid the git-push workaround",
         );
+        if (prefix === "renovate/") {
+          assert.match(
+            out.error,
+            /does NOT parse `@dependabot` slash commands/i,
+            "the Renovate refusal must redirect to the right primitive (the rebase label, not a slash command)",
+          );
+          assert.match(
+            out.error,
+            /`github_add_labels`/,
+            "the Renovate refusal must name github_add_labels as the next step",
+          );
+          assert.match(
+            out.error,
+            /`rebase`/,
+            "the Renovate refusal must name the rebase label that drives Renovate",
+          );
+          assert.doesNotMatch(
+            out.error,
+            /@dependabot rebase/,
+            "the Renovate refusal MUST NOT mention @dependabot commands (Renovate does not parse them)",
+          );
+          assert.doesNotMatch(
+            out.error,
+            /@dependabot recreate/,
+            "the Renovate refusal MUST NOT mention @dependabot commands (Renovate does not parse them)",
+          );
+        } else {
+          assert.match(
+            out.error,
+            /@dependabot rebase/,
+            "the Dependabot refusal must name the @dependabot rebase slash command",
+          );
+          assert.match(
+            out.error,
+            /@dependabot recreate/,
+            "the Dependabot refusal must name the @dependabot recreate slash command",
+          );
+          assert.match(
+            out.error,
+            /`github_add_issue_comment`/,
+            "the Dependabot refusal must name github_add_issue_comment as the next step",
+          );
+        }
       }
       assert.equal(fake.mutations.length, 0, "no write may reach GitHub");
+    } finally {
+      await fake.close();
+      r.cleanup();
+    }
+  });
+
+  test("refuses a dependabot-bot/* publish (renovate-style Renovate prefix) — issue #442", async () => {
+    // The shipped prefix list also covers `renovate-bot/` — a Renovate config
+    // that uses the bot-style branch naming instead of the default `renovate/`.
+    // A non-bot commit on one of those still triggers bot force-push, so the
+    // guard refuses with the right primitive (the rebase label), not the wrong
+    // one (the @dependabot comment).
+    const r = repo();
+    const fake = await fakeGitHub(r.base);
+    try {
+      writeFileSync(join(r.dir, "a.txt"), "two\n");
+      const out = await callPublish(fake.url, {
+        owner: "o",
+        repo: "r",
+        message: "m",
+        branch: "renovate-bot/lodash-4.x",
+        path: r.dir,
+      });
+      assert.ok(out.error);
+      assert.match(out.error, /branch `renovate-bot\/lodash-4\.x`/);
+      assert.match(out.error, /Nothing was published/);
+      assert.match(out.error, /`github_add_labels`/);
+      assert.match(out.error, /do not .*(fall back to|work around).*git push/i);
+      assert.doesNotMatch(out.error, /@dependabot rebase/);
+      assert.doesNotMatch(out.error, /@dependabot recreate/);
+      assert.equal(fake.mutations.length, 0);
     } finally {
       await fake.close();
       r.cleanup();
@@ -978,6 +1048,85 @@ describe("github_publish signature assertion", () => {
       assert.doesNotMatch(out.error, /Pull and try again/);
     } finally {
       await new Promise<void>((res2) => server.close(() => res2()));
+      r.cleanup();
+    }
+  });
+});
+
+async function callCreateOrUpdateFile(baseUrl: string, params: unknown): Promise<any> {
+  const tool = buildGitHubTools(staticAuth, { baseUrl }).find(
+    (t) => t.name === "github_create_or_update_file",
+  );
+  assert.ok(tool, "github_create_or_update_file is not registered");
+  const r = (await (tool as any).execute("call-1", params)) as { content: Array<{ text: string }> };
+  try {
+    return JSON.parse(r.content[0]!.text);
+  } catch {
+    return { error: r.content[0]!.text };
+  }
+}
+
+describe("github_create_or_update_file — bot-branch guard (issue #442)", () => {
+  test("refuses a write to a dependabot/* branch", async () => {
+    // The `REPO_WRITE_TOOLS` list includes `github_create_or_update_file`, so the
+    // same bot-branch protection introduced on `github_publish` must also live
+    // here — a non-bot commit on a `dependabot/*` / `renovate/*` branch still
+    // force-pushes the bot away (issue #442). Pinned per-prefix.
+    const r = repo();
+    const fake = await fakeGitHub(r.base);
+    try {
+      writeFileSync(join(r.dir, "a.txt"), "two\n");
+      for (const [branch, prefix] of [
+        ["dependabot/npm_and_yarn/lodash-4.17.21", "dependabot/"],
+        ["renovate/lodash-4.x", "renovate/"],
+      ] as const) {
+        const out = await callCreateOrUpdateFile(fake.url, {
+          owner: "o",
+          repo: "r",
+          path: "a.txt",
+          content: "two\n",
+          message: "m",
+          branch,
+        });
+        assert.ok(out.error, `expected a refusal for ${prefix}*`);
+        assert.match(out.error, new RegExp(`branch \`${branch}\``));
+        assert.match(out.error, /Nothing was published/);
+        assert.match(out.error, /do not .*(fall back to|work around).*git push/i);
+        if (prefix === "renovate/") {
+          assert.match(out.error, /`github_add_labels`/);
+          assert.doesNotMatch(out.error, /@dependabot rebase/);
+          assert.doesNotMatch(out.error, /@dependabot recreate/);
+        } else {
+          assert.match(out.error, /@dependabot rebase/);
+          assert.match(out.error, /@dependabot recreate/);
+          assert.match(out.error, /`github_add_issue_comment`/);
+        }
+      }
+      assert.equal(fake.mutations.length, 0);
+    } finally {
+      await fake.close();
+      r.cleanup();
+    }
+  });
+
+  test("accepts a write when no branch is supplied (default branch)", async () => {
+    // `branch` is optional and absent here. With no branch the tool writes to
+    // the repo's default branch (e.g. `main`), which isn't bot-owned — the
+    // guard must NOT trip on a missing branch.
+    const r = repo();
+    const fake = await fakeGitHub(r.base);
+    try {
+      writeFileSync(join(r.dir, "a.txt"), "two\n");
+      const out = await callCreateOrUpdateFile(fake.url, {
+        owner: "o",
+        repo: "r",
+        path: "a.txt",
+        content: "two\n",
+        message: "m",
+      });
+      assert.ok(!out.error, `expected success, got ${JSON.stringify(out)}`);
+    } finally {
+      await fake.close();
       r.cleanup();
     }
   });

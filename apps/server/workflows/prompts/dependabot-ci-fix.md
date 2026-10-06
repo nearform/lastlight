@@ -65,51 +65,85 @@ THEN SKIP STEPS 1-5 AND `github_publish` ENTIRELY.
 The bot OWNS that head. The moment any non-bot commit lands on a
 `dependabot/*` or `renovate/*` branch, the bot abandons the PR on its next
 sync with a comment about the branch having been "edited by someone other
-than Dependabot", force-pushes the head back to its own tip, and any
-reviewer who saw your commit watches it disappear. `github_publish` itself
-hard-refuses these branches for the same reason (its refusal error names the
-prefix), so even by accident you cannot push there — but the prompt is the
-real explanation, because the failure modes the refusal protects against
-are exactly the ones that follow a successful push on these branches.
+than the bot", force-pushes the head back to its own tip, and any reviewer
+who saw your commit watches it disappear. `github_publish` itself hard-refuses
+these branches for the same reason (its refusal error names the prefix AND
+the right remediation for that bot family), so even by accident you cannot
+push there — but the prompt is the real explanation, because the failure
+modes the refusal protects against are exactly the ones that follow a
+successful push on these branches.
 
- → Do NOT work around the `github_publish` refusal with `git push`: a
+→ Do NOT work around the `github_publish` refusal with `git push`: a
    non-bot commit (unsigned too) would still block or be force-pushed
-   away regardless. The PR comment IS the entire fix for a bot-owned
-   branch.
+   away regardless. Drive the bot by its own update primitive — that is
+   the entire fix for a bot-owned branch.
 
-What you DO instead — a SINGLE PR comment via `github_add_issue_comment`,
-whose body is exactly one bare command (no prose around it; Dependabot
-parses it as a slash command):
+FIRST: write the no-op gate. `{{verifyScript}}` (the path step 3 would
+have used) gets a single line: `exit 0`. Nothing on a bot-owned branch
+needs verification from us — the fix is the comment below, not a code
+change — but the harness's gate loop reads `until_bash` against this
+script and a missing script is `gate=skipped` (RED), which would re-render
+this same prompt and post the comment a second time. A green gate is the
+structural way this loop closes after exactly ONE iteration.
+
+The remediation DEPENDS on the bot family that owns the branch — read the
+prefix and don't conflate them:
+
+**`dependabot/` (Dependabot owns the branch).** Dependabot parses a
+`@dependabot …` slash command in a PR comment. Post exactly ONE comment via
+`github_add_issue_comment`, body is a bare command with NO prose around it
+(prose makes Dependabot ignore the slash):
 
   - `behind` (base moved past the PR's base) → `@dependabot rebase`. The
     common case. Bot regenerates the lockfile against current `main` and
     rewrites the PR head onto a fresh base SHA.
   - `dirty` (merge conflict, almost always the lockfile) → `@dependabot
-    recreate`. A rebase cannot resolve a conflict that already exists on the
-    branch; recreate regenerates from scratch and the new head is clean.
+    recreate`. A rebase cannot resolve a conflict that already exists on
+    the branch; recreate regenerates from scratch and the new head is
+    clean.
   - `checks-failing` (genuine red on the head, no conflict) → `@dependabot
-    recreate`. A bump whose own lockfile doesn't match what the test suite
-    expects after `main` moved is exactly what recreate's fresh re-lock
-    fixes. If recreate still goes red on the new head, a maintainer has to
-    look and the escalation below handles it.
+    recreate`. A bump whose own lockfile doesn't match what the test
+    suite expects after `main` moved is exactly what recreate's fresh
+    re-lock fixes. If recreate still goes red on the new head, a
+    maintainer has to look and the `STOP / requires-human` path below
+    handles it.
   - `blocked` → DO NOT post a rebase command (auto-merge has no
-    `behind`/`dirty` to clear). Use the standard STOP / `requires-human`
-    path below; a bot-managed branch that needs a human review is not
-    anything this loop can settle.
+    `behind`/`dirty` to clear). Use the `STOP / requires-human` path;
+    a bot-managed branch that needs a human review is not anything this
+    loop can settle.
 
-Then EMIT `CI_FIX_COMPLETE: … outcome=gave-up` on its own final line so the
-run closes cleanly and the bot-managed PR does not loop on the same head
-SHA. The next dispatch will see Dependabot's NEW head SHA (it is on a fresh
-SHA after every recreate), with the appropriate check state.
+**`renovate/` (Renovate owns the branch).** Renovate does NOT parse
+`@dependabot` commands — its documented mechanism is the `rebase` label,
+which is exactly what `dependabot-pr-merge.md` already uses on
+green-then-blocked Renovate PRs. Treat the four reasons as:
 
-Note for the rare Dependabot-managed branch whose PR was authored by
-someone ELSE (a maintainer's hand-written patch on top of a `dependabot/*`
-branch): the gate above is the branch prefix, not the author. The branch
-prefix is what makes the bot the lifecycle owner, so the same rule applies.
+  - `behind` OR `dirty` → add the `rebase` label via `github_add_labels`
+    (`{ owner: "{{owner}}", repo: "{{repo}}", issue_number: {{prNumber}},
+    labels: ["rebase"] }`). The label regenerates the branch on
+    Renovate's next sync and covers BOTH "behind base" and "lockfile
+    conflict" — Renovate has no recreate-from-scratch equivalent on the
+    PR side. The label itself is silent, so ALSO post a brief comment
+    via `github_add_issue_comment` naming the request, so a maintainer
+    notices if nothing happens.
+  - `checks-failing` OR `blocked` → Renovate has no way to clear a
+    genuine red test or a required review gate from the PR side, so
+    an external rebase won't help. Use the `STOP / requires-human` path.
+
+Then (for both families) EMIT `CI_FIX_COMPLETE: … outcome=gave-up` on its
+own final line. The marker is the postcondition gate; the structural gate
+that closes this iteration is the green `exit 0` you wrote at the top.
+The next dispatch will see the bot's NEW head SHA (it is on a fresh SHA
+after every successful rebase), with the appropriate check state.
+
+A note on author vs branch: the gate above is the branch prefix, not the
+author. A maintainer's hand-written patch on top of a `dependabot/*`
+branch still has Dependabot as the lifecycle owner — bot force-pushes
+away non-bot commits regardless of who made them — so the same rule
+applies. The branch prefix is what makes the bot the head owner.
 
 Below this block, **the rest of the instructions apply only to branches
-that are NOT `dependabot/*` or `renovate/*`** (e.g. a manually-opened PR with
-a dependency bump that ended up failing CI).
+that are NOT `dependabot/*` or `renovate/*`** (e.g. a manually-opened PR
+with a dependency bump that ended up failing CI).
 
 Work efficiently and stay focused — you are on a time budget, so spend it on the
 change that lands this PR. Make the smallest fix that works, don't refactor or
