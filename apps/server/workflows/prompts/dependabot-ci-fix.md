@@ -113,21 +113,50 @@ prefix and don't conflate them:
     loop can settle.
 
 **`renovate/` (Renovate owns the branch).** Renovate does NOT parse
-`@dependabot` commands — its documented mechanism is the `rebase` label,
-which is exactly what `dependabot-pr-merge.md` already uses on
-green-then-blocked Renovate PRs. Treat the four reasons as:
+`@dependabot` slash commands — and ignores them silently, so an
+agent that posts one into a Renovate PR wastes the comment and leaves
+the branch owned-but-unregenerated. Renovate's documented update
+mechanism is the **`rebase` label** (default name, configurable via
+Renovate's `rebaseLabel` option). Per Renovate's docs at
+`https://docs.renovatebot.com/updating-rebasing/#manual-rebasing`
+under "Manual rebasing", applying the label regenerates Renovate's
+commit for the branch on its next sync, **even if the branch has been
+modified**, and the label is the right call exactly for these three
+situations — a branch behind base, a branch the user wants Renovate
+to recreate from scratch, and a branch that was created with an
+error (e.g. lockfile generation) the user wants Renovate to try again.
 
-  - `behind` OR `dirty` → add the `rebase` label via `github_add_labels`
-    (`{ owner: "{{owner}}", repo: "{{repo}}", issue_number: {{prNumber}},
-    labels: ["rebase"] }`). The label regenerates the branch on
-    Renovate's next sync and covers BOTH "behind base" and "lockfile
-    conflict" — Renovate has no recreate-from-scratch equivalent on the
-    PR side. The label itself is silent, so ALSO post a brief comment
-    via `github_add_issue_comment` naming the request, so a maintainer
-    notices if nothing happens.
-  - `checks-failing` OR `blocked` → Renovate has no way to clear a
-    genuine red test or a required review gate from the PR side, so
-    an external rebase won't help. Use the `STOP / requires-human` path.
+Drive Renovate with the same primitive the existing
+`dependabot-pr-merge.md` uses on green-then-blocked Renovate PRs:
+add the `rebase` label via `github_add_labels`
+(`{ owner: "{{owner}}", repo: "{{repo}}", issue_number: {{prNumber}},
+labels: ["rebase"] }`) and post a brief comment via
+`github_add_issue_comment` naming the request. The label itself is
+silent on Renovate's UI, so the comment IS the visible signal — a
+maintainer sees the request, knows it's expected, and notices if
+nothing happens on the bot's next sync. The label's documented
+reach covers all three remediation cases for us:
+
+  - `behind` (base moved past the PR's base) → rebase label +
+    comment. Documented case 1: a branch behind base. Renovate
+    regenerates against current `main` on its next sync.
+  - `dirty` (lockfile conflict, almost always) → rebase label +
+    comment. Documented: Renovate auto-rebases conflicted PRs, and
+    the label forces that rebase immediately rather than waiting for
+    Renovate's natural schedule.
+  - `checks-failing` (genuine red on the head, no conflict) → rebase
+    label + comment. Documented case 3: a branch "created with an
+    error (e.g. lockfile generation)" that you want Renovate to try
+    again — a bump whose lockfile doesn't match the test suite
+    expectations for current `main` is exactly what a fresh
+    re-lock-and-regenerate fixes. If the recreated head still goes
+    red, that is a real code-side problem this loop cannot settle,
+    and the comment (plus the `requires-human` label below) tells
+    the maintainer so.
+  - `blocked` (a required human review is the only outstanding
+    obstacle) → STOP / requires-human. A required-review gate is
+    not something Renovate can clear from the PR side, and the
+    `rebase` label does nothing for it.
 
 Then (for both families) EMIT `CI_FIX_COMPLETE: … outcome=gave-up` on its
 own final line. The marker is the postcondition gate; the structural gate

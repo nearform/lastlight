@@ -232,7 +232,7 @@ it("branches the four `reason` values into the four correct commands", () => {
     expect(prompt).toMatch(/Renovate does NOT parse/i);
   });
 
-  it("routes Renovate to `github_add_labels` with the `rebase` label, not @dependabot slash commands", () => {
+it("routes Renovate to `github_add_labels` with the `rebase` label, not @dependabot slash commands", () => {
     // Renovate's rebase trigger is the `rebase` label, exactly what
     // `dependabot-pr-merge.md` uses on green-then-blocked Renovate PRs. The
     // prompt must NOT tell the agent to post `@dependabot` comments on a
@@ -246,6 +246,37 @@ it("branches the four `reason` values into the four correct commands", () => {
     expect(renovateBlock![0]).toMatch(/requires-human/);
     expect(renovateBlock![0]).not.toMatch(/@dependabot rebase/);
     expect(renovateBlock![0]).not.toMatch(/@dependabot recreate/);
+  });
+
+  it("cites Renovate's docs as the source of the `rebase` label protocol", () => {
+    // The agent has no shell history to draw on for Renovate — the prompt is
+    // its only source. Name the docs page (https://docs.renovatebot.com/…/#manual-rebasing)
+    // so a reviewer can read the contract alongside the prompt.
+    expect(prompt).toContain("https://docs.renovatebot.com/updating-rebasing/");
+    expect(prompt).toMatch(/manual-rebasing|Manual rebasing/);
+  });
+
+it("routes Renovate `checks-failing` through the `rebase` label, not STOP / requires-human", () => {
+    // Renovate's docs page lists three documented use cases for the rebase
+    // label, including "branch created with an error (e.g. lockfile generation)
+    // and you want Renovate to try again" — the bump's lockfile not matching
+    // the test suite for current `main` is exactly such an error. Mirrors the
+    // Dependabot `@dependabot recreate` rule for `checks-failing`: a fresh
+    // re-lock fixes lockfile-generation errors that show up as failing tests.
+    const renovateBlock = prompt.match(
+      /\*\*`renovate\/`[\s\S]*?(?=\n\nThen \(for both families\))/,
+    );
+    expect(renovateBlock).not.toBeNull();
+    // The prompt soft-wraps `rebase label + comment` across lines, so
+    // collapse whitespace before substring-matching (same approach as the
+    // @dependabot test above).
+    const flat = renovateBlock![0].replace(/\s+/g, " ");
+    expect(flat).toMatch(/`checks-failing`[\s\S]*?rebase label/);
+    // `behind` and `dirty` also route to rebase label, by the same rule.
+    expect(flat).toMatch(/`behind`[\s\S]*?rebase label/);
+    expect(flat).toMatch(/`dirty`[\s\S]*?rebase label/);
+    // `blocked` is the one reason the renovate block still routes to requires-human.
+    expect(renovateBlock![0]).toMatch(/`blocked`[\s\S]*?requires-human/);
   });
 
   it("writes a no-op gate as the first bot-branch step, so the loop closes after one iteration", () => {

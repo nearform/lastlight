@@ -163,17 +163,23 @@ function botBranchRefusalError(branch: string, kind: BotKind): Error {
     `sync with a comment about the branch having been edited by someone other than ` +
     `the bot itself, and the fix commit gets force-pushed away. Nothing was published.`
   );
-  if (kind === "renovate") {
+if (kind === "renovate") {
     return new Error(
       shared +
-        ` Renovate does NOT parse \`@dependabot\` slash commands — drive it by adding ` +
-        `the \`rebase\` label via \`github_add_labels\` ` +
-        `({ owner: your-owner, repo: your-repo, issue_number: pull_number, labels: ["rebase"] }), ` +
-        `which regenerates the branch on the bot's next sync and covers BOTH \`behind\` ` +
-        `and \`dirty\` triggers. \`checks-failing\` and \`blocked\` need a maintainer — ` +
-        `use the \`STOP / requires-human\` path. Do NOT fall back to \`git push\`; an ` +
-        `unsigned commit would still block the PR wherever the bot's own rebase succeeds ` +
-        `(issue #442).`,
+        ` Renovate does NOT parse \`@dependabot\` slash commands and silently ` +
+        `ignores them, so the equivalent primitive is the \`rebase\` label via ` +
+        `\`github_add_labels\` — Renovate's docs at ` +
+        `https://docs.renovatebot.com/updating-rebasing/#manual-rebasing ` +
+        `describe this label as the documented Manual rebase trigger, applying it ` +
+        `regenerates Renovate's commit for the branch on its next sync (even if ` +
+        `the branch has been modified) and covers \`behind\`, \`dirty\` AND ` +
+        `\`checks-failing\` (a branch "created with an error (e.g. lockfile ` +
+        `generation)" that you want Renovate to try again). \`blocked\` is the ` +
+        `one reason this loop can't settle — a required human review is not ` +
+        `something Renovate can clear from the PR side, so use the ` +
+        `\`STOP / requires-human\` path for it. Do NOT fall back to \`git push\`; ` +
+        `an unsigned commit would still block the PR wherever the bot's own ` +
+        `rebase succeeds (issue #442).`,
     );
   }
   return new Error(
