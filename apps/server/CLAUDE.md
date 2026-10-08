@@ -1507,7 +1507,10 @@ sudo -u lastlight -i lastlight server update
    without cleanup a host fills up (an early nearform outage: sandboxes failed
    to start at 95% disk). After a successful `up`, `server update` removes the
    old GHCR version tags beyond the newest `KEEP_IMAGE_VERSIONS` (2) per repo —
-   plus the tag just deployed — then `docker image prune -f` for the images the
+   or the overlay's `deploy.keepImageVersions` (drizby sets `1`) — plus the tag
+   just deployed, and on a PINNED deploy a stale `:latest` too (a pinned update
+   never re-pulls it, so nothing else ever supersedes it; one sat on drizby for
+   two months as ~12 GB), then `docker image prune -f` for the images the
    repeated `:latest` re-pulls left dangling. All best-effort (a live image's
    tag only untags; docker refuses to delete an in-use image) so it never fails
    a converged deploy. `--no-prune` keeps every version; only runs when

@@ -1147,8 +1147,9 @@ and re-tags each to its local name so compose + the harness (fixed names in
 `src/sandbox/images.ts`) find them unchanged; `--local` builds from source
 instead (the old `docker compose build` waves). After a healthy `up` it then
 **prunes superseded images** — deleting the old `ghcr.io/nearform/lastlight-*`
-version tags beyond the newest `KEEP_IMAGE_VERSIONS` (2) per repo plus the
-just-deployed tag, then `docker image prune -f` for the dangling leftovers of
+version tags beyond the newest `KEEP_IMAGE_VERSIONS` (2) per repo — overridable
+per host with `deploy.keepImageVersions` (a positive integer) — plus the
+just-deployed tag, and on a pinned deploy a stale `:latest`, then `docker image prune -f` for the dangling leftovers of
 repeated `:latest` re-pulls (each version is ~12 GB across the four repos, so
 without this a host fills up). Best-effort and skippable with `--no-prune`.
 These run on the server, unlike the rest of the CLI which targets a remote
