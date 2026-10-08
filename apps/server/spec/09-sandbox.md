@@ -53,7 +53,7 @@ re-exported through `src/engine/github/profiles.ts`) carries:
 | Field | Meaning |
 |---|---|
 | `cwd?` | Agent's working directory |
-| `model?` | Provider/model — e.g. `anthropic/claude-sonnet-4-6` |
+| `model?` | Provider/model — e.g. `anthropic/claude-sonnet-5-5` |
 | `variant?` | Reasoning effort — `off | minimal | low | medium | high | xhigh` |
 | `sandbox?` | Backend — `gondolin` (default) / `docker` / `smol` / `none` / `kubernetes` |
 | `sessionsDir?` | Where the JSONL event log lands |

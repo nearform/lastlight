@@ -46,7 +46,7 @@ describe('loadConfig — model resolution', () => {
   it('returns the OpenCode default model when OPENCODE_MODEL not set', () => {
     vi.stubEnv('OPENCODE_MODEL', '');
     const config = loadConfig();
-    expect(config.model).toBe('anthropic/claude-sonnet-4-6');
+    expect(config.model).toBe('anthropic/claude-sonnet-5-5');
   });
 
   it('uses OPENCODE_MODEL env var when set', () => {
@@ -159,7 +159,7 @@ describe('loadConfig — model overrides via OPENCODE_MODELS', () => {
     vi.stubEnv('OPENCODE_MODELS', '');
     vi.stubEnv('OPENCODE_MODEL', '');
     const config = loadConfig();
-    expect(config.models.default).toBe('anthropic/claude-sonnet-4-6');
+    expect(config.models.default).toBe('anthropic/claude-sonnet-5-5');
   });
 
   it('parses valid OPENCODE_MODELS JSON and sets per-type overrides', () => {
@@ -173,7 +173,7 @@ describe('loadConfig — model overrides via OPENCODE_MODELS', () => {
     vi.stubEnv('OPENCODE_MODELS', 'not-valid-json');
     vi.stubEnv('OPENCODE_MODEL', '');
     const config = loadConfig();
-    expect(config.models.default).toBe('anthropic/claude-sonnet-4-6');
+    expect(config.models.default).toBe('anthropic/claude-sonnet-5-5');
   });
 });
 

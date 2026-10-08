@@ -91,7 +91,7 @@ describe("providerByEnvKey", () => {
 
 describe("DEFAULT constants", () => {
   it("the default model is the registry's anthropic sample model", () => {
-    expect(DEFAULT_MODEL).toBe("anthropic/claude-sonnet-4-6");
+    expect(DEFAULT_MODEL).toBe("anthropic/claude-sonnet-5-5");
     expect(DEFAULT_MODEL.startsWith(`${DEFAULT_PROVIDER}/`)).toBe(true);
   });
 });

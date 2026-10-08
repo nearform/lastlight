@@ -15,7 +15,7 @@ import {
 } from "./providers.js";
 
 export interface RunConfig {
-  /** "provider/model_id", e.g. "anthropic/claude-haiku-4-5" */
+  /** "provider/model_id", e.g. "anthropic/claude-haiku-5-5" */
   model: string;
   /** Pi thinking level. */
   thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -557,7 +557,7 @@ export function parseArgs(argv: string[]): RunConfig {
   }
 
   if (!config.model) {
-    throw new Error("--model is required (e.g. anthropic/claude-haiku-4-5)");
+    throw new Error("--model is required (e.g. anthropic/claude-haiku-5-5)");
   }
   if (!config.model.includes("/")) {
     throw new Error(`--model must be 'provider/id', got '${config.model}'`);

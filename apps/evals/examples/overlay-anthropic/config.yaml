@@ -15,12 +15,12 @@
 # rest (sonnet). This is the kind of cost/quality trade-off the config run type
 # is built to evaluate.
 models:
-  default: anthropic/claude-sonnet-4-6
+  default: anthropic/claude-sonnet-5-5
   guardrails: anthropic/claude-haiku-4-5
   architect: anthropic/claude-opus-4-8
-  executor: anthropic/claude-sonnet-4-6
+  executor: anthropic/claude-sonnet-5-5
   reviewer: anthropic/claude-haiku-4-5
-  fix: anthropic/claude-sonnet-4-6
+  fix: anthropic/claude-sonnet-5-5
 
 variants:
   guardrails: low

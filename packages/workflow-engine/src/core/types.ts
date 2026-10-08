@@ -63,7 +63,7 @@ export interface ExecutorConfig {
   cwd?: string;
   /** Maximum conversation turns. Unused by agentic-pi; kept for API stability. */
   maxTurns?: number;
-  /** Model id (e.g. "anthropic/claude-sonnet-4-6"). */
+  /** Model id (e.g. "anthropic/claude-sonnet-5-5"). */
   model?: string;
   /**
    * Pi thinking level: `off | minimal | low | medium | high | xhigh`.

@@ -84,8 +84,8 @@ export const PROVIDERS: readonly ProviderSpec[] = [
     baseUrl: "https://api.anthropic.com/v1",
     api: "anthropic-messages",
     host: "anthropic.com",
-    fastModel: "claude-haiku-4-5-20251001",
-    sampleModel: "claude-sonnet-4-6",
+    fastModel: "claude-haiku-5-5",
+    sampleModel: "claude-sonnet-5-5",
     keyPrefix: "sk-ant-",
   },
   {
@@ -309,7 +309,7 @@ export const PROVIDER_HOSTS: readonly string[] = PROVIDERS.map((p) => p.host);
  * initial provider selection.
  */
 export const DEFAULT_PROVIDER = "anthropic";
-export const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
+export const DEFAULT_MODEL = "anthropic/claude-sonnet-5-5";
 
 // ── Endpoint overrides — pointing a provider at a gateway ────────────────────
 
@@ -682,7 +682,7 @@ export const OAUTH_PROVIDERS: readonly OAuthProviderSpec[] = [
     id: "anthropic",
     displayName: "Anthropic (Claude Pro/Max)",
     modelPrefix: "anthropic",
-    sampleModel: "anthropic/claude-sonnet-4-6",
+    sampleModel: "anthropic/claude-sonnet-5-5",
     sandboxEnvVar: "ANTHROPIC_OAUTH_TOKEN",
     oauthOnly: false, // falls back to ANTHROPIC_API_KEY
   },

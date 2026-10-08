@@ -89,4 +89,4 @@ echo
 echo "Done. To use the image:"
 echo "  agentic-pi run --sandbox gondolin \\"
 echo "    --sandbox-image \"\$(realpath images/agentic-pi-dev/out-${ARCHES[0]})\" \\"
-echo "    --model anthropic/claude-haiku-4-5"
+echo "    --model anthropic/claude-haiku-5-5"

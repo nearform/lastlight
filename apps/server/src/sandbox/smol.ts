@@ -253,7 +253,7 @@ export class SmolSandbox {
     const info = this.machines.get(taskId);
     if (!info) throw new Error(`No smol machine for task ${taskId}`);
 
-    const model = opts?.model || "anthropic/claude-sonnet-4-6";
+    const model = opts?.model || "anthropic/claude-sonnet-5-5";
     const timeout = requirePositiveSeconds(opts.timeoutSeconds, "timeoutSeconds");
     const gateTimeout = Math.ceil(requirePositiveSeconds(opts.gateTimeoutSeconds, "gateTimeoutSeconds"));
 

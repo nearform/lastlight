@@ -363,7 +363,7 @@ Fast-model resolution (`defaultFastModel(taskType)` in `llm.ts`), in order:
 2. The env `OPENCODE_MODELS` JSON read directly — a fallback for contexts where
    runtime config isn't loaded (some CLI / test paths).
 3. First configured provider's fast model, in registry order:
-   `ANTHROPIC_API_KEY` → `anthropic/claude-haiku-4-5-20251001`,
+   `ANTHROPIC_API_KEY` → `anthropic/claude-haiku-5-5`,
    else `OPENAI_API_KEY` → `openai/gpt-5.4-mini`,
    else `OPENROUTER_API_KEY` → `openrouter/google/gemini-2.5-flash`.
 

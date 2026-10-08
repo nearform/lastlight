@@ -59,7 +59,7 @@ export interface SetupConfig {
   GITHUB_TOKEN?: string;
   ADMIN_SECRET: string;
   DOMAIN: string;
-  /** Model id consumed by agentic-pi / pi-ai, e.g. "anthropic/claude-sonnet-4-6" or "openai/gpt-5.5". */
+  /** Model id consumed by agentic-pi / pi-ai, e.g. "anthropic/claude-sonnet-5-5" or "openai/gpt-5.5". */
   LASTLIGHT_MODEL: string;
   /**
    * The chosen provider's API key, set by the wizard. The runtime reads the
@@ -891,7 +891,7 @@ async function collectModelAndKey(): Promise<{
           if (!v || !v.trim()) return undefined; // accept the default on Enter
           // The user enters the model id without the provider prefix; keep
           // OpenRouter's nested `vendor/model` tail legal.
-          return /^[A-Za-z0-9][\w/.-]*$/.test(v) ? undefined : "Use the model id (e.g. claude-sonnet-4-6 or anthropic/claude-sonnet-4.5 for OpenRouter).";
+          return /^[A-Za-z0-9][\w/.-]*$/.test(v) ? undefined : "Use the model id (e.g. claude-sonnet-5-5 or anthropic/claude-sonnet-4.5 for OpenRouter).";
         },
       }),
     ) as string;
