@@ -29,7 +29,7 @@ import { runOnce, type RunOnceExitCode } from "./runner.js";
 
 export interface RunOptions {
   // ── Required ────────────────────────────────────────────────────
-  /** "provider/model_id", e.g. "anthropic/claude-haiku-4-5". */
+  /** "provider/model_id", e.g. "anthropic/claude-haiku-5-5". */
   model: string;
   /** The prompt to send to the agent. */
   prompt: string;
@@ -374,7 +374,7 @@ export interface RunResult {
  * import { run } from "agentic-pi";
  *
  * const result = await run({
- *   model: "anthropic/claude-haiku-4-5",
+ *   model: "anthropic/claude-haiku-5-5",
  *   prompt: "list the open PRs on owner/repo",
  *   profile: "read",
  *   noSession: true,

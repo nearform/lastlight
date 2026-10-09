@@ -623,7 +623,7 @@ fixtures stay byte-identical. Programmatic callers read the same data from
 
 ```bash
 echo "list open PRs on owner/repo" | agentic-pi run \
-  --model anthropic/claude-haiku-4-5 \
+  --model anthropic/claude-haiku-5-5 \
   --profile read \
   --no-session
 ```
@@ -748,7 +748,7 @@ events through callbacks instead.
 import { run } from "agentic-pi";
 
 const result = await run({
-  model: "anthropic/claude-haiku-4-5",
+  model: "anthropic/claude-haiku-5-5",
   prompt: "list the open PRs on owner/repo and summarize them",
   thinking: "medium",
   profile: "read",
@@ -860,7 +860,7 @@ npm test                 # unit only (same as test:unit) — integration tests n
 npm run test:unit        # unit only (fast, no API keys, no QEMU)
 npm run test:integration # integration only (needs OPENAI_API_KEY; sandbox also needs QEMU)
 
-echo "hello" | node dist/cli.js run --model anthropic/claude-haiku-4-5 --no-session
+echo "hello" | node dist/cli.js run --model anthropic/claude-haiku-5-5 --no-session
 ```
 
 ### Tests

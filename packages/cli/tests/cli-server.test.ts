@@ -130,9 +130,18 @@ describe("tagsToPrune", () => {
     expect(removed).toContain("v0.14.0");
   });
 
-  it("ignores floating tags like `latest` (left to dangling cleanup)", () => {
-    expect(tagsToPrune(["latest", "v0.16.0", "v0.15.0"], "v0.16.0")).toEqual([]);
+  it("drops a stale `latest` once the deploy is pinned to a version", () => {
+    // A pinned update never pulls `latest` again, so it is never superseded.
+    expect(tagsToPrune(["latest", "v0.16.0", "v0.15.0"], "v0.16.0")).toEqual(["latest"]);
+  });
+
+  it("keeps `latest` on an unpinned deploy, and never touches other floating tags", () => {
     expect(tagsToPrune(["latest", "main", "edge"], "latest")).toEqual([]);
+    expect(tagsToPrune(["main", "edge", "v0.16.0"], "v0.16.0")).toEqual([]);
+  });
+
+  it("keep = 1 leaves only the deployed version", () => {
+    expect(tagsToPrune(["v0.16.0", "v0.15.0", "latest"], "v0.16.0", 1)).toEqual(["v0.15.0", "latest"]);
   });
 
   it("removes nothing when at or below the retention window", () => {

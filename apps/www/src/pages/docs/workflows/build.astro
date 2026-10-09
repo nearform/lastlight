@@ -176,12 +176,12 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	<p>
 		Each phase can use a different model via the <code>LASTLIGHT_MODELS</code>
 		env var (the agent runtime is <a href="https://github.com/nearform/lastlight/tree/main/packages/agentic-pi" target="_blank" rel="noopener">agentic-pi</a>,
-		provider-agnostic; default <code>anthropic/claude-sonnet-4-6</code>). Common
+		provider-agnostic; default <code>anthropic/claude-sonnet-5-5</code>). Common
 		setup: a strong reasoning model for architect (planning quality), a mid-tier
 		model for executor and reviewer (speed), and a small/cheap model for
 		guardrails (cost).
 	</p>
-	<pre><code set:text={'LASTLIGHT_MODELS=\'{"architect":"openai/gpt-5.5","guardrails":"anthropic/claude-haiku-4-5-20251001"}\''}/></pre>
+	<pre><code set:text={'LASTLIGHT_MODELS=\'{"architect":"openai/gpt-5.5","guardrails":"anthropic/claude-haiku-5-5"}\''}/></pre>
 	<p>
 		Or use a single <a href="https://openrouter.ai" target="_blank" rel="noopener">OpenRouter</a>
 		key to mix vendors freely from one billing surface — useful if you don't want

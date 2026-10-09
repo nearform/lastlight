@@ -318,13 +318,18 @@ export interface PrDiscussionRead {
     comments: { author: string; isBot: boolean; body: string }[];
   }[];
   /**
-   * The PR has more review threads than this read holds (`reviewThreads` is
-   * one page). A caller asking "is anything still open?" must treat the
-   * unseen rest as unknown, not as none.
+   * The PR has more review threads than this read holds (the page cap ran
+   * out). A caller asking "is anything still open?" must treat the unseen rest
+   * as unknown, not as none.
    */
   threadsTruncated: boolean;
   comments: { author: string; isBot: boolean; body: string; createdAt: string | null }[];
 }
+
+/** Review threads per GraphQL page in {@link GitHubClient.getPullRequestDiscussion} (GitHub's max is 100). */
+export const DISCUSSION_THREADS_PAGE = 100;
+/** Pages followed at most — 300 threads at the default page size. A bound on request count, not a policy. */
+export const DISCUSSION_THREADS_MAX_PAGES = 3;
 
 /** What {@link GitHubClient.listRepoDigestDetail} returns — the week's content, in one request. */
 export interface RepoDigestDetail {
@@ -2092,28 +2097,34 @@ export class GitHubClient {
   }
 
   /**
-   * The PR's prior conversation in ONE GraphQL request: the last 30 reviews,
-   * the first 50 inline review threads (resolution is GraphQL-only — REST has
-   * no `isResolved`) with their first 5 comments, and the last 30 top-level
-   * comments. Read by `resolveSpecContext` only with the analysis pipeline on,
-   * so the `sites` engine's `select` can see what was already raised — the one
-   * thing the old reviewer's skill read that the pipeline did not.
+   * The PR's prior conversation: the last 30 reviews, every inline review
+   * thread (resolution is GraphQL-only — REST has no `isResolved`; paged
+   * {@link DISCUSSION_THREADS_PAGE} at a time, up to
+   * {@link DISCUSSION_THREADS_MAX_PAGES} pages, both overridable) with their
+   * first 5 comments, and the last 30 top-level comments — ONE request for a PR
+   * with ≤ one page of threads. Read by `resolveSpecContext` only with the
+   * analysis pipeline on, so the `sites` engine's `select` can see what was
+   * already raised — the one thing the old reviewer's skill read that the
+   * pipeline did not.
    */
   async getPullRequestDiscussion(
     owner: string,
     repo: string,
     pullNumber: number,
-    opts: { maxBodyChars?: number } = {},
+    opts: { maxBodyChars?: number; threadPageSize?: number; threadMaxPages?: number } = {},
   ): Promise<PrDiscussionRead> {
     const maxBody = Math.max(opts.maxBodyChars ?? 1500, 200);
+    // GitHub's GraphQL `first` max is 100; below 1 is not a page.
+    const pageSize = Math.min(Math.max(opts.threadPageSize ?? DISCUSSION_THREADS_PAGE, 1), 100);
+    const maxPages = Math.max(opts.threadMaxPages ?? DISCUSSION_THREADS_MAX_PAGES, 1);
     const kit = await this.kit(owner);
     const res = await kit.graphql<GraphQlPrDiscussion>(
-      `query($owner: String!, $repo: String!, $number: Int!) {
+      `query($owner: String!, $repo: String!, $number: Int!, $pageSize: Int!) {
          repository(owner: $owner, name: $repo) {
            pullRequest(number: $number) {
              reviews(last: 30) { nodes { author { __typename login } state body submittedAt } }
-             reviewThreads(first: 50) {
-               pageInfo { hasNextPage }
+             reviewThreads(first: $pageSize) {
+               pageInfo { hasNextPage endCursor }
                nodes {
                  path line isResolved isOutdated
                  comments(first: 5) { nodes { author { __typename login } body } }
@@ -2123,23 +2134,51 @@ export class GitHubClient {
            }
          }
        }`,
-      { owner, repo, number: pullNumber },
+      { owner, repo, number: pullNumber, pageSize },
     );
     const pr = res.repository?.pullRequest;
     const who = (a: GraphQlAuthor | null | undefined) => ({ author: a?.login ?? "ghost", isBot: a?.__typename === "Bot" });
     const cut = (b: string | null | undefined) => (b ?? "").slice(0, maxBody);
     const nodes = <T>(c: { nodes?: Array<T | null> | null } | null | undefined): T[] =>
       (c?.nodes ?? []).filter((n): n is T => !!n);
+
+    // `reviewThreads` is oldest-first and a long-lived PR outgrows one page —
+    // and the threads a re-review most needs (the ones a maintainer just
+    // resolved) are the NEWEST. Follow the cursor so they are seen; the read
+    // is `truncated` only when the page cap, not the PR, ran out.
+    let threadNodes = nodes(pr?.reviewThreads);
+    let page = pr?.reviewThreads?.pageInfo;
+    for (let fetched = 1; page?.hasNextPage === true && page.endCursor && fetched < maxPages; fetched++) {
+      const next = await kit.graphql<GraphQlPrDiscussion>(
+        `query($owner: String!, $repo: String!, $number: Int!, $after: String!, $pageSize: Int!) {
+           repository(owner: $owner, name: $repo) {
+             pullRequest(number: $number) {
+               reviewThreads(first: $pageSize, after: $after) {
+                 pageInfo { hasNextPage endCursor }
+                 nodes {
+                   path line isResolved isOutdated
+                   comments(first: 5) { nodes { author { __typename login } body } }
+                 }
+               }
+             }
+           }
+         }`,
+        { owner, repo, number: pullNumber, after: page.endCursor, pageSize },
+      );
+      const more = next.repository?.pullRequest?.reviewThreads;
+      threadNodes = threadNodes.concat(nodes(more));
+      page = more?.pageInfo;
+    }
     return {
       reviews: nodes(pr?.reviews).map((r) => ({ ...who(r.author), state: r.state ?? "", body: cut(r.body), submittedAt: r.submittedAt ?? null })),
-      threads: nodes(pr?.reviewThreads).map((t) => ({
+      threads: threadNodes.map((t) => ({
         path: t.path ?? "",
         line: typeof t.line === "number" ? t.line : null,
         isResolved: t.isResolved === true,
         isOutdated: t.isOutdated === true,
         comments: nodes(t.comments).map((c) => ({ ...who(c.author), body: cut(c.body) })),
       })),
-      threadsTruncated: pr?.reviewThreads?.pageInfo?.hasNextPage === true,
+      threadsTruncated: page?.hasNextPage === true,
       comments: nodes(pr?.comments).map((c) => ({ ...who(c.author), body: cut(c.body), createdAt: c.createdAt ?? null })),
     };
   }
@@ -2723,7 +2762,7 @@ interface GraphQlPrDiscussion {
     pullRequest?: {
       reviews?: { nodes?: Array<{ author?: GraphQlAuthor | null; state?: string | null; body?: string | null; submittedAt?: string | null } | null> | null } | null;
       reviewThreads?: {
-        pageInfo?: { hasNextPage?: boolean | null } | null;
+        pageInfo?: { hasNextPage?: boolean | null; endCursor?: string | null } | null;
         nodes?: Array<{
           path?: string | null;
           line?: number | null;

@@ -42,7 +42,7 @@ if (!haveKey) {
 const model =
   process.env.LASTLIGHT_MODEL ||
   process.env.OPENCODE_MODEL ||
-  "anthropic/claude-haiku-4-5-20251001";
+  "anthropic/claude-haiku-5-5";
 
 async function trial(label, webSearch) {
   console.log(`\n--- trial: ${label} (webSearch=${webSearch}) ---`);

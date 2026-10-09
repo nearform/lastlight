@@ -44,7 +44,7 @@ at it with:
 ```bash
 agentic-pi run --sandbox gondolin \
   --sandbox-image "$(realpath ./images/agentic-pi-dev/out-aarch64)" \
-  --model anthropic/claude-haiku-4-5
+  --model anthropic/claude-haiku-5-5
 ```
 
 Pre-requisites: `gondolin` CLI on PATH (installed transitively via

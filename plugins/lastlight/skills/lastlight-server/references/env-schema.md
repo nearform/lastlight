@@ -33,9 +33,9 @@ DOMAIN=lastlight.example.com
 
 # ── Model + provider API key ─────────────────────────────
 # Multi-provider: the `provider/` prefix selects the provider, e.g.
-#   anthropic/claude-sonnet-4-6 · openai/gpt-5.5 · google/gemini-2.5-pro
+#   anthropic/claude-sonnet-5-5 · openai/gpt-5.5 · google/gemini-2.5-pro
 #   openrouter/anthropic/claude-sonnet-4.5
-LASTLIGHT_MODEL=anthropic/claude-sonnet-4-6
+LASTLIGHT_MODEL=anthropic/claude-sonnet-5-5
 # Set whichever ONE env var matches LASTLIGHT_MODEL's provider:
 ANTHROPIC_API_KEY=sk-ant-...
 # OPENAI_API_KEY=sk-...

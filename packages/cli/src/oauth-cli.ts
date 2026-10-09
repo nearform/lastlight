@@ -180,7 +180,7 @@ function sampleModelFor(id: string): string {
     case "openai-codex":
       return "openai-codex/gpt-5.4";
     case "anthropic":
-      return "anthropic/claude-sonnet-4-6";
+      return "anthropic/claude-sonnet-5-5";
     case "github-copilot":
       return "github-copilot/gpt-4o";
     default:

@@ -180,7 +180,7 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 			<tr>
 				<td><code>LASTLIGHT_MODEL</code></td>
 				<td>No</td>
-				<td><code>anthropic/claude-sonnet-4-6</code></td>
+				<td><code>anthropic/claude-sonnet-5-5</code></td>
 				<td>Default model used when no per-task override matches. Must be a <code>provider/model</code> string pi-ai recognises.</td>
 			</tr>
 			<tr>
@@ -222,7 +222,7 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 			the <code>models:</code> block of <code>config/default.yaml</code> is a
 			commented-out example except <code>review-survey</code> and
 			<code>review-triage</code>, both pinned to
-			<code>anthropic/claude-haiku-4-5-20251001</code>. It is the model of the
+			<code>anthropic/claude-haiku-5-5</code>. It is the model of the
 			<a href="#workflow-policy">review evidence pipeline</a>'s unit survey, and
 			the fall-through of its site investigators (<code>models.review-site</code>)
 			when you have not pinned them. Pinning it is not a cost downgrade: on

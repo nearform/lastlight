@@ -52,10 +52,10 @@ Two halves — the **credential** (env) and the **model choice** (config):
 
    ```yaml
    models:
-     default: anthropic/claude-sonnet-4-6      # every phase, provider/model form
+     default: anthropic/claude-sonnet-5-5      # every phase, provider/model form
      architect: anthropic/claude-opus-4-8      # a specific phase
-     classifier: anthropic/claude-haiku-4-5-20251001   # the intent-routing helper
-     screener: anthropic/claude-haiku-4-5-20251001     # the prompt-injection screener
+     classifier: anthropic/claude-haiku-5-5            # the intent-routing helper
+     screener: anthropic/claude-haiku-5-5              # the prompt-injection screener
    ```
 
    Keys are `provider/model` strings. A per-task entry wins over `default`.

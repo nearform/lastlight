@@ -1,6 +1,6 @@
 {
   "name": "lastlight-shared",
-  "version": "0.11.2",
+  "version": "0.13.1",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nearform/lastlight.git",
@@ -70,7 +70,7 @@
   },
   "dependencies": {
     "@clack/prompts": "^1.8.1",
-    "@earendil-works/pi-ai": "^0.87.1",
+    "@earendil-works/pi-ai": "^1.1.0",
     "lastlight-workflow-engine": "workspace:*",
     "chalk": "^6.0.0",
     "yaml": "^2.9.1"

@@ -98,7 +98,7 @@ models:
   # A stronger reviewer for this repo only.
   review: anthropic/claude-opus-4-8
   # …and a cheap one for triage.
-  triage: anthropic/claude-haiku-4-5
+  triage: anthropic/claude-haiku-5-5
 
 variants:
   review: high
@@ -135,7 +135,7 @@ Effective config overrides
   approval.post_architect = true
   disabled.workflows = ["demo"]
   models.review = "anthropic/claude-opus-4-8"
-  models.triage = "anthropic/claude-haiku-4-5"
+  models.triage = "anthropic/claude-haiku-5-5"
   variants.review = "high"
 
 ✓ Everything in this layer is within the shipped default bounds.</code></pre>
@@ -482,9 +482,9 @@ repoConfig:
   .lastlight/ from main@3f1c9ab, fetched 2026-07-31T09:12:04.117Z
 
 Models
-  default = "anthropic/claude-sonnet-4-6"  (default)
+  default = "anthropic/claude-sonnet-5-5"  (default)
   review = "anthropic/claude-opus-4-8"  (repo)
-  triage = "anthropic/claude-haiku-4-5"  (repo)
+  triage = "anthropic/claude-haiku-5-5"  (repo)
 
 Approval gates
   post_architect = true  (repo)

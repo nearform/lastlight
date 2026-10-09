@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { readCorePin, pickTagCommit } from "lastlight-shared/core-pin";
+import { readCorePin, readKeepImageVersions, pickTagCommit } from "lastlight-shared/core-pin";
 
 /** Make a throwaway overlay dir with the given config.yaml body (or none). */
 function overlay(body?: string): string {
@@ -51,6 +51,23 @@ describe("readCorePin", () => {
   it("an env sentinel (main) falls through to the file", () => {
     process.env.LASTLIGHT_CORE_VERSION = "main";
     expect(readCorePin(overlay("deploy:\n  version: v0.10.6\n"))).toBe("v0.10.6");
+  });
+});
+
+describe("readKeepImageVersions", () => {
+  it("reads deploy.keepImageVersions", () => {
+    expect(readKeepImageVersions(overlay("deploy:\n  version: v0.40.0\n  keepImageVersions: 1\n"))).toBe(1);
+  });
+
+  it("ignores anything that isn't a positive integer", () => {
+    expect(readKeepImageVersions(overlay("deploy:\n  keepImageVersions: 0\n"))).toBeNull();
+    expect(readKeepImageVersions(overlay("deploy:\n  keepImageVersions: 1.5\n"))).toBeNull();
+    expect(readKeepImageVersions(overlay('deploy:\n  keepImageVersions: "1"\n'))).toBeNull();
+    expect(readKeepImageVersions(overlay("deploy:\n  version: v0.40.0\n"))).toBeNull();
+  });
+
+  it("is null with no overlay config", () => {
+    expect(readKeepImageVersions(join(tmpdir(), "lastlight-no-such-overlay"))).toBeNull();
   });
 });
 

@@ -148,7 +148,7 @@ lastlight server update                # the canonical deploy: pull core+overlay
                                         # tagged by deploy.version (else :latest) + re-tag to the
                                         # local names, up -d --remove-orphans, restart sidecars,
                                         # health-check, then prune superseded image versions
-                                        # (keeps the newest two per repo). --local builds from
+                                        # (keeps the newest two per repo, or deploy.keepImageVersions). --local builds from
                                         # source instead. [--no-core --no-overlay --no-build
                                         # --no-prune --local --yes]
 lastlight server status                # compose ps + core/overlay version drift +
@@ -192,7 +192,9 @@ is visible), converge the core checkout to that pin (`readCorePin`, else `main`)
 **pull** the prebuilt GHCR images (`--local` builds from source in dependency
 waves: `sandbox-base` before `sandbox`/`sandbox-qa`), `up -d --remove-orphans`,
 force-restart the egress sidecars, health-check `:8644/health`, then prune
-superseded image versions (keeps the newest `KEEP_IMAGE_VERSIONS` = 2 per repo).
+superseded image versions (keeps the newest `KEEP_IMAGE_VERSIONS` = 2 per repo,
+or the overlay's `deploy.keepImageVersions`; a pinned deploy also drops a stale
+`:latest`).
 The CLI is the **control plane** — npm-versioned and separate from the agent image
 it builds, so it survives the agent container recreating itself. For the full
 release→deploy flow see [`docs/RELEASING.md`](../../docs/RELEASING.md) and

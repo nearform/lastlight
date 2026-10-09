@@ -21,7 +21,7 @@ const log = logger("executor");
  * shared → backends → agent-executor.
  */
 
-export const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
+export const DEFAULT_MODEL = "anthropic/claude-sonnet-5-5";
 export const DOCKER_WORKSPACE_DIR = "/home/agent/workspace";
 // Directory holding one skill bundle per phase. Deliberately NOT named
 // `.agents/skills` (pi's auto-discovery path): we map each phase's bundle

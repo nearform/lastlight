@@ -65,10 +65,10 @@ Ask for each of these (don't guess). Group the questions; explain what each is f
   only TCP-probes the host; run `lastlight server db check` after the build for
   the full credential check. An existing SQLite deployment can move across
   later with `lastlight server db migrate` — no need to decide now.
-- **Model** — a `provider/model` string (default `anthropic/claude-sonnet-4-6`),
+- **Model** — a `provider/model` string (default `anthropic/claude-sonnet-5-5`),
   plus the **matching** provider's API key. Last Light is multi-provider: the
   `provider/` prefix picks the provider and the model id follows, e.g.
-  `anthropic/claude-sonnet-4-6`, `openai/gpt-5.5`, `google/gemini-2.5-pro`,
+  `anthropic/claude-sonnet-5-5`, `openai/gpt-5.5`, `google/gemini-2.5-pro`,
   `openrouter/anthropic/claude-sonnet-4.5`. Set **only** the one API-key env var
   that matches the provider you chose. Common ones:
   - `anthropic/…` → `ANTHROPIC_API_KEY` (`sk-ant-…`)

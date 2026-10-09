@@ -20,7 +20,7 @@ expressed as a **YAML workflow** the harness executes phase-by-phase.
 ## Runtime
 
 agentic-pi (and pi-ai underneath) is provider-agnostic. The harness defaults to
-`anthropic/claude-sonnet-4-6` (`config/default.yaml`) and accepts any
+`anthropic/claude-sonnet-5-5` (`config/default.yaml`) and accepts any
 `provider/model` string pi-ai supports (`anthropic/…`, `openai/…`,
 `openrouter/<vendor>/<model>`, etc.).
 API credentials are read from the provider env vars in the registry at
@@ -1061,9 +1061,9 @@ Models (the legacy `OPENCODE_MODEL/MODELS/VARIANT/VARIANTS` names are still
 accepted as aliases for the `LASTLIGHT_*` forms below):
 
 - `LASTLIGHT_MODEL` — default model for sandbox + chat
-  (default: `anthropic/claude-sonnet-4-6`, from `config/default.yaml`)
+  (default: `anthropic/claude-sonnet-5-5`, from `config/default.yaml`)
 - `LASTLIGHT_MODELS` — per-task overrides as JSON, e.g.
-  `{"architect":"anthropic/claude-opus-4-8","triage":"anthropic/claude-haiku-4-5-20251001"}`.
+  `{"architect":"anthropic/claude-opus-4-8","triage":"anthropic/claude-haiku-5-5"}`.
   Keys match phase names or skill types.
 - `LASTLIGHT_THINKING` — catch-all reasoning-effort default (passed to
   agentic-pi as `--thinking`; `--variant` is an accepted alias).
@@ -1507,7 +1507,10 @@ sudo -u lastlight -i lastlight server update
    without cleanup a host fills up (an early nearform outage: sandboxes failed
    to start at 95% disk). After a successful `up`, `server update` removes the
    old GHCR version tags beyond the newest `KEEP_IMAGE_VERSIONS` (2) per repo —
-   plus the tag just deployed — then `docker image prune -f` for the images the
+   or the overlay's `deploy.keepImageVersions` (drizby sets `1`) — plus the tag
+   just deployed, and on a PINNED deploy a stale `:latest` too (a pinned update
+   never re-pulls it, so nothing else ever supersedes it; one sat on drizby for
+   two months as ~12 GB), then `docker image prune -f` for the images the
    repeated `:latest` re-pulls left dangling. All best-effort (a live image's
    tag only untags; docker refuses to delete an in-use image) so it never fails
    a converged deploy. `--no-prune` keeps every version; only runs when

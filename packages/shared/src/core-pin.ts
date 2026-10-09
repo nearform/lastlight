@@ -66,13 +66,29 @@ export function pickTagCommit(lsRemoteOut: string | null, pin: string): string |
 export function readCorePin(overlayDir: string): string | null {
   const fromEnv = normalizePin(process.env.LASTLIGHT_CORE_VERSION);
   if (fromEnv) return fromEnv;
+  return normalizePin(readDeployBlock(overlayDir)?.version);
+}
+
+/**
+ * How many GHCR image versions `lastlight server update` keeps per repo when it
+ * prunes (`deploy.keepImageVersions` in the overlay's config.yaml), or `null`
+ * for the CLI's default. A positive integer; anything else is ignored. A host
+ * with little disk to spare sets `1` — each version is ~10 GB across the four
+ * images, so the default rollback target is a luxury there.
+ */
+export function readKeepImageVersions(overlayDir: string): number | null {
+  const raw = readDeployBlock(overlayDir)?.keepImageVersions;
+  return typeof raw === "number" && Number.isInteger(raw) && raw >= 1 ? raw : null;
+}
+
+/** The overlay's `deploy:` block, or null. Missing / unreadable / malformed
+ *  config.yaml reads as no block (never throws). */
+function readDeployBlock(overlayDir: string): Record<string, unknown> | null {
   try {
     const parsed = parseYaml(readFileSync(join(overlayDir, "config.yaml"), "utf8"));
     if (parsed && typeof parsed === "object") {
       const deploy = (parsed as Record<string, unknown>).deploy;
-      if (deploy && typeof deploy === "object") {
-        return normalizePin((deploy as Record<string, unknown>).version);
-      }
+      if (deploy && typeof deploy === "object") return deploy as Record<string, unknown>;
     }
   } catch {
     /* no overlay / no config.yaml / parse error → track main */

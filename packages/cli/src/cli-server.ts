@@ -30,6 +30,7 @@ import {
   enumerateOverlayAssets,
   type OverlayAsset,
   readCorePin,
+  readKeepImageVersions,
   pickTagCommit,
 } from "lastlight-shared";
 
@@ -95,7 +96,8 @@ export function resolveImageTag(instance: string): string {
 }
 
 /** How many superseded GHCR version tags per repo `server update` keeps when it
- *  prunes (newest-first). Two = the current deploy plus one rollback target. */
+ *  prunes (newest-first). Two = the current deploy plus one rollback target.
+ *  An overlay overrides it with `deploy.keepImageVersions` (`1` on a tight disk). */
 export const KEEP_IMAGE_VERSIONS = 2;
 
 /** Descending semver-ish compare for `vMAJOR.MINOR.PATCH` tags (numeric, so
@@ -114,15 +116,24 @@ function cmpVersionDesc(a: string, b: string): number {
 /**
  * Decide which of a repo's local tags `server update` should delete: keep the
  * `keep` newest `vX.Y.Z` version tags plus `keepTag` (the one just deployed),
- * drop the rest. Only ever returns version-like tags — floating tags such as
- * `latest` are left to dangling-image cleanup, never removed here. Pure, so the
- * retention policy is unit-tested without touching docker.
+ * drop the rest. Pure, so the retention policy is unit-tested without touching
+ * docker.
+ *
+ * `latest` goes too when the deploy is PINNED to a version: a pinned update
+ * only ever pulls the version tag, so a `:latest` left from before the pin is
+ * never refreshed and never superseded — it sat on drizby for two months as
+ * ~12 GB nothing referenced (the local names compose uses point at the
+ * deployed version). An unpinned deploy runs `latest`, so it stays. Other
+ * floating tags (`main`, `edge`) are an operator's hand pulls — left alone.
  */
 export function tagsToPrune(tags: string[], keepTag: string, keep = KEEP_IMAGE_VERSIONS): string[] {
-  const versions = tags.filter((t) => /^v\d/.test(t));
+  const isVersion = (t: string) => /^v\d/.test(t);
+  const versions = tags.filter(isVersion);
   const keepSet = new Set([...versions].sort(cmpVersionDesc).slice(0, keep));
   keepSet.add(keepTag);
-  return versions.filter((t) => !keepSet.has(t));
+  const stale = versions.filter((t) => !keepSet.has(t));
+  if (isVersion(keepTag) && tags.includes("latest")) stale.push("latest");
+  return stale;
 }
 
 // ── pure argv builders (unit-tested) ─────────────────────────────────────────
@@ -951,7 +962,7 @@ export async function serverUpdate(opts: UpdateOpts): Promise<void> {
   // live stack's images are safe. Skipped by `--no-prune`, and when `--no-build`
   // left the images untouched (nothing new to supersede).
   if (doBuild && opts.prune !== false) {
-    await pruneOldImages(home, resolveImageTag(instance));
+    await pruneOldImages(home, resolveImageTag(instance), readKeepImageVersions(instance) ?? KEEP_IMAGE_VERSIONS);
   }
 
   p.log.step(chalk.bold("Health check"));

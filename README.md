@@ -11,7 +11,7 @@
 
 An AI agent that maintains GitHub repositories: triaging issues, reviewing PRs, monitoring repo health, and building features through an Architect → Executor → Reviewer development cycle.
 
-Built on [agentic-pi](https://github.com/nearform/lastlight/tree/main/packages/agentic-pi) (workflow phases) and [`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai) (in-process chat) with a lightweight TypeScript harness for webhook ingestion, cron scheduling, and process management. Provider-agnostic — point `LASTLIGHT_MODEL` at any `provider/model` pi-ai supports (defaults to `anthropic/claude-sonnet-4-6`).
+Built on [agentic-pi](https://github.com/nearform/lastlight/tree/main/packages/agentic-pi) (workflow phases) and [`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai) (in-process chat) with a lightweight TypeScript harness for webhook ingestion, cron scheduling, and process management. Provider-agnostic — point `LASTLIGHT_MODEL` at any `provider/model` pi-ai supports (defaults to `anthropic/claude-sonnet-5-5`).
 
 ## Monorepo layout
 
@@ -119,7 +119,7 @@ WEBHOOK_SECRET=your-secret-here
 
 # Model + provider — the wizard surfaces pi-ai's 15+ providers. The
 # registry lives in packages/shared/src/providers.ts; pick any `provider/model` it lists.
-LASTLIGHT_MODEL=anthropic/claude-sonnet-4-6
+LASTLIGHT_MODEL=anthropic/claude-sonnet-5-5
 ANTHROPIC_API_KEY=sk-ant-...
 # OPENAI_API_KEY=sk-...
 # OPENROUTER_API_KEY=sk-or-...
@@ -491,7 +491,7 @@ Legacy `OPENCODE_*` names are still read as fallbacks for the corresponding `LAS
 | `OPENCODE_API_KEY` | One of | API key for `opencode/…` (OpenCode Zen gateway — one key for Claude, GPT, Gemini, Kimi, GLM, DeepSeek, Qwen, MiniMax) |
 | _… or any other `provider/model` whose key is forwarded by `packages/shared/src/providers.ts`_ | | The wizard surfaces the registered set; see `packages/shared/src/providers.ts` for the full list. |
 | `LASTLIGHT_OVERLAY_DIR` | No | Trusted deployment overlay directory (the docker-compose stack mounts `instance/` here as `/app/instance`). Startup loads `config/default.yaml`, optional `$LASTLIGHT_OVERLAY_DIR/config.yaml`, then env overrides; overlay assets under `workflows/`, `workflows/prompts/`, `skills/`, and `agent-context/` replace built-ins. Secrets live in `$LASTLIGHT_OVERLAY_DIR/secrets/`. Restart required after changes. See [Deployment overlay](#deployment-overlay). |
-| `LASTLIGHT_MODEL` | No | Default model (default: `anthropic/claude-sonnet-4-6`). Legacy: `OPENCODE_MODEL`. |
+| `LASTLIGHT_MODEL` | No | Default model (default: `anthropic/claude-sonnet-5-5`). Legacy: `OPENCODE_MODEL`. |
 | `LASTLIGHT_MODELS` | No | Per-task model overrides as JSON, e.g. `{"chat":"openai/gpt-5.1-mini","architect":"openai/gpt-5.5"}`. Legacy: `OPENCODE_MODELS`. |
 | `LASTLIGHT_THINKING` | No | Reasoning-effort default (`off` \| `minimal` \| `low` \| `medium` \| `high` \| `xhigh`). pi-ai translates per-provider. Legacy: `OPENCODE_VARIANT`. |
 | `LASTLIGHT_THINKINGS` | No | Per-task thinking-level overrides as JSON, e.g. `{"architect":"high","reviewer":"high","triage":"minimal"}`. Legacy: `OPENCODE_VARIANTS`. |

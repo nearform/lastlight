@@ -86,7 +86,7 @@ export const OVERLAY_ENV_EXAMPLE = [
   "DOMAIN=localhost",
   "",
   "# ── Model + provider API key ─────────────────────────────",
-  "LASTLIGHT_MODEL=anthropic/claude-sonnet-4-6",
+  "LASTLIGHT_MODEL=anthropic/claude-sonnet-5-5",
   "# Set the env var that matches your LASTLIGHT_MODEL's provider.",
   "# The wizard-able registry (src/providers.ts): anthropic, openai, openrouter,",
   "# google (GEMINI_API_KEY), mistral, groq, cerebras, xai, huggingface (HF_TOKEN),",

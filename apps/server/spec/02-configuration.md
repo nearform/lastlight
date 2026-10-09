@@ -37,7 +37,7 @@ interface LastLightConfig {
   stateDir: string;
   sandboxDir: string;                     // $STATE_DIR/sandboxes
   sessionsDir: string;
-  model: string;                          // provider/model, e.g. "anthropic/claude-sonnet-4-6"
+  model: string;                          // provider/model, e.g. "anthropic/claude-sonnet-5-5"
   models: ModelConfig;                    // { default: string; [taskType: string]: string }
   providers: ProviderOverrides;           // prefix → { baseUrl?, api?, envKey?, host?, … }
                                           //   endpoint overrides; {} = every provider on its vendor default
@@ -631,7 +631,7 @@ Without it, the Slack connector never registers.
 
 | Var | Purpose | Default |
 |---|---|---|
-| `LASTLIGHT_MODEL` / `OPENCODE_MODEL` | base model for all phases | `anthropic/claude-sonnet-4-6` |
+| `LASTLIGHT_MODEL` / `OPENCODE_MODEL` | base model for all phases | `anthropic/claude-sonnet-5-5` |
 | `LASTLIGHT_MODELS` / `OPENCODE_MODELS` | per-phase model overrides (JSON) | `{}` |
 | `LASTLIGHT_THINKING` / `OPENCODE_VARIANT` | base reasoning-effort | (provider default) |
 | `LASTLIGHT_THINKINGS` / `OPENCODE_VARIANTS` | per-phase reasoning overrides (JSON) | `{}` |
@@ -741,9 +741,9 @@ a resolvable name.
 
 ```json
 LASTLIGHT_MODELS={
-  "default":   "anthropic/claude-sonnet-4-6",
+  "default":   "anthropic/claude-sonnet-5-5",
   "architect": "anthropic/claude-opus-4-7",
-  "chat":      "anthropic/claude-haiku-4-5",
+  "chat":      "anthropic/claude-haiku-5-5",
   "triage":    "openai/gpt-4-turbo"
 }
 
@@ -813,7 +813,7 @@ on the replay, luna + deepseek found nearly twice luna's gold at 0.90 real-rate
 (`docs/plans/pr-review-units-sites.md`, H5). `select` merges what the two agree on.
 
 **`review-survey` is the one key `config/default.yaml` ships SET**, to
-`anthropic/claude-haiku-4-5-20251001` — the opposite of the `diagnose` rule
+`anthropic/claude-haiku-5-5` — the opposite of the `diagnose` rule
 above, and deliberately. It is not a cost downgrade: on review *recall* Haiku
 4.5 beats Sonnet 4.6 on two independent evals (41.2% vs 22.1% on the Martian
 corpus), so it is the better model for hypothesis generation, which is what a
@@ -1147,8 +1147,9 @@ and re-tags each to its local name so compose + the harness (fixed names in
 `src/sandbox/images.ts`) find them unchanged; `--local` builds from source
 instead (the old `docker compose build` waves). After a healthy `up` it then
 **prunes superseded images** — deleting the old `ghcr.io/nearform/lastlight-*`
-version tags beyond the newest `KEEP_IMAGE_VERSIONS` (2) per repo plus the
-just-deployed tag, then `docker image prune -f` for the dangling leftovers of
+version tags beyond the newest `KEEP_IMAGE_VERSIONS` (2) per repo — overridable
+per host with `deploy.keepImageVersions` (a positive integer) — plus the
+just-deployed tag, and on a pinned deploy a stale `:latest`, then `docker image prune -f` for the dangling leftovers of
 repeated `:latest` re-pulls (each version is ~12 GB across the four repos, so
 without this a host fills up). Best-effort and skippable with `--no-prune`.
 These run on the server, unlike the rest of the CLI which targets a remote
