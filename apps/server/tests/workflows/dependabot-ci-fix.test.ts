@@ -1,10 +1,15 @@
 import { describe, it, expect } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import {
   getWorkflow,
   getCronWorkflows,
   getWorkflowByIntent,
   loadPromptTemplate,
 } from "#src/workflows/loader.js";
+import { renderTemplate, type TemplateContext } from "#src/workflows/templates.js";
 
 /**
  * Contract test for the built-in dependabot-ci-fix workflow + its red-PR cron
@@ -147,5 +152,258 @@ describe("dependabot-ci-fix — the publish step", () => {
     expect(block).not.toBeNull();
     const withoutMarker = block![1].replace(/outcome=pushed/g, "");
     expect(withoutMarker).not.toMatch(/\bpush(ed|es|ing)?\b/i);
+  });
+});
+// Issue #442 — `cron-dependabot-ci-fix` was pushing commits onto
+// `dependabot/*` branches owned by Dependabot / Renovate, which the bot then
+// force-pushed away on its next sync, cancelling any review that saw the fix
+// and forcing a maintainer to manually run `@dependabot rebase`. The whole
+// loop must instead drive the bot by PR comment on those branches — and a
+// hard guard in `github_publish` refuses the write so even an accidental
+// push cannot land there.
+describe("dependabot-ci-fix — bot-owned branch routing (issue #442)", () => {
+  const prompt = loadPromptTemplate("prompts/dependabot-ci-fix.md");
+
+  it("intercepts bot-owned branches BEFORE step 1 with the @dependabot commands", () => {
+    // The interceptor must name both prefixes (Dependabot and Renovate) — the
+    // prompt covers the family, not just one vendor — and route ALL four
+    // reasons (behind / dirty / checks-failing / blocked) to either a bare
+    // rebase/recreate command or to the human path.
+    expect(prompt).toMatch(/`dependabot\/`\s+OR\s+`renovate\/`/);
+    // Same soft-wrap problem as the second test below — collapse whitespace
+    // before substring-matching.
+    const flatPrompt = prompt.replace(/\s+/g, " ");
+    expect(flatPrompt).toMatch(/@dependabot rebase/);
+    expect(flatPrompt).toMatch(/@dependabot recreate/);
+
+    // Place the block BEFORE the existing step 1: dependabot-ci-fix.md orders
+    // it as the first thing after `INSTRUCTIONS:`, before the `git fetch` /
+    // `git merge FETCH_HEAD` step. A literal copy/paster following the
+    // numbered steps could not reach `github_publish` from here.
+    // Soft-wrap aware: `indexOf` on the literal substring misses the
+    // `\n    recreate` line break, so normalize whitespace first.
+    const flat = prompt.replace(/\s+/g, " ");
+    const interceptorEnd = flat.indexOf("@dependabot recreate");
+    const step1Index = flat.indexOf("FIRST bring the branch up to date");
+    expect(interceptorEnd).toBeGreaterThan(0);
+    expect(step1Index).toBeGreaterThan(0);
+    expect(interceptorEnd).toBeLessThan(step1Index);
+  });
+
+  it("instructs a SINGLE PR comment, not a push, on bot-owned branches", () => {
+    // `github_add_issue_comment` is the only branch-mutation primitive on a
+    // bot-owned branch — the language test pins that, and so does the absence
+    // of any `git push` instruction outside the AFTER FIXING block. The
+    // helpful refresher: the bot-mode block never references step 5, the gate
+    // runner, or `github_publish` — it routes around them entirely.
+    expect(prompt).toContain("github_add_issue_comment");
+    expect(prompt).toContain("@dependabot rebase");
+    // The prompt soft-wraps `@dependabot recreate` across two lines, so
+    // collapse whitespace before checking.
+    const flatPrompt = prompt.replace(/\s+/g, " ");
+    expect(flatPrompt).toContain("@dependabot recreate");
+  });
+
+  it("tells the agent NOT to fall back to git push on bot-owned branches", () => {
+    // The same prohibition the rest of this prompt carries for the signed-
+    // publish path, repeated here so the bot-mode block stands alone when an
+    // agent reads only it.
+    const interceptor = prompt.match(
+      /IF `\{\{branch\}\}` STARTS WITH `dependabot\/`[\s\S]*?(?=\n\nBelow this block)/,
+    );
+    expect(interceptor).not.toBeNull();
+    expect(interceptor![0]).toMatch(/do NOT (push|fall back|work around)/i);
+    expect(interceptor![0]).toMatch(/git push/);
+  });
+
+it("branches the four `reason` values into the four correct commands", () => {
+    // The four reasons a runner can summon this workflow on a dependency PR,
+    // each mapped to either a Dependabot command OR the human escalation.
+    // `behind` rebase, `dirty` recreate, `checks-failing` recreate (the
+    // common fitter when recreate's fresh re-lock resolves it), `blocked`
+    // routes to `requires-human` because no comment can clear a reviewer
+    // gate. The Dependabot half is the @dependabot slash commands; the
+    // Renovate half is the `rebase` label via `github_add_labels` (Renovate
+    // does NOT parse @dependabot commands).
+    const flatPrompt = prompt.replace(/\s+/g, " ");
+
+    expect(prompt).toMatch(/`behind`[\s\S]*?@dependabot rebase/);
+    expect(prompt).toMatch(/`dirty`[\s\S]*?@dependabot\s+recreate/);
+    expect(prompt).toMatch(/`checks-failing`[\s\S]*?@dependabot\s+recreate/);
+    expect(prompt).toMatch(/`blocked`[\s\S]*?(requires-human|STOP)/);
+
+    expect(flatPrompt).toMatch(/`renovate\/`[\s\S]*?rebase/i);
+    expect(flatPrompt).toMatch(/`github_add_labels`/);
+    expect(prompt).toMatch(/Renovate does NOT parse/i);
+  });
+
+it("routes Renovate to `github_add_labels` with the `rebase` label, not @dependabot slash commands", () => {
+    // Renovate's rebase trigger is the `rebase` label, exactly what
+    // `dependabot-pr-merge.md` uses on green-then-blocked Renovate PRs. The
+    // prompt must NOT tell the agent to post `@dependabot` comments on a
+    // `renovate/*` branch — Renovate ignores those entirely.
+    const renovateBlock = prompt.match(
+      /\*\*`renovate\/`[\s\S]*?(?=\n\nThen \(for both families\))/,
+    );
+    expect(renovateBlock).not.toBeNull();
+    expect(renovateBlock![0]).toContain("`github_add_labels`");
+    expect(renovateBlock![0]).toContain("rebase");
+    expect(renovateBlock![0]).toMatch(/requires-human/);
+    expect(renovateBlock![0]).not.toMatch(/@dependabot rebase/);
+    expect(renovateBlock![0]).not.toMatch(/@dependabot recreate/);
+  });
+
+  it("cites Renovate's docs as the source of the `rebase` label protocol", () => {
+    // The agent has no shell history to draw on for Renovate — the prompt is
+    // its only source. Name the docs page (https://docs.renovatebot.com/…/#manual-rebasing)
+    // so a reviewer can read the contract alongside the prompt.
+    expect(prompt).toContain("https://docs.renovatebot.com/updating-rebasing/");
+    expect(prompt).toMatch(/manual-rebasing|Manual rebasing/);
+  });
+
+it("routes Renovate `checks-failing` through the `rebase` label, not STOP / requires-human", () => {
+    // Renovate's docs page lists three documented use cases for the rebase
+    // label, including "branch created with an error (e.g. lockfile generation)
+    // and you want Renovate to try again" — the bump's lockfile not matching
+    // the test suite for current `main` is exactly such an error. Mirrors the
+    // Dependabot `@dependabot recreate` rule for `checks-failing`: a fresh
+    // re-lock fixes lockfile-generation errors that show up as failing tests.
+    const renovateBlock = prompt.match(
+      /\*\*`renovate\/`[\s\S]*?(?=\n\nThen \(for both families\))/,
+    );
+    expect(renovateBlock).not.toBeNull();
+    // The prompt soft-wraps `rebase label + comment` across lines, so
+    // collapse whitespace before substring-matching (same approach as the
+    // @dependabot test above).
+    const flat = renovateBlock![0].replace(/\s+/g, " ");
+    expect(flat).toMatch(/`checks-failing`[\s\S]*?rebase label/);
+    // `behind` and `dirty` also route to rebase label, by the same rule.
+    expect(flat).toMatch(/`behind`[\s\S]*?rebase label/);
+    expect(flat).toMatch(/`dirty`[\s\S]*?rebase label/);
+    // `blocked` is the one reason the renovate block still routes to requires-human.
+    expect(renovateBlock![0]).toMatch(/`blocked`[\s\S]*?requires-human/);
+  });
+
+  it("writes a no-op gate as the first bot-branch step, so the loop closes after one iteration", () => {
+    // The fix phase's `generic_loop` runs `bash .git/lastlight-verify.sh`
+    // after every iteration; without a script (or with a red one) it exits 1
+    // and the prompt is re-rendered, posting the bot nudge a second time. The
+    // bot-branch path MUST write `exit 0` as the ENTIRE contents of the
+    // verify script FIRST, before posting the comment, so `until_bash`
+    // closes the loop after exactly one iteration — single comment, no
+    // duplicate on re-render (issue #442, contractually closes a fixed
+    // duplicate-comment bug the placeholder prompt left open).
+    const flatPrompt = prompt.replace(/\s+/g, " ");
+    // The very first thing the interceptor asks the agent to do — before
+    // any comment or label work — is the no-op gate. Place matches a
+    // leading "FIRST: write the no-op gate" / "exit 0" pair close to the
+    // `INSTRUCTIONS:` line, BEFORE the Dependabot / Renovate branching.
+    const gateStep = prompt.match(
+      /INSTRUCTIONS:[\s\S]*?FIRST: write the no-op gate\.?[\s\S]*?exit 0/,
+    );
+    expect(gateStep).not.toBeNull();
+    const dependabotStep = flatPrompt.indexOf("Dependabot parses a");
+    const renameStep = flatPrompt.indexOf("Renovate does NOT parse");
+    expect(dependabotStep).toBeGreaterThan(0);
+    expect(renameStep).toBeGreaterThan(0);
+    // Gate step exists within the interceptor block and precedes the
+    // Dependabot/Renovate branching.
+    const gateIdx = flatPrompt.indexOf("exit 0");
+    expect(gateIdx).toBeLessThan(dependabotStep);
+    expect(gateIdx).toBeLessThan(renameStep);
+  });
+it("resolves the rebase label from Renovate config at run time, defaulting to `rebase`", () => {
+    // `rebase` is Renovate's *default* rebase-trigger value, not the only one:
+    // the `rebaseLabel` option overrides it, and a repo that sets it to
+    // anything else (`rebase-now`, `renovate-rebase`, …) ignores a literal
+    // `rebase` post — the bug the review comment flagged. The prompt must
+    // teach the agent to read it from the repo's Renovate config and use the
+    // configured value, with a hard-coded fallback so a repo that hasn't
+    // customised anything still gets the same behaviour it did before.
+    const renovateBlock = prompt.match(
+      /\*\*`renovate\/`[\s\S]*?(?=\n\nThen \(for both families\))/,
+    );
+    expect(renovateBlock).not.toBeNull();
+    const flat = renovateBlock![0].replace(/\s+/g, " ");
+    // The block must name the configurable option …
+    expect(flat).toMatch(/rebaseLabel/);
+    // … show the agent how to read it (jq + the standard Renovate config
+    // paths) …
+    expect(flat).toMatch(/jq/);
+    expect(flat).toMatch(/renovate\.json/);
+// … keep the previous default behaviour: when the field is missing /
+    // the config is absent, the agent uses the literal `rebase` …
+    expect(flat).toMatch(/default[^.]*`rebase`/);
+    // not a baked string. `["$REBASE_LABEL"]` is the bind point.
+    expect(flat).toMatch(/labels:\s*\["\$REBASE_LABEL"\]/);
+});
+
+it("leaves the non-bot branch path untouched (steps 1-5 still apply)", () => {
+  // The interceptor only routes bot branches; the numbered steps still own
+  // the human-authored dependency PR repair. The contract test pins that,
+  // because a future "simpler" rewrite that drops steps out for everyone
+  // would break the open-source case where a maintainer's hand-written
+  // bump PR needs the same fix-loop Lat Light already runs on green-bumps.
+  expect(prompt).toContain("FIRST bring the branch up to date with its base");
+  expect(prompt).toContain("git merge --no-edit FETCH_HEAD");
+  expect(prompt).toContain("Publish with `github_publish`");
+  expect(prompt).toContain('message: "chore(deps): make #{{prNumber}} mergeable"');
+});
+
+});
+
+// The mechanisms behind the bot-branch path, run rather than read: the shell
+// snippet the agent copies to find Renovate's rebase label, and the phase's
+// success message, which must not claim a push on a branch it never pushed to.
+describe("dependabot-ci-fix — bot-branch mechanisms (issue #442)", () => {
+  const prompt = loadPromptTemplate("prompts/dependabot-ci-fix.md");
+  const snippet = prompt.match(/```\n(REBASE_LABEL="\$\([\s\S]*?\)")\n```/)?.[1];
+
+  function resolveLabel(files: Record<string, string>): string {
+    const dir = mkdtempSync(join(tmpdir(), "rebase-label-"));
+    try {
+      for (const [name, body] of Object.entries(files)) {
+        mkdirSync(dirname(join(dir, name)), { recursive: true });
+        writeFileSync(join(dir, name), body);
+      }
+      return execFileSync("bash", ["-c", `${snippet}\nprintf '%s' "$REBASE_LABEL"`], {
+        cwd: dir,
+        encoding: "utf8",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("the prompt carries a runnable rebase-label resolver", () => {
+    expect(snippet).toBeDefined();
+  });
+
+  it.each([
+    ["renovate.json", { "renovate.json": '{"rebaseLabel":"a"}' }, "a"],
+    [".github/renovate.json", { ".github/renovate.json": '{"rebaseLabel":"b"}' }, "b"],
+    [".renovaterc", { ".renovaterc": '{"rebaseLabel":"c"}' }, "c"],
+    [".renovaterc.json", { ".renovaterc.json": '{"rebaseLabel":"d"}' }, "d"],
+    [".github/.renovaterc.json", { ".github/.renovaterc.json": '{"rebaseLabel":"e"}' }, "e"],
+    ["package.json `renovate` key", { "package.json": '{"name":"x","renovate":{"rebaseLabel":"f"}}' }, "f"],
+    ["a config without the key", { "renovate.json": '{"extends":["config:base"]}' }, "rebase"],
+    ["a package.json without a `renovate` key", { "package.json": '{"name":"x"}' }, "rebase"],
+    ["no config at all", {}, "rebase"],
+  ])("resolves the label from %s", (_name, files, expected) => {
+    expect(resolveLabel(files)).toBe(expected);
+  });
+
+  it("reports a bot-owned run as no push, and a normal run as a push", () => {
+    const fix = getWorkflow("dependabot-ci-fix").phases.find((p) => p.name === "fix");
+    const template = fix?.messages?.on_success ?? "";
+    const render = (branch: string, botOwnedBranch: boolean) =>
+      renderTemplate(template, { branch, botOwnedBranch } as unknown as TemplateContext);
+
+    const bot = render("dependabot/npm_and_yarn/lodash-4.17.21", true);
+    expect(bot).not.toMatch(/Fix pushed/);
+    expect(bot).toMatch(/No fix pushed/);
+
+    const human = render("chore/bump-lodash", false);
+    expect(human).toBe("**Fix pushed** to `chore/bump-lodash`.");
   });
 });

@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { existsSync } from "fs";
+import { isBotOwnedBranch } from "agentic-pi/dist/bot-branches.js";
 import type { ExecutorConfig } from "../engine/github/profiles.js";
 import type { StateDb, WorkflowRun, TriggerActorType } from "../state/db.js";
 import type { DisabledConfig, NotificationsConfig } from "lastlight-shared/config-types";
@@ -1494,6 +1495,11 @@ export async function runSimpleWorkflow(
     // the agent starts. Stored on the workflow_run row above; also lives
     // on ctx so the runner can read it without an extra DB lookup.
     prePopulateBranch: effectivePrePopulateBranch,
+    // True when a dependency-update bot owns the branch (`dependabot/…`,
+    // `renovate/…`) — the same list `github_publish` refuses. On such a branch
+    // `dependabot-ci-fix` drives the bot instead of pushing, so its messages
+    // branch on `{{#if botOwnedBranch}}` rather than claiming a push (#442).
+    botOwnedBranch: isBotOwnedBranch(branch),
     // EFFECTIVE models — the repo layer is already folded in, so the existing
     // `{{models.<phase>}}` chain in the engine's `resolveModelVariant` needs no
     // knowledge of repo config at all.

@@ -59,6 +59,152 @@ publish a speculative fix.
 {{/if}}
 
 INSTRUCTIONS:
+IF `{{branch}}` STARTS WITH `dependabot/` OR `renovate/` — STOP, READ THIS,
+THEN SKIP STEPS 1-5 AND `github_publish` ENTIRELY.
+
+The bot OWNS that head. The moment any non-bot commit lands on a
+`dependabot/*` or `renovate/*` branch, the bot abandons the PR on its next
+sync with a comment about the branch having been "edited by someone other
+than the bot", force-pushes the head back to its own tip, and any reviewer
+who saw your commit watches it disappear. `github_publish` itself hard-refuses
+these branches for the same reason (its refusal error names the prefix AND
+the right remediation for that bot family), so even by accident you cannot
+push there — but the prompt is the real explanation, because the failure
+modes the refusal protects against are exactly the ones that follow a
+successful push on these branches.
+
+→ Do NOT work around the `github_publish` refusal with `git push`: a
+   non-bot commit (unsigned too) would still block or be force-pushed
+   away regardless. Drive the bot by its own update primitive — that is
+   the entire fix for a bot-owned branch.
+
+FIRST: write the no-op gate. `{{verifyScript}}` (the path step 3 would
+have used) gets a single line: `exit 0`. Nothing on a bot-owned branch
+needs verification from us — the fix is the comment below, not a code
+change — but the harness's gate loop reads `until_bash` against this
+script and a missing script is `gate=skipped` (RED), which would re-render
+this same prompt and post the comment a second time. A green gate is the
+structural way this loop closes after exactly ONE iteration.
+
+The remediation DEPENDS on the bot family that owns the branch — read the
+prefix and don't conflate them:
+
+**`dependabot/` (Dependabot owns the branch).** Dependabot parses a
+`@dependabot …` slash command in a PR comment. Post exactly ONE comment via
+`github_add_issue_comment`, body is a bare command with NO prose around it
+(prose makes Dependabot ignore the slash):
+
+  - `behind` (base moved past the PR's base) → `@dependabot rebase`. The
+    common case. Bot regenerates the lockfile against current `main` and
+    rewrites the PR head onto a fresh base SHA.
+  - `dirty` (merge conflict, almost always the lockfile) → `@dependabot
+    recreate`. A rebase cannot resolve a conflict that already exists on
+    the branch; recreate regenerates from scratch and the new head is
+    clean.
+  - `checks-failing` (genuine red on the head, no conflict) → `@dependabot
+    recreate`. A bump whose own lockfile doesn't match what the test
+    suite expects after `main` moved is exactly what recreate's fresh
+    re-lock fixes. If recreate still goes red on the new head, a
+    maintainer has to look and the `STOP / requires-human` path below
+    handles it.
+  - `blocked` → DO NOT post a rebase command (auto-merge has no
+    `behind`/`dirty` to clear). Use the `STOP / requires-human` path;
+    a bot-managed branch that needs a human review is not anything this
+    loop can settle.
+
+**`renovate/` (Renovate owns the branch).** Renovate does NOT parse
+`@dependabot` slash commands — and ignores them silently, so an
+agent that posts one into a Renovate PR wastes the comment and leaves
+the branch owned-but-unregenerated. Renovate's documented update
+mechanism is the **`rebase` label** (default name, configurable via
+Renovate's `rebaseLabel` option). Per Renovate's docs at
+`https://docs.renovatebot.com/updating-rebasing/#manual-rebasing`
+under "Manual rebasing", applying the label regenerates Renovate's
+commit for the branch on its next sync, **even if the branch has been
+modified**, and the label is the right call exactly for these three
+situations — a branch behind base, a branch the user wants Renovate
+to recreate from scratch, and a branch that was created with an
+error (e.g. lockfile generation) the user wants Renovate to try again.
+
+Drive Renovate with the same primitive the existing
+`dependabot-pr-merge.md` uses on green-then-blocked Renovate PRs:
+add the rebase label via `github_add_labels` and post a brief
+comment via `github_add_issue_comment` naming the request. The
+label itself is silent on Renovate's UI, so the comment IS the
+visible signal — a maintainer sees the request, knows it's
+expected, and notices if nothing happens on the bot's next sync.
+
+`rebase` is Renovate's *default* rebase-trigger label
+(`rebaseLabel`); a repo that sets a different value ignores the
+literal `rebase` post — the agent must read the configured value
+before posting it. Resolve it once, before the tool call:
+
+```
+REBASE_LABEL="$(
+  for f in renovate.json .github/renovate.json \
+           .renovaterc .renovaterc.json .github/.renovaterc.json; do
+    if [ -f "$f" ]; then
+      v=$(jq -r '.rebaseLabel // empty' "$f" 2>/dev/null || true)
+      if [ -n "$v" ]; then printf '%s' "$v"; exit 0; fi
+    fi
+  done
+  if [ -f package.json ]; then
+    v=$(jq -r '.renovate.rebaseLabel // empty' package.json 2>/dev/null || true)
+    if [ -n "$v" ]; then printf '%s' "$v"; exit 0; fi
+  fi
+  printf 'rebase'
+)"
+```
+
+`github_add_labels` 422s on a label the repository doesn't have, so create
+it first: `github_ensure_labels` with `{ owner: "{{owner}}", repo:
+"{{repo}}", labels: [{ name: "$REBASE_LABEL", color: "0e8a16",
+description: "Ask Renovate to rebase / regenerate this PR." }] }` (a
+no-op when it already exists). Then call `github_add_labels` with
+`{ owner: "{{owner}}", repo: "{{repo}}", issue_number: {{prNumber}},
+labels: ["$REBASE_LABEL"] }`. JSON5 configs (`renovate.json5`,
+`.renovaterc.json5`) are not parseable by `jq`; if the repo uses
+one, default to `rebase` and call it out in the comment so a
+maintainer notices the wiring isn't being read instead of guessing
+at an override that may not exist. The label's documented reach
+covers all three remediation cases for us:
+  - `behind` (base moved past the PR's base) → rebase label +
+    comment. Documented case 1: a branch behind base. Renovate
+    regenerates against current `main` on its next sync.
+  - `dirty` (lockfile conflict, almost always) → rebase label +
+    comment. Documented: Renovate auto-rebases conflicted PRs, and
+    the label forces that rebase immediately rather than waiting for
+    Renovate's natural schedule.
+  - `checks-failing` (genuine red on the head, no conflict) → rebase
+    label + comment. Documented case 3: a branch "created with an
+    error (e.g. lockfile generation)" that you want Renovate to try
+    again — a bump whose lockfile doesn't match the test suite
+    expectations for current `main` is exactly what a fresh
+    re-lock-and-regenerate fixes. If the recreated head still goes
+    red, that is a real code-side problem this loop cannot settle,
+    and the comment (plus the `requires-human` label below) tells
+    the maintainer so.
+  - `blocked` (a required human review is the only outstanding
+    obstacle) → STOP / requires-human. A required-review gate is
+    not something Renovate can clear from the PR side, and the
+    `rebase` label does nothing for it.
+
+Then (for both families) EMIT `CI_FIX_COMPLETE: … outcome=gave-up` on its
+own final line. The marker is the postcondition gate; the structural gate
+that closes this iteration is the green `exit 0` you wrote at the top.
+The next dispatch will see the bot's NEW head SHA (it is on a fresh SHA
+after every successful rebase), with the appropriate check state.
+
+A note on author vs branch: the gate above is the branch prefix, not the
+author. A maintainer's hand-written patch on top of a `dependabot/*`
+branch still has Dependabot as the lifecycle owner — bot force-pushes
+away non-bot commits regardless of who made them — so the same rule
+applies. The branch prefix is what makes the bot the head owner.
+
+Below this block, **the rest of the instructions apply only to branches
+that are NOT `dependabot/*` or `renovate/*`** (e.g. a manually-opened PR
+with a dependency bump that ended up failing CI).
+
 Work efficiently and stay focused — you are on a time budget, so spend it on the
 change that lands this PR. Make the smallest fix that works, don't refactor or
 chase failures unrelated to the dependency bump, and don't sink your budget into

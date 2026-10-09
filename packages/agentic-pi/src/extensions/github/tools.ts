@@ -27,6 +27,7 @@ import {
   type SignedCommit,
 } from "./client.js";
 import { gitAuthEnv } from "./credentials.js";
+import { botKindForBranch, isBotOwnedBranch, type BotKind } from "../../bot-branches.js";
 import {
   DEFAULT_LOG_EXCERPT_BYTES,
   MAX_LOG_EXCERPT_BYTES,
@@ -118,6 +119,58 @@ function firstLineOfFailure(err: unknown): string {
   return text.split("\n")[0]!;
 }
 
+/**
+ * Refuse a publish whose target branch belongs to a dependency-update bot
+ * (Dependabot, Renovate). These bots own their heads: once anyone else commits
+ * to `dependabot/*` / `renovate/*`, the bot abandons the PR on its next sync
+ * ("edited by someone other than Dependabot"), the maintainer has to manually
+ * run `@dependabot rebase` / `@dependabot recreate` (or add Renovate's
+ * `rebase` label — Renovate does not parse `@dependabot` commands), and any
+ * reviewer who saw the bot's commit watches the force-push revert it on the
+ * next pass. So the last-line rule is structural: this tool refuses the write
+ * before any GraphQL mutation runs, and surfaces the refusal as an error the
+ * agent can read and route around. The prompt for `dependabot-ci-fix`
+ * instructs the agent to post the bot's update primitive instead
+ * (issue #442).
+ *
+ * The prefix list lives in `../../bot-branches.ts`, shared with lastlight-core.
+ */
+function botBranchRefusalError(branch: string, kind: BotKind): Error {
+  const shared = (
+    `refusing to publish — branch \`${branch}\` is owned by a dependency-update bot. ` +
+    `A non-bot commit on that branch forces the bot to abandon the PR on its next ` +
+    `sync with a comment about the branch having been edited by someone other than ` +
+    `the bot itself, and the fix commit gets force-pushed away. Nothing was published.`
+  );
+if (kind === "renovate") {
+    return new Error(
+      shared +
+        ` Renovate does NOT parse \`@dependabot\` slash commands and silently ` +
+        `ignores them, so the equivalent primitive is the \`rebase\` label via ` +
+        `\`github_add_labels\` — Renovate's docs at ` +
+        `https://docs.renovatebot.com/updating-rebasing/#manual-rebasing ` +
+        `describe this label as the documented Manual rebase trigger, applying it ` +
+        `regenerates Renovate's commit for the branch on its next sync (even if ` +
+        `the branch has been modified) and covers \`behind\`, \`dirty\` AND ` +
+        `\`checks-failing\` (a branch "created with an error (e.g. lockfile ` +
+        `generation)" that you want Renovate to try again). \`blocked\` is the ` +
+        `one reason this loop can't settle — a required human review is not ` +
+        `something Renovate can clear from the PR side, so use the ` +
+        `\`STOP / requires-human\` path for it. Do NOT fall back to \`git push\`; ` +
+        `an unsigned commit would still block the PR wherever the bot's own ` +
+        `rebase succeeds (issue #442).`,
+    );
+  }
+  return new Error(
+    shared +
+      ` Drive the bot by posting a comment via \`github_add_issue_comment\` whose body ` +
+      `is exactly \`@dependabot rebase\` when the PR is \`behind\` its base, or ` +
+      `\`@dependabot recreate\` when it has a merge conflict or has been edited — ` +
+      `a bare command with no prose around it (Dependabot parses the comment as a slash). ` +
+      `Do NOT fall back to \`git push\`; an unsigned commit would still block the PR ` +
+      `wherever the bot's own rebase succeeds (issue #442).`,
+  );
+}
 /**
  * Local HEAD is now behind the branch we just wrote. `reset --mixed` moves the
  * branch ref and the index onto the published commit and leaves every file
@@ -441,8 +494,12 @@ export function buildGitHubTools(
           Type.String({ description: "SHA of file being replaced (for updates)" }),
         ),
       }),
-      ({ owner, repo, path, content, message, branch, sha }) =>
-        gh.createOrUpdateFile(owner, repo, path, content, message, branch, sha),
+      async ({ owner, repo, path, content, message, branch, sha }) => {
+          if (branch && isBotOwnedBranch(branch)) {
+            throw botBranchRefusalError(branch, botKindForBranch(branch)!);
+          }
+          return gh.createOrUpdateFile(owner, repo, path, content, message, branch, sha);
+      },
     ),
 
     tool(
@@ -484,6 +541,9 @@ export function buildGitHubTools(
       async ({ owner, repo, message, branch, base_branch, path: repoPath, exclude, include }) => {
         const cwd = repoPath || process.cwd();
         const target = branch || currentBranch(cwd);
+        if (isBotOwnedBranch(target)) {
+          throw botBranchRefusalError(target, botKindForBranch(target)!);
+        }
         const { tip, createFrom } = await resolveDiffBase({
           gh,
           auth,
