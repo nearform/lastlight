@@ -118,6 +118,9 @@ phases:
       fresh_context: false
     messages:
       on_start: "On it — investigating the failing checks on PR #{{prNumber}}..."
-      on_success: "**Fix pushed** to `{{branch}}`."
+      # A bot-owned branch is never pushed to — the phase asks the bot to
+      # rebase/recreate (or hands off to a human) and closes on its no-op gate
+      # — so "Fix pushed" would be false there.
+      on_success: "{{#if botOwnedBranch}}**No fix pushed** — `{{branch}}` is owned by its dependency-update bot, so I asked the bot to update it (or flagged it for a human) instead.{{/if}}{{#if !botOwnedBranch}}**Fix pushed** to `{{branch}}`.{{/if}}"
       on_failure: "**Couldn't auto-fix** the failing checks on PR #{{prNumber}} — leaving it for a human."
       on_skipped_done: "**No fix attempted** — the diagnosis says this isn't fixable from here. See the verdict above."

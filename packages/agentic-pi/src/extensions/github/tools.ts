@@ -27,6 +27,7 @@ import {
   type SignedCommit,
 } from "./client.js";
 import { gitAuthEnv } from "./credentials.js";
+import { botKindForBranch, isBotOwnedBranch, type BotKind } from "../../bot-branches.js";
 import {
   DEFAULT_LOG_EXCERPT_BYTES,
   MAX_LOG_EXCERPT_BYTES,
@@ -132,30 +133,8 @@ function firstLineOfFailure(err: unknown): string {
  * instructs the agent to post the bot's update primitive instead
  * (issue #442).
  *
- * `BOT_BRANCH_PREFIXES` covers the shipped defaults — `dependabot/[ecosystem]/…`,
- * `renovate/[package]-…`, and `renovate-bot/[package]-…`. Renovate supports a
- * configurable `branchPrefix`; repos that customise it (e.g. `deps/`) need to
- * extend this list — the operator owns the extension entry-point.
+ * The prefix list lives in `../../bot-branches.ts`, shared with lastlight-core.
  */
-type BotKind = "dependabot" | "renovate";
-
-const BOT_BRANCH_PREFIXES = [
-  { prefix: /^dependabot\//, kind: "dependabot" as const },
-  { prefix: /^renovate\//, kind: "renovate" as const },
-  { prefix: /^renovate-bot\//, kind: "renovate" as const },
-] as const;
-
-function botKindFor(branch: string): BotKind | null {
-  for (const { prefix, kind } of BOT_BRANCH_PREFIXES) {
-    if (prefix.test(branch)) return kind;
-  }
-  return null;
-}
-
-function isBotOwnedBranch(branch: string): boolean {
-  return botKindFor(branch) !== null;
-}
-
 function botBranchRefusalError(branch: string, kind: BotKind): Error {
   const shared = (
     `refusing to publish — branch \`${branch}\` is owned by a dependency-update bot. ` +
@@ -517,7 +496,7 @@ export function buildGitHubTools(
       }),
       async ({ owner, repo, path, content, message, branch, sha }) => {
           if (branch && isBotOwnedBranch(branch)) {
-            throw botBranchRefusalError(branch, botKindFor(branch)!);
+            throw botBranchRefusalError(branch, botKindForBranch(branch)!);
           }
           return gh.createOrUpdateFile(owner, repo, path, content, message, branch, sha);
       },
@@ -563,7 +542,7 @@ export function buildGitHubTools(
         const cwd = repoPath || process.cwd();
         const target = branch || currentBranch(cwd);
         if (isBotOwnedBranch(target)) {
-          throw botBranchRefusalError(target, botKindFor(target)!);
+          throw botBranchRefusalError(target, botKindForBranch(target)!);
         }
         const { tip, createFrom } = await resolveDiffBase({
           gh,

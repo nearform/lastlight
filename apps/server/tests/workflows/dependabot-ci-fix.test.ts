@@ -1,10 +1,15 @@
 import { describe, it, expect } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import {
   getWorkflow,
   getCronWorkflows,
   getWorkflowByIntent,
   loadPromptTemplate,
 } from "#src/workflows/loader.js";
+import { renderTemplate, type TemplateContext } from "#src/workflows/templates.js";
 
 /**
  * Contract test for the built-in dependabot-ci-fix workflow + its red-PR cron
@@ -345,4 +350,60 @@ it("leaves the non-bot branch path untouched (steps 1-5 still apply)", () => {
   expect(prompt).toContain('message: "chore(deps): make #{{prNumber}} mergeable"');
 });
 
+});
+
+// The mechanisms behind the bot-branch path, run rather than read: the shell
+// snippet the agent copies to find Renovate's rebase label, and the phase's
+// success message, which must not claim a push on a branch it never pushed to.
+describe("dependabot-ci-fix — bot-branch mechanisms (issue #442)", () => {
+  const prompt = loadPromptTemplate("prompts/dependabot-ci-fix.md");
+  const snippet = prompt.match(/```\n(REBASE_LABEL="\$\([\s\S]*?\)")\n```/)?.[1];
+
+  function resolveLabel(files: Record<string, string>): string {
+    const dir = mkdtempSync(join(tmpdir(), "rebase-label-"));
+    try {
+      for (const [name, body] of Object.entries(files)) {
+        mkdirSync(dirname(join(dir, name)), { recursive: true });
+        writeFileSync(join(dir, name), body);
+      }
+      return execFileSync("bash", ["-c", `${snippet}\nprintf '%s' "$REBASE_LABEL"`], {
+        cwd: dir,
+        encoding: "utf8",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("the prompt carries a runnable rebase-label resolver", () => {
+    expect(snippet).toBeDefined();
+  });
+
+  it.each([
+    ["renovate.json", { "renovate.json": '{"rebaseLabel":"a"}' }, "a"],
+    [".github/renovate.json", { ".github/renovate.json": '{"rebaseLabel":"b"}' }, "b"],
+    [".renovaterc", { ".renovaterc": '{"rebaseLabel":"c"}' }, "c"],
+    [".renovaterc.json", { ".renovaterc.json": '{"rebaseLabel":"d"}' }, "d"],
+    [".github/.renovaterc.json", { ".github/.renovaterc.json": '{"rebaseLabel":"e"}' }, "e"],
+    ["package.json `renovate` key", { "package.json": '{"name":"x","renovate":{"rebaseLabel":"f"}}' }, "f"],
+    ["a config without the key", { "renovate.json": '{"extends":["config:base"]}' }, "rebase"],
+    ["a package.json without a `renovate` key", { "package.json": '{"name":"x"}' }, "rebase"],
+    ["no config at all", {}, "rebase"],
+  ])("resolves the label from %s", (_name, files, expected) => {
+    expect(resolveLabel(files)).toBe(expected);
+  });
+
+  it("reports a bot-owned run as no push, and a normal run as a push", () => {
+    const fix = getWorkflow("dependabot-ci-fix").phases.find((p) => p.name === "fix");
+    const template = fix?.messages?.on_success ?? "";
+    const render = (branch: string, botOwnedBranch: boolean) =>
+      renderTemplate(template, { branch, botOwnedBranch } as unknown as TemplateContext);
+
+    const bot = render("dependabot/npm_and_yarn/lodash-4.17.21", true);
+    expect(bot).not.toMatch(/Fix pushed/);
+    expect(bot).toMatch(/No fix pushed/);
+
+    const human = render("chore/bump-lodash", false);
+    expect(human).toBe("**Fix pushed** to `chore/bump-lodash`.");
+  });
 });

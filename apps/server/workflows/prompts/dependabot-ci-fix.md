@@ -141,17 +141,26 @@ before posting it. Resolve it once, before the tool call:
 
 ```
 REBASE_LABEL="$(
-  for f in renovate.json .github/renovate.json .renovaterc.json .github/.renovaterc.json; do
+  for f in renovate.json .github/renovate.json \
+           .renovaterc .renovaterc.json .github/.renovaterc.json; do
     if [ -f "$f" ]; then
       v=$(jq -r '.rebaseLabel // empty' "$f" 2>/dev/null || true)
       if [ -n "$v" ]; then printf '%s' "$v"; exit 0; fi
     fi
   done
+  if [ -f package.json ]; then
+    v=$(jq -r '.renovate.rebaseLabel // empty' package.json 2>/dev/null || true)
+    if [ -n "$v" ]; then printf '%s' "$v"; exit 0; fi
+  fi
   printf 'rebase'
 )"
 ```
 
-Then call `github_add_labels` with
+`github_add_labels` 422s on a label the repository doesn't have, so create
+it first: `github_ensure_labels` with `{ owner: "{{owner}}", repo:
+"{{repo}}", labels: [{ name: "$REBASE_LABEL", color: "0e8a16",
+description: "Ask Renovate to rebase / regenerate this PR." }] }` (a
+no-op when it already exists). Then call `github_add_labels` with
 `{ owner: "{{owner}}", repo: "{{repo}}", issue_number: {{prNumber}},
 labels: ["$REBASE_LABEL"] }`. JSON5 configs (`renovate.json5`,
 `.renovaterc.json5`) are not parseable by `jq`; if the repo uses
