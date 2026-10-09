@@ -192,9 +192,43 @@ describe("review ledger ← discussion: a resolved thread past the first page cl
       dispositions: [],
       excerptPresent: () => true, // the quoted code is still there — only the thread says it is done
       threads: d.threads,
+      threadsTruncated: d.threadsTruncated,
       bot: "nearform-lastlight",
     });
     expect(carriedOpen(folded)).toHaveLength(0);
     expect(folded.findings.every((f) => f.status === "resolved")).toBe(true);
+  });
+
+  it("leaves findings open when their resolved threads sit past a truncated page (the old first:50 shape)", async () => {
+    const all = Array.from({ length: 58 }, (_, i) =>
+      thread(i + 1, i >= 55 ? { isResolved: true } : {}),
+    );
+    const { octokit } = pagedOctokit(all);
+    const d = await clientWith(octokit).getPullRequestDiscussion("o", "r", 1, {
+      threadPageSize: 50,
+      threadMaxPages: 1,
+    });
+    expect(d.threadsTruncated).toBe(true);
+    expect(d.threads).toHaveLength(50);
+
+    const prior = {
+      version: 1 as const,
+      head: "aaa",
+      at: new Date(0).toISOString(),
+      rounds: 1,
+      units: [],
+      findings: [56, 57, 58].map(finding),
+    };
+    const folded = foldReviewLedger({
+      prior,
+      head: "bbb",
+      units: null,
+      dispositions: [],
+      excerptPresent: () => true,
+      threads: d.threads,
+      threadsTruncated: d.threadsTruncated,
+      bot: "nearform-lastlight",
+    });
+    expect(carriedOpen(folded)).toHaveLength(3);
   });
 });

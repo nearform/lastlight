@@ -1247,11 +1247,21 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       const botLogin = getRuntimeConfig()?.botLogin ?? "last-light[bot]";
       // Threads are read only when an earlier finding could be resolved by one.
       let threads: LedgerThread[] | null = null;
+      let threadsTruncated = false;
       if (input.prior?.findings.some((f) => f.status === "open")) {
-        threads = await input.github
+        const d = await input.github
           .getPullRequestDiscussion(input.owner, input.repo, input.prNumber)
-          .then((d) => d.threads)
           .catch(() => null);
+        if (d) {
+          threads = d.threads;
+          threadsTruncated = d.threadsTruncated;
+          if (d.threadsTruncated) {
+            log.warn(
+              "review thread read truncated — open findings whose threads were not in this page stay open",
+              { repo: `${input.owner}/${input.repo}`, prNumber: input.prNumber, threadCount: d.threads.length },
+            );
+          }
+        }
       }
       const cut = readLedgerUnits(join(input.hostRepoDir, ".lastlight", "pr-review", "units.json"));
       return foldReviewLedger({
@@ -1266,6 +1276,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
           return text === null ? false : normalisedCode(text).includes(excerpt);
         },
         threads,
+        threadsTruncated,
         bot: botLogin.replace(/\[bot\]$/, ""),
       });
     } catch (err) {
