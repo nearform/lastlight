@@ -98,6 +98,42 @@ describe("folding a review into the ledger", () => {
     expect(notOurs.findings[0]!.status).toBe("open");
   });
 
+  it("on a truncated thread read, still closes a finding whose resolved thread is in the page it holds", () => {
+    const first = fold({ dispositions: [row("inline", "src/a.ts", "a()", "Inverted guard")] });
+    const folded = fold({
+      prior: first,
+      head: "h2",
+      threadsTruncated: true,
+      threads: [
+        {
+          path: "src/a.ts",
+          isResolved: true,
+          isOutdated: false,
+          comments: [{ author: "last-light", isBot: true, body: "**Inverted guard** — …" }],
+        },
+      ],
+    });
+    expect(folded.findings[0]).toMatchObject({ status: "resolved", closedAt: "h2" });
+  });
+
+  it("on a truncated thread read, leaves an unmatched open finding open — unseen threads are unknown, not unresolved", () => {
+    const first = fold({ dispositions: [row("inline", "src/a.ts", "a()", "Inverted guard")] });
+    const folded = fold({
+      prior: first,
+      head: "h2",
+      threadsTruncated: true,
+      threads: [
+        {
+          path: "src/other.ts",
+          isResolved: true,
+          isOutdated: false,
+          comments: [{ author: "last-light", isBot: true, body: "some other point" }],
+        },
+      ],
+    });
+    expect(folded.findings[0]!.status).toBe("open");
+  });
+
   it("re-finding the same code refreshes the entry; a withheld one that posts is open from then on", () => {
     const first = fold({ dispositions: [row("internal", "src/a.ts", "a()", "Was withheld", {}, "body-budget")] });
     const second = fold({ prior: first, head: "h2", dispositions: [row("body", "src/a.ts", "a()", "Now posted", {}, "overflow")] });

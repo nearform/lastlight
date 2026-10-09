@@ -234,6 +234,13 @@ export interface FoldInput {
   excerptPresent: (path: string, excerpt: string) => boolean | null;
   /** The PR's review threads; `null` when the read failed — no entry is resolved from them. */
   threads: readonly LedgerThread[] | null;
+  /**
+   * The thread read hit its page cap. Unseen threads are unknown, not absent:
+   * a resolved thread we DID see still closes its finding; one we did not
+   * leaves the finding open. Same fail-safe as `threads: null`, on the
+   * unmatched entries only — the pages we hold are still used.
+   */
+  threadsTruncated?: boolean;
   /** GraphQL's name for the bot (no `[bot]` suffix). */
   bot: string;
   now?: string;
@@ -246,6 +253,9 @@ export function foldReviewLedger(input: FoldInput): ReviewLedger {
   const carried = (input.prior?.findings ?? []).filter((f) => f.status === "open" || f.status === "withheld").map((f) => ({ ...f }));
 
   for (const f of carried) {
+    // A truncated page is still a page: honour a match we have. No match
+    // (or `threads: null`) is not evidence the thread is unresolved — the
+    // finding stays open, including when `threadsTruncated` is set.
     const thread = input.threads ? threadFor(f, input.threads, input.bot) : undefined;
     if (f.status === "open" && thread?.isResolved) {
       f.status = "resolved";
