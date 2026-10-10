@@ -6,7 +6,7 @@ import { streamSSE } from "hono/streaming";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { Slack, GitHub } from "arctic";
 import type { SessionSource, SessionMeta } from "./sessions.js";
-import type { StateDb, WorkflowRun } from "../state/db.js";
+import { foreignEngineMessage, isOwnedRun, type StateDb, type WorkflowRun } from "../state/db.js";
 import { tailJsonl } from "./tail.js";
 import {
   listRunningContainers,
@@ -1848,6 +1848,7 @@ export function createAdminRoutes(
     if (run.status !== "running" && run.status !== "paused" && run.status !== "queued") {
       return c.json({ error: `cannot cancel a run with status '${run.status}'` }, 400);
     }
+    if (!isOwnedRun(run)) return c.json({ error: foreignEngineMessage(run) }, 409);
     // Actor logging (issue #205): the canceller lands on the append-only
     // executions ledger (via the finish error below), never overwriting the
     // run's original `triggered_by`.
@@ -1975,6 +1976,7 @@ export function createAdminRoutes(
     if (run.status !== "failed" && run.status !== "cancelled") {
       return c.json({ error: `cannot retry a run with status '${run.status}'` }, 400);
     }
+    if (!isOwnedRun(run)) return c.json({ error: foreignEngineMessage(run) }, 409);
     if (!config.retryWorkflow) {
       return c.json({ error: "retry not available (runner not wired)" }, 503);
     }
@@ -2808,6 +2810,9 @@ export function createAdminRoutes(
     const approval = await db.approvals.getById(id);
     if (!approval) return c.json({ error: "approval not found" }, 404);
     if (approval.status !== "pending") return c.json({ error: `already ${approval.status}` }, 400);
+    // Another engine's gate stays pending for that engine (KNOWN_RUN_ENGINES).
+    const gatedRun = await db.runs.getRun(approval.workflowRunId);
+    if (gatedRun && !isOwnedRun(gatedRun)) return c.json({ error: foreignEngineMessage(gatedRun) }, 409);
     // Actor logging (issue #205): attribute the approval to the authenticated
     // user, falling back to `admin` for password/anonymous sessions.
     const actor = actorFromContext(c) ?? "admin";

@@ -5,7 +5,7 @@ import type { SessionManager } from "../connectors/index.js";
 // value import that would drag every connector (Slack, the GitHub webhook)
 // into the dispatcher's module graph.
 import { withThreadTranscript } from "../connectors/messaging/thread-transcript.js";
-import type { StateDb } from "../state/db.js";
+import { foreignEngineMessage, isOwnedRun, type StateDb } from "../state/db.js";
 import { qualifyRepo } from "../state/repo-ref.js";
 import type { GitHubClient } from "./github/github.js";
 import type { ChatResult } from "./chat/chat.js";
@@ -1013,6 +1013,11 @@ async function handleExploreReply(
     eventLog.warn("explore-reply: run not found", { workflowRunId });
     return handled;
   }
+  if (!isOwnedRun(run)) {
+    // Another engine's run (KNOWN_RUN_ENGINES): leave its gate pending for it.
+    await envelope.reply(foreignEngineMessage(run));
+    return handled;
+  }
   const pending = await deps.db.approvals.getPendingForWorkflow(workflowRunId);
   if (!pending || pending.kind !== "reply") {
     eventLog.warn("explore-reply: no pending reply gate", { workflowRunId });
@@ -1107,6 +1112,15 @@ async function handleApprovalResponse(
 
   if (!approval) {
     await envelope.reply("No pending approval found.");
+    return handled;
+  }
+
+  // A gate on another engine's run (KNOWN_RUN_ENGINES) stays pending, for that
+  // engine to resolve once it is back — recording the decision here would
+  // claim a resume this build cannot perform.
+  const gatedRun = await deps.db.runs.getRun(approval.workflowRunId);
+  if (gatedRun && !isOwnedRun(gatedRun)) {
+    await envelope.reply(foreignEngineMessage(gatedRun));
     return handled;
   }
 

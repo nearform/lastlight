@@ -122,6 +122,7 @@ export const workflowRuns = pgTable(
     restartCount: integer("restart_count").notNull().default(0),
     traceId: text("trace_id"),
     spanId: text("span_id"),
+    engine: text("engine"),
   },
   (t) => [
     index("idx_workflow_runs_trigger").on(t.triggerId, t.status),

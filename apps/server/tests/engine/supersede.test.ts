@@ -62,6 +62,37 @@ describe("supersedeRun — replacing a stale in-flight review", () => {
     expect(waitForStop).toHaveBeenCalled();
   });
 
+  it("leaves a run another engine owns completely alone — no cancel, no kill, no failed phases (#435)", async () => {
+    const db = fakeDb(
+      {
+        id: "run-durable",
+        status: "running",
+        workflowName: "pr-review",
+        engine: "durable",
+        context: { taskId: "skillspro-2008-pr-review" },
+      },
+      [{ id: 1, workflowRunId: "run-durable" }],
+    );
+    const listContainers = vi.fn().mockResolvedValue([
+      { name: "lastlight-sandbox-skillspro-2008-pr-review-deadbeef", taskId: "skillspro-2008-pr-review" },
+    ]);
+    const killContainer = vi.fn().mockResolvedValue(undefined);
+    const waitForStop = vi.fn().mockResolvedValue(false);
+
+    const stopped = await supersedeRun("run-durable", "why", {
+      db: db as any,
+      listContainers: listContainers as any,
+      killContainer,
+      waitForStop,
+    });
+
+    expect(stopped).toBe(true);
+    expect(db.runs.cancelRun).not.toHaveBeenCalled();
+    expect(killContainer).not.toHaveBeenCalled();
+    expect(db.executions.recordFinish).not.toHaveBeenCalled();
+    expect(waitForStop).not.toHaveBeenCalled();
+  });
+
   it("never throws — a failed cancel must not cost the new review its dispatch", async () => {
     const db = fakeDb(null);
     db.runs.getRun.mockRejectedValue(new Error("db down"));
