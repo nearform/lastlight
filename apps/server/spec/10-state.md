@@ -126,7 +126,8 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   updated_at TEXT NOT NULL,
   finished_at TEXT,
   triggered_by TEXT,                           -- ORIGINAL trigger's actor (joins users.login)
-  trigger_actor_type TEXT                       -- github | slack | cli | cron | admin | system
+  trigger_actor_type TEXT,                      -- github | slack | cli | cron | admin | system
+  engine TEXT                                  -- owning workflow engine; NULL = the YAML engine
 );
 
 CREATE INDEX idx_workflow_runs_trigger      ON workflow_runs(trigger_id, status);
@@ -748,6 +749,26 @@ Kept current by `team` / `membership` / `organization` webhooks, which
 a webhook would put an unbounded org walk on the delivery path. `POST
 /admin/api/me/repos/resync` is the manual fallback where those events aren't
 wired up.
+
+### `workflow_runs.engine`
+
+Which workflow engine owns the run. NULL means the YAML engine, which is every
+row written before the durable-workflow engine (#435). It exists so a release
+can be **rolled back** safely: the durable engine marks its rows
+`engine = 'durable'` and shares this table, and a build drives only the rows
+whose engine it knows (`KNOWN_RUN_ENGINES` in `workflow-run-store.ts`; empty
+on the YAML-only line, so only NULL rows are owned).
+
+For a run another engine owns, every **lifecycle** statement is a no-op — the
+ownership predicate is part of the statement's `WHERE`, so no caller can skip
+it: it is not counted against the concurrency cap, never admitted, re-queued,
+expired, restarted, resumed, paused, finished or cancelled, and the atomic gate
+ops throw `ForeignEngineRunError` before recording a decision. Boot recovery,
+run reuse in `runSimpleWorkflow`, the approval and reply routes (GitHub, Slack,
+dashboard) and the admin cancel/retry routes check `isOwnedRun` first and say
+why they refused. **Display and lock reads are deliberately unguarded**: the
+dashboard still lists the run, and the PR run lock still sees it, because a run
+this build cannot drive still owns its workspace.
 
 ### `workflow_runs.trace_id` / `span_id`
 

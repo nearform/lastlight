@@ -52,8 +52,17 @@ export async function supersedeRun(runId: string, reason: string, deps: Supersed
     const run = await db.runs.getRun(runId);
     if (!run) return true;
     if (run.status === "running" || run.status === "queued" || run.status === "paused") {
-      await db.runs.cancelRun(runId);
-      log.info("Superseded an in-flight run", { runId, workflow: run.workflowName, reason });
+      if (await db.runs.cancelRun(runId)) {
+        log.info("Superseded an in-flight run", { runId, workflow: run.workflowName, reason });
+      } else {
+        // Another engine's run (KNOWN_RUN_ENGINES) — not ours to cancel, and
+        // not executing in this process either.
+        log.warn("Did not cancel the superseded run: another workflow engine owns it", {
+          runId,
+          workflow: run.workflowName,
+          engine: run.engine,
+        });
+      }
     }
 
     const taskId = (run.context as Record<string, unknown> | undefined)?.taskId;

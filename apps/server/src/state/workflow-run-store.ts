@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, gte, inArray, isNotNull, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, inArray, isNotNull, isNull, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
 import type { ApprovalStore } from "./approval-store.js";
 import type { TriggerActorType } from "./user-store.js";
 import {
@@ -38,6 +38,58 @@ const ACTIVE_FIRST = ({ workflowRuns }: StateTables) => sql`CASE ${workflowRuns.
              WHEN 'queued'  THEN 2
              ELSE 3
            END`;
+
+/**
+ * The workflow engines THIS build drives, beyond the YAML engine (a NULL
+ * `engine` column). Empty today: every row this build writes is a YAML run.
+ *
+ * It exists for rollback (#435, decision 15). The durable-workflow engine marks
+ * its rows `engine = 'durable'` and shares this table, so the image before it —
+ * this one — must treat such a row as somebody else's: never resume, admit,
+ * retry, re-queue, approve, cancel or finish it, and never count it against the
+ * concurrency cap. Otherwise rolling back would re-run a durable run from the
+ * top on the YAML engine. The guard is a predicate on the lifecycle statements
+ * themselves ({@link ownedRunSql}), so a caller cannot forget it; the few call
+ * sites that would otherwise act silently also check {@link isOwnedRun} to say
+ * why they refused.
+ *
+ * Reads that only DISPLAY or LOCK are deliberately unguarded: the dashboard
+ * still lists a foreign run, and the PR run lock (`activeForTrigger`) still
+ * sees it — a run this build can't drive still owns its workspace.
+ */
+export const KNOWN_RUN_ENGINES: readonly string[] = [];
+
+/** True when this build owns (may drive) `run` — see {@link KNOWN_RUN_ENGINES}. */
+export function isOwnedRun(run: Pick<WorkflowRun, "engine">): boolean {
+  return run.engine == null || KNOWN_RUN_ENGINES.includes(run.engine);
+}
+
+/** The one user-facing explanation for refusing to act on a foreign-engine run. */
+export function foreignEngineMessage(run: Pick<WorkflowRun, "engine" | "workflowName">): string {
+  return (
+    `This \`${run.workflowName}\` run belongs to the \`${run.engine}\` workflow engine, which this version of ` +
+    `Last Light doesn't run (it was most likely started by a newer release before a rollback). ` +
+    `It will continue once that release is deployed again.`
+  );
+}
+
+/** Thrown by an atomic gate op asked to resolve a gate on a run another engine owns. */
+export class ForeignEngineRunError extends Error {
+  constructor(
+    readonly runId: string,
+    readonly engine: string,
+  ) {
+    super(`workflow run ${runId} is owned by the '${engine}' engine, which this version of Last Light does not run`);
+    this.name = "ForeignEngineRunError";
+  }
+}
+
+/** The SQL twin of {@link isOwnedRun}, ANDed into every lifecycle statement. */
+function ownedRunSql({ workflowRuns }: StateTables): SQL {
+  return KNOWN_RUN_ENGINES.length
+    ? (or(isNull(workflowRuns.engine), inArray(workflowRuns.engine, [...KNOWN_RUN_ENGINES])) as SQL)
+    : isNull(workflowRuns.engine);
+}
 
 export interface PhaseHistoryEntry {
   phase: string;
@@ -101,6 +153,12 @@ export interface WorkflowRun {
   traceId?: string;
   /** The `lastlight.workflow.run` span id — the parent a feedback span attaches to. */
   spanId?: string;
+  /**
+   * The workflow engine that owns this run. Absent = the YAML engine. A run
+   * whose engine this build doesn't know is never driven here — see
+   * {@link KNOWN_RUN_ENGINES}.
+   */
+  engine?: string;
   /**
    * Rolled-up totals across the run's executions (SUM of `cost_usd`,
    * input+output+cache-read+cache-write tokens, and sandbox CPU seconds). Populated only by {@link WorkflowRunStore.list}
@@ -345,6 +403,7 @@ export class WorkflowRunStore {
       updatedAt: now,
       triggeredBy: run.triggeredBy ?? null,
       triggerActorType: run.triggerActorType ?? null,
+      engine: run.engine ?? null,
     });
   }
 
@@ -805,7 +864,7 @@ export class WorkflowRunStore {
     const [row] = await this.client
       .select({ c: count() })
       .from(workflowRuns)
-      .where(eq(workflowRuns.status, "running"));
+      .where(and(eq(workflowRuns.status, "running"), ownedRunSql(this.t)));
     return row?.c ?? 0;
   }
 
@@ -819,7 +878,7 @@ export class WorkflowRunStore {
     const rows = await this.client
       .select()
       .from(workflowRuns)
-      .where(eq(workflowRuns.status, "queued"))
+      .where(and(eq(workflowRuns.status, "queued"), ownedRunSql(this.t)))
       .orderBy(asc(workflowRuns.startedAt));
     return rows.map((r) => this.deserialize(r));
   }
@@ -839,7 +898,7 @@ export class WorkflowRunStore {
     const result = await this.client
       .update(workflowRuns)
       .set({ status: "running", updatedAt: now })
-      .where(and(eq(workflowRuns.id, id), eq(workflowRuns.status, "queued")));
+      .where(and(eq(workflowRuns.id, id), eq(workflowRuns.status, "queued"), ownedRunSql(this.t)));
     return changes(result);
   }
 
@@ -864,7 +923,7 @@ export class WorkflowRunStore {
       await this.client
         .update(workflowRuns)
         .set({ status: "cancelled", finishedAt: now, updatedAt: now, context })
-        .where(and(eq(workflowRuns.id, id), eq(workflowRuns.status, "queued"))),
+        .where(and(eq(workflowRuns.id, id), eq(workflowRuns.status, "queued"), ownedRunSql(this.t))),
     );
     // A queued run that expires never ran a phase, but it may already own a
     // `last-light/review` check — the whole point of hanging the projection off
@@ -1032,7 +1091,10 @@ export class WorkflowRunStore {
         ? await this.serialize(() => this.client.transaction(async (tx) => apply(tx)))
         : await apply(this.client);
     if (!flipped) {
-      log.warn("Refused to finish a run: it is paused for a human or already cancelled", { runId: id, status });
+      log.warn("Refused to finish a run: it is paused for a human, already cancelled, or owned by another engine", {
+        runId: id,
+        status,
+      });
       return;
     }
     // AFTER the transaction commits — the observer reads the row back.
@@ -1077,22 +1139,28 @@ export class WorkflowRunStore {
       .set(patch)
       .where(
         refusedFrom.length
-          ? and(eq(workflowRuns.id, id), notInArray(workflowRuns.status, refusedFrom))
-          : eq(workflowRuns.id, id),
+          ? and(eq(workflowRuns.id, id), notInArray(workflowRuns.status, refusedFrom), ownedRunSql(this.t))
+          : and(eq(workflowRuns.id, id), ownedRunSql(this.t)),
       )
       .returning({ id: workflowRuns.id });
     return flipped.length > 0;
   }
 
-  /** Cancel a workflow run */
-  async cancelRun(id: string): Promise<void> {
+  /**
+   * Cancel a workflow run. Returns whether the row flipped — `false` for a run
+   * another engine owns ({@link KNOWN_RUN_ENGINES}), which is left untouched.
+   */
+  async cancelRun(id: string): Promise<boolean> {
     const { workflowRuns } = this.t;
     const now = new Date().toISOString();
-    await this.client
+    const flipped = await this.client
       .update(workflowRuns)
       .set({ status: "cancelled", updatedAt: now, finishedAt: now })
-      .where(eq(workflowRuns.id, id));
+      .where(and(eq(workflowRuns.id, id), ownedRunSql(this.t)))
+      .returning({ id: workflowRuns.id });
+    if (flipped.length === 0) return false;
     await this.notifyTerminal(id, "cancelled");
+    return true;
   }
 
   /** Pause a workflow run (waiting for approval) */
@@ -1102,7 +1170,7 @@ export class WorkflowRunStore {
     await dbc
       .update(workflowRuns)
       .set({ status: "paused", updatedAt: now })
-      .where(eq(workflowRuns.id, id));
+      .where(and(eq(workflowRuns.id, id), ownedRunSql(this.t)));
   }
 
   /**
@@ -1124,6 +1192,7 @@ export class WorkflowRunStore {
           eq(workflowRuns.id, id),
           eq(workflowRuns.status, "succeeded"),
           eq(workflowRuns.currentPhase, "waiting_approval"),
+          ownedRunSql(this.t),
         ),
       );
     return changes(result);
@@ -1136,7 +1205,7 @@ export class WorkflowRunStore {
     await dbc
       .update(workflowRuns)
       .set({ status: "running", updatedAt: now })
-      .where(eq(workflowRuns.id, id));
+      .where(and(eq(workflowRuns.id, id), ownedRunSql(this.t)));
   }
 
   /**
@@ -1175,7 +1244,7 @@ export class WorkflowRunStore {
         context,
       })
       .where(
-        and(eq(workflowRuns.id, id), inArray(workflowRuns.status, ["failed", "cancelled"])),
+        and(eq(workflowRuns.id, id), inArray(workflowRuns.status, ["failed", "cancelled"]), ownedRunSql(this.t)),
       );
     return changes(result);
   }
@@ -1194,7 +1263,7 @@ export class WorkflowRunStore {
     const result = await this.client
       .update(workflowRuns)
       .set({ startedAt: now, updatedAt: now })
-      .where(and(eq(workflowRuns.id, id), eq(workflowRuns.status, "queued")));
+      .where(and(eq(workflowRuns.id, id), eq(workflowRuns.status, "queued"), ownedRunSql(this.t)));
     return changes(result);
   }
 
@@ -1214,7 +1283,7 @@ export class WorkflowRunStore {
     const result = await this.client
       .update(workflowRuns)
       .set({ status: "queued", startedAt: now, updatedAt: now })
-      .where(and(eq(workflowRuns.id, id), eq(workflowRuns.status, "running")));
+      .where(and(eq(workflowRuns.id, id), eq(workflowRuns.status, "running"), ownedRunSql(this.t)));
     return changes(result);
   }
 
@@ -1238,6 +1307,16 @@ export class WorkflowRunStore {
       .where(eq(workflowRuns.id, id))
       .returning({ restartCount: workflowRuns.restartCount });
     return row?.restartCount ?? 0;
+  }
+
+  /**
+   * Throw {@link ForeignEngineRunError} when another engine owns `runId`, so an
+   * atomic gate op rolls back before it records a decision this build would
+   * then fail to act on. A missing run is left to the caller's own handling.
+   */
+  private async assertOwned(runId: string, dbc: StateDbc): Promise<void> {
+    const run = await this.getRun(runId, dbc);
+    if (run && !isOwnedRun(run)) throw new ForeignEngineRunError(runId, run.engine!);
   }
 
   private deserialize(row: RunRowLike): WorkflowRun {
@@ -1345,6 +1424,7 @@ export class WorkflowRunStore {
       this.client.transaction(async (tx) => {
         const approval = await this.approvals.getById(approvalId, tx);
         if (!approval) throw new Error(`approval ${approvalId} not found`);
+        await this.assertOwned(approval.workflowRunId, tx);
         const changed = await this.approvals.respond(approvalId, "approved", responder, undefined, tx);
         if (changed !== 1) {
           throw new Error(`approval ${approvalId} is not pending (already resolved?)`);
@@ -1369,6 +1449,7 @@ export class WorkflowRunStore {
       this.client.transaction(async (tx) => {
         const approval = await this.approvals.getById(approvalId, tx);
         if (!approval) throw new Error(`approval ${approvalId} not found`);
+        await this.assertOwned(approval.workflowRunId, tx);
         const changed = await this.approvals.respond(approvalId, "rejected", responder, reason, tx);
         if (changed !== 1) {
           throw new Error(`approval ${approvalId} is not pending (already resolved?)`);
@@ -1393,6 +1474,7 @@ export class WorkflowRunStore {
   ): Promise<WorkflowRun | null> {
     return this.serialize(() =>
       this.client.transaction(async (tx) => {
+        await this.assertOwned(runId, tx);
         const changed = await this.approvals.resolveReplyGate(approvalId, replyText, responder, tx);
         if (changed !== 1) {
           throw new Error(`reply gate ${approvalId} is not pending (already resolved?)`);

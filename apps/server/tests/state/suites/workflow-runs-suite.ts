@@ -15,7 +15,7 @@ import type { StateDb } from "#src/state/db.js";
 import { makeOpSerializer } from "#src/state/client.js";
 import { run as runSql } from "#src/state/dialect.js";
 import type { ApprovalStore } from "#src/state/approval-store.js";
-import { WorkflowRunStore } from "#src/state/workflow-run-store.js";
+import { ForeignEngineRunError, WorkflowRunStore, isOwnedRun } from "#src/state/workflow-run-store.js";
 import type { MakeDb, SuiteOpts } from "../store-suite.js";
 
 export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
@@ -494,6 +494,94 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
         const run = await db.runs.getRun(await makeRun());
         expect(run?.triggeredBy).toBeUndefined();
         expect(run?.triggerActorType).toBeUndefined();
+      });
+    });
+
+    describe("foreign-engine runs — the rollback guard (#435)", () => {
+      // A row a NEWER engine wrote (`engine = 'durable'`) must be invisible to
+      // every lifecycle path of this build, so rolling back never re-runs it
+      // on the YAML engine. Display and lock reads still see it.
+      const foreign = { engine: "durable" };
+
+      async function pendingGate(runId: string): Promise<string> {
+        const id = randomUUID();
+        await db.approvals.create({
+          id,
+          workflowRunId: runId,
+          gate: "post_architect",
+          summary: "Plan ready",
+          kind: "approve",
+          createdAt: new Date().toISOString(),
+        });
+        return id;
+      }
+
+      it("round-trips the engine, and a row without one reads as owned", async () => {
+        const mine = await makeRun();
+        const theirs = await makeRun(foreign);
+        expect((await db.runs.getRun(mine))!.engine).toBeUndefined();
+        expect((await db.runs.getRun(theirs))!.engine).toBe("durable");
+        expect(isOwnedRun((await db.runs.getRun(mine))!)).toBe(true);
+        expect(isOwnedRun((await db.runs.getRun(theirs))!)).toBe(false);
+      });
+
+      it("keeps foreign runs out of the concurrency cap and the admission queue", async () => {
+        await makeRun({ status: "running" });
+        await makeRun({ ...foreign, status: "running" });
+        const queuedMine = await makeRun({ status: "queued" });
+        const queuedTheirs = await makeRun({ ...foreign, status: "queued" });
+
+        expect(await db.runs.countRunning()).toBe(1);
+        expect((await db.runs.listQueued()).map((r) => r.id)).toEqual([queuedMine]);
+        expect(await db.runs.admitRun(queuedTheirs)).toBe(0);
+        expect(await db.runs.expireQueued(queuedTheirs, "ttl")).toBe(0);
+        expect(await db.runs.requeue(queuedTheirs)).toBe(0);
+        expect((await db.runs.getRun(queuedTheirs))!.status).toBe("queued");
+      });
+
+      it("refuses every status transition on a foreign run", async () => {
+        const running = await makeRun({ ...foreign, status: "running" });
+        const paused = await makeRun({ ...foreign, status: "paused" });
+        const failed = await makeRun({ ...foreign, status: "failed" });
+
+        expect(await db.runs.requeueRunning(running)).toBe(0);
+        await db.runs.setPaused(running);
+        await db.runs.finishRun(running, "failed", { error: "boom" });
+        expect(await db.runs.cancelRun(running)).toBe(false);
+        expect((await db.runs.getRun(running))!.status).toBe("running");
+
+        await db.runs.setRunning(paused);
+        expect((await db.runs.getRun(paused))!.status).toBe("paused");
+
+        expect(await db.runs.restartRun(failed)).toBe(0);
+        expect((await db.runs.getRun(failed))!.status).toBe("failed");
+      });
+
+      it("still cancels an owned run and reports it", async () => {
+        const mine = await makeRun({ status: "running" });
+        expect(await db.runs.cancelRun(mine)).toBe(true);
+        expect((await db.runs.getRun(mine))!.status).toBe("cancelled");
+      });
+
+      it("rolls back a gate op on a foreign run, leaving the gate pending", async () => {
+        const runId = await makeRun({ ...foreign, status: "paused", currentPhase: "waiting_approval" });
+        const approvalId = await pendingGate(runId);
+
+        await expect(db.runs.resolveGateAndResume(approvalId, "bob")).rejects.toBeInstanceOf(ForeignEngineRunError);
+        await expect(db.runs.resolveGateAndFail(approvalId, "bob", "no")).rejects.toBeInstanceOf(ForeignEngineRunError);
+        await expect(
+          db.runs.resolveReplyGateAndResume(runId, approvalId, "hi", "bob", { socratic: {} }),
+        ).rejects.toBeInstanceOf(ForeignEngineRunError);
+
+        expect((await db.approvals.getById(approvalId))!.status).toBe("pending");
+        expect((await db.runs.getRun(runId))!.status).toBe("paused");
+      });
+
+      it("still shows a foreign run to display and lock reads", async () => {
+        const id = await makeRun({ ...foreign, triggerId: "acme/widget#9", workflowName: "pr-review" });
+        expect((await db.runs.listActive()).map((r) => r.id)).toContain(id);
+        expect((await db.runs.getByTrigger("acme/widget#9"))!.id).toBe(id);
+        expect((await db.runs.activeForTrigger(["pr-review"], "acme/widget#9"))?.id).toBe(id);
       });
     });
 
