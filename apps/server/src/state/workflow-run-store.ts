@@ -56,6 +56,12 @@ const ACTIVE_FIRST = ({ workflowRuns }: StateTables) => sql`CASE ${workflowRuns.
  * Reads that only DISPLAY or LOCK are deliberately unguarded: the dashboard
  * still lists a foreign run, and the PR run lock (`activeForTrigger`) still
  * sees it — a run this build can't drive still owns its workspace.
+ *
+ * `countRunning` is guarded ON PURPOSE, although a foreign `running` row looks
+ * like it "uses a slot": in this build nothing executes it (one instance per
+ * database; the engine that would is the one we rolled back from), so counting
+ * it would only hold cap slots shut for the whole rollback window — two such
+ * rows under `maxWorkflows: 2` and nothing here would ever start again.
  */
 export const KNOWN_RUN_ENGINES: readonly string[] = [];
 
