@@ -1,5 +1,11 @@
 # 04 — Overlays in TypeScript
 
+> **Deferred 2026-10-10** ([`09-decisions.md`](09-decisions.md) #9). Not part
+> of #435: no overlay repo has ever forked a workflow YAML. #435 rejects
+> `instance/workflows/*.yaml` at boot and keeps built-ins internally
+> composable so this design stays open. Kept as the design for the follow-up
+> issue; the first real override need decides the typed options.
+
 ## Today
 
 Workflow YAML is replaced **whole, by name** (`packages/shared/src/workflow-loader.ts`

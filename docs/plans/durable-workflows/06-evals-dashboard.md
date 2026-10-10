@@ -33,7 +33,16 @@ executions by `PhaseRef` labels (`_fix_N`, `_iter_N`, `_branch_<name>`) in
 - Step names replace generated labels: `reviewer:fix:1`, `reviewer:recheck:1`,
   `site:<id>:1`. They are already hierarchical (`:`-separated), so grouping
   becomes "prefix before the first `:`" instead of a longest-prefix label match.
-- `WorkflowDefinitionDiagram` can no longer render a static phase graph from
-  YAML. Replace with the **recorded step trace** of a run (the OpenWorkflow
-  `step_attempts` list is exactly that), plus an optional declared `steps`
-  array on `defineWorkflow` for the definition page.
+- `WorkflowDefinitionDiagram` renders a graph **extracted from the workflow
+  code at build time**, conditions on the edges — no hand-declared `steps`
+  array (it would drift). The run view overlays the recorded step trace and
+  where the run is parked; the definition view adds per-edge frequencies from
+  history. Details and CI rules: [`09-decisions.md`](09-decisions.md) #10.
+
+## Time travel (decided 2026-10-10)
+
+Per-step workspace snapshot refs plus a `forkRun(runId, fromStep, overrides)`
+primitive are in #435 ([`09-decisions.md`](09-decisions.md) #11): on in
+evals, `off`/`failed` in prod. The follow-up ports the hand-built `micro-*`
+phase-replay scripts onto `forkRun`, so a replay runs the real workflow code
+instead of a mirror of it.

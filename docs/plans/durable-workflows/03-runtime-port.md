@@ -1,5 +1,12 @@
 # 03 — The runtime port and OpenWorkflow
 
+> **Decided 2026-10-10** ([`09-decisions.md`](09-decisions.md) #3, #4, #12):
+> depend on OpenWorkflow at a pinned version and engage upstream (logger
+> option, configurable lease, buffered signals, table prefix) instead of
+> vendoring; build the Drizzle `Backend` below as a generic, upstreamable
+> backend; admission stays Last Light's and OpenWorkflow only ever sees
+> admitted runs.
+
 ## The port
 
 ```ts

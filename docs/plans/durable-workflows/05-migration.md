@@ -1,5 +1,13 @@
 # 05 — Migration
 
+> **Revised 2026-10-10** ([`09-decisions.md`](09-decisions.md) #5, #7, #8,
+> #15). The cut-over is **one go**: every workflow hand-ported to its final
+> shape, no per-workflow flag, no dual engine, the dialect deleted in the same
+> change. The converter and parity test below are development aids, not a
+> ship gate; the gate is the E2E suite (#8). The ordered phases and the
+> "keep N-1 registered" rule below are superseded — see #5 and #15 for
+> versioning and rollback.
+
 ## The deterministic YAML → TS converter
 
 `apps/server/scripts/yaml-to-ts.mjs <workflow.yaml|dir> <outDir>` emits one

@@ -1,8 +1,10 @@
 # Durable TypeScript workflows — replacing the YAML dialect
 
-> **Status: design + spike (2026-10-03).** The spike lives on branch
-> `spike/durable-workflows` and is not for merge as-is. Results and the
-> go/no-go call are in [`07-spike-results.md`](07-spike-results.md).
+> **Status: design reviewed (2026-10-10), go.** The spike lives on branch
+> `spike/durable-workflows` and is not for merge as-is. Results are in
+> [`07-spike-results.md`](07-spike-results.md); the review's 15 decisions are
+> in [`09-decisions.md`](09-decisions.md), which wins wherever an earlier doc
+> disagrees.
 
 ## Problem
 
@@ -21,8 +23,10 @@ whole files with no drift tracking. Details: [`00-current-state.md`](00-current-
 1. **SQLite stays the default, zero extra infrastructure.** No Temporal, no
    sidecar engine, no mandatory Postgres.
 2. **Workflows become TypeScript.** A rewrite of all YAML is acceptable.
-3. **Overlays write TypeScript too** — they import built-ins and override
-   parts (prompts, models, steps), or author new workflows, loaded at runtime.
+3. ~~**Overlays write TypeScript too**~~ — **deferred** by the 2026-10-10
+   review ([`09-decisions.md`](09-decisions.md) #9): no overlay has ever forked
+   a workflow, so overlay TS workflows are a follow-up issue. Prompts, skills,
+   agent-context and config keep their per-file layering.
 4. **Graphviz DOT (Fabro) and Arazzo are out** — readability and fit.
 
 ## Recommendation
@@ -45,6 +49,9 @@ defineWorkflow({ name, version, policy, classification, chat, run(ctx) })
 - Migration, incl. the deterministic YAML→TS converter: [`05-migration.md`](05-migration.md)
 - Evals + dashboard compatibility: [`06-evals-dashboard.md`](06-evals-dashboard.md)
 - Comparison with Mastra workflows and the `~/work/mac` port: [`08-vs-mastra.md`](08-vs-mastra.md)
+- **Review decisions (2026-10-10)** — runtime, backend, versioning, typed
+  outcomes, cut-over, E2E gate, graph extraction, snapshots/fork, admission,
+  crons, rollback: [`09-decisions.md`](09-decisions.md)
 
 ## What this does NOT fix
 
@@ -56,5 +63,7 @@ the step boundary decides *whether* to resume, the session decides *where*.
 
 Also out of scope but adjacent: the webhook handler acks `202` and emits on
 `setImmediate`, so a crash before the run row is written loses the event
-(recovered today only by sweep crons). With a durable runtime the fix is cheap
-— enqueue the run (idempotency key = delivery id) *before* acking.
+(recovered today only by sweep crons). The fix is a transactional inbox —
+persist the delivery (keyed on `X-GitHub-Delivery`) *before* acking — which
+needs no durable runtime, so it ships as its own issue and PR
+([`09-decisions.md`](09-decisions.md) #14).

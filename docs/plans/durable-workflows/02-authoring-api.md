@@ -54,6 +54,25 @@ grammar, trigger rules and `PhaseRef` label conventions.
   — `generic_loop`.
 - `readStatusLine(output, ["READY", "BLOCKED"])` — a typed verdict from the
   first line that *starts* with a status token, replacing the substring rule.
+  **Superseded** (09-decisions #6): it survives only in converter output.
+
+## Typed agent outcomes — `result:` and the `submit_result` tool
+
+Decided 2026-10-10 ([`09-decisions.md`](09-decisions.md) #6):
+
+```ts
+const r = await ctx.agent("architect", {
+  prompt: "prompts/architect.md",
+  result: z.object({ verdict: z.enum(["READY", "BLOCKED"]), reason: z.string(), plan: z.string() }),
+});
+if (r.result.verdict === "BLOCKED") return { success: false, summary: r.result.reason };
+```
+
+`result:` injects a `submit_result` tool (agentic-pi) whose parameters are the
+schema. Invalid arguments come back as a tool error so the agent retries in
+the same turn; a session that ends without a valid call is nudged once, then
+the step fails. `r.output` (raw text) stays available. Workspace files remain
+for large artifacts only.
 
 ## Examples
 

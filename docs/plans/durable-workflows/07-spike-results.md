@@ -72,3 +72,7 @@ First PR: the `durable/` API + Drizzle `Backend` (both dialects) + dispatch
 flag, with the eight clean workflows converted behind it and compared in evals.
 Decide OpenWorkflow vs vendored replay core at the end of that PR, once the
 Drizzle backend shows how much of OpenWorkflow we actually use.
+
+> **Superseded 2026-10-10** ([`09-decisions.md`](09-decisions.md)): depend on
+> OpenWorkflow and engage upstream (#3), and cut over in one go rather than
+> per workflow (#7).
