@@ -18,6 +18,13 @@ export interface EmitterRecord {
 
 export interface EmitterSink {
   write(record: EmitterRecord): void;
+  /**
+   * Resolve once buffered output has been flushed. The runner awaits this
+   * between agent events so a slow reader throttles the agent instead of
+   * letting serialized records pile up in the heap. Optional: in-memory sinks
+   * have nothing to drain.
+   */
+  drain?(): Promise<void>;
 }
 
 export interface EmitterContext {
@@ -26,10 +33,37 @@ export interface EmitterContext {
   startedAt: string;
 }
 
+/** The slice of a writable stream `StdoutSink` needs (`process.stdout` by default). */
+export interface DrainableStream {
+  write(chunk: string): boolean;
+  readonly writableNeedDrain?: boolean;
+  once(event: "drain" | "close" | "error", listener: () => void): unknown;
+  off(event: "drain" | "close" | "error", listener: () => void): unknown;
+}
+
 /** Writes JSONL to process.stdout. Used by the CLI. */
 export class StdoutSink implements EmitterSink {
+  constructor(private readonly out: DrainableStream = process.stdout) {}
+
   write(record: EmitterRecord): void {
-    process.stdout.write(`${JSON.stringify(record)}\n`);
+    this.out.write(`${JSON.stringify(record)}\n`);
+  }
+
+  drain(): Promise<void> {
+    if (!this.out.writableNeedDrain) return Promise.resolve();
+    // `close`/`error` settle it too: a reader that went away never emits
+    // `drain`, and waiting on it would hang the agent loop forever.
+    return new Promise((resolve) => {
+      const done = () => {
+        this.out.off("drain", done);
+        this.out.off("close", done);
+        this.out.off("error", done);
+        resolve();
+      };
+      this.out.once("drain", done);
+      this.out.once("close", done);
+      this.out.once("error", done);
+    });
   }
 }
 
@@ -50,6 +84,43 @@ export class TeeSink implements EmitterSink {
   write(record: EmitterRecord): void {
     for (const s of this.sinks) s.write(record);
   }
+  async drain(): Promise<void> {
+    await Promise.all(this.sinks.map((s) => s.drain?.()));
+  }
+}
+
+/**
+ * Reduce a Pi `message_update` to the delta that is actually new.
+ *
+ * Pi's session event carries the whole assistant message so far TWICE — as
+ * `message` and as `assistantMessageEvent.partial` — and fires once per token.
+ * Serializing it verbatim makes output quadratic in the response size: a long
+ * streamed `write` produces gigabytes of JSON and kills the process with a V8
+ * heap OOM (Pi #7290; four nearform site-review branches died this way, exit
+ * 134 mid-response). Pi strips both in its own json/rpc modes (`toJsonEvent`,
+ * not exported); this is the same reduction. Consumers that need the partial
+ * message assemble the deltas between `message_start` and `message_end`; the
+ * latter stays authoritative.
+ */
+export function toWireEvent(event: EmitterRecord): EmitterRecord {
+  if (event.type !== "message_update") return event;
+  const message = event.message as { usage?: unknown } | undefined;
+  const update = event.assistantMessageEvent as
+    | ({ type?: string; partial?: { content?: unknown[] }; contentIndex?: number } & Record<string, unknown>)
+    | undefined;
+  const { message: _message, assistantMessageEvent: _update, ...rest } = event;
+  const wire: EmitterRecord = { ...rest, type: "message_update" };
+  if (message?.usage !== undefined) wire.usage = message.usage;
+  if (update) {
+    const { partial, ...delta } = update;
+    if (update.type === "toolcall_start" && typeof update.contentIndex === "number") {
+      // The start event names its tool only through the partial; keep that.
+      const block = partial?.content?.[update.contentIndex] as { type?: string; id?: string; name?: string } | undefined;
+      if (block?.type === "toolCall") Object.assign(delta, { id: block.id, toolName: block.name });
+    }
+    wire.assistantMessageEvent = delta;
+  }
+  return wire;
 }
 
 export class Emitter {
@@ -70,9 +141,14 @@ export class Emitter {
 
   event(event: EmitterRecord): void {
     this.sink.write({
-      ...event,
+      ...toWireEvent(event),
       sessionId: this.ctx.sessionId,
       timestamp: new Date().toISOString(),
     });
+  }
+
+  /** Wait for the sink's buffered output to flush (no-op for in-memory sinks). */
+  drain(): Promise<void> {
+    return this.sink.drain?.() ?? Promise.resolve();
   }
 }

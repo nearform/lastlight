@@ -502,6 +502,15 @@ export async function runOnce(
     }
   });
 
+  // Backpressure: the agent loop awaits its listeners, and this one runs after
+  // the session's own (subscription order), so every event waits until the
+  // sink has flushed what the listener above just wrote. Without it a slow
+  // reader leaves serialized records queued in the heap — Pi applies the same
+  // wait in its json mode (Pi #7395).
+  const unsubscribeBackpressure = session.agent.subscribe(async () => {
+    await emitter.drain();
+  });
+
   try {
     await session.prompt(prompt, { expandPromptTemplates: false });
   } catch (err) {
@@ -510,6 +519,7 @@ export async function runOnce(
       error: { name: (err as Error).name, message: (err as Error).message },
     });
     unsubscribe();
+    unsubscribeBackpressure();
     telemetry.recordFatal(err as Error);
     await telemetry.shutdown();
     session.dispose();
@@ -568,6 +578,7 @@ export async function runOnce(
   }
 
   unsubscribe();
+  unsubscribeBackpressure();
   await telemetry.shutdown();
   session.dispose();
   await sandbox.close();

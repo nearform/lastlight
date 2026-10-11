@@ -697,7 +697,7 @@ Reads the prompt from stdin. Emits JSONL on stdout. Exits 0 on `agent_end`,
 {"type":"message_start","message":{"role":"system","content":"","sections":{"preamble":"…","tools":"…","rules":"…","docs":"…","cwd":"…"},"toolsAdded":[…]},"sessionId":"<uuid>","timestamp":"…"}
 {"type":"message_end","message":{"role":"system",…},"sessionId":"<uuid>","timestamp":"…"}
 {"type":"message_start","message":{…},"sessionId":"<uuid>","timestamp":"…"}
-{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"…"},"sessionId":"<uuid>","timestamp":"…"}
+{"type":"message_update","usage":{…},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"…"},"sessionId":"<uuid>","timestamp":"…"}
 {"type":"tool_execution_start","toolCallId":"…","toolName":"github_list_pull_requests","args":{…},"sessionId":"<uuid>","timestamp":"…"}
 {"type":"tool_execution_end","toolCallId":"…","toolName":"github_list_pull_requests","result":{"content":[…]},"isError":false,"sessionId":"<uuid>","timestamp":"…"}
 {"type":"message_end","message":{…},"sessionId":"<uuid>","timestamp":"…"}
@@ -705,6 +705,15 @@ Reads the prompt from stdin. Emits JSONL on stdout. Exits 0 on `agent_end`,
 {"type":"agent_end","messages":[…],"willRetry":false,"sessionId":"<uuid>","timestamp":"…"}
 {"type":"usage_snapshot","stats":{"userMessages":1,"assistantMessages":2,"toolCalls":1,"toolResults":1,"tokens":{"input":…,"output":…,"cacheRead":…,"cacheWrite":…,"total":…},"cost":0.000…},"sessionId":"<uuid>","timestamp":"…"}
 ```
+
+`message_update` carries only the new **delta** (plus the message's running
+`usage`), never the partial message: Pi's session event holds the whole message
+so far twice, and re-emitting it per token makes output quadratic in the
+response size — a long streamed `write` would exhaust the heap (Pi #7290). A
+`toolcall_start` delta also names its tool (`id`, `toolName`). Consumers that
+want the partial text assemble the deltas between `message_start` and
+`message_end`; `message_end` is authoritative. The CLI writes stdout with
+backpressure: a slow reader slows the agent rather than growing its memory.
 
 The first message pair carries the **system prompt** (`role: "system"`, Pi
 0.86+): the base `content`, its named `sections`, and the tools the model was

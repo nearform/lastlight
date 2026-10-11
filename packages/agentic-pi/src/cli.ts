@@ -41,10 +41,16 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  return await runOnce(config, prompt, {
-    sink: new StdoutSink(),
+  const sink = new StdoutSink();
+  const code = await runOnce(config, prompt, {
+    sink,
     onWarn: (msg: string) => process.stderr.write(`agentic-pi: ${msg}\n`),
   });
+  // process.exit() below drops anything still queued on a piped stdout, and
+  // the run's last records (agent_end, usage_snapshot) are written after the
+  // agent loop's own backpressure stops applying.
+  await sink.drain();
+  return code;
 }
 
 main().then(
