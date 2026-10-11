@@ -48,8 +48,9 @@ async function main(): Promise<number> {
   });
   // process.exit() below drops anything still queued on a piped stdout, and
   // the run's last records (agent_end, usage_snapshot) are written after the
-  // agent loop's own backpressure stops applying.
-  await sink.drain();
+  // agent loop's own backpressure stops applying. drain() would not do here:
+  // it only waits above the high-water mark, so smaller writes could be lost.
+  await sink.flush();
   return code;
 }
 

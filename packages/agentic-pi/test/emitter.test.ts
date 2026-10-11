@@ -158,6 +158,15 @@ describe("toWireEvent", () => {
     assert.equal("message" in wire, false);
   });
 
+  test("collected updates keep the usage at their own point in the stream", () => {
+    // Pi mutates one usage object while streaming; CollectorSink keeps records.
+    const sink = new CollectorSink();
+    const emitter = new Emitter(ctx, sink);
+    for (const e of streamToolCall(24, 8)) emitter.event(e);
+    const outputs = sink.records.map((r) => (r.usage as { output: number }).output);
+    assert.deepEqual(outputs, [0, 1, 2, 3]);
+  });
+
   test("passes every other record through untouched", () => {
     const end = { type: "message_end", message: { role: "assistant", content: [] } };
     assert.equal(toWireEvent(end), end);
@@ -182,9 +191,15 @@ describe("Emitter output size", () => {
 class FakeStream extends EventEmitter {
   writableNeedDrain = false;
   written: string[] = [];
-  write(chunk: string): boolean {
+  private pending: Array<() => void> = [];
+  write(chunk: string, callback?: () => void): boolean {
     this.written.push(chunk);
+    if (callback) this.pending.push(callback);
     return !this.writableNeedDrain;
+  }
+  /** Complete every queued write, in order, as the OS would. */
+  completeWrites(): void {
+    for (const cb of this.pending.splice(0)) cb();
   }
 }
 
@@ -218,6 +233,30 @@ describe("StdoutSink.drain", () => {
     const out = new FakeStream();
     out.writableNeedDrain = true;
     const pending = new StdoutSink(out).drain();
+    out.emit("close");
+    await pending;
+  });
+
+  test("flush waits for writes still pending below the high-water mark", async () => {
+    // writableNeedDrain stays false here, so drain() would resolve at once and
+    // process.exit() would drop the run's last records.
+    const out = new FakeStream();
+    const sink = new StdoutSink(out);
+    sink.write({ type: "usage_snapshot" });
+    let flushed = false;
+    const pending = sink.flush().then(() => {
+      flushed = true;
+    });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(flushed, false);
+    out.completeWrites();
+    await pending;
+    assert.equal(out.listenerCount("close") + out.listenerCount("error"), 0);
+  });
+
+  test("flush settles when the reader goes away", async () => {
+    const out = new FakeStream();
+    const pending = new StdoutSink(out).flush();
     out.emit("close");
     await pending;
   });

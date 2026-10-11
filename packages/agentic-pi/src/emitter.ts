@@ -35,7 +35,7 @@ export interface EmitterContext {
 
 /** The slice of a writable stream `StdoutSink` needs (`process.stdout` by default). */
 export interface DrainableStream {
-  write(chunk: string): boolean;
+  write(chunk: string, callback?: (err?: Error | null) => void): boolean;
   readonly writableNeedDrain?: boolean;
   once(event: "drain" | "close" | "error", listener: () => void): unknown;
   off(event: "drain" | "close" | "error", listener: () => void): unknown;
@@ -49,20 +49,40 @@ export class StdoutSink implements EmitterSink {
     this.out.write(`${JSON.stringify(record)}\n`);
   }
 
+  /**
+   * Backpressure for the agent loop: wait only while the buffer is over its
+   * high-water mark. Cheap enough to await between every event, but writes
+   * below the mark may still be pending when it resolves — use {@link flush}
+   * before exiting.
+   */
   drain(): Promise<void> {
     if (!this.out.writableNeedDrain) return Promise.resolve();
-    // `close`/`error` settle it too: a reader that went away never emits
-    // `drain`, and waiting on it would hang the agent loop forever.
+    return this.settleOn("drain");
+  }
+
+  /**
+   * Resolve once every write so far has been flushed. Writes complete in
+   * order, so an empty write's callback fires only after all earlier ones —
+   * the same flush Pi's json mode does before it exits.
+   */
+  flush(): Promise<void> {
+    return this.settleOn(undefined, (done) => this.out.write("", () => done()));
+  }
+
+  // `close`/`error` settle every wait too: a reader that went away never
+  // emits `drain` or completes a write, and waiting would hang the agent.
+  private settleOn(event: "drain" | undefined, start?: (done: () => void) => void): Promise<void> {
     return new Promise((resolve) => {
       const done = () => {
-        this.out.off("drain", done);
+        if (event) this.out.off(event, done);
         this.out.off("close", done);
         this.out.off("error", done);
         resolve();
       };
-      this.out.once("drain", done);
+      if (event) this.out.once(event, done);
       this.out.once("close", done);
       this.out.once("error", done);
+      start?.(done);
     });
   }
 }
@@ -110,7 +130,10 @@ export function toWireEvent(event: EmitterRecord): EmitterRecord {
     | undefined;
   const { message: _message, assistantMessageEvent: _update, ...rest } = event;
   const wire: EmitterRecord = { ...rest, type: "message_update" };
-  if (message?.usage !== undefined) wire.usage = message.usage;
+  // Copied, not referenced: Pi mutates one usage object as the stream runs,
+  // and CollectorSink keeps the records, so a shared reference would make
+  // every collected update show the final usage instead of its own.
+  if (message?.usage !== undefined) wire.usage = structuredClone(message.usage);
   if (update) {
     const { partial, ...delta } = update;
     if (update.type === "toolcall_start" && typeof update.contentIndex === "number") {
