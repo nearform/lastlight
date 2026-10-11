@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import { existsSync } from "fs";
 import { isBotOwnedBranch } from "agentic-pi/dist/bot-branches.js";
 import type { ExecutorConfig } from "../engine/github/profiles.js";
-import type { StateDb, WorkflowRun, TriggerActorType } from "../state/db.js";
+import { isOwnedRun, type StateDb, type WorkflowRun, type TriggerActorType } from "../state/db.js";
 import type { DisabledConfig, NotificationsConfig } from "lastlight-shared/config-types";
 import {
   defaultDependenciesConfig,
@@ -1255,6 +1255,19 @@ export async function runSimpleWorkflow(
   let taskId: string;
   let issueDir: string;
   const existingRun = await db.runs.getByTrigger(triggerId);
+  if (existingRun && existingRun.workflowName === workflowName && !isOwnedRun(existingRun)) {
+    // A live run of this workflow for this trigger belongs to another engine
+    // (KNOWN_RUN_ENGINES) — a newer release's run, seen after a rollback.
+    // Neither reuse it (that would re-run it from the top on this engine) nor
+    // start a second one beside it (it still owns the workspace). Report it as
+    // parked: the dispatch path treats that as a non-failure.
+    simpleLog.warn("Live run for this trigger is owned by another workflow engine — not dispatching", {
+      runId: existingRun.id,
+      workflowName,
+      engine: existingRun.engine,
+    });
+    return { success: true, paused: true, phases: [] };
+  }
   if (existingRun && existingRun.workflowName === workflowName) {
     workflowId = existingRun.id;
     const stored = (existingRun.context || {}) as Record<string, unknown>;

@@ -31,6 +31,12 @@ import { FeedbackStore } from "./feedback-store.js";
 export type { ExecutionRecord } from "./execution-store.js";
 export type { WorkflowApproval } from "./approval-store.js";
 export type { WorkflowRun, PhaseHistoryEntry, PhaseMarker } from "./workflow-run-store.js";
+export {
+  ForeignEngineRunError,
+  KNOWN_RUN_ENGINES,
+  foreignEngineMessage,
+  isOwnedRun,
+} from "./workflow-run-store.js";
 export type { User, TriggerActorType } from "./user-store.js";
 export type { CronRunRecord, CronRunSource, CronRunStatus } from "./cron-run-store.js";
 export type {

@@ -145,6 +145,11 @@ export const workflowRuns = sqliteTable(
     // arrive days after the span closed, so we remember where the trace was.
     traceId: text("trace_id"),
     spanId: text("span_id"),
+    // Which workflow engine owns this run. NULL = the YAML engine (every row
+    // before #435). A build only drives rows whose engine it knows
+    // (`KNOWN_RUN_ENGINES`), so an older image rolled back over a newer
+    // engine's runs leaves them alone instead of re-running them.
+    engine: text("engine"),
   },
   (t) => [
     index("idx_workflow_runs_trigger").on(t.triggerId, t.status),

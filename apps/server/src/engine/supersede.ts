@@ -20,7 +20,7 @@
  * run cleanly (the sweep re-picks the unreviewed head), never both.
  */
 
-import type { StateDb } from "../state/db.js";
+import { isOwnedRun, type StateDb } from "../state/db.js";
 import { listRunningContainers, killContainer } from "../admin/docker.js";
 import { waitForRunToStop } from "../workflows/live-runs.js";
 import { logger } from "../logging/logger.js";
@@ -51,6 +51,19 @@ export async function supersedeRun(runId: string, reason: string, deps: Supersed
   try {
     const run = await db.runs.getRun(runId);
     if (!run) return true;
+    if (!isOwnedRun(run)) {
+      // Another engine's run (KNOWN_RUN_ENGINES): not ours to cancel, so not
+      // ours to kill or fail either — its containers and execution rows are
+      // left exactly as they are. It isn't executing in this process, so
+      // there is nothing to wait for; the new review still meets the run in
+      // `runSimpleWorkflow`, which refuses to start beside it.
+      log.warn("Not superseding a run another workflow engine owns", {
+        runId,
+        workflow: run.workflowName,
+        engine: run.engine,
+      });
+      return true;
+    }
     if (run.status === "running" || run.status === "queued" || run.status === "paused") {
       await db.runs.cancelRun(runId);
       log.info("Superseded an in-flight run", { runId, workflow: run.workflowName, reason });

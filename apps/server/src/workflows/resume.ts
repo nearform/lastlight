@@ -1,4 +1,4 @@
-import type { StateDb, WorkflowRun } from "../state/db.js";
+import { isOwnedRun, type StateDb, type WorkflowRun } from "../state/db.js";
 import type { ExecutorConfig } from "../engine/github/profiles.js";
 import type { GitHubClient } from "../engine/github/github.js";
 import type { ModelConfig, VariantConfig } from "../config/config.js";
@@ -294,6 +294,18 @@ export function restoredDispatchContext(stored: Record<string, unknown>): Record
  * terminal `finishRun` at the end.
  */
 export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Promise<void> {
+  // Last line of defence for every resume path (boot recovery, admission,
+  // retry): a run another engine owns is never re-run here — see
+  // KNOWN_RUN_ENGINES. The store's lifecycle predicates already keep such a
+  // row out of those paths; this catches a caller holding a stale row.
+  if (!isOwnedRun(run)) {
+    log.warn("Skipping — run is owned by another workflow engine", {
+      runId: run.id,
+      workflowName: run.workflowName,
+      engine: run.engine,
+    });
+    return;
+  }
   const stored = (run.context || {}) as Record<string, unknown>;
 
   // Derive owner/repo: GitHub trigger ids encode it as owner/repo#N;
@@ -575,7 +587,17 @@ const MAX_RESTART_RESUMES = 3;
 export async function resumeOrphanedWorkflows(opts: ResumeOptions): Promise<void> {
   await restoreGateStrandedRuns(opts.db);
 
-  const active = await opts.db.runs.listActive();
+  // `listActive` is a display read and returns every engine's rows; recovery
+  // only ever touches runs this build owns (KNOWN_RUN_ENGINES). A newer
+  // engine's runs are left exactly as they are, for that engine to reclaim.
+  const all = await opts.db.runs.listActive();
+  const active = all.filter(isOwnedRun);
+  if (active.length < all.length) {
+    log.warn("Leaving run(s) owned by another workflow engine untouched", {
+      count: all.length - active.length,
+      engines: [...new Set(all.filter((r) => !isOwnedRun(r)).map((r) => r.engine))],
+    });
+  }
 
   // Queued orphans: a run that was still `queued` (waiting on the concurrency
   // cap) when the harness died carries a stale `started_at`, so the admission

@@ -29,6 +29,13 @@
       "when": 1790482056291,
       "tag": "0003_first_namorita",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1791613889809,
+      "tag": "0004_adorable_puck",
+      "breakpoints": true
     }
   ]
 }
