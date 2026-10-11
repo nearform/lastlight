@@ -1,6 +1,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { Writable } from "node:stream";
 
 import {
   CollectorSink,
@@ -259,6 +260,28 @@ describe("StdoutSink.drain", () => {
     const pending = new StdoutSink(out).flush();
     out.emit("close");
     await pending;
+  });
+
+  test("a failed final write neither crashes the process nor hangs flush", async () => {
+    // Node's Writable calls the write callback first and emits `error` after;
+    // with no listener left by then, that event is an uncaught exception.
+    const out = new Writable({
+      write(_chunk, _enc, cb) {
+        cb(Object.assign(new Error("write EPIPE"), { code: "EPIPE" }));
+      },
+    });
+    const listenersAtError: number[] = [];
+    const emit = out.emit.bind(out);
+    out.emit = ((event: string | symbol, ...args: unknown[]) => {
+      if (event === "error") listenersAtError.push(out.listenerCount("error"));
+      return emit(event, ...args);
+    }) as typeof out.emit;
+    await new StdoutSink(out).flush();
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(listenersAtError, [1], "the stream error must reach a listener");
+    // Destroyed now: the write fails without re-emitting `error`, so flush
+    // must settle on the callback rather than wait for the event.
+    await new StdoutSink(out).flush();
   });
 
   test("Emitter and TeeSink forward drain; in-memory sinks need none", async () => {

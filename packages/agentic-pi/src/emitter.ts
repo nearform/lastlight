@@ -66,7 +66,16 @@ export class StdoutSink implements EmitterSink {
    * the same flush Pi's json mode does before it exits.
    */
   flush(): Promise<void> {
-    return this.settleOn(undefined, (done) => this.out.write("", () => done()));
+    return this.settleOn(undefined, (done) =>
+      this.out.write("", (err) => {
+        // A failed write calls back BEFORE the stream emits `error`, and
+        // done() drops our listener — so leave one to absorb that event
+        // rather than crash at exit over a reader that went away. Not a wait:
+        // an already-destroyed stream fails the write without re-emitting.
+        if (err) this.out.once("error", () => {});
+        done();
+      }),
+    );
   }
 
   // `close`/`error` settle every wait too: a reader that went away never
