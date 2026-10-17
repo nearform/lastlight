@@ -449,7 +449,17 @@ async function runWorkflowBody(
   // without pre-merging — notably `resume.ts` when it grows the same wiring.
   const effectiveModels = repoConfig?.models ?? models;
   const effectiveVariants = repoConfig?.variants ?? variants;
-  const effectiveApproval = repoConfig?.approval ?? approvalConfig;
+  // UNION, in that direction: the caller's map is the EFFECTIVE one — it
+  // already carries the base ⊕ repo ⊕ autonomy-stage gates (`simple.ts` unions
+  // the stage's gates before calling here) — and `repoConfig.approval` is
+  // clamped add-only, so re-applying it underneath can only raise gates. The
+  // old `repoConfig?.approval ?? approvalConfig` REPLACED instead: whenever
+  // `repoConfig.approval` was present-but-empty — the shape
+  // `resolveRepoRunConfig` returns for a repo with no `.lastlight/` layer — the
+  // `??` kept the empty `{}` and silently dropped the stage's gates, so an
+  // autonomous build never paused at a gate the stage asked for
+  // (`autonomy.stages.build.gates.post_architect: true`).
+  const effectiveApproval = { ...(repoConfig?.approval ?? {}), ...(approvalConfig ?? {}) };
 
   // Per-run asset stack. `assets` is undefined for every run without a repo
   // layer, in which case the module-level functions are used unchanged.
