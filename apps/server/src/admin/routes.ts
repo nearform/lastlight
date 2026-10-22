@@ -94,11 +94,14 @@ const MAX_BOARD_REPOS = 20;
  * is a much larger thing than the button says it is — and it already exists,
  * deliberately, as `POST /api/run` for operators who want it.
  *
- * So the workflow is resolved from `routes.github` — the operator's own route
- * map — and then CHECKED to be one of these three keys' values. An operator who
- * repoints `issue_build` at a different workflow moves this surface with it,
- * which is right; an operator who never configured the stage at all gets a
- * refusal rather than a dispatch, which is also right.
+ * So the workflow is resolved from operator config — the stage's own
+ * `workflow` (`stageWorkflow`) — and then CHECKED to be one the operator
+ * already points an issue trigger at: one of these three keys' values, or a
+ * configured stage's workflow. `autonomy.stages` is operator-only config, so a
+ * stage's workflow is as much the operator's decision as a route is; leaving it
+ * out refused every stage that names its own workflow (issue #452). An operator
+ * who never configured the workflow at all still gets a refusal rather than a
+ * dispatch.
  */
 const ISSUE_DISPATCH_ROUTE_KEYS = ["issue_opened", "issue_labeled", "issue_build"] as const;
 
@@ -151,9 +154,10 @@ function stageSlotForLabel(
  * drifts open is a "run anything against any managed repo" hole.
  */
 function isIssueRoutableWorkflow(workflow: string): boolean {
-  const routable = new Set(
-    ISSUE_DISPATCH_ROUTE_KEYS.map((key) => getRoutes().github?.[key]).filter(Boolean),
-  );
+  const routable = new Set([
+    ...ISSUE_DISPATCH_ROUTE_KEYS.map((key) => getRoutes().github?.[key]).filter(Boolean),
+    ...Object.values(getAutonomyConfig().stages).map(stageWorkflow),
+  ]);
   return routable.has(workflow);
 }
 import {
@@ -168,6 +172,7 @@ import {
   // pasted credential. It must stay single-source (see config.ts).
   redactPublic,
   getAutonomyConfig,
+  stageWorkflow,
   getHoldLabel,
   type RepoConfigPolicy,
 } from "../config/config.js";
@@ -3431,14 +3436,15 @@ export function createAdminRoutes(
         400,
       );
     }
+    const workflow = stageWorkflow(stage);
 
     // THE ALLOW-LIST. See `ISSUE_DISPATCH_ROUTE_KEYS` — the workflow has to be
     // one the operator's own route map already points an issue trigger at.
-    if (!isIssueRoutableWorkflow(stage.workflow)) {
+    if (!isIssueRoutableWorkflow(workflow)) {
       return c.json(
         {
           error:
-            `workflow \`${stage.workflow}\` is not reachable from an issue route ` +
+            `workflow \`${workflow}\` is not reachable from an issue route ` +
             `(${ISSUE_DISPATCH_ROUTE_KEYS.join(", ")}), so the board may not dispatch it`,
         },
         400,
@@ -3508,7 +3514,7 @@ export function createAdminRoutes(
         outcome: "denied",
         detail: {
           stage: stageName,
-          workflow: stage.workflow,
+          workflow,
           dispatched: false,
           reason: String(gate.reason ?? "").slice(0, 200),
           ...(reason ? { note: reason } : {}),
@@ -3519,7 +3525,7 @@ export function createAdminRoutes(
           repo,
           issueNumber,
           stage: stageName,
-          workflow: stage.workflow,
+          workflow,
           dispatched: false,
           // The hold is the one skip that owes a human a sentence rather than a
           // reason string, and it is the SAME sentence every other surface
@@ -3533,8 +3539,8 @@ export function createAdminRoutes(
 
     // Fire-and-forget, exactly like `cron trigger` and the PR retry above: a
     // build takes minutes and the dashboard is waiting on this response.
-    log.info("board dispatch", { workflow: stage.workflow, repo, issueNumber, stage: stageName, by });
-    config.dispatchWorkflow(stage.workflow, {
+    log.info("board dispatch", { workflow, repo, issueNumber, stage: stageName, by });
+    config.dispatchWorkflow(workflow, {
       repo,
       issueNumber,
       title: live.title,
@@ -3551,7 +3557,7 @@ export function createAdminRoutes(
       sender: by,
       triggeredBy: by,
     }).catch((err: unknown) => {
-      log.error("board dispatch failed", { workflow: stage.workflow, repo, issueNumber, err });
+      log.error("board dispatch failed", { workflow, repo, issueNumber, err });
     });
 
     // The freshness lever that matters. Without this the card keeps rendering
@@ -3565,7 +3571,7 @@ export function createAdminRoutes(
       targetId,
       detail: {
         stage: stageName,
-        workflow: stage.workflow,
+        workflow,
         dispatched: true,
         ...(reason ? { note: reason } : {}),
       },
@@ -3574,7 +3580,7 @@ export function createAdminRoutes(
       repo,
       issueNumber,
       stage: stageName,
-      workflow: stage.workflow,
+      workflow,
       dispatched: true,
       reason: gate.reason,
     });
@@ -3849,9 +3855,9 @@ export function createAdminRoutes(
       // gesture with no menu and no confirm step from being drop-spam that
       // bills.
       if (labels.includes(to)) return `already-in-stage: ${repo}#${issueNumber} already carries \`${to}\``;
-      if (!isIssueRoutableWorkflow(matchedStage.workflow)) {
+      if (!isIssueRoutableWorkflow(stageWorkflow(matchedStage))) {
         return (
-          `unroutable-workflow: \`${matchedStage.workflow}\` is not reachable from an ` +
+          `unroutable-workflow: \`${stageWorkflow(matchedStage)}\` is not reachable from an ` +
           `issue route (${ISSUE_DISPATCH_ROUTE_KEYS.join(", ")})`
         );
       }
@@ -3939,7 +3945,7 @@ export function createAdminRoutes(
             });
           }
         }
-        fireDispatch(slotMatch.stage, matchedStage.workflow, gate.gates);
+        fireDispatch(slotMatch.stage, stageWorkflow(matchedStage), gate.gates);
         invalidateBoard(repo);
         await recordActivityFor(c, db, {
           action: "issue.stage",
@@ -4006,7 +4012,7 @@ export function createAdminRoutes(
     if (!gateFirst && dispatchRefusal === undefined && slotMatch?.kind === "match" && matchedStage) {
       const gate = await crossGate(slotMatch.stage);
       if (gate.decision === "dispatch") {
-        fireDispatch(slotMatch.stage, matchedStage.workflow, gate.gates);
+        fireDispatch(slotMatch.stage, stageWorkflow(matchedStage), gate.gates);
       }
     }
 

@@ -239,15 +239,16 @@ describe("POST /issues/:owner/:repo/:number/dispatch", () => {
     expect(dispatchWorkflow).not.toHaveBeenCalled();
   });
 
-  it("refuses a workflow no issue route points at — the board is not a generic dispatch surface", async () => {
-    // The stage names a workflow the operator's `routes.github` never points an
-    // issue trigger at. Refused BEFORE the GitHub read: nothing about the issue
-    // could make this dispatch acceptable.
+  it("dispatches the stage's own workflow, though no issue route points at it (#452)", async () => {
+    // The board still posts a stage, never a workflow name, so it is no more a
+    // generic dispatch surface than before. `autonomy.stages` is operator-only
+    // config: a stage's workflow is the operator's decision exactly as a route
+    // is, and the label route already dispatches it.
     setRuntimeConfig(
       runtimeConfig({
         autonomy: {
           repos: [REPO],
-          stages: { build: { ...BUILD_STAGE, workflow: "exfiltrate" } },
+          stages: { build: { ...BUILD_STAGE, workflow: "build-ui" } },
           budget: { maxConcurrentBuilds: 2, maxBuildsPerRepoPerDay: 3, dailyUsd: 25, repoDailyUsd: 10 },
         },
       }),
@@ -255,12 +256,10 @@ describe("POST /issues/:owner/:repo/:number/dispatch", () => {
     const github = fakeGithub();
     const { app, dispatchWorkflow } = makeApp({ github });
 
-    const { res, json } = await dispatch(app);
+    const { json } = await dispatch(app);
 
-    expect(res.status).toBe(400);
-    expect(json.error).toMatch(/not reachable from an issue route/);
-    expect(github.getIssue).not.toHaveBeenCalled();
-    expect(dispatchWorkflow).not.toHaveBeenCalled();
+    expect(json).toMatchObject({ dispatched: true, workflow: "build-ui" });
+    expect(dispatchWorkflow.mock.calls[0]?.[0]).toBe("build-ui");
   });
 
   it("refuses a stage that is not configured at all", async () => {

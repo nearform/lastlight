@@ -914,7 +914,8 @@ routes:
     # flow). The router drops every label that is not a configured
     # `autonomy.stages.*.enter`, so this is inert until `autonomy.repos` names
     # a repo — and it is guard 1 of the four that replace the bot-sender filter
-    # we deliberately opened for `issues.labeled`.
+    # we deliberately opened for `issues.labeled`. A stage's own `workflow`
+    # wins over this route; it is only the fallback for a stage that names none.
     issue_labeled: build
     pr_opened: pr-review
     pr_synchronize: pr-review
