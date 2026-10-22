@@ -130,6 +130,12 @@ const CLONE_SCRIPT = [
   '      git -C "$repo_dir" remote set-url origin "$url" || true',
   "      ensure_base; stamp",
   '      echo "[clone] refreshed reused workspace -> $branch"',
+  // A fork PR's preserved checkout cannot be trusted to be the PR head: a
+  // pre-fix PVC holds the default branch under the PR's name. Discard it and
+  // fail rather than review it.
+  '    elif [ -n "$fetch_ref" ]; then',
+  '      echo "[clone] refresh fetch of $fetch_ref failed — discarding checkout"',
+  '      rm -rf "$repo_dir"; exit 1',
   "    else",
   '      echo "[clone] refresh fetch failed — preserving existing checkout"',
   "    fi",
@@ -144,10 +150,15 @@ const CLONE_SCRIPT = [
   '  git -C "$repo_dir" remote set-url origin "$url"',
   'elif [ -n "$fetch_ref" ]; then',
   // No fallback: a failed pull-ref fetch fails the init container rather than
-  // leaving the default branch checked out under the PR's branch name.
-  '  git clone --depth 50 -- "$url" "$repo_dir"',
-  '  git -C "$repo_dir" fetch --depth 50 -- "$url" "$fetch_ref"',
-  '  git -C "$repo_dir" checkout -B "$branch" FETCH_HEAD',
+  // leaving the default branch checked out under the PR's branch name. The
+  // clone is removed too — `set -e` alone would leave it on the PVC, and the
+  // retry's reuse path would then find a `.git` and keep it.
+  '  if ! { git clone --depth 50 -- "$url" "$repo_dir" \\',
+  '    && git -C "$repo_dir" fetch --depth 50 -- "$url" "$fetch_ref" \\',
+  '    && git -C "$repo_dir" checkout -B "$branch" FETCH_HEAD; }; then',
+  '    echo "[clone] fetch of $fetch_ref failed — discarding the default-branch clone"',
+  '    rm -rf "$repo_dir"; exit 1',
+  "  fi",
   '  git -C "$repo_dir" remote set-url origin "$url"',
   'elif git clone --branch "$branch" --depth 50 -- "$url" "$repo_dir"; then',
   '  git -C "$repo_dir" remote set-url origin "$url"',

@@ -782,6 +782,18 @@ function refreshExistingClone(
     });
   } catch (err: any) {
     const reason = scrub(err?.message) || scrub(err?.stderr?.toString?.()) || "unknown error";
+    if (pre.headFetchRef) {
+      // A fork PR's existing checkout cannot be trusted to be the PR head — a
+      // workspace from before the fetch ref existed holds the default branch
+      // under the PR's name. Discard it rather than review it.
+      try { rmSync(repoDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+      log.warn("Refresh of reused fork-PR workspace failed — discarded the checkout", {
+        repoDir,
+        ref: pre.headFetchRef,
+        reason,
+      });
+      return;
+    }
     log.warn("Refresh of reused workspace failed — leaving it untouched; agent can re-fetch via MCP", {
       repoDir,
       reason,

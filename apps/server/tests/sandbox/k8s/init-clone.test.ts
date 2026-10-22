@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { buildCloneInitContainer } from "#src/sandbox/k8s/init-clone.js";
@@ -245,10 +245,10 @@ describe.runIf(gitAvailable)("buildCloneInitContainer fork PR (refs/pull/<N>/hea
     if (root) rmSync(root, { recursive: true, force: true });
   });
 
-  function runClone(headFetchRef: string | undefined): void {
+  function runClone(headFetchRef: string | undefined, runId = "run-1"): void {
     const c = buildCloneInitContainer("img", {
       owner: "acme", repo: "web", branch: "fix/from-a-fork", baseBranch: "main",
-      cwd: ws, runAsUser: 10001, runId: "run-1", headFetchRef,
+      cwd: ws, runAsUser: 10001, runId, headFetchRef,
     });
     execFileSync(c.command![0]!, [...c.command!.slice(1), ...c.args!], { cwd: ws, env, stdio: "pipe" });
   }
@@ -267,5 +267,18 @@ describe.runIf(gitAvailable)("buildCloneInitContainer fork PR (refs/pull/<N>/hea
 
   it("fails the init container on a missing pull ref instead of checking out main", () => {
     expect(() => runClone("refs/pull/999/head")).toThrow();
+  });
+
+  it("leaves no clone on the PVC after a failed pull-ref fetch, so the retry fails too", () => {
+    expect(() => runClone("refs/pull/999/head")).toThrow();
+    expect(existsSync(join(ws, "web", ".git"))).toBe(false);
+    // The retry must not find a default-branch `.git` and keep it (exit 0 on main).
+    expect(() => runClone("refs/pull/999/head", "run-2")).toThrow();
+  });
+
+  it("discards a reused default-branch checkout when the refresh's pull-ref fetch fails", () => {
+    runClone(undefined); // a pre-fix PVC: main under the PR's branch name
+    expect(() => runClone("refs/pull/999/head", "run-2")).toThrow();
+    expect(existsSync(join(ws, "web", ".git"))).toBe(false);
   });
 });

@@ -121,4 +121,12 @@ describe.runIf(gitAvailable)("fork PR checkout via refs/pull/<N>/head", () => {
     provision("run-1", "refs/pull/999/head");
     expect(existsSync(join(repoDir, ".git"))).toBe(false);
   });
+
+  it("discards a reused default-branch checkout when the refresh's pull-ref fetch fails", () => {
+    provision("run-1", undefined); // a pre-fix workspace: main under the PR's branch name
+    expect(git(repoDir, "rev-parse", "HEAD")).toBe(mainSha);
+
+    provision("run-2", "refs/pull/999/head");
+    expect(existsSync(join(repoDir, ".git"))).toBe(false);
+  });
 });
