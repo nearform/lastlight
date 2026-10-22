@@ -1758,8 +1758,8 @@ describe('routeEvent — issue.labeled (the autonomy pipeline)', () => {
 
     expect(result.action).toBe('handler');
     if (result.action !== 'handler') return;
-    // `routes.github.issue_labeled` is unset in the packaged config, so the
-    // STAGE's own workflow is what resolves.
+    // The STAGE's own workflow resolves (the packaged route is also `build`;
+    // the next test pulls the two apart).
     expect(result.handler).toBe('build');
     expect(result.context).toEqual({
       _routeKey: 'github.issue_labeled',
@@ -1773,6 +1773,32 @@ describe('routeEvent — issue.labeled (the autonomy pipeline)', () => {
       sender: 'octocat',
       labels: ['ready-for-agent'],
     });
+  });
+
+  it("dispatches each stage's own workflow over the issue_labeled route (#452)", async () => {
+    // The packaged `routes.github.issue_labeled: build` used to win over every
+    // stage, so a second stage's entry label still dispatched `build`.
+    setRuntimeConfig({
+      managedRepos: ['cliftonc/drizzle-cube'],
+      autonomy: {
+        repos: ['cliftonc/drizzle-cube'],
+        stages: {
+          ...STAGES,
+          build_ui: { ...STAGES.build, enter: 'ready-for-agent-ui', workflow: 'build-ui' },
+          no_workflow: { ...STAGES.build, enter: 'ready-for-agent-x', workflow: '' },
+        },
+        budget: { maxConcurrentBuilds: 2, maxBuildsPerRepoPerDay: 3, dailyUsd: 25, repoDailyUsd: 10 },
+      },
+    } as unknown as LastLightConfig);
+
+    const handlerFor = async (label: string) => {
+      const result = await routeEvent(labeled({ addedLabel: label, labels: [label] }));
+      return result.action === 'handler' ? result.handler : result.action;
+    };
+    expect(await handlerFor('ready-for-agent-ui')).toBe('build-ui');
+    expect(await handlerFor('ready-for-agent')).toBe('build');
+    // A stage that names no workflow falls back to the route.
+    expect(await handlerFor('ready-for-agent-x')).toBe('build');
   });
 
   it("GUARD 1: the harness's OWN stage writes never re-trigger the pipeline", async () => {

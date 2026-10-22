@@ -654,6 +654,21 @@ export function getAutonomyConfig(): AutonomyConfig {
 }
 
 /**
+ * The workflow a stage dispatches: the stage's own `workflow`, else
+ * `routes.github.issue_labeled`, else `build`.
+ *
+ * The stage comes FIRST because it is the value that varies per stage. The
+ * route ships set (`issue_labeled: build`) and an overlay cannot unset it, so
+ * the route-first order this replaced sent every stage's entry label to the
+ * same workflow (issue #452). One function, because the router, the board and
+ * the build dispatch gate must agree on it — the gate counts runs of this
+ * workflow, so a disagreement is a budget that counts the wrong runs.
+ */
+export function stageWorkflow(stage: AutonomyStageConfig): string {
+  return stage.workflow || getRoutes().github?.issue_labeled || "build";
+}
+
+/**
  * Is `repo` ("owner/name") one the operator listed under `autonomy.repos`?
  *
  * EXACT MATCH by design — no globs, no org prefixes. Enabling an org by pattern

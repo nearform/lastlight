@@ -10,6 +10,7 @@ import {
   getReviewConfig,
   getAutonomyConfig,
   isAutonomousRepo,
+  stageWorkflow,
   type ReviewConfig,
   type AutonomyStageConfig,
 } from "../config/config.js";
@@ -415,10 +416,9 @@ export async function routeEvent(
       });
       return {
         action: "handler",
-        // `routes.github.issue_labeled` is the operator's override; absent, the
-        // STAGE names its own workflow, which is the value that actually varies
-        // per stage. `build` is the last resort.
-        handler: gh.issue_labeled || entered.stage.workflow || "build",
+        // The stage's own workflow, else the route, else `build` — see
+        // `stageWorkflow` for why the stage wins.
+        handler: stageWorkflow(entered.stage),
         context: {
           _routeKey: "github.issue_labeled",
           _stage: entered.name,

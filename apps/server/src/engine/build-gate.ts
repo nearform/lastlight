@@ -23,7 +23,7 @@
  * keeps the footprint of this feature small enough to read in one sitting.
  */
 
-import { getAutonomyConfig, getHoldLabel, isAutonomousRepo } from "../config/config.js";
+import { getAutonomyConfig, getHoldLabel, isAutonomousRepo, stageWorkflow } from "../config/config.js";
 import type { AutonomyStageConfig } from "../config/config.js";
 import { issueTriggerId, resolveBuildTrigger } from "./build-decisions.js";
 import { advanceStage } from "./stage-advance.js";
@@ -99,6 +99,9 @@ export async function applyBuildDispatchGate(
   // Resolved once, here, so the pure function reads a single consistent record
   // — the same rule `resolvePrState` follows for the PR side.
   const triggerId = issueTriggerId(args.repo, args.issueNumber);
+  // The workflow the router dispatched for this stage, so every guard below
+  // counts runs of the workflow that actually runs.
+  const workflow = stageWorkflow(stage);
   const budget = getAutonomyConfig().budget;
   const [owner, name] = args.repo.split("/");
   // Read → decide → reserve under ONE in-process lock. The fan-out gates every
@@ -114,14 +117,14 @@ export async function applyBuildDispatchGate(
     const [alreadyBuilt, inFlight, activeRuns, buildsForRepoToday, dailyStats, repoSpend] = await Promise.all([
       // GUARD 3 — the real lock. A fact in our own database, in ANY status, that
       // no GitHub outage can move.
-      deps.db.runs.hasRunForTrigger(triggerId, stage.workflow),
+      deps.db.runs.hasRunForTrigger(triggerId, workflow),
       // `activeForTrigger`, not `getByTrigger`: both mean "queued | running |
       // paused for this trigger", but `getByTrigger` answers for ANY workflow, so
       // a live issue-triage run on the same issue would read as a build in
       // flight. The constraint being protected is two agents in one build
       // workspace, which is scoped to the stage's own workflow — and it is what
       // the decision's `run-in-flight:` reason claims in prose.
-      deps.db.runs.activeForTrigger([stage.workflow], triggerId),
+      deps.db.runs.activeForTrigger([workflow], triggerId),
       // The concurrency input. `listActive()` + a filter, NOT `countRunning()`:
       // that one counts every running workflow in the harness — a PR review, a
       // triage, a cron fan-out — so the autonomy pipeline's own ceiling would be
@@ -129,7 +132,7 @@ export async function applyBuildDispatchGate(
       // refuse every autonomous build while running none.
       deps.db.runs.listActive(),
       // Guard 4's counter. Runs STARTED for this repo today, in any status.
-      deps.db.runs.countRunsForRepoSince(stage.workflow, args.repo, sinceIso),
+      deps.db.runs.countRunsForRepoSince(workflow, args.repo, sinceIso),
       // `dailyStats(1)` is the inclusive window [today, today] — one bucket, and
       // it is synthesised as a zero row when nothing has run, so the array is
       // never empty. Read defensively anyway: a spend input that read `undefined`
@@ -144,14 +147,14 @@ export async function applyBuildDispatchGate(
     // a rebuild of ITS issue — that is `inFlight` above, which keeps `paused`.)
     const liveRows = activeRuns.filter(
       (run) =>
-        run.workflowName === stage.workflow &&
+        run.workflowName === workflow &&
         isAutonomousRun(run) &&
         (run.status === "queued" || run.status === "running"),
     ).length;
     // Dispatches this gate approved whose run row does not exist yet — see
     // `pendingReservations`. Without them every gate in one sweep tick reads the
     // same pre-burst count.
-    const pending = await pendingReservations(deps.db, stage.workflow, triggerId);
+    const pending = await pendingReservations(deps.db, workflow, triggerId);
     const concurrentAutonomousBuilds = liveRows + pending.length;
     const spendTodayUsd = dailyStats[dailyStats.length - 1]?.costUsd ?? 0;
 
@@ -172,7 +175,7 @@ export async function applyBuildDispatchGate(
       spendTodayUsd,
       repoSpendTodayUsd: repoSpend.costUsd,
     }, budget);
-    if (decision.decision === "dispatch") reserve(deps.db, stage.workflow, triggerId, args.repo);
+    if (decision.decision === "dispatch") reserve(deps.db, workflow, triggerId, args.repo);
     return decision;
   });
 
@@ -182,7 +185,7 @@ export async function applyBuildDispatchGate(
   // decision AND the reason that produced it, because the reason is the single
   // source the comment and the admin panel also render.
   log.info("Build gate decision", {
-    workflow: stage.workflow,
+    workflow,
     repo: args.repo,
     issueNumber: args.issueNumber,
     decision: decision.decision,
@@ -226,7 +229,7 @@ export async function applyBuildDispatchGate(
   );
   if (!advance.advanced || !advance.removed) {
     log.warn("Stage label advance degraded — the sweep's re-pickup guard is weaker for this issue", {
-      workflow: stage.workflow,
+      workflow,
       repo: args.repo,
       issueNumber: args.issueNumber,
       from: stage.enter,
@@ -404,12 +407,13 @@ async function applySkipConsequence(
   if (skipCase !== "repo-quota-exhausted" && skipCase !== "budget-exhausted") return;
 
   const triggerId = issueTriggerId(args.repo, args.issueNumber);
+  const workflow = stageWorkflow(stage);
 
   // A ceiling somebody configured has been hit. `warn`, not `info`: this is the
   // level an operator filters for when asking "is the pipeline stuck, or just
   // quiet?", and both cases are answers to that question.
   log.warn("Build gate refused a dispatch on a budget ceiling", {
-    workflow: stage.workflow,
+    workflow,
     repo: args.repo,
     issueNumber: args.issueNumber,
     case: skipCase,
@@ -425,7 +429,7 @@ async function applySkipConsequence(
     // `denied`, not `ok`: the row records an action that did NOT happen, which
     // is the same reading `pr.retry` gives a gate-refused retry.
     outcome: "denied",
-    detail: { case: skipCase, workflow: stage.workflow, reason: decision.reason },
+    detail: { case: skipCase, workflow, reason: decision.reason },
   });
 
   // The typed field, not the case name, is what gates the comment — and it is

@@ -530,13 +530,14 @@ describe("POST /issues/:owner/:repo/:number/stage — dispatch", () => {
     expect(dispatchWorkflow).not.toHaveBeenCalled();
   });
 
-  it("does not dispatch a workflow no issue route points at", async () => {
-    // The drag must not become a hole around the check the button honours.
+  it("dispatches the stage's own workflow, though no issue route points at it (#452)", async () => {
+    // The drag and the button resolve the workflow the same way — from the
+    // stage — so neither can become a hole around the other.
     setRuntimeConfig(
       runtimeConfig({
         autonomy: {
           repos: [REPO],
-          stages: { build: { ...BUILD_STAGE, workflow: "exfiltrate" } },
+          stages: { build: { ...BUILD_STAGE, workflow: "build-ui" } },
           budget: { maxConcurrentBuilds: 2, maxBuildsPerRepoPerDay: 3, dailyUsd: 25, repoDailyUsd: 10 },
         },
       }),
@@ -549,9 +550,8 @@ describe("POST /issues/:owner/:repo/:number/stage — dispatch", () => {
       to: STAGE_AGENT_BUILDING,
     });
 
-    expect(json).toMatchObject({ moved: true, dispatched: false });
-    expect(json.dispatchReason).toMatch(/unroutable-workflow/);
-    expect(dispatchWorkflow).not.toHaveBeenCalled();
+    expect(json).toMatchObject({ moved: true, dispatched: true });
+    expect(dispatchWorkflow.mock.calls[0]?.[0]).toBe("build-ui");
   });
 
   it("fails CLOSED when two stages claim the same label", async () => {
