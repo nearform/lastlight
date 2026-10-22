@@ -462,13 +462,29 @@ export function prePopulateWorkspace(
 }
 
 /**
+ * Replace a checkout that must not be reviewed with an EMPTY directory. Not a
+ * bare delete: the backends pin the agent's cwd to `<workspace>/<repo>` (docker
+ * `exec -w`), so a missing dir fails the agent at start instead of reaching its
+ * MCP clone fallback. With no `.git` the next provision takes the fresh path,
+ * and `git clone` accepts an empty target.
+ */
+function discardCheckout(repoDir: string): void {
+  try {
+    rmSync(repoDir, { recursive: true, force: true });
+    mkdirSync(repoDir, { recursive: true });
+  } catch (err) {
+    log.warn("Could not discard the checkout", { repoDir, err });
+  }
+}
+
+/**
  * Clone the head from `pre.headFetchRef` (a fork PR's `refs/pull/<N>/head`)
  * and check it out as the local `pre.branch`. Clones the default branch first
  * only to get a repository; the head is then fetched by ref and checked out
  * over it.
  *
  * NO missing-branch fallback, on purpose: a failure here leaves an empty
- * workspace (the agent's MCP clone path), never the default branch under the
+ * repo dir (the agent's MCP clone path), never the default branch under the
  * PR's name — that fallback is what reviewed `main` for every fork PR.
  */
 function cloneFromFetchRef(
@@ -516,7 +532,7 @@ function cloneFromFetchRef(
     const reason = scrub(err?.message) || scrub(err?.stderr?.toString?.()) || "unknown error";
     // Never leave a half-built checkout of the default branch behind: a later
     // phase would find a `.git` and review it.
-    try { rmSync(repoDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+    discardCheckout(repoDir);
     log.warn("Pre-clone from fetch ref failed — agent will need to clone via MCP", {
       owner: pre.owner,
       repo: pre.repo,
@@ -786,7 +802,7 @@ function refreshExistingClone(
       // A fork PR's existing checkout cannot be trusted to be the PR head — a
       // workspace from before the fetch ref existed holds the default branch
       // under the PR's name. Discard it rather than review it.
-      try { rmSync(repoDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+      discardCheckout(repoDir);
       log.warn("Refresh of reused fork-PR workspace failed — discarded the checkout", {
         repoDir,
         ref: pre.headFetchRef,

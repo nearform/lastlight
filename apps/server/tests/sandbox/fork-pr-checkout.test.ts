@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { execFileSync } from "child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -117,9 +117,16 @@ describe.runIf(gitAvailable)("fork PR checkout via refs/pull/<N>/head", () => {
     expect(git(repoDir, "rev-parse", "HEAD")).toBe(second);
   });
 
-  it("leaves no checkout at all when the pull ref is missing — never main", () => {
+  it("leaves an empty repo dir when the pull ref is missing — never main", () => {
     provision("run-1", "refs/pull/999/head");
     expect(existsSync(join(repoDir, ".git"))).toBe(false);
+    // The agent's cwd is pinned to the repo dir (docker `exec -w`), so it must exist.
+    expect(readdirSync(repoDir)).toEqual([]);
+
+    // The next run clones into the empty dir.
+    const prSha = pushPrCommit("the-change");
+    provision("run-2", PULL_REF);
+    expect(git(repoDir, "rev-parse", "HEAD")).toBe(prSha);
   });
 
   it("discards a reused default-branch checkout when the refresh's pull-ref fetch fails", () => {
@@ -128,5 +135,6 @@ describe.runIf(gitAvailable)("fork PR checkout via refs/pull/<N>/head", () => {
 
     provision("run-2", "refs/pull/999/head");
     expect(existsSync(join(repoDir, ".git"))).toBe(false);
+    expect(readdirSync(repoDir)).toEqual([]);
   });
 });
