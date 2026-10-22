@@ -891,11 +891,19 @@ async function main() {
       (isPrFixShaped(workflowName) || prepopulatesPrHeadRef(workflowName))
     ) {
       prePopulateBranch = prState.headRef;
+      // A fork PR's head branch lives on the fork, not on origin, so cloning
+      // it by name fails and the pre-clone's missing-branch fallback checks out
+      // the DEFAULT branch under the PR's name — every fork review reviewed
+      // `main`. The base repo always carries `refs/pull/<N>/head`.
+      if (prState.isFork && typeof prNumber === "number") {
+        extra.headFetchRef = `refs/pull/${prNumber}/head`;
+      }
       log.info("Pre-populating workspace", {
         workflowName,
         repo: `${owner}/${repo}`,
         branch: prePopulateBranch,
         base: prState.baseRef || "?",
+        headFetchRef: extra.headFetchRef ?? null,
       });
     }
     if (!prePopulateBranch && typeof ctxBranch === "string" && ctxBranch && isPrFixShaped(workflowName)) {
@@ -920,6 +928,11 @@ async function main() {
       try {
         const pr = await github.getPullRequest(owner, repo, prNumber);
         prePopulateBranch = pr.head.ref;
+        // Fork PR — fetch the head by pull ref (see the snapshot path above).
+        // A deleted fork (`head.repo` null) counts as a fork too.
+        if (pr.head.repo?.full_name !== `${owner}/${repo}`) {
+          extra.headFetchRef = `refs/pull/${prNumber}/head`;
+        }
         // Surface the base ref so a before/after demo can fetch + check out the
         // baseline (the read-only pre-clone is shallow + single-branch at the
         // head ref, so `origin/<base>` isn't present until the agent fetches it).

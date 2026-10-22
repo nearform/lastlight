@@ -126,6 +126,12 @@ export interface PrePopulateSpec {
    * PR-diff workflows (pr-review / pr-fix); harmless elsewhere.
    */
   baseBranch?: string;
+  /**
+   * Fetch the head from this ref instead of `branch` — `refs/pull/<N>/head`
+   * for a fork PR, whose head branch is not on origin. `branch` stays the local
+   * branch name. See `PrePopulate.headFetchRef` in `sandbox/index.ts`.
+   */
+  headFetchRef?: string;
   runId?: string;
   shallow?: boolean;
   /**

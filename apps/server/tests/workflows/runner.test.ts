@@ -1572,3 +1572,13 @@ describe("gitSandboxAccessForWorkflow — recreate-from-base (issue #153)", () =
     },
   );
 });
+
+describe("gitSandboxAccessForWorkflow — fork PR head fetch ref (nearform/lastlight#451)", () => {
+  it("carries the pull ref through to the sandbox access", () => {
+    const access = gitSandboxAccessForWorkflow(
+      "pr-review", "owner", "repo", "fix/from-a-fork", "run-1", "main", "refs/pull/7/head",
+    );
+    expect(access.prePopulateBranch).toBe("fix/from-a-fork");
+    expect(access.headFetchRef).toBe("refs/pull/7/head");
+  });
+});

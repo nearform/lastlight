@@ -340,6 +340,12 @@ export interface GitSandboxAccess {
    */
   baseBranch?: string;
   /**
+   * The ref to fetch the head from when `prePopulateBranch` is not on origin —
+   * `refs/pull/<N>/head` for a fork PR, whose head branch lives on the fork.
+   * `prePopulateBranch` stays the local branch name.
+   */
+  headFetchRef?: string;
+  /**
    * The owning workflow run id. Stamped into a `<workDir>/.lastlight-run`
    * marker by the pre-clone so a reused per-PR workspace can tell "next phase
    * of the same run" from "a fresh run reusing an old PR dir".

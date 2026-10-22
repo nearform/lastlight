@@ -637,6 +637,26 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     // undefined on k8s, where the workspace lives in a sandbox PVC and only the
     // harvested `.lastlight/` reaches the harness.
     const localHeadSha = this.gitHeadSha(hostRepoDir);
+    // The checkout must BE the PR. A pull request always has at least one
+    // commit beyond its base, so a HEAD with none is the base branch — the
+    // pre-clone's missing-branch fallback, which is what reviewed `main` for
+    // every fork PR and then hid it: the stale check below saw "the head moved"
+    // and dropped the review, promising a re-review nothing ever dispatched.
+    // Fail the run instead. Skipped when HEAD is the head this run was
+    // dispatched for (a PR merged mid-review is ahead of nothing, and correct),
+    // and fails open when the count can't be read.
+    const dispatchedHeadSha = typeof ctx.headSha === "string" ? ctx.headSha : undefined;
+    if (localHeadSha && baseRef && localHeadSha !== dispatchedHeadSha) {
+      const ahead = this.gitCommitsAhead(hostRepoDir, baseRef);
+      if (ahead === 0) {
+        return fail(
+          `post-review: the checkout (${localHeadSha.slice(0, 7)}) carries no commits beyond ` +
+            `origin/${baseRef}, so it is not the PR head` +
+            (dispatchedHeadSha ? ` (${dispatchedHeadSha.slice(0, 7)})` : "") +
+            ` — the workspace was provisioned from the base branch; not posting a review of the wrong tree`,
+        );
+      }
+    }
     // No local checkout (k8s) — fetch the head SHA from the GitHub API so the
     // idempotency check below and inline comments (which require a commit id)
     // both work.
@@ -1341,6 +1361,21 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "ignore"],
       }).trim();
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Commits on HEAD not on `origin/<baseRef>`, or undefined if git can't say. */
+  private gitCommitsAhead(repoDir: string, baseRef: string): number | undefined {
+    try {
+      const out = execFileSync(
+        "git",
+        ["-C", repoDir, "rev-list", "--count", `origin/${baseRef}..HEAD`],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      ).trim();
+      const n = Number(out);
+      return Number.isInteger(n) ? n : undefined;
     } catch {
       return undefined;
     }

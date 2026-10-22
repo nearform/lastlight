@@ -28,10 +28,17 @@ export interface CloneSpec {
    * (issue #153, `build`). A same-run reuse still preserves.
    */
   recreateFromBase?: boolean;
+  /**
+   * Fetch the head from this ref instead of `branch` — `refs/pull/<N>/head` for
+   * a fork PR, whose head branch is not on origin. A fresh clone then checks it
+   * out as `branch` and has NO default-branch fallback: that fallback is what
+   * reviewed `main` under a fork PR's branch name.
+   */
+  headFetchRef?: string;
 }
 
 // A fixed script — untrusted values (owner/repo/branch/cwd/base/runId) arrive as
-// positional args ($1..$7), NEVER interpolated into shell text, so a branch name
+// positional args ($1..$8), NEVER interpolated into shell text, so a branch name
 // containing shell metacharacters cannot break out. `--` before the URL/dir
 // positionals blocks flag-smuggling on a value starting with `-`.
 //
@@ -58,7 +65,9 @@ export interface CloneSpec {
 // which is why this runs after the refresh rather than relying on it.
 const CLONE_SCRIPT = [
   "set -eu",
-  'owner="$1"; repo="$2"; branch="$3"; ws="$4"; base="$5"; run_id="$6"; recreate="$7"',
+  'owner="$1"; repo="$2"; branch="$3"; ws="$4"; base="$5"; run_id="$6"; recreate="$7"; fetch_ref="${8:-}"',
+  // Where the head is FETCHED from: the branch, or a fork PR's pull ref.
+  'head_src="${fetch_ref:-$branch}"',
   'repo_dir="$ws/$repo"',
   'marker="$ws/.lastlight-run"',
   'url="https://github.com/$owner/$repo.git"',
@@ -84,11 +93,11 @@ const CLONE_SCRIPT = [
   // intended.
   "  for depth in 50 500; do",
   '    git -C "$repo_dir" fetch --depth "$depth" -- "$url" "$dest" || true',
-  '    git -C "$repo_dir" fetch --depth "$depth" -- "$url" "$branch" || true',
+  '    git -C "$repo_dir" fetch --depth "$depth" -- "$url" "$head_src" || true',
   '    git -C "$repo_dir" merge-base "origin/$base" HEAD >/dev/null 2>&1 && return 0',
   "  done",
   '  git -C "$repo_dir" fetch --unshallow -- "$url" "$dest" || true',
-  '  git -C "$repo_dir" fetch --unshallow -- "$url" "$branch" || true',
+  '  git -C "$repo_dir" fetch --unshallow -- "$url" "$head_src" || true',
   "  return 0",
   "}",
   'stamp() { [ -n "$run_id" ] && printf %s "$run_id" > "$marker" 2>/dev/null || true; }',
@@ -114,7 +123,7 @@ const CLONE_SCRIPT = [
   // not inherit a superseded diagnosis's gate (mirrors the host, which calls
   // the two resets outside `refreshExistingClone`'s try/catch).
   "    reset_scratch",
-  '    if git -C "$repo_dir" fetch --depth 50 -- "$url" "$branch" \\',
+  '    if git -C "$repo_dir" fetch --depth 50 -- "$url" "$head_src" \\',
   '      && git -C "$repo_dir" checkout -B "$branch" FETCH_HEAD \\',
   '      && git -C "$repo_dir" reset --hard FETCH_HEAD \\',
   '      && git -C "$repo_dir" clean -fdx -e node_modules; then',
@@ -132,6 +141,13 @@ const CLONE_SCRIPT = [
   'if [ -n "$recreate" ]; then',
   '  git clone --depth 50 -- "$url" "$repo_dir"',
   '  git -C "$repo_dir" checkout -B "$branch"',
+  '  git -C "$repo_dir" remote set-url origin "$url"',
+  'elif [ -n "$fetch_ref" ]; then',
+  // No fallback: a failed pull-ref fetch fails the init container rather than
+  // leaving the default branch checked out under the PR's branch name.
+  '  git clone --depth 50 -- "$url" "$repo_dir"',
+  '  git -C "$repo_dir" fetch --depth 50 -- "$url" "$fetch_ref"',
+  '  git -C "$repo_dir" checkout -B "$branch" FETCH_HEAD',
   '  git -C "$repo_dir" remote set-url origin "$url"',
   'elif git clone --branch "$branch" --depth 50 -- "$url" "$repo_dir"; then',
   '  git -C "$repo_dir" remote set-url origin "$url"',
@@ -175,8 +191,8 @@ const CLONE_SCRIPT = [
  * owner/repo/branch/cwd/base/runId are NOT validated upstream (branch is the PR
  * head ref, attacker-named for external pr-review/pr-fix PRs) — so they're passed
  * as positional args to a fixed script rather than interpolated into shell text.
- * `sh -c CLONE_SCRIPT sh <owner> <repo> <branch> <cwd> <base> <runId> <recreate>`
- * binds argv to `$1`..`$7` at exec time, immune to quote-breaking regardless of
+ * `sh -c CLONE_SCRIPT sh <owner> <repo> <branch> <cwd> <base> <runId> <recreate> <fetchRef>`
+ * binds argv to `$1`..`$8` at exec time, immune to quote-breaking regardless of
  * characters.
  */
 export function buildCloneInitContainer(image: string, spec: CloneSpec): V1Container {
@@ -193,6 +209,7 @@ export function buildCloneInitContainer(image: string, spec: CloneSpec): V1Conta
       spec.baseBranch ?? "",
       spec.runId ?? "",
       spec.recreateFromBase ? "1" : "",
+      spec.headFetchRef ?? "",
     ],
     workingDir: spec.cwd,
     // Populated in the pod builder to share the creds Secret (GIT_CONFIG_* extraheader).

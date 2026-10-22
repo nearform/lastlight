@@ -122,6 +122,7 @@ export function gitSandboxAccessForWorkflow(
   prePopulateBranch?: string,
   runId?: string,
   baseBranch?: string,
+  headFetchRef?: string,
 ): GitSandboxAccess {
   const profile = gitAccessProfileForWorkflow(workflowName);
   return {
@@ -138,6 +139,9 @@ export function gitSandboxAccessForWorkflow(
     // (see PrePopulate.baseBranch in src/sandbox/index.ts). Only meaningful for
     // PR-diff workflows (pr-review / pr-fix); harmless elsewhere.
     baseBranch,
+    // A fork PR's head is fetched by `refs/pull/<N>/head` — its branch is not
+    // on origin (set at dispatch, see `src/index.ts`).
+    headFetchRef,
     runId,
     // Read-only workflows never need git history — clone at --depth 1. Only
     // the code-pushing profiles (build / pr-fix / security-feedback) keep the
@@ -424,6 +428,7 @@ async function runWorkflowBody(
     ? ctx.prePopulateBranch
     : undefined;
   const baseBranch = typeof ctx.baseBranch === "string" ? ctx.baseBranch : undefined;
+  const headFetchRef = typeof ctx.headFetchRef === "string" ? ctx.headFetchRef : undefined;
   const githubAccess = gitSandboxAccessForWorkflow(
     definition.name,
     ctx.owner,
@@ -431,6 +436,7 @@ async function runWorkflowBody(
     prePopulateBranch,
     workflowId,
     baseBranch,
+    headFetchRef,
   );
   const notify = callbacks.postComment || (async () => {});
   const reporter = callbacks.reporter;

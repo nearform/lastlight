@@ -532,6 +532,7 @@ export class KubernetesSandbox implements Sandbox, AgentContextSink {
           baseBranch: pre.baseBranch,
           runId: pre.runId,
           recreateFromBase: pre.recreateFromBase,
+          headFetchRef: pre.headFetchRef,
         }),
       );
     }

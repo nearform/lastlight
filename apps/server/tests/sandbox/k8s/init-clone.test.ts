@@ -1,4 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { execFileSync } from "child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { buildCloneInitContainer } from "#src/sandbox/k8s/init-clone.js";
 
 describe("buildCloneInitContainer", () => {
@@ -52,7 +56,7 @@ describe("buildCloneInitContainer reuse refresh (Task 18b)", () => {
 
   it("refreshes a reused checkout: fetch head + reset --hard + clean -fdx -e node_modules", () => {
     // A different-run reuse must refresh, not bare-skip (the reported gap).
-    expect(scriptText).toMatch(/fetch .*"\$branch"/); // fetch the head ref
+    expect(scriptText).toMatch(/fetch .*"\$head_src"/); // fetch the head (branch, or a fork's pull ref)
     expect(scriptText).toContain("reset --hard");
     expect(scriptText).toContain("clean -fdx -e node_modules"); // keep node_modules warm
   });
@@ -87,7 +91,7 @@ describe("buildCloneInitContainer reuse refresh (Task 18b)", () => {
     // cannot clear them either; nothing cleans inside `.git/`.
     const lines = scriptText.split("\n");
     const resetAt = lines.findIndex((l) => l.trim() === "reset_scratch");
-    const fetchAt = lines.findIndex((l) => l.includes('fetch --depth 50 -- "$url" "$branch"'));
+    const fetchAt = lines.findIndex((l) => l.includes('fetch --depth 50 -- "$url" "$head_src"'));
     expect(resetAt).toBeGreaterThan(-1);
     expect(fetchAt).toBeGreaterThan(resetAt);
   });
@@ -181,5 +185,87 @@ describe("buildCloneInitContainer reuse refresh (Task 18b)", () => {
     const s = (rc.command ?? []).join("\n");
     expect(rc.args).toContain("1"); // recreate flag delivered as argv "1"
     expect(s).toContain("checkout -B"); // cut the head branch locally off default
+  });
+});
+
+/**
+ * The fork-PR path, EXECUTED rather than pattern-matched: the real script runs
+ * under `sh` against a local bare origin (an `insteadOf` rewrite binds the
+ * github.com URL to it) where the PR head exists only as `refs/pull/7/head`.
+ * Without the fetch ref the missing-branch fallback checks out `main` under the
+ * PR's branch name — nearform/lastlight#451.
+ */
+const gitAvailable = (() => {
+  try {
+    execFileSync("git", ["--version"], { stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+describe.runIf(gitAvailable)("buildCloneInitContainer fork PR (refs/pull/<N>/head), executed", () => {
+  let root: string;
+  let ws: string;
+  let mainSha: string;
+  let prSha: string;
+  let env: NodeJS.ProcessEnv;
+  const git = (cwd: string, ...args: string[]): string =>
+    execFileSync("git", ["-C", cwd, ...args], { stdio: ["ignore", "pipe", "pipe"], env }).toString().trim();
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "ll-k8s-fork-"));
+    const origin = join(root, "origin.git");
+    const seed = join(root, "seed");
+    ws = join(root, "ws");
+    mkdirSync(ws);
+    const gitconfig = join(root, "gitconfig");
+    writeFileSync(
+      gitconfig,
+      `[user]\n\tname = test\n\temail = test@example.invalid\n` +
+        `[url "file://${origin}"]\n\tinsteadOf = https://github.com/acme/web.git\n`,
+    );
+    env = { ...process.env, GIT_CONFIG_GLOBAL: gitconfig };
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin], { env });
+    execFileSync("git", ["clone", "-q", origin, seed], { env, stdio: "pipe" });
+    writeFileSync(join(seed, "README.md"), "web\n");
+    git(seed, "add", "-A");
+    git(seed, "commit", "-q", "-m", "initial");
+    git(seed, "push", "-q", "origin", "main");
+    mainSha = git(seed, "rev-parse", "HEAD");
+    git(seed, "checkout", "-q", "-b", "fix/from-a-fork");
+    writeFileSync(join(seed, "change.txt"), "the change\n");
+    git(seed, "add", "-A");
+    git(seed, "commit", "-q", "-m", "the change");
+    git(seed, "push", "-q", "origin", "HEAD:refs/pull/7/head");
+    prSha = git(seed, "rev-parse", "HEAD");
+  });
+
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  function runClone(headFetchRef: string | undefined): void {
+    const c = buildCloneInitContainer("img", {
+      owner: "acme", repo: "web", branch: "fix/from-a-fork", baseBranch: "main",
+      cwd: ws, runAsUser: 10001, runId: "run-1", headFetchRef,
+    });
+    execFileSync(c.command![0]!, [...c.command!.slice(1), ...c.args!], { cwd: ws, env, stdio: "pipe" });
+  }
+
+  it("without the fetch ref, falls back to main (the bug this guards)", () => {
+    runClone(undefined);
+    expect(git(join(ws, "web"), "rev-parse", "HEAD")).toBe(mainSha);
+  });
+
+  it("with the fetch ref, checks out the PR head as the PR's branch name", () => {
+    runClone("refs/pull/7/head");
+    const repoDir = join(ws, "web");
+    expect(git(repoDir, "rev-parse", "HEAD")).toBe(prSha);
+    expect(git(repoDir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("fix/from-a-fork");
+  });
+
+  it("fails the init container on a missing pull ref instead of checking out main", () => {
+    expect(() => runClone("refs/pull/999/head")).toThrow();
   });
 });

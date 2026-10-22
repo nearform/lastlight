@@ -476,6 +476,65 @@ describe("post-review action (runPostReview)", () => {
       expect(comparedBaseheads).toHaveLength(0);
     });
 
+    /**
+     * The wrong-checkout guard (nearform/lastlight#451). A fork PR's head
+     * branch is not on origin, so the pre-clone fell back to the BASE branch;
+     * every phase reviewed `main`, and the stale check above then read "the
+     * head moved", dropped the review and promised a re-review nothing ever
+     * dispatched. A HEAD with no commits beyond its base is not a PR head.
+     */
+    function seedCheckoutAt(taskId: string, prCommits: number): string {
+      seedCheckout(taskId, "widget");
+      const dir = join(stateDir, "sandboxes", taskId, "widget");
+      const git = (...args: string[]) =>
+        execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" }).trim();
+      git("update-ref", "refs/remotes/origin/main", "HEAD");
+      for (let i = 0; i < prCommits; i++) git("commit", "-q", "--allow-empty", "-m", `pr ${i}`);
+      return git("rev-parse", "HEAD");
+    }
+
+    it("FAILS when the checkout is the base branch, not the PR — never a silent stale skip", async () => {
+      withReviewConfig({ trigger: "after-checks" });
+      setCompareFiles(["src/auth.ts"]);
+      const taskId = "widget-42-wrong-checkout";
+      seedCheckoutAt(taskId, 0);
+      seedFindings(taskId, "widget", { summary: "ok", event: "APPROVE", findings: [] });
+
+      const { executor } = makeExecutor(taskId, { baseBranch: "main", headSha: HEAD_SHA });
+      const outcome = await executor.execute(NODE, {});
+
+      expect(outcome.status).toBe("failed");
+      expect(reviews).toHaveLength(0);
+      expect(String(outcome.results[0]!.error ?? outcome.results[0]!.output)).toMatch(/not the PR head/);
+    });
+
+    it("leaves a real PR checkout to the stale check (commits beyond the base)", async () => {
+      withReviewConfig({ trigger: "after-checks" });
+      setCompareFiles(["src/auth.ts"]);
+      const taskId = "widget-42-real-checkout";
+      seedCheckoutAt(taskId, 1);
+      seedFindings(taskId, "widget", { summary: "ok", event: "APPROVE", findings: [] });
+
+      const { executor } = makeExecutor(taskId, { baseBranch: "main", headSha: HEAD_SHA });
+      const outcome = await executor.execute(NODE, {});
+
+      expect(outcome.status).toBe("succeeded");
+      expect(outcome.results[0]!.output).toMatch(/^stale:/);
+    });
+
+    it("does not fail a checkout that IS the dispatched head, even with nothing beyond the base", async () => {
+      // A PR merged mid-review: its head is now contained in the base.
+      withReviewConfig({ trigger: "after-checks" });
+      const taskId = "widget-42-merged-mid-review";
+      const sha = seedCheckoutAt(taskId, 0);
+      seedFindings(taskId, "widget", { summary: "ok", event: "APPROVE", findings: [] });
+
+      const { executor } = makeExecutor(taskId, { baseBranch: "main", headSha: sha });
+      const outcome = await executor.execute(NODE, {});
+
+      expect(outcome.status).not.toBe("failed");
+    });
+
     it("POSTS when the compare read fails — a degraded read never drops a review", async () => {
       withReviewConfig({ trigger: "eager" });
       setCompareFiles([]); // an empty file list proves nothing material changed
