@@ -72,6 +72,18 @@ export interface ReviewHistoryContext {
    * re-review is not a "good to merge".
    */
   stillOpen?: boolean;
+  /**
+   * Humans whose standing review is CHANGES_REQUESTED. A clean pass of ours
+   * does not lift their request, so the summary must not read as if it did —
+   * "Looks good" over an open human change request reads as overruling it.
+   */
+  changesRequestedBy?: readonly string[];
+}
+
+/** `@a`, `@a and @b`, `@a, @b and @c`. */
+function mentions(logins: readonly string[]): string {
+  const at = logins.map((l) => `@${l}`);
+  return at.length <= 1 ? (at[0] ?? "") : `${at.slice(0, -1).join(", ")} and ${at[at.length - 1]}`;
 }
 
 const STILL_OPEN_LINE = /^\s*(?:[-*]\s*)?(?:\*\*)?Still open\b/im;
@@ -93,7 +105,8 @@ export function hasStillOpen(ledger: string, tiered: TieredFindings): boolean {
  *
  * Brief and kind. A clean re-review thanks the author for the updates and
  * says it is good to merge — unless an earlier point is still open, when it
- * thanks them and claims nothing more.
+ * thanks them and claims nothing more. A human's open change request is
+ * named rather than talked over: nothing we add or omit lifts it.
  */
 export function renderFallbackSummary(
   event: ReviewEvent,
@@ -105,6 +118,14 @@ export function renderFallbackSummary(
     return n === 0
       ? "Requesting changes."
       : `Requesting changes: ${plural(n, "issue", "issues")} below should be addressed before this merges.`;
+  }
+  const humans = history.changesRequestedBy ?? [];
+  if (humans.length) {
+    const theirs = `the changes ${mentions(humans)} requested`;
+    if (n > 0) return `${plural(n, "issue", "issues")} below worth a look, on top of ${theirs}.`;
+    return history.rereview
+      ? `Thanks for the updates — nothing to add beyond ${theirs}, which are still open.`
+      : `Nothing to add beyond ${theirs}, which are still open.`;
   }
   if (n === 0 && history.rereview) {
     return history.stillOpen
@@ -162,6 +183,8 @@ export interface PostedSummaryInput {
   rereview?: boolean;
   /** An earlier review of ours has an open inline thread on unchanged code. */
   priorOpen?: boolean;
+  /** Humans whose standing review is CHANGES_REQUESTED (`ReviewHistoryContext`). */
+  changesRequestedBy?: readonly string[];
   model?: string;
   chat?: ChatFunction;
   timeoutMs?: number;
@@ -175,6 +198,7 @@ export async function writePostedSummary(input: PostedSummaryInput): Promise<Pos
   const history: ReviewHistoryContext = {
     rereview: input.rereview,
     stillOpen: !!input.priorOpen || hasStillOpen(ledger, input.tiered),
+    changesRequestedBy: input.changesRequestedBy,
   };
   const fallback = (reason: string): PostedSummary => ({
     text: withLedger(renderFallbackSummary(input.event, posted, history)),
@@ -191,6 +215,9 @@ export async function writePostedSummary(input: PostedSummaryInput): Promise<Pos
     input.rereview ? "This is a re-review: the author has pushed changes since the last one." : "",
     history.stillOpen
       ? "A point an earlier review raised is still unresolved: do not call the change ready or good to merge."
+      : "",
+    history.changesRequestedBy?.length
+      ? `${mentions(history.changesRequestedBy)} requested changes on this pull request and that request is still open: these findings add to it, never replace it — do not call the change ready or good to merge.`
       : "",
     `Posted findings (${posted.length}):`,
     ...posted.map(describe),

@@ -906,6 +906,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
         prTitle: typeof ctx.prTitle === "string" && ctx.prTitle ? ctx.prTitle : undefined,
         rereview,
         priorOpen: rereview ? await openBotThreads(github, owner, repo, prNumber) : false,
+        changesRequestedBy: history.changesRequestedBy ?? [],
         model: this.run.modelFor?.("review-summary"),
         chat: this.run.chat ?? chat,
       });

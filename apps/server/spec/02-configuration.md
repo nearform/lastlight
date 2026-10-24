@@ -795,7 +795,11 @@ head is not one) thanks the author and says it is good to merge — unless a
 point an earlier review raised is still open (a `Still open` ledger line, a
 finding recorded `alreadyRaised`, or an unresolved, non-outdated inline thread
 of the bot's; a failed thread read counts as open), when it thanks them and
-claims nothing more. The model-written summary is told the same.
+claims nothing more. A human whose standing review is CHANGES_REQUESTED is
+named instead of talked over — a clean pass reads "Nothing to add beyond the
+changes @x requested, which are still open.", and posted findings are "on top
+of" that request — since nothing the bot adds or omits lifts it. The
+model-written summary is told the same.
 `review-site`, `review-select` and `review-falsify` are the keys with a
 **fall-through**: each phase's `model:` template is an `{{#if}}` /
 `{{#if !x}}` pair rendering `models.review-survey` (`review-site`,

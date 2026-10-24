@@ -203,3 +203,44 @@ describe("renderFallbackSummary", () => {
     expect(text).not.toContain("secret title");
   });
 });
+
+describe("a human's open change request", () => {
+  const none = { inline: [], body: [], internal: [] };
+
+  it("is named on a clean pass instead of 'Looks good' (nearform/lastlight#451)", () => {
+    const text = renderFallbackSummary("COMMENT", [], { changesRequestedBy: ["cliftonc"] });
+    expect(text).toBe("Nothing to add beyond the changes @cliftonc requested, which are still open.");
+    expect(text).not.toContain("Looks good");
+  });
+
+  it("is named on a clean re-review, which never says good to merge", () => {
+    const text = renderFallbackSummary("COMMENT", [], { rereview: true, changesRequestedBy: ["a", "b", "c"] });
+    expect(text).toBe("Thanks for the updates — nothing to add beyond the changes @a, @b and @c requested, which are still open.");
+    expect(text).not.toContain("Good to merge");
+  });
+
+  it("is added to, not replaced, by our own findings", () => {
+    expect(renderFallbackSummary("COMMENT", [f("x", 1)], { changesRequestedBy: ["a", "b"] })).toBe(
+      "1 issue below worth a look, on top of the changes @a and @b requested.",
+    );
+  });
+
+  it("leaves a request-changes review's wording alone", () => {
+    expect(renderFallbackSummary("REQUEST_CHANGES", [], { changesRequestedBy: ["a"] })).toBe("Requesting changes.");
+  });
+
+  it("reaches the fallback through writePostedSummary", async () => {
+    const out = await writePostedSummary({ event: "COMMENT", tiered: none, changesRequestedBy: ["cliftonc"] });
+    expect(out).toMatchObject({ source: "fallback", text: "Nothing to add beyond the changes @cliftonc requested, which are still open." });
+  });
+
+  it("is handed to the summary model when findings post", async () => {
+    const { calls, chat } = recorder("Two things to fix.");
+    await writePostedSummary({ event: "COMMENT", tiered: tiered(), changesRequestedBy: ["cliftonc"], model: "m/x", chat });
+    expect(calls[0]!.messages.map((m) => m.content).join("\n")).toContain("@cliftonc");
+  });
+
+  it("changes nothing when no human has requested changes", () => {
+    expect(renderFallbackSummary("COMMENT", [], { changesRequestedBy: [] })).toBe("Looks good — no issues to raise.");
+  });
+});
