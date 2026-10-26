@@ -11,16 +11,16 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.103.2",
+    "@tanstack/react-query": "^5.104.5",
     "ansi-to-html": "^0.7.2",
     "clsx": "^2.1.1",
     "dompurify": "^3.4.17",
-    "lucide-react": "^1.48.0",
-    "marked": "^18.0.14",
+    "lucide-react": "^1.61.0",
+    "marked": "^18.1.1",
     "prismjs": "^1.30.0",
-    "react": "^19.3.0",
+    "react": "^19.3.1",
     "react-diff-view": "^3.3.3",
-    "react-dom": "^19.3.0"
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
     "lastlight-core": "workspace:*",

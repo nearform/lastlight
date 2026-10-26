@@ -70,9 +70,9 @@
   },
   "dependencies": {
     "@clack/prompts": "^1.8.1",
-    "@earendil-works/pi-ai": "^1.1.0",
+    "@earendil-works/pi-ai": "^1.4.0",
     "lastlight-workflow-engine": "workspace:*",
-    "chalk": "^6.0.0",
+    "chalk": "^6.0.1",
     "yaml": "^2.9.1"
   },
   "devDependencies": {

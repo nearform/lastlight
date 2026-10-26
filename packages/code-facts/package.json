@@ -50,9 +50,9 @@
     "@ast-grep/lang-go": "0.0.6",
     "@ast-grep/lang-java": "0.0.7",
     "@ast-grep/lang-python": "0.0.6",
-    "@ast-grep/napi": "^0.45.3",
+    "@ast-grep/napi": "^0.51.0",
     "typescript": "7.0.2",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^26.6.2",
