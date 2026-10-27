@@ -96,7 +96,10 @@ export interface SlackConnectorConfig extends MessagingConfig {
  *
  * Behaviors:
  * - DMs: responds to every message (subscribe `message.im` in webhook mode)
- * - Channels: only responds when @mentioned (subscribe `app_mention`)
+ * - Channels: responds when @mentioned (subscribe `app_mention`), and to a
+ *   plain reply in a thread the bot is already in (subscribe
+ *   `message.channels` + `message.groups`; needs the bot's own user id, see
+ *   `resolveBotIdentifier`)
  */
 export class SlackConnector extends MessagingConnector {
   readonly name = "slack";
@@ -170,11 +173,32 @@ export class SlackConnector extends MessagingConnector {
   }
 
   async start(): Promise<void> {
+    await this.resolveBotIdentifier();
     if (this.bolt) {
       await this.bolt.start();
       log.info("Connected via Socket Mode");
     } else {
       log.info("Listening via HTTP Events API at /webhooks/slack");
+    }
+  }
+
+  /**
+   * Learn the bot's own Slack user id (`auth.test`) when the caller didn't pass
+   * one. A channel `message` event carries the mention only as `<@U…>` text, so
+   * without the id the connector cannot tell an @mention (which `app_mention`
+   * also delivers) from a plain thread reply — see `onMessageEvent`. Best-effort:
+   * on failure, channel `message` events are ignored and mentions still work.
+   */
+  private async resolveBotIdentifier(): Promise<void> {
+    if (this.config.botIdentifier) return;
+    try {
+      const res = await this.web.auth.test();
+      if (typeof res.user_id === "string" && res.user_id) {
+        this.config.botIdentifier = res.user_id;
+        log.info("Resolved bot user id", { botUserId: res.user_id });
+      }
+    } catch (err: unknown) {
+      log.warn("Could not resolve the bot user id — un-mentioned thread replies in channels will be ignored", { err });
     }
   }
 
@@ -563,11 +587,19 @@ export class SlackConnector extends MessagingConnector {
     // Ignore bot messages
     if (msg.bot_id) return;
 
-    const username = await this.resolveUsername(msg.user);
     const isDM = msg.channel_type === "im";
-    const isMention = this.config.botIdentifier
-      ? msg.text.includes(`<@${this.config.botIdentifier}>`)
-      : false;
+    if (!isDM) {
+      // A channel `message` event (`message.channels` / `message.groups`) is
+      // subscribed for ONE case: a reply in a thread the bot is already in,
+      // without an @mention. A mention arrives a second time as `app_mention`,
+      // which handles it — so drop it here, or the bot answers twice. With no
+      // known bot id a mention can't be recognised, so drop them all.
+      const botId = this.config.botIdentifier;
+      if (!botId || msg.text.includes(`<@${botId}>`)) return;
+      if (!msg.thread_ts) return;
+    }
+
+    const username = await this.resolveUsername(msg.user);
 
     await this.handleIncomingMessage({
       platformUserId: msg.user,
@@ -577,7 +609,9 @@ export class SlackConnector extends MessagingConnector {
       messageId: msg.ts,
       text: msg.text,
       isDM,
-      isMention,
+      // Never a mention: in a channel those were dropped above, and in a DM
+      // the flag is not read.
+      isMention: false,
       raw: msg,
     });
   }

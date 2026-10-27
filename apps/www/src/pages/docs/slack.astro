@@ -68,9 +68,10 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 			<ul>
 				<li><code>message.im</code> — direct messages</li>
 				<li><code>app_mention</code> — @mentions in channels</li>
+				<li><code>message.channels</code>, <code>message.groups</code> — replies in a thread the bot is already in, without an @mention</li>
 			</ul>
-			(Don't also subscribe <code>message.channels</code> — a channel @mention would then
-			arrive twice, as both a <code>message</code> and an <code>app_mention</code>.)
+			(A channel @mention then arrives twice, as both a <code>message</code> and an
+			<code>app_mention</code>; Last Light answers it once.)
 		</li>
 		<li>
 			<strong>Slash Commands</strong> (optional) → create <code>/approve</code>, <code>/reject</code>, <code>/status</code>, <code>/reset</code> pointing at <code>https://your-host/...</code>.

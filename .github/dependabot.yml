@@ -1,24 +1,18 @@
 # Dependabot config for the nearform/lastlight monorepo (pnpm + Turborepo).
 #
-# One pnpm-lock.yaml lives at the repo root, but Dependabot must be pointed at
-# each workspace package's directory to update its package.json. The globs below
-# cover all ten tracked manifests and deliberately EXCLUDE the frozen eval
-# fixture under apps/evals/datasets/** (an intentionally-buggy eval case).
-#
-#   /                    -> lastlight-monorepo (root)
-#   /apps/*              -> server, www, evals
-#   /apps/*/dashboard    -> server/dashboard, evals/dashboard
-#   /packages/*          -> agentic-pi, cli, shared, workflow-engine
+# npm is pointed at the repo root ONLY. Dependabot resolves the pnpm workspace
+# from pnpm-workspace.yaml there, so one root run updates every member's
+# package.json AND the single root pnpm-lock.yaml together. Per-package
+# directories must NOT be listed: those runs bump one package.json without the
+# lockfile, so CI fails on `pnpm install --frozen-lockfile`, and they duplicate
+# the root PR. The frozen eval fixture under apps/evals/datasets/** (an
+# intentionally-buggy eval case) is not a workspace member, so it stays out.
 version: 2
 
 updates:
   # ── npm / pnpm: every workspace package ────────────────────────────────────
   - package-ecosystem: "npm"
-    directories:
-      - "/"
-      - "/apps/*"
-      - "/apps/*/dashboard"
-      - "/packages/*"
+    directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"

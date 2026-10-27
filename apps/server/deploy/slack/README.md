@@ -25,6 +25,7 @@ paste it into an existing app's *App Manifest* editor.
 | `chat:write` | Post replies + cron reports; edit the in-place status message (`chat.postMessage` / `chat.update`) | `src/connectors/slack/connector.ts` |
 | `app_mentions:read` | Respond when `@mention`ed in a channel (`app_mention` event) | `connector.ts` |
 | `im:history` | Read + respond to DMs (`message.im` event) | `connector.ts` |
+| `channels:history` / `groups:history` | Receive plain replies in a thread the bot is already in, in public / private channels (`message.channels` / `message.groups`) | `connector.ts` |
 | `users:read` | Resolve a user ID → username for display (`users.info`) | `connector.ts` |
 | `assistant:write` | The "Thinking…" thread status indicator (`assistant.threads.setStatus`) | `connector.ts` |
 | `reactions:write` | Fallback 👀 ack reaction when the assistant status API isn't available (`reactions.add`) | `connector.ts` |
@@ -34,6 +35,14 @@ paste it into an existing app's *App Manifest* editor.
 
 - `app_mention` — needs `app_mentions:read`.
 - `message.im` — needs `im:history`.
+- `message.channels` / `message.groups` — need `channels:history` /
+  `groups:history`. They exist for ONE case: a reply in a thread the bot is
+  already in, without an `@mention` ("Ok, thanks!"). A channel `@mention` is
+  delivered twice once these are subscribed (as `message` and as
+  `app_mention`); the connector drops the `message` copy, recognising it by the
+  bot's own user id (resolved with `auth.test` at start), so it answers once.
+  Every other channel message is dropped on arrival. The bot only receives
+  messages from channels it is a member of.
 - `reaction_added` / `reaction_removed` — needs `reactions:read`. These carry the
   feedback signals (issue #255): a 👍 or 👎 on a message the bot posted is scored
   against the workflow run that produced it. Only reactions on messages Last
@@ -68,10 +77,9 @@ default). For Socket Mode local dev (`SLACK_MODE=socket`) instead:
 - set `settings.socket_mode_enabled: true`,
 - add an **app-level token** (`xapp-…`, `SLACK_APP_TOKEN`) with the
   `connections:write` scope, and
-- add `channels:history` + `groups:history` bot scopes **only if** you want the
-  bot to see non-mention messages in channels/private channels — Bolt's
-  `message()` listener is a catch-all in Socket Mode. The default handlers act
-  on DMs + mentions only, so you usually don't need them.
+- keep the `channels:history` + `groups:history` bot scopes — Bolt's
+  `message()` listener is a catch-all in Socket Mode, and the same handler
+  continues thread replies (and drops everything else) there too.
 
 ## What was dropped from the original manifest (and why)
 
@@ -88,9 +96,9 @@ no code path uses:
   channels, DMs, and files — a needless privacy/blast-radius liability.
   (`reactions:read` and `reactions:write` stay dropped **as user scopes** — both
   are granted on the *bot* token above, which is the token the code uses.)
-- **Bot scopes dropped:** `channels:read`, `files:write`, `im:read`, `im:write`,
-  `channels:history`, `groups:history` — none are called by the connector, and
-  the two `*:history` channel scopes only matter for Socket Mode (see above).
+- **Bot scopes dropped:** `channels:read`, `files:write`, `im:read`, `im:write`
+  — none are called by the connector. (`channels:history` / `groups:history`
+  were dropped here too, and have since been restored — see the last entry.)
 - **Bot scopes ADDED (were missing but required):** `assistant:write` and
   `reactions:write`. The code calls both on the **bot** token; the original
   granted `reactions:write` only as a *user* scope and omitted `assistant:write`
@@ -101,7 +109,9 @@ no code path uses:
   installation, and until it is granted no reaction event is delivered at all
   (silently: the handler is simply never called). Feedback is off in that state,
   not broken; everything else keeps working.
-- **Events dropped:** `message.channels`, `message.groups` — the handlers act on
-  DMs (`message.im`) and mentions (`app_mention`); the code ignores plain
-  channel/group messages, so subscribing to them just delivers events nothing
-  consumes.
+- **Events restored:** `message.channels`, `message.groups` (+ the two
+  `*:history` scopes). They were dropped on the belief that the code ignores
+  plain channel messages — but it continues a thread the bot is already in, and
+  that only works if Slack delivers the un-mentioned reply. Without them a
+  channel conversation needed an `@mention` on every turn. **Re-consent the app
+  after adding them.**
