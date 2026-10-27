@@ -20,7 +20,7 @@
   },
   "dependencies": {
     "@astrojs/sitemap": "^3.7.4",
-    "astro": "^7.3.5"
+    "astro": "^7.4.2"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.12",
@@ -28,6 +28,6 @@
     "node-html-markdown": "^2.0.0",
     "typescript": "^7.0.2",
     "wrangler": "^4.152.0",
-    "zod": "^4.6.6"
+    "zod": "^4.6.7"
   }
 }

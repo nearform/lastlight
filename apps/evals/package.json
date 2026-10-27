@@ -43,7 +43,7 @@
   "license": "MIT",
   "dependencies": {
     "@clack/prompts": "^1.8.1",
-    "chalk": "^6.0.0",
+    "chalk": "^6.0.1",
     "lastlight-code-facts": "workspace:*",
     "lastlight-core": "workspace:*",
     "lastlight-workflow-engine": "workspace:*",
