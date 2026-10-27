@@ -44,7 +44,7 @@
     "lastlight-code-facts": "workspace:*",
     "lastlight-shared": "workspace:*",
     "lastlight-workflow-engine": "workspace:*",
-    "chalk": "^6.0.0",
+    "chalk": "^6.0.1",
     "cli-table3": "^0.6.5"
   },
   "devDependencies": {

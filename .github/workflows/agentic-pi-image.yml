@@ -44,6 +44,7 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: '22'
+          check-latest: true
 
       # gondolin's build pipeline shells out to these. Names match what
       # packages/agentic-pi/scripts/build-image.sh checks for locally.
