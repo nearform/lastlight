@@ -173,6 +173,80 @@ describe("SlackConnector webhook receiver", () => {
     expect(events).toHaveLength(0);
   });
 
+  describe("channel thread replies (message.channels / message.groups)", () => {
+    const settle = async () => {
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+    };
+    let n = 0;
+    const deliver = (event: Record<string, unknown>) =>
+      post(JSON.stringify({ type: "event_callback", event_id: `EvC${++n}`, event }));
+
+    const mention = { type: "app_mention", channel: "G1", user: "U1", ts: "10.1", text: "<@UBOT> any open issues?" };
+    // Slack sends a channel mention TWICE once message.* is subscribed.
+    const mentionAsMessage = { ...mention, type: "message", channel_type: "group" };
+    const reply = { type: "message", channel: "G1", channel_type: "group", user: "U1", ts: "10.2", thread_ts: "10.1", text: "Ok, thanks!" };
+
+    beforeEach(() => {
+      (conn as any).web.auth = { test: async () => ({ user_id: "UBOT" }) };
+    });
+
+    it("start() resolves the bot's user id from auth.test", async () => {
+      await conn.start();
+      expect((conn as any).config.botIdentifier).toBe("UBOT");
+    });
+
+    it("answers an un-mentioned reply in a thread the bot is in", async () => {
+      await conn.start();
+      await deliver(mention);
+      await settle();
+      await deliver(reply);
+      await settle();
+      expect(events.map((e) => e.body)).toEqual(["any open issues?", "Ok, thanks!"]);
+      expect(events[1].raw.threadId).toBe("10.1");
+    });
+
+    it("handles a channel mention once, though Slack delivers it as message AND app_mention", async () => {
+      await conn.start();
+      await deliver(mentionAsMessage);
+      await deliver(mention);
+      await settle();
+      expect(events).toHaveLength(1);
+    });
+
+    it("answers a follow-up @mention inside its own thread once, not twice", async () => {
+      await conn.start();
+      await deliver(mention);
+      await settle();
+      const followUp = { ...mention, ts: "10.3", thread_ts: "10.1", text: "<@UBOT> and closed ones?" };
+      await deliver({ ...followUp, type: "message", channel_type: "group" });
+      await deliver(followUp);
+      await settle();
+      expect(events.map((e) => e.body)).toEqual(["any open issues?", "and closed ones?"]);
+    });
+
+    it("ignores a reply in a thread the bot is not in, and top-level chatter", async () => {
+      await conn.start();
+      await deliver(reply);
+      await deliver({ ...reply, ts: "11.1", thread_ts: undefined, text: "unrelated" });
+      await settle();
+      expect(events).toHaveLength(0);
+    });
+
+    it("ignores every channel message when the bot id could not be resolved", async () => {
+      (conn as any).web.auth = { test: async () => { throw new Error("invalid_auth"); } };
+      await conn.start();
+      await deliver(mention);
+      await settle();
+      await deliver(mentionAsMessage);
+      await deliver(reply);
+      await settle();
+      // The app_mention still works; neither message event gets through.
+      expect(events).toHaveLength(1);
+    });
+  });
+
   it("sends both text fallback and blocks when blocks are provided", async () => {
     let payload: any;
     (conn as any).web.chat.postMessage = async (p: any) => {
