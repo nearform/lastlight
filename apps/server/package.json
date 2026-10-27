@@ -103,7 +103,7 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.11",
-    "@opentelemetry/context-async-hooks": "^2.11.0",
+    "@opentelemetry/context-async-hooks": "^3.0.0",
     "@opentelemetry/sdk-trace-base": "^2.11.0",
     "@types/node": "^26.6.5",
     "@types/pg": "^8.23.1",
