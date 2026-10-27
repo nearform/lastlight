@@ -28,6 +28,6 @@
     "node-html-markdown": "^2.0.0",
     "typescript": "^7.0.2",
     "wrangler": "^4.152.0",
-    "zod": "^4.6.5"
+    "zod": "^4.6.6"
   }
 }
