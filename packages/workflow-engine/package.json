@@ -34,10 +34,10 @@
     "lint:boundaries": "node ../../scripts/lint-import-boundaries.mjs engine"
   },
   "dependencies": {
-    "zod": "^4.6.5"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
-    "@types/node": "^26.6.2",
+    "@types/node": "^26.6.5",
     "typescript": "^7.0.2"
   }
 }

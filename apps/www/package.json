@@ -23,11 +23,11 @@
     "astro": "^7.3.5"
   },
   "devDependencies": {
-    "@astrojs/check": "^0.9.10",
+    "@astrojs/check": "^0.9.12",
     "cheerio": "^1.2.0",
     "node-html-markdown": "^2.0.0",
     "typescript": "^7.0.2",
-    "wrangler": "^4.139.0",
-    "zod": "^4.6.5"
+    "wrangler": "^4.152.0",
+    "zod": "^4.6.6"
   }
 }
