@@ -674,9 +674,19 @@ providers:
     envKey: ACME_API_KEY
     host: llm.corp.example         # egress allowlist entry; defaults to the URL's hostname
     fastModel: acme-small          # what the cheap helpers use if they pick this provider
+    headers:                       # sent on every model call to this provider
+      x-retention: "none"          # values are strings — quote numbers in YAML
 ```
 
-Two rules about which fields a **built-in** override may carry, and both exist so
+`headers` is for flags a gateway reads (routing, data retention), never for
+credentials: the map is plain config and shows up wherever config does, so the
+key still travels through `envKey`, and `authorization` / `x-api-key` are
+refused. Values must be literals. pi resolves header values itself — a value
+starting with `!` runs as a shell command and `$NAME` expands from the
+environment — so both are refused at boot rather than left to run inside the
+sandbox.
+
+Three rules about which fields a **built-in** override may carry, and all exist so
 the four paths below cannot disagree:
 
 - **`envKey` may be re-pointed.** That is how a gateway keeps custody of its own
@@ -692,6 +702,12 @@ the four paths below cannot disagree:
   in-process while the sandbox ignored it would split one deployment in half, so
   it throws at boot and names the alternative: if your gateway proxies Anthropic
   but speaks OpenAI's dialect, declare your own prefix and point `models:` at it.
+- **`headers` may not be set.** pi learns about a built-in override only through
+  its `baseUrl`, and the registry's base URL is not always pi's (`anthropic` is
+  `…/v1` here and bare in pi's catalog), so forwarding a headers-only override
+  would move the endpoint as a side effect. Silently dropping the header instead
+  would break whatever the gateway was promised, so it throws at boot and names
+  the same alternative: declare your own prefix.
 
 Why it matters beyond convenience: a gateway is how a deployment gets central
 spend accounting, key custody, rate limiting and audit — and a self-hosted or
@@ -706,10 +722,10 @@ config key reach four independent code paths:
 
 | Path | What follows the override |
 |---|---|
-| the cheap helpers (`src/engine/llm.ts`) | request URL, api family, key env var — including the bare-model-id fallback, which used to hardcode `api.openai.com` |
+| the cheap helpers (`src/engine/llm.ts`) | request URL, api family, key env var, headers — including the bare-model-id fallback, which used to hardcode `api.openai.com` |
 | the sandbox (`agentic-pi`) | `AGENTIC_PI_PROVIDERS` in the sandbox env (container backends) and the `providers` run option (in-process backends); agentic-pi registers the override on pi's `ModelRuntime` |
 | the egress allowlist | the resolved `host` is what `providerHosts()` returns, so the firewall permits the gateway ([Sandbox](/spec/09-sandbox)) |
-| in-process chat (`src/engine/chat/chat-runner.ts`) | the resolved `baseUrl`, and a synthesized model for a custom provider pi-ai has no catalog entry for |
+| in-process chat (`src/engine/chat/chat-runner.ts`) | the resolved `baseUrl` and headers, and a synthesized model for a custom provider pi-ai has no catalog entry for |
 
 **Precedence** is the ordinary one — `default < overlay < env` — and merges
 **per prefix**, so `ANTHROPIC_BASE_URL` moves one endpoint without dropping a

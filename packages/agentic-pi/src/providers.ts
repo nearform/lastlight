@@ -26,6 +26,8 @@ export interface ProviderEndpointOverride {
   contextWindow?: number;
   /** Unknown providers only: output-token ceiling to advertise. Default 16384. */
   maxTokens?: number;
+  /** Literal headers sent on every call to this provider (never credentials). */
+  headers?: Record<string, string>;
 }
 
 /** Prefix → endpoint override, as `--providers` / `AGENTIC_PI_PROVIDERS` carry it. */
@@ -81,7 +83,31 @@ export function parseProviderOverrides(raw: string, label: string): ProviderEndp
       ...(typeof entry.apiKeyEnv === "string" ? { apiKeyEnv: entry.apiKeyEnv } : {}),
       ...(typeof entry.contextWindow === "number" ? { contextWindow: entry.contextWindow } : {}),
       ...(typeof entry.maxTokens === "number" ? { maxTokens: entry.maxTokens } : {}),
+      ...(entry.headers !== undefined ? { headers: parseHeaders(entry.headers, `${label}.${prefix}.headers`) } : {}),
     };
+  }
+  return out;
+}
+
+/**
+ * Header values reach pi's `registerProvider`, which resolves them at request
+ * time: a leading `!` runs a shell command and `$NAME` expands an env var. Only
+ * literals are accepted, so an override can carry a flag but never a command
+ * or a secret pulled from this process's environment.
+ */
+function parseHeaders(raw: unknown, label: string): Record<string, string> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`${label} must be an object of header name → value`);
+  }
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value !== "string") {
+      throw new Error(`${label}.${name} must be a string`);
+    }
+    if (value.startsWith("!") || value.includes("$")) {
+      throw new Error(`${label}.${name} must be a literal value (no leading "!", no "$")`);
+    }
+    out[name] = value;
   }
   return out;
 }
