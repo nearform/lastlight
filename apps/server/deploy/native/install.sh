@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Idempotent provision + (re)deploy of lastlight as a systemd service on a
-# KVM-capable Linux host. Run as root from the repo root:
+# KVM-capable Linux host. Run as root from apps/server:
 #
 #     sudo bash deploy/native/install.sh
 #
@@ -11,7 +11,8 @@
 
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+NATIVE_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$NATIVE_DIR/../../../.." && pwd)"
 SERVICE_NAME=lastlight
 LASTLIGHT_USER=lastlight
 LASTLIGHT_HOME=/var/lib/lastlight
@@ -41,7 +42,8 @@ apt-get install -y --no-install-recommends \
   qemu-system-x86 qemu-utils \
   python3 build-essential
 # Use NodeSource for a current Node 22 LTS (Debian's nodejs is too old).
-if ! command -v node >/dev/null 2>&1 || ! node -e 'process.exit(process.versions.node.split(".")[0] >= 20 ? 0 : 1)'; then
+# The workspace needs Node >= 22.12 (engines in package.json).
+if ! command -v node >/dev/null 2>&1 || ! node -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a === 22 && b >= 12) ? 0 : 1)'; then
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
   apt-get install -y --no-install-recommends nodejs
 fi
@@ -58,11 +60,20 @@ if getent group kvm >/dev/null 2>&1; then
 fi
 
 # ── 4. Repo install + build (as the lastlight user) ────────────────────────
+# pnpm workspace: corepack runs the pnpm version pinned in package.json
+# (packageManager). Only the server, its workspace deps and the dashboard are
+# installed and built; the other apps (www, evals) are not needed to run it.
+if ! command -v corepack >/dev/null 2>&1; then
+  npm install -g corepack
+fi
 chown -R "$LASTLIGHT_USER:$LASTLIGHT_USER" "$REPO_DIR"
-sudo -u "$LASTLIGHT_USER" -H bash -c "cd '$REPO_DIR' && npm ci --no-audit --no-fund"
-sudo -u "$LASTLIGHT_USER" -H bash -c "cd '$REPO_DIR' && npm run build && npm run build:dashboard"
-# Prune dev deps to shrink the on-disk footprint of the deployed checkout.
-sudo -u "$LASTLIGHT_USER" -H bash -c "cd '$REPO_DIR' && npm prune --omit=dev"
+sudo -u "$LASTLIGHT_USER" -H env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 CI=1 bash -c "
+  set -euo pipefail
+  cd '$REPO_DIR'
+  corepack pnpm install --frozen-lockfile --filter 'lastlight-core...' --filter '@lastlight/dashboard...'
+  corepack pnpm --filter 'lastlight-core...' run build
+  corepack pnpm --filter '@lastlight/dashboard' run build
+"
 
 # ── 5. Env file scaffold (don't overwrite an existing config) ──────────────
 mkdir -p "$ENV_DIR"
@@ -70,7 +81,7 @@ chmod 0750 "$ENV_DIR"
 chgrp "$LASTLIGHT_USER" "$ENV_DIR"
 if [ ! -f "$ENV_FILE" ]; then
   install -m 0640 -o root -g "$LASTLIGHT_USER" \
-    "$REPO_DIR/deploy/native/lastlight.env.example" "$ENV_FILE"
+    "$NATIVE_DIR/lastlight.env.example" "$ENV_FILE"
   echo "" >&2
   echo "  NOTE: $ENV_FILE was just created from the example template." >&2
   echo "  Edit it to fill in your GitHub App, model API keys, Slack tokens, etc." >&2
@@ -88,7 +99,7 @@ fi
 
 # ── 7. systemd unit ────────────────────────────────────────────────────────
 install -m 0644 \
-  "$REPO_DIR/deploy/native/lastlight.service" \
+  "$NATIVE_DIR/lastlight.service" \
   "/etc/systemd/system/${SERVICE_NAME}.service"
 systemctl daemon-reload
 
