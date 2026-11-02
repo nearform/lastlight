@@ -89,7 +89,7 @@
     "@slack/web-api": "^8.2.0",
     "agentic-pi": "workspace:*",
     "arctic": "^3.7.0",
-    "croner": "^10.0.1",
+    "croner": "^11.0.0",
     "drizzle-orm": "^0.45.4",
     "hono": "^4.13.14",
     "lastlight-shared": "workspace:*",
