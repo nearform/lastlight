@@ -865,6 +865,14 @@ const OBLIGATION_ID_HEX = 6;
  * Two obligations with the same identity (rare — one site minting the same
  * family twice) are told apart by `-2`, `-3`… in introduced-line, then
  * mechanism order, so the numbering is deterministic for one input.
+ *
+ * That numbering is positional, and deliberately so: nothing line-free tells
+ * twins apart. It does not cost the cache in practice. Twins share a path, so
+ * a new twin ABOVE an existing one (the only way to renumber it) adds lines
+ * above it, and the request already prints absolute line numbers (`L0042`
+ * tags, `introduced at: path:line`) — the existing unit's request changed
+ * anyway. The one case it costs a hit is an earlier line in another unit being
+ * edited, in place, into an identical quote.
  */
 export function assignObligationIds(obligations: Obligation[]): void {
   const identity = (o: Obligation): string =>
