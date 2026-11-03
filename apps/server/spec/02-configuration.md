@@ -684,7 +684,8 @@ key still travels through `envKey`, and `authorization` / `x-api-key` are
 refused. Values must be literals. pi resolves header values itself — a value
 starting with `!` runs as a shell command and `$NAME` expands from the
 environment — so both are refused at boot rather than left to run inside the
-sandbox.
+sandbox. So are control characters and anything above U+00FF, which `fetch`
+would reject on every request.
 
 Three rules about which fields a **built-in** override may carry, and all exist so
 the four paths below cannot disagree:

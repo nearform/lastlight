@@ -65,6 +65,15 @@ export function parseProviderOverrides(raw: string, label: string): ProviderEndp
   } catch (err) {
     throw new Error(`${label} must be JSON: ${err instanceof Error ? err.message : String(err)}`);
   }
+  return validateProviderOverrides(parsed, label);
+}
+
+/**
+ * Check an already-parsed override map: what {@link parseProviderOverrides}
+ * applies to the flag's JSON, and what `run()` applies to its `providers`
+ * option, so programmatic callers get the same header checks as the CLI.
+ */
+export function validateProviderOverrides(parsed: unknown, label: string): ProviderEndpointOverrides {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error(`${label} must be a JSON object of provider → { baseUrl, … }`);
   }
@@ -89,11 +98,20 @@ export function parseProviderOverrides(raw: string, label: string): ProviderEndp
   return out;
 }
 
+/** RFC 9110 field-name `token`. */
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+/** Where the API key travels. `apiKeyEnv` owns these, so a header may not replace them. */
+const CREDENTIAL_HEADERS = new Set(["authorization", "x-api-key"]);
+
 /**
  * Header values reach pi's `registerProvider`, which resolves them at request
  * time: a leading `!` runs a shell command and `$NAME` expands an env var. Only
  * literals are accepted, so an override can carry a flag but never a command
  * or a secret pulled from this process's environment.
+ *
+ * The same rules as Last Light's `normalizeProviderHeaders` (packages/shared),
+ * repeated here because this package takes no workspace dependencies. Values
+ * above U+00FF are refused too: `fetch` would throw on every request instead.
  */
 function parseHeaders(raw: unknown, label: string): Record<string, string> {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -101,8 +119,20 @@ function parseHeaders(raw: unknown, label: string): Record<string, string> {
   }
   const out: Record<string, string> = {};
   for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!HEADER_NAME.test(name)) {
+      throw new Error(`${label}.${name}: not a valid HTTP header name`);
+    }
+    if (CREDENTIAL_HEADERS.has(name.toLowerCase())) {
+      throw new Error(`${label}.${name}: credentials go in apiKeyEnv, not in headers`);
+    }
     if (typeof value !== "string") {
       throw new Error(`${label}.${name} must be a string`);
+    }
+    if (/[\x00-\x08\x0a-\x1f\x7f]/.test(value)) {
+      throw new Error(`${label}.${name}: header values may not contain control characters`);
+    }
+    if (/[^\x00-\xff]/.test(value)) {
+      throw new Error(`${label}.${name}: header values may not contain characters outside Latin-1`);
     }
     if (value.startsWith("!") || value.includes("$")) {
       throw new Error(`${label}.${name} must be a literal value (no leading "!", no "$")`);

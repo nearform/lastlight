@@ -497,6 +497,10 @@ export function normalizeProviderHeaders(
     if (/[\x00-\x08\x0a-\x1f\x7f]/.test(value)) {
       throw new Error(`${path}: header values may not contain control characters`);
     }
+    // fetch refuses these with a ByteString TypeError on every request.
+    if (/[^\x00-\xff]/.test(value)) {
+      throw new Error(`${path}: header values may not contain characters outside Latin-1`);
+    }
     if (value.startsWith("!") || value.includes("$")) {
       throw new Error(
         `${path}: header values must be literal — a leading "!" or a "$" would be ` +

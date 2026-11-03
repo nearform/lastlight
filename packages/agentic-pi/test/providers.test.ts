@@ -8,8 +8,9 @@ import { join } from "node:path";
 
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 
-import { parseProviderOverrides } from "../src/providers.js";
+import { parseProviderOverrides, validateProviderOverrides } from "../src/providers.js";
 import { registerProviderOverrides, resolveModel } from "../src/models.js";
+import { run } from "../src/run.js";
 
 describe("parseProviderOverrides", () => {
   test("parses a minimal override and strips trailing slashes", () => {
@@ -52,6 +53,47 @@ describe("parseProviderOverrides", () => {
     assert.throws(withHeaders({ "x-flag": "$GITHUB_TOKEN" }), /must be a literal value/);
     assert.throws(withHeaders({ "x-flag": 1 }), /must be a string/);
     assert.throws(withHeaders(["x-flag"]), /must be an object/);
+  });
+
+  // The same rules as Last Light's normalizeProviderHeaders (packages/shared),
+  // copied here because agentic-pi takes no workspace dependencies.
+  test("throws on credential headers, malformed names and values fetch cannot send", () => {
+    const withHeaders = (headers: unknown) => () =>
+      parseProviderOverrides(JSON.stringify({ acme: { baseUrl: "https://gw/v1", headers } }), "--providers");
+    assert.throws(withHeaders({ Authorization: "Bearer x" }), /--providers\.acme\.headers\.Authorization: credentials go in apiKeyEnv/);
+    assert.throws(withHeaders({ "x-api-key": "k" }), /credentials go in apiKeyEnv/);
+    assert.throws(withHeaders({ "bad name": "v" }), /not a valid HTTP header name/);
+    assert.throws(withHeaders({ "x-flag": "a\r\nx-injected: 1" }), /control characters/);
+    assert.throws(withHeaders({ "x-flag": "\u20ac" }), /outside Latin-1/);
+    assert.doesNotThrow(withHeaders({ "x-flag": "caf\u00e9 on!" }));
+  });
+});
+
+describe("validateProviderOverrides", () => {
+  test("applies the same checks to an object as parseProviderOverrides does to JSON", () => {
+    assert.deepEqual(validateProviderOverrides({ acme: { baseUrl: "https://gw/v1/", headers: { "x-retention": "none" } } }, "providers"), {
+      acme: { baseUrl: "https://gw/v1", headers: { "x-retention": "none" } },
+    });
+    assert.throws(
+      () => validateProviderOverrides({ acme: { baseUrl: "https://gw/v1", headers: { "x-flag": "!id" } } }, "providers"),
+      /providers\.acme\.headers\.x-flag must be a literal value/,
+    );
+    assert.throws(() => validateProviderOverrides([], "providers"), /must be a JSON object/);
+  });
+});
+
+describe("run() with providers", () => {
+  // Programmatic callers skip --providers / AGENTIC_PI_PROVIDERS, so run()
+  // must validate too; otherwise pi would run "!id" when it builds the request.
+  test("refuses a header pi would run, before any model call", async () => {
+    await assert.rejects(
+      run({
+        prompt: "hi",
+        model: "acme/m",
+        providers: { acme: { baseUrl: "https://gw.invalid/v1", api: "openai-completions", headers: { "x-flag": "!id" } } },
+      }),
+      /providers\.acme\.headers\.x-flag must be a literal value/,
+    );
   });
 });
 

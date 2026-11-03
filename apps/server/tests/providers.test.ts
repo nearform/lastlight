@@ -250,6 +250,9 @@ describe("resolveProviderRegistry — custom provider headers", () => {
     expect(withValue("$GITHUB_TOKEN")).toThrow(/must be literal/);
     expect(withValue("prefix-${SECRET}")).toThrow(/must be literal/);
     expect(withValue("a\r\nx-injected: 1")).toThrow(/control characters/);
+    // fetch refuses anything above U+00FF on every request; say so at boot instead.
+    expect(withValue("\u20ac")).toThrow(/providers\.acme\.headers\.x-flag: header values may not contain characters outside Latin-1/);
+    expect(withValue("caf\u00e9")).not.toThrow();
     // An exclamation mark that does not lead is just text.
     expect(withValue("on!")).not.toThrow();
   });
