@@ -60,7 +60,7 @@ const mockRunWorkflow = vi.mocked(runWorkflow);
 const RUN_ID = "live-run-id";
 const TRIGGER = "acme/widgets#227";
 
-function dispatch(db: StateDb) {
+function dispatch(db: StateDb, onRunStart: (runId: string) => Promise<void> = async () => {}) {
   return runSimpleWorkflow(
     "explore",
     { owner: "acme", repo: "widgets", issueNumber: 227, issueTitle: "Test", sender: "alice" },
@@ -74,7 +74,7 @@ function dispatch(db: StateDb) {
       buildAssets: "repo" as const,
       buildAssetsDir: "/tmp/build-assets",
     },
-    { postComment: vi.fn(async () => {}), onRunStart: vi.fn(async () => {}) },
+    { postComment: vi.fn(async () => {}), onRunStart: vi.fn(onRunStart) },
     db,
     undefined,
     undefined,
@@ -87,16 +87,19 @@ function dispatch(db: StateDb) {
 describe("runSimpleWorkflow — duplicate trigger on a live run (issue #488)", () => {
   let db: StateDb;
 
-  beforeEach(async () => {
-    db = await makeTestDb();
+  async function seedRunningRow(currentPhase: string) {
     await db.runs.createRun({
       id: RUN_ID,
       workflowName: "explore",
       triggerId: TRIGGER,
-      currentPhase: "socratic",
+      currentPhase,
       status: "running",
       startedAt: new Date().toISOString(),
     });
+  }
+
+  beforeEach(async () => {
+    db = await makeTestDb();
   });
 
   afterEach(() => {
@@ -105,6 +108,7 @@ describe("runSimpleWorkflow — duplicate trigger on a live run (issue #488)", (
   });
 
   it("does not start a second scheduler when the run is still executing in this process", async () => {
+    await seedRunningRow("socratic");
     const release = markRunLive(RUN_ID);
     try {
       const result = await dispatch(db);
@@ -119,8 +123,44 @@ describe("runSimpleWorkflow — duplicate trigger on a live run (issue #488)", (
   });
 
   it("still resumes a running row whose scheduler is not live here (orphan after a restart)", async () => {
+    await seedRunningRow("socratic");
     await dispatch(db);
 
+    expect(mockRunWorkflow).toHaveBeenCalledOnce();
+  });
+
+  it("an approved gate waits for the paused scheduler to stop, then resumes", async () => {
+    // The gate committed the pause (row shows `waiting_approval`) and an
+    // approval already flipped it back to `running`, but the old scheduler is
+    // still posting the gate message, so it is live.
+    await seedRunningRow("waiting_approval");
+    const releaseOld = markRunLive(RUN_ID);
+    setTimeout(releaseOld, 20);
+
+    await dispatch(db);
+
+    expect(mockRunWorkflow).toHaveBeenCalledOnce();
+  });
+});
+
+describe("runSimpleWorkflow — duplicate trigger before the new run's scheduler starts (issue #488)", () => {
+  afterEach(() => {
+    __resetLiveRunsForTest();
+    vi.clearAllMocks();
+  });
+
+  it("is a no-op while the first dispatch is still awaiting its start hooks", async () => {
+    const db = await makeTestDb();
+    let duplicate: Awaited<ReturnType<typeof dispatch>> | undefined;
+
+    // The first dispatch has created its `running` row and is awaiting
+    // `onRunStart` (real GitHub I/O in production) — runWorkflow has not run
+    // yet. A second trigger for the same PR arrives in exactly that window.
+    await dispatch(db, async () => {
+      duplicate = await dispatch(db);
+    });
+
+    expect(duplicate).toEqual({ success: true, paused: true, phases: [] });
     expect(mockRunWorkflow).toHaveBeenCalledOnce();
   });
 });

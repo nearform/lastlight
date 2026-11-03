@@ -52,7 +52,7 @@ import {
 } from "./runner.js";
 import { PhaseRef } from "./phase-ref.js";
 import { K8S_SANITY_FUSE } from "./admission.js";
-import { isRunLive } from "./live-runs.js";
+import { claimRun, isRunLive, markRunLive, waitForRunToStop } from "./live-runs.js";
 import type { TemplateContext } from "./templates.js";
 import { slugify } from "./templates.js";
 import { wrapUntrusted } from "../engine/screen/screen.js";
@@ -1109,6 +1109,46 @@ export async function runSimpleWorkflow(
   variants?: VariantConfig,
   concurrency?: { maxWorkflows: number; maxQueueWaitMs: number },
 ): Promise<WorkflowResult & { backpressure?: boolean }> {
+  // The run this dispatch holds live (`./live-runs.ts`), from before its row is
+  // created or reused until this function returns — so a duplicate trigger in
+  // ANY part of that window (the start hooks, the scheduler, the wrap-up) meets
+  // a live run rather than a free one (issue #488).
+  const hold: LiveHold = { release: () => {} };
+  try {
+    return await runSimpleWorkflowBody(
+      hold, workflowName, request, config, callbacks, db, models, approvalConfig,
+      bootstrapLabel, variants, concurrency,
+    );
+  } finally {
+    hold.release();
+  }
+}
+
+interface LiveHold {
+  release: () => void;
+}
+
+/**
+ * How long a gate resume waits for the scheduler that paused the run to return.
+ * The pause is committed before that scheduler posts the gate message, so an
+ * approval can land while it is still live; it has no phase left to run, only
+ * those posts to finish.
+ */
+const GATE_HANDOFF_WAIT_MS = 5 * 60_000;
+
+async function runSimpleWorkflowBody(
+  hold: LiveHold,
+  workflowName: string,
+  request: SimpleWorkflowRequest,
+  config: ExecutorConfig,
+  callbacks: RunnerCallbacks,
+  db: StateDb,
+  models: ModelConfig | undefined,
+  approvalConfig: ApprovalGateConfig | undefined,
+  bootstrapLabel: string,
+  variants: VariantConfig | undefined,
+  concurrency: { maxWorkflows: number; maxQueueWaitMs: number } | undefined,
+): Promise<WorkflowResult & { backpressure?: boolean }> {
   // Kill switch — the BACKSTOP copy.
   //
   // The switch is read twice above this line, and has to be: `dispatch` reads
@@ -1255,7 +1295,7 @@ export async function runSimpleWorkflow(
   let workflowId: string;
   let taskId: string;
   let issueDir: string;
-  const existingRun = await db.runs.getByTrigger(triggerId);
+  let existingRun = await db.runs.getByTrigger(triggerId);
   if (existingRun && existingRun.workflowName === workflowName && !isOwnedRun(existingRun)) {
     // A live run of this workflow for this trigger belongs to another engine
     // (KNOWN_RUN_ENGINES) — a newer release's run, seen after a rollback.
@@ -1270,6 +1310,17 @@ export async function runSimpleWorkflow(
     return { success: true, paused: true, phases: [] };
   }
   if (existingRun && existingRun.workflowName === workflowName) {
+    const claimed = await claimExistingRun(existingRun, db);
+    if (!claimed) {
+      simpleLog.info("Duplicate trigger for a live run — not starting a second scheduler", {
+        runId: existingRun.id,
+        workflowName,
+      });
+      // Parked, not failed — the same answer the other-engine guard gives.
+      return { success: true, paused: true, phases: [] };
+    }
+    hold.release = claimed.release;
+    existingRun = claimed.run;
     workflowId = existingRun.id;
     const stored = (existingRun.context || {}) as Record<string, unknown>;
     taskId = (stored.taskId as string | undefined) ||
@@ -1295,6 +1346,10 @@ export async function runSimpleWorkflow(
     if (handled) return handled;
   } else {
     workflowId = randomUUID();
+    // A fresh id cannot be live anywhere yet; register it before `createRun`
+    // makes the row visible to `getByTrigger`, so a duplicate trigger that
+    // finds the row always finds it live.
+    hold.release = markRunLive(workflowId);
     taskId = workflowScopedTaskId(repo, number, workflowName, workflowId);
     // Issue-scoped workflows share a dir by issue number; non-issue
     // workflows (explore, health, etc.) get a run-scoped dir so
@@ -1631,6 +1686,38 @@ export async function runSimpleWorkflow(
 }
 
 /**
+ * Claim an existing run for this dispatch, or `null` when its scheduler is
+ * still executing in this process and the trigger must be a no-op — a second
+ * `runWorkflow` on the same run id is the #488 failure.
+ *
+ * One exception waits instead of refusing: a run whose row says
+ * `waiting_approval` has committed its pause and has no phase left to run, but
+ * its scheduler is still posting the gate message. An approval that lands in
+ * that window must resume the run once the old scheduler returns — refusing it
+ * would leave the row `running` with no scheduler at all.
+ */
+async function claimExistingRun(
+  run: WorkflowRun,
+  db: StateDb,
+): Promise<{ release: () => void; run: WorkflowRun } | null> {
+  let current = run;
+  if (run.currentPhase === "waiting_approval" && isRunLive(run.id)) {
+    const stopped = await waitForRunToStop(run.id, GATE_HANDOFF_WAIT_MS);
+    if (!stopped) {
+      simpleLog.warn("Paused scheduler did not return in time — not resuming", {
+        runId: run.id,
+        waitedMs: GATE_HANDOFF_WAIT_MS,
+      });
+    }
+    // The row may have moved while we waited (an approval flipping it to
+    // `running`), so decide on what it says now.
+    current = (await db.runs.getRun(run.id)) ?? run;
+  }
+  const release = claimRun(current.id);
+  return release ? { release, run: current } : null;
+}
+
+/**
  * Short-circuit for a workflow run that already has state. Returns a
  * WorkflowResult to return directly (already complete / rejected / still
  * paused), or `null` to continue into `runWorkflow` for normal resume.
@@ -1649,22 +1736,6 @@ async function handleExistingRun(
       workflowName: run.workflowName,
     });
     return { success: true, queued: true, phases: [] };
-  }
-
-  // Dedup: a duplicate trigger on a run whose scheduler is STILL EXECUTING in
-  // this process must be a no-op too. Falling through would start a second
-  // `runWorkflow` on the same run id — two schedulers re-running phases the
-  // other has open, the first marking the row `succeeded` while the second
-  // keeps the run live, and the next run on this workspace failing with
-  // WorkspaceBusyError (issue #488: two `pr.checks_settled` events for one head
-  // both passed the PR run lock before either row existed). A `running` row
-  // that is NOT live here (orphaned by a restart) still resumes below.
-  if (isRunLive(run.id)) {
-    simpleLog.info("Duplicate trigger for a live run — not starting a second scheduler", {
-      runId: run.id,
-      workflowName: run.workflowName,
-    });
-    return { success: true, paused: true, phases: [] };
   }
 
   // Workflow already completed: currentPhase is a terminal set_phase marker
