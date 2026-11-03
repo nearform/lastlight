@@ -20,7 +20,7 @@ On the prod host as root:
 ```bash
 # 1. Clone the repo to the canonical path.
 git clone https://github.com/nearform/lastlight.git /opt/lastlight
-cd /opt/lastlight
+cd /opt/lastlight/apps/server
 
 # 2. (Optional) Drop the GitHub App PEM in place before the install runs,
 #    so install.sh locks it down. Otherwise place it later and re-run.
@@ -41,7 +41,7 @@ sudo bash deploy/native/install.sh
 ## Re-deploying a code change
 
 ```bash
-cd /opt/lastlight
+cd /opt/lastlight/apps/server
 sudo -u lastlight git pull
 sudo bash deploy/native/install.sh   # rebuilds + restarts the service
 ```
@@ -53,7 +53,7 @@ replaced with the two lines above (or wrap them in a script).
 
 | Path | Purpose |
 | --- | --- |
-| `/opt/lastlight` | Source checkout. `node dist/index.js` runs from here. |
+| `/opt/lastlight` | Source checkout (pnpm workspace). `node dist/index.js` runs from `apps/server/`. |
 | `/etc/lastlight/lastlight.env` | systemd EnvironmentFile (mode 0640). Holds all secrets. |
 | `/etc/lastlight/app.pem` | GitHub App private key (mode 0640). Optional but typical. |
 | `/var/lib/lastlight/` | Persistent state — SQLite DB, session JSONLs, gondolin image cache. |
@@ -61,7 +61,7 @@ replaced with the two lines above (or wrap them in a script).
 | `/var/lib/lastlight/agent-sessions/` | Dashboard's JSONL envelope store. |
 | `/var/lib/lastlight/.cache/agentic-pi/images/` | Downloaded gondolin guest images (~89 MB each). |
 | `/var/log/lastlight/` | LogsDirectory if anything writes to it. |
-| `/etc/systemd/system/lastlight.service` | The unit file (installed by install.sh from `deploy/native/lastlight.service`). |
+| `/etc/systemd/system/lastlight.service` | The unit file (installed by install.sh from `apps/server/deploy/native/lastlight.service`). |
 
 ## Operations
 
@@ -81,8 +81,10 @@ sudo systemctl disable lastlight
 
 ## TLS / reverse proxy
 
-The harness binds `127.0.0.1:8644` by default (PORT in the env file).
-Front it with Caddy or nginx for TLS.
+The harness listens on port 8644 (PORT in the env file) on all interfaces
+(`0.0.0.0`), not only on localhost. Front it with Caddy or nginx for TLS,
+and block 8644 from outside with the host firewall (for example
+`sudo ufw deny 8644/tcp`), so the proxy is the only way in.
 
 Minimal Caddy setup:
 
