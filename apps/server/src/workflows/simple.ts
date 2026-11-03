@@ -52,6 +52,7 @@ import {
 } from "./runner.js";
 import { PhaseRef } from "./phase-ref.js";
 import { K8S_SANITY_FUSE } from "./admission.js";
+import { isRunLive } from "./live-runs.js";
 import type { TemplateContext } from "./templates.js";
 import { slugify } from "./templates.js";
 import { wrapUntrusted } from "../engine/screen/screen.js";
@@ -1648,6 +1649,22 @@ async function handleExistingRun(
       workflowName: run.workflowName,
     });
     return { success: true, queued: true, phases: [] };
+  }
+
+  // Dedup: a duplicate trigger on a run whose scheduler is STILL EXECUTING in
+  // this process must be a no-op too. Falling through would start a second
+  // `runWorkflow` on the same run id — two schedulers re-running phases the
+  // other has open, the first marking the row `succeeded` while the second
+  // keeps the run live, and the next run on this workspace failing with
+  // WorkspaceBusyError (issue #488: two `pr.checks_settled` events for one head
+  // both passed the PR run lock before either row existed). A `running` row
+  // that is NOT live here (orphaned by a restart) still resumes below.
+  if (isRunLive(run.id)) {
+    simpleLog.info("Duplicate trigger for a live run — not starting a second scheduler", {
+      runId: run.id,
+      workflowName: run.workflowName,
+    });
+    return { success: true, paused: true, phases: [] };
   }
 
   // Workflow already completed: currentPhase is a terminal set_phase marker

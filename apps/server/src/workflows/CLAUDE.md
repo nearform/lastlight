@@ -43,6 +43,9 @@ EventEnvelope
 Approval-gate resumption bypasses the router and re-enters via
 `src/workflows/resume.ts → resumeOrphanedWorkflows → runWorkflow` (boot
 recovery) or `runSimpleWorkflow` (a fresh trigger on a paused/running run).
+A fresh trigger on a `running` run whose scheduler is still live in this
+process (`isRunLive`, `live-runs.ts`) is a no-op, not a resume: a second
+`runWorkflow` on the same run id is never correct (issue #488).
 Resume is **ledger-driven**: the runner always re-runs from the top and the
 `executions` table (via `shouldRunPhase`) skips already-completed phases — no
 per-workflow branching, no `currentPhase`-derived resume index.
