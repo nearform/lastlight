@@ -74,6 +74,7 @@ import type {
   ContractDelta,
   SymbolFact,
 } from "./schema.js";
+import { createHash } from "node:crypto";
 import { type LoggerPort, noopLogger } from "./log.js";
 
 /** The five families this package can seed. `spec` is WP0's and is not here. */
@@ -105,7 +106,11 @@ export interface EnforcementEnd {
 }
 
 export interface Obligation {
-  /** `O-001`, … — stable within one document, referenced by the hypothesis. */
+  /**
+   * `O-3f9a2c` — a hash of what the obligation is (see
+   * {@link assignObligationIds}), stable across heads and re-ranks; referenced
+   * by the hypothesis. Priority is `rank` and array order, never this.
+   */
   id: string;
   family: SeedFamily;
   /** The defect shape, in one clause. Not a finding; a question's premise. */
@@ -408,10 +413,11 @@ interface CappedResult {
  * 1. **A family's excess costs only that family.** `contract` minting 89 with
  *    `security` minting 3 yields 12 and 3 — the starvation case, gone by
  *    construction rather than by a reserve competing inside a pool.
- * 2. **Deterministic, and the ids still ascend with rank.** `ranked` arrives in
- *    global rank order and one pass keeps each family's first `cap` entries, so
- *    the survivors come back in that same global order and one input yields a
- *    byte-identical document.
+ * 2. **Deterministic, and the document stays in rank order.** `ranked` arrives
+ *    in global rank order and one pass keeps each family's first `cap`
+ *    entries, so the survivors come back in that same global order and one
+ *    input yields a byte-identical document. (Ids are content hashes — see
+ *    {@link assignObligationIds} — so order lives in the array, not the id.)
  * 3. **An under-cap family is untouched.** No slot is reserved, so a family
  *    with two obligations gets two and gives nothing up to anyone.
  */
@@ -840,6 +846,51 @@ function seedRegistrations(symbols: SymbolFact[]): Obligation[] {
 // the seeder
 // ---------------------------------------------------------------------------
 
+/** Hex characters of an obligation id's hash — ~16.7M values over ≤ a few dozen obligations a run. */
+const OBLIGATION_ID_HEX = 6;
+
+/**
+ * Give each kept obligation an id that names WHAT it is, never where it
+ * ranked: `O-` + a short hash of its family, the path of its introducing
+ * site, and that site's quoted source (not its line — an edit above the site
+ * must not rename it), plus its evidence types.
+ *
+ * Why not `O-<rank position>`: the id is printed inside every survey request
+ * (`units-render.ts`), and the survey's reply cache keys on the request's
+ * hash. A positional id renumbered every obligation below one that was newly
+ * minted or re-ranked, so a re-review of a PR with ten changed files re-asked
+ * 205 of 214 units (nearform/unwind-next#15, 2026-11-03). Priority lives in
+ * `rank` and in the document's array order, never in the id.
+ *
+ * Two obligations with the same identity (rare — one site minting the same
+ * family twice) are told apart by `-2`, `-3`… in introduced-line, then
+ * mechanism order, so the numbering is deterministic for one input.
+ */
+export function assignObligationIds(obligations: Obligation[]): void {
+  const identity = (o: Obligation): string =>
+    [
+      "obligation-id-v1",
+      o.family,
+      o.introducedAt.path,
+      o.introducedAt.quote.replace(/\s+$/, ""),
+      [...new Set(o.evidence.map((e) => e.type))].sort().join(","),
+    ].join("\n");
+  const byBase = new Map<string, Obligation[]>();
+  for (const o of obligations) {
+    const base = `O-${createHash("sha256").update(identity(o)).digest("hex").slice(0, OBLIGATION_ID_HEX)}`;
+    const group = byBase.get(base);
+    if (group) group.push(o);
+    else byBase.set(base, [o]);
+  }
+  for (const [base, group] of byBase) {
+    group
+      .sort((a, b) => a.introducedAt.line - b.introducedAt.line || a.mechanism.localeCompare(b.mechanism))
+      .forEach((o, i) => {
+        o.id = i === 0 ? base : `${base}-${i + 1}`;
+      });
+  }
+}
+
 /**
  * Build the obligation document from an `all` envelope.
  *
@@ -923,9 +974,7 @@ export function seedObligations(
     );
   }
 
-  kept.forEach((o, i) => {
-    o.id = `O-${String(i + 1).padStart(3, "0")}`;
-  });
+  assignObligationIds(kept);
 
   const counts = new Map<SeedFamily, number>();
   for (const o of kept) counts.set(o.family, (counts.get(o.family) ?? 0) + 1);

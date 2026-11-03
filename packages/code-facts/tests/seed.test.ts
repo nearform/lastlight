@@ -8,6 +8,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  assignObligationIds,
   seedObligations,
   validateObligation,
   type Obligation,
@@ -424,7 +425,7 @@ describe("per-family obligation ceilings", () => {
     ).toBeUndefined();
   });
 
-  it("emits in rank order, so the ids still ascend with the ranking", () => {
+  it("emits in rank order; the order lives in the array, not the id", () => {
     // The ceiling decides WHICH obligations survive; it never reorders them.
     const seeded = seedObligations(mixed(4, 2));
     expect(seeded.obligations.map((o) => o.family)).toEqual([
@@ -435,14 +436,41 @@ describe("per-family obligation ceilings", () => {
       "security",
       "security",
     ]);
-    expect(seeded.obligations.map((o) => o.id)).toEqual([
-      "O-001",
-      "O-002",
-      "O-003",
-      "O-004",
-      "O-005",
-      "O-006",
-    ]);
+    const ids = seeded.obligations.map((o) => o.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const id of ids) expect(id).toMatch(/^O-[0-9a-f]{6}(-\d+)?$/);
+  });
+
+  it("keeps every obligation's id when another is minted above it", () => {
+    // The id is printed in the survey request, whose hash is the reply cache
+    // key. With positional ids one new contract obligation renumbered both
+    // security ones below it, so their unchanged units missed the cache.
+    const before = seedObligations(mixed(4, 2)).obligations;
+    const after = seedObligations(mixed(5, 2)).obligations;
+    expect(after).toHaveLength(before.length + 1);
+    const idOf = (os: typeof before) => new Map(os.map((o) => [`${o.family} ${o.introducedAt.path}`, o.id]));
+    const was = idOf(before);
+    for (const [identity, id] of idOf(after)) {
+      if (was.has(identity)) expect(id).toBe(was.get(identity));
+    }
+  });
+
+  it("numbers obligations that share an identity, deterministically", () => {
+    const twin = (line: number, mechanism: string) => ({
+      id: "",
+      family: "state" as const,
+      mechanism,
+      introducedAt: { path: "src/a.ts", line, quote: "export const x = 1" },
+      enforcedAt: { candidates: [], found: false as const },
+      question: "q",
+      evidence: [{ type: "symbol", ref: "facts.symbols[0]" }],
+      discharge: "quote" as const,
+      rank: 1,
+    });
+    const os = [twin(9, "b"), twin(3, "a")];
+    assignObligationIds(os);
+    expect(os[1]!.id).toMatch(/^O-[0-9a-f]{6}$/);
+    expect(os[0]!.id).toBe(`${os[1]!.id}-2`);
   });
 
   it("records minted and cap per family, so 'truncated' needs no prose join", () => {

@@ -290,6 +290,71 @@ const TAG = /^L(\d{4,})\s*?([+ ])\|/;
 
 // ── the assembler ────────────────────────────────────────────────────────────
 
+/**
+ * The survey's reply cache keys on each unit's request hash, and the request
+ * prints the unit's id and its obligations' ids. With positional ids
+ * (`u-NNN`, `O-NNN`) one unit appearing early in file order renumbered every
+ * unit after it: a re-review of nearform/unwind-next#15 with ten changed
+ * files re-asked 205 of 214 units. A unit whose code did not change must
+ * render byte-identically whatever else the PR gained.
+ */
+describe("units — ids are stable when another unit appears", () => {
+  let before: Fixture;
+  let after: Fixture;
+
+  beforeAll(() => {
+    before = makeUnitsFixture();
+    after = makeFixture(
+      "units-grown",
+      {
+        message: "base",
+        files: {
+          "tsconfig.json": TSCONFIG,
+          "package.json": JSON.stringify({ name: "fixture-units", version: "1.0.0" }),
+          "src/log.ts": `export function log(msg: string): void {\n  void msg;\n}\n`,
+          "src/limits.ts": LIMITS_BASE,
+          "src/app.ts": APP,
+          "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+        },
+      },
+      {
+        message: "head",
+        files: {
+          // Sorts before every existing unit, so a positional id shifts them all.
+          "src/aaa.ts": `export const FIRST = 1;\n`,
+          "src/limits.ts": LIMITS_HEAD,
+          "pnpm-lock.yaml": "lockfileVersion: '9.0'\n# changed\n",
+        },
+      },
+    );
+  });
+  afterAll(() => {
+    before.cleanup();
+    after.cleanup();
+  });
+
+  it("keeps every unchanged unit's id and request bytes", () => {
+    const build = (f: Fixture) =>
+      buildUnits({ dir: workspace(f, factsFor(f), OBLIGATIONS, "stable"), repo: f.dir }).document;
+    const a = build(before);
+    const b = build(after);
+    expect(b.units.length).toBe(a.units.length + 1);
+    expect(b.units[0]!.file).toBe("src/aaa.ts");
+    const byKey = (d: UnitsDocument) => new Map(d.units.map((u) => [u.key, u]));
+    const was = byKey(a);
+    let compared = 0;
+    for (const [key, u] of byKey(b)) {
+      const old = was.get(key);
+      // The pr unit's overview lists every changed file, so it legitimately changes.
+      if (!old || u.kind === "pr") continue;
+      expect(u.id, key).toBe(old.id);
+      expect(u.requestSha256, key).toBe(old.requestSha256);
+      compared++;
+    }
+    expect(compared).toBe(a.units.length - 1);
+  });
+});
+
 describe("units — the assembler", () => {
   let fixture: Fixture;
   let dir: string;
@@ -303,13 +368,15 @@ describe("units — the assembler", () => {
   afterAll(() => fixture.cleanup());
 
   it("makes one symbol unit per changed function or method, one module unit per loose region, and one pr unit", () => {
-    const shape = doc.units.map((u) => [u.id, u.kind, u.file, u.symbol, u.lines]);
+    const shape = doc.units.map((u) => [u.kind, u.file, u.symbol, u.lines]);
     expect(shape).toEqual([
-      ["u-001", "module", "src/limits.ts", null, [3, 3]],
-      ["u-002", "symbol", "src/limits.ts", "checkUpload", [6, 10]],
-      ["u-003", "symbol", "src/limits.ts", "Store.put", [19, 22]],
-      ["u-004", "pr", null, null, null],
+      ["module", "src/limits.ts", null, [3, 3]],
+      ["symbol", "src/limits.ts", "checkUpload", [6, 10]],
+      ["symbol", "src/limits.ts", "Store.put", [19, 22]],
+      ["pr", null, null, null],
     ]);
+    for (const u of doc.units) expect(u.id).toMatch(/^u-[0-9a-f]{6}$/);
+    expect(new Set(doc.units.map((u) => u.id)).size).toBe(doc.units.length);
     // `Store.get` did not change, so it is no unit; the lockfile is skipped by name, and says so.
     expect(doc.units.some((u) => u.symbol === "Store.get")).toBe(false);
     expect(doc.skipped.map((s) => s.file)).toEqual(["pnpm-lock.yaml"]);
@@ -361,16 +428,16 @@ describe("units — the assembler", () => {
   });
 
   it("attaches each obligation to the unit that holds it, and the rest to the pr unit", () => {
-    const owner = (id: string) => doc.units.find((u) => u.obligationIds.includes(id))?.id;
-    expect(owner("O-001")).toBe("u-001"); // the constant's line → the module region
-    expect(owner("O-002")).toBe("u-002"); // a contract delta → the symbol it names
-    expect(owner("O-003")).toBe("u-003"); // a class obligation → the method its hunks touch
-    expect(owner("O-004")).toBe("u-004"); // not in the diff → the pr unit
+    const owner = (id: string) => doc.units.find((u) => u.obligationIds.includes(id));
+    expect(owner("O-001")?.kind).toBe("module"); // the constant's line → the module region
+    expect(owner("O-002")?.symbol).toBe("checkUpload"); // a contract delta → the symbol it names
+    expect(owner("O-003")?.symbol).toBe("Store.put"); // a class obligation → the method its hunks touch
+    expect(owner("O-004")?.kind).toBe("pr"); // not in the diff → the pr unit
     // Every obligation exactly once across the document.
     const all = doc.units.flatMap((u) => u.obligationIds).sort();
     expect(all).toEqual(["O-001", "O-002", "O-003", "O-004"]);
     // `families` is the attached obligations' families.
-    expect(unitOf(doc, (u) => u.id === "u-003").families).toEqual(["state"]);
+    expect(unitOf(doc, (u) => u.symbol === "Store.put").families).toEqual(["state"]);
     // The request names every attached id.
     for (const unit of doc.units) for (const id of unit.obligationIds) expect(unit.request).toContain(id);
   });
@@ -642,7 +709,7 @@ describe("units-ingest", () => {
       obligation: "O-002",
       discharge: "QUOTE",
       source: "units",
-      unitId: "u-002",
+      unitId: unitOf(doc, (u) => u.symbol === "checkUpload").id,
       bothEnds: { introducedAt: "src/limits.ts:1", enforcedAt: "src/limits.ts:8" },
       quotes: [{ path: "src/limits.ts", line: 6, text: "export function checkUpload(size: number, strict = false): boolean {" }],
     });
@@ -1713,13 +1780,16 @@ describe("units — a large unit is surveyed once per family", () => {
     expect(new Set(shown).size).toBe(1);
   });
 
-  it("gives siblings deterministic ids the core handler accepts, beside their parent's number", () => {
+  it("gives siblings deterministic ids the core handler accepts, beside their parent's id", () => {
     const big = siblings();
+    const parent = big[0]!.splitOf!;
+    expect(parent).toMatch(/^u-[0-9a-f]{6}$/);
     for (const u of big) {
-      expect(u.splitOf).toBe("u-001");
-      expect(u.id).toBe(`u-001-${u.family}`);
+      expect(u.splitOf).toBe(parent);
+      expect(u.id).toBe(`${parent}-${u.family}`);
     }
-    expect(doc.units.map((u) => u.id)).toEqual([...big.map((u) => u.id), "u-002"]);
+    const mid = doc.units.find((u) => u.symbol === "mid")!;
+    expect(doc.units.map((u) => u.id)).toEqual([...big.map((u) => u.id), mid.id]);
     for (const u of doc.units) expect(SAFE_UNIT_ID.test(u.id), u.id).toBe(true);
     const again = buildUnits({ dir, repo: fixture.dir }).document;
     expect(again.units).toEqual(doc.units);
@@ -1761,12 +1831,17 @@ describe("units — a large unit is surveyed once per family", () => {
       expect(unsplit.units.some((u) => u.family)).toBe(false);
       const split = buildUnits({ dir: specDir, repo: small.dir, familySplitLines: 1 }).document;
       const check = split.units.filter((u) => u.symbol === "checkUpload");
-      expect(check.map((u) => u.id)).toEqual(ALWAYS_ASKED.map((f) => `u-002-${f}`));
+      const parent = check[0]!.splitOf!;
+      expect(check.map((u) => u.id)).toEqual(ALWAYS_ASKED.map((f) => `${parent}-${f}`));
+      // Splitting renames nothing else: every other unit keeps its unsplit id.
+      const unsplitIds = new Map(unsplit.units.map((u) => [`${u.kind} ${u.symbol}`, u.id]));
+      expect(parent).toBe(unsplitIds.get("symbol checkUpload"));
+      for (const u of split.units.filter((x) => !x.family)) expect(u.id).toBe(unsplitIds.get(`${u.kind} ${u.symbol}`));
       expect(check.find((u) => u.obligationIds.includes("S-1"))?.family).toBe("spec");
       expect(check.find((u) => u.obligationIds.includes("O-002"))?.family).toBe("contract");
       expect(split.units.flatMap((u) => u.obligationIds).sort()).toEqual([...OBLIGATIONS.map((o) => o.id), "S-1"].sort());
-      // The pr unit keeps its place after the split parent's number.
-      expect(split.units.at(-1)).toMatchObject({ kind: "pr", id: "u-004" });
+      // The pr unit still comes last.
+      expect(split.units.at(-1)?.kind).toBe("pr");
     } finally {
       small.cleanup();
     }
