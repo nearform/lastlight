@@ -141,6 +141,42 @@ describe("runSimpleWorkflow — duplicate trigger on a live run (issue #488)", (
 
     expect(mockRunWorkflow).toHaveBeenCalledOnce();
   });
+
+  it("an approved gate still resumes when the paused scheduler takes longer than five minutes", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await seedRunningRow("waiting_approval");
+      const releaseOld = markRunLive(RUN_ID);
+
+      const pending = dispatch(db);
+      // The old scheduler is stuck on a slow gate-message post well past any
+      // fixed handoff deadline. The approval must not be dropped meanwhile.
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      releaseOld();
+      await pending;
+
+      expect(mockRunWorkflow).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("parks a gate resume when the run finished while it waited", async () => {
+    // Another dispatch already resumed this run and its scheduler is now
+    // finishing it. Once that scheduler returns, the run is done — the waiter
+    // must not start the run again.
+    await seedRunningRow("waiting_approval");
+    const releaseOther = markRunLive(RUN_ID);
+
+    const pending = dispatch(db);
+    await new Promise((r) => setTimeout(r, 10));
+    await db.runs.finishRun(RUN_ID, "succeeded");
+    releaseOther();
+    const result = await pending;
+
+    expect(mockRunWorkflow).not.toHaveBeenCalled();
+    expect(result).toEqual({ success: true, paused: true, phases: [] });
+  });
 });
 
 describe("runSimpleWorkflow — duplicate trigger before the new run's scheduler starts (issue #488)", () => {

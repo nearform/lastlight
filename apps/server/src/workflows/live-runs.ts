@@ -84,11 +84,16 @@ export function isRunLive(runId: string): boolean {
 /**
  * Resolve once `runId` is no longer live (every registration released), or
  * after `timeoutMs`. `true` when it stopped, `false` on timeout. A run that is
- * not live resolves `true` at once.
+ * not live resolves `true` at once. With no `timeoutMs` it waits for the stop
+ * however long that takes (never `Infinity`: `setTimeout` clamps it to ~1 ms).
  */
-export async function waitForRunToStop(runId: string, timeoutMs: number): Promise<boolean> {
+export async function waitForRunToStop(runId: string, timeoutMs?: number): Promise<boolean> {
   const done = live.get(runId)?.done;
   if (!done) return true;
+  if (timeoutMs === undefined) {
+    await done;
+    return true;
+  }
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<false>((resolve) => {
     timer = setTimeout(() => resolve(false), timeoutMs);

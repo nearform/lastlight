@@ -1128,14 +1128,6 @@ interface LiveHold {
   release: () => void;
 }
 
-/**
- * How long a gate resume waits for the scheduler that paused the run to return.
- * The pause is committed before that scheduler posts the gate message, so an
- * approval can land while it is still live; it has no phase left to run, only
- * those posts to finish.
- */
-const GATE_HANDOFF_WAIT_MS = 5 * 60_000;
-
 async function runSimpleWorkflowBody(
   hold: LiveHold,
   workflowName: string,
@@ -1312,7 +1304,7 @@ async function runSimpleWorkflowBody(
   if (existingRun && existingRun.workflowName === workflowName) {
     const claimed = await claimExistingRun(existingRun, db);
     if (!claimed) {
-      simpleLog.info("Duplicate trigger for a live run — not starting a second scheduler", {
+      simpleLog.info("Run is live or already handled — not starting a second scheduler", {
         runId: existingRun.id,
         workflowName,
       });
@@ -1694,7 +1686,14 @@ async function runSimpleWorkflowBody(
  * `waiting_approval` has committed its pause and has no phase left to run, but
  * its scheduler is still posting the gate message. An approval that lands in
  * that window must resume the run once the old scheduler returns — refusing it
- * would leave the row `running` with no scheduler at all.
+ * would leave the row `running` with no scheduler at all. The wait has no
+ * deadline for the same reason: a slow post must delay the approval, never
+ * drop it.
+ *
+ * After the wait the row decides. Still at `waiting_approval` and live-able
+ * (`running` or `paused`) → claim it. Anything else means another dispatch
+ * already resumed the run and its scheduler moved it on or finished it, so this
+ * one must not start it again.
  */
 async function claimExistingRun(
   run: WorkflowRun,
@@ -1702,16 +1701,16 @@ async function claimExistingRun(
 ): Promise<{ release: () => void; run: WorkflowRun } | null> {
   let current = run;
   if (run.currentPhase === "waiting_approval" && isRunLive(run.id)) {
-    const stopped = await waitForRunToStop(run.id, GATE_HANDOFF_WAIT_MS);
-    if (!stopped) {
-      simpleLog.warn("Paused scheduler did not return in time — not resuming", {
-        runId: run.id,
-        waitedMs: GATE_HANDOFF_WAIT_MS,
-      });
+    await waitForRunToStop(run.id);
+    const now = await db.runs.getRun(run.id);
+    if (
+      !now ||
+      now.currentPhase !== "waiting_approval" ||
+      (now.status !== "running" && now.status !== "paused")
+    ) {
+      return null;
     }
-    // The row may have moved while we waited (an approval flipping it to
-    // `running`), so decide on what it says now.
-    current = (await db.runs.getRun(run.id)) ?? run;
+    current = now;
   }
   const release = claimRun(current.id);
   return release ? { release, run: current } : null;
