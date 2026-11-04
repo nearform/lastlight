@@ -10,13 +10,21 @@
  * runs no `git` in it, follows no link, and reads only regular, singly-linked
  * files, within a size and count cap.
  */
-import { closeSync, constants, lstatSync, openSync, readdirSync, readFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
+import { join, relative, sep } from "node:path";
 import { isBotOwnedBranch } from "agentic-pi/dist/bot-branches.js";
 
 const NOTES_DIR = ".lastlight";
 
 export type NotesRefusal = "symlink" | "hardlink" | "not_regular" | "too_large" | "too_many";
+
+/** A note held a secret: nothing was published. */
+export class NotesSecretError extends Error {
+  constructor(readonly path: string) {
+    super(`refusing to publish notes: ${path} holds a secret`);
+    this.name = "NotesSecretError";
+  }
+}
 
 export interface NotesGitHub {
   getBranchTip(owner: string, repo: string, branch: string): Promise<string | null>;
@@ -31,6 +39,43 @@ export interface NotesGitHub {
     additions: { path: string; contents: string }[];
     deletions: { path: string }[];
   }): Promise<{ oid: string }>;
+}
+
+/** Where an open fd really points: `/proc/self/fd` on Linux (race-free), else realpath. */
+function openedPath(fd: number, abs: string): string | null {
+  try {
+    return readlinkSync(`/proc/self/fd/${fd}`);
+  } catch {
+    try {
+      return realpathSync(abs);
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * Read one note, or null. The walk's lstat can be stale by the time of the
+ * open (a parent directory swapped for a link), so the decision is made on the
+ * opened fd: it must be a regular, singly-linked file within the size cap, and
+ * really inside `rootReal`.
+ */
+export function openNoteUnder(abs: string, rootReal: string, maxBytes: number): Buffer | null {
+  let fd: number;
+  try {
+    fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    return null;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.nlink > 1 || st.size > maxBytes) return null;
+    const real = openedPath(fd, abs);
+    if (!real || !real.startsWith(rootReal + sep)) return null;
+    return readFileSync(fd);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** The notes under `<workspace>/.lastlight/`, as repo-relative paths, sorted. */
@@ -55,6 +100,7 @@ export async function readNotesDir(
     return { files, refused };
   }
 
+  const rootReal = realpathSync(root);
   const stack = [root];
   while (stack.length > 0) {
     const dir = stack.pop()!;
@@ -69,12 +115,9 @@ export async function readNotesDir(
       else if (st.size > maxBytes) refused.push({ path: rel, reason: "too_large" });
       else {
         if (files.length >= maxFiles) return { files: [], refused: [{ path: NOTES_DIR, reason: "too_many" }] };
-        const fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
-        try {
-          files.push({ path: rel, contents: readFileSync(fd) });
-        } finally {
-          closeSync(fd);
-        }
+        const contents = openNoteUnder(abs, rootReal, maxBytes);
+        if (contents) files.push({ path: rel, contents });
+        else refused.push({ path: rel, reason: "not_regular" });
       }
     }
   }
@@ -90,6 +133,8 @@ export async function publishClaudeNotes(opts: {
   /** The checkout root on the host; the notes are its `.lastlight/` tree. */
   workspace: string;
   message: string;
+  /** Checked on the exact bytes about to be sent; a hit publishes nothing. */
+  holdsSecret?: (contents: Buffer) => boolean;
 }): Promise<{ published: boolean; oid?: string; refused: string[] }> {
   if (isBotOwnedBranch(opts.branch)) {
     throw new Error(`refusing to publish notes to ${opts.branch}: a dependency bot owns that branch`);
@@ -97,6 +142,8 @@ export async function publishClaudeNotes(opts: {
   const { files, refused } = await readNotesDir(opts.workspace);
   const refusedPaths = refused.map((r) => `${r.path} (${r.reason})`);
   if (files.length === 0) return { published: false, refused: refusedPaths };
+  const secret = opts.holdsSecret && files.find((f) => opts.holdsSecret!(f.contents));
+  if (secret) throw new NotesSecretError(secret.path);
 
   const { gh, owner, repo, branch } = opts;
   let tip = await gh.getBranchTip(owner, repo, branch);

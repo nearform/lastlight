@@ -1,8 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, readFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { findTokenLeak, redactTokenFiles, scanTreeForToken } from "#src/engine/claude-code/leak-scan.js";
+import { findTokenLeak, redactInSandbox, scanTreeForToken } from "#src/engine/claude-code/leak-scan.js";
 
 const TOKEN = "sk-ant-oat01-ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
@@ -38,7 +38,7 @@ describe("scanTreeForToken", () => {
     const dir = tree();
     writeFileSync(join(dir, "repo", "src", "leak.ts"), `const t = "${TOKEN}";`);
     writeFileSync(join(dir, ".lastlight", "issue-7", "architect-plan.md"), `token: ${TOKEN}`);
-    expect(scanTreeForToken(dir, TOKEN).sort()).toEqual([".lastlight/issue-7/architect-plan.md", "repo/src/leak.ts"]);
+    expect(scanTreeForToken(dir, TOKEN).hits.sort()).toEqual([".lastlight/issue-7/architect-plan.md", "repo/src/leak.ts"]);
   });
 
   it("skips .git and node_modules, and never follows a link", () => {
@@ -48,15 +48,39 @@ describe("scanTreeForToken", () => {
     const outside = mkdtempSync(join(tmpdir(), "leak-outside-"));
     writeFileSync(join(outside, "secret"), TOKEN);
     symlinkSync(join(outside, "secret"), join(dir, "repo", "src", "link"));
-    expect(scanTreeForToken(dir, TOKEN)).toEqual([]);
+    expect(scanTreeForToken(dir, TOKEN).hits).toEqual([]);
   });
 
-  it("redacts the files it found, in place", () => {
+  it("finds the token at the end of a file larger than one read", () => {
     const dir = tree();
-    writeFileSync(join(dir, ".lastlight", "issue-7", "architect-plan.md"), `token: ${TOKEN}`);
-    redactTokenFiles(dir, [".lastlight/issue-7/architect-plan.md"]);
-    expect(readFileSync(join(dir, ".lastlight", "issue-7", "architect-plan.md"), "utf8")).toBe(
-      "[redacted: contained the Claude token]\n",
-    );
+    writeFileSync(join(dir, "repo", "big.log"), Buffer.concat([Buffer.alloc(9 * 1024 * 1024, 120), Buffer.from(TOKEN)]));
+    expect(scanTreeForToken(dir, TOKEN).hits).toEqual(["repo/big.log"]);
+  });
+
+  it("finds a token split across two reads", () => {
+    const dir = tree();
+    const chunk = 1024 * 1024;
+    writeFileSync(join(dir, "repo", "split.bin"), Buffer.concat([Buffer.alloc(chunk - 10, 120), Buffer.from(TOKEN)]));
+    expect(scanTreeForToken(dir, TOKEN).hits).toEqual(["repo/split.bin"]);
+  });
+
+  it("reports an incomplete scan when the file cap is hit, rather than clean", () => {
+    const dir = tree();
+    for (let i = 0; i < 5; i++) writeFileSync(join(dir, "repo", `f${i}.txt`), "x");
+    expect(scanTreeForToken(dir, TOKEN, { maxFiles: 3 }).incomplete).toBe(true);
+    expect(scanTreeForToken(dir, TOKEN).incomplete).toBe(false);
+  });
+});
+
+describe("redactInSandbox", () => {
+  it("overwrites the files from inside the sandbox, never through a host path", async () => {
+    const exec = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
+    await redactInSandbox({ exec, stream: vi.fn() } as never, "/home/agent/workspace", ["repo/.env", "-odd name"]);
+    expect(exec).toHaveBeenCalledTimes(1);
+    const [argv, opts] = exec.mock.calls[0]! as unknown as [string[], { cwd: string }];
+    expect(argv.slice(0, 2)).toEqual(["sh", "-c"]);
+    expect(argv.slice(-2)).toEqual(["./repo/.env", "./-odd name"]);
+    expect(argv[2]).toContain("[ -L");
+    expect(opts.cwd).toBe("/home/agent/workspace");
   });
 });

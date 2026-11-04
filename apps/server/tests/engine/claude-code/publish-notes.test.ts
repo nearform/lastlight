@@ -1,9 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
-import { linkSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "fs";
+import { linkSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "fs";
 import { execFileSync } from "child_process";
 import { join } from "path";
 import { tmpdir } from "os";
-import { publishClaudeNotes, readNotesDir, type NotesGitHub } from "#src/engine/claude-code/publish-notes.js";
+import { NotesSecretError, openNoteUnder, publishClaudeNotes, readNotesDir, type NotesGitHub } from "#src/engine/claude-code/publish-notes.js";
 
 function workspace() {
   const dir = mkdtempSync(join(tmpdir(), "notes-"));
@@ -69,6 +69,17 @@ describe("readNotesDir", () => {
     expect(refused).toEqual([{ path: ".lastlight", reason: "symlink" }]);
   });
 
+  it("never reads a file reached through a directory swapped for a link after the walk saw it", () => {
+    const ws = workspace();
+    const outside = mkdtempSync(join(tmpdir(), "outside-"));
+    writeFileSync(join(outside, "app-key.pem"), "PRIVATE");
+    symlinkSync(outside, join(ws, ".lastlight", "swapped"));
+    const root = realpathSync(join(ws, ".lastlight"));
+    expect(openNoteUnder(join(ws, ".lastlight", "swapped", "app-key.pem"), root, 1024)).toBeNull();
+    writeFileSync(join(ws, ".lastlight", "issue-7", "ok.md"), "ok");
+    expect(openNoteUnder(join(ws, ".lastlight", "issue-7", "ok.md"), root, 1024)?.toString()).toBe("ok");
+  });
+
   it("caps size and count", async () => {
     const ws = workspace();
     writeFileSync(join(ws, ".lastlight", "issue-7", "big.md"), Buffer.alloc(2 * 1024 * 1024));
@@ -118,6 +129,17 @@ describe("publishClaudeNotes", () => {
   it("publishes nothing for an empty dir", async () => {
     const gh = fakeGh();
     expect(await publishClaudeNotes({ ...base, gh, workspace: workspace() })).toEqual({ published: false, refused: [] });
+    expect(gh.calls).toEqual([]);
+  });
+
+  it("refuses to publish a note holding the secret, checked on the bytes it would send", async () => {
+    const ws = workspace();
+    writeFileSync(join(ws, ".lastlight", "issue-7", "ok.md"), "fine");
+    writeFileSync(join(ws, ".lastlight", "issue-7", "env.md"), "TOKEN=sk-secret");
+    const gh = fakeGh();
+    await expect(
+      publishClaudeNotes({ ...base, gh, workspace: ws, holdsSecret: (b) => b.includes("sk-secret") }),
+    ).rejects.toThrow(NotesSecretError);
     expect(gh.calls).toEqual([]);
   });
 

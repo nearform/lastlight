@@ -174,7 +174,7 @@ describe("runClaudeCodeSession", () => {
     expect(port.clock).toBeGreaterThanOrEqual(60_000);
     expect(port.clock).toBeLessThan(70_000);
     expect(port.argvs().some((a) => a[1] === "paste-buffer")).toBe(false);
-    expect(port.argvs().at(-1)).toEqual(["tmux", "kill-session", "-t", "ll"]);
+    expect(port.argvs().slice(-2)).toEqual([["tmux", "kill-session", "-t", "ll"], ["sh", "-c", "kill -KILL -1 2>/dev/null; true"]]);
   });
 
   it("returns done on the Stop marker", async () => {
@@ -189,7 +189,7 @@ describe("runClaudeCodeSession", () => {
     expect(events[0]).toMatchObject({ type: "session" });
     expect(events.some((e) => e.type === "message_end")).toBe(true);
     expect(port.streamStopped).toBe(true);
-    expect(port.argvs().at(-1)).toEqual(["tmux", "kill-session", "-t", "ll"]);
+    expect(port.argvs().slice(-2)).toEqual([["tmux", "kill-session", "-t", "ll"], ["sh", "-c", "kill -KILL -1 2>/dev/null; true"]]);
   });
 
   it("fails stalled after stallMinutes without transcript growth", async () => {

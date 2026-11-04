@@ -199,13 +199,47 @@ describe("executeAgent on a claude-code model", () => {
       o.onEvent({ type: "message_end", sessionId: SESSION, message: { role: "assistant", content: [{ type: "text", text: "Done." }] } });
       return { kind: "done", sessionId: SESSION };
     });
-    const { result, fake } = await run();
+    fakePort.exec.mockClear();
+    const { result } = await run();
     expect(result).toMatchObject({ success: false, stopReason: "error_secret_leak" });
     expect(result.error).toContain(".lastlight/issue-7/architect-plan.md");
-    expect(readFileSync(join(fake.hostWorkspaceDir, ".lastlight", "issue-7", "architect-plan.md"), "utf8")).toBe(
-      "[redacted: contained the Claude token]\n",
-    );
+    // redacted from inside the sandbox, never written through a host path
+    const redact = fakePort.exec.mock.calls.find((c) => (c[0] as string[]).includes(".lastlight/issue-7/architect-plan.md") || (c[0] as string[]).some((a) => a.endsWith("architect-plan.md")));
+    expect(redact).toBeDefined();
     expect(JSON.stringify(result)).not.toContain("TESTTOKEN");
+  });
+
+  it.each([
+    [{ kind: "failed", reason: "stalled" }],
+    [{ kind: "usage_limit", resetsAt: null }],
+  ])("checks the workspace for the token on a %o outcome too", async (outcome) => {
+    sessionSpy.mockImplementation(async (_port, o) => {
+      writeFileSync(join(o.cwd, "env.txt"), String(process.env.CLAUDE_CODE_OAUTH_TOKEN));
+      return { ...outcome, sessionId: SESSION };
+    });
+    const { result } = await run();
+    expect(result).toMatchObject({ success: false, stopReason: "error_secret_leak" });
+  });
+
+  it("checks the workspace when the session runner throws", async () => {
+    sessionSpy.mockImplementation(async (_port, o) => {
+      writeFileSync(join(o.cwd, "env.txt"), String(process.env.CLAUDE_CODE_OAUTH_TOKEN));
+      throw new Error("docker exec died");
+    });
+    const { result } = await run();
+    expect(result).toMatchObject({ success: false, stopReason: "error_secret_leak" });
+  });
+
+  it("fails closed when a note holds the token at publish time", async () => {
+    emitsBasicSession();
+    const actual = await vi.importActual<typeof import("#src/engine/claude-code/publish-notes.js")>("#src/engine/claude-code/publish-notes.js");
+    publishSpy.mockImplementation(async (o: { holdsSecret?: (b: Buffer) => boolean }) => {
+      expect(o.holdsSecret?.(Buffer.from(`x ${process.env.CLAUDE_CODE_OAUTH_TOKEN}`))).toBe(true);
+      expect(o.holdsSecret?.(Buffer.from("clean"))).toBe(false);
+      throw new actual.NotesSecretError(".lastlight/issue-7/x.md");
+    });
+    const { result } = await run({ access: true, buildAssets: "repo" });
+    expect(result).toMatchObject({ success: false, stopReason: "error_secret_leak" });
   });
 
   it("fails a phase whose final answer holds the token, without returning it", async () => {

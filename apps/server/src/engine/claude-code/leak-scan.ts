@@ -8,14 +8,16 @@
  * disguised token.
  *
  * The workspace is read on the host as plain files: no `git`, no link ever
- * followed, `.git` and `node_modules` skipped, oversized files skipped.
+ * followed, `.git` and `node_modules` skipped. No publish path reads `.git`
+ * objects: `github_publish` and the host's notes commit send working-tree files.
  */
-import { closeSync, constants, lstatSync, openSync, readdirSync, readFileSync, writeSync } from "node:fs";
+import { closeSync, constants, lstatSync, openSync, readdirSync, readSync } from "node:fs";
 import { join, relative } from "node:path";
+import type { ClaudeCodeExecPort } from "../../sandbox/sandbox.js";
 
 export const REDACTED = "[redacted: contained the Claude token]\n";
 const PREFIX_CHARS = 24;
-const MAX_FILE_BYTES = 8 * 1024 * 1024;
+const CHUNK_BYTES = 1024 * 1024;
 const MAX_FILES = 100_000;
 const SKIP_DIRS = new Set([".git", "node_modules"]);
 
@@ -40,10 +42,21 @@ export function findTokenLeak(token: string, sources: { name: string; text: stri
   return null;
 }
 
-/** Workspace-relative paths of regular files holding the token. */
-export function scanTreeForToken(root: string, token: string): string[] {
+/**
+ * Workspace-relative paths of regular files holding the token. Files are read
+ * in chunks (overlapping by a needle's length), so size never hides a hit.
+ * `incomplete` is true when the file cap stopped the walk: the caller must
+ * treat that as "not known clean", never as clean.
+ */
+export function scanTreeForToken(
+  root: string,
+  token: string,
+  opts: { maxFiles?: number } = {},
+): { hits: string[]; incomplete: boolean } {
+  const maxFiles = opts.maxFiles ?? MAX_FILES;
   const ns = needles(token).map((n) => Buffer.from(n));
-  if (ns.length === 0) return [];
+  if (ns.length === 0) return { hits: [], incomplete: false };
+  const overlap = Math.max(...ns.map((n) => n.length)) - 1;
   const hits: string[] = [];
   const stack = [root];
   let seen = 0;
@@ -67,37 +80,51 @@ export function scanTreeForToken(root: string, token: string): string[] {
         if (!SKIP_DIRS.has(name)) stack.push(abs);
         continue;
       }
-      if (!st.isFile() || st.size > MAX_FILE_BYTES) continue;
-      if (++seen > MAX_FILES) return hits;
-      let buf: Buffer;
-      try {
-        const fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
-        try {
-          buf = readFileSync(fd);
-        } finally {
-          closeSync(fd);
-        }
-      } catch {
-        continue;
-      }
-      if (ns.some((n) => buf.includes(n))) hits.push(relative(root, abs));
+      if (!st.isFile()) continue;
+      if (++seen > maxFiles) return { hits, incomplete: true };
+      if (fileHolds(abs, ns, overlap)) hits.push(relative(root, abs));
     }
   }
-  return hits;
+  return { hits, incomplete: false };
 }
 
-/** Overwrite each listed file (workspace-relative) with a redaction note; links are never written through. */
-export function redactTokenFiles(root: string, paths: string[]): void {
-  for (const p of paths) {
-    try {
-      const fd = openSync(join(root, p), constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW);
-      try {
-        writeSync(fd, REDACTED);
-      } finally {
-        closeSync(fd);
-      }
-    } catch {
-      // A file that vanished or turned into a link is not published either way.
+function fileHolds(abs: string, ns: Buffer[], overlap: number): boolean {
+  let fd: number;
+  try {
+    fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    return false;
+  }
+  try {
+    const buf = Buffer.alloc(CHUNK_BYTES + overlap);
+    let kept = 0;
+    for (;;) {
+      const n = readSync(fd, buf, kept, CHUNK_BYTES, null);
+      if (n <= 0) return false;
+      const view = buf.subarray(0, kept + n);
+      if (ns.some((needle) => view.includes(needle))) return true;
+      kept = Math.min(overlap, view.length);
+      view.copy(buf, 0, view.length - kept);
     }
+  } catch {
+    return false;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Overwrite each listed file (workspace-relative) with a redaction note, from
+ * INSIDE the sandbox as its own user: the tree is sandbox-written, so the host
+ * never writes through a path in it (a swapped-in link could aim a host write
+ * anywhere). A link is skipped; a failure is ignored, as the phase fails anyway.
+ */
+export async function redactInSandbox(port: ClaudeCodeExecPort, sandboxRoot: string, paths: string[]): Promise<void> {
+  if (paths.length === 0) return;
+  const script = `for f; do [ -L "$f" ] || { [ -f "$f" ] && printf '%s' '${REDACTED.trimEnd()}' > "$f"; }; done; true`;
+  try {
+    await port.exec(["sh", "-c", script, "sh", ...paths.map((p) => `./${p}`)], { cwd: sandboxRoot });
+  } catch {
+    // nothing to add: the phase is already failing on the leak
   }
 }

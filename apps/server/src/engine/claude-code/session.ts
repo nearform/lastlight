@@ -164,6 +164,9 @@ export async function runClaudeCodeSession(
   } finally {
     stream?.stop();
     await port.exec(["tmux", "kill-session", "-t", TMUX_SESSION]).catch(() => undefined);
+    // Anything the session left running (a background job) dies too, so it
+    // cannot change the workspace after the harness has checked it.
+    await port.exec(["sh", "-c", "kill -KILL -1 2>/dev/null; true"]).catch(() => undefined);
   }
 }
 

@@ -1,4 +1,4 @@
-import { basename, dirname, join } from "path";
+import { basename, dirname, join, relative } from "path";
 import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { resolveAuthFile } from "../oauth.js";
 import { randomUUID } from "crypto";
@@ -54,9 +54,9 @@ import {
   claudeCodeModelId,
   isClaudeCodeModel,
 } from "../claude-code/model-ref.js";
-import { runClaudeCodeSession, type ClaudeCodeOutcome } from "../claude-code/session.js";
-import { findTokenLeak, redactTokenFiles, scanTreeForToken, scrubToken } from "../claude-code/leak-scan.js";
-import { publishClaudeNotes, readNotesDir } from "../claude-code/publish-notes.js";
+import { runClaudeCodeSession, type ClaudeCodeExecPort, type ClaudeCodeOutcome } from "../claude-code/session.js";
+import { findTokenLeak, redactInSandbox, scanTreeForToken, scrubToken } from "../claude-code/leak-scan.js";
+import { NotesSecretError, publishClaudeNotes, readNotesDir } from "../claude-code/publish-notes.js";
 import { GitHubClient } from "agentic-pi/dist/extensions/github/client.js";
 import {
   DEFAULT_MODEL,
@@ -459,7 +459,10 @@ export async function runAgentIn(
         // The raw final answer is remembered to check it before it is used.
         let lastAnswerRaw = "";
         const keep = claudeTranscriptKeeper(ctx);
-        const outcome = await runClaudeCodeSession(sandbox.claudeCodePort!(ctx.taskId), {
+        const port = sandbox.claudeCodePort!(ctx.taskId);
+        let outcome: ClaudeCodeOutcome;
+        try {
+          outcome = await runClaudeCodeSession(port, {
           model: claudeCodeModelId(model),
           prompt,
           cwd: prov.agentCwd,
@@ -473,19 +476,28 @@ export async function runAgentIn(
           },
           onRawLine: (line) => keep(token ? scrubToken(line, token) : line),
         });
+        } catch (err: unknown) {
+          // Whatever the session got to write is checked on every way out.
+          const leak = await claudeCodeLeaks(token, lastAnswerRaw, prov, port);
+          if (leak) {
+            tree.end();
+            return await claudeCodeStop("error_secret_leak", leak, "", shim, startTime, ctx, model);
+          }
+          throw err;
+        }
+        const leak = await claudeCodeLeaks(token, lastAnswerRaw, prov, port);
+        if (leak) {
+          tree.end();
+          return await claudeCodeStop("error_secret_leak", leak, outcome.sessionId ?? "", shim, startTime, ctx, model);
+        }
         if (outcome.kind !== "done") {
           tree.end();
           return await claudeCodeFailure(outcome, shim, startTime, ctx, model);
         }
-        const leaked = claudeCodeLeaks(token, lastAnswerRaw, prov.hostWorkspaceDir);
-        if (leaked) {
+        const publishStop = await publishClaudeNotesFor(ctx, prov, token);
+        if (publishStop) {
           tree.end();
-          return await claudeCodeLeakFailure(leaked, outcome.sessionId, shim, startTime, ctx, model);
-        }
-        const publishError = await publishClaudeNotesFor(ctx, prov);
-        if (publishError) {
-          tree.end();
-          return await claudeCodeStop("error_publish", publishError, outcome.sessionId, shim, startTime, ctx, model);
+          return await claudeCodeStop(publishStop.stopReason, publishStop.error, outcome.sessionId, shim, startTime, ctx, model);
         }
         onEvent({ type: "agent_end" });
       } else {
@@ -732,29 +744,34 @@ function assistantText(e: SandboxEvent): string {
 }
 
 /**
- * Where the token turned up in what this phase would hand on: its final
- * answer, or any file in the workspace (those found are redacted in place).
- * Null when clean.
+ * Check what this phase would hand on for the token: its final answer, and
+ * every file in the workspace. Files that hold it are redacted from inside the
+ * sandbox. A walk the file cap cut short fails closed. Returns the phase's
+ * error message, or null when clean.
  */
-function claudeCodeLeaks(token: string, finalAnswer: string, workspace: string): string | null {
+async function claudeCodeLeaks(
+  token: string,
+  finalAnswer: string,
+  prov: ProvisionResult,
+  port: ClaudeCodeExecPort,
+): Promise<string | null> {
   if (!token) return null;
-  if (findTokenLeak(token, [{ name: "final answer", text: finalAnswer }])) return "the final answer";
-  const files = scanTreeForToken(workspace, token);
-  if (files.length === 0) return null;
-  redactTokenFiles(workspace, files);
-  return files.slice(0, 5).join(", ") + (files.length > 5 ? ` and ${files.length - 5} more` : "");
-}
-
-function claudeCodeLeakFailure(
-  where: string,
-  sessionId: string,
-  shim: AgenticShim,
-  startTime: number,
-  ctx: SandboxRunContext,
-  model: string,
-): Promise<ExecutionResult> {
-  const error = `The Claude Code phase's output contained the Claude token (in ${where}); it was redacted and nothing was published`;
-  return claudeCodeStop("error_secret_leak", error, sessionId, shim, startTime, ctx, model);
+  if (findTokenLeak(token, [{ name: "final answer", text: finalAnswer }])) {
+    return "The Claude Code phase's output contained the Claude token (in the final answer); nothing was published";
+  }
+  const { hits, incomplete } = scanTreeForToken(prov.hostWorkspaceDir, token);
+  if (hits.length > 0) {
+    const rel = relative(prov.hostWorkspaceDir, prov.hostAgentCwd).split("\\").join("/");
+    const root = !rel ? prov.agentCwd : prov.agentCwd.endsWith(`/${rel}`) ? prov.agentCwd.slice(0, -rel.length - 1) : null;
+    if (root) await redactInSandbox(port, root, hits);
+    else log.warn("Could not map the workspace into the sandbox to redact it");
+    const where = hits.slice(0, 5).join(", ") + (hits.length > 5 ? ` and ${hits.length - 5} more` : "");
+    return `The Claude Code phase's output contained the Claude token (in ${where}); it was redacted and nothing was published`;
+  }
+  if (incomplete) {
+    return "The Claude Code phase's workspace has too many files to check for the Claude token; nothing was published";
+  }
+  return null;
 }
 
 /**
@@ -762,7 +779,11 @@ function claudeCodeLeakFailure(
  * the host, since the Claude session had no way to. Returns an error message,
  * or null when published (or when there is nothing to do).
  */
-async function publishClaudeNotesFor(ctx: SandboxRunContext, prov: ProvisionResult): Promise<string | null> {
+async function publishClaudeNotesFor(
+  ctx: SandboxRunContext,
+  prov: ProvisionResult,
+  claudeToken: string,
+): Promise<{ stopReason: string; error: string } | null> {
   if (ctx.config.buildAssets === "server") return null;
   const access = ctx.access;
   const branch = access?.prePopulateBranch;
@@ -770,7 +791,10 @@ async function publishClaudeNotesFor(ctx: SandboxRunContext, prov: ProvisionResu
     const { files } = await readNotesDir(prov.hostAgentCwd);
     return files.length === 0
       ? null
-      : "The Claude Code phase wrote notes but this run has no branch or GitHub token to publish them with";
+      : {
+          stopReason: "error_publish",
+          error: "The Claude Code phase wrote notes but this run has no branch or GitHub token to publish them with",
+        };
   }
   const token = ctx.hostGitToken;
   const client = new GitHubClient({ getToken: async () => token, expiresAt: null, canRefresh: false });
@@ -792,6 +816,7 @@ async function publishClaudeNotesFor(ctx: SandboxRunContext, prov: ProvisionResu
       branch,
       workspace: prov.hostAgentCwd,
       message: `docs(lastlight): ${ctx.config.telemetry?.phaseName ?? "phase"} notes`,
+      holdsSecret: (b) => !!claudeToken && findTokenLeak(claudeToken, [{ name: "note", text: b.toString("latin1") }]) !== null,
     });
     if (out.refused.length > 0) log.warn("Claude Code notes skipped", { refused: out.refused });
     if (out.published && out.oid) {
@@ -801,7 +826,16 @@ async function publishClaudeNotesFor(ctx: SandboxRunContext, prov: ProvisionResu
     }
     return null;
   } catch (err: unknown) {
-    return `Publishing the Claude Code phase's notes failed: ${err instanceof Error ? err.message : String(err)}`;
+    if (err instanceof NotesSecretError) {
+      return {
+        stopReason: "error_secret_leak",
+        error: `The Claude Code phase's notes contained the Claude token (in ${err.path}); nothing was published`,
+      };
+    }
+    return {
+      stopReason: "error_publish",
+      error: `Publishing the Claude Code phase's notes failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
 }
 
