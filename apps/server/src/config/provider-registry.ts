@@ -66,7 +66,7 @@ export function resetProviderRegistry(): void {
 export { PROVIDER_OVERRIDES_ENV };
 
 /** One endpoint override in agentic-pi's wire shape. */
-interface WireEndpoint {
+export interface WireEndpoint {
   baseUrl: string;
   api: string;
   /**
