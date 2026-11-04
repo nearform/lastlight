@@ -21,6 +21,7 @@ import {
   type ProviderOverride,
   type ProviderOverrides,
 } from "lastlight-shared/providers";
+import { parseClaudeCodeConfig, type ClaudeCodeConfig } from "../engine/claude-code/model-ref.js";
 import { installProviderOverrides } from "./provider-registry.js";
 import { HOST_READABLE_WORKSPACE } from "../workflows/handlers/host-repo-dir.js";
 import type { SandboxBackend, BuildAssetsLocation, OtelConfig } from "lastlight-workflow-engine";
@@ -241,6 +242,8 @@ export interface LastLightConfig {
   buildAssets: BuildAssetsLocation;
   /** Filesystem root for server-mode build assets (default $STATE_DIR/build-assets). */
   buildAssetsDir: string;
+  /** Session settings for roles on the `claude-code/` runtime (`claudeCode:` block). */
+  claudeCode: ClaudeCodeConfig;
   /**
    * Core-version pin the overlay declares (`deploy.version` in config.yaml, or
    * the `LASTLIGHT_CORE_VERSION` env override). A git tag/ref (e.g. `v0.10.6`)
@@ -1201,6 +1204,7 @@ export function loadConfig(): LastLightConfig {
     kubernetes: fileCfg.kubernetes,
     buildAssets,
     buildAssetsDir,
+    claudeCode: fileCfg.claudeCode,
     deploy: fileCfg.deploy,
     managedRepos: fileCfg.managedRepos,
     routes: fileCfg.routes,
@@ -1258,6 +1262,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   sandbox: { backend: SandboxBackend; maxTurns: number };
   kubernetes?: Partial<KubernetesConfig>;
   buildAssets: BuildAssetsLocation;
+  claudeCode: ClaudeCodeConfig;
   database: { url?: string; driver?: PgDriver; poolMax?: number };
   deploy: { version: string | null };
   approval: Record<string, boolean>;
@@ -1731,6 +1736,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     sandbox: { backend, maxTurns },
     kubernetes,
     buildAssets,
+    claudeCode: parseClaudeCodeConfig(raw.claudeCode),
     database: { url: databaseUrl, driver: databaseDriver, poolMax: databasePoolMax },
     deploy: { version: deployVersion },
     approval,
