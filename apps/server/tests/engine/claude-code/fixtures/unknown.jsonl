@@ -1,0 +1,7 @@
+{"type":"summary","summary":"Earlier work","leafUuid":"x"}
+{"type":"file-history-snapshot","messageId":"m","snapshot":{}}
+not json at all
+{"type":"assistant","sessionId":"s"}
+{"type":"user","message":"plain string, not an object"}
+{"type":"assistant","message":{"role":"assistant","content":"not an array"}}
+[1,2,3]
