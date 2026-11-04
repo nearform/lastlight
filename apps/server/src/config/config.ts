@@ -1082,6 +1082,7 @@ export function loadConfig(): LastLightConfig {
   });
   const variants = fileCfg.variants;
   const sandbox = fileCfg.sandbox.backend;
+  assertSandboxGatewaySupported(fileCfg.providers, sandbox);
   const maxTurns = fileCfg.sandbox.maxTurns;
   const buildAssets = fileCfg.buildAssets;
   const buildAssetsDir = resolve(
@@ -2079,9 +2080,30 @@ function normalizeProviderOverrides(raw: unknown): ProviderOverrides {
     } else if (headers !== undefined && headers !== null) {
       throw new Error(`providers.${prefix}.headers must be a map of header name → value`);
     }
+    const sandboxGateway = value.sandboxGateway;
+    if (typeof sandboxGateway === "boolean") entry.sandboxGateway = sandboxGateway;
+    else if (sandboxGateway !== undefined && sandboxGateway !== null) {
+      throw new Error(`providers.${prefix}.sandboxGateway must be true or false`);
+    }
     out[prefix] = entry as ProviderOverride;
   }
   return out;
+}
+
+/**
+ * `sandboxGateway` hides a provider's key behind the docker model-gateway
+ * sidecar. smol and kubernetes have no such sidecar, and handing them the key
+ * anyway would break the promise the flag makes, so the boot fails instead.
+ * gondolin and none call the provider host-side, where the key already lives.
+ */
+function assertSandboxGatewaySupported(providers: ProviderOverrides, backend: SandboxBackend): void {
+  if (backend !== "smol" && backend !== "kubernetes") return;
+  const gated = Object.entries(providers).filter(([, o]) => o.sandboxGateway === true).map(([p]) => p);
+  if (gated.length === 0) return;
+  throw new Error(
+    `providers.${gated[0]}.sandboxGateway is only supported on the docker backend (sandbox.backend is ` +
+      `"${backend}"). Remove it, or run the docker backend.`,
+  );
 }
 
 function parseBool(raw: string | undefined): boolean {

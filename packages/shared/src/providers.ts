@@ -365,6 +365,14 @@ export interface ProviderOverride {
    * does. See {@link normalizeProviderHeaders} for what is refused.
    */
   readonly headers?: Readonly<Record<string, string>>;
+  /**
+   * Custom providers only, docker backend only: the sandbox never holds this
+   * provider's key. Docker runs get a placeholder key and reach the provider
+   * through the model-gateway sidecar, which adds the real key and `headers`
+   * on the way out (and the provider's host leaves the sandbox allowlist).
+   * Host-side callers (the in-process helpers, gondolin, none) are unchanged.
+   */
+  readonly sandboxGateway?: boolean;
 }
 
 export type ProviderOverrides = Readonly<Record<string, ProviderOverride>>;
@@ -388,6 +396,8 @@ export interface ProviderEndpoint {
   readonly contextWindow?: number;
   readonly maxTokens?: number;
   readonly headers?: Readonly<Record<string, string>>;
+  /** Set only when the override said `sandboxGateway: true` (custom providers). */
+  readonly sandboxGateway?: true;
 }
 
 /**
@@ -585,6 +595,14 @@ export function resolveProviderRegistry(
           `built in. Declare a new prefix with baseUrl + api + envKey + headers and use it in models:.`,
       );
     }
+    // Refused for the same reason: a built-in's in-sandbox endpoint is pi's own,
+    // so there is no baseUrl here the gateway could stand in for.
+    if (override.sandboxGateway) {
+      throw new Error(
+        `providers.${spec.prefix}.sandboxGateway is only supported on a provider of your own: "${spec.prefix}" is ` +
+          `built in. Declare a new prefix with baseUrl + api + envKey + sandboxGateway and use it in models:.`,
+      );
+    }
     const baseUrl = override.baseUrl
       ? normalizeProviderBaseUrl(override.baseUrl, { prefix: spec.prefix, allowInsecure: opts.allowInsecure })
       : spec.baseUrl;
@@ -647,6 +665,7 @@ export function resolveProviderRegistry(
       contextWindow: override.contextWindow,
       maxTokens: override.maxTokens,
       ...(hasHeaders ? { headers } : {}),
+      ...(override.sandboxGateway === true ? { sandboxGateway: true as const } : {}),
     });
   }
 
