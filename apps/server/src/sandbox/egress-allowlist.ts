@@ -112,6 +112,25 @@ export function defaultAllowlist(): readonly string[] {
 }
 
 /**
+ * The docker backend's strict allowlist: {@link defaultAllowlist} minus every
+ * host that only `sandboxGateway` providers use. Those providers are reached
+ * through the model-gateway sidecar, which has its own egress, so the sandbox
+ * has no reason to resolve or reach them directly. A host another provider
+ * still calls directly stays. kubernetes and gondolin keep reading
+ * {@link defaultAllowlist}.
+ */
+export function dockerSandboxAllowlist(): readonly string[] {
+  const registry = providerRegistry();
+  const gated = new Set(registry.endpoints.filter((e) => e.sandboxGateway === true).map((e) => e.prefix));
+  if (gated.size === 0) return defaultAllowlist();
+  const direct = new Set(registry.providers.filter((p) => !gated.has(p.prefix)).map((p) => p.host));
+  const gatewayOnly = new Set(
+    registry.providers.filter((p) => gated.has(p.prefix) && !direct.has(p.host)).map((p) => p.host),
+  );
+  return defaultAllowlist().filter((h) => !gatewayOnly.has(h));
+}
+
+/**
  * Sentinel value recognized by agentic-pi/gondolin (post the `"*"` patch)
  * meaning "allow every host". Used when a phase sets `unrestricted_egress`.
  *
