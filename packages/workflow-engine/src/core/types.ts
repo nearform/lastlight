@@ -310,6 +310,11 @@ export interface ExecutionResult {
   extensions?: ExtensionStatusMap;
   /** Skill-loading status captured from agentic-pi's `skills_status` event. */
   skills?: SkillsStatus;
+  /**
+   * When `stopReason` is `usage_limit`: the ISO time the provider's usage
+   * window resets, i.e. the earliest a retry can succeed.
+   */
+  retryAfter?: string;
 }
 
 // ── Git sandbox access (was in engine/github/profiles.ts) ────────────────────

@@ -35,6 +35,8 @@ import {
   type SandboxSession,
 } from "./executors/orchestrator.js";
 import { logger } from "../logging/logger.js";
+import { CLAUDE_CODE_DEFAULTS, CLAUDE_CODE_NEEDS_DOCKER, isClaudeCodeModel } from "./claude-code/model-ref.js";
+import { sandboxEnvForClaudeCode } from "./claude-code/sandbox-env.js";
 
 const log = logger("executor");
 // Re-exported for back-compat with existing importers (tests, dashboards,
@@ -108,10 +110,33 @@ async function prepareRun(
   mintError?: string;
   /** Which of the two failure modes {@link mintFailureResult} should describe. */
   mintErrorKind?: MintErrorKind;
+  /** A configuration problem that makes this phase impossible to run; fail it before provisioning. */
+  setupError?: string;
 }> {
   const taskId = opts?.taskId || `task-${randomUUID().slice(0, 8)}`;
   const stateDir = config.stateDir || resolve("data");
   const backend: SandboxBackend = config.sandbox ?? "gondolin";
+
+  // A `claude-code/` phase runs the Claude Code CLI in the docker sandbox,
+  // signed in with the operator's own token. Both are hard requirements.
+  const claudeCode = isClaudeCodeModel(config.model);
+  if (claudeCode) {
+    if (backend !== "docker") {
+      return { taskId, stateDir, backend, ghEnv: {}, setupError: CLAUDE_CODE_NEEDS_DOCKER };
+    }
+    const tokenEnv = (getRuntimeConfig()?.claudeCode ?? CLAUDE_CODE_DEFAULTS).tokenEnv;
+    if (!process.env[tokenEnv]) {
+      return {
+        taskId,
+        stateDir,
+        backend,
+        ghEnv: {},
+        setupError:
+          `claude-code models need ${tokenEnv} set on the Last Light server ` +
+          "(the token from `claude setup-token`)",
+      };
+    }
+  }
 
   // Mint a scoped GitHub App token. Same flow as the legacy executor —
   // defense in depth so a downstream tool gating regression can't burn
@@ -351,7 +376,18 @@ async function prepareRun(
         }
       : undefined;
 
-  return { taskId, stateDir, backend, ghEnv, mintedToken, prePopulate, mintError, mintErrorKind };
+  // The Claude phase's container gets the Claude token and nothing GitHub- or
+  // provider-shaped: the host keeps the minted token for the pre-clone above
+  // and for publishing what the phase wrote.
+  const sandboxEnv = claudeCode
+    ? sandboxEnvForClaudeCode(
+        ghEnv,
+        process.env[(getRuntimeConfig()?.claudeCode ?? CLAUDE_CODE_DEFAULTS).tokenEnv]!,
+        providerRegistry().envKeys,
+      )
+    : ghEnv;
+
+  return { taskId, stateDir, backend, ghEnv: sandboxEnv, mintedToken, prePopulate, mintError, mintErrorKind };
 }
 
 /**
@@ -421,9 +457,13 @@ export async function executeAgent(
     sandboxFactory?: SandboxFactory;
   },
 ): Promise<ExecutionResult> {
-  const { taskId, stateDir, backend, ghEnv, prePopulate, mintError, mintErrorKind } =
+  const { taskId, stateDir, backend, ghEnv, prePopulate, mintError, mintErrorKind, setupError } =
     await prepareRun(config, opts);
   const access = opts?.githubAccess;
+
+  if (setupError) {
+    return { success: false, output: "", turns: 0, durationMs: 0, stopReason: "error_fatal", error: setupError };
+  }
 
   // Fail fast: an expected-but-failed token mint means no github_* tools (and a
   // doomed pre-clone). Don't burn a sandbox on a toolless run.
@@ -494,9 +534,10 @@ export async function withAgentSession<T>(
   },
   fn: (session: SandboxSession) => Promise<T>,
 ): Promise<T> {
-  const { taskId, stateDir, backend, ghEnv, prePopulate, mintError, mintErrorKind } =
+  const { taskId, stateDir, backend, ghEnv, prePopulate, mintError, mintErrorKind, setupError } =
     await prepareRun(config, opts);
   const access = opts.githubAccess;
+  if (setupError) throw new Error(setupError);
 
   // Fail fast, exactly as executeAgent does — except here the cost of not doing
   // so is N toolless sessions rather than one.

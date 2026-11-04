@@ -320,3 +320,50 @@ describe("DockerSandbox.create — /data/proxy is masked (model gateway key)", (
     expect(argv.indexOf(mask)).toBeGreaterThan(argv.findIndex((a) => a.endsWith(":/data")));
   });
 });
+
+describe("DockerSandbox.claudeCodePort", () => {
+  let manager: DockerSandbox;
+  let fakeChild: ReturnType<typeof makeFakeChild>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fakeChild = makeFakeChild();
+    mockSpawn.mockReturnValue(fakeChild as unknown as ReturnType<typeof spawn>);
+    manager = new DockerSandbox({ imageName: "test-image", env: {} });
+    (manager as unknown as { activeContainers: Map<string, unknown> }).activeContainers.set("task-001", {
+      containerId: "abc123",
+      containerName: "test-container",
+      worktreePath: "/tmp/work",
+    });
+  });
+
+  it("execs argv as agent, stdin piped, resolving with the exit code", async () => {
+    const port = manager.claudeCodePort("task-001");
+    const p = port.exec(["tmux", "load-buffer", "-"], { stdin: "/exit", cwd: "/home/agent/workspace/repo" });
+    process.nextTick(() => {
+      fakeChild.stdout.emit("data", "ok");
+      fakeChild.emit("close", 3);
+    });
+    await expect(p).resolves.toEqual({ code: 3, stdout: "ok", stderr: "" });
+    expect(mockSpawn.mock.calls[0][1]).toEqual([
+      "exec", "-i", "--user", "agent", "-w", "/home/agent/workspace/repo", "test-container", "tmux", "load-buffer", "-",
+    ]);
+    expect(fakeChild.stdin.write).toHaveBeenCalledWith("/exit");
+  });
+
+  it("refuses a cwd outside the workspace", () => {
+    const port = manager.claudeCodePort("task-001");
+    expect(() => port.exec(["true"], { cwd: "/etc" })).toThrow(/workspace/);
+  });
+
+  it("streams stdout lines until stopped", async () => {
+    const port = manager.claudeCodePort("task-001");
+    const lines: string[] = [];
+    const s = port.stream(["tail", "-F", "x"], (l) => lines.push(l));
+    fakeChild.stdout.emit("data", "a\nb");
+    fakeChild.stdout.emit("data", "c\n");
+    s.stop();
+    expect(lines).toEqual(["a", "bc"]);
+    expect(fakeChild.kill).toHaveBeenCalled();
+  });
+});

@@ -7,6 +7,7 @@ import { AGENTIC_PROFILES, type GitAccessProfile } from "../engine/github/profil
 import { logger } from "../logging/logger.js";
 import { CGROUP_USAGE_SCRIPT, parseUsageLine, type ResourceUsage } from "./resource-usage.js";
 import type { ServiceSet } from "lastlight-shared/sandbox-services";
+import type { ClaudeCodeExecPort } from "./sandbox.js";
 import {
   buildServiceRunArgs,
   serviceContainerName,
@@ -550,6 +551,78 @@ export class DockerSandbox {
    * intend to run. Env is forwarded via `docker exec -e KEY=VALUE` (argv, not
    * shell-interpolated); keys are charset-asserted defensively.
    */
+  /**
+   * Raw process access for the `claude-code` runtime: `docker exec -i --user
+   * agent [-w cwd] <container> <argv…>`. argv goes straight to docker (no host
+   * shell); stdin carries any payload (a prompt, a settings file) so it never
+   * appears in argv. Output is capped — callers read short status text.
+   */
+  claudeCodePort(taskId: string): ClaudeCodeExecPort {
+    const info = this.activeContainers.get(taskId);
+    if (!info) throw new Error(`No sandbox for task ${taskId}`);
+    const OUT_CAP = 64 * 1024;
+    const argsFor = (argv: string[], cwd?: string): string[] => {
+      if (cwd !== undefined && (!cwd.startsWith(WORKSPACE_DIR) || !/^[A-Za-z0-9/_.-]+$/.test(cwd))) {
+        throw new Error(`Refusing cwd "${cwd}" — must live under ${WORKSPACE_DIR}`);
+      }
+      return ["exec", "-i", "--user", "agent", ...(cwd ? ["-w", cwd] : []), info.containerName, ...argv];
+    };
+    return {
+      exec: (argv, opts) => {
+        const args = argsFor(argv, opts?.cwd);
+        return new Promise((resolvePromise, reject) => {
+          const child = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] });
+          let stdout = "";
+          let stderr = "";
+          const timer = opts?.timeoutMs
+            ? setTimeout(() => child.kill("SIGKILL"), opts.timeoutMs)
+            : undefined;
+          child.stdout.setEncoding("utf-8");
+          child.stderr.setEncoding("utf-8");
+          child.stdout.on("data", (c: string) => {
+            if (stdout.length < OUT_CAP) stdout += c;
+          });
+          child.stderr.on("data", (c: string) => {
+            if (stderr.length < OUT_CAP) stderr += c;
+          });
+          child.on("error", (err) => {
+            if (timer) clearTimeout(timer);
+            reject(new Error(`docker exec failed: ${err.message}`));
+          });
+          child.on("close", (code) => {
+            if (timer) clearTimeout(timer);
+            resolvePromise({ code: code ?? 1, stdout, stderr });
+          });
+          if (opts?.stdin !== undefined) child.stdin.write(opts.stdin);
+          child.stdin.end();
+        });
+      },
+      stream: (argv, onLine) => {
+        const child = spawn("docker", argsFor(argv), { stdio: ["pipe", "pipe", "pipe"] });
+        child.stdin.end();
+        let buf = "";
+        child.stdout.setEncoding("utf-8");
+        child.stdout.on("data", (chunk: string) => {
+          buf += chunk;
+          let nl: number;
+          while ((nl = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, nl);
+            buf = buf.slice(nl + 1);
+            if (line.length > 0) {
+              try { onLine(line); } catch { /* a listener error must not end the stream */ }
+            }
+          }
+        });
+        child.stderr.on("data", () => {});
+        const done = new Promise<number>((r) => {
+          child.on("close", (code) => r(code ?? 1));
+          child.on("error", () => r(1));
+        });
+        return { stop: () => child.kill("SIGKILL"), done };
+      },
+    };
+  }
+
   async runCommand(
     taskId: string,
     command: string,

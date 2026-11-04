@@ -8,6 +8,8 @@
 
 export const CLAUDE_CODE_PREFIX = "claude-code/";
 
+export const CLAUDE_CODE_NEEDS_DOCKER = "claude-code models need sandbox: docker";
+
 export interface ClaudeCodeConfig {
   /** Env var on the harness that holds the operator's `claude setup-token` token. */
   tokenEnv: string;

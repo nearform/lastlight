@@ -46,6 +46,14 @@ import { recordError, recordExecutionMetrics, setSpanAttributes } from "../../te
 import { AgentSpanTree, recordPiEvent } from "../../telemetry/pi-events.js";
 import { OI, llmTokenAttributes } from "../../telemetry/openinference.js";
 import { logger } from "../../logging/logger.js";
+import { appendFileSync, chmodSync } from "fs";
+import {
+  CLAUDE_CODE_DEFAULTS,
+  CLAUDE_CODE_NEEDS_DOCKER,
+  claudeCodeModelId,
+  isClaudeCodeModel,
+} from "../claude-code/model-ref.js";
+import { runClaudeCodeSession, type ClaudeCodeOutcome } from "../claude-code/session.js";
 import {
   DEFAULT_MODEL,
   RunResultAccumulator,
@@ -359,6 +367,11 @@ export async function runAgentIn(
   const thinking = coerceThinking(config.variant);
   const profile = access ? AGENTIC_PROFILE_FOR[access.profile] : undefined;
   const sessionsDir = resolveSessionsDir(config);
+  const claudeCode = isClaudeCodeModel(model);
+  if (claudeCode) {
+    const refusal = claudeCodeRefusal(sandbox, prompt, config.telemetry?.phaseName);
+    if (refusal) return { success: false, output: "", turns: 0, durationMs: 0, stopReason: "error_fatal", error: refusal };
+  }
 
   return await (async () => {
     log.info("Running agent", { taskId: ctx.taskId, sandbox: ctx.backend });
@@ -429,7 +442,23 @@ export async function runAgentIn(
 
     let returned;
     try {
-      returned = await sandbox.runAgent(
+      if (claudeCode) {
+        const outcome = await runClaudeCodeSession(sandbox.claudeCodePort!(ctx.taskId), {
+          model: claudeCodeModelId(model),
+          prompt,
+          cwd: prov.agentCwd,
+          skillDirs,
+          config: getRuntimeConfig()?.claudeCode ?? CLAUDE_CODE_DEFAULTS,
+          timeoutSeconds: ctx.agentTimeoutSeconds ?? getSandboxTimeouts().agentTimeoutSeconds,
+          onEvent,
+          onRawLine: claudeTranscriptKeeper(ctx),
+        });
+        if (outcome.kind !== "done") {
+          tree.end();
+          return await claudeCodeFailure(outcome, shim, startTime, ctx, model);
+        }
+        onEvent({ type: "agent_end" });
+      } else returned = await sandbox.runAgent(
         ctx.taskId,
         prompt,
         {
@@ -545,6 +574,104 @@ export async function runAgentIn(
     });
     return finalResult;
   })();
+}
+
+// ── claude-code runtime ─────────────────────────────────────────────
+
+/** A GitHub tool named in a prompt: the Claude session has none of them. */
+const GITHUB_TOOL_RE = /\bgithub_[a-z][a-z_]*/;
+
+/**
+ * Why a `claude-code` phase cannot run here, or null. Checked before anything
+ * is provisioned so an operator's misconfiguration fails in seconds.
+ */
+function claudeCodeRefusal(sandbox: Sandbox, prompt: string, phase: string | undefined): string | null {
+  if (sandbox.backend !== "docker" || typeof sandbox.claudeCodePort !== "function") return CLAUDE_CODE_NEEDS_DOCKER;
+  if (GITHUB_TOOL_RE.test(prompt)) {
+    return `claude-code is not supported for the ${phase ?? "this"} phase yet: it needs GitHub tools`;
+  }
+  return null;
+}
+
+/** Where a claude-code phase's raw transcript is kept, so a later attempt can resume it. */
+export function claudeTranscriptPath(stateDir: string, runKey: string, phase: string | undefined): string {
+  const safe = (v: string) => v.replace(/[^A-Za-z0-9._-]/g, "_");
+  return join(stateDir, "claude-code", safe(runKey), `${safe(phase ?? "phase")}.jsonl`);
+}
+
+function claudeTranscriptKeeper(ctx: SandboxRunContext): (line: string) => void {
+  const file = claudeTranscriptPath(ctx.stateDir, ctx.access?.runId ?? basename(ctx.taskId), ctx.config.telemetry?.phaseName);
+  let ready = false;
+  return (line) => {
+    try {
+      if (!ready) {
+        mkdirSync(join(file, ".."), { recursive: true, mode: 0o700 });
+        ready = true;
+      }
+      appendFileSync(file, line + "\n", { mode: 0o600 });
+      chmodSync(file, 0o600);
+    } catch (err: unknown) {
+      log.warn("Could not keep the Claude transcript line", { err });
+    }
+  };
+}
+
+type ClaudeStop = "usage_limit" | Extract<ClaudeCodeOutcome, { kind: "failed" }>["reason"];
+
+const CLAUDE_FAILURE: Record<ClaudeStop, { stopReason: string; error: (o: ClaudeCodeOutcome, tokenEnv: string) => string }> = {
+  usage_limit: {
+    stopReason: "usage_limit",
+    error: (o) => {
+      const at = o.kind === "usage_limit" ? o.resetsAt : null;
+      return at ? `Claude usage limit reached; the window resets at ${at}` : "Claude usage limit reached; reset time unknown";
+    },
+  },
+  not_ready: { stopReason: "error_sandbox", error: () => "Claude Code did not reach its input prompt in time" },
+  stalled: { stopReason: "error_stalled", error: () => "Claude Code session stalled: its transcript stopped growing" },
+  timeout: { stopReason: "error_timeout", error: () => "Claude Code session hit the phase timeout" },
+  auth_failed: {
+    stopReason: "error_auth",
+    error: (_o, tokenEnv) => `Claude Code sign-in failed or expired: run \`claude setup-token\` and replace ${tokenEnv}`,
+  },
+  exited: { stopReason: "error_sandbox", error: () => "Claude Code session ended before finishing its turn" },
+};
+
+async function claudeCodeFailure(
+  outcome: Exclude<ClaudeCodeOutcome, { kind: "done" }>,
+  shim: AgenticShim,
+  startTime: number,
+  ctx: SandboxRunContext,
+  model: string,
+): Promise<ExecutionResult> {
+  const key = outcome.kind === "failed" ? outcome.reason : outcome.kind;
+  const spec = CLAUDE_FAILURE[key];
+  const tokenEnv = (getRuntimeConfig()?.claudeCode ?? CLAUDE_CODE_DEFAULTS).tokenEnv;
+  const error = spec.error(outcome, tokenEnv);
+  const durationMs = Date.now() - startTime;
+  recordExecutionMetrics("agent", {
+    "sandbox.backend": ctx.backend,
+    model,
+    success: false,
+    stop_reason: spec.stopReason,
+    durationMs,
+    "workflow.name": ctx.config.telemetry?.workflowName,
+    "phase.name": ctx.config.telemetry?.phaseName,
+  });
+  const sessionId =
+    (await shim
+      .finalizeWithFallback(emptyResult(spec.stopReason, durationMs), outcome.sessionId ?? `exec-${basename(ctx.taskId)}`, error)
+      .catch(() => null)) ??
+    outcome.sessionId;
+  return {
+    success: false,
+    output: "",
+    turns: 0,
+    error,
+    durationMs,
+    sessionId: sessionId ?? undefined,
+    stopReason: spec.stopReason,
+    ...(outcome.kind === "usage_limit" && outcome.resetsAt ? { retryAfter: outcome.resetsAt } : {}),
+  };
 }
 
 /**
