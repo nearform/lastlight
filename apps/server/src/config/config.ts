@@ -2066,6 +2066,19 @@ function normalizeProviderOverrides(raw: unknown): ProviderOverrides {
         throw new Error(`providers.${prefix}.${key} must be a positive integer`);
       }
     }
+    const headers = value.headers;
+    if (isPlainObject(headers)) {
+      for (const [name, v] of Object.entries(headers)) {
+        // YAML reads `x-flag: 1` as a number; demanding quotes keeps the value
+        // byte-exact rather than whatever String() makes of a float or a date.
+        if (typeof v !== "string") {
+          throw new Error(`providers.${prefix}.headers.${name} must be a string (quote it in YAML)`);
+        }
+      }
+      entry.headers = headers;
+    } else if (headers !== undefined && headers !== null) {
+      throw new Error(`providers.${prefix}.headers must be a map of header name → value`);
+    }
     out[prefix] = entry as ProviderOverride;
   }
   return out;

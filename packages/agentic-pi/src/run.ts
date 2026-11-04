@@ -13,7 +13,7 @@
  */
 
 import type { RunConfig } from "./args.js";
-import type { ProviderEndpointOverrides } from "./providers.js";
+import { type ProviderEndpointOverrides, validateProviderOverrides } from "./providers.js";
 import { type CommandPolicy, validateCommandPolicy } from "./command-policy.js";
 import type { GitHubAuthEnv } from "./extensions/github/auth.js";
 
@@ -420,7 +420,9 @@ export async function run(options: RunOptions): Promise<RunResult> {
     otelIncludeContent: options.otelIncludeContent,
     otelServiceName: options.otelServiceName,
     otelEndpoint: options.otelEndpoint,
-    providers: options.providers,
+    providers: options.providers
+      ? validateProviderOverrides(options.providers, "providers")
+      : undefined,
   };
 
   const collector = new CollectorSink(options.onEvent);

@@ -519,7 +519,13 @@ export function resolveModel(spec: string): Model<Api> {
   // override there, precisely so this path and `llm.ts` cannot disagree about
   // the request shape (a gateway with a different dialect declares its own
   // prefix, and takes the synthesized branch below).
-  if (model) return endpoint ? { ...model, baseUrl: endpoint.baseUrl } : model;
+  if (model) {
+    if (!endpoint) return model;
+    // Headers only ever come from a deployment-declared prefix (built-ins refuse
+    // them), but such a prefix can still be one pi-ai's catalog knows.
+    const headers = endpoint.headers ? { headers: { ...model.headers, ...endpoint.headers } } : {};
+    return { ...model, baseUrl: endpoint.baseUrl, ...headers };
+  }
   if (endpoint) {
     // A deployment-declared provider pi-ai has never heard of. Nothing to
     // inherit, so the model is synthesized from the override: its api family
@@ -537,6 +543,7 @@ export function resolveModel(spec: string): Model<Api> {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: endpoint.contextWindow ?? 128_000,
       maxTokens: endpoint.maxTokens ?? 16_384,
+      ...(endpoint.headers ? { headers: { ...endpoint.headers } } : {}),
     };
   }
   throw new Error(

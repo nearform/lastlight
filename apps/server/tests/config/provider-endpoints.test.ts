@@ -128,6 +128,25 @@ describe("providers: config block", () => {
     expect(providerRegistry().byPrefix("acme")!.baseUrl).toBe("https://json.example/v1");
   });
 
+  it("a custom provider's headers reach the sandbox payload", () => {
+    vi.stubEnv(
+      "LASTLIGHT_OVERLAY_DIR",
+      overlayWith(
+        'providers:\n  acme:\n    baseUrl: https://llm.corp.example/v1\n    headers:\n      x-retention: "none"\n',
+      ),
+    );
+    loadConfig();
+    expect(providerEndpointOverrides()!.acme.headers).toEqual({ "x-retention": "none" });
+  });
+
+  it("asks for quotes when YAML reads a header value as a number", () => {
+    vi.stubEnv(
+      "LASTLIGHT_OVERLAY_DIR",
+      overlayWith("providers:\n  acme:\n    baseUrl: https://llm.corp.example/v1\n    headers:\n      x-flag: 1\n"),
+    );
+    expect(() => loadConfig()).toThrow(/providers\.acme\.headers\.x-flag must be a string \(quote it in YAML\)/);
+  });
+
   it("fails the boot on a bad override rather than quietly using the vendor", () => {
     vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlayWith("providers:\n  anthropic:\n    baseUrl: http://gw.internal/v1\n"));
     expect(() => loadConfig()).toThrow(/non-loopback host/);
