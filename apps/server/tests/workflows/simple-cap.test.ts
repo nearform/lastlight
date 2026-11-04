@@ -338,3 +338,20 @@ describe("runSimpleWorkflow — concurrency cap (issue #172)", () => {
     expect(run.notBefore).toBe(notBefore);
   });
 });
+
+describe("runSimpleWorkflow — repo-mode notes dir", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("tells the executor which notes dir is this run's own", async () => {
+    const db = await makeDb();
+    mockRunWorkflow.mockResolvedValue({ success: true, phases: [{ phase: "socratic", success: true, output: "ok" }] });
+    await runSimpleWorkflow("explore", makeRequest(), makeConfig(), makeCallbacks(), db, undefined, undefined, "lastlight:bootstrap", undefined, {
+      maxWorkflows: 4,
+      maxQueueWaitMs: 1_800_000,
+    });
+    const runConfig = mockRunWorkflow.mock.calls[0]![2] as { notesDir?: string };
+    expect(runConfig.notesDir).toMatch(/^\.lastlight\/[^/.][^/]*$/);
+  });
+});

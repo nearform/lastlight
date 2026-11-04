@@ -22,6 +22,7 @@ import {
 } from "../notify/index.js";
 import { logger } from "../logging/logger.js";
 import { logPhaseEnd, logPhaseStart } from "../logging/phase-log.js";
+import { isNotesDir } from "../engine/claude-code/publish-notes.js";
 
 const log = logger("resume");
 
@@ -489,7 +490,9 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
         buildAssetsKey: { owner, repo, issueKey: issueDir.replace(/^(\.\.\/)?\.lastlight\//, "") },
         buildAssetsRelocated: issueDir.startsWith("../"),
       }
-    : opts.config;
+    : isNotesDir(issueDir)
+      ? { ...opts.config, notesDir: issueDir }
+      : opts.config;
 
   try {
     const result = await runWorkflow(

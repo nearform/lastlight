@@ -148,6 +148,12 @@ export interface ExecutorConfig {
    */
   buildAssetsRelocated?: boolean;
   /**
+   * Repo mode: this run's own notes dir (its `{{issueDir}}`, e.g.
+   * `.lastlight/issue-7`). A `claude-code` phase's notes are published from
+   * the host, and only from here. Unset: the whole `.lastlight/` tree.
+   */
+  notesDir?: string;
+  /**
    * Bypass the HTTP egress allowlist for this phase. When true:
    *   - gondolin: `allowedHttpHosts: ["*"]` is passed to agentic-pi.
    *   - docker:   the sandbox container uses the open CoreDNS/nginx

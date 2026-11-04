@@ -57,6 +57,7 @@ import {
 import { runClaudeCodeSession, type ClaudeCodeExecPort, type ClaudeCodeOutcome } from "../claude-code/session.js";
 import { findTokenLeak, redactInSandbox, scanTreeForToken, scrubToken } from "../claude-code/leak-scan.js";
 import { NotesSecretError, publishClaudeNotes, readNotesDir } from "../claude-code/publish-notes.js";
+import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from "../screen/screen.js";
 import { GitHubClient } from "agentic-pi/dist/extensions/github/client.js";
 import {
   DEFAULT_MODEL,
@@ -237,6 +238,7 @@ export async function withSandbox<T>(
     imageName: ctx.config.sandboxImage === "qa" ? SANDBOX_IMAGE_QA : undefined,
     otel: ctx.config.otel,
   });
+  if (ctx.backend === "docker") ensureClaudeCodeStateDir(ctx.stateDir);
   let provisioned: ProvisionResult | undefined;
   try {
     provisioned = await sandbox.provision(ctx.prePopulate);
@@ -471,6 +473,7 @@ export async function runAgentIn(
           ...(resume ? { resume } : {}),
           cwd: prov.agentCwd,
           skillDirs,
+          memory: claudeMemory(ctx),
           config: ccConfig,
           timeoutSeconds: ctx.agentTimeoutSeconds ?? getSandboxTimeouts().agentTimeoutSeconds,
           onEvent: (e) => {
@@ -637,10 +640,49 @@ const GITHUB_TOOL_RE = /\bgithub_[a-z][a-z_]*/;
  */
 function claudeCodeRefusal(sandbox: Sandbox, prompt: string, phase: string | undefined): string | null {
   if (sandbox.backend !== "docker" || typeof sandbox.claudeCodePort !== "function") return CLAUDE_CODE_NEEDS_DOCKER;
-  if (GITHUB_TOOL_RE.test(prompt)) {
+  // Quoted issue or comment text is not the phase's instructions: an issue
+  // that mentions `github_publish` must neither block nor enable a phase.
+  if (GITHUB_TOOL_RE.test(withoutUntrustedBlocks(prompt))) {
     return `claude-code is not supported for the ${phase ?? "this"} phase yet: it needs GitHub tools`;
   }
   return null;
+}
+
+/** The prompt with every fenced untrusted block cut out (an unclosed one runs to the end). */
+function withoutUntrustedBlocks(prompt: string): string {
+  let out = "";
+  let at = 0;
+  for (;;) {
+    const open = prompt.indexOf(UNTRUSTED_OPEN, at);
+    if (open < 0) return out + prompt.slice(at);
+    out += prompt.slice(at, open);
+    const close = prompt.indexOf(UNTRUSTED_CLOSE, open);
+    if (close < 0) return out;
+    at = close + UNTRUSTED_CLOSE.length;
+  }
+}
+
+/** The phase's agent context, for Claude's user memory; undefined when there is none. */
+function claudeMemory(ctx: SandboxRunContext): string | undefined {
+  try {
+    return agentContextFor(ctx.config) || undefined;
+  } catch (err: unknown) {
+    log.warn("Could not compose the agent context for the Claude Code session", { err });
+    return undefined;
+  }
+}
+
+/**
+ * Every docker sandbox masks `/data/claude-code` with an empty tmpfs. Create
+ * the mountpoint first, as the harness and private, so docker never creates
+ * it (as root) on the shared volume. Best effort.
+ */
+function ensureClaudeCodeStateDir(stateDir: string): void {
+  try {
+    mkdirSync(join(stateDir, "claude-code"), { recursive: true, mode: 0o700 });
+  } catch (err: unknown) {
+    log.warn("Could not create the claude-code state dir", { err });
+  }
 }
 
 /** Where a claude-code phase's raw transcript is kept, so a later attempt can resume it. */
@@ -688,9 +730,14 @@ async function syncOntoClaudeNotes(sandbox: Sandbox, prov: ProvisionResult, ctx:
     log.warn("Skipping the sync onto the Claude Code notes commit", { taskId: ctx.taskId });
     return;
   }
+  // The checkout was last written by an agent, so no hook or fsmonitor it may
+  // have planted runs here with the credential. What is left: git still reads
+  // the repo's own config (a remote URL, a credential helper), so this is no
+  // stronger than the phase's own git use, which already trusts that tree.
+  const git = "git -c core.hooksPath=/dev/null -c core.fsmonitor=false";
   const command =
-    `[ "$(git rev-parse --abbrev-ref HEAD)" = '${branch}' ] || exit 3; ` +
-    `git fetch origin '${branch}' && git merge-base --is-ancestor HEAD ${oid} && git reset --mixed ${oid} >/dev/null`;
+    `[ "$(${git} rev-parse --abbrev-ref HEAD)" = '${branch}' ] || exit 3; ` +
+    `${git} fetch origin '${branch}' && ${git} merge-base --is-ancestor HEAD ${oid} && ${git} reset --mixed ${oid} >/dev/null`;
   try {
     const r = await sandbox.runCommand(ctx.taskId, command, {
       cwd: prov.agentCwd,
@@ -804,7 +851,7 @@ async function claudeCodeLeaks(
   if (findTokenLeak(token, [{ name: "final answer", text: finalAnswer }])) {
     return "The Claude Code phase's output contained the Claude token (in the final answer); nothing was published";
   }
-  const { hits, incomplete } = scanTreeForToken(prov.hostWorkspaceDir, token);
+  const { hits, incomplete } = await scanTreeForToken(prov.hostWorkspaceDir, token);
   if (hits.length > 0) {
     const rel = relative(prov.hostWorkspaceDir, prov.hostAgentCwd).split("\\").join("/");
     const root = !rel ? prov.agentCwd : prov.agentCwd.endsWith(`/${rel}`) ? prov.agentCwd.slice(0, -rel.length - 1) : null;
@@ -832,8 +879,9 @@ async function publishClaudeNotesFor(
   if (ctx.config.buildAssets === "server") return null;
   const access = ctx.access;
   const branch = access?.prePopulateBranch;
+  const notesDir = ctx.config.notesDir;
   if (!access || !branch || !ctx.hostGitToken) {
-    const { files } = await readNotesDir(prov.hostAgentCwd);
+    const { files } = await readNotesDir(prov.hostAgentCwd, { dir: notesDir });
     return files.length === 0
       ? null
       : {
@@ -860,15 +908,11 @@ async function publishClaudeNotesFor(
       repo: access.repo,
       branch,
       workspace: prov.hostAgentCwd,
+      notesDir,
       message: `docs(lastlight): ${ctx.config.telemetry?.phaseName ?? "phase"} notes`,
       holdsSecret: (b) => !!claudeToken && findTokenLeak(claudeToken, [{ name: "note", text: b.toString("latin1") }]) !== null,
     });
-    if (out.refused.length > 0) log.warn("Claude Code notes skipped", { refused: out.refused });
-    if (out.published && out.oid) {
-      const file = claudePendingSyncPath(ctx);
-      mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-      writeFileSync(file, JSON.stringify({ branch, oid: out.oid }), { mode: 0o600 });
-    }
+    if (out.published && out.oid) recordPendingSync(ctx, branch, out.oid);
     return null;
   } catch (err: unknown) {
     if (err instanceof NotesSecretError) {
@@ -881,6 +925,20 @@ async function publishClaudeNotesFor(
       stopReason: "error_publish",
       error: `Publishing the Claude Code phase's notes failed: ${err instanceof Error ? err.message : String(err)}`,
     };
+  }
+}
+
+/**
+ * Remember the notes commit for the run's next agentic-pi phase. The notes are
+ * already published, so a failure here only costs that phase the fast-forward.
+ */
+function recordPendingSync(ctx: SandboxRunContext, branch: string, oid: string): void {
+  try {
+    const file = claudePendingSyncPath(ctx);
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+    writeFileSync(file, JSON.stringify({ branch, oid }), { mode: 0o600 });
+  } catch (err: unknown) {
+    log.warn("Could not record the Claude Code notes commit for the next phase", { err });
   }
 }
 

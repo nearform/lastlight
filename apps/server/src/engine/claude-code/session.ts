@@ -56,6 +56,11 @@ export interface ClaudeCodeSessionOpts {
   cwd: string;
   /** Staged skill dirs (sandbox paths); copied into Claude's skills dir. */
   skillDirs?: string[];
+  /**
+   * The phase's agent context (what agentic-pi phases get as AGENTS.md),
+   * written as Claude's user memory (`CLAUDE.md` in its config dir).
+   */
+  memory?: string;
   /** Continue an earlier session from its kept transcript instead of starting fresh. */
   resume?: { sessionId: string; lines: string[] };
   config: ClaudeCodeConfig;
@@ -72,6 +77,18 @@ export interface ClaudeCodeSessionOpts {
 /** Claude Code's project dir name for a cwd: every non-alphanumeric → `-`. */
 export function claudeProjectDir(cwd: string): string {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
+}
+
+/**
+ * The prompt as it is pasted. Control characters (other than newline and tab)
+ * are dropped, so an ESC can never end the bracketed paste early and type the
+ * rest as keys. A prompt that would open as a slash command, a shell (`!`) or
+ * a memory note (`#`) gets a neutral first line.
+ */
+export function pastablePrompt(prompt: string): string {
+  // eslint-disable-next-line no-control-regex
+  const clean = prompt.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
+  return /^\s*[/!#]/.test(clean) ? `Task:\n${clean.trimStart()}` : clean;
 }
 
 function sh(script: string, ...args: string[]): string[] {
@@ -105,6 +122,9 @@ export async function runClaudeCodeSession(
         "--model", opts.model,
         "--disallowedTools", "AskUserQuestion",
         "--settings", SETTINGS_FILE,
+        // Only the harness's own settings: a repo's .claude/settings.json
+        // (env, apiKeyHelper, hooks) never steers the session.
+        "--setting-sources", "user",
         ...resumeArgs,
       ],
       { cwd: opts.cwd },
@@ -133,8 +153,8 @@ export async function runClaudeCodeSession(
     );
 
     // The prompt goes in as a bracketed paste from a buffer: literal text, so
-    // a leading `/` or a line like `C-c` is never a command or a key.
-    await port.exec(["tmux", "load-buffer", "-b", "ll-prompt", "-"], { stdin: opts.prompt });
+    // a line like `C-c` is never a key, and a leading `/` is never a command.
+    await port.exec(["tmux", "load-buffer", "-b", "ll-prompt", "-"], { stdin: pastablePrompt(opts.prompt) });
     await port.exec(["tmux", "paste-buffer", "-p", "-d", "-b", "ll-prompt", "-t", TMUX_SESSION]);
     await sleep(500);
     await port.exec(["tmux", "send-keys", "-t", TMUX_SESSION, "Enter"]);
@@ -147,12 +167,13 @@ export async function runClaudeCodeSession(
       const done = (await port.exec(["test", "-f", DONE_MARKER])).code === 0;
       // The limit and sign-in checks come first: Claude Code ends its turn on
       // either, which fires the Stop hook too.
-      if (translator.authFailed) return { kind: "failed", reason: "auth_failed", sessionId };
-      if (translator.usageLimit) return { kind: "usage_limit", sessionId, resetsAt: translator.usageLimit.resetsAt };
+      const stopped = accountStop(translator, sessionId);
+      if (stopped) return stopped;
       if (done) {
-        // Let the last transcript lines land before the stream is stopped.
+        // Let the last transcript lines land before the stream is stopped,
+        // then look again: the limit or sign-in line may be among them.
         await sleep(pollMs);
-        return { kind: "done", sessionId };
+        return accountStop(translator, sessionId) ?? { kind: "done", sessionId };
       }
       const t = now();
       if (t - started >= timeoutMs) return { kind: "failed", reason: "timeout", sessionId };
@@ -170,6 +191,14 @@ export async function runClaudeCodeSession(
   }
 }
 
+/** The session ended on the account (sign-in failed, usage limit), or null. */
+function accountStop(translator: ClaudeTranscriptTranslator, sessionId: string): ClaudeCodeOutcome | null {
+  if (translator.authFailed) return { kind: "failed", reason: "auth_failed", sessionId };
+  const limit = translator.usageLimit;
+  if (limit) return { kind: "usage_limit", sessionId, resetsAt: limit.resetsAt };
+  return null;
+}
+
 /** Settings, skills, the resumed transcript, and a clean done marker. */
 async function prepare(port: ClaudeCodeExecPort, opts: ClaudeCodeSessionOpts, sessionId: string): Promise<void> {
   const state = {
@@ -185,6 +214,7 @@ async function prepare(port: ClaudeCodeExecPort, opts: ClaudeCodeSessionOpts, se
   await port.exec(writeFile(STATE_FILE), { stdin: JSON.stringify(state) });
   await port.exec(writeFile(SETTINGS_FILE), { stdin: JSON.stringify(settings) });
   await port.exec(["rm", "-f", DONE_MARKER]);
+  if (opts.memory) await port.exec(writeFile(`${CLAUDE_CONFIG_DIR}/CLAUDE.md`), { stdin: opts.memory });
   for (const dir of opts.skillDirs ?? []) {
     await port.exec(["mkdir", "-p", `${CLAUDE_CONFIG_DIR}/skills`]);
     await port.exec(["cp", "-R", dir, `${CLAUDE_CONFIG_DIR}/skills/${basename(dir)}`]);

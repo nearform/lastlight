@@ -657,8 +657,12 @@ operator's model reference selects it; no default and no workflow does.
 - **Backend:** `docker` only, in the same per-phase container. The image pins
   the CLI (`CLAUDE_CODE_VERSION`) and installs tmux. The CLI runs as `agent`
   in a detached tmux session with `--dangerously-skip-permissions`,
-  `--disallowedTools AskUserQuestion`, and settings that pre-answer every
-  first-run screen. A `Stop` hook marks the end of the turn. The harness
+  `--disallowedTools AskUserQuestion`, `--setting-sources user` (a repo's
+  `.claude/settings.json` is never loaded), and settings that pre-answer
+  every first-run screen. The phase's agent context is written as Claude's
+  user memory (`CLAUDE.md` in its config dir). The prompt is pasted with
+  control characters removed, and never starts with `/`, `!` or `#`. A `Stop`
+  hook marks the end of the turn. The harness
   drives it through `Sandbox.claudeCodePort()` (`docker exec -i`, with the cwd
   confined to the workspace).
 - **Env:** the container env holds `CLAUDE_CODE_OAUTH_TOKEN` (from the
@@ -678,12 +682,18 @@ operator's model reference selects it; no default and no workflow does.
   ([State](10-state.md)). The next attempt resumes the session once, with
   `continue`.
 - **Refusals:** a non-docker backend, a missing token, or a rendered prompt
-  that names a `github_*` tool fails the phase before any session starts.
-- **Notes:** in `buildAssets: repo` mode the host publishes `.lastlight/` as
-  one signed commit through the API, reading only regular, singly-linked
-  files (checked on the opened fd), with no `git` in the sandbox-written tree.
+  that names a `github_*` tool outside its quoted, untrusted blocks fails the
+  phase before any session starts.
+- **Notes:** in `buildAssets: repo` mode the host publishes the run's own
+  notes dir (`ExecutorConfig.notesDir`, its `{{issueDir}}`) as one signed
+  commit through the API. It reads only regular, singly-linked files (checked
+  on the opened fd), with no `git` in the sandbox-written tree. A file it will
+  not read fails the phase with `error_publish`, and nothing is published.
   The run's next agentic-pi phase fast-forwards its own checkout onto that
-  commit, inside its own sandbox.
+  commit, inside its own sandbox, with hooks and fsmonitor turned off.
+- **State dir:** every docker sandbox masks `/data/claude-code` with an empty
+  tmpfs. The harness creates `$STATE_DIR/claude-code` (`0700`) before a docker
+  sandbox starts, so docker never creates the mountpoint itself.
 - **Invariant: the token does not leave the phase.** After the session (on
   every exit path), every agent-user process is killed. The final answer and
   the whole workspace are then scanned for the token, its prefix and its

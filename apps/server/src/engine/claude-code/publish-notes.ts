@@ -26,6 +26,20 @@ export class NotesSecretError extends Error {
   }
 }
 
+/** A note could not be read safely (a link, a FIFO, too large…): nothing was published. */
+export class NotesRefusedError extends Error {
+  constructor(readonly refused: string[]) {
+    super(`refusing to publish notes: ${refused.join(", ")}`);
+    this.name = "NotesRefusedError";
+  }
+}
+
+/** A run's notes dir: `.lastlight` or a plain path below it, never out of it. */
+export function isNotesDir(dir: string): boolean {
+  const parts = dir.split("/");
+  return parts[0] === NOTES_DIR && parts.every((p) => p !== "" && p !== "." && p !== "..");
+}
+
 export interface NotesGitHub {
   getBranchTip(owner: string, repo: string, branch: string): Promise<string | null>;
   getDefaultBranchTip(owner: string, repo: string): Promise<string>;
@@ -78,26 +92,35 @@ export function openNoteUnder(abs: string, rootReal: string, maxBytes: number): 
   }
 }
 
-/** The notes under `<workspace>/.lastlight/`, as repo-relative paths, sorted. */
+/**
+ * The notes under `<workspace>/<dir>/` (default `.lastlight`), as repo-relative
+ * paths, sorted. Every component of `dir` must be a real directory, not a link.
+ */
 export async function readNotesDir(
   workspace: string,
-  opts: { maxFiles?: number; maxBytes?: number } = {},
+  opts: { maxFiles?: number; maxBytes?: number; dir?: string } = {},
 ): Promise<{ files: { path: string; contents: Buffer }[]; refused: { path: string; reason: NotesRefusal }[] }> {
   const maxFiles = opts.maxFiles ?? 50;
   const maxBytes = opts.maxBytes ?? 1_048_576;
-  const root = join(workspace, NOTES_DIR);
+  const dirRel = opts.dir ?? NOTES_DIR;
+  if (!isNotesDir(dirRel)) throw new Error(`refusing to read notes: ${dirRel} is not a notes dir under ${NOTES_DIR}/`);
+  const root = join(workspace, ...dirRel.split("/"));
   const files: { path: string; contents: Buffer }[] = [];
   const refused: { path: string; reason: NotesRefusal }[] = [];
 
-  let top;
-  try {
-    top = lstatSync(root);
-  } catch {
-    return { files, refused };
-  }
-  if (!top.isDirectory()) {
-    refused.push({ path: NOTES_DIR, reason: top.isSymbolicLink() ? "symlink" : "not_regular" });
-    return { files, refused };
+  const parts = dirRel.split("/");
+  for (let i = 1; i <= parts.length; i++) {
+    const prefix = parts.slice(0, i).join("/");
+    let st;
+    try {
+      st = lstatSync(join(workspace, ...parts.slice(0, i)));
+    } catch {
+      return { files, refused };
+    }
+    if (!st.isDirectory()) {
+      refused.push({ path: prefix, reason: st.isSymbolicLink() ? "symlink" : "not_regular" });
+      return { files, refused };
+    }
   }
 
   const rootReal = realpathSync(root);
@@ -114,7 +137,7 @@ export async function readNotesDir(
       else if (st.nlink > 1) refused.push({ path: rel, reason: "hardlink" });
       else if (st.size > maxBytes) refused.push({ path: rel, reason: "too_large" });
       else {
-        if (files.length >= maxFiles) return { files: [], refused: [{ path: NOTES_DIR, reason: "too_many" }] };
+        if (files.length >= maxFiles) return { files: [], refused: [{ path: dirRel, reason: "too_many" }] };
         const contents = openNoteUnder(abs, rootReal, maxBytes);
         if (contents) files.push({ path: rel, contents });
         else refused.push({ path: rel, reason: "not_regular" });
@@ -133,15 +156,23 @@ export async function publishClaudeNotes(opts: {
   /** The checkout root on the host; the notes are its `.lastlight/` tree. */
   workspace: string;
   message: string;
+  /** The run's own notes dir (`.lastlight/<issue>`); the whole `.lastlight` when unset. */
+  notesDir?: string;
   /** Checked on the exact bytes about to be sent; a hit publishes nothing. */
   holdsSecret?: (contents: Buffer) => boolean;
 }): Promise<{ published: boolean; oid?: string; refused: string[] }> {
   if (isBotOwnedBranch(opts.branch)) {
     throw new Error(`refusing to publish notes to ${opts.branch}: a dependency bot owns that branch`);
   }
-  const { files, refused } = await readNotesDir(opts.workspace);
+  if (opts.notesDir !== undefined && !isNotesDir(opts.notesDir)) {
+    throw new Error(`refusing to publish notes: ${opts.notesDir} is not a notes dir under ${NOTES_DIR}/`);
+  }
+  const { files, refused } = await readNotesDir(opts.workspace, { dir: opts.notesDir });
   const refusedPaths = refused.map((r) => `${r.path} (${r.reason})`);
-  if (files.length === 0) return { published: false, refused: refusedPaths };
+  // A note the agent wrote but the host would not read is a lost handoff.
+  // Fail the phase rather than publish a partial set.
+  if (refusedPaths.length > 0) throw new NotesRefusedError(refusedPaths);
+  if (files.length === 0) return { published: false, refused: [] };
   const secret = opts.holdsSecret && files.find((f) => opts.holdsSecret!(f.contents));
   if (secret) throw new NotesSecretError(secret.path);
 
@@ -160,5 +191,5 @@ export async function publishClaudeNotes(opts: {
     additions: files.map((f) => ({ path: f.path, contents: f.contents.toString("base64") })),
     deletions: [],
   });
-  return { published: true, oid: commit.oid, refused: refusedPaths };
+  return { published: true, oid: commit.oid, refused: [] };
 }

@@ -3,7 +3,7 @@ import { linkSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileS
 import { execFileSync } from "child_process";
 import { join } from "path";
 import { tmpdir } from "os";
-import { NotesSecretError, openNoteUnder, publishClaudeNotes, readNotesDir, type NotesGitHub } from "#src/engine/claude-code/publish-notes.js";
+import { NotesRefusedError, NotesSecretError, openNoteUnder, publishClaudeNotes, readNotesDir, type NotesGitHub } from "#src/engine/claude-code/publish-notes.js";
 
 function workspace() {
   const dir = mkdtempSync(join(tmpdir(), "notes-"));
@@ -148,6 +148,39 @@ describe("publishClaudeNotes", () => {
     writeFileSync(join(ws, ".lastlight", "issue-7", "x.md"), "x");
     const gh = fakeGh();
     await expect(publishClaudeNotes({ ...base, branch: "renovate/x", gh, workspace: ws })).rejects.toThrow(/renovate\/x/);
+    expect(gh.calls).toEqual([]);
+  });
+
+  it("publishes only the run's own notes dir", async () => {
+    const ws = workspace();
+    writeFileSync(join(ws, ".lastlight", "issue-7", "plan.md"), "mine");
+    mkdirSync(join(ws, ".lastlight", "issue-8"));
+    writeFileSync(join(ws, ".lastlight", "issue-8", "plan.md"), "someone else's");
+    writeFileSync(join(ws, ".lastlight", "top.md"), "top");
+    const gh = fakeGh();
+    await publishClaudeNotes({ ...base, gh, workspace: ws, notesDir: ".lastlight/issue-7" });
+    const additions = vi.mocked(gh.publishSignedCommit).mock.calls[0]![0].additions.map((a) => a.path);
+    expect(additions).toEqual([".lastlight/issue-7/plan.md"]);
+  });
+
+  it.each(["../x", ".lastlight/../src", "src", "/etc", ".lastlight/a/../../b"])(
+    "rejects a notes dir outside .lastlight (%j)",
+    async (notesDir) => {
+      const gh = fakeGh();
+      await expect(publishClaudeNotes({ ...base, gh, workspace: workspace(), notesDir })).rejects.toThrow(/notes dir/);
+      expect(gh.calls).toEqual([]);
+    },
+  );
+
+  it("publishes nothing when any note was refused", async () => {
+    const ws = workspace();
+    const d = join(ws, ".lastlight", "issue-7");
+    writeFileSync(join(d, "plan.md"), "ok");
+    symlinkSync("/etc/passwd", join(d, "passwd.md"));
+    const gh = fakeGh();
+    const err = await publishClaudeNotes({ ...base, gh, workspace: ws }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NotesRefusedError);
+    expect((err as Error).message).toContain(".lastlight/issue-7/passwd.md (symlink)");
     expect(gh.calls).toEqual([]);
   });
 

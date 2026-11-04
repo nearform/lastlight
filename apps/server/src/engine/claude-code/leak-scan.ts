@@ -11,7 +11,8 @@
  * followed, `.git` and `node_modules` skipped. No publish path reads `.git`
  * objects: `github_publish` and the host's notes commit send working-tree files.
  */
-import { closeSync, constants, lstatSync, openSync, readdirSync, readSync } from "node:fs";
+import { constants } from "node:fs";
+import { lstat, open, readdir } from "node:fs/promises";
 import { join, relative } from "node:path";
 import type { ClaudeCodeExecPort } from "../../sandbox/sandbox.js";
 
@@ -48,13 +49,14 @@ export function findTokenLeak(token: string, sources: { name: string; text: stri
  * Workspace-relative paths of regular files holding the token. Files are read
  * in chunks (overlapping by a needle's length), so size never hides a hit.
  * `incomplete` is true when the file cap or the byte budget stopped the walk: the caller must
- * treat that as "not known clean", never as clean.
+ * treat that as "not known clean", never as clean. Asynchronous, so a large
+ * workspace never blocks the harness's event loop.
  */
-export function scanTreeForToken(
+export async function scanTreeForToken(
   root: string,
   token: string,
   opts: { maxFiles?: number; maxTotalBytes?: number } = {},
-): { hits: string[]; incomplete: boolean } {
+): Promise<{ hits: string[]; incomplete: boolean }> {
   const maxFiles = opts.maxFiles ?? MAX_FILES;
   let budget = opts.maxTotalBytes ?? MAX_TOTAL_BYTES;
   const ns = needles(token).map((n) => Buffer.from(n));
@@ -67,7 +69,7 @@ export function scanTreeForToken(
     const dir = stack.pop()!;
     let names: string[];
     try {
-      names = readdirSync(dir);
+      names = await readdir(dir);
     } catch {
       continue;
     }
@@ -75,7 +77,7 @@ export function scanTreeForToken(
       const abs = join(dir, name);
       let st;
       try {
-        st = lstatSync(abs);
+        st = await lstat(abs);
       } catch {
         continue;
       }
@@ -87,16 +89,16 @@ export function scanTreeForToken(
       if (++seen > maxFiles) return { hits, incomplete: true };
       budget -= st.size;
       if (budget < 0) return { hits, incomplete: true };
-      if (fileHolds(abs, ns, overlap)) hits.push(relative(root, abs));
+      if (await fileHolds(abs, ns, overlap)) hits.push(relative(root, abs));
     }
   }
   return { hits, incomplete: false };
 }
 
-function fileHolds(abs: string, ns: Buffer[], overlap: number): boolean {
-  let fd: number;
+async function fileHolds(abs: string, ns: Buffer[], overlap: number): Promise<boolean> {
+  let fh;
   try {
-    fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
+    fh = await open(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch {
     return false;
   }
@@ -104,7 +106,7 @@ function fileHolds(abs: string, ns: Buffer[], overlap: number): boolean {
     const buf = Buffer.alloc(CHUNK_BYTES + overlap);
     let kept = 0;
     for (;;) {
-      const n = readSync(fd, buf, kept, CHUNK_BYTES, null);
+      const { bytesRead: n } = await fh.read(buf, kept, CHUNK_BYTES, null);
       if (n <= 0) return false;
       const view = buf.subarray(0, kept + n);
       if (ns.some((needle) => view.includes(needle))) return true;
@@ -114,7 +116,7 @@ function fileHolds(abs: string, ns: Buffer[], overlap: number): boolean {
   } catch {
     return false;
   } finally {
-    closeSync(fd);
+    await fh.close();
   }
 }
 

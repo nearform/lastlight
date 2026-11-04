@@ -64,6 +64,7 @@ import {
   isPrFixShaped,
 } from "./target-policy.js";
 import { logger } from "../logging/logger.js";
+import { isNotesDir } from "../engine/claude-code/publish-notes.js";
 
 const repoConfigLog = logger("repo-config");
 const simpleLog = logger("simple");
@@ -1622,6 +1623,8 @@ async function runSimpleWorkflowBody(
   // at `<buildAssetsDir>/<owner>/<repo>/<issueKey>/`, plus whether the docs
   // live at the workspace root (relocated) so `hostRepoDirFor` stages/harvests
   // there instead of inside the repo checkout.
+  // In repo mode, name the run's own notes dir, so a claude-code phase's notes
+  // are published from there alone (never another run's).
   const runConfig: ExecutorConfig =
     config.buildAssets === "server"
       ? {
@@ -1629,7 +1632,9 @@ async function runSimpleWorkflowBody(
           buildAssetsKey: { owner, repo, issueKey },
           buildAssetsRelocated,
         }
-      : config;
+      : isNotesDir(issueDir)
+        ? { ...config, notesDir: issueDir }
+        : config;
 
   try {
     const result = await runWorkflow(

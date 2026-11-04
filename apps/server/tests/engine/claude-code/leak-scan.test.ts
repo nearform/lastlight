@@ -34,47 +34,60 @@ describe("scanTreeForToken", () => {
     return dir;
   }
 
-  it("finds the token in any regular file of the workspace, notes included", () => {
+  it("finds the token in any regular file of the workspace, notes included", async () => {
     const dir = tree();
     writeFileSync(join(dir, "repo", "src", "leak.ts"), `const t = "${TOKEN}";`);
     writeFileSync(join(dir, ".lastlight", "issue-7", "architect-plan.md"), `token: ${TOKEN}`);
-    expect(scanTreeForToken(dir, TOKEN).hits.sort()).toEqual([".lastlight/issue-7/architect-plan.md", "repo/src/leak.ts"]);
+    expect((await scanTreeForToken(dir, TOKEN)).hits.sort()).toEqual([".lastlight/issue-7/architect-plan.md", "repo/src/leak.ts"]);
   });
 
-  it("skips .git and node_modules, and never follows a link", () => {
+  it("skips .git and node_modules, and never follows a link", async () => {
     const dir = tree();
     writeFileSync(join(dir, "repo", ".git", "x"), TOKEN);
     writeFileSync(join(dir, "repo", "node_modules", "x", "y.js"), TOKEN);
     const outside = mkdtempSync(join(tmpdir(), "leak-outside-"));
     writeFileSync(join(outside, "secret"), TOKEN);
     symlinkSync(join(outside, "secret"), join(dir, "repo", "src", "link"));
-    expect(scanTreeForToken(dir, TOKEN).hits).toEqual([]);
+    expect((await scanTreeForToken(dir, TOKEN)).hits).toEqual([]);
   });
 
-  it("finds the token at the end of a file larger than one read", () => {
+  it("finds the token at the end of a file larger than one read", async () => {
     const dir = tree();
     writeFileSync(join(dir, "repo", "big.log"), Buffer.concat([Buffer.alloc(9 * 1024 * 1024, 120), Buffer.from(TOKEN)]));
-    expect(scanTreeForToken(dir, TOKEN).hits).toEqual(["repo/big.log"]);
+    expect((await scanTreeForToken(dir, TOKEN)).hits).toEqual(["repo/big.log"]);
   });
 
-  it("finds a token split across two reads", () => {
+  it("finds a token split across two reads", async () => {
     const dir = tree();
     const chunk = 1024 * 1024;
     writeFileSync(join(dir, "repo", "split.bin"), Buffer.concat([Buffer.alloc(chunk - 10, 120), Buffer.from(TOKEN)]));
-    expect(scanTreeForToken(dir, TOKEN).hits).toEqual(["repo/split.bin"]);
+    expect((await scanTreeForToken(dir, TOKEN)).hits).toEqual(["repo/split.bin"]);
   });
 
-  it("reports an incomplete scan when the file cap is hit, rather than clean", () => {
+  it("reports an incomplete scan when the file cap is hit, rather than clean", async () => {
     const dir = tree();
     for (let i = 0; i < 5; i++) writeFileSync(join(dir, "repo", `f${i}.txt`), "x");
-    expect(scanTreeForToken(dir, TOKEN, { maxFiles: 3 }).incomplete).toBe(true);
-    expect(scanTreeForToken(dir, TOKEN).incomplete).toBe(false);
+    expect((await scanTreeForToken(dir, TOKEN, { maxFiles: 3 })).incomplete).toBe(true);
+    expect((await scanTreeForToken(dir, TOKEN)).incomplete).toBe(false);
   });
 
-  it("reports an incomplete scan past the byte budget, without reading the rest", () => {
+  it("reports an incomplete scan past the byte budget, without reading the rest", async () => {
     const dir = tree();
     writeFileSync(join(dir, "repo", "a.bin"), Buffer.alloc(4096, 120));
-    expect(scanTreeForToken(dir, TOKEN, { maxTotalBytes: 1024 }).incomplete).toBe(true);
+    expect((await scanTreeForToken(dir, TOKEN, { maxTotalBytes: 1024 })).incomplete).toBe(true);
+  });
+
+  it("yields to the event loop while it reads, so a big workspace never stalls the harness", async () => {
+    const dir = tree();
+    for (let i = 0; i < 20; i++) writeFileSync(join(dir, "repo", `f${i}.txt`), "x".repeat(1000));
+    let ticked = false;
+    setImmediate(() => {
+      ticked = true;
+    });
+    const out = scanTreeForToken(dir, TOKEN);
+    expect(out).toBeInstanceOf(Promise);
+    expect((await out).hits).toEqual([]);
+    expect(ticked).toBe(true);
   });
 });
 

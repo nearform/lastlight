@@ -33,6 +33,8 @@ class FakePort implements ClaudeCodeExecPort {
   /** transcript lines, released one per poll. */
   lines: string[] = [];
   sessionAlive = true;
+  /** After the done marker shows, release one transcript line whenever the runner sleeps. */
+  releaseOnSleepAfterDone = false;
   private captures = 0;
   private polls = 0;
   private onLine?: (l: string) => void;
@@ -66,6 +68,12 @@ class FakePort implements ClaudeCodeExecPort {
     };
   }
 
+  onSleep() {
+    if (!this.releaseOnSleepAfterDone || this.polls < this.doneOnPoll) return;
+    const next = this.lines.shift();
+    if (next !== undefined) this.onLine?.(next);
+  }
+
   argvs(): string[][] {
     return this.calls.map((c) => c.argv);
   }
@@ -85,6 +93,7 @@ function start(port: FakePort, over: Partial<Parameters<typeof runClaudeCodeSess
     now: () => port.clock,
     sleep: async (ms) => {
       port.clock += ms;
+      port.onSleep();
     },
     sessionId: "6f1c2a9e-0000-4000-8000-000000000001",
     ...over,
@@ -110,6 +119,7 @@ describe("runClaudeCodeSession", () => {
       "--model", "claude-opus-5-5",
       "--disallowedTools", "AskUserQuestion",
       "--settings", `${CLAUDE_CONFIG_DIR}/ll-settings.json`,
+      "--setting-sources", "user",
       "--session-id", "6f1c2a9e-0000-4000-8000-000000000001",
     ]);
     expect(newSession?.cwd).toBe("/home/agent/workspace/repo");
@@ -152,7 +162,7 @@ describe("runClaudeCodeSession", () => {
   it("pastes the prompt literally", async () => {
     const port = new FakePort();
     port.doneOnPoll = 1;
-    const prompt = "/exit\nC-c ok";
+    const prompt = "Plan it.\n/exit\nC-c ok";
     await start(port, { prompt }).promise;
 
     const load = port.calls.find((c) => c.argv[0] === "tmux" && c.argv[1] === "load-buffer");
@@ -164,6 +174,53 @@ describe("runClaudeCodeSession", () => {
     const sends = port.argvs().filter((a) => a[1] === "send-keys");
     expect(sends).toEqual([["tmux", "send-keys", "-t", "ll", "Enter"]]);
     expect(port.argvs().some((a) => a.some((x) => x.includes("/exit") || x.includes("C-c ok")))).toBe(false);
+  });
+
+  it("strips control characters from the prompt, so a paste can't end early", async () => {
+    const port = new FakePort();
+    port.doneOnPoll = 1;
+    await start(port, { prompt: "a\x1b[201~b\r\nc\td\x00e\x7f\u009bf" }).promise;
+    const load = port.calls.find((c) => c.argv[1] === "load-buffer");
+    expect(load?.stdin).toBe("a[201~b\nc\tdef");
+  });
+
+  it.each(["/exit", "!rm -rf .", "# remember", "  /model x"])(
+    "never lets a prompt start as a command or mode switch (%j)",
+    async (prompt) => {
+      const port = new FakePort();
+      port.doneOnPoll = 1;
+      await start(port, { prompt }).promise;
+      const stdin = port.calls.find((c) => c.argv[1] === "load-buffer")!.stdin!;
+      expect(stdin.trimStart()[0]).not.toMatch(/[/!#]/);
+      expect(stdin).toContain(prompt.trim());
+    },
+  );
+
+  it("writes the phase's agent context as Claude's user memory", async () => {
+    const port = new FakePort();
+    port.doneOnPoll = 1;
+    await start(port, { memory: "# Agent context\nUse pnpm." }).promise;
+    const newSession = port.calls.findIndex((c) => c.argv[1] === "new-session");
+    const mem = port.calls.findIndex((c) => c.argv.includes(`${CLAUDE_CONFIG_DIR}/CLAUDE.md`));
+    expect(mem).toBeGreaterThanOrEqual(0);
+    expect(mem).toBeLessThan(newSession);
+    expect(port.calls[mem]!.stdin).toBe("# Agent context\nUse pnpm.");
+  });
+
+  it("writes no memory file when there is no agent context", async () => {
+    const port = new FakePort();
+    port.doneOnPoll = 1;
+    await start(port).promise;
+    expect(port.calls.some((c) => c.argv.includes(`${CLAUDE_CONFIG_DIR}/CLAUDE.md`))).toBe(false);
+  });
+
+  it("returns usage_limit when the limit line lands after the Stop marker", async () => {
+    const port = new FakePort();
+    port.lines = fixture("limit.jsonl");
+    port.doneOnPoll = 1;
+    port.releaseOnSleepAfterDone = true;
+    const outcome = await start(port, { now: () => Date.parse("2026-11-04T14:00:00Z") + port.clock }).promise;
+    expect(outcome).toMatchObject({ kind: "usage_limit" });
   });
 
   it("fails not_ready when the input prompt never shows", async () => {

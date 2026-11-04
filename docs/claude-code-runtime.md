@@ -60,10 +60,12 @@ comment on issues. It is better to fail at the start than to fail halfway.
 
 - `buildAssets.location: repo` (the default): the prompt tells Claude not to
   commit `.lastlight/`. After the phase, Last Light publishes the phase's
-  `.lastlight/` notes to the run's branch itself, as one signed commit through
-  GitHub's API. It reads only regular, singly-linked files (at most 50, each
-  at most 1 MiB), follows no link, and runs no `git` in the tree the session
-  wrote. Before the run's next agentic-pi phase starts, that phase's own
+  notes to the run's branch itself, as one signed commit through GitHub's
+  API. It publishes only the run's own notes dir (`.lastlight/<issue>/`). It
+  reads only regular, singly-linked files (at most 50, each at most 1 MiB),
+  follows no link, and runs no `git` in the tree the session wrote. If any
+  file there is one it will not read (a link, a FIFO, too large), the phase
+  fails with `error_publish` and nothing is published. Before the run's next agentic-pi phase starts, that phase's own
   sandbox moves its checkout onto the new commit (a fast-forward on the
   checked-out branch, files untouched), so its later `github_publish` is not
   refused.
@@ -76,7 +78,10 @@ Each phase starts `claude` in a detached tmux terminal inside the sandbox, as
 the sandbox's non-root user, with permissions bypassed (the sandbox is the
 boundary), and `AskUserQuestion` disabled. Before it starts, Last Light writes
 Claude Code's own settings to answer every first-run screen: onboarding,
-workspace trust, the bypass-mode warning. The prompt is pasted as literal text.
+workspace trust, the bypass-mode warning. Only those settings load: a repo's
+own `.claude/settings.json` is ignored. The phase's agent context (what other
+phases get as `AGENTS.md`) becomes Claude's user memory. The prompt is pasted
+as literal text, with control characters removed.
 A `Stop` hook marks the end of the turn.
 
 The session's transcript is translated into the same events agentic-pi emits,
