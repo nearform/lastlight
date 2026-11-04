@@ -860,9 +860,13 @@ than dropping them silently.
 
 Sandboxes take their addresses from the network's `ip_range` (`172.30.0.128/25`),
 so none can be given a sidecar's static address (`.10`–`.40`). On an existing
-deployment, compose recreates `sandbox-egress` to apply this, which fails while
-any container (a running sandbox included) is still attached: upgrade with no
-runs in progress.
+deployment, compose recreates `sandbox-egress` to apply this: it stops the
+services on the network, then removes it, which fails while a sandbox is still
+attached. `lastlight server update` checks this first: when the network's IPAM
+settings differ from the compose file and a container compose doesn't manage is
+attached, it exits non-zero before pulling images or stopping anything, and
+names the containers. Let those runs finish (or `docker stop` them) and run the
+update again; it then recreates the network once.
 
 The strict allowlist the docker firewalls render is `dockerSandboxAllowlist()`:
 the default allowlist minus every host that only gateway providers use. An entry

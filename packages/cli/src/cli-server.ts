@@ -433,6 +433,117 @@ async function captureSoft(cmd: string, args: string[], cwd?: string): Promise<s
   }
 }
 
+// ── sandbox network pre-flight ───────────────────────────────────────────────
+
+/** One IPAM pool, normalised from compose config or `docker network inspect`. */
+export interface IpamPool {
+  subnet: string;
+  ipRange: string;
+}
+
+/** A running container attached to the sandbox network. */
+export interface AttachedContainer {
+  name: string;
+  /** `com.docker.compose.project` label; empty for harness-spawned sandboxes. */
+  project: string;
+}
+
+export type SandboxNetworkVerdict =
+  | { kind: "ok" }
+  | { kind: "recreate" }
+  | { kind: "blocked"; blockers: string[] };
+
+/**
+ * Decide whether `compose up` can apply the sandbox network's IPAM settings.
+ *
+ * Compose can't change a network's IPAM in place: when they differ it stops the
+ * services on the network, removes it and creates it again. The removal fails
+ * while a container compose doesn't manage (a harness-spawned sandbox) is still
+ * attached, and by then the services are already stopped. So when the network
+ * must be recreated and such a container is attached, `server update` stops
+ * before it touches anything.
+ *
+ * `actual` is null when the network doesn't exist yet (compose just creates it).
+ */
+export function sandboxNetworkVerdict(
+  desired: IpamPool[],
+  actual: IpamPool[] | null,
+  attached: AttachedContainer[],
+  project: string,
+): SandboxNetworkVerdict {
+  if (actual === null) return { kind: "ok" };
+  const key = (pools: IpamPool[]) =>
+    pools.map((x) => `${x.subnet}|${x.ipRange}`).sort().join(",");
+  if (key(desired) === key(actual)) return { kind: "ok" };
+  const blockers = attached.filter((c) => c.project !== project).map((c) => c.name).sort();
+  return blockers.length ? { kind: "blocked", blockers } : { kind: "recreate" };
+}
+
+/**
+ * Check the `sandbox-egress` network before `server update` recreates services.
+ * Exits non-zero (nothing stopped yet) when the network needs recreating while
+ * sandboxes are attached; best-effort otherwise — if docker can't be queried,
+ * the update proceeds as before.
+ */
+async function guardSandboxNetwork(home: string): Promise<void> {
+  const c = compose();
+  const raw = await captureSoft(c.cmd, composeArgv(home, ["config", "--format", "json"], c.pre), home);
+  if (!raw) return;
+  let project: string;
+  let name: string;
+  let desired: IpamPool[];
+  try {
+    const cfg = JSON.parse(raw) as {
+      name?: string;
+      networks?: Record<string, { name?: string; ipam?: { config?: { subnet?: string; ip_range?: string }[] } }>;
+    };
+    const net = cfg.networks?.["sandbox-egress"];
+    if (!cfg.name || !net?.name) return;
+    project = cfg.name;
+    name = net.name;
+    desired = (net.ipam?.config ?? []).map((x) => ({ subnet: x.subnet ?? "", ipRange: x.ip_range ?? "" }));
+  } catch {
+    return;
+  }
+
+  const inspect = await captureSoft("docker", ["network", "inspect", name, "--format", "{{json .IPAM.Config}}"]);
+  let actual: IpamPool[] | null = null;
+  if (inspect) {
+    try {
+      const pools = (JSON.parse(inspect) ?? []) as { Subnet?: string; IPRange?: string }[];
+      actual = pools.map((x) => ({ subnet: x.Subnet ?? "", ipRange: x.IPRange ?? "" }));
+    } catch {
+      return;
+    }
+  }
+
+  const ps = await captureSoft("docker", [
+    "ps", "--filter", `network=${name}`,
+    "--format", '{{.Names}}\t{{.Label "com.docker.compose.project"}}',
+  ]);
+  const attached: AttachedContainer[] = (ps ?? "")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const [n, proj = ""] = line.split("\t");
+      return { name: n, project: proj };
+    });
+
+  const verdict = sandboxNetworkVerdict(desired, actual, attached, project);
+  if (verdict.kind === "recreate") {
+    p.log.info(`Network ${chalk.bold(name)} changed its address settings; compose will recreate it.`);
+  } else if (verdict.kind === "blocked") {
+    p.log.error(
+      `Network ${chalk.bold(name)} has new address settings, so compose must recreate it,\n` +
+        `  but these containers are still attached:\n` +
+        verdict.blockers.map((b) => `    ${b}`).join("\n") +
+        `\n  Nothing has been stopped. Let the runs finish (or stop them with ` +
+        `${chalk.cyan("docker stop <name>")}), then run ${chalk.cyan("lastlight server update")} again.`,
+    );
+    process.exit(1);
+  }
+}
+
 // ── filesystem helpers ───────────────────────────────────────────────────────
 
 function isGitRepo(dir: string): boolean {
@@ -932,6 +1043,11 @@ export async function serverUpdate(opts: UpdateOpts): Promise<void> {
   }
 
   ensureOverrideSymlink(home);
+
+  // Before any image work or `up`: refuse while the sandbox network must be
+  // recreated but sandboxes are still attached (compose would stop the
+  // services, then fail to remove the network).
+  await guardSandboxNetwork(home);
 
   // Images: pull prebuilt from GHCR by default (seconds); `--local` builds from
   // source (minutes). `--no-build` skips both — just recreate + restart.

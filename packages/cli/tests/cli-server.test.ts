@@ -18,6 +18,7 @@ import {
   IMAGE_REGISTRY,
   PUBLISHED_IMAGES,
   SIDECARS,
+  sandboxNetworkVerdict,
 } from "../src/cli-server.js";
 
 describe("cli-server argv builders", () => {
@@ -157,5 +158,38 @@ describe("parseLsRemoteSha", () => {
   it("returns null for junk / empty", () => {
     expect(parseLsRemoteSha("")).toBeNull();
     expect(parseLsRemoteSha("not-a-sha\tHEAD")).toBeNull();
+  });
+});
+
+describe("sandboxNetworkVerdict", () => {
+  const project = "lastlight";
+  const desired = [{ subnet: "172.30.0.0/24", ipRange: "172.30.0.128/25" }];
+  const old = [{ subnet: "172.30.0.0/24", ipRange: "" }];
+  const sidecar = { name: "lastlight-coredns-1", project };
+  const sandbox = { name: "lastlight-sandbox-abc123", project: "" };
+
+  it("ok when the network doesn't exist yet", () => {
+    expect(sandboxNetworkVerdict(desired, null, [sandbox], project)).toEqual({ kind: "ok" });
+  });
+
+  it("ok when the IPAM settings already match, even with sandboxes attached", () => {
+    expect(sandboxNetworkVerdict(desired, [...desired], [sidecar, sandbox], project)).toEqual({ kind: "ok" });
+  });
+
+  it("recreate when only compose's own services are attached", () => {
+    expect(sandboxNetworkVerdict(desired, old, [sidecar], project)).toEqual({ kind: "recreate" });
+  });
+
+  it("blocked when a container compose doesn't manage is attached", () => {
+    const other = { name: "z-other-project", project: "something-else" };
+    expect(sandboxNetworkVerdict(desired, old, [sidecar, other, sandbox], project)).toEqual({
+      kind: "blocked",
+      blockers: ["lastlight-sandbox-abc123", "z-other-project"],
+    });
+  });
+
+  it("ignores pool order", () => {
+    const two = [desired[0], { subnet: "10.0.0.0/24", ipRange: "" }];
+    expect(sandboxNetworkVerdict(two, [...two].reverse(), [sandbox], project)).toEqual({ kind: "ok" });
   });
 });
