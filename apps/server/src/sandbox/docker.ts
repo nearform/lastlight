@@ -160,6 +160,9 @@ export class DockerSandbox {
     // shares). Cover it with an empty, root-only tmpfs so the agent can neither
     // read the key nor rewrite a config a sidecar loads.
     dockerArgs.push("--mount", "type=tmpfs,destination=/data/proxy,tmpfs-size=4096,tmpfs-mode=0500");
+    // /data/claude-code keeps claude-code phases' raw transcripts for a later
+    // resume (harness-only state): masked the same way.
+    dockerArgs.push("--mount", "type=tmpfs,destination=/data/claude-code,tmpfs-size=4096,tmpfs-mode=0500");
     if (opts.workspaceMount.type === "bind") {
       dockerArgs.push("-v", `${opts.workspaceMount.hostPath}:${WORKSPACE_DIR}`);
     } else {

@@ -3,7 +3,7 @@
  * runner, never agentic-pi, in a container whose env holds the Claude token
  * and no GitHub or provider credential.
  */
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -19,7 +19,7 @@ vi.mock("#src/engine/claude-code/session.js", async (importActual) => {
   return { ...actual, runClaudeCodeSession: (...a: unknown[]) => sessionSpy(...a) };
 });
 
-const { executeAgent } = await import("#src/engine/agent-executor.js");
+const { executeAgent, executeCommand } = await import("#src/engine/agent-executor.js");
 const { FakeSandbox } = await import("#src/sandbox/sandbox.js");
 
 const SESSION = "6f1c2a9e-0000-4000-8000-000000000001";
@@ -35,6 +35,8 @@ function dirs() {
 async function run(opts: { model?: string; backend?: "docker" | "none"; prompt?: string; phase?: string } = {}) {
   const { stateDir, sessionsDir } = dirs();
   const fake = new FakeSandbox({ claudeCodePort: fakePort });
+  // Keep the workspace after the run so a test can read what was left in it.
+  fake.dispose = () => {};
   const result = await executeAgent(
     opts.prompt ?? "Write the architect plan.",
     {
@@ -58,6 +60,7 @@ function emitsBasicSession() {
     o.onEvent({ type: "session", id: SESSION, timestamp: "2026-11-04T10:00:00Z" });
     o.onEvent({
       type: "message_end",
+      sessionId: SESSION,
       message: { role: "assistant", content: [{ type: "text", text: "Plan written." }], usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } } },
     });
     return { kind: "done", sessionId: SESSION };
@@ -148,6 +151,72 @@ describe("executeAgent on a claude-code model", () => {
       sessionId: SESSION,
     });
     expect(result.error).toMatch(/usage limit/i);
+  });
+
+  it("fails a phase whose workspace holds the token, and redacts the file", async () => {
+    sessionSpy.mockImplementation(async (_port, o) => {
+      mkdirSync(join(o.cwd, ".lastlight", "issue-7"), { recursive: true });
+      writeFileSync(join(o.cwd, ".lastlight", "issue-7", "architect-plan.md"), `env: ${process.env.CLAUDE_CODE_OAUTH_TOKEN}`);
+      o.onEvent({ type: "message_end", sessionId: SESSION, message: { role: "assistant", content: [{ type: "text", text: "Done." }] } });
+      return { kind: "done", sessionId: SESSION };
+    });
+    const { result, fake } = await run();
+    expect(result).toMatchObject({ success: false, stopReason: "error_secret_leak" });
+    expect(result.error).toContain(".lastlight/issue-7/architect-plan.md");
+    expect(readFileSync(join(fake.hostWorkspaceDir, ".lastlight", "issue-7", "architect-plan.md"), "utf8")).toBe(
+      "[redacted: contained the Claude token]\n",
+    );
+    expect(JSON.stringify(result)).not.toContain("TESTTOKEN");
+  });
+
+  it("fails a phase whose final answer holds the token, without returning it", async () => {
+    sessionSpy.mockImplementation(async (_port, o) => {
+      o.onEvent({
+        type: "message_end",
+        sessionId: SESSION,
+        message: { role: "assistant", content: [{ type: "text", text: `my env has ${process.env.CLAUDE_CODE_OAUTH_TOKEN}` }] },
+      });
+      return { kind: "done", sessionId: SESSION };
+    });
+    const { result } = await run();
+    expect(result).toMatchObject({ success: false, stopReason: "error_secret_leak", output: "" });
+    expect(JSON.stringify(result)).not.toContain("TESTTOKEN");
+  });
+
+  it("scrubs the token from the dashboard log and the kept transcript", async () => {
+    sessionSpy.mockImplementation(async (_port, o) => {
+      const tok = process.env.CLAUDE_CODE_OAUTH_TOKEN!;
+      o.onRawLine(JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: `TOKEN=${tok}` }] } }));
+      o.onEvent({ type: "session", id: SESSION, timestamp: "2026-11-04T10:00:00Z" });
+      o.onEvent({ type: "message_end", sessionId: SESSION, message: { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "Bash", arguments: { command: "env" } }] } });
+      o.onEvent({ type: "tool_execution_end", sessionId: SESSION, toolCallId: "t1", toolName: "Bash", result: `TOKEN=${tok}`, isError: false });
+      o.onEvent({ type: "message_end", sessionId: SESSION, message: { role: "assistant", content: [{ type: "text", text: `I saw TOKEN=${tok} there.` }] } });
+      o.onEvent({ type: "message_end", sessionId: SESSION, message: { role: "assistant", content: [{ type: "text", text: "ok" }] } });
+      return { kind: "done", sessionId: SESSION };
+    });
+    const { sessionsDir, stateDir } = await run();
+    const projects = join(sessionsDir, "projects");
+    const logText = () =>
+      readdirSync(projects, { recursive: true }).map(String).filter((f) => f.endsWith(".jsonl"))
+        .map((f) => readFileSync(join(projects, f), "utf8")).join("");
+    for (let i = 0; i < 50 && !logText().includes("I saw TOKEN="); i++) await new Promise((r) => setTimeout(r, 20));
+    expect(logText()).toContain("I saw TOKEN=[redacted] there.");
+    expect(logText()).not.toContain("TESTTOKEN");
+    const kept = readFileSync(join(stateDir, "claude-code", "run-42-architect", "architect.jsonl"), "utf8");
+    expect(kept).toContain("TOKEN=");
+    expect(kept).not.toContain("TESTTOKEN");
+  });
+
+  it("never hands the Claude token to a command phase", async () => {
+    const { stateDir, sessionsDir } = dirs();
+    const fake = new FakeSandbox({});
+    await executeCommand(
+      { kind: "bash", command: "echo hi" } as never,
+      { sandbox: "docker", stateDir, sessionsDir, model: "claude-code/claude-opus-5-5" },
+      { sandboxFactory: fake.asFactory() },
+    );
+    expect(fake.env?.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    expect(fake.receivedCommand).toBeDefined();
   });
 
   it.each([

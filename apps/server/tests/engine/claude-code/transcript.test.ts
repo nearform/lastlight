@@ -32,9 +32,16 @@ describe("ClaudeTranscriptTranslator", () => {
     });
     expect(ends[2]).toMatchObject({ message: { content: [{ type: "text", text: "Plan written to architect-plan.md." }] } });
 
+    // The dashboard's session log drops any record without a sessionId.
+    for (const e of events) expect(e.sessionId ?? e.id).toBe(SESSION);
+    for (const e of events.filter((x) => x.type !== "session")) expect(e).toHaveProperty("sessionId", SESSION);
+    expect(ends[2]).toHaveProperty("timestamp", "2026-11-04T10:00:06.000Z");
+
     const result = events.find((e) => e.type === "tool_execution_end");
     expect(result).toEqual({
       type: "tool_execution_end",
+      sessionId: SESSION,
+      timestamp: "2026-11-04T10:00:04.000Z",
       toolCallId: "toolu_01",
       toolName: "Bash",
       result: "README.md\nsrc",

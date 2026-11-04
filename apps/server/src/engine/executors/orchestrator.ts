@@ -54,6 +54,7 @@ import {
   isClaudeCodeModel,
 } from "../claude-code/model-ref.js";
 import { runClaudeCodeSession, type ClaudeCodeOutcome } from "../claude-code/session.js";
+import { findTokenLeak, redactTokenFiles, scanTreeForToken, scrubToken } from "../claude-code/leak-scan.js";
 import {
   DEFAULT_MODEL,
   RunResultAccumulator,
@@ -443,19 +444,35 @@ export async function runAgentIn(
     let returned;
     try {
       if (claudeCode) {
+        const ccConfig = getRuntimeConfig()?.claudeCode ?? CLAUDE_CODE_DEFAULTS;
+        const token = process.env[ccConfig.tokenEnv] ?? "";
+        // The token never reaches the dashboard, telemetry or the kept
+        // transcript, even when the session printed it (an `env` tool call).
+        // The raw final answer is remembered to check it before it is used.
+        let lastAnswerRaw = "";
+        const keep = claudeTranscriptKeeper(ctx);
         const outcome = await runClaudeCodeSession(sandbox.claudeCodePort!(ctx.taskId), {
           model: claudeCodeModelId(model),
           prompt,
           cwd: prov.agentCwd,
           skillDirs,
-          config: getRuntimeConfig()?.claudeCode ?? CLAUDE_CODE_DEFAULTS,
+          config: ccConfig,
           timeoutSeconds: ctx.agentTimeoutSeconds ?? getSandboxTimeouts().agentTimeoutSeconds,
-          onEvent,
-          onRawLine: claudeTranscriptKeeper(ctx),
+          onEvent: (e) => {
+            const text = assistantText(e);
+            if (text) lastAnswerRaw = text;
+            onEvent(token ? (JSON.parse(scrubToken(JSON.stringify(e), token)) as SandboxEvent) : e);
+          },
+          onRawLine: (line) => keep(token ? scrubToken(line, token) : line),
         });
         if (outcome.kind !== "done") {
           tree.end();
           return await claudeCodeFailure(outcome, shim, startTime, ctx, model);
+        }
+        const leaked = claudeCodeLeaks(token, lastAnswerRaw, prov.hostWorkspaceDir);
+        if (leaked) {
+          tree.end();
+          return await claudeCodeLeakFailure(leaked, outcome.sessionId, shim, startTime, ctx, model);
         }
         onEvent({ type: "agent_end" });
       } else returned = await sandbox.runAgent(
@@ -635,6 +652,52 @@ const CLAUDE_FAILURE: Record<ClaudeStop, { stopReason: string; error: (o: Claude
   },
   exited: { stopReason: "error_sandbox", error: () => "Claude Code session ended before finishing its turn" },
 };
+
+/** The joined text blocks of an assistant `message_end`, else "". */
+function assistantText(e: SandboxEvent): string {
+  if (e.type !== "message_end") return "";
+  const m = e.message as { role?: string; content?: Array<{ type?: string; text?: unknown }> } | undefined;
+  if (m?.role !== "assistant" || !Array.isArray(m.content)) return "";
+  return m.content.map((c) => (c.type === "text" && typeof c.text === "string" ? c.text : "")).join("");
+}
+
+/**
+ * Where the token turned up in what this phase would hand on: its final
+ * answer, or any file in the workspace (those found are redacted in place).
+ * Null when clean.
+ */
+function claudeCodeLeaks(token: string, finalAnswer: string, workspace: string): string | null {
+  if (!token) return null;
+  if (findTokenLeak(token, [{ name: "final answer", text: finalAnswer }])) return "the final answer";
+  const files = scanTreeForToken(workspace, token);
+  if (files.length === 0) return null;
+  redactTokenFiles(workspace, files);
+  return files.slice(0, 5).join(", ") + (files.length > 5 ? ` and ${files.length - 5} more` : "");
+}
+
+async function claudeCodeLeakFailure(
+  where: string,
+  sessionId: string,
+  shim: AgenticShim,
+  startTime: number,
+  ctx: SandboxRunContext,
+  model: string,
+): Promise<ExecutionResult> {
+  const stopReason = "error_secret_leak";
+  const error = `The Claude Code phase's output contained the Claude token (in ${where}); it was redacted and nothing was published`;
+  const durationMs = Date.now() - startTime;
+  recordExecutionMetrics("agent", {
+    "sandbox.backend": ctx.backend,
+    model,
+    success: false,
+    stop_reason: stopReason,
+    durationMs,
+    "workflow.name": ctx.config.telemetry?.workflowName,
+    "phase.name": ctx.config.telemetry?.phaseName,
+  });
+  await shim.finalizeWithFallback(emptyResult(stopReason, durationMs), sessionId, error).catch(() => null);
+  return { success: false, output: "", turns: 0, error, durationMs, sessionId, stopReason };
+}
 
 async function claudeCodeFailure(
   outcome: Exclude<ClaudeCodeOutcome, { kind: "done" }>,

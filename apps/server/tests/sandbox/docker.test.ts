@@ -321,6 +321,23 @@ describe("DockerSandbox.create — /data/proxy is masked (model gateway key)", (
   });
 });
 
+describe("DockerSandbox.create — kept Claude transcripts are masked", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockExecFileSync.mockReturnValue("container-xyz\n");
+  });
+
+  it("covers /data/claude-code with an empty root-only tmpfs after the /data mount", async () => {
+    const manager = new DockerSandbox({ imageName: "img", env: {} });
+    await manager.create({ taskId: "t", worktreePath: "/tmp/work", workspaceMount: { type: "bind", hostPath: "/tmp/work" } });
+    const call = mockExecFileSync.mock.calls.find((c) => Array.isArray(c[1]) && (c[1] as string[])[0] === "run");
+    const argv = (call?.[1] as string[]) ?? [];
+    const mask = "type=tmpfs,destination=/data/claude-code,tmpfs-size=4096,tmpfs-mode=0500";
+    expect(argv).toContain(mask);
+    expect(argv.indexOf(mask)).toBeGreaterThan(argv.findIndex((a) => a.endsWith(":/data")));
+  });
+});
+
 describe("DockerSandbox.claudeCodePort", () => {
   let manager: DockerSandbox;
   let fakeChild: ReturnType<typeof makeFakeChild>;

@@ -93,6 +93,8 @@ function resolveGithubApp(config: ExecutorConfig): GithubAppCreds | undefined {
 async function prepareRun(
   config: ExecutorConfig,
   opts?: { taskId?: string; githubAccess?: GitSandboxAccess },
+  /** A deterministic command phase never runs Claude Code, so never gets its token. */
+  kind: "agent" | "command" = "agent",
 ): Promise<{
   taskId: string;
   stateDir: string;
@@ -119,7 +121,7 @@ async function prepareRun(
 
   // A `claude-code/` phase runs the Claude Code CLI in the docker sandbox,
   // signed in with the operator's own token. Both are hard requirements.
-  const claudeCode = isClaudeCodeModel(config.model);
+  const claudeCode = kind === "agent" && isClaudeCodeModel(config.model);
   if (claudeCode) {
     if (backend !== "docker") {
       return { taskId, stateDir, backend, ghEnv: {}, setupError: CLAUDE_CODE_NEEDS_DOCKER };
@@ -590,7 +592,7 @@ export async function executeCommand(
   },
 ): Promise<ExecutionResult> {
   const { taskId, stateDir, backend, ghEnv, prePopulate, mintError, mintErrorKind } =
-    await prepareRun(config, opts);
+    await prepareRun(config, opts, "command");
   const access = opts?.githubAccess;
 
   if (mintError) return mintFailureResult(access, mintError, mintErrorKind);

@@ -104,12 +104,17 @@ export class ClaudeTranscriptTranslator {
     return [];
   }
 
+  /**
+   * Stamp every record with the session id and the line's timestamp, as
+   * agentic-pi does (the dashboard's session log drops a record without one),
+   * and put the `session` header in front of the first.
+   */
   private withSession(prefix: SandboxEvent[], events: SandboxEvent[], rec: Json): SandboxEvent[] {
-    if (events.length === 0) return prefix;
-    if (this.sessionSent) return [...prefix, ...events];
-    this.sessionSent = true;
     const timestamp = typeof rec.timestamp === "string" ? rec.timestamp : this.now().toISOString();
-    return [{ type: "session", id: this.sessionId, timestamp }, ...prefix, ...events];
+    const stamped = [...prefix, ...events].map((e) => ({ ...e, sessionId: this.sessionId, timestamp }));
+    if (stamped.length === 0 || this.sessionSent) return stamped;
+    this.sessionSent = true;
+    return [{ type: "session", id: this.sessionId, timestamp }, ...stamped];
   }
 
   private assistantContent(blocks: unknown[]): Json[] {
