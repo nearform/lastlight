@@ -480,12 +480,13 @@ export function sandboxNetworkVerdict(
 }
 
 /**
- * Check the `sandbox-egress` network before `server update` recreates services.
+ * Check the `sandbox-egress` network before `compose up` recreates services.
  * Exits non-zero (nothing stopped yet) when the network needs recreating while
  * sandboxes are attached; best-effort otherwise — if docker can't be queried,
- * the update proceeds as before.
+ * the command proceeds as before. `rerun` is the command the error tells the
+ * operator to run again.
  */
-async function guardSandboxNetwork(home: string): Promise<void> {
+async function guardSandboxNetwork(home: string, rerun = "lastlight server update"): Promise<void> {
   const c = compose();
   const raw = await captureSoft(c.cmd, composeArgv(home, ["config", "--format", "json"], c.pre), home);
   if (!raw) return;
@@ -538,7 +539,7 @@ async function guardSandboxNetwork(home: string): Promise<void> {
         `  but these containers are still attached:\n` +
         verdict.blockers.map((b) => `    ${b}`).join("\n") +
         `\n  Nothing has been stopped. Let the runs finish (or stop them with ` +
-        `${chalk.cyan("docker stop <name>")}), then run ${chalk.cyan("lastlight server update")} again.`,
+        `${chalk.cyan("docker stop <name>")}), then run ${chalk.cyan(rerun)} again.`,
     );
     process.exit(1);
   }
@@ -881,6 +882,7 @@ export async function serverStart(service: string | undefined, opts: ServerOpts)
     );
     process.exit(1);
   }
+  await guardSandboxNetwork(home, "lastlight server start");
   await composeRun(home, service ? `Start ${service}` : "Start stack", startArgv(service));
   p.log.success("Started.");
 }
@@ -1046,7 +1048,8 @@ export async function serverUpdate(opts: UpdateOpts): Promise<void> {
 
   // Before any image work or `up`: refuse while the sandbox network must be
   // recreated but sandboxes are still attached (compose would stop the
-  // services, then fail to remove the network).
+  // services, then fail to remove the network). Checked again right before
+  // each `up`, because a run can spawn a sandbox during the pull or build.
   await guardSandboxNetwork(home);
 
   // Images: pull prebuilt from GHCR by default (seconds); `--local` builds from
@@ -1063,6 +1066,7 @@ export async function serverUpdate(opts: UpdateOpts): Promise<void> {
   if (doBuild && !opts.local) {
     const tag = resolveImageTag(instance);
     await pullImages(home, tag, isAgent); // agent only — the serving container
+    await guardSandboxNetwork(home);
     await composeRun(home, "Recreate services", upArgv());
     await composeRun(home, "Restart egress sidecars", restartSidecarsArgv());
     await pullImages(home, tag, (img) => !isAgent(img)); // sandbox images, agent already up
@@ -1070,6 +1074,7 @@ export async function serverUpdate(opts: UpdateOpts): Promise<void> {
     if (doBuild && opts.local) {
       await buildImages(home);
     }
+    await guardSandboxNetwork(home);
     await composeRun(home, "Recreate services", upArgv());
     await composeRun(home, "Restart egress sidecars", restartSidecarsArgv());
   }

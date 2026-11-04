@@ -865,8 +865,10 @@ services on the network, then removes it, which fails while a sandbox is still
 attached. `lastlight server update` checks this first: when the network's IPAM
 settings differ from the compose file and a container compose doesn't manage is
 attached, it exits non-zero before pulling images or stopping anything, and
-names the containers. Let those runs finish (or `docker stop` them) and run the
-update again; it then recreates the network once.
+names the containers. It checks again immediately before `compose up`, since a
+run can spawn a sandbox while images are pulled or built; `lastlight server
+start` runs the same check. Let those runs finish (or `docker stop` them) and
+run the command again; it then recreates the network once.
 
 The strict allowlist the docker firewalls render is `dockerSandboxAllowlist()`:
 the default allowlist minus every host that only gateway providers use. An entry
