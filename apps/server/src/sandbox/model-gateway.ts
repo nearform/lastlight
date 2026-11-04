@@ -137,7 +137,6 @@ http {
     proxy_send_timeout 600s;
     proxy_connect_timeout 10s;
     proxy_http_version 1.1;
-    proxy_set_header Connection "";
 
     proxy_ssl_server_name on;
     proxy_ssl_verify on;
@@ -166,6 +165,14 @@ function renderProviderLocations(e: ProviderEndpoint, env: NodeJS.ProcessEnv): s
   }
   assertNginxSafe(key, e.envKey);
   const url = new URL(e.baseUrl);
+  // The gateway forwards to origin + path only; refuse what it would drop.
+  // Never echo the URL: userinfo or a query may hold a credential.
+  if (url.search || url.hash || url.username || url.password) {
+    throw new Error(
+      `providers.${e.prefix}.baseUrl: the model gateway can't forward a query string, fragment or ` +
+        `user:password; put credentials in the key env var or in headers`,
+    );
+  }
   const basePath = url.pathname.replace(/\/+$/, "");
   if (!URL_PATH_SAFE.test(basePath)) {
     throw new Error(`providers.${e.prefix}.baseUrl: the model gateway can't forward this path`);
@@ -187,6 +194,9 @@ function renderProviderLocations(e: ProviderEndpoint, env: NodeJS.ProcessEnv): s
   const directives = [
     `set $upstream "${url.protocol}//${url.host}";`,
     `proxy_set_header Host "${url.host}";`,
+    // Here, not at server level: any proxy_set_header in a location replaces
+    // every inherited one.
+    `proxy_set_header Connection "";`,
     `proxy_ssl_name "${url.hostname}";`,
     ...auth,
     ...headers,

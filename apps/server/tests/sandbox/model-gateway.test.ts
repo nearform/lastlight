@@ -161,6 +161,36 @@ describe("model gateway nginx config", () => {
     expect(conf).toContain('set $upstream "https://gw.example";');
   });
 
+  it('clears Connection in every forwarding location (a location-level proxy_set_header drops the server-level ones)', () => {
+    install();
+    const conf = renderModelGatewayConf(env)!;
+    const blocks = conf.match(/location = [^{]*\{[^}]*\}/g)!;
+    expect(blocks).toHaveLength(2);
+    for (const block of blocks) expect(block).toContain('proxy_set_header Connection "";');
+    // not left at server level, where nginx would ignore it
+    expect(conf.match(/proxy_set_header Connection "";/g)).toHaveLength(blocks.length);
+  });
+
+  it("refuses a baseUrl with a query string, userinfo or fragment, without echoing it", () => {
+    for (const baseUrl of [
+      "https://gw.example/v1?tenant=secret-q",
+      "https://user:secret-p@gw.example/v1",
+      "https://secret-u@gw.example/v1",
+      "https://gw.example/v1#secret-f",
+    ]) {
+      resetProviderRegistry();
+      install({ baseUrl });
+      let message = "";
+      try {
+        renderModelGatewayConf(env);
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message).toMatch(/providers\.acme\.baseUrl/);
+      expect(message).not.toContain("secret");
+    }
+  });
+
   it("keeps a non-default upstream port", () => {
     install({ baseUrl: "https://gw.example:8443/v1" });
     const conf = renderModelGatewayConf(env)!;
