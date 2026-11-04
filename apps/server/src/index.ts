@@ -46,6 +46,7 @@ import { agentContextRegistry } from "./sandbox/k8s/agent-context-registry.js";
 import { mountArtifactUpload } from "./sandbox/k8s/artifact-upload-route.js";
 import { artifactStore } from "./sandbox/artifact-store.js";
 import { writeEgressFirewallConfigs, writeOtelCollectorConfig } from "./sandbox/egress-firewall-config.js";
+import { writeModelGatewayConfig } from "./sandbox/model-gateway.js";
 import { initTelemetry, shutdownTelemetry } from "./telemetry/index.js";
 import { authMiddleware, authIsEnabled, actorFromContext } from "./admin/auth.js";
 import { recordActivity } from "./activity.js";
@@ -222,6 +223,13 @@ async function main() {
   // the collector's trusted outbound leg, not through the firewall.
   const proxyDir = writeEgressFirewallConfigs(config.stateDir);
   configLog.info("Egress firewall configs", { dir: proxyDir });
+
+  // Model gateway (docker backend): the nginx config that holds the keys of
+  // `sandboxGateway` providers, mode 0600. Removed again when no provider uses
+  // it. Throws on a missing key or one nginx can't carry — fail the boot
+  // rather than start runs that can't authenticate.
+  const modelGatewayPath = writeModelGatewayConfig(config.stateDir);
+  configLog.info("Model gateway config", { path: modelGatewayPath ?? "none (no sandboxGateway provider)" });
 
   // Generate the in-network OTEL collector config (docker backend). Derived
   // from the harness's OTEL_* backend env so the collector re-exports to the

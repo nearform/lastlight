@@ -11,6 +11,7 @@ import {
   OTEL_COLLECTOR_UID,
   SANDBOX_EGRESS_SUBNET,
 } from "#src/sandbox/egress-firewall-config.js";
+import { MODEL_GATEWAY_IP } from "#src/sandbox/model-gateway.js";
 
 /**
  * Regression test for the sandbox egress network topology.
@@ -34,6 +35,8 @@ interface ComposeService {
   // per-network config (`{a: {ipv4_address: ...}, b: {}}`).
   networks?: string[] | Record<string, unknown>;
   user?: string;
+  command?: string[] | string;
+  volumes?: unknown[];
 }
 interface ComposeFile {
   services: Record<string, ComposeService>;
@@ -178,7 +181,7 @@ describe("docker-compose egress topology", () => {
     });
   }
 
-  it("proxy-egress contains exactly the two nginx firewalls and the otel-collector", () => {
+  it("proxy-egress contains exactly the two nginx firewalls, the otel-collector and the model gateway", () => {
     // These are the only services allowed an outbound path: the firewalls
     // tunnel sandbox HTTPS, and the collector re-exports sandbox telemetry.
     // None touch `internal`, so none can bridge a sandbox into harness
@@ -186,6 +189,52 @@ describe("docker-compose egress topology", () => {
     const onProxyEgress = Object.keys(compose.services)
       .filter((name) => networkNamesOf(name).includes("proxy-egress"))
       .sort();
-    expect(onProxyEgress).toEqual(["nginx-egress-open", "nginx-egress-strict", "otel-collector"]);
+    expect(onProxyEgress).toEqual(["model-gateway", "nginx-egress-open", "nginx-egress-strict", "otel-collector"]);
+  });
+
+  describe("model-gateway", () => {
+    const nets = networkNamesOf("model-gateway");
+
+    it("is dual-homed on sandbox-egress (172.30.0.40) + proxy-egress", () => {
+      expect(nets).toContain("sandbox-egress");
+      expect(nets).toContain("proxy-egress");
+    });
+
+    it("does NOT attach to the harness `internal` network", () => {
+      expect(nets).not.toContain("internal");
+    });
+
+    it("static IP matches MODEL_GATEWAY_IP", () => {
+      expect(ipv4OnNetwork("model-gateway", "sandbox-egress")).toBe(MODEL_GATEWAY_IP);
+    });
+
+    it("mounts only the proxy config directory, read-only — not the whole agent-data volume", () => {
+      // The gateway holds the provider key; it must not also see sessions,
+      // clones, or the credential store under /app/data.
+      const volumes = compose.services["model-gateway"]?.volumes ?? [];
+      expect(volumes).toHaveLength(1);
+      expect(volumes[0]).toMatchObject({
+        type: "volume",
+        source: "agent-data",
+        target: "/app/data/proxy",
+        read_only: true,
+        volume: { subpath: "proxy" },
+      });
+    });
+
+    it("is opt-in behind the model-gateway profile (no config to load without a gateway provider)", () => {
+      expect((compose.services["model-gateway"] as { profiles?: string[] })?.profiles).toEqual(["model-gateway"]);
+    });
+
+    it("runs nginx with /app/data/proxy/model-gateway.conf", () => {
+      expect(compose.services["model-gateway"]?.command).toEqual([
+        "nginx", "-c", "/app/data/proxy/model-gateway.conf", "-g", "daemon off;",
+      ]);
+    });
+  });
+
+  it("egress-init also writes the model gateway config", () => {
+    const command = JSON.stringify(compose.services["egress-init"]?.command);
+    expect(command).toContain("writeModelGatewayConfig");
   });
 });

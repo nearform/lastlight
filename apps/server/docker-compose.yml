@@ -127,7 +127,7 @@ services:
       - agent-data:/app/data
     command:
       ["node", "-e",
-       "const c=require('/app/dist/config/config.js').loadConfig();const m=require('/app/dist/sandbox/egress-firewall-config.js');const d=c.stateDir;m.writeEgressFirewallConfigs(d);m.writeOtelCollectorConfig(d,{active:c.otel.enabled&&c.otel.forwardToSandbox})"]
+       "const c=require('/app/dist/config/config.js').loadConfig();const m=require('/app/dist/sandbox/egress-firewall-config.js');const d=c.stateDir;m.writeEgressFirewallConfigs(d);m.writeOtelCollectorConfig(d,{active:c.otel.enabled&&c.otel.forwardToSandbox});require('/app/dist/sandbox/model-gateway.js').writeModelGatewayConfig(d)"]
     depends_on:
       - agent          # ensures the image has been built when init runs
 
@@ -190,6 +190,35 @@ services:
     networks:
       sandbox-egress:
         ipv4_address: 172.30.0.21
+      proxy-egress: {}
+
+  # Model gateway: holds the keys of `sandboxGateway` providers so docker
+  # sandboxes never do. Sandboxes call it by IP on sandbox-egress with a
+  # placeholder key; it swaps in the real key and forwards over HTTPS on
+  # proxy-egress. Its config (mode 0600, written by the harness/egress-init)
+  # holds the keys, so it mounts ONLY the proxy config directory — not the
+  # rest of agent-data. Not on `internal`, like the firewalls. Opt-in
+  # (`COMPOSE_PROFILES=model-gateway`): without a `sandboxGateway` provider
+  # there is no config for it to load.
+  model-gateway:
+    image: nginx:alpine
+    profiles: ["model-gateway"]
+    restart: unless-stopped
+    command:
+      ["nginx", "-c", "/app/data/proxy/model-gateway.conf", "-g", "daemon off;"]
+    volumes:
+      - type: volume
+        source: agent-data
+        target: /app/data/proxy
+        read_only: true
+        volume:
+          subpath: proxy
+    depends_on:
+      egress-init:
+        condition: service_completed_successfully
+    networks:
+      sandbox-egress:
+        ipv4_address: 172.30.0.40
       proxy-egress: {}
 
   # In-network OTEL collector. Sandboxes export telemetry here (by IP, on
