@@ -266,6 +266,24 @@ describe("resolveProviderRegistry — custom provider headers", () => {
   });
 });
 
+describe("resolveProviderRegistry — sandboxGateway", () => {
+  it("carries sandboxGateway onto a custom provider's endpoint", () => {
+    const r = resolveProviderRegistry({ acme: { baseUrl: "https://gw.example/v1", sandboxGateway: true } });
+    expect(r.endpoints.find((e) => e.prefix === "acme")?.sandboxGateway).toBe(true);
+  });
+
+  it("leaves the endpoint unchanged without it", () => {
+    const r = resolveProviderRegistry({ acme: { baseUrl: "https://gw.example/v1" } });
+    expect(r.endpoints[0]).not.toHaveProperty("sandboxGateway");
+  });
+
+  it("refuses sandboxGateway on a built-in provider and names the alternative", () => {
+    expect(() => resolveProviderRegistry({ anthropic: { sandboxGateway: true } })).toThrow(
+      /providers\.anthropic\.sandboxGateway is only supported on a provider of your own/,
+    );
+  });
+});
+
 describe("providerOverridesFromEnv", () => {
   it("reads the per-provider base-URL vars the vendor SDKs already use", () => {
     expect(providerBaseUrlEnvVar("anthropic")).toBe("ANTHROPIC_BASE_URL");

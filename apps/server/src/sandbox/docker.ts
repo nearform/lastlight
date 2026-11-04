@@ -154,6 +154,11 @@ export class DockerSandbox {
     // bug that made staged skills invisible — the two paths look identical
     // but live in different physical locations).
     const dockerArgs: string[] = ["-v", `${dataMount}:/data`];
+    // /data/proxy holds the generated firewall configs and the model gateway's
+    // key file (mode 0600, owned by the harness UID, which the sandbox agent
+    // shares). Cover it with an empty, root-only tmpfs so the agent can neither
+    // read the key nor rewrite a config a sidecar loads.
+    dockerArgs.push("--mount", "type=tmpfs,destination=/data/proxy,tmpfs-size=4096,tmpfs-mode=0500");
     if (opts.workspaceMount.type === "bind") {
       dockerArgs.push("-v", `${opts.workspaceMount.hostPath}:${WORKSPACE_DIR}`);
     } else {

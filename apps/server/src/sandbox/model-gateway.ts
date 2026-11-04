@@ -1,0 +1,263 @@
+/**
+ * The model gateway (docker backend only).
+ *
+ * A custom provider with `sandboxGateway: true` never hands its key to a docker
+ * sandbox. The sandbox gets a placeholder key and a base URL on the gateway
+ * sidecar (`model-gateway`, on the sandbox egress network); the gateway strips
+ * whatever credential the client sent, adds the real key and the provider's
+ * literal headers, and forwards over HTTPS. The real key lives only in the
+ * server's env and in the gateway's mode-0600 config.
+ *
+ * Kept free of imports from `egress-firewall-config.ts`: that module imports the
+ * allowlist, which imports this one.
+ */
+import { existsSync, mkdirSync, rmSync, chmodSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import type { ApiType, ProviderEndpoint } from "lastlight-shared/providers";
+import type { SandboxBackend } from "../config/config.js";
+import { providerRegistry, type WireEndpoint } from "../config/provider-registry.js";
+
+/** The gateway's fixed address on `SANDBOX_EGRESS_SUBNET` (172.30.0.0/24). */
+export const MODEL_GATEWAY_IP = "172.30.0.40";
+export const MODEL_GATEWAY_PORT = 80;
+/** What the sandbox holds instead of the key. The gateway overwrites it. */
+export const MODEL_GATEWAY_KEY_PLACEHOLDER = "lastlight-model-gateway";
+
+/** The in-sandbox base URL for a gateway provider: one path prefix per provider. */
+export function modelGatewayBaseUrl(prefix: string): string {
+  return `http://${MODEL_GATEWAY_IP}/${prefix}`;
+}
+
+/** The providers this deployment routes through the gateway. */
+export function gatewayEndpoints(): readonly ProviderEndpoint[] {
+  return providerRegistry().endpoints.filter((e) => e.sandboxGateway === true);
+}
+
+/**
+ * Swap a gateway provider's key and base URL for the placeholder and the
+ * gateway URL, for docker runs. Pure: returns new objects. Every other backend
+ * gets its inputs back, since gondolin and none make the model call host-side
+ * and smol/kubernetes refuse `sandboxGateway` at config load.
+ *
+ * The placeholder is set even when the key is absent from `env`, so pi always
+ * has a key to send and the gateway always has one to replace.
+ */
+export function applyModelGateway(
+  env: Record<string, string>,
+  wire: Record<string, WireEndpoint> | undefined,
+  backend: SandboxBackend,
+): { env: Record<string, string>; wire: Record<string, WireEndpoint> | undefined } {
+  const gated = backend === "docker" ? gatewayEndpoints() : [];
+  if (gated.length === 0) return { env, wire };
+  const outEnv = { ...env };
+  const outWire: Record<string, WireEndpoint> = { ...(wire ?? {}) };
+  for (const e of gated) {
+    outEnv[e.envKey] = MODEL_GATEWAY_KEY_PLACEHOLDER;
+    const current = outWire[e.prefix];
+    if (current) outWire[e.prefix] = { ...current, baseUrl: modelGatewayBaseUrl(e.prefix) };
+  }
+  return { env: outEnv, wire: outWire };
+}
+
+/**
+ * The paths each request family appends to its `baseUrl`, and so the only ones
+ * the gateway forwards. The OpenAI client posts `chat/completions`; the
+ * Anthropic SDK posts `/v1/messages` onto a bare base URL (it adds the `/v1`
+ * itself). `models` is the cheap listing the deploy health check reads.
+ */
+const GATEWAY_PATHS: Record<ApiType, readonly string[]> = {
+  "openai-completions": ["chat/completions", "models"],
+  "anthropic-messages": ["v1/messages", "v1/models"],
+};
+
+/**
+ * What a value inside a double-quoted nginx string may contain: printable
+ * ASCII without whitespace, minus the characters nginx would read as syntax
+ * or as a variable (`"`, `\`, `$`, `;`, `{`, `}`).
+ */
+const NGINX_SAFE_VALUE = /^[\x21-\x7e]+$/;
+const NGINX_SPECIAL = /["\\$;{}]/;
+/**
+ * What a literal header value may contain: printable ASCII plus space and tab,
+ * without `$` (nginx would expand it as a variable). `"` and `\` are escaped by
+ * {@link nginxHeaderValue}; `;`, `{` and `}` are plain characters inside quotes.
+ */
+const HEADER_VALUE_SAFE = /^[\t\x20-\x7e]*$/;
+const URL_PATH_SAFE = /^[A-Za-z0-9._~/%-]*$/;
+const PREFIX_SAFE = /^[A-Za-z0-9._-]+$/;
+/** A header name nginx reads as one plain token (no `#` comment, no quote). */
+const HEADER_NAME_SAFE = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
+/** Headers the gateway itself owns: overriding them corrupts every request. */
+const RESERVED_HEADERS = new Set([
+  "host", "content-length", "transfer-encoding", "connection", "keep-alive", "upgrade",
+  "te", "trailer", "proxy-connection", "proxy-authorization", "authorization", "x-api-key",
+]);
+
+/** A header value as the body of a double-quoted nginx string. */
+function nginxHeaderValue(value: string, what: string): string {
+  if (!HEADER_VALUE_SAFE.test(value) || value.includes("$")) {
+    throw new Error(
+      `${what}: the model gateway can't carry this value — it must be printable ASCII (spaces and tabs ` +
+        `allowed) without "$"`,
+    );
+  }
+  return value.replace(/[\\"]/g, (c) => `\\${c}`);
+}
+
+/** Never echoes `value`: the key must not reach a log or an error. */
+function assertNginxSafe(value: string, what: string): void {
+  if (!NGINX_SAFE_VALUE.test(value) || NGINX_SPECIAL.test(value)) {
+    throw new Error(
+      `${what}: the model gateway can't carry this value — it must be printable ASCII without ` +
+        `whitespace, quotes, backslashes, "$", ";", "{" or "}"`,
+    );
+  }
+}
+
+/**
+ * The gateway's nginx config, or `undefined` when no provider uses the gateway.
+ * Throws (naming the env var or header, never echoing a value) when a gateway
+ * provider's key is missing or a key/header value can't be written safely,
+ * which fails the boot instead of starting a gateway that can't authenticate.
+ */
+export function renderModelGatewayConf(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const gated = gatewayEndpoints();
+  if (gated.length === 0) return undefined;
+  const servers = gated.map((e) => renderProviderLocations(e, env)).join("\n");
+  return `# Generated by lastlight at harness boot. DO NOT EDIT BY HAND.
+# Model gateway: holds provider keys so docker sandboxes never do.
+# Source of truth: src/sandbox/model-gateway.ts. Mode 0600 — contains keys.
+
+error_log /dev/stderr warn;
+pid /tmp/nginx.pid;
+
+events { worker_connections 256; }
+
+http {
+  access_log off;
+  server_tokens off;
+  client_body_temp_path /tmp/nginx-client-body;
+  proxy_temp_path /tmp/nginx-proxy;
+
+  # Runtime resolver (docker's embedded DNS): the upstream is a variable, so
+  # nginx resolves it per request instead of pinning one IP at startup.
+  resolver 127.0.0.11 valid=30s ipv6=off;
+
+  server {
+    listen 80;
+
+    # Agent runs send big contexts and stream long generations.
+    client_max_body_size 64m;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_read_timeout 600s;
+    proxy_send_timeout 600s;
+    proxy_connect_timeout 10s;
+    proxy_http_version 1.1;
+
+    proxy_ssl_server_name on;
+    proxy_ssl_verify on;
+    proxy_ssl_verify_depth 3;
+    proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+
+${servers}
+    # Anything else: not a model call.
+    location / {
+      return 404;
+    }
+  }
+}
+`;
+}
+
+function renderProviderLocations(e: ProviderEndpoint, env: NodeJS.ProcessEnv): string {
+  if (!PREFIX_SAFE.test(e.prefix)) {
+    throw new Error(`providers.${e.prefix}: the model gateway needs a prefix of letters, digits, ".", "_" or "-"`);
+  }
+  const key = env[e.envKey];
+  if (!key) {
+    throw new Error(
+      `${e.envKey} is not set: providers.${e.prefix} uses the model gateway, which needs the key to add it`,
+    );
+  }
+  assertNginxSafe(key, e.envKey);
+  const url = new URL(e.baseUrl);
+  // The real key goes on every forwarded request: never over plain http. The
+  // registry refuses this at config load; this guards the renderer itself.
+  if (url.protocol !== "https:") {
+    throw new Error(`providers.${e.prefix}.baseUrl: the model gateway only forwards to https:// upstreams`);
+  }
+  // The gateway forwards to origin + path only; refuse what it would drop.
+  // Never echo the URL: userinfo or a query may hold a credential.
+  if (url.search || url.hash || url.username || url.password) {
+    throw new Error(
+      `providers.${e.prefix}.baseUrl: the model gateway can't forward a query string, fragment or ` +
+        `user:password; put credentials in the key env var or in headers`,
+    );
+  }
+  const basePath = url.pathname.replace(/\/+$/, "");
+  if (!URL_PATH_SAFE.test(basePath)) {
+    throw new Error(`providers.${e.prefix}.baseUrl: the model gateway can't forward this path`);
+  }
+  const auth =
+    e.api === "anthropic-messages"
+      ? [`proxy_set_header x-api-key "${key}";`, `proxy_set_header Authorization "";`]
+      : [`proxy_set_header Authorization "Bearer ${key}";`, `proxy_set_header x-api-key "";`];
+  const headers = Object.entries(e.headers ?? {}).map(([name, value]) => {
+    if (!HEADER_NAME_SAFE.test(name) || RESERVED_HEADERS.has(name.toLowerCase())) {
+      throw new Error(
+        `providers.${e.prefix}.headers.${name}: the model gateway only sends header names of letters, ` +
+          `digits and "-", and sets Host, Content-Length, Connection and the credential headers itself`,
+      );
+    }
+    return `proxy_set_header ${name} "${nginxHeaderValue(value, `providers.${e.prefix}.headers.${name}`)}";`;
+  });
+  const directives = [
+    `set $upstream "https://${url.host}";`,
+    `proxy_set_header Host "${url.host}";`,
+    // Here, not at server level: any proxy_set_header in a location replaces
+    // every inherited one.
+    `proxy_set_header Connection "";`,
+    `proxy_ssl_name "${url.hostname}";`,
+    ...auth,
+    ...headers,
+  ];
+  return GATEWAY_PATHS[e.api]
+    .map(
+      (path) => `    location = /${e.prefix}/${path} {
+${directives.map((d) => `      ${d}`).join("\n")}
+      proxy_pass $upstream${basePath}/${path}$is_args$args;
+    }
+`,
+    )
+    .join("\n");
+}
+
+/**
+ * Write `<stateDir>/proxy/model-gateway.conf` (mode 0600: it holds keys) and
+ * return its path; or, when no provider uses the gateway, remove a stale file
+ * so a key from an earlier config does not linger on disk, and return
+ * `undefined` — also on every backend but docker. Called at harness boot and
+ * by the compose `egress-init`.
+ */
+export function writeModelGatewayConfig(
+  stateDir: string,
+  env: NodeJS.ProcessEnv = process.env,
+  backend: SandboxBackend = "docker",
+): string | undefined {
+  const dir = join(stateDir, "proxy");
+  const path = join(dir, "model-gateway.conf");
+  // Only docker runs use the gateway; elsewhere a key file would be a needless
+  // second copy of the key.
+  const conf = backend === "docker" ? renderModelGatewayConf(env) : undefined;
+  if (conf === undefined) {
+    if (existsSync(path)) rmSync(path, { force: true });
+    return undefined;
+  }
+  mkdirSync(dir, { recursive: true });
+  // `mode` only applies when the file is created, so tighten an existing file
+  // BEFORE the key goes into it.
+  if (existsSync(path)) chmodSync(path, 0o600);
+  writeFileSync(path, conf, { mode: 0o600 });
+  return path;
+}

@@ -26,7 +26,7 @@ function overlayWith(yaml: string): string {
 
 describe("providers: config block", () => {
   beforeEach(() => {
-    for (const k of ["GITHUB_APP_ID", "LASTLIGHT_OVERLAY_DIR", "LASTLIGHT_PROVIDERS", "ANTHROPIC_BASE_URL", "LASTLIGHT_ALLOW_INSECURE_PROVIDER_URLS"]) {
+    for (const k of ["GITHUB_APP_ID", "LASTLIGHT_OVERLAY_DIR", "LASTLIGHT_PROVIDERS", "ANTHROPIC_BASE_URL", "LASTLIGHT_ALLOW_INSECURE_PROVIDER_URLS", "LASTLIGHT_SANDBOX"]) {
       vi.stubEnv(k, "");
     }
   });
@@ -157,5 +157,37 @@ describe("providers: config block", () => {
     vi.stubEnv("LASTLIGHT_ALLOW_INSECURE_PROVIDER_URLS", "1");
     loadConfig();
     expect(providerRegistry().byPrefix("anthropic")!.baseUrl).toBe("http://gw.internal/v1");
+  });
+  describe("sandboxGateway", () => {
+    const gatewayOverlay = (flag: string) =>
+      overlayWith(`providers:\n  acme:\n    baseUrl: https://llm.corp.example/v1\n    sandboxGateway: ${flag}\n`);
+
+    it("refuses a non-boolean sandboxGateway", () => {
+      vi.stubEnv("LASTLIGHT_OVERLAY_DIR", gatewayOverlay('"yes"'));
+      expect(() => loadConfig()).toThrow(/providers\.acme\.sandboxGateway must be true or false/);
+    });
+
+    it("refuses sandboxGateway on the kubernetes backend", () => {
+      vi.stubEnv("LASTLIGHT_OVERLAY_DIR", gatewayOverlay("true"));
+      vi.stubEnv("LASTLIGHT_SANDBOX", "kubernetes");
+      expect(() => loadConfig()).toThrow(/sandboxGateway is only supported on the docker backend/);
+    });
+
+    it("refuses sandboxGateway on the smol backend", () => {
+      vi.stubEnv("LASTLIGHT_OVERLAY_DIR", gatewayOverlay("true"));
+      vi.stubEnv("LASTLIGHT_SANDBOX", "smol");
+      expect(() => loadConfig()).toThrow(/sandboxGateway is only supported on the docker backend/);
+    });
+
+    it("accepts it on docker, gondolin and none", () => {
+      for (const backend of ["docker", "gondolin", "none"]) {
+        vi.stubEnv("LASTLIGHT_OVERLAY_DIR", gatewayOverlay("true"));
+        vi.stubEnv("LASTLIGHT_SANDBOX", backend);
+        loadConfig();
+        expect(providerRegistry().endpoints.find((e) => e.prefix === "acme")?.sandboxGateway).toBe(true);
+        resetRuntimeConfigForTests();
+        resetProviderRegistry();
+      }
+    });
   });
 });
