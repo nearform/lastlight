@@ -57,6 +57,7 @@ import { QuotaExceededError } from "../sandbox/k8s/quota.js";
 import type { ProgressReporter } from "../notify/types.js";
 import { collapseDetail } from "../notify/render.js";
 import { markRunLive } from "./live-runs.js";
+import { nextNotBefore } from "./usage-wait.js";
 
 // `isTerminated` used to live here; re-exported for API stability.
 export { isTerminated };
@@ -376,7 +377,7 @@ export async function runWorkflow(
   // a parameter with a default doesn't count toward it. Existing callers are
   // unaffected — omitting it reproduces today's behaviour exactly.
   repoConfig: RunRepoConfig | undefined = undefined,
-): Promise<WorkflowResult & { backpressure?: boolean }> {
+): Promise<WorkflowResult & { backpressure?: boolean; notBefore?: string }> {
   // Every route into the runner crosses here, so this is where a run becomes
   // "live in this process" (`./live-runs.ts`) — for the whole execution, not
   // just while its row says `running`.
@@ -401,7 +402,7 @@ async function runWorkflowBody(
   workflowId: string | undefined,
   variants: VariantConfig | undefined,
   repoConfig: RunRepoConfig | undefined,
-): Promise<WorkflowResult & { backpressure?: boolean }> {
+): Promise<WorkflowResult & { backpressure?: boolean; notBefore?: string }> {
   const outputs: Record<string, unknown> = {};
   const { taskId } = ctx;
   // Slack-originated runs carry an explicit `slack:` trigger id — everything
@@ -596,7 +597,9 @@ async function runWorkflowBody(
   // be stuck failed instead of re-queued. This is the root cause #8/#11 missed:
   // they converted the RESULT/THROW to backpressure but not the fail-flip that
   // ran first.
-  const quota = { hit: false };
+  // A phase that hit a model provider's usage limit is backpressure too, with
+  // the time the run may be admitted again.
+  const quota: { hit: boolean; notBefore?: string } = { hit: false };
 
   /** Mark the workflow run as failed. */
   const failWorkflow = async (errorMsg?: string): Promise<void> => {
@@ -672,6 +675,11 @@ async function runWorkflowBody(
   // entirely in the server-owned port wrapper.
   const noteStopReason = (r: ExecutionResult): ExecutionResult => {
     if (r.stopReason === "error_quota") quota.hit = true;
+    if (r.stopReason === "usage_limit") {
+      quota.hit = true;
+      const at = nextNotBefore(r.retryAfter ?? null, new Date());
+      if (!quota.notBefore || at > quota.notBefore) quota.notBefore = at;
+    }
     return r;
   };
   // A quota rejection usually surfaces as a resolved `error_quota` ExecutionResult
@@ -791,7 +799,7 @@ async function runWorkflowBody(
       reporterActive: !!reporter,
       capabilities: { qaImageAvailable, qaImageName: SANDBOX_IMAGE_QA },
     }, outputs);
-    return quota.hit ? { ...result, backpressure: true } : result;
+    return quota.hit ? { ...result, backpressure: true, ...(quota.notBefore ? { notBefore: quota.notBefore } : {}) } : result;
   } catch (err) {
     // A hard phase failure — notably a single-phase workflow (e.g. issue-triage)
     // whose only phase fails — throws OUT of the engine, bypassing the quota.hit
@@ -800,7 +808,7 @@ async function runWorkflowBody(
     // the run terminal-fails red instead of requeuing. Every other error (a real
     // failure) propagates unchanged.
     if (quota.hit || err instanceof QuotaExceededError) {
-      return { success: false, phases: [], backpressure: true };
+      return { success: false, phases: [], backpressure: true, ...(quota.notBefore ? { notBefore: quota.notBefore } : {}) };
     }
     throw err;
   } finally {

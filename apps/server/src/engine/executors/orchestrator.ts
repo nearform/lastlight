@@ -458,13 +458,17 @@ export async function runAgentIn(
         // transcript, even when the session printed it (an `env` tool call).
         // The raw final answer is remembered to check it before it is used.
         let lastAnswerRaw = "";
+        // An attempt a usage limit stopped is resumed, once, from its kept
+        // transcript; any other attempt starts a fresh session (and transcript).
+        const resume = takeClaudeResume(ctx);
         const keep = claudeTranscriptKeeper(ctx);
         const port = sandbox.claudeCodePort!(ctx.taskId);
         let outcome: ClaudeCodeOutcome;
         try {
           outcome = await runClaudeCodeSession(port, {
           model: claudeCodeModelId(model),
-          prompt,
+          prompt: resume ? "continue" : prompt,
+          ...(resume ? { resume } : {}),
           cwd: prov.agentCwd,
           skillDirs,
           config: ccConfig,
@@ -491,6 +495,7 @@ export async function runAgentIn(
           return await claudeCodeStop("error_secret_leak", leak, outcome.sessionId ?? "", shim, startTime, ctx, model);
         }
         if (outcome.kind !== "done") {
+          if (outcome.kind === "usage_limit") markClaudeResume(ctx, outcome.sessionId);
           tree.end();
           return await claudeCodeFailure(outcome, shim, startTime, ctx, model);
         }
@@ -698,8 +703,48 @@ async function syncOntoClaudeNotes(sandbox: Sandbox, prov: ProvisionResult, ctx:
   }
 }
 
+function claudeTranscriptFile(ctx: SandboxRunContext): string {
+  return claudeTranscriptPath(ctx.stateDir, claudeRunKey(ctx), ctx.config.telemetry?.phaseName);
+}
+
+/** Remember that this phase's session stopped on a usage limit, to resume it. */
+function markClaudeResume(ctx: SandboxRunContext, sessionId: string): void {
+  try {
+    writeFileSync(`${claudeTranscriptFile(ctx)}.resume.json`, JSON.stringify({ sessionId }), { mode: 0o600 });
+  } catch (err: unknown) {
+    log.warn("Could not record the Claude session for a resume", { err });
+  }
+}
+
+/**
+ * The session to resume for this phase, consumed: its id and kept transcript.
+ * Without one, the old transcript is cleared so the next resume never mixes
+ * two sessions' lines.
+ */
+function takeClaudeResume(ctx: SandboxRunContext): { sessionId: string; lines: string[] } | undefined {
+  const file = claudeTranscriptFile(ctx);
+  const marker = `${file}.resume.json`;
+  let sessionId: unknown;
+  try {
+    sessionId = (JSON.parse(readFileSync(marker, "utf8")) as { sessionId?: unknown }).sessionId;
+  } catch {
+    sessionId = undefined;
+  }
+  rmSync(marker, { force: true });
+  if (typeof sessionId === "string" && /^[0-9a-f-]{36}$/i.test(sessionId)) {
+    try {
+      const lines = readFileSync(file, "utf8").split("\n").filter(Boolean);
+      if (lines.length > 0) return { sessionId, lines };
+    } catch {
+      // no transcript kept: start fresh
+    }
+  }
+  rmSync(file, { force: true });
+  return undefined;
+}
+
 function claudeTranscriptKeeper(ctx: SandboxRunContext): (line: string) => void {
-  const file = claudeTranscriptPath(ctx.stateDir, claudeRunKey(ctx), ctx.config.telemetry?.phaseName);
+  const file = claudeTranscriptFile(ctx);
   let ready = false;
   return (line) => {
     try {

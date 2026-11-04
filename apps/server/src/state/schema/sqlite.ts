@@ -141,6 +141,8 @@ export const workflowRuns = sqliteTable(
     triggerActorType: text("trigger_actor_type"),
     scratch: text("scratch", { mode: "json" }).$type<Record<string, unknown>>(),
     restartCount: integer("restart_count").notNull().default(0),
+    /** ISO time a queued run waiting for a usage-limit reset may be admitted again; null = now. */
+    notBefore: text("not_before"),
     // The run's OTel trace/span context (issue #255) — a feedback signal can
     // arrive days after the span closed, so we remember where the trace was.
     traceId: text("trace_id"),

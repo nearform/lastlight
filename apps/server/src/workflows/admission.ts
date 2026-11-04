@@ -35,6 +35,7 @@ import type { StateDb } from "../state/db.js";
 import type { WorkflowRun } from "../state/workflow-run-store.js";
 import { resumeSimpleRun, type ResumeOptions } from "./resume.js";
 import { logger } from "../logging/logger.js";
+export { nextNotBefore } from "./usage-wait.js";
 
 const log = logger("admission");
 
@@ -108,8 +109,11 @@ export function createAdmissionController(deps: AdmissionDeps): AdmissionControl
     for (;;) {
       if ((await db.runs.countRunning()) >= cap) break;
       const queued = await db.runs.listQueued();
-      if (queued.length === 0) break;
-      const next = queued[0];
+      // A run waiting for a usage-limit reset stays queued until its
+      // `notBefore`, and does not hold up the runs behind it.
+      const nowIso = new Date().toISOString();
+      const next = queued.find((r) => !r.notBefore || r.notBefore <= nowIso);
+      if (!next) break;
       const changes = await db.runs.admitRun(next.id);
       if (changes !== 1) {
         // CAS lost — another admitter won this row; re-check from scratch.
@@ -173,7 +177,8 @@ async function expireStaleRuns(
   const queued = await db.runs.listQueued();
   const now = Date.now();
   for (const run of queued) {
-    const enqueuedAt = Date.parse(run.startedAt);
+    // A run waiting for a usage reset starts its queue wait at that reset.
+    const enqueuedAt = Math.max(Date.parse(run.startedAt), run.notBefore ? Date.parse(run.notBefore) || 0 : 0);
     if (now - enqueuedAt > maxQueueWaitMs) {
       const reason = "dropped from queue after waiting too long";
       const changed = await db.runs.expireQueued(run.id, reason);

@@ -311,4 +311,30 @@ describe("runSimpleWorkflow — concurrency cap (issue #172)", () => {
     const runs = await db.runs.listActive();
     expect(runs.find((r) => r.workflowName === "explore")!.status).toBe("queued");
   });
+
+  it("requeues a run that hit a usage limit with its not_before", async () => {
+    const notBefore = "2026-11-04T15:00:00.000Z";
+    mockRunWorkflow.mockResolvedValue({
+      success: false,
+      phases: [{ phase: "socratic", success: false, output: "", error: "Claude usage limit reached" }],
+      backpressure: true,
+      notBefore,
+    });
+    const result = await runSimpleWorkflow(
+      "explore",
+      makeRequest(),
+      { ...makeConfig(), sandbox: "docker" as const },
+      makeCallbacks(),
+      db,
+      undefined,
+      undefined,
+      "lastlight:bootstrap",
+      undefined,
+      { maxWorkflows: 1000, maxQueueWaitMs: 1_800_000 },
+    );
+    expect(result.queued).toBe(true);
+    const run = (await db.runs.listActive()).find((r) => r.workflowName === "explore")!;
+    expect(run.status).toBe("queued");
+    expect(run.notBefore).toBe(notBefore);
+  });
 });

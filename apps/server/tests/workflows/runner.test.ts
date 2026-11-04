@@ -375,6 +375,59 @@ describe("runWorkflow — backpressure", () => {
   });
 });
 
+describe("runWorkflow — usage limit", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("a phase ending usage_limit is backpressure with not_before, completed phases kept", async () => {
+    const db = await makeTestDb();
+    await db.runs.createRun({
+      id: "run-usage",
+      workflowName: "simple",
+      triggerId: "acme/widget#43",
+      currentPhase: "architect",
+      status: "running",
+      startedAt: new Date().toISOString(),
+    });
+    const resetsAt = new Date(Date.now() + 3 * 3_600_000).toISOString();
+    mockExecuteAgent
+      .mockResolvedValueOnce(makeSuccessResult("architect done"))
+      .mockResolvedValueOnce({
+        success: false,
+        output: "",
+        turns: 0,
+        durationMs: 1,
+        error: "Claude usage limit reached",
+        stopReason: "usage_limit",
+        retryAfter: resetsAt,
+      });
+
+    const result = await runWorkflow(SIMPLE_WORKFLOW, BASE_CTX, {} as never, {}, db, undefined, undefined, "run-usage");
+
+    expect(result.backpressure).toBe(true);
+    expect(result.notBefore).toBe(resetsAt);
+    const row = (await db.runs.getRun("run-usage"))!;
+    expect(row.status).toBe("running"); // the caller requeues it
+    expect(row.phaseHistory.some((p) => p.phase === "architect" && p.success)).toBe(true);
+  });
+
+  it("an unknown reset waits an hour", async () => {
+    mockExecuteAgent.mockResolvedValue({
+      success: false,
+      output: "",
+      turns: 0,
+      durationMs: 1,
+      error: "Claude usage limit reached; reset time unknown",
+      stopReason: "usage_limit",
+    });
+    const before = Date.now();
+    const result = await runWorkflow(SIMPLE_WORKFLOW, BASE_CTX, {} as never, {});
+    expect(result.backpressure).toBe(true);
+    expect(Date.parse(result.notBefore!)).toBeGreaterThanOrEqual(before + 3_600_000);
+  });
+});
+
 describe("runWorkflow — guardrails on_output rules", () => {
   beforeEach(() => {
     vi.clearAllMocks();

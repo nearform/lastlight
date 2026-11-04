@@ -36,6 +36,13 @@
       "when": 1791613889809,
       "tag": "0004_adorable_puck",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1793805091610,
+      "tag": "0005_dizzy_magus",
+      "breakpoints": true
     }
   ]
 }

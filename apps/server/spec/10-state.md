@@ -127,7 +127,8 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   finished_at TEXT,
   triggered_by TEXT,                           -- ORIGINAL trigger's actor (joins users.login)
   trigger_actor_type TEXT,                      -- github | slack | cli | cron | admin | system
-  engine TEXT                                  -- owning workflow engine; NULL = the YAML engine
+  engine TEXT,                                 -- owning workflow engine; NULL = the YAML engine
+  not_before TEXT                              -- queued run waiting for a usage-limit reset: not admitted before this ISO time
 );
 
 CREATE INDEX idx_workflow_runs_trigger      ON workflow_runs(trigger_id, status);
@@ -139,7 +140,11 @@ CREATE INDEX idx_workflow_runs_name_started ON workflow_runs(workflow_name, star
 `scratch` is the only mutable JSON. `context` is set on creation and
 never changed. `phase_history` is technically a JSON array that the
 runner appends to. `restart_count` is the [Workflow Engine](/spec/06-workflow-engine)
-crash-loop circuit breaker.
+crash-loop circuit breaker. `not_before` is set only by the backpressure requeue
+of a run whose phase hit a model provider's usage limit (`stopReason:
+usage_limit`): admission skips the run until then, its queue-wait TTL counts
+from then, and admitting it clears the column. It is never earlier than five
+minutes after the requeue, and an hour out when the reset time is unknown.
 
 **Per-repository config on the row.** `context.models` / `context.variants` are
 the run's **effective** maps — the target repo's `.lastlight/lastlight.yml`

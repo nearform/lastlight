@@ -520,8 +520,12 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
     } else if (result.backpressure) {
       // Same backpressure requeue as the fresh-dispatch path: a promoted run
       // that re-hits the quota goes back to `queued` for the next admission tick.
-      await opts.db.runs.requeueRunning(run.id);
-      log.info("Requeued — cluster at capacity", { workflowName: run.workflowName, runId: run.id });
+      await opts.db.runs.requeueRunning(run.id, result.notBefore ? { notBefore: result.notBefore } : {});
+      log.info(result.notBefore ? "Requeued — waiting for the usage limit to reset" : "Requeued — cluster at capacity", {
+        workflowName: run.workflowName,
+        runId: run.id,
+        ...(result.notBefore ? { notBefore: result.notBefore } : {}),
+      });
     } else {
       await opts.db.runs.finishRun(run.id, "failed", {
         error: result.phases.find((p) => !p.success)?.error || "workflow failed during resume",

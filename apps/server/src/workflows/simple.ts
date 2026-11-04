@@ -1108,7 +1108,7 @@ export async function runSimpleWorkflow(
   bootstrapLabel = "lastlight:bootstrap",
   variants?: VariantConfig,
   concurrency?: { maxWorkflows: number; maxQueueWaitMs: number },
-): Promise<WorkflowResult & { backpressure?: boolean }> {
+): Promise<WorkflowResult & { backpressure?: boolean; notBefore?: string }> {
   // The run this dispatch holds live (`./live-runs.ts`), from before its row is
   // created or reused until this function returns — so a duplicate trigger in
   // ANY part of that window (the start hooks, the scheduler, the wrap-up) meets
@@ -1140,7 +1140,7 @@ async function runSimpleWorkflowBody(
   bootstrapLabel: string,
   variants: VariantConfig | undefined,
   concurrency: { maxWorkflows: number; maxQueueWaitMs: number } | undefined,
-): Promise<WorkflowResult & { backpressure?: boolean }> {
+): Promise<WorkflowResult & { backpressure?: boolean; notBefore?: string }> {
   // Kill switch — the BACKSTOP copy.
   //
   // The switch is read twice above this line, and has to be: `dispatch` reads
@@ -1654,9 +1654,11 @@ async function runSimpleWorkflowBody(
     } else if (result.backpressure) {
       // k8s ResourceQuota rejected a pod-create: requeue, don't fail. The
       // AdmissionController promotes it again as capacity frees (spec/09-sandbox.md (Concurrency)).
-      await db.runs.requeueRunning(workflowId);
+      await db.runs.requeueRunning(workflowId, result.notBefore ? { notBefore: result.notBefore } : {});
       await notify(
-        `\`${workflowName}\` is waiting for cluster capacity — it'll start automatically when a slot frees.`,
+        result.notBefore
+          ? `\`${workflowName}\` hit its model's usage limit — it'll resume automatically after ${result.notBefore}.`
+          : `\`${workflowName}\` is waiting for cluster capacity — it'll start automatically when a slot frees.`,
       );
       return { success: true, queued: true, backpressure: true, phases: result.phases };
     } else if (!result.success && !result.paused) {

@@ -353,6 +353,37 @@ describe("executeAgent on a claude-code model", () => {
     expect(other.fake.receivedCommand).toBeUndefined();
   });
 
+  it("resumes the session a usage limit stopped, with the kept transcript and `continue`", async () => {
+    const line = JSON.stringify({ type: "user", sessionId: SESSION, message: { role: "user", content: "plan it" } });
+    sessionSpy.mockImplementationOnce(async (_port, o) => {
+      o.onRawLine(line);
+      return { kind: "usage_limit", sessionId: SESSION, resetsAt: null };
+    });
+    const first = await run({ runId: "run-77", access: true, buildAssets: "server" });
+    expect(first.result.stopReason).toBe("usage_limit");
+
+    emitsBasicSession();
+    await run({ runId: "run-77", access: true, buildAssets: "server", stateDir: first.stateDir });
+    const resumed = sessionSpy.mock.calls.at(-1)![1];
+    expect(resumed.resume).toEqual({ sessionId: SESSION, lines: [line] });
+    expect(resumed.prompt).toBe("continue");
+
+    // once: a later attempt of the phase starts fresh
+    await run({ runId: "run-77", access: true, buildAssets: "server", stateDir: first.stateDir });
+    expect(sessionSpy.mock.calls.at(-1)![1].resume).toBeUndefined();
+  });
+
+  it("does not resume another phase's session", async () => {
+    sessionSpy.mockImplementationOnce(async (_port, o) => {
+      o.onRawLine("{}");
+      return { kind: "usage_limit", sessionId: SESSION, resetsAt: null };
+    });
+    const first = await run({ runId: "run-78", access: true, buildAssets: "server" });
+    emitsBasicSession();
+    await run({ runId: "run-78", access: true, buildAssets: "server", stateDir: first.stateDir, phase: "reviewer" });
+    expect(sessionSpy.mock.calls.at(-1)![1].resume).toBeUndefined();
+  });
+
   it("fails the phase when the publish fails", async () => {
     emitsBasicSession();
     publishSpy.mockRejectedValue(new Error("GraphQL: STALE_DATA"));
