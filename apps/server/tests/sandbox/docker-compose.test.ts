@@ -235,6 +235,6 @@ describe("docker-compose egress topology", () => {
 
   it("egress-init also writes the model gateway config", () => {
     const command = JSON.stringify(compose.services["egress-init"]?.command);
-    expect(command).toContain("writeModelGatewayConfig");
+    expect(command).toContain("writeModelGatewayConfig(d,process.env,c.sandbox)");
   });
 });

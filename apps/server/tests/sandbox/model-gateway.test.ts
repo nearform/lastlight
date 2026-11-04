@@ -228,6 +228,16 @@ describe("model gateway nginx config", () => {
     expect(statSync(path).mode & 0o777).toBe(0o600);
   });
 
+  it("writer: writes no key file on a backend that never uses the gateway, and removes a stale one", () => {
+    install();
+    const stateDir = mkdtempSync(join(tmpdir(), "ll-gw-"));
+    const path = writeModelGatewayConfig(stateDir, env, "docker")!;
+    for (const backend of ["gondolin", "none"] as const) {
+      expect(writeModelGatewayConfig(stateDir, env, backend)).toBeUndefined();
+      expect(existsSync(path)).toBe(false);
+    }
+  });
+
   it("writer: removes a stale model-gateway.conf when no provider uses the gateway", () => {
     install();
     const stateDir = mkdtempSync(join(tmpdir(), "ll-gw-"));
@@ -236,5 +246,36 @@ describe("model gateway nginx config", () => {
     installProviderOverrides({ acme: { baseUrl: "https://gw.example/v1" } });
     expect(writeModelGatewayConfig(stateDir, env)).toBeUndefined();
     expect(existsSync(path)).toBe(false);
+  });
+
+  it("throws on a header name nginx would misread or that would corrupt the request", () => {
+    for (const bad of ["#x", "'x", "Host", "content-length", "Transfer-Encoding", "Connection", "x_flag"]) {
+      resetProviderRegistry();
+      install({ headers: { [bad]: "1" } });
+      expect(() => renderModelGatewayConf(env), bad).toThrow(/providers\.acme\.headers\./);
+    }
+  });
+});
+
+describe("model gateway: shared key env var", () => {
+  afterEach(() => resetProviderRegistry());
+
+  it("refuses a gateway provider whose envKey another provider uses directly", () => {
+    // The placeholder would replace that provider's real key in the sandbox
+    // too, and its runs would 401 against the vendor with no boot error.
+    expect(() =>
+      installProviderOverrides({
+        myproxy: { baseUrl: "https://gw.example/v1", envKey: "ANTHROPIC_API_KEY", sandboxGateway: true },
+      }),
+    ).toThrow(/providers\.myproxy\.envKey ANTHROPIC_API_KEY is also used by anthropic/);
+  });
+
+  it("allows two gateway providers to share a key", () => {
+    expect(() =>
+      installProviderOverrides({
+        a: { baseUrl: "https://gw.example/a/v1", envKey: "GW_KEY", sandboxGateway: true },
+        b: { baseUrl: "https://gw.example/b/v1", envKey: "GW_KEY", sandboxGateway: true },
+      }),
+    ).not.toThrow();
   });
 });

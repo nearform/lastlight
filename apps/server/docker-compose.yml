@@ -127,7 +127,7 @@ services:
       - agent-data:/app/data
     command:
       ["node", "-e",
-       "const c=require('/app/dist/config/config.js').loadConfig();const m=require('/app/dist/sandbox/egress-firewall-config.js');const d=c.stateDir;m.writeEgressFirewallConfigs(d);m.writeOtelCollectorConfig(d,{active:c.otel.enabled&&c.otel.forwardToSandbox});require('/app/dist/sandbox/model-gateway.js').writeModelGatewayConfig(d)"]
+       "const c=require('/app/dist/config/config.js').loadConfig();const m=require('/app/dist/sandbox/egress-firewall-config.js');const d=c.stateDir;m.writeEgressFirewallConfigs(d);m.writeOtelCollectorConfig(d,{active:c.otel.enabled&&c.otel.forwardToSandbox});require('/app/dist/sandbox/model-gateway.js').writeModelGatewayConfig(d,process.env,c.sandbox)"]
     depends_on:
       - agent          # ensures the image has been built when init runs
 

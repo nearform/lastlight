@@ -228,7 +228,7 @@ async function main() {
   // `sandboxGateway` providers, mode 0600. Removed again when no provider uses
   // it. Throws on a missing key or one nginx can't carry — fail the boot
   // rather than start runs that can't authenticate.
-  const modelGatewayPath = writeModelGatewayConfig(config.stateDir);
+  const modelGatewayPath = writeModelGatewayConfig(config.stateDir, process.env, config.sandbox);
   configLog.info("Model gateway config", { path: modelGatewayPath ?? "none (no sandboxGateway provider)" });
 
   // Generate the in-network OTEL collector config (docker backend). Derived

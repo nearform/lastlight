@@ -843,16 +843,20 @@ the model-call paths over verified TLS on `proxy-egress` (everything else gets a
 404). It streams (`proxy_buffering off`), accepts 64 MB request bodies and waits
 up to 600 s for a response.
 
-Its config (`src/sandbox/model-gateway.ts`) is the only file that holds the key:
-mode 0600, written at harness boot and by `egress-init`, removed when no provider
-uses the gateway. The compose service mounts only `agent-data`'s `proxy/`
-directory, read-only, and like the firewalls it is not on `internal`.
+Its config (`src/sandbox/model-gateway.ts`) holds the key: mode 0600 in
+`$STATE_DIR/proxy/`, written at harness boot and by `egress-init` on the docker
+backend only, removed when no provider uses the gateway. The compose service
+mounts only `agent-data`'s `proxy/` directory, read-only, and like the firewalls
+it is not on `internal`. Sandboxes mount the shared data volume at `/data`, so
+`DockerSandbox` covers `/data/proxy` with an empty root-only tmpfs: the agent
+can neither read the key nor rewrite a config a sidecar loads.
 
 The strict allowlist the docker firewalls render is `dockerSandboxAllowlist()`:
-the default allowlist minus every host that only gateway providers use, so a
-strict sandbox can neither resolve nor reach the provider directly. The open pair
-is unchanged: an `unrestricted_egress` phase can still reach the host, without a
-key.
+the default allowlist minus every host that only gateway providers use. An entry
+that still covers that host (an apex like `deepseek.com` covers
+`api.deepseek.com`) keeps it reachable; the sandbox then still holds only the
+placeholder. The open pair is unchanged: an `unrestricted_egress` phase can still
+reach the host, without a key.
 
 ### Strict vs open
 

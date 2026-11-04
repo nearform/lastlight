@@ -669,6 +669,21 @@ export function resolveProviderRegistry(
     });
   }
 
+  // A gateway provider's key var becomes a placeholder in docker sandboxes. If
+  // a provider that calls its vendor directly reads the same var, its runs
+  // would send that placeholder and fail with 401s and no boot error.
+  const gatedPrefixes = new Set(endpoints.filter((e) => e.sandboxGateway).map((e) => e.prefix));
+  for (const e of endpoints) {
+    if (!e.sandboxGateway) continue;
+    const direct = [...providers, ...custom].find((p) => !gatedPrefixes.has(p.prefix) && p.envKey === e.envKey);
+    if (direct) {
+      throw new Error(
+        `providers.${e.prefix}.envKey ${e.envKey} is also used by ${direct.prefix}, which calls its provider ` +
+          `directly — give the sandboxGateway provider a key env var of its own.`,
+      );
+    }
+  }
+
   return buildRegistry([...providers, ...custom], endpoints);
 }
 

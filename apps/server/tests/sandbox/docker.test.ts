@@ -296,3 +296,27 @@ describe("DockerSandbox.create — shared package cache (issue #107)", () => {
     }
   });
 });
+
+describe("DockerSandbox.create — /data/proxy is masked (model gateway key)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockExecFileSync.mockReturnValue("container-xyz\n");
+  });
+
+  it("covers /data/proxy with an empty root-only tmpfs after the /data mount", async () => {
+    // /data is the shared agent-data volume by default; its proxy/ dir holds
+    // the generated firewall configs and the model gateway's key file (owned
+    // by the same UID as the sandbox agent). The sandbox must see neither.
+    const manager = new DockerSandbox({ imageName: "img", env: {} });
+    await manager.create({
+      taskId: "t",
+      worktreePath: "/tmp/work",
+      workspaceMount: { type: "bind", hostPath: "/tmp/work" },
+    });
+    const call = mockExecFileSync.mock.calls.find((c) => Array.isArray(c[1]) && (c[1] as string[])[0] === "run");
+    const argv = (call?.[1] as string[]) ?? [];
+    const mask = "type=tmpfs,destination=/data/proxy,tmpfs-size=4096,tmpfs-mode=0500";
+    expect(argv).toContain(mask);
+    expect(argv.indexOf(mask)).toBeGreaterThan(argv.findIndex((a) => a.endsWith(":/data")));
+  });
+});

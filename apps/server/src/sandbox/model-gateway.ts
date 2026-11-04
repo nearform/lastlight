@@ -79,6 +79,13 @@ const NGINX_SAFE_VALUE = /^[\x21-\x7e]+$/;
 const NGINX_SPECIAL = /["\\$;{}]/;
 const URL_PATH_SAFE = /^[A-Za-z0-9._~/%-]*$/;
 const PREFIX_SAFE = /^[A-Za-z0-9._-]+$/;
+/** A header name nginx reads as one plain token (no `#` comment, no quote). */
+const HEADER_NAME_SAFE = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
+/** Headers the gateway itself owns: overriding them corrupts every request. */
+const RESERVED_HEADERS = new Set([
+  "host", "content-length", "transfer-encoding", "connection", "keep-alive", "upgrade",
+  "te", "trailer", "proxy-connection", "proxy-authorization", "authorization", "x-api-key",
+]);
 
 /** Never echoes `value`: the key must not reach a log or an error. */
 function assertNginxSafe(value: string, what: string): void {
@@ -168,6 +175,12 @@ function renderProviderLocations(e: ProviderEndpoint, env: NodeJS.ProcessEnv): s
       ? [`proxy_set_header x-api-key "${key}";`, `proxy_set_header Authorization "";`]
       : [`proxy_set_header Authorization "Bearer ${key}";`, `proxy_set_header x-api-key "";`];
   const headers = Object.entries(e.headers ?? {}).map(([name, value]) => {
+    if (!HEADER_NAME_SAFE.test(name) || RESERVED_HEADERS.has(name.toLowerCase())) {
+      throw new Error(
+        `providers.${e.prefix}.headers.${name}: the model gateway only sends header names of letters, ` +
+          `digits and "-", and sets Host, Content-Length, Connection and the credential headers itself`,
+      );
+    }
     assertNginxSafe(value, `providers.${e.prefix}.headers.${name}`);
     return `proxy_set_header ${name} "${value}";`;
   });
@@ -193,12 +206,19 @@ ${directives.map((d) => `      ${d}`).join("\n")}
  * Write `<stateDir>/proxy/model-gateway.conf` (mode 0600: it holds keys) and
  * return its path; or, when no provider uses the gateway, remove a stale file
  * so a key from an earlier config does not linger on disk, and return
- * `undefined`. Called at harness boot and by the compose `egress-init`.
+ * `undefined` — also on every backend but docker. Called at harness boot and
+ * by the compose `egress-init`.
  */
-export function writeModelGatewayConfig(stateDir: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+export function writeModelGatewayConfig(
+  stateDir: string,
+  env: NodeJS.ProcessEnv = process.env,
+  backend: SandboxBackend = "docker",
+): string | undefined {
   const dir = join(stateDir, "proxy");
   const path = join(dir, "model-gateway.conf");
-  const conf = renderModelGatewayConf(env);
+  // Only docker runs use the gateway; elsewhere a key file would be a needless
+  // second copy of the key.
+  const conf = backend === "docker" ? renderModelGatewayConf(env) : undefined;
   if (conf === undefined) {
     if (existsSync(path)) rmSync(path, { force: true });
     return undefined;

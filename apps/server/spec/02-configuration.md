@@ -712,15 +712,24 @@ provider's `headers`, and forwards over verified TLS. It forwards only the model
 calls (`chat/completions` and `models` for `openai-completions`;
 `v1/messages` and `v1/models` for `anthropic-messages`) and answers 404 to
 everything else. The provider's host also leaves the docker strict egress
-allowlist, so the sandbox can't call it directly ([Sandbox](/spec/09-sandbox)).
+allowlist, so the sandbox can't call it directly, unless another allowlist entry
+still covers it (entries match the apex and every subdomain, so a gateway
+provider on `api.deepseek.com` stays reachable through the built-in
+`deepseek.com`). Either way the sandbox has only the placeholder
+([Sandbox](/spec/09-sandbox)).
 
 - **Docker only.** `smol` and `kubernetes` have no gateway and refuse the flag at
   boot rather than hand the sandbox the key anyway. `gondolin` and `none` call
   the provider host-side, where the key already is, so they ignore it.
 - **Custom providers only**, like `headers`: a built-in refuses it.
 - **The key must be one nginx can carry**: printable ASCII without whitespace,
-  quotes, backslashes, `$`, `;`, `{` or `}`. So must each `headers` value. A
+  quotes, backslashes, `$`, `;`, `{` or `}`. So must each `headers` value, and
+  header names must be letters, digits and `-` (and not `Host`,
+  `Content-Length`, `Connection` or another header the gateway sets itself). A
   missing or unsafe key fails the boot, naming the env var and never the value.
+- **The key env var must be the gateway provider's own.** If a provider that
+  calls its vendor directly reads the same var, the boot fails: that provider
+  would otherwise get the placeholder too.
 - **A phase with `unrestricted_egress`** can still resolve and reach the
   provider's host through the open egress pair, but it only has the placeholder.
 - **The gateway down means model calls fail** for that provider. In compose it is
