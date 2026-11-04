@@ -58,6 +58,8 @@ describe("nextNotBefore", () => {
     expect(nextNotBefore(null, now)).toBe("2026-11-04T13:00:00.000Z");
     expect(nextNotBefore("2026-11-04T15:00:00.000Z", now)).toBe("2026-11-04T15:00:00.000Z");
     expect(nextNotBefore("not a date", now)).toBe("2026-11-04T13:00:00.000Z");
+    // a reset parsed from transcript text never parks a run past the longest (weekly) window
+    expect(nextNotBefore("2099-12-31T00:00:00.000Z", now)).toBe("2026-11-11T12:00:00.000Z");
   });
 });
 

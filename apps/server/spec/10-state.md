@@ -144,7 +144,8 @@ crash-loop circuit breaker. `not_before` is set only by the backpressure requeue
 of a run whose phase hit a model provider's usage limit (`stopReason:
 usage_limit`): admission skips the run until then, its queue-wait TTL counts
 from then, and admitting it clears the column. It is never earlier than five
-minutes after the requeue, and an hour out when the reset time is unknown.
+minutes after the requeue nor later than seven days (the reset is parsed from
+the session transcript), and an hour out when the reset time is unknown.
 
 **Per-repository config on the row.** `context.models` / `context.variants` are
 the run's **effective** maps — the target repo's `.lastlight/lastlight.yml`
