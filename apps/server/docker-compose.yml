@@ -199,9 +199,11 @@ services:
   # holds the keys, so it mounts ONLY the proxy config directory — not the
   # rest of agent-data. Not on `internal`, like the firewalls. Opt-in
   # (`COMPOSE_PROFILES=model-gateway`): without a `sandboxGateway` provider
-  # there is no config for it to load.
+  # there is no config for it to load. nginx reads the config (and so the
+  # keys) only at start: after rotating a key, restart the agent (it rewrites
+  # the config), then `docker compose restart model-gateway`.
   model-gateway:
-    image: nginx:alpine
+    image: nginx:1.31-alpine
     profiles: ["model-gateway"]
     restart: unless-stopped
     command:
@@ -343,12 +345,14 @@ networks:
   # `internal: true` disables direct host egress, so the only path to the
   # public internet is through the nginx firewalls, which receive sandbox
   # traffic on this network. Static subnet so the coredns + nginx IPs
-  # baked into the generated configs are stable.
+  # baked into the generated configs are stable. Sandboxes get addresses only
+  # from ip_range (.128–.254), so none can take a sidecar's static IP (.10–.40).
   sandbox-egress:
     internal: true
     ipam:
       config:
         - subnet: 172.30.0.0/24
+          ip_range: 172.30.0.128/25
   # Egress-only network for the nginx firewalls. Regular bridge (has a
   # default route to the host's network, so nginx can reach the public
   # internet). Critically: NO other compose services attach here. That way

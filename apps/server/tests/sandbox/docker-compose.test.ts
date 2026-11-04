@@ -9,6 +9,7 @@ import {
   NGINX_STRICT_IP,
   OTEL_COLLECTOR_IP,
   OTEL_COLLECTOR_UID,
+  SANDBOX_EGRESS_IP_RANGE,
   SANDBOX_EGRESS_SUBNET,
 } from "#src/sandbox/egress-firewall-config.js";
 import { MODEL_GATEWAY_IP } from "#src/sandbox/model-gateway.js";
@@ -89,6 +90,30 @@ describe("docker-compose egress topology", () => {
     // egress-firewall-config.ts are valid IPs in that range.
     const subnet = net?.ipam?.config?.[0]?.subnet;
     expect(subnet).toBe(SANDBOX_EGRESS_SUBNET);
+  });
+
+  it("hands dynamic sandboxes addresses only from an ip_range that no static sidecar IP is in", () => {
+    const net = compose.networks["sandbox-egress"] as {
+      ipam?: { config?: Array<{ ip_range?: string }> };
+    };
+    expect(net?.ipam?.config?.[0]?.ip_range).toBe(SANDBOX_EGRESS_IP_RANGE);
+    // 172.30.0.128/25 = .128–.255; every static address must sit below it.
+    const [base, bits] = SANDBOX_EGRESS_IP_RANGE.split("/");
+    const first = Number(base.split(".")[3]);
+    expect(Number(bits)).toBe(25);
+    for (const ip of [
+      COREDNS_STRICT_IP, COREDNS_OPEN_IP, NGINX_STRICT_IP, NGINX_OPEN_IP, OTEL_COLLECTOR_IP, MODEL_GATEWAY_IP,
+    ]) {
+      expect(ip.startsWith("172.30.0.")).toBe(true);
+      expect(Number(ip.split(".")[3])).toBeLessThan(first);
+    }
+    // and every static ipv4_address in the file is one of those
+    for (const [name, svc] of Object.entries(compose.services)) {
+      const addr = (svc as { networks?: Record<string, { ipv4_address?: string } | null> }).networks?.[
+        "sandbox-egress"
+      ]?.ipv4_address;
+      if (addr) expect(Number(addr.split(".")[3]), name).toBeLessThan(first);
+    }
   });
 
   it("proxy-egress is a regular bridge (no internal: true) so firewalls can reach the internet", () => {
@@ -230,6 +255,10 @@ describe("docker-compose egress topology", () => {
       expect(compose.services["model-gateway"]?.command).toEqual([
         "nginx", "-c", "/app/data/proxy/model-gateway.conf", "-g", "daemon off;",
       ]);
+    });
+
+    it("pins the nginx version its generated config was checked against", () => {
+      expect((compose.services["model-gateway"] as { image?: string })?.image).toBe("nginx:1.31-alpine");
     });
   });
 

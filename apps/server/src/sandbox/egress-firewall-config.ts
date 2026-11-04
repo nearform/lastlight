@@ -74,6 +74,12 @@ export const OTEL_COLLECTOR_UID = 10001;
 
 /** Subnet for sandbox-egress. Compose declares this CIDR so the IPs above are valid. */
 export const SANDBOX_EGRESS_SUBNET = "172.30.0.0/24";
+/**
+ * The part of the subnet docker hands to dynamically attached containers
+ * (sandboxes). Every static sidecar IP above sits below it, so a sandbox can
+ * never be given — or race a restarting sidecar for — a sidecar's address.
+ */
+export const SANDBOX_EGRESS_IP_RANGE = "172.30.0.128/25";
 
 /**
  * Hostnames the open coredns explicitly NXDOMAINs even in unrestricted
