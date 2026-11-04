@@ -730,6 +730,11 @@ provider on `api.deepseek.com` stays reachable through the built-in
 - **The key env var must be the gateway provider's own.** If a provider that
   calls its vendor directly reads the same var, the boot fails: that provider
   would otherwise get the placeholder too.
+- **The `baseUrl` is origin and path only**: a query string, fragment or
+  `user:password` fails the boot instead of being dropped.
+- **Rotating the key** needs an agent restart (it rewrites the gateway config)
+  and then a restart of the `model-gateway` service, which reads its config only
+  at start.
 - **A phase with `unrestricted_egress`** can still resolve and reach the
   provider's host through the open egress pair, but it only has the placeholder.
 - **The gateway down means model calls fail** for that provider. In compose it is
