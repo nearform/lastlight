@@ -647,6 +647,50 @@ The `onEvent` callback receives agentic-pi's `EmitterRecord` events —
 `fatal_error`. The shim (`src/engine/event-shim.ts`) translates them
 into Claude-SDK-style JSONL envelopes — see [State §JSONL](/spec/10-state).
 
+## Claude Code runtime
+
+A phase whose model is `claude-code/<model>` runs in the interactive Claude
+Code CLI instead of agentic-pi (operator guide:
+[`docs/claude-code-runtime.md`](../../../docs/claude-code-runtime.md)). Only an
+operator's model reference selects it; no default and no workflow does.
+
+- **Backend:** `docker` only, in the same per-phase container. The image pins
+  the CLI (`CLAUDE_CODE_VERSION`) and installs tmux. The CLI runs as `agent`
+  in a detached tmux session with `--dangerously-skip-permissions`,
+  `--disallowedTools AskUserQuestion`, and settings that pre-answer every
+  first-run screen. A `Stop` hook marks the end of the turn. The harness
+  drives it through `Sandbox.claudeCodePort()` (`docker exec -i`, with the cwd
+  confined to the workspace).
+- **Env:** the container env holds `CLAUDE_CODE_OAUTH_TOKEN` (from the
+  harness env named by `claudeCode.tokenEnv`) and no GitHub token, provider
+  key, gateway setting or Last Light variable (`sandboxEnvForClaudeCode`). The
+  host still pre-clones the repo with its minted token. Command phases never
+  receive the Claude token.
+- **Egress:** the Anthropic API host is the only addition; it is already on
+  the base allowlist.
+- **Events:** the session transcript is translated into agentic-pi's event
+  records, so the shim, the dashboard and telemetry need no change. The raw,
+  token-scrubbed transcript is kept at
+  `$STATE_DIR/claude-code/<runId>/<phase>.jsonl` (`0600`).
+- **Exits:** not ready, stalled, timeout, terminal exited, sign-in failed, and
+  usage limit, each a distinct `stopReason`. A `usage_limit` result carries
+  `retryAfter`, and the run is requeued with `not_before`
+  ([State](10-state.md)). The next attempt resumes the session once, with
+  `continue`.
+- **Refusals:** a non-docker backend, a missing token, or a rendered prompt
+  that names a `github_*` tool fails the phase before any session starts.
+- **Notes:** in `buildAssets: repo` mode the host publishes `.lastlight/` as
+  one signed commit through the API, reading only regular, singly-linked
+  files (checked on the opened fd), with no `git` in the sandbox-written tree.
+  The run's next agentic-pi phase fast-forwards its own checkout onto that
+  commit, inside its own sandbox.
+- **Invariant: the token does not leave the phase.** After the session (on
+  every exit path), every agent-user process is killed. The final answer and
+  the whole workspace are then scanned for the token, its prefix and its
+  base64 form, failing closed past the scan's caps. The note bytes are scanned
+  again just before the publish. A hit is `error_secret_leak`: files are
+  redacted from inside the sandbox, and nothing is published.
+
 ## Dependency services
 
 A managed repo may declare services its phases run against — a test postgres, a
