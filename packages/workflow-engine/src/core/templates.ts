@@ -36,6 +36,19 @@ export interface TemplateContext {
   externalizeArtifacts?: boolean;
 
   /**
+   * True when the phase's agent must NOT publish its handoff notes itself:
+   * server mode (they are externalized), or a runtime with no GitHub tools.
+   * Absent ⇒ the agent publishes, as before — same fail-safe default.
+   */
+  skipAgentPublish?: boolean;
+
+  /**
+   * True when Last Light publishes the phase's handoff notes to the branch
+   * after the phase (repo mode, on a runtime with no GitHub tools).
+   */
+  hostPublishesArtifacts?: boolean;
+
+  /**
    * Dashboard base URL (no trailing slash). Used by the `{{artifactUrl file}}`
    * helper to build a server-mode dashboard link to a handoff doc. Absent when
    * no public URL is configured.

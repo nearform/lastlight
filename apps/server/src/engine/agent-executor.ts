@@ -459,7 +459,7 @@ export async function executeAgent(
     sandboxFactory?: SandboxFactory;
   },
 ): Promise<ExecutionResult> {
-  const { taskId, stateDir, backend, ghEnv, prePopulate, mintError, mintErrorKind, setupError } =
+  const { taskId, stateDir, backend, ghEnv, prePopulate, mintError, mintErrorKind, setupError, mintedToken } =
     await prepareRun(config, opts);
   const access = opts?.githubAccess;
 
@@ -504,6 +504,7 @@ export async function executeAgent(
     onSessionId: opts?.onSessionId,
     agentTimeoutSeconds: opts?.timeoutSeconds,
     sandboxFactory: opts?.sandboxFactory,
+    hostGitToken: mintedToken,
   };
   return withSpan("lastlight.agent.execute", spanAttrs, (span) => runSandboxedAgent(prompt, ctx, span));
 }
@@ -536,7 +537,7 @@ export async function withAgentSession<T>(
   },
   fn: (session: SandboxSession) => Promise<T>,
 ): Promise<T> {
-  const { taskId, stateDir, backend, ghEnv, prePopulate, mintError, mintErrorKind, setupError } =
+  const { taskId, stateDir, backend, ghEnv, prePopulate, mintError, mintErrorKind, setupError, mintedToken } =
     await prepareRun(config, opts);
   const access = opts.githubAccess;
   if (setupError) throw new Error(setupError);
@@ -557,6 +558,7 @@ export async function withAgentSession<T>(
     prePopulate,
     access,
     sandboxFactory: opts.sandboxFactory,
+    hostGitToken: mintedToken,
   };
   return withSandboxSession(ctx, fn);
 }

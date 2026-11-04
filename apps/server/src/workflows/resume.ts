@@ -374,6 +374,9 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
     // externalizing (and linking docs to the dashboard) instead of silently
     // reverting to committing them on the branch.
     externalizeArtifacts: opts.config.buildAssets === "server",
+    // The agent publishes its own notes unless they are externalized; a
+    // claude-code phase also skips it (runner `promptContextFor`).
+    skipAgentPublish: opts.config.buildAssets === "server",
     publicUrl: opts.publicUrl,
     bootstrapLabel: opts.bootstrapLabel || "lastlight:bootstrap",
     contextSnapshot: "",

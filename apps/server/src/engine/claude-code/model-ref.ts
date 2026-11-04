@@ -68,3 +68,17 @@ export function parseClaudeCodeConfig(raw: unknown): ClaudeCodeConfig {
   }
   return out;
 }
+
+/**
+ * Prompt context for a phase on `model`. A Claude Code session has no GitHub
+ * tools, so the prompt must not ask it to publish its notes: in `repo` mode
+ * Last Light publishes them after the phase; in `server` mode the existing
+ * harvest does. Other models get nothing extra.
+ */
+export function claudeCodePromptContext(
+  model: string | undefined,
+  buildAssets: "repo" | "server",
+): { skipAgentPublish?: boolean; hostPublishesArtifacts?: boolean } {
+  if (!isClaudeCodeModel(model)) return {};
+  return { skipAgentPublish: true, hostPublishesArtifacts: buildAssets === "repo" };
+}

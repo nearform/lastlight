@@ -946,3 +946,40 @@ describe("PhaseExecutor — bash / script phase", () => {
     expect(spec).toEqual({ kind: "script", script: "print(6*7)", runtime: "python", name: "calc-it" });
   });
 });
+
+describe("PhaseExecutor — per-phase prompt context (promptContextFor)", () => {
+  const def: AgentWorkflowDefinition = {
+    kind: "agent",
+    name: "wf",
+    phases: [{ name: "architect", prompt: "prompts/architect.md", model: "claude-code/claude-opus-5-5" } as PhaseDefinition],
+  } as AgentWorkflowDefinition;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockExecuteAgent.mockResolvedValue(makeSuccessResult() as never);
+    vi.mocked(loadPromptTemplate).mockReturnValue(
+      "{{#if !skipAgentPublish}}AGENT-PUBLISHES{{/if}}{{#if hostPublishesArtifacts}}HOST-PUBLISHES{{/if}}",
+    );
+  });
+
+  it("renders the phase prompt with the context the port gives for the phase's model", async () => {
+    const seen: (string | undefined)[] = [];
+    const ports: EnginePorts = {
+      ...testPorts,
+      promptContextFor: (model) => {
+        seen.push(model);
+        return model?.startsWith("claude-code/") ? { skipAgentPublish: true, hostPublishesArtifacts: true } : {};
+      },
+    };
+    const exec = new PhaseExecutor(makeRun(def), makeReporter(), makeResolver(), ports);
+    await exec.execute(node("architect"), {});
+    expect(seen).toEqual(["claude-code/claude-opus-5-5"]);
+    expect(mockExecuteAgent.mock.calls[0]![0]).toBe("HOST-PUBLISHES");
+  });
+
+  it("renders exactly as before without the port", async () => {
+    const exec = makeExecutor(makeRun(def), makeReporter(), makeResolver());
+    await exec.execute(node("architect"), {});
+    expect(mockExecuteAgent.mock.calls[0]![0]).toBe("AGENT-PUBLISHES");
+  });
+});

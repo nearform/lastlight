@@ -1,4 +1,4 @@
-import { basename, join } from "path";
+import { basename, dirname, join } from "path";
 import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { resolveAuthFile } from "../oauth.js";
 import { randomUUID } from "crypto";
@@ -46,7 +46,8 @@ import { recordError, recordExecutionMetrics, setSpanAttributes } from "../../te
 import { AgentSpanTree, recordPiEvent } from "../../telemetry/pi-events.js";
 import { OI, llmTokenAttributes } from "../../telemetry/openinference.js";
 import { logger } from "../../logging/logger.js";
-import { appendFileSync, chmodSync } from "fs";
+import { appendFileSync, chmodSync, readFileSync, rmSync } from "fs";
+import { gitAuthEnv } from "agentic-pi/dist/extensions/github/credentials.js";
 import {
   CLAUDE_CODE_DEFAULTS,
   CLAUDE_CODE_NEEDS_DOCKER,
@@ -55,6 +56,8 @@ import {
 } from "../claude-code/model-ref.js";
 import { runClaudeCodeSession, type ClaudeCodeOutcome } from "../claude-code/session.js";
 import { findTokenLeak, redactTokenFiles, scanTreeForToken, scrubToken } from "../claude-code/leak-scan.js";
+import { publishClaudeNotes, readNotesDir } from "../claude-code/publish-notes.js";
+import { GitHubClient } from "agentic-pi/dist/extensions/github/client.js";
 import {
   DEFAULT_MODEL,
   RunResultAccumulator,
@@ -109,6 +112,11 @@ export interface SandboxRunContext {
   agentTimeoutSeconds?: number;
   /** Test seam — substitute a FakeSandbox. Defaults to {@link sandboxFor}. */
   sandboxFactory?: SandboxFactory;
+  /**
+   * The run's minted GitHub token, HOST-side only (never in `env` for a
+   * claude-code phase): Last Light publishes such a phase's notes with it.
+   */
+  hostGitToken?: string;
 }
 
 /**
@@ -474,8 +482,15 @@ export async function runAgentIn(
           tree.end();
           return await claudeCodeLeakFailure(leaked, outcome.sessionId, shim, startTime, ctx, model);
         }
+        const publishError = await publishClaudeNotesFor(ctx, prov);
+        if (publishError) {
+          tree.end();
+          return await claudeCodeStop("error_publish", publishError, outcome.sessionId, shim, startTime, ctx, model);
+        }
         onEvent({ type: "agent_end" });
-      } else returned = await sandbox.runAgent(
+      } else {
+        await syncOntoClaudeNotes(sandbox, prov, ctx);
+        returned = await sandbox.runAgent(
         ctx.taskId,
         prompt,
         {
@@ -501,6 +516,7 @@ export async function runAgentIn(
         },
         onEvent,
       );
+      }
     } catch (err: unknown) {
       // The single converged fallback path (was three near-identical catches).
       const msg = err instanceof Error ? err.message : String(err);
@@ -616,8 +632,62 @@ export function claudeTranscriptPath(stateDir: string, runKey: string, phase: st
   return join(stateDir, "claude-code", safe(runKey), `${safe(phase ?? "phase")}.jsonl`);
 }
 
+function claudeRunKey(ctx: SandboxRunContext): string {
+  return ctx.access?.runId ?? basename(ctx.taskId);
+}
+
+/** Host-side record of the last notes commit the host published for a run. */
+function claudePendingSyncPath(ctx: SandboxRunContext): string {
+  return join(dirname(claudeTranscriptPath(ctx.stateDir, claudeRunKey(ctx), undefined)), "pending-sync.json");
+}
+
+/**
+ * The host published a Claude phase's notes through the API, so this run's
+ * checkout is now one commit behind its branch, and agentic-pi's
+ * `github_publish` refuses a checkout that does not descend from the remote
+ * tip. Before the next agentic-pi phase starts, move the pointer forward,
+ * inside THAT phase's sandbox (which holds the GitHub credential anyway; the
+ * Claude sandbox never does, and the host never runs git in a sandbox-written
+ * tree). Only a fast-forward on the checked-out branch: `reset --mixed`
+ * leaves every file as it is. Best effort, once: a failed sync leaves the
+ * phase to recover with the steps `github_publish`'s refusal spells out.
+ */
+async function syncOntoClaudeNotes(sandbox: Sandbox, prov: ProvisionResult, ctx: SandboxRunContext): Promise<void> {
+  if (ctx.backend !== "docker") return;
+  const file = claudePendingSyncPath(ctx);
+  let pending: { branch?: unknown; oid?: unknown };
+  try {
+    pending = JSON.parse(readFileSync(file, "utf8")) as typeof pending;
+  } catch {
+    return;
+  }
+  rmSync(file, { force: true });
+  const { branch, oid } = pending;
+  const token = ctx.env.GIT_TOKEN;
+  if (
+    typeof branch !== "string" || !/^[A-Za-z0-9._/-]+$/.test(branch) || branch.includes("..") ||
+    typeof oid !== "string" || !/^[0-9a-f]{40}$/.test(oid) || !token
+  ) {
+    log.warn("Skipping the sync onto the Claude Code notes commit", { taskId: ctx.taskId });
+    return;
+  }
+  const command =
+    `[ "$(git rev-parse --abbrev-ref HEAD)" = '${branch}' ] || exit 3; ` +
+    `git fetch origin '${branch}' && git merge-base --is-ancestor HEAD ${oid} && git reset --mixed ${oid} >/dev/null`;
+  try {
+    const r = await sandbox.runCommand(ctx.taskId, command, {
+      cwd: prov.agentCwd,
+      sandboxEnv: { ...gitAuthEnv(token), GIT_TERMINAL_PROMPT: "0" },
+      timeoutSeconds: 120,
+    });
+    if (r.exitCode !== 0) log.warn("Sync onto the Claude Code notes commit failed", { taskId: ctx.taskId, exitCode: r.exitCode });
+  } catch (err: unknown) {
+    log.warn("Sync onto the Claude Code notes commit failed", { taskId: ctx.taskId, err: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 function claudeTranscriptKeeper(ctx: SandboxRunContext): (line: string) => void {
-  const file = claudeTranscriptPath(ctx.stateDir, ctx.access?.runId ?? basename(ctx.taskId), ctx.config.telemetry?.phaseName);
+  const file = claudeTranscriptPath(ctx.stateDir, claudeRunKey(ctx), ctx.config.telemetry?.phaseName);
   let ready = false;
   return (line) => {
     try {
@@ -675,7 +745,7 @@ function claudeCodeLeaks(token: string, finalAnswer: string, workspace: string):
   return files.slice(0, 5).join(", ") + (files.length > 5 ? ` and ${files.length - 5} more` : "");
 }
 
-async function claudeCodeLeakFailure(
+function claudeCodeLeakFailure(
   where: string,
   sessionId: string,
   shim: AgenticShim,
@@ -683,8 +753,67 @@ async function claudeCodeLeakFailure(
   ctx: SandboxRunContext,
   model: string,
 ): Promise<ExecutionResult> {
-  const stopReason = "error_secret_leak";
   const error = `The Claude Code phase's output contained the Claude token (in ${where}); it was redacted and nothing was published`;
+  return claudeCodeStop("error_secret_leak", error, sessionId, shim, startTime, ctx, model);
+}
+
+/**
+ * Repo mode: commit the phase's `.lastlight/` notes to the run's branch from
+ * the host, since the Claude session had no way to. Returns an error message,
+ * or null when published (or when there is nothing to do).
+ */
+async function publishClaudeNotesFor(ctx: SandboxRunContext, prov: ProvisionResult): Promise<string | null> {
+  if (ctx.config.buildAssets === "server") return null;
+  const access = ctx.access;
+  const branch = access?.prePopulateBranch;
+  if (!access || !branch || !ctx.hostGitToken) {
+    const { files } = await readNotesDir(prov.hostAgentCwd);
+    return files.length === 0
+      ? null
+      : "The Claude Code phase wrote notes but this run has no branch or GitHub token to publish them with";
+  }
+  const token = ctx.hostGitToken;
+  const client = new GitHubClient({ getToken: async () => token, expiresAt: null, canRefresh: false });
+  try {
+    const out = await publishClaudeNotes({
+      gh: {
+        getBranchTip: (o, r, b) => client.getBranchTip(o, r, b),
+        getDefaultBranchTip: async (o, r) => {
+          const repo = await client.getRepository(o, r);
+          const tip = await client.getBranchTip(o, r, repo.default_branch);
+          if (!tip) throw new Error(`default branch ${repo.default_branch} of ${o}/${r} has no tip`);
+          return tip;
+        },
+        createBranchAt: (o, r, b, sha) => client.createBranchAt(o, r, b, sha),
+        publishSignedCommit: (c) => client.publishSignedCommit({ ...c, additions: c.additions.map((a) => ({ ...a, status: "M" as const })) }),
+      },
+      owner: access.owner,
+      repo: access.repo,
+      branch,
+      workspace: prov.hostAgentCwd,
+      message: `docs(lastlight): ${ctx.config.telemetry?.phaseName ?? "phase"} notes`,
+    });
+    if (out.refused.length > 0) log.warn("Claude Code notes skipped", { refused: out.refused });
+    if (out.published && out.oid) {
+      const file = claudePendingSyncPath(ctx);
+      mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+      writeFileSync(file, JSON.stringify({ branch, oid: out.oid }), { mode: 0o600 });
+    }
+    return null;
+  } catch (err: unknown) {
+    return `Publishing the Claude Code phase's notes failed: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+async function claudeCodeStop(
+  stopReason: string,
+  error: string,
+  sessionId: string,
+  shim: AgenticShim,
+  startTime: number,
+  ctx: SandboxRunContext,
+  model: string,
+): Promise<ExecutionResult> {
   const durationMs = Date.now() - startTime;
   recordExecutionMetrics("agent", {
     "sandbox.backend": ctx.backend,

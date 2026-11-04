@@ -19,6 +19,12 @@ vi.mock("#src/engine/claude-code/session.js", async (importActual) => {
   return { ...actual, runClaudeCodeSession: (...a: unknown[]) => sessionSpy(...a) };
 });
 
+const { publishSpy } = vi.hoisted(() => ({ publishSpy: vi.fn() }));
+vi.mock("#src/engine/claude-code/publish-notes.js", async (importActual) => {
+  const actual = await importActual<typeof import("#src/engine/claude-code/publish-notes.js")>();
+  return { ...actual, publishClaudeNotes: (...a: unknown[]) => publishSpy(...a) };
+});
+
 const { executeAgent, executeCommand } = await import("#src/engine/agent-executor.js");
 const { FakeSandbox } = await import("#src/sandbox/sandbox.js");
 
@@ -32,9 +38,25 @@ function dirs() {
   return { stateDir, sessionsDir };
 }
 
-async function run(opts: { model?: string; backend?: "docker" | "none"; prompt?: string; phase?: string } = {}) {
-  const { stateDir, sessionsDir } = dirs();
-  const fake = new FakeSandbox({ claudeCodePort: fakePort });
+async function run(
+  opts: {
+    model?: string;
+    backend?: "docker" | "none";
+    prompt?: string;
+    phase?: string;
+    buildAssets?: "repo" | "server";
+    access?: boolean;
+    stateDir?: string;
+    runId?: string;
+  } = {},
+) {
+  const d = dirs();
+  const stateDir = opts.stateDir ?? d.stateDir;
+  const sessionsDir = d.sessionsDir;
+  const fake = new FakeSandbox({
+    claudeCodePort: fakePort,
+    returnRunResult: { success: true, output: "done", turns: 1, durationMs: 1, stopReason: "end_turn" } as never,
+  });
   // Keep the workspace after the run so a test can read what was left in it.
   fake.dispose = () => {};
   const result = await executeAgent(
@@ -45,8 +67,23 @@ async function run(opts: { model?: string; backend?: "docker" | "none"; prompt?:
       sessionsDir,
       model: opts.model ?? "claude-code/claude-opus-5-5",
       telemetry: { workflowName: "build", phaseName: opts.phase ?? "architect" },
+      ...(opts.buildAssets ? { buildAssets: opts.buildAssets } : {}),
     },
-    { sandboxFactory: fake.asFactory(), taskId: "run-42-architect" },
+    {
+      sandboxFactory: fake.asFactory(),
+      taskId: "run-42-architect",
+      ...(opts.access
+        ? {
+            githubAccess: {
+              owner: "acme",
+              repo: "widget",
+              profile: "repo-write",
+              prePopulateBranch: "lastlight/7-x",
+              ...(opts.runId ? { runId: opts.runId } : {}),
+            } as never,
+          }
+        : {}),
+    },
   );
   return { fake, result, stateDir, sessionsDir };
 }
@@ -70,6 +107,8 @@ function emitsBasicSession() {
 const saved = { ...process.env };
 beforeEach(() => {
   sessionSpy.mockReset();
+  publishSpy.mockReset();
+  publishSpy.mockResolvedValue({ published: true, oid: "oid-1", refused: [] });
   process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat01-TESTTOKEN";
   process.env.DEEPSEEK_API_KEY = "deepseek-key";
   process.env.GITHUB_TOKEN = "ghp_pat";
@@ -217,6 +256,75 @@ describe("executeAgent on a claude-code model", () => {
     );
     expect(fake.env?.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
     expect(fake.receivedCommand).toBeDefined();
+  });
+
+  it("publishes the phase's notes from the host in repo mode", async () => {
+    emitsBasicSession();
+    const { result, fake } = await run({ access: true, buildAssets: "repo" });
+    expect(result.success).toBe(true);
+    expect(publishSpy).toHaveBeenCalledTimes(1);
+    const arg = publishSpy.mock.calls[0]![0];
+    expect(arg).toMatchObject({
+      owner: "acme",
+      repo: "widget",
+      branch: "lastlight/7-x",
+      workspace: fake.agentCwd,
+      message: "docs(lastlight): architect notes",
+    });
+    expect(typeof arg.gh.publishSignedCommit).toBe("function");
+    // the host's token never went into the container
+    expect(Object.values(fake.env ?? {})).not.toContain("ghp_pat");
+  });
+
+  it("does not publish in server mode, or after a leak", async () => {
+    emitsBasicSession();
+    await run({ access: true, buildAssets: "server" });
+    expect(publishSpy).not.toHaveBeenCalled();
+
+    sessionSpy.mockImplementation(async (_port, o) => {
+      writeFileSync(join(o.cwd, "leak.txt"), String(process.env.CLAUDE_CODE_OAUTH_TOKEN));
+      o.onEvent({ type: "message_end", sessionId: SESSION, message: { role: "assistant", content: [{ type: "text", text: "x" }] } });
+      return { kind: "done", sessionId: SESSION };
+    });
+    const { result } = await run({ access: true, buildAssets: "repo" });
+    expect(result.stopReason).toBe("error_secret_leak");
+    expect(publishSpy).not.toHaveBeenCalled();
+  });
+
+  it("moves the next phase's checkout onto the published notes, in its own sandbox, once", async () => {
+    const oid = "a".repeat(40);
+    publishSpy.mockResolvedValue({ published: true, oid, refused: [] });
+    emitsBasicSession();
+    const first = await run({ access: true, buildAssets: "repo", runId: "run-42" });
+    expect(first.result.success).toBe(true);
+    // the Claude sandbox holds no GitHub credential, so it never runs the sync
+    expect(first.fake.receivedCommand).toBeUndefined();
+
+    const next = await run({ access: true, model: "deepseek/deepseek-chat", stateDir: first.stateDir, runId: "run-42", phase: "executor" });
+    expect(next.fake.receivedCommand).toContain("git fetch origin");
+    expect(next.fake.receivedCommand).toContain(oid);
+    expect(next.fake.receivedCommand).toContain("reset --mixed");
+    expect(next.fake.receivedCommand).toContain("merge-base --is-ancestor");
+    expect(next.fake.receivedCommandOpts?.sandboxEnv?.GIT_CONFIG_COUNT).toBe("2");
+
+    const third = await run({ access: true, model: "deepseek/deepseek-chat", stateDir: first.stateDir, runId: "run-42", phase: "reviewer" });
+    expect(third.fake.receivedCommand).toBeUndefined();
+  });
+
+  it("does not sync a phase of another run", async () => {
+    publishSpy.mockResolvedValue({ published: true, oid: "b".repeat(40), refused: [] });
+    emitsBasicSession();
+    const first = await run({ access: true, buildAssets: "repo", runId: "run-42" });
+    const other = await run({ access: true, model: "deepseek/deepseek-chat", stateDir: first.stateDir, runId: "run-43", phase: "executor" });
+    expect(other.fake.receivedCommand).toBeUndefined();
+  });
+
+  it("fails the phase when the publish fails", async () => {
+    emitsBasicSession();
+    publishSpy.mockRejectedValue(new Error("GraphQL: STALE_DATA"));
+    const { result } = await run({ access: true, buildAssets: "repo" });
+    expect(result).toMatchObject({ success: false, stopReason: "error_publish" });
+    expect(result.error).toContain("STALE_DATA");
   });
 
   it.each([

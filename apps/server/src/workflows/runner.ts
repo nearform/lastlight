@@ -21,6 +21,7 @@ import {
   type AssetResolver,
 } from "./loader.js";
 import { renderTemplate, type TemplateContext } from "./templates.js";
+import { claudeCodePromptContext } from "../engine/claude-code/model-ref.js";
 import type { RunRepoConfig } from "./simple.js";
 import { gitAccessFor, isPerTargetRecreate } from "./target-policy.js";
 import { qaImageAvailable, SANDBOX_IMAGE_QA } from "../sandbox/images.js";
@@ -691,6 +692,7 @@ async function runWorkflowBody(
 
   const ports: EnginePorts = {
     agent: agentPort,
+    promptContextFor: (model) => claudeCodePromptContext(model, ctx.externalizeArtifacts ? "server" : "repo"),
     logger: logger("runner"),
     // The repo's prompt/skill overrides reach the agent through this port:
     // `resolveSkillPaths` returns HOST paths (the repo-config cache dir is just

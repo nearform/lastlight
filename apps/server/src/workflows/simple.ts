@@ -1538,6 +1538,9 @@ async function runSimpleWorkflowBody(
     // never committed into the target repo (they're harvested to the server
     // store instead). Absent/false ⇒ repo behaviour (commit the docs).
     externalizeArtifacts: config.buildAssets === "server",
+    // The agent publishes its own notes unless they are externalized; a
+    // claude-code phase also skips it (runner `promptContextFor`).
+    skipAgentPublish: config.buildAssets === "server",
     // Dashboard base URL for the {{artifactUrl}} helper (server-mode doc links).
     publicUrl: callbacks.publicUrl,
     // Public, unauthenticated, image-only base URL for inline screenshot embeds
