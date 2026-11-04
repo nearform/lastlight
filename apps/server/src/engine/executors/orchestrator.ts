@@ -769,7 +769,7 @@ async function claudeCodeLeaks(
     return `The Claude Code phase's output contained the Claude token (in ${where}); it was redacted and nothing was published`;
   }
   if (incomplete) {
-    return "The Claude Code phase's workspace has too many files to check for the Claude token; nothing was published";
+    return "The Claude Code phase's workspace is too large to check for the Claude token; nothing was published";
   }
   return null;
 }

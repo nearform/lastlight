@@ -19,6 +19,8 @@ export const REDACTED = "[redacted: contained the Claude token]\n";
 const PREFIX_CHARS = 24;
 const CHUNK_BYTES = 1024 * 1024;
 const MAX_FILES = 100_000;
+/** Bytes the whole walk may read; past it the scan fails closed (a sparse file can claim terabytes). */
+const MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024;
 const SKIP_DIRS = new Set([".git", "node_modules"]);
 
 function needles(token: string): string[] {
@@ -45,15 +47,16 @@ export function findTokenLeak(token: string, sources: { name: string; text: stri
 /**
  * Workspace-relative paths of regular files holding the token. Files are read
  * in chunks (overlapping by a needle's length), so size never hides a hit.
- * `incomplete` is true when the file cap stopped the walk: the caller must
+ * `incomplete` is true when the file cap or the byte budget stopped the walk: the caller must
  * treat that as "not known clean", never as clean.
  */
 export function scanTreeForToken(
   root: string,
   token: string,
-  opts: { maxFiles?: number } = {},
+  opts: { maxFiles?: number; maxTotalBytes?: number } = {},
 ): { hits: string[]; incomplete: boolean } {
   const maxFiles = opts.maxFiles ?? MAX_FILES;
+  let budget = opts.maxTotalBytes ?? MAX_TOTAL_BYTES;
   const ns = needles(token).map((n) => Buffer.from(n));
   if (ns.length === 0) return { hits: [], incomplete: false };
   const overlap = Math.max(...ns.map((n) => n.length)) - 1;
@@ -82,6 +85,8 @@ export function scanTreeForToken(
       }
       if (!st.isFile()) continue;
       if (++seen > maxFiles) return { hits, incomplete: true };
+      budget -= st.size;
+      if (budget < 0) return { hits, incomplete: true };
       if (fileHolds(abs, ns, overlap)) hits.push(relative(root, abs));
     }
   }

@@ -70,6 +70,12 @@ describe("scanTreeForToken", () => {
     expect(scanTreeForToken(dir, TOKEN, { maxFiles: 3 }).incomplete).toBe(true);
     expect(scanTreeForToken(dir, TOKEN).incomplete).toBe(false);
   });
+
+  it("reports an incomplete scan past the byte budget, without reading the rest", () => {
+    const dir = tree();
+    writeFileSync(join(dir, "repo", "a.bin"), Buffer.alloc(4096, 120));
+    expect(scanTreeForToken(dir, TOKEN, { maxTotalBytes: 1024 }).incomplete).toBe(true);
+  });
 });
 
 describe("redactInSandbox", () => {
