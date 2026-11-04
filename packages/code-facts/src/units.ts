@@ -1281,6 +1281,43 @@ export function emptyUnitsDocument(reason: string, shas: { baseSha?: string; hea
 }
 
 /** A draft's identity, risk and delta (issue #429) — shared by every piece split off it. */
+/** Hex characters of a unit id's hash — ~16.7M values over ≤ a few hundred units a run. */
+export const UNIT_ID_HEX = 6;
+
+/**
+ * One stable base id per unsplit unit, from its identity rather than its
+ * position: `u-<hash of key>`, plus `-p<n>` for pass `n` of a unit split into
+ * passes (passes share their parent's key). Two distinct identities whose hash
+ * prefixes collide are told apart by `x2`, `x3`… in key order, so the result
+ * is deterministic for one input and never depends on where a unit sorts.
+ */
+export function unitBaseIds(units: readonly { key: string; part: number | null }[]): string[] {
+  const hashOf = (u: { key: string; part: number | null }): string =>
+    createHash("sha256").update(`unit-id-v1\n${u.key}`).digest("hex").slice(0, UNIT_ID_HEX);
+  const byHash = new Map<string, string[]>();
+  for (const u of units) {
+    const h = hashOf(u);
+    const seen = byHash.get(h) ?? [];
+    if (!seen.includes(u.key)) seen.push(u.key);
+    byHash.set(h, seen);
+  }
+  for (const keys of byHash.values()) keys.sort();
+  const out = units.map((u) => {
+    const h = hashOf(u);
+    const n = byHash.get(h)!.indexOf(u.key);
+    return `u-${h}${n === 0 ? "" : `x${n + 1}`}${u.part === null ? "" : `-p${u.part}`}`;
+  });
+  // Same key AND same pass twice should not happen (`numberKeys` makes keys
+  // distinct and passes are numbered), but a repeated id would make
+  // survey-units refuse the whole document — so number any repeat instead.
+  const count = new Map<string, number>();
+  return out.map((id) => {
+    const n = (count.get(id) ?? 0) + 1;
+    count.set(id, n);
+    return n === 1 ? id : `${id}-d${n}`;
+  });
+}
+
 interface Identity {
   key: string;
   contentSha: string;
@@ -1560,8 +1597,9 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
     ordered.forEach((d, i) => identityOf.set(d, identities[i]!));
   }
 
-  // Placeholder id of the final width, so a size decision made now holds later.
-  const PLACEHOLDER = "u-000";
+  // Placeholder id at least as long as a final base id (hash + a pass suffix),
+  // so a size decision made now holds later.
+  const PLACEHOLDER = `u-${"0".repeat(UNIT_ID_HEX)}-p00`;
   const inputFor = (d: Draft) => ({ unitId: PLACEHOLDER, draft: d, neighbours: neighboursFor(d), head, overview: [] as string[] });
   const finalDrafts: Draft[] = [];
   for (const d of drafts) {
@@ -1655,24 +1693,33 @@ export function buildUnits(options: BuildUnitsOptions): BuildUnitsResult {
           weight: 0,
         }
       : null;
-  // Ids number the UNSPLIT units in order (`u-NNN`); a family sibling is
-  // `u-NNN-<family>` — within the core handler's `[A-Za-z0-9_-]` alphabet, and
-  // sorting beside its parent's number. With no split the ids are unchanged.
-  const width = Math.max(3, String(groups.length + (prDraft ? 1 : 0)).length);
-  const numbered = (i: number): string => `u-${String(i + 1).padStart(width, "0")}`;
+  // Ids name WHAT a unit is, never where it sorts: `u-` + a short hash of its
+  // re-review `key` (`path::symbol`, `path::(module)`, `(pr)`), `-p<n>` for a
+  // pass of a split unit, and `-<family>` for a family sibling — inside the
+  // core handler's `[A-Za-z0-9_-]` alphabet. The id is printed in the request
+  // and the survey's reply cache keys on the request's hash, so a positional
+  // `u-NNN` renumbered every unit after one that appeared or vanished: a
+  // re-review of a PR with ten changed files re-asked 205 of 214 units
+  // (nearform/unwind-next#15, 2026-11-03). See {@link unitBaseIds}.
+  const baseIds = unitBaseIds(
+    [...groups.map((g) => g[0]!), ...(prDraft ? [prDraft] : [])].map((d) => ({
+      key: identityOf.get(d)?.key ?? (d.kind === "pr" ? "(pr)" : `${d.ctx?.path ?? ""}::${d.lines?.join("-") ?? ""}`),
+      part: d.part && d.part.of > 1 ? d.part.index : null,
+    })),
+  );
   const all: Draft[] = [];
   const ids: string[] = [];
   const splitOf: (string | null)[] = [];
   groups.forEach((group, i) => {
     for (const d of group) {
       all.push(d);
-      ids.push(d.split ? `${numbered(i)}-${d.split.family}` : numbered(i));
-      splitOf.push(d.split ? numbered(i) : null);
+      ids.push(d.split ? `${baseIds[i]!}-${d.split.family}` : baseIds[i]!);
+      splitOf.push(d.split ? baseIds[i]! : null);
     }
   });
   if (prDraft) {
     all.push(prDraft);
-    ids.push(numbered(groups.length));
+    ids.push(baseIds[groups.length]!);
     splitOf.push(null);
   }
 
