@@ -3,7 +3,7 @@ import { linkSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileS
 import { execFileSync } from "child_process";
 import { join } from "path";
 import { tmpdir } from "os";
-import { NotesRefusedError, NotesSecretError, openNoteUnder, publishClaudeNotes, readNotesDir, type NotesGitHub } from "#src/engine/claude-code/publish-notes.js";
+import { NotesRefusedError, NotesSecretError, notesRootUnder, openNoteUnder, publishClaudeNotes, readNotesDir, type NotesGitHub } from "#src/engine/claude-code/publish-notes.js";
 
 function workspace() {
   const dir = mkdtempSync(join(tmpdir(), "notes-"));
@@ -89,6 +89,21 @@ describe("readNotesDir", () => {
     const r = await readNotesDir(ws2);
     expect(r.files).toEqual([]);
     expect(r.refused).toEqual([{ path: ".lastlight", reason: "too_many" }]);
+  });
+});
+
+describe("notesRootUnder", () => {
+  it("returns the canonical notes dir only when it is exactly workspace/dir", () => {
+    const ws = workspace();
+    expect(notesRootUnder(ws, ".lastlight/issue-7")).toBe(join(realpathSync(ws), ".lastlight", "issue-7"));
+  });
+
+  it("refuses a notes dir whose path resolves elsewhere (a component swapped for a link)", () => {
+    const ws = workspace();
+    const outside = mkdtempSync(join(tmpdir(), "notes-outside-"));
+    mkdirSync(join(outside, "issue-9"));
+    symlinkSync(join(outside, "issue-9"), join(ws, ".lastlight", "issue-9"));
+    expect(notesRootUnder(ws, ".lastlight/issue-9")).toBeNull();
   });
 });
 

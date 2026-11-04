@@ -93,6 +93,21 @@ export function openNoteUnder(abs: string, rootReal: string, maxBytes: number): 
 }
 
 /**
+ * The canonical path of `<workspace>/<dir>`, or null unless it is exactly that
+ * path with no link anywhere in `dir`. Resolved after the per-component lstat
+ * walk, so a component swapped for a link in between is still caught; each
+ * note's opened fd is then checked against this root.
+ */
+export function notesRootUnder(workspace: string, dirRel: string): string | null {
+  try {
+    const expected = join(realpathSync(workspace), ...dirRel.split("/"));
+    return realpathSync(join(workspace, ...dirRel.split("/"))) === expected ? expected : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The notes under `<workspace>/<dir>/` (default `.lastlight`), as repo-relative
  * paths, sorted. Every component of `dir` must be a real directory, not a link.
  */
@@ -123,7 +138,11 @@ export async function readNotesDir(
     }
   }
 
-  const rootReal = realpathSync(root);
+  const rootReal = notesRootUnder(workspace, dirRel);
+  if (!rootReal) {
+    refused.push({ path: dirRel, reason: "symlink" });
+    return { files, refused };
+  }
   const stack = [root];
   while (stack.length > 0) {
     const dir = stack.pop()!;
