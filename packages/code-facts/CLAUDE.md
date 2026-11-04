@@ -997,10 +997,16 @@ Four properties, each pinned by `tests/seed.test.ts`:
   or 400 — structural, not arbitrated.
 - **An under-cap family is untouched.** No slot is reserved from anyone, so a
   family minting two gets two and gives up nothing.
-- **Deterministic, ids still ascending with rank.** One pass over the
+- **Deterministic, and the document stays in rank order.** One pass over the
   globally-ranked list keeping each family's first `cap` entries, so the
   survivors come back in that same global order and one input yields a
-  byte-identical document.
+  byte-identical document. The order lives in the ARRAY (and `rank`), never
+  in the id: an obligation's id is `O-` + a 6-hex hash of what it is — family,
+  the introducing site's path and quoted source (not its line), and its
+  evidence types — with `-2`, `-3`… for a repeat (`assignObligationIds`). It
+  used to be `O-<rank position>`, and since the id is printed in every survey
+  request, one newly-minted obligation renumbered every one below it and busted
+  the reply cache for units whose code had not changed.
 - **The backstop binds only after the ceilings**, taking the lowest-ranked
   across families — the one place cross-family ranking still decides anything.
 
@@ -1229,14 +1235,21 @@ lastlight-facts units-ingest --dir .lastlight/pr-review          # → hypothese
   (`--family-split-lines`) becomes one unit per asked family — same source,
   imports and neighbours; a request asking ONLY that family, carrying ONLY its
   obligations (spec obligations ride with the `spec` sibling) and taking only
-  its defects. Ids `u-NNN-<family>` (inside core's `SAFE_UNIT_ID`), with
+  its defects. Ids `<parent id>-<family>` (inside core's `SAFE_UNIT_ID`), with
   `family` + `splitOf` on the unit; every obligation still lands exactly once;
   the `pr` unit never splits; `--max-units` counts units before the split.
   Measured reason: the v5 replay audit (Haiku 4.5, 8 cases × 2 arms, 3/50 gold)
   had defects/unit flat at 0.31–0.41 whatever the size and 81% of 100+-line
   units answering `[]`.
-- **Deterministic**: units ordered by file then line, `u-NNN` in that order
-  (a family sibling `u-NNN-<family>`),
+- **Deterministic, and the ids are IDENTITIES, not positions**: units ordered
+  by file then line; a unit's id is `u-` + a 6-hex hash of its re-review `key`
+  (`unitBaseIds`), `-p<n>` for pass `n` of a split unit, `-<family>` for a
+  family sibling (`x2`… / `-d2` only on a hash or identity collision). The id
+  is printed in the request and the survey's reply cache keys on the request's
+  hash, so positional `u-NNN` made one new unit early in file order renumber
+  every unit after it — measured on nearform/unwind-next#15's re-review, 205
+  of 214 units re-asked with ten files changed. A unit's obligations render in
+  id order, so a re-rank never reorders a request either.
   `requestSha256` = sha256 of the request, and no sha or timestamp inside a
   request, so an unchanged unit renders byte-identically across pushes.
   `UNITS_PROMPT_VERSION` (now `units-v7`: breadth — every defect a changed
