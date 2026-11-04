@@ -854,7 +854,7 @@ can neither read the key nor rewrite a config a sidecar loads.
 nginx reads the config, and so the key, only when it starts. After rotating a
 gateway provider's key, restart the agent (it rewrites the config), then
 `docker compose restart model-gateway`; until then the gateway sends the old key.
-A gateway provider's `baseUrl` may not carry a query string, fragment or
+A gateway provider's `baseUrl` must be `https://` and may not carry a query string, fragment or
 `user:password`: the gateway forwards origin and path only, so boot fails rather
 than dropping them silently.
 
@@ -873,7 +873,8 @@ run the command again; it then recreates the network once.
 The strict allowlist the docker firewalls render is `dockerSandboxAllowlist()`:
 the default allowlist minus every host that only gateway providers use. An entry
 that still covers that host (an apex like `deepseek.com` covers
-`api.deepseek.com`) keeps it reachable; the sandbox then still holds only the
+`api.deepseek.com`) keeps it reachable, and boot logs a warning naming both
+(`gatewayHostsStillAllowed()`); the sandbox then still holds only the
 placeholder. The open pair is unchanged: an `unrestricted_egress` phase can still
 reach the host, without a key.
 

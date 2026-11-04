@@ -46,6 +46,7 @@ import { agentContextRegistry } from "./sandbox/k8s/agent-context-registry.js";
 import { mountArtifactUpload } from "./sandbox/k8s/artifact-upload-route.js";
 import { artifactStore } from "./sandbox/artifact-store.js";
 import { writeEgressFirewallConfigs, writeOtelCollectorConfig } from "./sandbox/egress-firewall-config.js";
+import { gatewayHostsStillAllowed } from "./sandbox/egress-allowlist.js";
 import { writeModelGatewayConfig } from "./sandbox/model-gateway.js";
 import { initTelemetry, shutdownTelemetry } from "./telemetry/index.js";
 import { authMiddleware, authIsEnabled, actorFromContext } from "./admin/auth.js";
@@ -223,6 +224,13 @@ async function main() {
   // the collector's trusted outbound leg, not through the firewall.
   const proxyDir = writeEgressFirewallConfigs(config.stateDir);
   configLog.info("Egress firewall configs", { dir: proxyDir });
+  for (const { host, coveredBy } of gatewayHostsStillAllowed()) {
+    configLog.warn("Gateway-only provider host stays reachable from docker sandboxes", {
+      host,
+      coveredBy,
+      reason: `allowlist entry ${coveredBy} also matches its subdomains`,
+    });
+  }
 
   // Model gateway (docker backend): the nginx config that holds the keys of
   // `sandboxGateway` providers, mode 0600. Removed again when no provider uses

@@ -77,6 +77,12 @@ const GATEWAY_PATHS: Record<ApiType, readonly string[]> = {
  */
 const NGINX_SAFE_VALUE = /^[\x21-\x7e]+$/;
 const NGINX_SPECIAL = /["\\$;{}]/;
+/**
+ * What a literal header value may contain: printable ASCII plus space and tab,
+ * without `$` (nginx would expand it as a variable). `"` and `\` are escaped by
+ * {@link nginxHeaderValue}; `;`, `{` and `}` are plain characters inside quotes.
+ */
+const HEADER_VALUE_SAFE = /^[\t\x20-\x7e]*$/;
 const URL_PATH_SAFE = /^[A-Za-z0-9._~/%-]*$/;
 const PREFIX_SAFE = /^[A-Za-z0-9._-]+$/;
 /** A header name nginx reads as one plain token (no `#` comment, no quote). */
@@ -86,6 +92,17 @@ const RESERVED_HEADERS = new Set([
   "host", "content-length", "transfer-encoding", "connection", "keep-alive", "upgrade",
   "te", "trailer", "proxy-connection", "proxy-authorization", "authorization", "x-api-key",
 ]);
+
+/** A header value as the body of a double-quoted nginx string. */
+function nginxHeaderValue(value: string, what: string): string {
+  if (!HEADER_VALUE_SAFE.test(value) || value.includes("$")) {
+    throw new Error(
+      `${what}: the model gateway can't carry this value — it must be printable ASCII (spaces and tabs ` +
+        `allowed) without "$"`,
+    );
+  }
+  return value.replace(/[\\"]/g, (c) => `\\${c}`);
+}
 
 /** Never echoes `value`: the key must not reach a log or an error. */
 function assertNginxSafe(value: string, what: string): void {
@@ -165,6 +182,11 @@ function renderProviderLocations(e: ProviderEndpoint, env: NodeJS.ProcessEnv): s
   }
   assertNginxSafe(key, e.envKey);
   const url = new URL(e.baseUrl);
+  // The real key goes on every forwarded request: never over plain http. The
+  // registry refuses this at config load; this guards the renderer itself.
+  if (url.protocol !== "https:") {
+    throw new Error(`providers.${e.prefix}.baseUrl: the model gateway only forwards to https:// upstreams`);
+  }
   // The gateway forwards to origin + path only; refuse what it would drop.
   // Never echo the URL: userinfo or a query may hold a credential.
   if (url.search || url.hash || url.username || url.password) {
@@ -188,11 +210,10 @@ function renderProviderLocations(e: ProviderEndpoint, env: NodeJS.ProcessEnv): s
           `digits and "-", and sets Host, Content-Length, Connection and the credential headers itself`,
       );
     }
-    assertNginxSafe(value, `providers.${e.prefix}.headers.${name}`);
-    return `proxy_set_header ${name} "${value}";`;
+    return `proxy_set_header ${name} "${nginxHeaderValue(value, `providers.${e.prefix}.headers.${name}`)}";`;
   });
   const directives = [
-    `set $upstream "${url.protocol}//${url.host}";`,
+    `set $upstream "https://${url.host}";`,
     `proxy_set_header Host "${url.host}";`,
     // Here, not at server level: any proxy_set_header in a location replaces
     // every inherited one.

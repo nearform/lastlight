@@ -675,6 +675,22 @@ export function resolveProviderRegistry(
   const gatedPrefixes = new Set(endpoints.filter((e) => e.sandboxGateway).map((e) => e.prefix));
   for (const e of endpoints) {
     if (!e.sandboxGateway) continue;
+    // The gateway adds the real key to every request it forwards. Over plain
+    // http (allowed for loopback or with LASTLIGHT_ALLOW_INSECURE_PROVIDER_URLS)
+    // the key and the prompts would leave the host unencrypted.
+    if (!e.baseUrl.startsWith("https://")) {
+      throw new Error(
+        `providers.${e.prefix}.baseUrl must be https:// — the model gateway adds the real key to every ` +
+          `request it forwards, so it never sends to a plain-http upstream`,
+      );
+    }
+    // nginx writes the config file as UTF-8, so a Latin-1 character would go
+    // out as two bytes instead of the one fetch sends.
+    for (const [name, value] of Object.entries(e.headers ?? {})) {
+      if (/[^\x00-\x7f]/.test(value)) {
+        throw new Error(`providers.${e.prefix}.headers.${name}: the model gateway only sends ASCII header values`);
+      }
+    }
     const direct = [...providers, ...custom].find((p) => !gatedPrefixes.has(p.prefix) && p.envKey === e.envKey);
     if (direct) {
       throw new Error(

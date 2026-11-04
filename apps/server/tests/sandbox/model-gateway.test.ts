@@ -226,14 +226,38 @@ describe("model gateway nginx config", () => {
     }
   });
 
-  it("throws on a header value nginx would interpret, naming the header", () => {
-    // `;`, `{`, `}`, `"` and space pass the registry's header rules but would
-    // break out of the nginx directive.
-    for (const bad of ["a;b", "a{b", "a}b", 'a"b', "a b", "a\\b"]) {
+  it("carries any header value the registry accepts, escaping quotes and backslashes", () => {
+    // Every one of these passes config load, so none may fail the boot.
+    const cases: [string, string][] = [
+      ["Last Light", "Last Light"],
+      ["a\tb", "a\tb"],
+      ["a;b{c}", "a;b{c}"],
+      ['say "hi"', 'say \\"hi\\"'],
+      ["a\\b", "a\\\\b"],
+    ];
+    for (const [value, rendered] of cases) {
       resetProviderRegistry();
-      install({ headers: { "x-flag": bad } });
-      expect(() => renderModelGatewayConf(env)).toThrow(/providers\.acme\.headers\.x-flag/);
+      install({ headers: { "x-title": value } });
+      expect(renderModelGatewayConf(env), value).toContain(`proxy_set_header x-title "${rendered}";`);
     }
+  });
+
+  it("refuses a non-ASCII header value at config load, naming the header", () => {
+    expect(() => install({ headers: { "x-title": "caf\u00e9" } })).toThrow(/providers\.acme\.headers\.x-title/);
+  });
+
+  it("refuses a plain-http upstream at config load, even where http is otherwise allowed", () => {
+    expect(() => install({ baseUrl: "http://127.0.0.1:8080/v1" })).toThrow(/providers\.acme\.baseUrl must be https/);
+    expect(() =>
+      installProviderOverrides(
+        { acme: { baseUrl: "http://gw.example/v1", sandboxGateway: true } },
+        { allowInsecure: true },
+      ),
+    ).toThrow(/providers\.acme\.baseUrl must be https/);
+    // A provider without the gateway keeps the existing http rules.
+    expect(() =>
+      installProviderOverrides({ acme: { baseUrl: "http://127.0.0.1:8080/v1" } }),
+    ).not.toThrow();
   });
 
   it("renders nothing without a gateway provider", () => {

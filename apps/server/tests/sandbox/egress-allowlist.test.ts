@@ -4,6 +4,7 @@ import {
   ALLOW_ALL_SENTINEL,
   defaultAllowlist,
   dockerSandboxAllowlist,
+  gatewayHostsStillAllowed,
   GITHUB_HOSTS,
   PACKAGE_REGISTRY_HOSTS,
   providerHosts,
@@ -95,6 +96,20 @@ describe("dockerSandboxAllowlist (model gateway)", () => {
       other: { baseUrl: "https://gw.example/other/v1" },
     });
     expect(dockerSandboxAllowlist()).toContain("gw.example");
+  });
+
+  it("reports a gateway-only host that a direct provider's apex still covers", () => {
+    installProviderOverrides({
+      acme: { baseUrl: "https://api.gw.example/v1", sandboxGateway: true },
+      other: { baseUrl: "https://gw.example/v1" },
+    });
+    expect(dockerSandboxAllowlist()).not.toContain("api.gw.example");
+    expect(gatewayHostsStillAllowed()).toEqual([{ host: "api.gw.example", coveredBy: "gw.example" }]);
+  });
+
+  it("reports nothing when the gateway-only host is really dropped", () => {
+    installProviderOverrides({ acme: { baseUrl: "https://gw.example/v1", sandboxGateway: true } });
+    expect(gatewayHostsStillAllowed()).toEqual([]);
   });
 
   it("equals defaultAllowlist when no provider uses the gateway", () => {

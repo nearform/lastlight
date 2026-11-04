@@ -715,23 +715,26 @@ everything else. The provider's host also leaves the docker strict egress
 allowlist, so the sandbox can't call it directly, unless another allowlist entry
 still covers it (entries match the apex and every subdomain, so a gateway
 provider on `api.deepseek.com` stays reachable through the built-in
-`deepseek.com`). Either way the sandbox has only the placeholder
-([Sandbox](/spec/09-sandbox)).
+`deepseek.com`; boot logs a warning naming the host and the covering entry).
+Either way the sandbox has only the placeholder ([Sandbox](/spec/09-sandbox)).
 
 - **Docker only.** `smol` and `kubernetes` have no gateway and refuse the flag at
   boot rather than hand the sandbox the key anyway. `gondolin` and `none` call
   the provider host-side, where the key already is, so they ignore it.
 - **Custom providers only**, like `headers`: a built-in refuses it.
 - **The key must be one nginx can carry**: printable ASCII without whitespace,
-  quotes, backslashes, `$`, `;`, `{` or `}`. So must each `headers` value, and
-  header names must be letters, digits and `-` (and not `Host`,
-  `Content-Length`, `Connection` or another header the gateway sets itself). A
-  missing or unsafe key fails the boot, naming the env var and never the value.
+  quotes, backslashes, `$`, `;`, `{` or `}`. A missing or unsafe key fails the
+  boot, naming the env var and never the value. `headers` values must be ASCII
+  (spaces and tabs are fine; config load refuses anything else), and header
+  names must be letters, digits and `-` (and not `Host`, `Content-Length`,
+  `Connection` or another header the gateway sets itself).
 - **The key env var must be the gateway provider's own.** If a provider that
   calls its vendor directly reads the same var, the boot fails: that provider
   would otherwise get the placeholder too.
-- **The `baseUrl` is origin and path only**: a query string, fragment or
-  `user:password` fails the boot instead of being dropped.
+- **The `baseUrl` is `https://`, origin and path only**: plain `http://` fails
+  config load even for loopback or with `LASTLIGHT_ALLOW_INSECURE_PROVIDER_URLS`,
+  since the gateway adds the real key to every request. A query string, fragment
+  or `user:password` fails the boot instead of being dropped.
 - **Rotating the key** needs an agent restart (it rewrites the gateway config)
   and then a restart of the `model-gateway` service, which reads its config only
   at start.
