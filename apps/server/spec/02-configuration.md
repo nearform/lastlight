@@ -687,6 +687,45 @@ environment — so both are refused at boot rather than left to run inside the
 sandbox. So are control characters and anything above U+00FF, which `fetch`
 would reject on every request.
 
+**Keeping the key out of the sandbox (`sandboxGateway`, docker backend).** By
+default a container sandbox holds every provider key it might need, because the
+model call runs inside it. A custom provider can opt out:
+
+```yaml
+providers:
+  commandcode:
+    baseUrl: https://api.commandcode.ai/provider/v1
+    api: openai-completions
+    envKey: COMMANDCODE_API_KEY
+    headers:
+      x-cmd-zdr: "1"
+    sandboxGateway: true
+```
+
+With `sandboxGateway: true`, a docker run gets the placeholder
+`lastlight-model-gateway` in `COMMANDCODE_API_KEY` and calls the provider at
+`http://172.30.0.40/commandcode`, the **model gateway** sidecar. The gateway
+holds the real key in a mode-0600 nginx config the harness writes at boot
+(`$STATE_DIR/proxy/model-gateway.conf`, removed again when no provider uses the
+gateway). It drops the credential the sandbox sent, adds the real key and the
+provider's `headers`, and forwards over verified TLS. It forwards only the model
+calls (`chat/completions` and `models` for `openai-completions`;
+`v1/messages` and `v1/models` for `anthropic-messages`) and answers 404 to
+everything else. The provider's host also leaves the docker strict egress
+allowlist, so the sandbox can't call it directly ([Sandbox](/spec/09-sandbox)).
+
+- **Docker only.** `smol` and `kubernetes` have no gateway and refuse the flag at
+  boot rather than hand the sandbox the key anyway. `gondolin` and `none` call
+  the provider host-side, where the key already is, so they ignore it.
+- **Custom providers only**, like `headers`: a built-in refuses it.
+- **The key must be one nginx can carry**: printable ASCII without whitespace,
+  quotes, backslashes, `$`, `;`, `{` or `}`. So must each `headers` value. A
+  missing or unsafe key fails the boot, naming the env var and never the value.
+- **A phase with `unrestricted_egress`** can still resolve and reach the
+  provider's host through the open egress pair, but it only has the placeholder.
+- **The gateway down means model calls fail** for that provider. In compose it is
+  opt-in: set `COMPOSE_PROFILES=model-gateway`.
+
 Three rules about which fields a **built-in** override may carry, and all exist so
 the four paths below cannot disagree:
 
