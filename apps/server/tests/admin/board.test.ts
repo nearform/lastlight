@@ -604,6 +604,22 @@ describe("buildBoard — dispatch after a previous run", () => {
     expect(dispatchOn(board)?.enabled).toBe(true);
   });
 
+  it("says Start build when the only earlier run was another workflow, such as triage", () => {
+    const board = build([item(4, ["ready-for-agent"])], {
+      stages: [{ ...BUILD_STAGE, workflow: "build" }],
+      runs: new Map([[`${REPO}#4`, { ...run("succeeded"), workflowName: "issue-triage" }]]),
+    });
+    expect(dispatchOn(board)).toMatchObject({ enabled: true, label: "Start build" });
+  });
+
+  it("says Rebuild when the stage's own workflow has run", () => {
+    const board = build([item(4, ["ready-for-agent"])], {
+      stages: [{ ...BUILD_STAGE, workflow: "build" }],
+      runs: new Map([[`${REPO}#4`, run("succeeded")]]),
+    });
+    expect(dispatchOn(board)).toMatchObject({ enabled: true, label: "Rebuild" });
+  });
+
   it("says Start build when nothing has run yet", () => {
     const board = build([item(4, ["ready-for-agent"])]);
     expect(dispatchOn(board)).toMatchObject({ enabled: true, label: "Start build" });

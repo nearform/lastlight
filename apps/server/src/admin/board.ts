@@ -145,6 +145,11 @@ export interface BoardStage {
   running: string;
   on_success: string;
   on_failure: string;
+  /**
+   * The workflow this stage's dispatch starts (`stageWorkflow`). Optional: a
+   * stage without it keeps calling any earlier run a rebuild.
+   */
+  workflow?: string;
 }
 
 /** An action the board offers on a card. */
@@ -366,8 +371,10 @@ function actionsFor(args: {
   entryLabel: string | null;
   /** Its stage's `on_failure` label — where a stopped run parks. */
   failureLabel: string | null;
+  /** The workflow its stage dispatches, when known. */
+  stageWorkflow: string | null;
 }): BoardAction[] {
-  const { held, holdLabel, run, approval, staged, stageLabel, entryLabel, failureLabel } = args;
+  const { held, holdLabel, run, approval, staged, stageLabel, entryLabel, failureLabel, stageWorkflow } = args;
   const actions: BoardAction[] = [
     { id: "open", label: "Open on GitHub", kind: "link", enabled: true, disabledReason: null },
   ];
@@ -447,7 +454,9 @@ function actionsFor(args: {
     actions.push({
       id: "dispatch",
       // Named for what it does to THIS card: a first build, or another one.
-      label: run ? "Rebuild" : "Start build",
+      // Only a run of the stage's own workflow makes it a rebuild — a triage
+      // run on the same issue built nothing.
+      label: run && (!stageWorkflow || run.workflowName === stageWorkflow) ? "Rebuild" : "Start build",
       kind: "dispatch",
       enabled: !disabledReason,
       disabledReason,
@@ -617,6 +626,7 @@ export function buildBoard(input: BuildBoardInput, opts: BuildBoardOptions = {})
         stageLabel: staged ? columns[index]!.label : "",
         entryLabel: stage?.enter ?? null,
         failureLabel: stage?.on_failure ?? null,
+        stageWorkflow: stage?.workflow ?? null,
       }),
     };
 

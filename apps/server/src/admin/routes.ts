@@ -2288,6 +2288,7 @@ export function createAdminRoutes(
       running: stage.running,
       on_success: stage.on_success,
       on_failure: stage.on_failure,
+      workflow: stageWorkflow(stage),
     }));
 
     const managedSet = new Set(getManagedRepos());
