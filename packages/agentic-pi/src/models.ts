@@ -107,14 +107,15 @@ export function registerProviderOverrides(
       // endpoint merely moved we leave it off and pi's own resolution — env var,
       // stored credential, OAuth subscription token — keeps working.
       const auth = override.apiKeyEnv ? { apiKey: `$${override.apiKeyEnv}` } : {};
+      const headers = override.headers ? { headers: override.headers } : {};
       if (builtin) {
-        registry.registerProvider(prefix, { baseUrl: override.baseUrl, ...auth });
+        registry.registerProvider(prefix, { baseUrl: override.baseUrl, ...auth, ...headers });
         continue;
       }
       if (!modelId) {
         // Not the model we're running and not obviously built-in: a baseUrl-only
         // registration still moves that provider's catalog if it has one.
-        registry.registerProvider(prefix, { baseUrl: override.baseUrl, ...auth });
+        registry.registerProvider(prefix, { baseUrl: override.baseUrl, ...auth, ...headers });
         continue;
       }
       registry.registerProvider(prefix, {
@@ -122,6 +123,7 @@ export function registerProviderOverrides(
         baseUrl: override.baseUrl,
         api: override.api ?? "openai-completions",
         apiKey: `$${override.apiKeyEnv ?? defaultApiKeyEnv(prefix)}`,
+        ...headers,
         models: [
           {
             id: modelId,

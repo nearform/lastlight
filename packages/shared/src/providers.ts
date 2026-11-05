@@ -62,7 +62,7 @@ export interface ProviderSpec {
   readonly maxTokensField?: "max_tokens" | "max_completion_tokens";
   /** OpenAI-completions only: keep the nested `vendor/model` tail verbatim (OpenRouter). */
   readonly preserveNestedModelId?: boolean;
-  /** OpenAI-completions only: extra request headers (OpenRouter's referer/title). */
+  /** Extra request headers (OpenRouter's referer/title, a custom provider's `headers`). */
   readonly extraHeaders?: Readonly<Record<string, string>>;
   /** Optional wizard hint for the API-key prefix (used in placeholder + loose validation). */
   readonly keyPrefix?: string;
@@ -358,6 +358,21 @@ export interface ProviderOverride {
   readonly contextWindow?: number;
   /** Custom providers only: output-token ceiling advertised to the agent. Default 16384. */
   readonly maxTokens?: number;
+  /**
+   * Custom providers only: literal headers sent on every model call, e.g. a
+   * gateway's routing or data-retention flag. Not for credentials — those stay
+   * in `envKey` — since this map is plain config and shows up wherever config
+   * does. See {@link normalizeProviderHeaders} for what is refused.
+   */
+  readonly headers?: Readonly<Record<string, string>>;
+  /**
+   * Custom providers only, docker backend only: the sandbox never holds this
+   * provider's key. Docker runs get a placeholder key and reach the provider
+   * through the model-gateway sidecar, which adds the real key and `headers`
+   * on the way out (and the provider's host leaves the sandbox allowlist).
+   * Host-side callers (the in-process helpers, gondolin, none) are unchanged.
+   */
+  readonly sandboxGateway?: boolean;
 }
 
 export type ProviderOverrides = Readonly<Record<string, ProviderOverride>>;
@@ -380,6 +395,9 @@ export interface ProviderEndpoint {
   readonly envKeyOverridden: boolean;
   readonly contextWindow?: number;
   readonly maxTokens?: number;
+  readonly headers?: Readonly<Record<string, string>>;
+  /** Set only when the override said `sandboxGateway: true` (custom providers). */
+  readonly sandboxGateway?: true;
 }
 
 /**
@@ -459,6 +477,51 @@ export function normalizeProviderBaseUrl(
   return trimmed.replace(/\/+$/, "");
 }
 
+/** RFC 9110 field-name `token`. */
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+/** Where the API key travels. `envKey` owns these, so a header may not replace them. */
+const CREDENTIAL_HEADERS = new Set(["authorization", "x-api-key"]);
+
+/**
+ * Validate a provider's `headers` map. Values must be literal, because pi
+ * resolves provider header values itself: a leading `!` runs the rest as a
+ * shell command and `$NAME` is replaced with that env var — both at request
+ * time, inside the sandbox for the container backends. A literal-only rule
+ * keeps a config typo from becoming a command or leaking an env var to the
+ * gateway, and keeps the in-process helper (which sends values as written)
+ * and the agent sending the same bytes.
+ */
+export function normalizeProviderHeaders(
+  raw: Readonly<Record<string, string>>,
+  ctx: { prefix: string },
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(raw)) {
+    const path = `providers.${ctx.prefix}.headers.${name}`;
+    if (!HEADER_NAME.test(name)) {
+      throw new Error(`${path}: not a valid HTTP header name`);
+    }
+    if (CREDENTIAL_HEADERS.has(name.toLowerCase())) {
+      throw new Error(`${path}: credentials go in providers.${ctx.prefix}.envKey, not in headers`);
+    }
+    if (/[\x00-\x08\x0a-\x1f\x7f]/.test(value)) {
+      throw new Error(`${path}: header values may not contain control characters`);
+    }
+    // fetch refuses these with a ByteString TypeError on every request.
+    if (/[^\x00-\xff]/.test(value)) {
+      throw new Error(`${path}: header values may not contain characters outside Latin-1`);
+    }
+    if (value.startsWith("!") || value.includes("$")) {
+      throw new Error(
+        `${path}: header values must be literal — a leading "!" or a "$" would be ` +
+          `run as a command or expanded from the environment by the agent runtime`,
+      );
+    }
+    out[name] = value;
+  }
+  return out;
+}
+
 function isValidPrefix(prefix: string): boolean {
   return /^[a-z0-9][a-z0-9._-]*$/.test(prefix);
 }
@@ -519,6 +582,27 @@ export function resolveProviderRegistry(
           `of your own instead (a new prefix with baseUrl + api + envKey) and use it in models:.`,
       );
     }
+    // Refused rather than ignored like the other custom-only fields: a header is
+    // often a promise to the gateway (a retention or routing flag), so dropping
+    // it silently is worse than failing the boot. A built-in can't carry one
+    // because pi only learns about a built-in override through its baseUrl, and
+    // the registry's baseUrl is not always pi's (anthropic is `…/v1` here and
+    // bare in pi's catalog), so forwarding a headers-only override would move
+    // the endpoint as a side effect.
+    if (override.headers && Object.keys(override.headers).length > 0) {
+      throw new Error(
+        `providers.${spec.prefix}.headers is only supported on a provider of your own: "${spec.prefix}" is ` +
+          `built in. Declare a new prefix with baseUrl + api + envKey + headers and use it in models:.`,
+      );
+    }
+    // Refused for the same reason: a built-in's in-sandbox endpoint is pi's own,
+    // so there is no baseUrl here the gateway could stand in for.
+    if (override.sandboxGateway) {
+      throw new Error(
+        `providers.${spec.prefix}.sandboxGateway is only supported on a provider of your own: "${spec.prefix}" is ` +
+          `built in. Declare a new prefix with baseUrl + api + envKey + sandboxGateway and use it in models:.`,
+      );
+    }
     const baseUrl = override.baseUrl
       ? normalizeProviderBaseUrl(override.baseUrl, { prefix: spec.prefix, allowInsecure: opts.allowInsecure })
       : spec.baseUrl;
@@ -557,6 +641,8 @@ export function resolveProviderRegistry(
     const api = override.api ?? "openai-completions";
     const envKey = override.envKey ?? defaultProviderEnvKey(prefix);
     const fastModel = override.fastModel ?? "";
+    const headers = override.headers ? normalizeProviderHeaders(override.headers, { prefix }) : {};
+    const hasHeaders = Object.keys(headers).length > 0;
     custom.push({
       prefix,
       displayName: override.displayName ?? prefix,
@@ -566,6 +652,7 @@ export function resolveProviderRegistry(
       host: override.host ?? hostOf(baseUrl),
       fastModel,
       sampleModel: override.sampleModel ?? fastModel,
+      ...(hasHeaders ? { extraHeaders: headers } : {}),
     });
     endpoints.push({
       prefix,
@@ -577,7 +664,40 @@ export function resolveProviderRegistry(
       envKeyOverridden: true,
       contextWindow: override.contextWindow,
       maxTokens: override.maxTokens,
+      ...(hasHeaders ? { headers } : {}),
+      ...(override.sandboxGateway === true ? { sandboxGateway: true as const } : {}),
     });
+  }
+
+  // A gateway provider's key var becomes a placeholder in docker sandboxes. If
+  // a provider that calls its vendor directly reads the same var, its runs
+  // would send that placeholder and fail with 401s and no boot error.
+  const gatedPrefixes = new Set(endpoints.filter((e) => e.sandboxGateway).map((e) => e.prefix));
+  for (const e of endpoints) {
+    if (!e.sandboxGateway) continue;
+    // The gateway adds the real key to every request it forwards. Over plain
+    // http (allowed for loopback or with LASTLIGHT_ALLOW_INSECURE_PROVIDER_URLS)
+    // the key and the prompts would leave the host unencrypted.
+    if (!e.baseUrl.startsWith("https://")) {
+      throw new Error(
+        `providers.${e.prefix}.baseUrl must be https:// — the model gateway adds the real key to every ` +
+          `request it forwards, so it never sends to a plain-http upstream`,
+      );
+    }
+    // nginx writes the config file as UTF-8, so a Latin-1 character would go
+    // out as two bytes instead of the one fetch sends.
+    for (const [name, value] of Object.entries(e.headers ?? {})) {
+      if (/[^\x00-\x7f]/.test(value)) {
+        throw new Error(`providers.${e.prefix}.headers.${name}: the model gateway only sends ASCII header values`);
+      }
+    }
+    const direct = [...providers, ...custom].find((p) => !gatedPrefixes.has(p.prefix) && p.envKey === e.envKey);
+    if (direct) {
+      throw new Error(
+        `providers.${e.prefix}.envKey ${e.envKey} is also used by ${direct.prefix}, which calls its provider ` +
+          `directly — give the sandboxGateway provider a key env var of its own.`,
+      );
+    }
   }
 
   return buildRegistry([...providers, ...custom], endpoints);

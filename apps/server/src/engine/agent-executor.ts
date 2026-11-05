@@ -10,6 +10,7 @@ import {
 } from "./github/profiles.js";
 import { getRuntimeConfig, type SandboxBackend } from "../config/config.js";
 import type { PrePopulateSpec, SandboxFactory } from "../sandbox/sandbox.js";
+import { applyModelGateway } from "../sandbox/model-gateway.js";
 import { getDockerSandboxOtelEnv, getOtelEnvForSandbox, safeSpanAttributes, withSpan } from "../telemetry/index.js";
 import { OI, SpanKind, splitProviderModel } from "../telemetry/openinference.js";
 import { DEFAULT_MODEL } from "./executors/shared.js";
@@ -254,7 +255,13 @@ async function prepareRun(
   // payload as an argument (see `RunAgentOpts.providers`); this is set for every
   // backend so the two routes can never disagree. Not a secret: a gateway URL is
   // routing, and the key stays in its own env var.
-  const endpointOverrides = providerEndpointOverrides();
+  //
+  // Model gateway (docker only): a `sandboxGateway` provider's key is swapped
+  // for a placeholder and its URL for the gateway sidecar's, so the real key
+  // never enters the sandbox. See `sandbox/model-gateway.ts`.
+  const gated = applyModelGateway(ghEnv, providerEndpointOverrides(), backend);
+  Object.assign(ghEnv, gated.env);
+  const endpointOverrides = gated.wire;
   if (endpointOverrides) ghEnv[PROVIDER_OVERRIDES_ENV] = JSON.stringify(endpointOverrides);
 
   // OAuth-backed providers (subscription logins: Codex / Claude Pro / Copilot).

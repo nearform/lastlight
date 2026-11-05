@@ -674,9 +674,76 @@ providers:
     envKey: ACME_API_KEY
     host: llm.corp.example         # egress allowlist entry; defaults to the URL's hostname
     fastModel: acme-small          # what the cheap helpers use if they pick this provider
+    headers:                       # sent on every model call to this provider
+      x-retention: "none"          # values are strings — quote numbers in YAML
 ```
 
-Two rules about which fields a **built-in** override may carry, and both exist so
+`headers` is for flags a gateway reads (routing, data retention), never for
+credentials: the map is plain config and shows up wherever config does, so the
+key still travels through `envKey`, and `authorization` / `x-api-key` are
+refused. Values must be literals. pi resolves header values itself — a value
+starting with `!` runs as a shell command and `$NAME` expands from the
+environment — so both are refused at boot rather than left to run inside the
+sandbox. So are control characters and anything above U+00FF, which `fetch`
+would reject on every request.
+
+**Keeping the key out of the sandbox (`sandboxGateway`, docker backend).** By
+default a container sandbox holds every provider key it might need, because the
+model call runs inside it. A custom provider can opt out:
+
+```yaml
+providers:
+  commandcode:
+    baseUrl: https://api.commandcode.ai/provider/v1
+    api: openai-completions
+    envKey: COMMANDCODE_API_KEY
+    headers:
+      x-cmd-zdr: "1"
+    sandboxGateway: true
+```
+
+With `sandboxGateway: true`, a docker run gets the placeholder
+`lastlight-model-gateway` in `COMMANDCODE_API_KEY` and calls the provider at
+`http://172.30.0.40/commandcode`, the **model gateway** sidecar. The gateway
+holds the real key in a mode-0600 nginx config the harness writes at boot
+(`$STATE_DIR/proxy/model-gateway.conf`, removed again when no provider uses the
+gateway). It drops the credential the sandbox sent, adds the real key and the
+provider's `headers`, and forwards over verified TLS. It forwards only the model
+calls (`chat/completions` and `models` for `openai-completions`;
+`v1/messages` and `v1/models` for `anthropic-messages`) and answers 404 to
+everything else. The provider's host also leaves the docker strict egress
+allowlist, so the sandbox can't call it directly, unless another allowlist entry
+still covers it (entries match the apex and every subdomain, so a gateway
+provider on `api.deepseek.com` stays reachable through the built-in
+`deepseek.com`; boot logs a warning naming the host and the covering entry).
+Either way the sandbox has only the placeholder ([Sandbox](/spec/09-sandbox)).
+
+- **Docker only.** `smol` and `kubernetes` have no gateway and refuse the flag at
+  boot rather than hand the sandbox the key anyway. `gondolin` and `none` call
+  the provider host-side, where the key already is, so they ignore it.
+- **Custom providers only**, like `headers`: a built-in refuses it.
+- **The key must be one nginx can carry**: printable ASCII without whitespace,
+  quotes, backslashes, `$`, `;`, `{` or `}`. A missing or unsafe key fails the
+  boot, naming the env var and never the value. `headers` values must be ASCII
+  (spaces and tabs are fine; config load refuses anything else), and header
+  names must be letters, digits and `-` (and not `Host`, `Content-Length`,
+  `Connection` or another header the gateway sets itself).
+- **The key env var must be the gateway provider's own.** If a provider that
+  calls its vendor directly reads the same var, the boot fails: that provider
+  would otherwise get the placeholder too.
+- **The `baseUrl` is `https://`, origin and path only**: plain `http://` fails
+  config load even for loopback or with `LASTLIGHT_ALLOW_INSECURE_PROVIDER_URLS`,
+  since the gateway adds the real key to every request. A query string, fragment
+  or `user:password` fails the boot instead of being dropped.
+- **Rotating the key** needs an agent restart (it rewrites the gateway config)
+  and then a restart of the `model-gateway` service, which reads its config only
+  at start.
+- **A phase with `unrestricted_egress`** can still resolve and reach the
+  provider's host through the open egress pair, but it only has the placeholder.
+- **The gateway down means model calls fail** for that provider. In compose it is
+  opt-in: set `COMPOSE_PROFILES=model-gateway`.
+
+Three rules about which fields a **built-in** override may carry, and all exist so
 the four paths below cannot disagree:
 
 - **`envKey` may be re-pointed.** That is how a gateway keeps custody of its own
@@ -692,6 +759,12 @@ the four paths below cannot disagree:
   in-process while the sandbox ignored it would split one deployment in half, so
   it throws at boot and names the alternative: if your gateway proxies Anthropic
   but speaks OpenAI's dialect, declare your own prefix and point `models:` at it.
+- **`headers` may not be set.** pi learns about a built-in override only through
+  its `baseUrl`, and the registry's base URL is not always pi's (`anthropic` is
+  `…/v1` here and bare in pi's catalog), so forwarding a headers-only override
+  would move the endpoint as a side effect. Silently dropping the header instead
+  would break whatever the gateway was promised, so it throws at boot and names
+  the same alternative: declare your own prefix.
 
 Why it matters beyond convenience: a gateway is how a deployment gets central
 spend accounting, key custody, rate limiting and audit — and a self-hosted or
@@ -706,10 +779,10 @@ config key reach four independent code paths:
 
 | Path | What follows the override |
 |---|---|
-| the cheap helpers (`src/engine/llm.ts`) | request URL, api family, key env var — including the bare-model-id fallback, which used to hardcode `api.openai.com` |
+| the cheap helpers (`src/engine/llm.ts`) | request URL, api family, key env var, headers — including the bare-model-id fallback, which used to hardcode `api.openai.com` |
 | the sandbox (`agentic-pi`) | `AGENTIC_PI_PROVIDERS` in the sandbox env (container backends) and the `providers` run option (in-process backends); agentic-pi registers the override on pi's `ModelRuntime` |
 | the egress allowlist | the resolved `host` is what `providerHosts()` returns, so the firewall permits the gateway ([Sandbox](/spec/09-sandbox)) |
-| in-process chat (`src/engine/chat/chat-runner.ts`) | the resolved `baseUrl`, and a synthesized model for a custom provider pi-ai has no catalog entry for |
+| in-process chat (`src/engine/chat/chat-runner.ts`) | the resolved `baseUrl` and headers, and a synthesized model for a custom provider pi-ai has no catalog entry for |
 
 **Precedence** is the ordinary one — `default < overlay < env` — and merges
 **per prefix**, so `ANTHROPIC_BASE_URL` moves one endpoint without dropping a

@@ -217,6 +217,73 @@ describe("resolveProviderRegistry — endpoint overrides (issue #373)", () => {
   });
 });
 
+describe("resolveProviderRegistry — custom provider headers", () => {
+  it("carries a custom provider's headers to the in-process helper and the sandbox payload", () => {
+    const registry = resolveProviderRegistry({
+      acme: { baseUrl: "https://llm.corp.example/v1", headers: { "x-retention": "none" } },
+    });
+    expect(registry.byPrefix("acme")!.extraHeaders).toEqual({ "x-retention": "none" });
+    expect(registry.endpoints[0].headers).toEqual({ "x-retention": "none" });
+  });
+
+  it("leaves a custom provider without headers exactly as before", () => {
+    const registry = resolveProviderRegistry({ acme: { baseUrl: "https://llm.corp.example/v1", headers: {} } });
+    expect(registry.byPrefix("acme")!.extraHeaders).toBeUndefined();
+    expect("headers" in registry.endpoints[0]).toBe(false);
+  });
+
+  /**
+   * Refused rather than ignored: a dropped header is often a broken promise to
+   * the gateway (a retention flag), and pi learns about a built-in override only
+   * through its baseUrl, which the registry and pi's catalog spell differently.
+   */
+  it("refuses headers on a built-in provider and points at the alternative", () => {
+    expect(() => resolveProviderRegistry({ anthropic: { headers: { "x-retention": "none" } } })).toThrow(
+      /providers\.anthropic\.headers is only supported on a provider of your own/,
+    );
+  });
+
+  it("refuses values the agent runtime would run as a command or expand from the environment", () => {
+    const withValue = (value: string) => () =>
+      resolveProviderRegistry({ acme: { baseUrl: "https://gw/v1", headers: { "x-flag": value } } });
+    expect(withValue("!cat /etc/passwd")).toThrow(/providers\.acme\.headers\.x-flag: header values must be literal/);
+    expect(withValue("$GITHUB_TOKEN")).toThrow(/must be literal/);
+    expect(withValue("prefix-${SECRET}")).toThrow(/must be literal/);
+    expect(withValue("a\r\nx-injected: 1")).toThrow(/control characters/);
+    // fetch refuses anything above U+00FF on every request; say so at boot instead.
+    expect(withValue("\u20ac")).toThrow(/providers\.acme\.headers\.x-flag: header values may not contain characters outside Latin-1/);
+    expect(withValue("caf\u00e9")).not.toThrow();
+    // An exclamation mark that does not lead is just text.
+    expect(withValue("on!")).not.toThrow();
+  });
+
+  it("refuses credential headers and malformed names", () => {
+    const withName = (name: string) => () =>
+      resolveProviderRegistry({ acme: { baseUrl: "https://gw/v1", headers: { [name]: "v" } } });
+    expect(withName("Authorization")).toThrow(/credentials go in providers\.acme\.envKey/);
+    expect(withName("x-api-key")).toThrow(/credentials go in providers\.acme\.envKey/);
+    expect(withName("bad name")).toThrow(/not a valid HTTP header name/);
+  });
+});
+
+describe("resolveProviderRegistry — sandboxGateway", () => {
+  it("carries sandboxGateway onto a custom provider's endpoint", () => {
+    const r = resolveProviderRegistry({ acme: { baseUrl: "https://gw.example/v1", sandboxGateway: true } });
+    expect(r.endpoints.find((e) => e.prefix === "acme")?.sandboxGateway).toBe(true);
+  });
+
+  it("leaves the endpoint unchanged without it", () => {
+    const r = resolveProviderRegistry({ acme: { baseUrl: "https://gw.example/v1" } });
+    expect(r.endpoints[0]).not.toHaveProperty("sandboxGateway");
+  });
+
+  it("refuses sandboxGateway on a built-in provider and names the alternative", () => {
+    expect(() => resolveProviderRegistry({ anthropic: { sandboxGateway: true } })).toThrow(
+      /providers\.anthropic\.sandboxGateway is only supported on a provider of your own/,
+    );
+  });
+});
+
 describe("providerOverridesFromEnv", () => {
   it("reads the per-provider base-URL vars the vendor SDKs already use", () => {
     expect(providerBaseUrlEnvVar("anthropic")).toBe("ANTHROPIC_BASE_URL");

@@ -286,4 +286,29 @@ describe("chat with a provider endpoint override (issue #373)", () => {
       "https://gateway.internal/openai/v1/chat/completions",
     );
   });
+
+  async function headersOf(model: string, body: unknown): Promise<Record<string, string>> {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    await chat(model, [{ role: "user", content: "hi" }]);
+    return (fetchMock.mock.calls.at(-1)![1] as RequestInit).headers as Record<string, string>;
+  }
+
+  it("sends a custom provider's headers alongside its key, in either dialect", async () => {
+    process.env.ACME_API_KEY = "k";
+    installProviderOverrides({ acme: { baseUrl: "https://llm.corp.example/v1", headers: { "x-retention": "none" } } });
+    expect(await headersOf("acme/my-model", { choices: [{ message: { content: "ok" } }] })).toMatchObject({
+      authorization: "Bearer k",
+      "x-retention": "none",
+    });
+
+    installProviderOverrides({
+      acme: { baseUrl: "https://llm.corp.example", api: "anthropic-messages", headers: { "x-retention": "none" } },
+    });
+    expect(await headersOf("acme/my-model", { content: [{ type: "text", text: "ok" }] })).toMatchObject({
+      "x-api-key": "k",
+      "x-retention": "none",
+    });
+  });
 });

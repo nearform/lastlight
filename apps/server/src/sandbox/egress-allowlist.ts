@@ -112,6 +112,50 @@ export function defaultAllowlist(): readonly string[] {
 }
 
 /**
+ * The docker backend's strict allowlist: {@link defaultAllowlist} minus every
+ * host that only `sandboxGateway` providers use. Those providers are reached
+ * through the model-gateway sidecar, which has its own egress, so the sandbox
+ * has no reason to resolve or reach them directly. A host another provider
+ * still calls directly stays. kubernetes and gondolin keep reading
+ * {@link defaultAllowlist}.
+ */
+export function dockerSandboxAllowlist(): readonly string[] {
+  const gatewayOnly = gatewayOnlyHosts();
+  if (gatewayOnly.size === 0) return defaultAllowlist();
+  return defaultAllowlist().filter((h) => !gatewayOnly.has(h));
+}
+
+/** Hosts that only `sandboxGateway` providers use. */
+function gatewayOnlyHosts(): Set<string> {
+  const registry = providerRegistry();
+  const gated = new Set(registry.endpoints.filter((e) => e.sandboxGateway === true).map((e) => e.prefix));
+  if (gated.size === 0) return new Set();
+  const direct = new Set(registry.providers.filter((p) => !gated.has(p.prefix)).map((p) => p.host));
+  return new Set(registry.providers.filter((p) => gated.has(p.prefix) && !direct.has(p.host)).map((p) => p.host));
+}
+
+/**
+ * Gateway-only hosts that {@link dockerSandboxAllowlist} still lets through,
+ * because every entry also matches its subdomains: a direct provider on
+ * `openai.com` keeps `api.openai.com` reachable. The sandbox still holds only
+ * the placeholder key, but the egress tightening doesn't happen, so boot logs
+ * these rather than leaving it silent.
+ */
+export function gatewayHostsStillAllowed(): { host: string; coveredBy: string }[] {
+  const gatewayOnly = gatewayOnlyHosts();
+  if (gatewayOnly.size === 0) return [];
+  const allowed = mergeAllowlist(dockerSandboxAllowlist());
+  const out: { host: string; coveredBy: string }[] = [];
+  for (const host of gatewayOnly) {
+    const h = normalizeAllowlistHost(host);
+    if (!h) continue;
+    const coveredBy = allowed.find((entry) => h === entry || h.endsWith(`.${entry}`));
+    if (coveredBy) out.push({ host, coveredBy });
+  }
+  return out;
+}
+
+/**
  * Sentinel value recognized by agentic-pi/gondolin (post the `"*"` patch)
  * meaning "allow every host". Used when a phase sets `unrestricted_egress`.
  *

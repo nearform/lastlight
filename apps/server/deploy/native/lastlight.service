@@ -11,8 +11,8 @@ Group=lastlight
 # gondolin needs /dev/kvm — group `kvm` is the standard accessor on Debian/Ubuntu.
 SupplementaryGroups=kvm
 
-WorkingDirectory=/opt/lastlight
-ExecStart=/usr/bin/node /opt/lastlight/dist/index.js
+WorkingDirectory=/opt/lastlight/apps/server
+ExecStart=/usr/bin/node /opt/lastlight/apps/server/dist/index.js
 EnvironmentFile=/etc/lastlight/lastlight.env
 
 # HOME drives where agentic-pi caches the gondolin guest image

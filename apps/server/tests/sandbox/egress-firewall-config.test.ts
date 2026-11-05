@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
+import { installProviderOverrides, resetProviderRegistry } from "#src/config/provider-registry.js";
 import {
   COREDNS_OPEN_IP,
   COREDNS_STRICT_IP,
@@ -291,5 +292,24 @@ describe("apex + subdomain match sanity", () => {
     // (^|\.)github\.com\.$ matches both "github.com." and "api.github.com."
     // in FQDN-with-trailing-dot form.
     expect(conf).toContain("(^|\\.)github\\.com\\.$");
+  });
+});
+
+describe("model gateway: gateway-only provider hosts", () => {
+  afterEach(() => resetProviderRegistry());
+
+  it("strict nginx and coredns configs omit the gateway-only host", () => {
+    installProviderOverrides({ acme: { baseUrl: "https://gw.example/v1", sandboxGateway: true } });
+    expect(renderNginxStrictConf()).not.toContain("gw.example");
+    expect(renderCorefileStrict()).not.toContain("gw.example");
+  });
+
+  // Stated limitation (design §4.3): the open pair allows every host, so a
+  // phase with unrestricted egress could still reach the provider directly —
+  // with only the placeholder key.
+  it("open configs are unchanged", () => {
+    const before = [renderNginxOpenConf(), renderCorefileOpen()];
+    installProviderOverrides({ acme: { baseUrl: "https://gw.example/v1", sandboxGateway: true } });
+    expect([renderNginxOpenConf(), renderCorefileOpen()]).toEqual(before);
   });
 });

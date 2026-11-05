@@ -1,0 +1,98 @@
+/**
+ * Seam: what a docker sandbox receives for a `sandboxGateway` provider. The
+ * real key must not reach the sandbox env in any form — not as the key var,
+ * not inside AGENTIC_PI_PROVIDERS.
+ */
+import { mkdtempSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { installProviderOverrides, resetProviderRegistry, PROVIDER_OVERRIDES_ENV } from "#src/config/provider-registry.js";
+
+const { executeAgent, executeCommand, withAgentSession } = await import("#src/engine/agent-executor.js");
+const { FakeSandbox } = await import("#src/sandbox/sandbox.js");
+
+const REAL_KEY = "sk-test-not-a-real-key";
+const savedEnv = { ...process.env };
+
+afterEach(() => {
+  process.env = { ...savedEnv };
+  resetProviderRegistry();
+});
+
+async function runOn(backend: "docker" | "none") {
+  const stateDir = mkdtempSync(join(tmpdir(), "ll-exec-gw-"));
+  const sessionsDir = join(stateDir, "agent-sessions");
+  mkdirSync(join(sessionsDir, "projects"), { recursive: true });
+  const fake = new FakeSandbox({ returnRunResult: { success: true } as any });
+  await executeAgent(
+    "noop",
+    { sandbox: backend, stateDir, sessionsDir, model: "acme/some-model" },
+    { sandboxFactory: fake.asFactory() },
+  );
+  return fake;
+}
+
+describe("executor: model gateway (docker)", () => {
+  it("hands the docker sandbox the placeholder and the gateway URL, never the real key", async () => {
+    process.env.ACME_API_KEY = REAL_KEY;
+    installProviderOverrides({
+      acme: { baseUrl: "https://gw.example/v1", sandboxGateway: true, headers: { "x-cmd-zdr": "1" } },
+    });
+    const fake = await runOn("docker");
+    const env = fake.env!;
+    expect(env.ACME_API_KEY).toBe("lastlight-model-gateway");
+    const wire = JSON.parse(env[PROVIDER_OVERRIDES_ENV]);
+    expect(wire.acme.baseUrl).toBe("http://172.30.0.40/acme");
+    expect(wire.acme.apiKeyEnv).toBe("ACME_API_KEY");
+    for (const [k, v] of Object.entries(env)) expect(`${k}=${v}`).not.toContain(REAL_KEY);
+  });
+
+  it("leaves a provider without sandboxGateway alone", async () => {
+    process.env.ACME_API_KEY = REAL_KEY;
+    installProviderOverrides({ acme: { baseUrl: "https://gw.example/v1" } });
+    const fake = await runOn("docker");
+    expect(fake.env!.ACME_API_KEY).toBe(REAL_KEY);
+  });
+});
+
+// executeCommand and withAgentSession build the sandbox env through the same
+// prepareRun; these pin that, so a future path that skips it shows up here.
+describe("executor: model gateway on the command and session paths (docker)", () => {
+  function setup() {
+    process.env.ACME_API_KEY = REAL_KEY;
+    installProviderOverrides({ acme: { baseUrl: "https://gw.example/v1", sandboxGateway: true } });
+    const stateDir = mkdtempSync(join(tmpdir(), "ll-exec-gw-"));
+    const sessionsDir = join(stateDir, "agent-sessions");
+    mkdirSync(join(sessionsDir, "projects"), { recursive: true });
+    return { stateDir, sessionsDir };
+  }
+  function expectGated(env: Record<string, string>) {
+    expect(env.ACME_API_KEY).toBe("lastlight-model-gateway");
+    expect(JSON.parse(env[PROVIDER_OVERRIDES_ENV]).acme.baseUrl).toBe("http://172.30.0.40/acme");
+    for (const [k, v] of Object.entries(env)) expect(`${k}=${v}`).not.toContain(REAL_KEY);
+  }
+
+  it("executeCommand: the sandbox gets the placeholder, never the real key", async () => {
+    const { stateDir, sessionsDir } = setup();
+    const fake = new FakeSandbox();
+    await executeCommand(
+      { kind: "bash", command: "true" },
+      { sandbox: "docker", stateDir, sessionsDir },
+      { sandboxFactory: fake.asFactory(), writeSession: false },
+    );
+    expectGated(fake.env!);
+    for (const v of Object.values(fake.receivedCommandOpts?.env ?? {})) expect(v).not.toContain(REAL_KEY);
+  });
+
+  it("withAgentSession: the session's sandbox gets the placeholder, never the real key", async () => {
+    const { stateDir, sessionsDir } = setup();
+    const fake = new FakeSandbox({ returnRunResult: { success: true } as any });
+    await withAgentSession(
+      { sandbox: "docker", stateDir, sessionsDir, model: "acme/some-model" },
+      { sandboxFactory: fake.asFactory() },
+      async () => undefined,
+    );
+    expectGated(fake.env!);
+  });
+});

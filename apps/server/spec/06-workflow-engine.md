@@ -1046,7 +1046,16 @@ triggers can't swamp the host. It is enforced at the single dispatch funnel
 `{ success: true, queued: true, phases: [] }` — **no phases run**. A
 duplicate trigger on an already-`queued` run is a no-op (returns the same
 `queued` result; it must not fall through to `runWorkflow`, which would
-execute outside the cap). Resumes and orphan restarts **bypass** the cap:
+execute outside the cap). The same holds for a duplicate trigger on a run
+that is already executing in this process: `runSimpleWorkflow` claims the
+run (`claimRun`) before it creates or reuses the row and holds the claim
+until it returns, so the duplicate gets `{ success: true, paused: true,
+phases: [] }` (parked, not failed) instead of a second `runWorkflow` on the
+same run id. A run at `waiting_approval` whose scheduler is still posting
+the gate message is the one case that waits rather than parks: an approval
+there resumes the run once the old scheduler returns. A `running` row that
+is *not* live here — orphaned by a restart — still resumes. Resumes and
+orphan restarts **bypass** the cap:
 they re-enter `runWorkflow` directly, finishing in-flight work rather than
 re-queuing behind it.
 

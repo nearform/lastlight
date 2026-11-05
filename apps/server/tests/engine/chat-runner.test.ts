@@ -6,6 +6,7 @@ import {
   isRetryableModelError,
   resolveModel,
 } from "#src/engine/chat/chat-runner.js";
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { installProviderOverrides, resetProviderRegistry } from "#src/config/provider-registry.js";
 
 // Minimal stand-ins — the helper only ever forwards these to `complete`.
@@ -173,6 +174,21 @@ describe("chat model resolution with a provider endpoint override", () => {
   it("honours the declared dialect when the gateway speaks Anthropic", () => {
     installProviderOverrides({ acme: { baseUrl: "https://gw/anthropic", api: "anthropic-messages" } });
     expect(resolveModel("acme/my-model").api).toBe("anthropic-messages");
+  });
+
+  it("carries a custom provider's headers onto the synthesized model", () => {
+    installProviderOverrides({ acme: { baseUrl: "https://gw/v1", headers: { "x-retention": "none" } } });
+    expect(resolveModel("acme/my-model").headers).toEqual({ "x-retention": "none" });
+  });
+
+  it("carries them onto a catalog model too, when a custom prefix is one pi-ai knows", () => {
+    // `openai-codex` is in pi-ai's catalog but not in the provider registry, so
+    // the registry treats it as deployment-declared and accepts headers for it.
+    const [catalogModel] = getBuiltinModels("openai-codex");
+    installProviderOverrides({ "openai-codex": { baseUrl: "https://gw/codex", headers: { "x-retention": "none" } } });
+    const resolved = resolveModel(`openai-codex/${catalogModel.id}`);
+    expect(resolved.baseUrl).toBe("https://gw/codex");
+    expect(resolved.headers).toMatchObject({ "x-retention": "none" });
   });
 
   it("still fails loudly for a model nobody declared", () => {
