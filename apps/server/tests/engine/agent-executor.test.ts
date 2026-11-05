@@ -17,6 +17,8 @@ function assistantMessageEnd(opts: {
   cacheWrite?: number;
   cost: number;
   toolCalls?: number;
+  /** pi's stop reason for the turn, e.g. "length" when it hit the output cap. */
+  stopReason?: string;
 }): Record<string, unknown> {
   const content: Array<Record<string, unknown>> = [];
   if (opts.text) content.push({ type: "text", text: opts.text });
@@ -28,6 +30,7 @@ function assistantMessageEnd(opts: {
     message: {
       role: "assistant",
       content,
+      ...(opts.stopReason ? { stopReason: opts.stopReason } : {}),
       usage: {
         input: opts.input,
         output: opts.output,
@@ -380,6 +383,33 @@ describe("RunResultAccumulator truncation detection", () => {
   });
 });
 
+describe("RunResultAccumulator output-cap detection", () => {
+  it("flags a run whose final assistant turn stopped at the output-token cap", () => {
+    // The prod failure (a reasoning model on a 16k per-reply cap): an early
+    // turn says "I'll start by reading the plan", later tool turns, then a final
+    // turn that spends the whole cap thinking and stops with "length". The
+    // earlier text survives as `finalText`, so nothing else noticed.
+    const acc = new RunResultAccumulator();
+    acc.feed(assistantMessageEnd({ text: "I'll start by reading the plan.", input: 1, output: 1, cost: 0, toolCalls: 1 }));
+    acc.feed({ type: "tool_execution_end", tool: "read", isError: false, result: "plan" });
+    acc.feed(assistantMessageEnd({ input: 1, output: 16384, cost: 0, stopReason: "length" }));
+    acc.feed({ type: "agent_end", messages: [] });
+    expect(acc.endedOnOutputCap()).toBe(true);
+    expect(acc.endedOnToolCall()).toBe(false);
+  });
+
+  it("reflects the latest assistant turn: a capped turn followed by a finished one is fine", () => {
+    const acc = new RunResultAccumulator();
+    acc.feed(assistantMessageEnd({ input: 1, output: 16384, cost: 0, stopReason: "length" }));
+    acc.feed(assistantMessageEnd({ text: "done", input: 1, output: 1, cost: 0, stopReason: "stop" }));
+    expect(acc.endedOnOutputCap()).toBe(false);
+  });
+
+  it("defaults to false before any assistant turn", () => {
+    expect(new RunResultAccumulator().endedOnOutputCap()).toBe(false);
+  });
+});
+
 describe("reclassifySuccess — degenerate 'success' guard", () => {
   const base = { hasAgentError: false, endedOnToolCall: false, finalText: "here is the answer" };
 
@@ -398,6 +428,11 @@ describe("reclassifySuccess — degenerate 'success' guard", () => {
   it("reclassifies a run cut off mid-tool-call as error_truncated (takes precedence over empty)", () => {
     expect(reclassifySuccess("success", { ...base, endedOnToolCall: true, finalText: "" })).toBe("error_truncated");
     expect(reclassifySuccess("success", { ...base, endedOnToolCall: true })).toBe("error_truncated");
+  });
+
+  it("reclassifies a run whose last turn hit the output cap as error_truncated, even with earlier text", () => {
+    expect(reclassifySuccess("success", { ...base, endedOnOutputCap: true })).toBe("error_truncated");
+    expect(reclassifySuccess("success", { ...base, endedOnOutputCap: true, finalText: "" })).toBe("error_truncated");
   });
 
   it("passes through a real agent error untouched", () => {
