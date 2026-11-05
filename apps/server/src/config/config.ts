@@ -987,7 +987,12 @@ function clonePublic(obj: Record<string, unknown> | null): Record<string, unknow
  * rather than mirrored by hand.
  */
 export const SENSITIVE_KEY_RE =
-  /secret|token|password|passwd|credential|private[-_]?key|signing[-_]?key|api[-_]?key|key[-_]?path|\bpem\b/i;
+  /^(?!(?:max|min|max[-_]?output|output|input|context|reasoning|thinking)[-_]?tokens$)[\s\S]*(?:secret|token|password|passwd|credential|private[-_]?key|signing[-_]?key|api[-_]?key|key[-_]?path|\bpem\b)/i;
+// The one exemption is a WHOLE key that names a count of tokens (`maxTokens`,
+// `max_tokens`, `maxOutputTokens`, `contextTokens`): a number the operator
+// tunes and needs to read back. It is anchored at both ends, so a key that only
+// ends in a count-like word (`adminToken`) or carries more than the count
+// (`maxTokensSecret`) is still redacted, as is a bare `tokens` list.
 // `url` deliberately does NOT match — `database.url` is masked by VALUE below
 // instead, so `file:/app/data/lastlight.db` stays legible in the provenance
 // view while `postgres://user:pass@host/db` does not. A key rule could not

@@ -103,6 +103,26 @@ afterEach(() => {
   resetRuntimeConfigForTests();
 });
 
+describe("token counts are not secrets", () => {
+  it("leaves token-count settings such as providers.<name>.maxTokens readable", () => {
+    for (const key of ["maxTokens", "max_tokens", "maxOutputTokens", "contextTokens", "reasoningTokens"]) {
+      expect(SENSITIVE_KEY_RE.test(key), key).toBe(false);
+    }
+    expect(redactPublic({ providers: { cc: { maxTokens: 65536, apiKey: "leaked" } } })).toEqual({
+      providers: { cc: { maxTokens: 65536, apiKey: "[redacted]" } },
+    });
+  });
+
+  it("still redacts every credential-shaped token key", () => {
+    for (const key of [
+      "token", "tokens", "githubToken", "accessToken", "apiTokens", "token_path", "botTokenEnv",
+      "adminToken", "admin_token", "adminTokens", "maxToken", "inputToken", "maxTokensSecret", "x\nmaxTokens",
+    ]) {
+      expect(SENSITIVE_KEY_RE.test(key), key).toBe(true);
+    }
+  });
+});
+
 describe("GET /repos/:owner/:repo/config", () => {
   it("redacts every key the exported rule matches, at any depth", async () => {
     const secrets = Object.fromEntries(SECRET_KEY_NAMES.map((k) => [k, `leaked-${k}`]));
