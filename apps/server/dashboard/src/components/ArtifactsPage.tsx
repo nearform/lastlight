@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { ExternalLink } from "lucide-react";
+import clsx from "clsx";
+import { ArrowLeft, ExternalLink } from "lucide-react";
 import {
   api,
   isImageArtifact,
@@ -11,6 +12,7 @@ import { ArtifactEditor } from "./ArtifactEditor";
 import { ArtifactImageViewer } from "./ArtifactImageViewer";
 import { ArtifactVideoViewer } from "./ArtifactVideoViewer";
 import { GhLink } from "./GhLink";
+import { useIsNarrow } from "../hooks/useIsNarrow";
 import { repoUrl } from "../lib/githubLinks";
 import {
   useUrlState,
@@ -72,6 +74,9 @@ export function ArtifactsPage({ timeRange, query, lockedRepo }: ArtifactsPagePro
   const [repo, setRepo] = useUrlState<string>("repo", "", stringParser, stringSerializer);
   const [key, setKey] = useUrlState<string>("key", "", stringParser, stringSerializer);
   const [doc, setDoc] = useUrlState<string>("doc", "", stringParser, stringSerializer);
+  // Below lg the list and the open doc are one column: the list until a doc is
+  // opened, then the doc with a way back.
+  const narrow = useIsNarrow();
 
   // When locked, the fixed repo wins over the URL `repo` param so the embed is
   // decoupled from the browser's own repo state.
@@ -148,10 +153,24 @@ export function ArtifactsPage({ timeRange, query, lockedRepo }: ArtifactsPagePro
     setRepo("");
   }, [setRepo, setKey, setDoc]);
 
+  const mainPane =
+    doc && isImageArtifact(doc) ? (
+      <ArtifactImageViewer owner={owner} repo={name} docKey={key} doc={doc} />
+    ) : doc && isVideoArtifact(doc) ? (
+      <ArtifactVideoViewer owner={owner} repo={name} docKey={key} doc={doc} />
+    ) : (
+      <ArtifactEditor owner={owner} repo={name} docKey={key} doc={doc} />
+    );
+
   return (
     <div className="flex flex-1 overflow-hidden bg-base-100">
       {/* ── Left list pane ──────────────────────────────────────────────── */}
-      <div className="w-72 shrink-0 border-r border-hairline flex flex-col overflow-hidden">
+      <div
+        className={clsx(
+          narrow ? (doc ? "hidden" : "flex-1 min-w-0") : "w-72 shrink-0",
+          "border-r border-hairline flex flex-col overflow-hidden",
+        )}
+      >
         {/* When locked to a repo (embedded in the Repos tab), the repo picker
             and "all repositories" back-link are hidden — the parent owns repo
             selection. Just show the run-key list. */}
@@ -303,13 +322,23 @@ export function ArtifactsPage({ timeRange, query, lockedRepo }: ArtifactsPagePro
       </div>
 
       {/* ── Main pane — image/video viewer for evidence, else editor ───── */}
-      {doc && isImageArtifact(doc) ? (
-        <ArtifactImageViewer owner={owner} repo={name} docKey={key} doc={doc} />
-      ) : doc && isVideoArtifact(doc) ? (
-        <ArtifactVideoViewer owner={owner} repo={name} docKey={key} doc={doc} />
-      ) : (
-        <ArtifactEditor owner={owner} repo={name} docKey={key} doc={doc} />
-      )}
+      {!narrow ? (
+        mainPane
+      ) : doc ? (
+        <div className="flex flex-1 flex-col overflow-hidden min-w-0">
+          <div className="flex items-center gap-2 border-b border-hairline bg-base-200/40 px-2 py-1 shrink-0">
+            <button
+              onClick={() => setDoc("")}
+              className="btn btn-ghost btn-xs ll-control text-muted"
+              aria-label="Back to the document list"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+            </button>
+            <span className="truncate font-mono text-xs text-strong">{doc}</span>
+          </div>
+          <div className="flex flex-1 overflow-hidden">{mainPane}</div>
+        </div>
+      ) : null}
     </div>
   );
 }

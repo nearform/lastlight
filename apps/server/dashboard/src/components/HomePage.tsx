@@ -449,12 +449,12 @@ function LiveActivitySection({
         <h2 className="card-title text-sm font-semibold text-strong uppercase tracking-wide mb-3">
           Live Activity
         </h2>
-        <div className="flex gap-4 mb-4">
-          <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1">
+        <div className="flex flex-wrap gap-4 mb-4">
+          <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1 min-w-[7rem]">
             <div className="stat-title text-xs">Active Workflows</div>
             <div className="stat-value text-2xl text-primary">{workflowCount}</div>
           </div>
-          <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1">
+          <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1 min-w-[7rem]">
             <div className="stat-title text-xs">Queued Workflows</div>
             <div
               className={clsx(
@@ -465,7 +465,7 @@ function LiveActivitySection({
               {queuedCount}
             </div>
           </div>
-          <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1">
+          <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1 min-w-[7rem]">
             <div className="stat-title text-xs">Running Containers</div>
             <div className="stat-value text-2xl text-secondary">{containerCount}</div>
           </div>
@@ -486,7 +486,7 @@ function LiveActivitySection({
                     onSelect(run.id);
                   }
                 }}
-                className="flex items-center gap-2 px-3 py-2 bg-base-100 rounded text-xs w-full text-left cursor-pointer hover:bg-base-300/60 transition-colors"
+                className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 bg-base-100 rounded text-xs w-full text-left cursor-pointer hover:bg-base-300/60 transition-colors"
               >
                 <StatusBadge status={run.status} />
                 <span className="font-mono text-strong shrink-0">
@@ -551,7 +551,7 @@ function RecentWorkflowsSection({
                   }}
                   className="px-3 py-2 bg-base-100 rounded text-xs w-full text-left cursor-pointer hover:bg-base-300/60 transition-colors space-y-1"
                 >
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                     <StatusBadge status={run.status} />
                     <span className="font-mono text-strong shrink-0">
                       {run.workflowName}
@@ -678,20 +678,20 @@ function StatsChartsSection() {
 
         {/* Summary stat cards */}
         {summary && (
-          <div className="flex gap-3 mb-4">
-            <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1">
+          <div className="flex flex-wrap gap-3 mb-4">
+            <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1 min-w-[7rem]">
               <div className="stat-title text-xs">Executions</div>
               <div className="stat-value text-xl">{summary.executions}</div>
             </div>
-            <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1">
+            <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1 min-w-[7rem]">
               <div className="stat-title text-xs">Tokens</div>
               <div className="stat-value text-xl">{formatTokens(summary.tokens)}</div>
             </div>
-            <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1">
+            <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1 min-w-[7rem]">
               <div className="stat-title text-xs">Cost</div>
               <div className="stat-value text-xl">{formatCost(summary.cost)}</div>
             </div>
-            <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1">
+            <div className="stat bg-base-100 border border-hairline rounded-panel p-3 flex-1 min-w-[7rem]">
               <div className="stat-title text-xs">CPU</div>
               <div className="stat-value text-xl">{formatCpuSeconds(summary.cpuSeconds)}</div>
             </div>
@@ -907,7 +907,7 @@ export function HomePage({ onSelectWorkflow }: { onSelectWorkflow: (id: string) 
   return (
     <div className="flex-1 overflow-auto p-4">
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
-        <div className="lg:col-span-2 space-y-4">
+        <div className="lg:col-span-2 space-y-4 min-w-0">
           <LiveActivitySection
             workflowCount={workflowCount}
             queuedCount={queuedCount}
@@ -918,7 +918,7 @@ export function HomePage({ onSelectWorkflow }: { onSelectWorkflow: (id: string) 
           <RecentWorkflowsSection runs={recentRuns} onSelect={onSelectWorkflow} />
           <ResourceUsageSection stats={stats} host={host} loaded={loaded} />
         </div>
-        <div className="lg:col-span-3 space-y-4">
+        <div className="lg:col-span-3 space-y-4 min-w-0">
           <StatsChartsSection />
         </div>
       </div>

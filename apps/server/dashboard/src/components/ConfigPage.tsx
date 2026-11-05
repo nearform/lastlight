@@ -201,7 +201,7 @@ export function ConfigPage() {
           account the GitHub App is installed on.
         </p>
       </div>
-      <div className="flex gap-1 border-b border-hairline bg-base-200/60 px-4 py-2">
+      <div className="flex flex-wrap gap-1 shrink-0 border-b border-hairline bg-base-200/60 px-4 py-2">
         {(["default", "overlay", "merged", "sources", "overrides", "repos"] as const).map((id) => (
           <button
             key={id}
