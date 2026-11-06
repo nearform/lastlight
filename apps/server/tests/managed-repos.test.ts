@@ -13,6 +13,11 @@ import {
   getInstallationReposRefreshedAt,
   getAccessibleManagedRepos,
   resetInstallationReposForTests,
+  effectiveRepos,
+  getRepoApprovalState,
+  setStoredRepoApproval,
+  refreshRepoApproval,
+  REPO_APPROVAL_SETTING_KEY,
 } from '#src/managed-repos.js';
 import { setRuntimeConfig, resetRuntimeConfigForTests, type LastLightConfig } from '#src/config/config.js';
 
@@ -254,5 +259,65 @@ describe('unmanagedReposInContext (dispatch guard)', () => {
     setInstallationRepos('1', ['acme/one']);
     expect(unmanagedReposInContext({ repo: 'acme/one' })).toEqual([]);
     expect(unmanagedReposInContext({ repo: 'nope/repo' })).toEqual(['nope/repo']);
+  });
+});
+
+describe('repo approval state', () => {
+  afterEach(() => {
+    resetRuntimeConfigForTests();
+    resetInstallationReposForTests();
+  });
+
+  it('effectiveRepos: flag off + empty approved follows the App grant', () => {
+    expect(effectiveRepos({ requireApproval: false, approved: [] }, ['a/one', 'a/two'])).toEqual(['a/one', 'a/two']);
+  });
+
+  it('effectiveRepos: flag off + approved restricts to approved', () => {
+    expect(effectiveRepos({ requireApproval: false, approved: ['a/one'] }, ['a/one', 'a/two'])).toEqual(['a/one']);
+  });
+
+  it('effectiveRepos: flag on + empty approved is empty', () => {
+    expect(effectiveRepos({ requireApproval: true, approved: [] }, ['a/one'])).toEqual([]);
+    setRuntimeConfig(configWithRepos([]));
+    setInstallationRepos('1', ['acme/one']);
+    setStoredRepoApproval({ requireApproval: true, approved: [] });
+    expect(isManagedRepo('acme/one')).toBe(false);
+  });
+
+  it('YAML requireRepoApproval with an empty list gates everything', () => {
+    setRuntimeConfig({ managedRepos: [], requireRepoApproval: true } as unknown as LastLightConfig);
+    setInstallationRepos('1', ['acme/one']);
+    expect(getManagedRepos()).toEqual([]);
+    expect(getRepoApprovalState()).toEqual({ state: { requireApproval: true, approved: [] }, stored: false });
+  });
+
+  it('stored state wins over YAML managedRepos', () => {
+    setRuntimeConfig(configWithRepos(['acme/yaml']));
+    setInstallationRepos('1', ['acme/yaml', 'acme/stored']);
+    setStoredRepoApproval({ requireApproval: false, approved: ['acme/stored'] });
+    expect(getManagedRepos()).toEqual(['acme/stored']);
+    expect(getRepoApprovalState().stored).toBe(true);
+  });
+
+  it('isManagedRepo is case-insensitive', () => {
+    setRuntimeConfig(configWithRepos(['Acme/Repo']));
+    expect(isManagedRepo('acme/repo')).toBe(true);
+    expect(unmanagedReposInContext({ repo: 'ACME/REPO' })).toEqual([]);
+  });
+
+  it('refreshRepoApproval loads the row, and a missing row falls back to YAML', async () => {
+    setRuntimeConfig(configWithRepos(['acme/yaml']));
+    const rows = new Map<string, unknown>([
+      [REPO_APPROVAL_SETTING_KEY, { requireApproval: true, approved: ['acme/db'] }],
+    ]);
+    const db = {
+      getSetting: async (key: string) =>
+        rows.has(key) ? { value: rows.get(key), updatedAt: 'now', updatedBy: null } : null,
+    };
+    await refreshRepoApproval(db as never);
+    expect(getManagedRepos()).toEqual(['acme/db']);
+    rows.clear();
+    await refreshRepoApproval(db as never);
+    expect(getManagedRepos()).toEqual(['acme/yaml']);
   });
 });

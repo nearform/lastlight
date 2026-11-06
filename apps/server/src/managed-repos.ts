@@ -82,25 +82,95 @@ export function getInstallationReposRefreshedAt(): string | null {
 /** Test-only: clear the discovered installation-repo cache. */
 export function resetInstallationReposForTests(): void {
   installationRepos.clear();
+  storedRepoApproval = null;
   installationReposRefreshedAt = null;
 }
 
 /**
- * The effective managed-repo list. A non-empty configured list (overlay
- * `managedRepos`) wins and restricts to exactly those repos; when it's empty we
- * fall back to the repos the GitHub App installation can access (discovered at
- * boot + kept live by installation webhooks). So an org install that limits the
- * App to a subset of repos need not maintain a second copy in config.
+ * The operator's approval state: which repos are approved, and whether a repo
+ * must be approved before it gets work. Stored as one `harness_settings` row
+ * (key {@link REPO_APPROVAL_SETTING_KEY}) once the dashboard changes it; until
+ * then it is the YAML `managedRepos` / `requireRepoApproval`.
+ */
+export interface RepoApprovalState {
+  requireApproval: boolean;
+  approved: string[];
+}
+
+export const REPO_APPROVAL_SETTING_KEY = "managed-repos";
+
+/** The stored row, or null when none was loaded (⇒ YAML values). */
+let storedRepoApproval: RepoApprovalState | null = null;
+
+/** Cache setter: the loaded or just-written row; null = no row. */
+export function setStoredRepoApproval(state: RepoApprovalState | null): void {
+  storedRepoApproval = state ? { requireApproval: state.requireApproval, approved: [...state.approved] } : null;
+}
+
+/** The approval state in effect, and whether it came from the stored row. */
+export function getRepoApprovalState(): { state: RepoApprovalState; stored: boolean } {
+  if (storedRepoApproval) {
+    return { state: { ...storedRepoApproval, approved: [...storedRepoApproval.approved] }, stored: true };
+  }
+  const cfg = getRuntimeConfig();
+  return {
+    state: {
+      requireApproval: cfg?.requireRepoApproval ?? false,
+      approved: [...(cfg?.managedRepos ?? DEFAULT_MANAGED_REPOS)],
+    },
+    stored: false,
+  };
+}
+
+/**
+ * Re-read the stored row into the in-memory copy. Called at boot and on a
+ * timer, so a second process sharing the database picks up dashboard changes;
+ * the process that made a change updates its copy directly.
+ */
+export async function refreshRepoApproval(
+  db: { getSetting<T>(key: string): Promise<{ value: T } | null> },
+): Promise<void> {
+  const row = await db.getSetting<RepoApprovalState>(REPO_APPROVAL_SETTING_KEY);
+  setStoredRepoApproval(row ? normalizeApprovalState(row.value) : null);
+}
+
+function normalizeApprovalState(raw: unknown): RepoApprovalState {
+  const v = (raw ?? {}) as Partial<RepoApprovalState>;
+  return {
+    requireApproval: v.requireApproval === true,
+    approved: Array.isArray(v.approved) ? v.approved.filter((r): r is string => typeof r === "string" && !!r) : [],
+  };
+}
+
+/**
+ * The effective list for an approval state: the approved list when it is
+ * non-empty or approval is required, otherwise the App grant (the default).
+ */
+export function effectiveRepos(state: RepoApprovalState, installation: string[]): string[] {
+  if (state.requireApproval || state.approved.length > 0) return [...state.approved];
+  return [...installation];
+}
+
+/**
+ * The effective managed-repo list. Approved repos (stored row, else the
+ * overlay's `managedRepos`) win and restrict to exactly those repos; with none
+ * approved and approval not required we fall back to the repos the GitHub App
+ * installation can access (discovered at boot + kept live by installation
+ * webhooks). So an org install that limits the App to a subset of repos need
+ * not maintain a second copy in config.
  */
 export function getManagedRepos(): string[] {
-  const configured = getRuntimeConfig()?.managedRepos ?? DEFAULT_MANAGED_REPOS;
-  if (configured.length > 0) return configured;
-  return getInstallationRepos();
+  return effectiveRepos(getRepoApprovalState().state, getInstallationRepos());
+}
+
+/** Repo names compare case-insensitively, as GitHub treats them. */
+export function sameRepo(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
 }
 
 export function isManagedRepo(repo: string | undefined | null): boolean {
   if (!repo) return false;
-  return getManagedRepos().includes(repo);
+  return getManagedRepos().some((r) => sameRepo(r, repo));
 }
 
 /**
@@ -138,6 +208,6 @@ export function getAccessibleManagedRepos(): string[] {
   const configured = getManagedRepos();
   const installed = getInstallationRepos();
   if (installed.length === 0) return configured;
-  const accessible = new Set(installed);
-  return configured.filter((r) => accessible.has(r));
+  const accessible = new Set(installed.map((r) => r.toLowerCase()));
+  return configured.filter((r) => accessible.has(r.toLowerCase()));
 }

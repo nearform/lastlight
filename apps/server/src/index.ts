@@ -53,7 +53,12 @@ import { authMiddleware, authIsEnabled, actorFromContext } from "./admin/auth.js
 import { recordActivity } from "./activity.js";
 import { readPackageVersion } from "./admin/version.js";
 import { GitHubClient } from "./engine/github/github.js";
-import { setInstallationRepos, isManagedRepo, unmanagedReposInContext } from "./managed-repos.js";
+import {
+  setInstallationRepos,
+  isManagedRepo,
+  unmanagedReposInContext,
+  refreshRepoApproval,
+} from "./managed-repos.js";
 import { screenForInjection, flagPrefix } from "./engine/screen/screen.js";
 import {
   runSimpleWorkflow,
@@ -266,6 +271,20 @@ async function main() {
   // NEVER log dbTarget raw: on the Postgres runtime it carries the userinfo,
   // and operational logs go to a sink that outlives the process.
   configLog.info("Database", { path: redactDbUrl(dbTarget), dialect: db.dialect });
+
+  // The dashboard's repo approval state (Config → Managed repos) lives in the
+  // state db and wins over the overlay's managedRepos / requireRepoApproval once
+  // written. Load it before anything can route an event; a failed read here is
+  // fatal on purpose (the db is unusable). Re-read every minute so a second
+  // process sharing the db picks up changes; a failed re-read keeps the last copy.
+  await refreshRepoApproval(db);
+  setInterval(() => {
+    refreshRepoApproval(db).catch((err: unknown) =>
+      configLog.warn("Repo approval refresh failed; keeping the last copy", {
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+  }, 60_000).unref();
 
   // Session manager for messaging connectors (shared across Slack, Discord, etc.)
   const sessionManager = new SessionManager(db.client, db.dialect);
