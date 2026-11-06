@@ -329,6 +329,7 @@ ${chalk.bold("Activity")} (the audit stream — who did what, when)
          issue.dispatch   ${chalk.dim("(a build started from the pipeline board)")}
          issue.stage   ${chalk.dim("(a card dragged between pipeline-board columns \u2014 a label write, not a dispatch)")}
          autonomy.skip   ${chalk.dim("(not a person's action \u2014 a build the harness refused on a budget)")}
+         managed-repos.approve|remove|require-approval   ${chalk.dim("(Config \u2192 Managed repos)")}
   ${chalk.dim("A row with no actor is a password session — authenticated, but carrying no login.")}`,
 
   logs: `

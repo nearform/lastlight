@@ -57,8 +57,17 @@ import {
   getInstallationRepoBreakdown,
   getInstallationRepos,
   getInstallationReposRefreshedAt,
+  getRepoApprovalState,
   isManagedRepo,
+  sameRepo,
 } from "../managed-repos.js";
+import {
+  approveRepos,
+  removeRepos,
+  setRequireApproval,
+  type ApprovalResult,
+  type WhenEmpty,
+} from "../managed-repo-approvals.js";
 import {
   getInstallationDirectory,
   installationSettingsUrl,
@@ -794,9 +803,28 @@ export function createAdminRoutes(
   // list; `installation` is what the GitHub App can access (discovered at boot +
   // kept live by installation webhooks); `effective` is what actually gates
   // events (config wins when set, else installation). See src/managed-repos.ts.
-  app.get("/managed-repos", (c) => {
-    const configured = getRuntimeConfig()?.managedRepos ?? [];
+  // The GET body, also returned by every write below so the pane re-renders
+  // from one shape.
+  const managedReposView = () => {
+    const cfg = getRuntimeConfig();
+    const configured = cfg?.managedRepos ?? [];
     const effective = getManagedRepos();
+    // Repo approval (Config → Managed repos). `gap` = what the App can see that
+    // is not approved; null until installation discovery has run, so the pane
+    // can say "not discovered yet" rather than "no gap".
+    const { state: approval, stored } = getRepoApprovalState();
+    const grant = getInstallationRepos();
+    const discovered = getInstallationReposRefreshedAt() !== null;
+    const gap = discovered ? grant.filter((g) => !approval.approved.some((a) => sameRepo(a, g))) : null;
+    const approvedNoAccess = discovered
+      ? approval.approved.filter((a) => !grant.some((g) => sameRepo(g, a)))
+      : [];
+    const sameList = (x: string[], y: string[]) =>
+      x.length === y.length && x.every((a) => y.some((b) => sameRepo(a, b)));
+    const yamlDiffers =
+      stored &&
+      (approval.requireApproval !== (cfg?.requireRepoApproval ?? false) ||
+        !sameList(approval.approved, configured));
     // Every ACCOUNT the App is installed on, with its repo grant. A GitHub App
     // is installed per account and each installation mints its own tokens, so a
     // `managedRepos` entry whose owner has no installation cannot be acted on —
@@ -814,11 +842,11 @@ export function createAdminRoutes(
           .filter((owner) => owner && !installedOwners.has(owner.toLowerCase())),
       ),
     ];
-    return c.json({
+    return {
       configured,
       installation: getInstallationRepos(),
       effective,
-      source: configured.length > 0 ? "config" : "installation",
+      source: approval.requireApproval || approval.approved.length > 0 ? "config" : "installation",
       refreshedAt: getInstallationReposRefreshedAt(),
       installations: installations.map((i) => ({
         id: i.id,
@@ -845,7 +873,86 @@ export function createAdminRoutes(
         const layer = getCachedRepoLayer(repo);
         return { repo, hasRepoConfig: Boolean(layer), fetchedAt: layer?.fetchedAt ?? null };
       }),
-    });
+      approved: approval.approved,
+      requireApproval: approval.requireApproval,
+      stored,
+      gap,
+      approvedNoAccess,
+      yamlDiffers,
+      showApprovalLists:
+        approval.requireApproval || (approval.approved.length > 0 && (gap?.length ?? 0) > 0),
+    };
+  };
+
+  app.get("/managed-repos", (c) => c.json(managedReposView()));
+
+  // Writes behind Config → Managed repos. The rules live in
+  // managed-repo-approvals.ts; these routes validate the body, record activity,
+  // and answer with the new view so the pane re-renders from one shape.
+  const repoList = (raw: unknown): string[] | null =>
+    Array.isArray(raw) &&
+    raw.length > 0 &&
+    raw.every((r) => typeof r === "string" && /^[^/\s]+\/[^/\s]+$/.test(r))
+      ? (raw as string[])
+      : null;
+  const answer = (c: Context, res: ApprovalResult) =>
+    res.ok
+      ? c.json(managedReposView())
+      : c.json(
+          res.installationCount === undefined
+            ? { error: res.error }
+            : { error: res.error, installationCount: res.installationCount },
+          res.status,
+        );
+
+  app.post("/managed-repos/approve", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as { repos?: unknown } | null;
+    const repos = repoList(body?.repos);
+    if (!repos) return c.json({ error: "repos must be a non-empty array of owner/repo" }, 400);
+    const res = await approveRepos(db, repos, actorFromContext(c));
+    if (res.ok) {
+      await recordActivityFor(c, db, {
+        action: "managed-repos.approve",
+        targetType: "managed-repos",
+        detail: { repos: repos.join(",") },
+      });
+    }
+    return answer(c, res);
+  });
+
+  app.post("/managed-repos/remove", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as { repos?: unknown; whenEmpty?: unknown } | null;
+    const repos = repoList(body?.repos);
+    if (!repos) return c.json({ error: "repos must be a non-empty array of owner/repo" }, 400);
+    const raw = body?.whenEmpty;
+    if (raw !== undefined && raw !== "follow-app" && raw !== "require-approval") {
+      return c.json({ error: 'whenEmpty must be "follow-app" or "require-approval"' }, 400);
+    }
+    const whenEmpty = raw as WhenEmpty | undefined;
+    const res = await removeRepos(db, repos, { whenEmpty }, actorFromContext(c));
+    if (res.ok) {
+      await recordActivityFor(c, db, {
+        action: "managed-repos.remove",
+        targetType: "managed-repos",
+        detail: whenEmpty ? { repos: repos.join(","), whenEmpty } : { repos: repos.join(",") },
+      });
+    }
+    return answer(c, res);
+  });
+
+  app.post("/managed-repos/require-approval", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as { enabled?: unknown } | null;
+    const enabled = body?.enabled;
+    if (typeof enabled !== "boolean") return c.json({ error: "enabled must be true or false" }, 400);
+    const res = await setRequireApproval(db, enabled, actorFromContext(c));
+    if (res.ok) {
+      await recordActivityFor(c, db, {
+        action: "managed-repos.require-approval",
+        targetType: "managed-repos",
+        detail: { enabled },
+      });
+    }
+    return answer(c, res);
   });
 
   // The managed repos THIS user should see by default, from their GitHub team

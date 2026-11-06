@@ -53,7 +53,7 @@ session management, allowlist enforcement, and message chunking.
 |---|---|
 | **Transport** | HTTP POST to `/webhooks/github` on the Hono app the GitHub connector exposes |
 | **Auth** | HMAC-SHA256 over the request body, header `X-Hub-Signature-256`. Timing-safe compare. Runs *before* JSON parse. (`src/connectors/github-webhook.ts:146–155`) |
-| **Allowlist** | Repo allowlist check via `isManagedRepo()`. Events from non-managed repos short-circuit. The effective list is the overlay's `managedRepos` when non-empty; when empty it falls back to the repos the **GitHub App installation** can access (discovered at boot, kept live by installation webhooks — see below). So an org install that limits the App to a subset need not duplicate the list in config. |
+| **Allowlist** | Repo allowlist check via `isManagedRepo()`. Events from non-managed repos short-circuit. The effective list is the approved list (the dashboard's stored approval state, else the overlay's `managedRepos`) when it is non-empty or `requireRepoApproval` is on; otherwise it falls back to the repos the **GitHub App installation** can access (discovered at boot, kept live by installation webhooks — see below). So an org install that limits the App to a subset need not duplicate the list in config. |
 | **Installation sync** | `installation` and `installation_repositories` events are intercepted at the top of the handler (before the ignored-action + repo filters, since they carry no `payload.repository`) and applied to the in-memory installation-repo cache, **scoped to `payload.installation.id`**: `created` / `unsuspend` set that installation's set, `deleted` / `suspend` remove it, `installation_repositories` added/removed patch it. A **suspended** installation still exists and keeps its id but 403s every mint, so it is out of service exactly like an uninstall — the only difference is that the directory keeps it visible, flagged, instead of forgetting it. They produce no envelope (return `installation-sync`, 200). Every delivery — these included — also records its `payload.installation` in the installation directory (below). See `src/managed-repos.ts`. |
 | **Team-visibility sync** | `team`, `membership` and `organization` events are intercepted in the same place, and for the same reason: they are org-wide, carry no `payload.repository`, and several of their actions (`deleted`, `edited`) sit in `IGNORED_ACTIONS`. They **invalidate** the dashboard's per-repo visibility cache (issue #169) rather than re-derive it — `membership` and `organization` member changes drop that one login's answer, a `team` change drops the team and every member's answer with it. Deleting is the whole response because the cache is filled on demand per logged-in user; re-deriving here would put an unbounded org walk on the delivery path. They produce no envelope (return `team-visibility-sync`, 200). See `src/state/team-store.ts` and `10-state.md`. |
 | **Board invalidation** | `issues` and `pull_request` deliveries whose action would change what the pipeline board renders (`opened`, `reopened`, `closed`, `labeled`, `unlabeled`, `transferred`, `deleted`, `ready_for_review`) drop that repo's cached board items. Intercepted in the same place as the two rows above and for a sharper version of the same reason: the single most important board signal is `closed`, which is how a merged PR or a closed issue LEAVES the board's universe (the GitHub read lists **open** items only) — and `closed`, `unlabeled` and `deleted` all sit in `IGNORED_ACTIONS`, so nothing below that line would ever hear about them. Unlike the two above it **does not consume the delivery**: there is no early return, so the event still normalizes and dispatches exactly as before. It is a side-effect, not a handler. It **invalidates** rather than re-derives, so a delivery for a repo nobody is looking at costs a `Map` miss, and it is deliberately *not* label-name-aware — the connector has no config access by design and cannot know which labels are configured stages. A hook that throws is swallowed: a cache that refuses to clear must never cost us a webhook. See `src/admin/board-cache.ts`. |
@@ -211,6 +211,23 @@ carries no account, so it is used only when the JWT lookup itself fails
 degrades to exactly its old behaviour. `GET /admin/api/managed-repos` reports
 every installation plus `uninstalledOwners` — any `managedRepos` account with no
 installation — so the condition is visible before it becomes a failed run.
+
+The same endpoint carries the repo-approval view behind Config → Managed
+repos: `approved`, `requireApproval`, `stored` (whether the dashboard has
+written the state), `gap` (repos the App can see that are not approved; `null`
+before installation discovery), `approvedNoAccess`, `yamlDiffers` and
+`showApprovalLists`. Three writes change it live, each recorded in the activity
+log and answering with the same view:
+
+- `POST /admin/api/managed-repos/approve` `{ repos }` — only repos in the App
+  grant (400 otherwise; 409 before discovery).
+- `POST /admin/api/managed-repos/remove` `{ repos, whenEmpty? }` — a removal
+  that would empty the list with `requireApproval` off is refused with 409
+  `{ error: "would-empty", installationCount }` unless `whenEmpty` is
+  `"follow-app"` (empty list ⇒ follow the App grant) or `"require-approval"`
+  (also turns approval on). The bot never widens to every App repo without
+  that explicit choice.
+- `POST /admin/api/managed-repos/require-approval` `{ enabled }`.
 
 Each installation carries an `htmlUrl` deep link to its GitHub settings page
 (where the repo grant, suspension and uninstall live), built server-side by
