@@ -18,6 +18,8 @@ import {
   setStoredRepoApproval,
   refreshRepoApproval,
   REPO_APPROVAL_SETTING_KEY,
+  setInstallationDiscoveryError,
+  getInstallationDiscoveryFailures,
 } from '#src/managed-repos.js';
 import { setRuntimeConfig, resetRuntimeConfigForTests, type LastLightConfig } from '#src/config/config.js';
 
@@ -352,5 +354,16 @@ describe('repo approval state — fail closed', () => {
     release({ value: { requireApproval: false, approved: ['acme/old'] }, updatedAt: 'now', updatedBy: null });
     await pending;
     expect(getManagedRepos()).toEqual(['acme/new']);
+  });
+});
+
+describe('installation discovery failures', () => {
+  afterEach(() => resetInstallationReposForTests());
+
+  it('records a failed account until that installation loads', () => {
+    setInstallationDiscoveryError('7', 'other-org');
+    expect(getInstallationDiscoveryFailures()).toEqual(['other-org']);
+    setInstallationRepos('7', ['other-org/x']);
+    expect(getInstallationDiscoveryFailures()).toEqual([]);
   });
 });

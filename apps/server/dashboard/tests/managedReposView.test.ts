@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from "vitest";
 import type { ManagedRepos } from "../src/api";
-import { followAppCount, removeNeedsChoice, showGapSection, toggleConfirmText } from "../src/lib/managed-repos-view";
+import { followAppCount, followAppPhrase, removeNeedsChoice, showGapSection, toggleConfirmText } from "../src/lib/managed-repos-view";
 
 function view(over: Partial<ManagedRepos>): ManagedRepos {
   return {
@@ -26,6 +26,7 @@ function view(over: Partial<ManagedRepos>): ManagedRepos {
     approvedNoAccess: [],
     yamlDiffers: false,
     showApprovalLists: true,
+    discoveryFailedAccounts: [],
     ...over,
   };
 }
@@ -80,5 +81,19 @@ describe("showGapSection", () => {
     expect(showGapSection(view({ approved: ["a/one"], gap: ["a/two"] }))).toBe(true);
     expect(showGapSection(view({ approved: ["a/one"], gap: null }))).toBe(true);
     expect(showGapSection(view({ approved: ["a/one"], gap: [], requireApproval: true }))).toBe(true);
+  });
+});
+
+describe("before the App's repo list is discovered", () => {
+  it("does not say \"all 0 repos\"", () => {
+    const d = view({ installation: [], refreshedAt: null, requireApproval: true });
+    expect(followAppPhrase(d)).toBe("every repo the App can see");
+    expect(toggleConfirmText(d, false)).toBe(
+      "The bot will work on every repo the App can see (not discovered yet), and future repos.",
+    );
+  });
+
+  it("names the count once discovered", () => {
+    expect(followAppPhrase(view({}))).toBe("all 7 repos the App can see");
   });
 });

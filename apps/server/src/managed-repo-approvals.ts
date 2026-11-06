@@ -1,6 +1,7 @@
 import type { StateDb } from "./state/db.js";
 import {
   REPO_APPROVAL_SETTING_KEY,
+  getInstallationDiscoveryFailures,
   getInstallationRepos,
   getInstallationReposRefreshedAt,
   normalizeApprovalState,
@@ -68,7 +69,11 @@ async function approveNow(db: SettingsDb, repos: string[], actor?: string): Prom
   const grant = getInstallationRepos();
   const unknown = repos.filter((r) => !grant.some((g) => sameRepo(g, r)));
   if (unknown.length > 0) {
-    return { ok: false, status: 400, error: `not in the GitHub App's repo grant: ${unknown.join(", ")}` };
+    const failed = getInstallationDiscoveryFailures();
+    const hint = failed.length
+      ? ` (the repo list for ${failed.join(", ")} failed to load; it reloads on restart or the next installation event)`
+      : "";
+    return { ok: false, status: 400, error: `not in the GitHub App's repo grant: ${unknown.join(", ")}${hint}` };
   }
   const state = await current(db);
   const approved = [...state.approved];
@@ -129,6 +134,9 @@ export function setRequireApproval(
     if (!enabled && state.requireApproval && state.approved.length === 0 && !opts.confirm) {
       return { ok: false, status: 409, error: "would-follow-app", installationCount: getInstallationRepos().length };
     }
+    // A no-op click must not store a row: that would detach the deployment
+    // from its YAML values for nothing.
+    if (state.requireApproval === enabled) return { ok: true, state };
     return save(db, { ...state, requireApproval: enabled }, actor);
   });
 }

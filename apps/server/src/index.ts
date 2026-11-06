@@ -58,6 +58,7 @@ import {
   isManagedRepo,
   unmanagedReposInContext,
   refreshRepoApproval,
+  setInstallationDiscoveryError,
 } from "./managed-repos.js";
 import { screenForInjection, flagPrefix } from "./engine/screen/screen.js";
 import {
@@ -429,6 +430,7 @@ async function main() {
             installationId: grant.installationId,
             error: grant.error,
           });
+          setInstallationDiscoveryError(grant.installationId, grant.account);
           continue;
         }
         setInstallationRepos(grant.installationId, grant.repos);

@@ -30,9 +30,28 @@ function touch(): void {
   installationReposRefreshedAt = new Date().toISOString();
 }
 
+/**
+ * Accounts whose installation repo list failed to load at boot, keyed by
+ * installation id. Their repos are missing from the grant until that
+ * installation loads (boot retry or an installation webhook), so the dashboard
+ * names them rather than calling those repos "not in the grant".
+ */
+const discoveryFailures = new Map<string, string>();
+
+/** Record that one installation's repo list failed to load. */
+export function setInstallationDiscoveryError(installationId: string, account: string): void {
+  discoveryFailures.set(String(installationId), account);
+}
+
+/** Accounts whose repo list failed to load and has not loaded since. */
+export function getInstallationDiscoveryFailures(): string[] {
+  return [...discoveryFailures.values()];
+}
+
 /** Replace ONE installation's repo set (boot fetch, initial install). */
 export function setInstallationRepos(installationId: string, repos: string[]): void {
   installationRepos.set(String(installationId), new Set(repos));
+  discoveryFailures.delete(String(installationId));
   touch();
 }
 
@@ -56,6 +75,7 @@ export function removeInstallationRepos(installationId: string, repos: string[])
 /** Drop an installation entirely — the App was uninstalled from that account. */
 export function removeInstallation(installationId: string): void {
   installationRepos.delete(String(installationId));
+  discoveryFailures.delete(String(installationId));
   touch();
 }
 
@@ -82,6 +102,7 @@ export function getInstallationReposRefreshedAt(): string | null {
 /** Test-only: clear the discovered installation-repo cache. */
 export function resetInstallationReposForTests(): void {
   installationRepos.clear();
+  discoveryFailures.clear();
   storedRepoApproval = null;
   installationReposRefreshedAt = null;
 }

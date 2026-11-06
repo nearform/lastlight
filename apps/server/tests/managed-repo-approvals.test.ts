@@ -6,6 +6,7 @@ import {
   setInstallationRepos,
   resetInstallationReposForTests,
   REPO_APPROVAL_SETTING_KEY,
+  setInstallationDiscoveryError,
 } from "#src/managed-repos.js";
 import { setRuntimeConfig, resetRuntimeConfigForTests, type LastLightConfig } from "#src/config/config.js";
 import type { StateDb } from "#src/state/db.js";
@@ -50,6 +51,15 @@ describe("managed-repo approvals", () => {
     expect(res).toMatchObject({ ok: false, status: 400 });
     expect(!res.ok && res.error).toContain("b/nope");
     expect(await db.getSetting(REPO_APPROVAL_SETTING_KEY)).toBeNull();
+  });
+
+  it("approve outside the grant names accounts whose repo list failed to load", async () => {
+    yaml([]);
+    setInstallationDiscoveryError("9", "other-org");
+    const res = await approveRepos(db, ["other-org/x"]);
+    expect(res).toMatchObject({ ok: false, status: 400 });
+    expect(!res.ok && res.error).toContain("other-org");
+    expect(!res.ok && res.error).toContain("failed to load");
   });
 
   it("approve before discovery is 409", async () => {
@@ -97,6 +107,14 @@ describe("managed-repo approvals", () => {
     yaml(["a/one"], true);
     const res = await removeRepos(db, ["a/one"], {});
     expect(res).toEqual({ ok: true, state: { requireApproval: true, approved: [] } });
+  });
+
+  it("setRequireApproval to the value already in effect writes nothing", async () => {
+    yaml(["a/one"]);
+    const res = await setRequireApproval(db, false);
+    expect(res).toEqual({ ok: true, state: { requireApproval: false, approved: ["a/one"] } });
+    expect(await db.getSetting(REPO_APPROVAL_SETTING_KEY)).toBeNull();
+    expect(getRepoApprovalState().stored).toBe(false);
   });
 
   it("setRequireApproval stores the flag and keeps the list", async () => {

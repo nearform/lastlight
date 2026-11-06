@@ -57,6 +57,7 @@ import {
   getInstallationRepoBreakdown,
   getInstallationRepos,
   getInstallationReposRefreshedAt,
+  getInstallationDiscoveryFailures,
   getRepoApprovalState,
   isManagedRepo,
   sameRepo,
@@ -879,6 +880,7 @@ export function createAdminRoutes(
       gap,
       approvedNoAccess,
       yamlDiffers,
+      discoveryFailedAccounts: getInstallationDiscoveryFailures(),
       // Shown whenever approval is required or anything is approved, so every
       // approved repo stays removable (also right after "Approve all", and for
       // an approved repo the App lost access to). The Not-approved section in
@@ -2401,7 +2403,6 @@ export function createAdminRoutes(
       workflow: stageWorkflow(stage),
     }));
 
-    const managedSet = new Set(getManagedRepos());
 
     // ── The board's universe is the AUTONOMY ALLOW-LIST, not the managed list ──
     //
@@ -2416,7 +2417,7 @@ export function createAdminRoutes(
     // Intersected with the managed set rather than trusted outright: the two are
     // configured independently, and a repo named in `autonomy.repos` that the
     // App cannot see is a typo, not a target.
-    const eligible = new Set(autonomy.repos.filter((r) => managedSet.has(r)));
+    const eligible = new Set(autonomy.repos.filter((r) => isManagedRepo(r)));
 
     // Scope, in precedence order. Each step narrows to `eligible`.
     const requested = (c.req.query("repos") || "")
@@ -2629,7 +2630,6 @@ export function createAdminRoutes(
   });
 
   app.get("/repos", async (c) => {
-    const managed = new Set(getManagedRepos());
     const activity = new Map(
       (await db.runs.distinctRepos()).map((r) => [r.repo, r]),
     );
@@ -2646,16 +2646,21 @@ export function createAdminRoutes(
       }
     }
 
-    const names = new Set<string>([
-      ...managed,
-      ...activity.keys(),
-      ...artifactCounts.keys(),
-    ]);
+    const names = new Set<string>([...activity.keys(), ...artifactCounts.keys()]);
+    // A managed repo is listed under the spelling activity already uses, so a
+    // case difference (overlay `Acme/Web`, runs `acme/web`) is one row, not two.
+    const seen = new Set([...names].map((n) => n.toLowerCase()));
+    for (const r of getManagedRepos()) {
+      if (!seen.has(r.toLowerCase())) {
+        names.add(r);
+        seen.add(r.toLowerCase());
+      }
+    }
 
     const repos = [...names]
       .map((repo) => ({
         repo,
-        managed: managed.has(repo),
+        managed: isManagedRepo(repo),
         runCount: activity.get(repo)?.runCount ?? 0,
         lastRunAt: activity.get(repo)?.lastRunAt ?? null,
         artifactKeyCount: artifactCounts.get(repo) ?? 0,

@@ -177,6 +177,8 @@ export interface ManagedRepos {
   yamlDiffers: boolean;
   /** Whether the pane shows the approved and gap lists. */
   showApprovalLists: boolean;
+  /** Accounts whose installation repo list failed to load; their repos are missing from `gap`. */
+  discoveryFailedAccounts: string[];
 }
 
 /** What to do when a removal empties the approved list with approval off. */

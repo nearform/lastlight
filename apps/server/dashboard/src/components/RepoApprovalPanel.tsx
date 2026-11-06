@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api, ApiError, type ManagedRepos, type WhenEmpty } from "../api";
-import { followAppCount, removeNeedsChoice, showGapSection, toggleConfirmText } from "../lib/managed-repos-view";
+import { followAppPhrase, removeNeedsChoice, showGapSection, toggleConfirmText } from "../lib/managed-repos-view";
 
 /**
  * Config → Managed repos, the writable part: the "Require repo approval"
@@ -102,6 +102,13 @@ export function RepoApprovalPanel({
         </p>
       )}
 
+      {data.discoveryFailedAccounts.length > 0 && (
+        <div className="rounded border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
+          The repo list for <strong>{data.discoveryFailedAccounts.join(", ")}</strong> failed to load, so
+          those repos are missing below. It reloads on restart or the next installation event.
+        </div>
+      )}
+
       {error && (
         <div className="rounded border border-error/30 bg-error/10 p-3 text-sm text-error">{error}</div>
       )}
@@ -188,7 +195,7 @@ export function RepoApprovalPanel({
 
       {pendingRemove && (
         <Confirm
-          title={`Enable all ${followAppCount(data)} repos the App can see, and future repos, automatically?`}
+          title={`Enable ${followAppPhrase(data)}, and future repos, automatically?`}
           body="This removes the last approved repo. Yes: the bot follows the App's repo grant. No: require approval, so nothing gets work until you approve repos."
           busy={busy}
           actions={[

@@ -215,7 +215,8 @@ installation — so the condition is visible before it becomes a failed run.
 The same endpoint carries the repo-approval view behind Config → Managed
 repos: `approved`, `requireApproval`, `stored` (whether the dashboard has
 written the state), `gap` (repos the App can see that are not approved; `null`
-before installation discovery), `approvedNoAccess`, `yamlDiffers` and
+before installation discovery), `approvedNoAccess`, `yamlDiffers`,
+`discoveryFailedAccounts` (accounts whose repo list failed to load at boot) and
 `showApprovalLists`. Three writes change it live, each recorded in the activity
 log and answering with the same view:
 

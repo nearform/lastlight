@@ -80,7 +80,12 @@ async function send(
   return { status: res.status, body: await res.json().catch(() => null) };
 }
 
-import { setInstallationRepos, resetInstallationReposForTests, REPO_APPROVAL_SETTING_KEY } from "#src/managed-repos.js";
+import {
+  setInstallationRepos,
+  setInstallationDiscoveryError,
+  resetInstallationReposForTests,
+  REPO_APPROVAL_SETTING_KEY,
+} from "#src/managed-repos.js";
 
 function yaml(managedRepos: string[], requireRepoApproval = false): void {
   setRuntimeConfig({ botName: "last-light", managedRepos, requireRepoApproval } as unknown as LastLightConfig);
@@ -135,6 +140,13 @@ describe("GET /managed-repos — approval fields", () => {
     expect(body.gap).toEqual([]);
     expect(body.approvedNoAccess).toEqual(["a/gone"]);
     expect(body.showApprovalLists).toBe(true);
+  });
+
+  it("reports accounts whose repo list failed to load", async () => {
+    setInstallationRepos("1", ["a/one"]);
+    setInstallationDiscoveryError("2", "b-org");
+    const { body } = await send("GET", "/managed-repos", { token: GITHUB_TOKEN });
+    expect(body.discoveryFailedAccounts).toEqual(["b-org"]);
   });
 
   it("flag on with an empty list shows the lists", async () => {
