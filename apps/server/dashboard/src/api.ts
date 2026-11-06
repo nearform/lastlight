@@ -125,7 +125,7 @@ export interface ManagedRepos {
   configured: string[];
   /** Repos the GitHub App installation can access (discovered at boot + webhooks). */
   installation: string[];
-  /** What actually gates events: `configured` when non-empty, else `installation`. */
+  /** What actually gates events: `approved` when non-empty or approval is required, else `installation`. */
   effective: string[];
   /** Which list `effective` came from. */
   source: "config" | "installation";
@@ -163,7 +163,24 @@ export interface ManagedRepos {
    * not necessarily "no repo config" — opening the repo's Config tab settles it.
    */
   repoConfig: { repo: string; hasRepoConfig: boolean; fetchedAt: string | null }[];
+  /** Approved repos: the stored approval list, else the overlay `managedRepos`. */
+  approved: string[];
+  /** When true only approved repos get work, even with an empty list. */
+  requireApproval: boolean;
+  /** Whether the dashboard has stored the approval state (it then wins over YAML). */
+  stored: boolean;
+  /** Repos the App can see that are not approved; null before installation discovery. */
+  gap: string[] | null;
+  /** Approved repos the App can no longer see. */
+  approvedNoAccess: string[];
+  /** The stored state differs from the YAML `managedRepos` / `requireRepoApproval`. */
+  yamlDiffers: boolean;
+  /** Whether the pane shows the approved and gap lists. */
+  showApprovalLists: boolean;
 }
+
+/** What to do when a removal empties the approved list with approval off. */
+export type WhenEmpty = "follow-app" | "require-approval";
 
 /**
  * One row in the Repos tab's index — the union of managed repos and repos with
@@ -1567,6 +1584,24 @@ export const api = {
   config: () => req<ConfigBundle>("/config"),
   overrides: () => req<OverridesBundle>("/overrides"),
   managedRepos: () => req<ManagedRepos>("/managed-repos"),
+  approveManagedRepos: (repos: string[]) =>
+    reqAction<ManagedRepos>("/managed-repos/approve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repos }),
+    }),
+  removeManagedRepos: (repos: string[], whenEmpty?: WhenEmpty) =>
+    reqAction<ManagedRepos>("/managed-repos/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(whenEmpty ? { repos, whenEmpty } : { repos }),
+    }),
+  setRequireRepoApproval: (enabled: boolean) =>
+    reqAction<ManagedRepos>("/managed-repos/require-approval", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    }),
   // Repos this user's GitHub teams can reach — the client-side declutter filter.
   meRepos: () => req<MeRepos>("/me/repos"),
   meReposResync: () => req<MeRepos>("/me/repos/resync", { method: "POST" }),
