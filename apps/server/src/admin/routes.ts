@@ -2412,9 +2412,17 @@ export function createAdminRoutes(
       force: c.req.query("refresh") === "1",
     });
 
-    const runs = await db.runs.latestForTriggers(
-      items.map((item) => issueTriggerId(item.repo, item.number)),
-    );
+    const triggerIds = items.map((item) => issueTriggerId(item.repo, item.number));
+    const runs = await db.runs.latestForTriggers(triggerIds);
+    // The latest run of each stage's OWN workflow, so a triage run after a build
+    // does not turn "Rebuild" back into "Start build". Skipped when every
+    // card's latest run already is one.
+    const stageWorkflows = [...new Set(stages.map((stage) => stage.workflow).filter((w): w is string => !!w))];
+    const needStageRuns = [...runs.values()].some((run) => !stageWorkflows.includes(run.workflowName));
+    const stageRuns =
+      stageWorkflows.length > 0 && needStageRuns
+        ? await db.runs.latestForTriggers(triggerIds, { workflowNames: stageWorkflows })
+        : undefined;
     const pending = await db.approvals.listPending();
 
     // The fourth statement, and only when something failed. `workflow_runs` has
@@ -2447,6 +2455,7 @@ export function createAdminRoutes(
         {
           items,
           runs,
+          ...(stageRuns ? { stageRuns } : {}),
           approvals: pending,
           ...(failures ? { failures } : {}),
           ...(inFlight ? { inFlight } : {}),
