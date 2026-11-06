@@ -357,8 +357,9 @@ requires `ASSESSMENT_COMPLETE`); (2) `reclassifySuccess` (executors/shared.ts)
 demotes a terminal `agent_end` that carried **no final answer** (an empty
 completion, including agentic-pi's synthesized backstop) from `success` to the
 soft `unknown`, so it fails a plain phase and retries in a loop. It likewise demotes a run whose last reply stopped at the
-provider's output-token cap (pi stop reason `length`) to `error_truncated`, even
-when an earlier turn left text behind.
+provider's output-token cap (pi stop reason `length`) with no text of its own to
+`error_truncated`, even when an earlier turn left text behind; a capped reply
+that did write text passes as before.
 
 ## Per-phase sandbox requirement (`requires_sandbox`)
 

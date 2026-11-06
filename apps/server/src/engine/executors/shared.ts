@@ -271,7 +271,7 @@ export class RunResultAccumulator {
   // result. That's a truncated run (pi hit its internal step cap mid-task),
   // not a finished one. See `finalizeFromRunResult`'s truncation guard.
   private lastAssistantHadToolCall = false;
-  private lastAssistantHitOutputCap = false;
+  private lastOutputCap: OutputCapStop = "none";
   private fatalError?: { name: string; message: string };
   private snapshotStats?: RunResult["stats"];
   private messages: unknown[] = [];
@@ -340,7 +340,8 @@ export class RunResultAccumulator {
           // reasoning model can spend the whole cap thinking and stop with
           // "length" and no answer, while `finalText` still holds an EARLIER
           // turn's text — so the empty-answer guard alone cannot see it.
-          this.lastAssistantHitOutputCap = m.stopReason === "length";
+          this.lastOutputCap =
+            m.stopReason !== "length" ? "none" : text.trim().length > 0 ? "partial" : "no-answer";
           this.accumulateUsage(m.usage);
         } else if (m?.role === "user") {
           this.userMessages += 1;
@@ -527,16 +528,20 @@ export class RunResultAccumulator {
   }
 
   /**
-   * True iff the run's final assistant turn stopped at the provider's
-   * output-token cap (pi stop reason "length"): the reply was cut off, so
-   * whatever `finalText` holds is not its answer.
+   * Whether the run's final assistant turn stopped at the provider's
+   * output-token cap (pi stop reason "length"): `"no-answer"` when that turn
+   * wrote no text of its own (so whatever `finalText` holds is an earlier
+   * turn's), `"partial"` when it did, `"none"` otherwise.
    */
-  endedOnOutputCap(): boolean {
-    return this.lastAssistantHitOutputCap;
+  outputCapStop(): OutputCapStop {
+    return this.lastOutputCap;
   }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
+
+/** See {@link RunResultAccumulator.outputCapStop}. */
+export type OutputCapStop = "none" | "partial" | "no-answer";
 
 /** Provider account/billing/auth failures pi may surface as error text. */
 const ACCOUNT_ERROR_MARKERS = [
@@ -589,7 +594,7 @@ export function finalizeFromRunResult(
   skills?: SkillsStatus,
   toolError?: { tool?: string; message: string },
   endedOnToolCall = false,
-  endedOnOutputCap = false,
+  outputCap: OutputCapStop = "none",
 ): ExecutionResult {
   const durationMs = Date.now() - startTime;
   const stats = result.stats;
@@ -603,14 +608,18 @@ export function finalizeFromRunResult(
   const stopReason = reclassifySuccess(mappedStopReason, {
     hasAgentError: !!agentError,
     endedOnToolCall,
-    endedOnOutputCap,
+    // Only a capped turn with no text of its own is demoted: a long answer cut
+    // at the cap still carries what it said, and passed before this check.
+    endedOnOutputCap: outputCap === "no-answer",
     finalText: result.finalText,
   });
   // `truncated` == cut off mid-tool-call (see reclassifySuccess) — drives the
   // step-limit message below.
   const truncated = stopReason === "error_truncated";
   const success = stopReason === "success";
-  const truncationMessage = endedOnOutputCap && !endedOnToolCall
+  // A capped turn is named as such even when it also requested a tool: the cap,
+  // not the step limit, is what the operator can change.
+  const truncationMessage = outputCap !== "none"
     ? "The model hit its output-token cap (stop reason \"length\") before " +
       "finishing its last reply. No answer was delivered. Raise the provider's " +
       "`maxTokens`, or lower the phase's thinking level."

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, lstatSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { finalizeFromRunResult } from "#src/engine/executors/shared.js";
 import { RunResultAccumulator, stageSkillBundle, excludeFromGit, resetVerifyScript, VERIFY_SCRIPT_NAME, detectAccountError, reclassifySuccess, mapStopReason } from "#src/engine/agent-executor.js";
 
 /**
@@ -384,7 +385,7 @@ describe("RunResultAccumulator truncation detection", () => {
 });
 
 describe("RunResultAccumulator output-cap detection", () => {
-  it("flags a run whose final assistant turn stopped at the output-token cap", () => {
+  it("reports no-answer when the final turn stopped at the cap with no text of its own", () => {
     // The prod failure (a reasoning model on a 16k per-reply cap): an early
     // turn says "I'll start by reading the plan", later tool turns, then a final
     // turn that spends the whole cap thinking and stops with "length". The
@@ -394,19 +395,51 @@ describe("RunResultAccumulator output-cap detection", () => {
     acc.feed({ type: "tool_execution_end", tool: "read", isError: false, result: "plan" });
     acc.feed(assistantMessageEnd({ input: 1, output: 16384, cost: 0, stopReason: "length" }));
     acc.feed({ type: "agent_end", messages: [] });
-    expect(acc.endedOnOutputCap()).toBe(true);
+    expect(acc.outputCapStop()).toBe("no-answer");
     expect(acc.endedOnToolCall()).toBe(false);
   });
 
-  it("reflects the latest assistant turn: a capped turn followed by a finished one is fine", () => {
+  it("reports partial when the capped final turn carried text of its own", () => {
+    const acc = new RunResultAccumulator();
+    acc.feed(assistantMessageEnd({ text: "A long answer that got cut", input: 1, output: 16384, cost: 0, stopReason: "length" }));
+    expect(acc.outputCapStop()).toBe("partial");
+  });
+
+  it("reflects the latest assistant turn: a capped turn followed by a finished one is none", () => {
     const acc = new RunResultAccumulator();
     acc.feed(assistantMessageEnd({ input: 1, output: 16384, cost: 0, stopReason: "length" }));
     acc.feed(assistantMessageEnd({ text: "done", input: 1, output: 1, cost: 0, stopReason: "stop" }));
-    expect(acc.endedOnOutputCap()).toBe(false);
+    expect(acc.outputCapStop()).toBe("none");
   });
 
-  it("defaults to false before any assistant turn", () => {
-    expect(new RunResultAccumulator().endedOnOutputCap()).toBe(false);
+  it("defaults to none before any assistant turn", () => {
+    expect(new RunResultAccumulator().outputCapStop()).toBe("none");
+  });
+});
+
+describe("finalizeFromRunResult — output-cap message", () => {
+  const shim = { finalize() {}, flush: () => Promise.resolve() } as unknown as Parameters<typeof finalizeFromRunResult>[2];
+  const result = (finalText: string) =>
+    ({ ok: true, exitCode: 0, agentEnded: true, finalText, messages: [], sessionId: "s" }) as unknown as Parameters<typeof finalizeFromRunResult>[0];
+
+  it("fails a no-answer cap stop with the maxTokens advice", () => {
+    const r = finalizeFromRunResult(result("I'll start by reading the plan."), "p", shim, Date.now(), undefined, undefined, undefined, false, "no-answer");
+    expect(r.success).toBe(false);
+    expect(r.stopReason).toBe("error_truncated");
+    expect(r.error).toContain("output-token cap");
+    expect(r.error).toContain("maxTokens");
+  });
+
+  it("names the output cap, not the step limit, when the capped turn also requested a tool", () => {
+    const r = finalizeFromRunResult(result("Let me check."), "p", shim, Date.now(), undefined, undefined, undefined, true, "partial");
+    expect(r.stopReason).toBe("error_truncated");
+    expect(r.error).toContain("output-token cap");
+    expect(r.error).not.toContain("step limit");
+  });
+
+  it("leaves a capped final answer that carried its own text a success, as before", () => {
+    const r = finalizeFromRunResult(result("A long answer that got cut"), "p", shim, Date.now(), undefined, undefined, undefined, false, "partial");
+    expect(r.success).toBe(true);
   });
 });
 

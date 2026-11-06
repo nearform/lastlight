@@ -509,7 +509,7 @@ export async function runAgentIn(
       acc.skills(),
       acc.toolError(),
       acc.endedOnToolCall(),
-      acc.endedOnOutputCap(),
+      acc.outputCapStop(),
     );
     recordExecutionMetrics("agent", {
       "sandbox.backend": ctx.backend,
