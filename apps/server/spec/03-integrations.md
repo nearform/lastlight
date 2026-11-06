@@ -227,7 +227,12 @@ log and answering with the same view:
   `"follow-app"` (empty list ⇒ follow the App grant) or `"require-approval"`
   (also turns approval on). The bot never widens to every App repo without
   that explicit choice.
-- `POST /admin/api/managed-repos/require-approval` `{ enabled }`.
+- `POST /admin/api/managed-repos/require-approval` `{ enabled, confirm? }` —
+  turning approval off with nothing approved is refused with 409
+  `{ error: "would-follow-app", installationCount }` unless `confirm: true`.
+
+Writes read the stored row (not the in-memory copy) and run one at a time per
+process; a stored row that does not parse fails closed (approval required).
 
 Each installation carries an `htmlUrl` deep link to its GitHub settings page
 (where the repo grant, suspension and uninstall live), built server-side by

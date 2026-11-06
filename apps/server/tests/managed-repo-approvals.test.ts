@@ -106,3 +106,45 @@ describe("managed-repo approvals", () => {
     expect(getRepoApprovalState()).toEqual({ state: { requireApproval: true, approved: ["a/one"] }, stored: true });
   });
 });
+
+describe("managed-repo approvals — no silent widening", () => {
+  let db: StateDb;
+
+  beforeEach(async () => {
+    db = await makeTestDb();
+    setInstallationRepos("1", ["a/one", "a/two", "a/three"]);
+  });
+
+  afterEach(() => {
+    resetRuntimeConfigForTests();
+    resetInstallationReposForTests();
+  });
+
+  it("turning approval off with nothing approved needs confirm", async () => {
+    yaml([], true);
+    const res = await setRequireApproval(db, false, "octocat");
+    expect(res).toEqual({ ok: false, status: 409, error: "would-follow-app", installationCount: 3 });
+    expect(getManagedRepos()).toEqual([]);
+    const ok = await setRequireApproval(db, false, "octocat", { confirm: true });
+    expect(ok).toEqual({ ok: true, state: { requireApproval: false, approved: [] } });
+  });
+
+  it("writes start from the stored row, not a stale in-memory copy", async () => {
+    yaml(["a/one"]);
+    // Another process stored a different state; this process's copy is stale.
+    await db.setSetting(REPO_APPROVAL_SETTING_KEY, { requireApproval: true, approved: ["a/two"] });
+    const res = await approveRepos(db, ["a/three"]);
+    expect(res).toEqual({ ok: true, state: { requireApproval: true, approved: ["a/two", "a/three"] } });
+  });
+
+  it("concurrent writes do not lose updates", async () => {
+    yaml(["a/one", "a/two"]);
+    const [a, b] = await Promise.all([approveRepos(db, ["a/three"]), removeRepos(db, ["a/one"], {})]);
+    expect(a.ok && b.ok).toBe(true);
+    expect(getManagedRepos()).toEqual(["a/two", "a/three"]);
+    expect((await db.getSetting(REPO_APPROVAL_SETTING_KEY))?.value).toEqual({
+      requireApproval: false,
+      approved: ["a/two", "a/three"],
+    });
+  });
+});

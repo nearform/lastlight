@@ -1596,11 +1596,12 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(whenEmpty ? { repos, whenEmpty } : { repos }),
     }),
-  setRequireRepoApproval: (enabled: boolean) =>
+  /** `confirm` is required to turn approval off with nothing approved (409 `would-follow-app` otherwise). */
+  setRequireRepoApproval: (enabled: boolean, confirm = false) =>
     reqAction<ManagedRepos>("/managed-repos/require-approval", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled }),
+      body: JSON.stringify(confirm ? { enabled, confirm } : { enabled }),
     }),
   // Repos this user's GitHub teams can reach — the client-side declutter filter.
   meRepos: () => req<MeRepos>("/me/repos"),

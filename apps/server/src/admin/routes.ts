@@ -879,8 +879,11 @@ export function createAdminRoutes(
       gap,
       approvedNoAccess,
       yamlDiffers,
-      showApprovalLists:
-        approval.requireApproval || (approval.approved.length > 0 && (gap?.length ?? 0) > 0),
+      // Shown whenever approval is required or anything is approved, so every
+      // approved repo stays removable (also right after "Approve all", and for
+      // an approved repo the App lost access to). The Not-approved section in
+      // the pane hides itself when the gap is empty.
+      showApprovalLists: approval.requireApproval || approval.approved.length > 0,
     };
   };
 
@@ -941,10 +944,10 @@ export function createAdminRoutes(
   });
 
   app.post("/managed-repos/require-approval", async (c) => {
-    const body = (await c.req.json().catch(() => null)) as { enabled?: unknown } | null;
+    const body = (await c.req.json().catch(() => null)) as { enabled?: unknown; confirm?: unknown } | null;
     const enabled = body?.enabled;
     if (typeof enabled !== "boolean") return c.json({ error: "enabled must be true or false" }, 400);
-    const res = await setRequireApproval(db, enabled, actorFromContext(c));
+    const res = await setRequireApproval(db, enabled, actorFromContext(c), { confirm: body?.confirm === true });
     if (res.ok) {
       await recordActivityFor(c, db, {
         action: "managed-repos.require-approval",

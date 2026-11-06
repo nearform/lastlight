@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from "vitest";
 import type { ManagedRepos } from "../src/api";
-import { followAppCount, removeNeedsChoice, toggleConfirmText } from "../src/lib/managed-repos-view";
+import { followAppCount, removeNeedsChoice, showGapSection, toggleConfirmText } from "../src/lib/managed-repos-view";
 
 function view(over: Partial<ManagedRepos>): ManagedRepos {
   return {
@@ -68,5 +68,17 @@ describe("toggleConfirmText", () => {
 describe("followAppCount", () => {
   it("is the size of the App grant", () => {
     expect(followAppCount(view({}))).toBe(7);
+  });
+});
+
+describe("showGapSection", () => {
+  it("hides the Not approved section when every visible repo is approved and approval is off", () => {
+    expect(showGapSection(view({ approved: ["a/one"], gap: [] }))).toBe(false);
+  });
+
+  it("shows it when there is a gap, before discovery, or when approval is required", () => {
+    expect(showGapSection(view({ approved: ["a/one"], gap: ["a/two"] }))).toBe(true);
+    expect(showGapSection(view({ approved: ["a/one"], gap: null }))).toBe(true);
+    expect(showGapSection(view({ approved: ["a/one"], gap: [], requireApproval: true }))).toBe(true);
   });
 });

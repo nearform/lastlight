@@ -3,9 +3,10 @@ import {
   REPO_APPROVAL_SETTING_KEY,
   getInstallationRepos,
   getInstallationReposRefreshedAt,
-  getRepoApprovalState,
+  normalizeApprovalState,
   sameRepo,
   setStoredRepoApproval,
+  yamlRepoApprovalState,
   type RepoApprovalState,
 } from "./managed-repos.js";
 
@@ -26,7 +27,7 @@ export type ApprovalResult =
   | { ok: true; state: RepoApprovalState }
   | { ok: false; status: 400 | 409; error: string; installationCount?: number };
 
-type SettingsDb = Pick<StateDb, "setSetting">;
+type SettingsDb = Pick<StateDb, "getSetting" | "setSetting">;
 
 async function save(db: SettingsDb, state: RepoApprovalState, actor?: string): Promise<ApprovalResult> {
   await db.setSetting(REPO_APPROVAL_SETTING_KEY, state, actor);
@@ -35,11 +36,32 @@ async function save(db: SettingsDb, state: RepoApprovalState, actor?: string): P
 }
 
 /**
+ * The state a write starts from: the STORED row (another process may have
+ * changed it since this process last refreshed), else the YAML values.
+ */
+async function current(db: SettingsDb): Promise<RepoApprovalState> {
+  const row = await db.getSetting<unknown>(REPO_APPROVAL_SETTING_KEY);
+  return row ? normalizeApprovalState(row.value) : yamlRepoApprovalState();
+}
+
+/** Writes run one at a time in this process, so two requests cannot interleave a read-modify-write. */
+let queue: Promise<unknown> = Promise.resolve();
+function serialized<T>(fn: () => Promise<T>): Promise<T> {
+  const next = queue.then(fn, fn);
+  queue = next.catch(() => undefined);
+  return next;
+}
+
+/**
  * Approve repos the App can see. Refused before installation discovery has run
  * (we cannot tell a typo from a real repo yet) and for any repo outside the
  * grant. Stored as the grant spells the name; already-approved repos are kept.
  */
-export async function approveRepos(db: SettingsDb, repos: string[], actor?: string): Promise<ApprovalResult> {
+export function approveRepos(db: SettingsDb, repos: string[], actor?: string): Promise<ApprovalResult> {
+  return serialized(() => approveNow(db, repos, actor));
+}
+
+async function approveNow(db: SettingsDb, repos: string[], actor?: string): Promise<ApprovalResult> {
   if (getInstallationReposRefreshedAt() === null) {
     return { ok: false, status: 409, error: "installation list not loaded yet" };
   }
@@ -48,7 +70,7 @@ export async function approveRepos(db: SettingsDb, repos: string[], actor?: stri
   if (unknown.length > 0) {
     return { ok: false, status: 400, error: `not in the GitHub App's repo grant: ${unknown.join(", ")}` };
   }
-  const { state } = getRepoApprovalState();
+  const state = await current(db);
   const approved = [...state.approved];
   for (const r of repos) {
     if (approved.some((a) => sameRepo(a, r))) continue;
@@ -63,13 +85,22 @@ export async function approveRepos(db: SettingsDb, repos: string[], actor?: stri
  * go (`whenEmpty`); without that it is refused with `would-empty`, carrying the
  * grant size the confirm dialog shows. `require-approval` also turns the flag on.
  */
-export async function removeRepos(
+export function removeRepos(
   db: SettingsDb,
   repos: string[],
   opts: { whenEmpty?: WhenEmpty },
   actor?: string,
 ): Promise<ApprovalResult> {
-  const { state } = getRepoApprovalState();
+  return serialized(() => removeNow(db, repos, opts, actor));
+}
+
+async function removeNow(
+  db: SettingsDb,
+  repos: string[],
+  opts: { whenEmpty?: WhenEmpty },
+  actor?: string,
+): Promise<ApprovalResult> {
+  const state = await current(db);
   const approved = state.approved.filter((a) => !repos.some((r) => sameRepo(a, r)));
   let requireApproval = state.requireApproval;
   if (approved.length === 0 && !requireApproval && state.approved.length > 0) {
@@ -81,8 +112,23 @@ export async function removeRepos(
   return save(db, { requireApproval, approved }, actor);
 }
 
-/** Turn "require repo approval" on or off; the approved list is unchanged. */
-export async function setRequireApproval(db: SettingsDb, enabled: boolean, actor?: string): Promise<ApprovalResult> {
-  const { state } = getRepoApprovalState();
-  return save(db, { ...state, requireApproval: enabled }, actor);
+/**
+ * Turn "require repo approval" on or off; the approved list is unchanged.
+ * Turning it OFF with nothing approved makes the bot follow the whole App grant,
+ * so that needs `confirm` — the same no-silent-widening rule `removeRepos`
+ * enforces, held on the server so a stale dashboard or an API caller cannot skip it.
+ */
+export function setRequireApproval(
+  db: SettingsDb,
+  enabled: boolean,
+  actor?: string,
+  opts: { confirm?: boolean } = {},
+): Promise<ApprovalResult> {
+  return serialized(async () => {
+    const state = await current(db);
+    if (!enabled && state.requireApproval && state.approved.length === 0 && !opts.confirm) {
+      return { ok: false, status: 409, error: "would-follow-app", installationCount: getInstallationRepos().length };
+    }
+    return save(db, { ...state, requireApproval: enabled }, actor);
+  });
 }

@@ -27,3 +27,8 @@ export function toggleConfirmText(data: ManagedRepos, enable: boolean): string |
     ? "Nothing will get work until you approve repos."
     : `The bot will work on all ${followAppCount(data)} repos the App can see, and future repos.`;
 }
+
+/** The Not approved section: hidden only when there is nothing to approve and approval is off. */
+export function showGapSection(data: ManagedRepos): boolean {
+  return data.requireApproval || data.gap === null || data.gap.length > 0;
+}

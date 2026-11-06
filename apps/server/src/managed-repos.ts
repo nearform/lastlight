@@ -101,10 +101,29 @@ export const REPO_APPROVAL_SETTING_KEY = "managed-repos";
 
 /** The stored row, or null when none was loaded (⇒ YAML values). */
 let storedRepoApproval: RepoApprovalState | null = null;
+/**
+ * Bumped by every write, so a timer refresh that read the row BEFORE a write
+ * landed drops its (older) result instead of reverting the write in memory.
+ */
+let approvalGeneration = 0;
 
-/** Cache setter: the loaded or just-written row; null = no row. */
-export function setStoredRepoApproval(state: RepoApprovalState | null): void {
+function cacheApproval(state: RepoApprovalState | null): void {
   storedRepoApproval = state ? { requireApproval: state.requireApproval, approved: [...state.approved] } : null;
+}
+
+/** Cache setter for a just-written row (or null = no row). */
+export function setStoredRepoApproval(state: RepoApprovalState | null): void {
+  approvalGeneration++;
+  cacheApproval(state);
+}
+
+/** The YAML approval state (`managedRepos` / `requireRepoApproval`), ignoring any stored row. */
+export function yamlRepoApprovalState(): RepoApprovalState {
+  const cfg = getRuntimeConfig();
+  return {
+    requireApproval: cfg?.requireRepoApproval ?? false,
+    approved: [...(cfg?.managedRepos ?? DEFAULT_MANAGED_REPOS)],
+  };
 }
 
 /** The approval state in effect, and whether it came from the stored row. */
@@ -112,14 +131,7 @@ export function getRepoApprovalState(): { state: RepoApprovalState; stored: bool
   if (storedRepoApproval) {
     return { state: { ...storedRepoApproval, approved: [...storedRepoApproval.approved] }, stored: true };
   }
-  const cfg = getRuntimeConfig();
-  return {
-    state: {
-      requireApproval: cfg?.requireRepoApproval ?? false,
-      approved: [...(cfg?.managedRepos ?? DEFAULT_MANAGED_REPOS)],
-    },
-    stored: false,
-  };
+  return { state: yamlRepoApprovalState(), stored: false };
 }
 
 /**
@@ -130,16 +142,23 @@ export function getRepoApprovalState(): { state: RepoApprovalState; stored: bool
 export async function refreshRepoApproval(
   db: { getSetting<T>(key: string): Promise<{ value: T } | null> },
 ): Promise<void> {
-  const row = await db.getSetting<RepoApprovalState>(REPO_APPROVAL_SETTING_KEY);
-  setStoredRepoApproval(row ? normalizeApprovalState(row.value) : null);
+  const generation = approvalGeneration;
+  const row = await db.getSetting<unknown>(REPO_APPROVAL_SETTING_KEY);
+  if (generation !== approvalGeneration) return; // a write landed meanwhile; it is newer
+  cacheApproval(row ? normalizeApprovalState(row.value) : null);
 }
 
-function normalizeApprovalState(raw: unknown): RepoApprovalState {
-  const v = (raw ?? {}) as Partial<RepoApprovalState>;
-  return {
-    requireApproval: v.requireApproval === true,
-    approved: Array.isArray(v.approved) ? v.approved.filter((r): r is string => typeof r === "string" && !!r) : [],
-  };
+/**
+ * Parse a stored row. A row exists only because an operator chose something,
+ * so a malformed one FAILS CLOSED: approval required, keeping whichever
+ * approved entries are valid. Never "follow the App".
+ */
+export function normalizeApprovalState(raw: unknown): RepoApprovalState {
+  const v = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+  const list = Array.isArray(v?.approved) ? (v!.approved as unknown[]) : null;
+  const approved = (list ?? []).filter((r): r is string => typeof r === "string" && !!r);
+  const wellFormed = v !== null && typeof v.requireApproval === "boolean" && list !== null && approved.length === list.length;
+  return { requireApproval: wellFormed ? (v!.requireApproval as boolean) : true, approved };
 }
 
 /**

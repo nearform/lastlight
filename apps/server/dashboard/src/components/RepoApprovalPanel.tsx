@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { api, type ManagedRepos, type WhenEmpty } from "../api";
-import { followAppCount, removeNeedsChoice, toggleConfirmText } from "../lib/managed-repos-view";
+import { api, ApiError, type ManagedRepos, type WhenEmpty } from "../api";
+import { followAppCount, removeNeedsChoice, showGapSection, toggleConfirmText } from "../lib/managed-repos-view";
 
 /**
  * Config → Managed repos, the writable part: the "Require repo approval"
@@ -30,30 +30,44 @@ export function RepoApprovalPanel({
   /** The switch position waiting on its confirm. */
   const [pendingToggle, setPendingToggle] = useState<boolean | null>(null);
 
-  async function run(write: () => Promise<ManagedRepos>) {
+  /**
+   * Send a write and adopt the view it answers with. A 409 means this pane was
+   * stale (another tab or operator changed the list): re-fetch, then put the
+   * question the server asked — the same confirm the pane would have shown had
+   * it been current.
+   */
+  async function run(write: () => Promise<ManagedRepos>, retry?: { remove?: string[]; toggle?: boolean }) {
     setBusy(true);
     setError(null);
+    setPendingRemove(null);
+    setPendingToggle(null);
     try {
       const next = await write();
       onChange(next);
       setSelected((s) => s.filter((r) => next.gap?.includes(r)));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (err instanceof ApiError && err.status === 409) {
+        const fresh = await api.managedRepos().catch(() => null);
+        if (fresh) onChange(fresh);
+        if (err.message === "would-empty" && retry?.remove) setPendingRemove(retry.remove);
+        else if (err.message === "would-follow-app" && retry?.toggle === false) setPendingToggle(false);
+        else setError(err.message);
+      } else {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       setBusy(false);
-      setPendingRemove(null);
-      setPendingToggle(null);
     }
   }
 
   function remove(repos: string[]) {
     if (removeNeedsChoice(data, repos)) setPendingRemove(repos);
-    else void run(() => api.removeManagedRepos(repos));
+    else void run(() => api.removeManagedRepos(repos), { remove: repos });
   }
 
   function toggle(enable: boolean) {
     if (toggleConfirmText(data, enable)) setPendingToggle(enable);
-    else void run(() => api.setRequireRepoApproval(enable));
+    else void run(() => api.setRequireRepoApproval(enable), { toggle: enable });
   }
 
   const gap = data.gap;
@@ -118,55 +132,57 @@ export function RepoApprovalPanel({
             )}
           </section>
 
-          <section className="rounded border border-hairline ll-surface p-3 min-w-0">
-            <div className="flex flex-wrap items-center gap-2 mb-2">
-              <div className="text-sm font-medium text-base-content flex-1">
-                Not approved{gap ? ` (${gap.length})` : ""}
+          {showGapSection(data) && (
+            <section className="rounded border border-hairline ll-surface p-3 min-w-0">
+              <div className="flex flex-wrap items-center gap-2 mb-2">
+                <div className="text-sm font-medium text-base-content flex-1">
+                  Not approved{gap ? ` (${gap.length})` : ""}
+                </div>
+                {gap && gap.length > 0 && (
+                  <>
+                    <button
+                      className="btn btn-xs btn-ghost"
+                      disabled={busy || selected.length === 0}
+                      onClick={() => void run(() => api.approveManagedRepos(selected))}
+                    >
+                      Approve selected
+                    </button>
+                    <button
+                      className="btn btn-xs btn-primary"
+                      disabled={busy}
+                      onClick={() => void run(() => api.approveManagedRepos(gap))}
+                    >
+                      Approve all ({gap.length})
+                    </button>
+                  </>
+                )}
               </div>
-              {gap && gap.length > 0 && (
-                <>
-                  <button
-                    className="btn btn-xs btn-ghost"
-                    disabled={busy || selected.length === 0}
-                    onClick={() => void run(() => api.approveManagedRepos(selected))}
-                  >
-                    Approve selected
-                  </button>
-                  <button
-                    className="btn btn-xs btn-primary"
-                    disabled={busy}
-                    onClick={() => void run(() => api.approveManagedRepos(gap))}
-                  >
-                    Approve all ({gap.length})
-                  </button>
-                </>
+              {gap === null ? (
+                <div className="text-sm text-muted">The App's repo list hasn't been discovered yet.</div>
+              ) : gap.length === 0 ? (
+                <div className="text-sm text-muted">Every repo the App can see is approved.</div>
+              ) : (
+                <ul className="grid gap-1">
+                  {gap.map((r) => (
+                    <li key={r} className="rounded border border-hairline px-2 py-1 text-xs">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          className="checkbox checkbox-xs"
+                          checked={selected.includes(r)}
+                          disabled={busy}
+                          onChange={(e) =>
+                            setSelected((s) => (e.target.checked ? [...s, r] : s.filter((x) => x !== r)))
+                          }
+                        />
+                        <span className="font-mono text-base-content break-all">{r}</span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
               )}
-            </div>
-            {gap === null ? (
-              <div className="text-sm text-muted">The App's repo list hasn't been discovered yet.</div>
-            ) : gap.length === 0 ? (
-              <div className="text-sm text-muted">Every repo the App can see is approved.</div>
-            ) : (
-              <ul className="grid gap-1">
-                {gap.map((r) => (
-                  <li key={r} className="rounded border border-hairline px-2 py-1 text-xs">
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        className="checkbox checkbox-xs"
-                        checked={selected.includes(r)}
-                        disabled={busy}
-                        onChange={(e) =>
-                          setSelected((s) => (e.target.checked ? [...s, r] : s.filter((x) => x !== r)))
-                        }
-                      />
-                      <span className="font-mono text-base-content break-all">{r}</span>
-                    </label>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
+            </section>
+          )}
         </div>
       )}
 
@@ -193,7 +209,7 @@ export function RepoApprovalPanel({
             {
               label: pendingToggle ? "Require approval" : "Follow the App",
               className: "btn-primary",
-              onClick: () => void run(() => api.setRequireRepoApproval(pendingToggle)),
+              onClick: () => void run(() => api.setRequireRepoApproval(pendingToggle, true)),
             },
           ]}
         />

@@ -125,6 +125,7 @@ describe("GET /managed-repos — approval fields", () => {
     const { body } = await send("GET", "/managed-repos", { token: GITHUB_TOKEN });
     expect(body.gap).toBeNull();
     expect(body.approvedNoAccess).toEqual([]);
+    expect(body.showApprovalLists).toBe(true);
   });
 
   it("flags approved repos the App cannot see, case-insensitively", async () => {
@@ -133,6 +134,7 @@ describe("GET /managed-repos — approval fields", () => {
     const { body } = await send("GET", "/managed-repos", { token: GITHUB_TOKEN });
     expect(body.gap).toEqual([]);
     expect(body.approvedNoAccess).toEqual(["a/gone"]);
+    expect(body.showApprovalLists).toBe(true);
   });
 
   it("flag on with an empty list shows the lists", async () => {
@@ -218,6 +220,24 @@ describe("POST /managed-repos/*", () => {
     const { activity } = await db.activity.list();
     expect(activity[0]).toMatchObject({ action: "managed-repos.require-approval" });
     expect(activity[0].detail).toEqual({ enabled: true });
+  });
+
+  it("require-approval off with nothing approved is 409 unless confirmed", async () => {
+    yaml([], true);
+    const res = await send("POST", "/managed-repos/require-approval", { token: GITHUB_TOKEN, body: { enabled: false } });
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: "would-follow-app", installationCount: 2 });
+    const ok = await send("POST", "/managed-repos/require-approval", {
+      token: GITHUB_TOKEN,
+      body: { enabled: false, confirm: true },
+    });
+    expect(ok.status).toBe(200);
+    expect(ok.body).toMatchObject({ requireApproval: false, effective: ["a/one", "a/two"] });
+  });
+
+  it("keeps the lists visible after Approve all, so approved repos stay removable", async () => {
+    const res = await send("POST", "/managed-repos/approve", { token: GITHUB_TOKEN, body: { repos: ["a/two"] } });
+    expect(res.body).toMatchObject({ gap: [], showApprovalLists: true });
   });
 
   it("requires authentication", async () => {

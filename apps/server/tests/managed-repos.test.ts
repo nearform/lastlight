@@ -321,3 +321,36 @@ describe('repo approval state', () => {
     expect(getManagedRepos()).toEqual(['acme/yaml']);
   });
 });
+
+describe('repo approval state — fail closed', () => {
+  afterEach(() => {
+    resetRuntimeConfigForTests();
+    resetInstallationReposForTests();
+  });
+
+  it('a malformed stored row manages nothing rather than following the App', async () => {
+    setRuntimeConfig(configWithRepos([]));
+    setInstallationRepos('1', ['acme/one']);
+    for (const value of [null, 'x', { requireApproval: 'true', approved: 'acme/one' }, { approved: ['acme/one', 3] }]) {
+      const db = { getSetting: async () => ({ value, updatedAt: 'now', updatedBy: null }) };
+      await refreshRepoApproval(db as never);
+      expect(getRepoApprovalState().state.requireApproval).toBe(true);
+      expect(isManagedRepo('acme/two')).toBe(false);
+    }
+    // Valid entries of a malformed row survive.
+    expect(getManagedRepos()).toEqual(['acme/one']);
+  });
+
+  it('a timer refresh that read before a write does not undo it', async () => {
+    setRuntimeConfig(configWithRepos(['acme/old']));
+    let release!: (v: unknown) => void;
+    const db = {
+      getSetting: () => new Promise((r) => { release = r; }),
+    };
+    const pending = refreshRepoApproval(db as never);
+    setStoredRepoApproval({ requireApproval: false, approved: ['acme/new'] });
+    release({ value: { requireApproval: false, approved: ['acme/old'] }, updatedAt: 'now', updatedBy: null });
+    await pending;
+    expect(getManagedRepos()).toEqual(['acme/new']);
+  });
+});
