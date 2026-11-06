@@ -7,6 +7,9 @@
 # to a subset of repos need not maintain a second copy here. See
 # src/managed-repos.ts.
 managedRepos: []
+# true: a repo gets work only once approved (here or in the dashboard),
+# even when managedRepos is empty. See spec/02-configuration.md.
+requireRepoApproval: false
 
 # The GitHub App slug (no `[bot]` suffix). Single source of truth for the bot's
 # identity: the incoming `@mention` handle (e.g. `@last-light`), the derived

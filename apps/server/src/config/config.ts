@@ -250,6 +250,13 @@ export interface LastLightConfig {
    */
   deploy: { version: string | null };
   managedRepos: string[];
+  /**
+   * When true, a repo gets work only once approved (overlay `managedRepos`, or
+   * the dashboard's stored approval list) — a repo newly granted to the App
+   * waits in the gap. False (default) keeps "empty list ⇒ follow the App".
+   * See src/managed-repos.ts.
+   */
+  requireRepoApproval: boolean;
   routes: RouteConfig;
   disabled: DisabledConfig;
   /**
@@ -1203,6 +1210,7 @@ export function loadConfig(): LastLightConfig {
     buildAssetsDir,
     deploy: fileCfg.deploy,
     managedRepos: fileCfg.managedRepos,
+    requireRepoApproval: fileCfg.requireRepoApproval,
     routes: fileCfg.routes,
     disabled: fileCfg.disabled,
     crons: fileCfg.crons,
@@ -1248,6 +1256,7 @@ type NormalizedFileConfig = ReturnType<typeof normalizeFileConfig>;
 
 function normalizeFileConfig(raw: Record<string, unknown>): {
   managedRepos: string[];
+  requireRepoApproval: boolean;
   botName: string;
   routes: RouteConfig;
   disabled: DisabledConfig;
@@ -1285,6 +1294,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   repoConfig: RepoConfigPolicy;
 } {
   const managedRepos = stringArray(raw.managedRepos, "managedRepos");
+  const requireRepoApproval = optionalBoolean(raw.requireRepoApproval, "requireRepoApproval") ?? false;
   const botName = typeof raw.botName === "string" && raw.botName.trim() ? raw.botName.trim() : "last-light";
   const routes = normalizeRoutes(raw.routes);
   const disabledRaw = isPlainObject(raw.disabled) ? raw.disabled : {};
@@ -1715,6 +1725,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
 
   return {
     managedRepos,
+    requireRepoApproval,
     botName,
     routes,
     disabled: {
@@ -2012,6 +2023,12 @@ function stringArray(raw: unknown, path: string): string[] {
     throw new Error(`${path} must be an array of non-empty strings`);
   }
   return raw as string[];
+}
+
+function optionalBoolean(raw: unknown, path: string): boolean | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "boolean") throw new Error(`${path} must be true or false`);
+  return raw;
 }
 
 function optionalStringArray(raw: unknown, path: string): string[] {
