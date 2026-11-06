@@ -27,7 +27,7 @@ into the resume state read by every dashboard query.
 ## State tables
 
 The schema is **declared in Drizzle**, not in DDL: `src/state/schema/sqlite.ts`
-is the source of truth for sixteen tables, with `src/state/schema/pg.ts` as its
+is the source of truth for seventeen tables, with `src/state/schema/pg.ts` as its
 name-parity Postgres mirror (see "Dialect posture" below). The per-table stores
 in `src/state/*-store.ts` operate on them; `src/state/db.ts` wires the stores
 together. All rows are append-only unless marked mutable. Migrations are
@@ -447,6 +447,26 @@ order within a same-timestamp tie is arbitrary but **stable**, which is all
 either read needs — and a tiebreak that is merely deterministic is not enough
 here, because dropping it entirely makes `recentFailures` report 0 for an
 always-failing cron.
+
+### `harness_settings`
+
+```sql
+CREATE TABLE harness_settings (
+  key TEXT PRIMARY KEY NOT NULL,
+  value TEXT NOT NULL,          -- JSON (jsonb on Postgres)
+  updated_at TEXT NOT NULL,
+  updated_by TEXT
+);
+```
+
+Live operator settings the dashboard writes, one JSON value per key. Mutable
+(upsert per key). Absence of a row means "use the YAML config value". Keys:
+
+- `managed-repos` — `{ requireApproval: boolean, approved: string[] }`, written
+  by Config → Managed repos. Once present it wins over the overlay's
+  `managedRepos` / `requireRepoApproval`; `src/managed-repos.ts` holds an
+  in-memory copy (loaded at boot, refreshed every 60 s and on every write) so
+  `isManagedRepo` stays synchronous.
 
 ### `workflow_overrides`
 
@@ -1072,7 +1092,7 @@ Four properties, each of which is a data-loss bug if dropped:
 - **The target must be empty** unless `--truncate` — copying into a populated
   database half-succeeds on PK collisions and leaves an interleaved mess.
 - **Coverage is checked against the schema's own exports** on every run, so a
-  sixteenth table added later fails loudly instead of being silently skipped.
+  new table added later fails loudly instead of being silently skipped.
 
 `messaging_messages.id` is the one value that does not survive: it is
 `AUTOINCREMENT` on SQLite and `GENERATED ALWAYS AS IDENTITY` on Postgres, which

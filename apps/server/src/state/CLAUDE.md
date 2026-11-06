@@ -1,8 +1,8 @@
 # State layer — schema, migrations, and the two dialects
 
-This is the harness's own database: sixteen tables holding workflow runs,
-executions, approvals, cron history, users, chat sessions, feedback signals and
-the activity log.
+This is the harness's own database: seventeen tables holding workflow runs,
+executions, approvals, cron history, users, chat sessions, feedback signals,
+live operator settings and the activity log.
 It is written **once** and runs on **two dialects** — SQLite (via libsql) by
 default, Postgres (node-postgres or Neon) when `DATABASE_URL` says so. Both are
 supported production stores.
@@ -36,7 +36,7 @@ and the PGlite leg replays the entire behavioural suite against real Postgres.
 | `schema/pg.ts` | The name-parity `pgTable` mirror. **Nothing under `src/` may import it** except `pg-client.ts`. |
 | `pg-client.ts` | The production Postgres client factory — node-postgres or Neon behind one `PgClientHandle`, each **dynamically** imported inside its own builder. Registers the int8 parser. The one module allowed to import `schema/pg.ts`. |
 | `legacy-sqlite.ts` | Idempotent pre-migrator compat step for SQLite deployments older than the baseline. sqlite-only, PRAGMA-guarded. |
-| `data-migrate.ts` | One-way SQLite → Postgres row copy, FK-ordered and batched. `TABLE_ORDER` is the FK order; the coverage check is what stops a sixteenth table being silently skipped. |
+| `data-migrate.ts` | One-way SQLite → Postgres row copy, FK-ordered and batched. `TABLE_ORDER` is the FK order; the coverage check is what stops a new table being silently skipped. |
 | `state-cli.ts` | The `lastlight-state` bin (`check` / `migrate`) shipped in the agent image — what `lastlight server db` runs inside the container, since the CLI may never gain an edge to core. |
 | `*-store.ts` | One store class per table, over one shared client. Each destructures its tables from `tablesOf(client)`. |
 | `activity-store.ts` | The `activity_log` audit stream (issue #206) — one row per user-initiated action, append-only. Complements #205's per-run actor columns rather than replacing them. |
