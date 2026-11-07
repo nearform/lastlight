@@ -121,6 +121,16 @@ describe("loadConfig — webhooks", () => {
     expect(cfg.webhooks[0].url).toBe("https://hooks.example.com/a?token=abc123");
     expect(JSON.stringify(cfg.publicConfig)).not.toContain("abc123");
   });
+
+  it("hides a URL's path too — many hook URLs carry their token there", () => {
+    vi.stubEnv(
+      "LASTLIGHT_OVERLAY_DIR",
+      overlayWith("webhooks:\n  - url: https://hooks.example.com/services/T000/B000/XyZsecretPath\n    secretEnv: HOOK_SECRET\n"),
+    );
+    const view = JSON.stringify(loadConfig().publicConfig);
+    expect(view).not.toContain("XyZsecretPath");
+    expect(view).toContain("https://hooks.example.com/[redacted]");
+  });
 });
 
 describe("a repo's .lastlight/ cannot add webhooks", () => {

@@ -123,12 +123,15 @@ export function assertWebhookSecrets(endpoints: WebhookEndpointConfig[], env: No
   });
 }
 
-/** A URL for display: no query string or fragment (they may carry a token). */
+/**
+ * A URL for display: the origin only. Many hook URLs carry their token in the
+ * path (`/services/T…/B…/<token>`) or the query, so neither is shown.
+ */
 export function displayWebhookUrl(url: string): string {
   try {
     const u = new URL(url);
-    const hidden = u.search || u.hash ? "?[redacted]" : "";
-    return `${u.origin}${u.pathname}${hidden}`;
+    const hidden = (u.pathname && u.pathname !== "/") || u.search || u.hash ? "/[redacted]" : "";
+    return `${u.origin}${hidden}`;
   } catch {
     return "[invalid url]";
   }
