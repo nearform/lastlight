@@ -145,6 +145,11 @@ export interface BoardStage {
   running: string;
   on_success: string;
   on_failure: string;
+  /**
+   * The workflow this stage's dispatch starts (`stageWorkflow`). Optional: a
+   * stage without it keeps calling any earlier run a rebuild.
+   */
+  workflow?: string;
 }
 
 /** An action the board offers on a card. */
@@ -271,6 +276,13 @@ export interface BuildBoardInput {
   items: BoardBuilderItem[];
   /** Keyed by trigger id (`owner/repo#N`) — one `latestForTriggers` answer. */
   runs: Map<string, BoardBuilderRun>;
+  /**
+   * The latest run of a STAGE's workflow per card (same keys as `runs`). It
+   * decides whether dispatch reads "Rebuild" or "Start build": `runs` holds the
+   * latest run of any workflow, so a triage run after a build would hide the
+   * build. Absent → `runs` decides, as before.
+   */
+  stageRuns?: Map<string, BoardBuilderRun>;
   /** Pending approvals, in any order; indexed by `workflowRunId` here. */
   approvals: BoardBuilderApproval[];
   /** The ordered `autonomy.stages` list. Empty means "not configured". */
@@ -302,6 +314,23 @@ function cardKey(repo: string, number: number): string {
 function titleForLabel(label: string): string {
   const words = label.replace(/[-_]+/g, " ").trim();
   return words ? words.charAt(0).toUpperCase() + words.slice(1) : label;
+}
+
+/**
+ * Has this card's stage workflow run on it before? Null when the board cannot
+ * tell (no stage, or a stage without a `workflow`), so the caller falls back to
+ * "any earlier run".
+ */
+function builtFor(
+  key: string,
+  stage: BoardStage | null,
+  latest: BoardBuilderRun | null,
+  stageRuns: Map<string, BoardBuilderRun> | undefined,
+): boolean | null {
+  if (!stage?.workflow) return null;
+  if (latest?.workflowName === stage.workflow) return true;
+  if (!stageRuns) return false;
+  return stageRuns.get(key)?.workflowName === stage.workflow;
 }
 
 /**
@@ -366,8 +395,13 @@ function actionsFor(args: {
   entryLabel: string | null;
   /** Its stage's `on_failure` label — where a stopped run parks. */
   failureLabel: string | null;
+  /**
+   * Whether the stage's own workflow has run on this card before: decides
+   * "Rebuild" vs "Start build". Null when unknown → any earlier run counts.
+   */
+  built: boolean | null;
 }): BoardAction[] {
-  const { held, holdLabel, run, approval, staged, stageLabel, entryLabel, failureLabel } = args;
+  const { held, holdLabel, run, approval, staged, stageLabel, entryLabel, failureLabel, built } = args;
   const actions: BoardAction[] = [
     { id: "open", label: "Open on GitHub", kind: "link", enabled: true, disabledReason: null },
   ];
@@ -447,7 +481,9 @@ function actionsFor(args: {
     actions.push({
       id: "dispatch",
       // Named for what it does to THIS card: a first build, or another one.
-      label: run ? "Rebuild" : "Start build",
+      // Only a run of the stage's own workflow makes it a rebuild — a triage
+      // run on the same issue built nothing.
+      label: (built ?? !!run) ? "Rebuild" : "Start build",
       kind: "dispatch",
       enabled: !disabledReason,
       disabledReason,
@@ -617,6 +653,7 @@ export function buildBoard(input: BuildBoardInput, opts: BuildBoardOptions = {})
         stageLabel: staged ? columns[index]!.label : "",
         entryLabel: stage?.enter ?? null,
         failureLabel: stage?.on_failure ?? null,
+        built: builtFor(key, stage, baseRun, input.stageRuns),
       }),
     };
 
