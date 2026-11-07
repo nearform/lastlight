@@ -45,6 +45,7 @@ function build(
   over: {
     stages?: BoardStage[];
     runs?: Map<string, BoardBuilderRun>;
+    stageRuns?: Map<string, BoardBuilderRun>;
     approvals?: BoardBuilderApproval[];
     failures?: Map<string, { phase: string; error: string }>;
     inFlight?: Map<string, string>;
@@ -55,6 +56,7 @@ function build(
     {
       items,
       runs: over.runs ?? new Map(),
+      ...(over.stageRuns ? { stageRuns: over.stageRuns } : {}),
       approvals: over.approvals ?? [],
       ...(over.failures ? { failures: over.failures } : {}),
       ...(over.inFlight ? { inFlight: over.inFlight } : {}),
@@ -602,6 +604,42 @@ describe("buildBoard — dispatch after a previous run", () => {
     const card = ("columns" in board ? board.columns : []).flatMap((c) => c.cards)[0];
     expect(card?.actions.find((a) => a.id === "unblock")).toBeUndefined();
     expect(dispatchOn(board)?.enabled).toBe(true);
+  });
+
+  it("says Start build when the only earlier run was another workflow, such as triage", () => {
+    const board = build([item(4, ["ready-for-agent"])], {
+      stages: [{ ...BUILD_STAGE, workflow: "build" }],
+      runs: new Map([[`${REPO}#4`, { ...run("succeeded"), workflowName: "issue-triage" }]]),
+    });
+    expect(dispatchOn(board)).toMatchObject({ enabled: true, label: "Start build" });
+  });
+
+  it("says Rebuild when an earlier build was followed by a newer triage run", () => {
+    // `runs` holds the latest run of ANY workflow; `stageRuns` the latest run
+    // of a stage's own workflow, which is what decides the wording.
+    const board = build([item(4, ["ready-for-agent"])], {
+      stages: [{ ...BUILD_STAGE, workflow: "build" }],
+      runs: new Map([[`${REPO}#4`, { ...run("succeeded"), id: "run-2", workflowName: "issue-triage" }]]),
+      stageRuns: new Map([[`${REPO}#4`, run("succeeded")]]),
+    });
+    expect(dispatchOn(board)).toMatchObject({ enabled: true, label: "Rebuild" });
+  });
+
+  it("says Start build when stageRuns has no run of the stage's workflow", () => {
+    const board = build([item(4, ["ready-for-agent"])], {
+      stages: [{ ...BUILD_STAGE, workflow: "build" }],
+      runs: new Map([[`${REPO}#4`, { ...run("succeeded"), workflowName: "issue-triage" }]]),
+      stageRuns: new Map(),
+    });
+    expect(dispatchOn(board)).toMatchObject({ enabled: true, label: "Start build" });
+  });
+
+  it("says Rebuild when the stage's own workflow has run", () => {
+    const board = build([item(4, ["ready-for-agent"])], {
+      stages: [{ ...BUILD_STAGE, workflow: "build" }],
+      runs: new Map([[`${REPO}#4`, run("succeeded")]]),
+    });
+    expect(dispatchOn(board)).toMatchObject({ enabled: true, label: "Rebuild" });
   });
 
   it("says Start build when nothing has run yet", () => {

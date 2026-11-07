@@ -97,6 +97,23 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
         expect(found.get("acme/widget#1")!.id).toBe(live);
       });
 
+      it("narrows to the requested workflow names", async () => {
+        const build = await makeRun({
+          triggerId: "acme/widget#1",
+          workflowName: "build",
+          startedAt: "2026-01-01T00:00:00.000Z",
+        });
+        await makeRun({
+          triggerId: "acme/widget#1",
+          workflowName: "issue-triage",
+          startedAt: "2026-02-01T00:00:00.000Z",
+        });
+
+        const found = await db.runs.latestForTriggers(["acme/widget#1"], { workflowNames: ["build"] });
+
+        expect(found.get("acme/widget#1")!.id).toBe(build);
+      });
+
       it("omits the heavy JSON columns the board never reads", async () => {
         await makeRun({
           triggerId: "acme/widget#1",
