@@ -2,7 +2,7 @@ import type { StateDb } from "../../state/db.js";
 import { qualifyRepo } from "../../state/repo-ref.js";
 import type { WorkflowRun } from "../../state/workflow-run-store.js";
 import { deliverWebhook, type DeliveryResult } from "./deliver.js";
-import { buildRunPayload, type PayloadExtra } from "./payload.js";
+import { buildRunPayload, redactEnvValues, type PayloadExtra } from "./payload.js";
 import type { WebhookEndpointConfig, WebhookEventType, WebhookPayload } from "./types.js";
 
 interface EmitterLog {
@@ -47,8 +47,9 @@ export class WebhookEmitter {
     this.log = deps.log;
   }
 
-  emit(payload: WebhookPayload, repo?: string): void {
+  emit(raw: WebhookPayload, repo?: string): void {
     const want = repo?.toLowerCase();
+    const payload = redactEnvValues(raw, this.env, this.endpoints.map((e) => e.secretEnv));
     for (const endpoint of this.endpoints) {
       if (!endpoint.events.includes(payload.type)) continue;
       if (endpoint.repos.length > 0 && (!want || !endpoint.repos.some((r) => r.toLowerCase() === want))) continue;

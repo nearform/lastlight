@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { runDashboardUrl } from "../model.js";
 import { qualifyRepo } from "../../state/repo-ref.js";
+import { SENSITIVE_KEY_RE } from "../../config/config.js";
 import type { WorkflowRun } from "../../state/workflow-run-store.js";
 import type { WebhookEventType, WebhookPayload } from "./types.js";
 
@@ -9,6 +10,32 @@ export const SUMMARY_MAX_CHARS = 2000;
 
 function truncate(s: string): string {
   return s.length > SUMMARY_MAX_CHARS ? s.slice(0, SUMMARY_MAX_CHARS) + "…" : s;
+}
+
+/** Shorter values are too likely to occur by chance to be worth replacing. */
+const MIN_REDACT_LENGTH = 8;
+
+/**
+ * A copy of `payload` in which every string has the value of each sensitive
+ * env var (key matching `SENSITIVE_KEY_RE`, or named in `extraKeys` — the
+ * endpoints' own `secretEnv`) replaced by `[redacted]`. Error and summary
+ * text comes from exception messages and agents; this is the last stop before
+ * it leaves the process.
+ */
+export function redactEnvValues(payload: WebhookPayload, env: NodeJS.ProcessEnv, extraKeys: string[] = []): WebhookPayload {
+  const extra = new Set(extraKeys);
+  const values = Object.entries(env)
+    .filter(([k, v]) => typeof v === "string" && v.length >= MIN_REDACT_LENGTH && (extra.has(k) || SENSITIVE_KEY_RE.test(k)))
+    .map(([, v]) => v as string)
+    .sort((a, b) => b.length - a.length);
+  if (values.length === 0) return payload;
+  const scrub = (x: unknown): unknown => {
+    if (typeof x === "string") return values.reduce((s, v) => s.split(v).join("[redacted]"), x);
+    if (Array.isArray(x)) return x.map(scrub);
+    if (x && typeof x === "object") return Object.fromEntries(Object.entries(x).map(([k, v]) => [k, scrub(v)]));
+    return x;
+  };
+  return scrub(payload) as WebhookPayload;
 }
 
 export interface PayloadExtra {

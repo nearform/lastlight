@@ -672,7 +672,11 @@ Only the block for the event is present; `subject` replaces `run` on
 `autonomy.held`, which has no run yet. `approval.summary` and `result.error`
 are agent- or reporter-written text: they are cut at 2000 characters and never
 copied into `text`, so a receiver can forward `text` as is and treat the rest
-as data. `dashboardUrl` needs `PUBLIC_URL`.
+as data. Before a payload leaves the process, every string in it has the
+value of each sensitive env var (key matching `SENSITIVE_KEY_RE`, or any
+endpoint's `secretEnv`; values of 8+ characters) replaced by `[redacted]`
+(`redactEnvValues`), since error text comes from exception messages.
+`dashboardUrl` needs `PUBLIC_URL`.
 
 **Delivery** (`src/notify/webhook/deliver.ts`): `POST`, `Content-Type:
 application/json`, `X-Hub-Signature-256: sha256=<hex HMAC-SHA256(key, raw

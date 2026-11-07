@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildRunPayload, SUMMARY_MAX_CHARS } from "#src/notify/webhook/payload.js";
+import { buildRunPayload, redactEnvValues, SUMMARY_MAX_CHARS } from "#src/notify/webhook/payload.js";
 import type { WorkflowRun } from "#src/state/workflow-run-store.js";
 
 const now = new Date("2026-11-07T10:00:00Z");
@@ -95,16 +95,23 @@ describe("buildRunPayload", () => {
     expect(p.text).toContain("failed");
   });
 
-  it("never carries an environment value", () => {
-    vi.stubEnv("SOME_SECRET", "s3cr3t");
+  it("redactEnvValues replaces sensitive env values and the named keys' values in every string", () => {
+    const env = {
+      GITHUB_TOKEN: "ghs_abcdefgh12345",
+      HOOK_SIGNING: "hooksecret99",
+      SHORT_TOKEN: "abc",
+      HOME: "/var/lib/lastlight",
+    } as NodeJS.ProcessEnv;
     const p = buildRunPayload(
       "run.finished",
-      run({ status: "succeeded" }),
-      { result: { status: "succeeded", prUrl: "https://github.com/acme/widgets/pull/7" } },
+      run({ status: "failed" }),
+      { result: { status: "failed", error: "git push https://x:ghs_abcdefgh12345@github.com failed; sig hooksecret99; abc in /var/lib/lastlight" } },
       ctx,
     );
-    expect(JSON.stringify(p)).not.toContain("s3cr3t");
-    expect(p.result?.prUrl).toBe("https://github.com/acme/widgets/pull/7");
+    const safe = redactEnvValues(p, env, ["HOOK_SIGNING"]);
+    expect(safe.result?.error).toBe("git push https://x:[redacted]@github.com failed; sig [redacted]; abc in /var/lib/lastlight");
+    expect(p.result?.error).toContain("ghs_abcdefgh12345");
+    expect(safe.run).toEqual(p.run);
   });
 
   it("describes a hold", () => {

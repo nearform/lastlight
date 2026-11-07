@@ -45,6 +45,21 @@ describe("WebhookEmitter", () => {
     expect(deliver.mock.calls[0][1]).toBe("k");
   });
 
+  it("never sends an env secret, including the endpoint's own, in a payload", async () => {
+    const deliver = ok();
+    const e = new WebhookEmitter({
+      endpoints: [ep({ secretEnv: "HOOK_SIGNING" })],
+      env: { HOOK_SIGNING: "hooksecret99", GH_TOKEN: "ghs_abcdefgh12345" } as NodeJS.ProcessEnv,
+      deliver,
+      log: log(),
+    });
+    e.emit({ ...payload("run.finished"), result: { status: "failed", error: "ghs_abcdefgh12345 / hooksecret99" } });
+    await flush();
+    const sent = deliver.mock.calls[0][2] as WebhookPayload;
+    expect(sent.result?.error).toBe("[redacted] / [redacted]");
+    expect(deliver.mock.calls[0][1]).toBe("hooksecret99");
+  });
+
   it("matches the repo filter case-insensitively, and an unscoped event only reaches unfiltered endpoints", async () => {
     const deliver = ok();
     const e = new WebhookEmitter({
