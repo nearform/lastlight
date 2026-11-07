@@ -58,6 +58,7 @@ export async function deliverWebhook(
     attempts++;
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), timeoutMs);
+    timer.unref?.();
     try {
       const res = await doFetch(endpoint.url, { method: "POST", headers, body, signal: ac.signal, redirect: "manual" });
       lastStatus = res.status;

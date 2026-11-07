@@ -93,6 +93,23 @@ describe("deliverWebhook", () => {
     expect(Date.now() - started).toBeLessThan(2000);
   });
 
+  it("the per-attempt timeout timer never keeps the process alive", async () => {
+    const real = globalThis.setTimeout;
+    const timers: Array<{ hasRef(): boolean }> = [];
+    const spy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+      const t = real(fn, ms);
+      timers.push(t);
+      return t;
+    }) as typeof setTimeout);
+    try {
+      await deliverWebhook(endpoint, "k", payload, { fetch: (async () => new Response("", { status: 200 })) as typeof fetch });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(timers.length).toBeGreaterThan(0);
+    expect(timers.every((t) => !t.hasRef())).toBe(true);
+  });
+
   it("never throws, even when fetch throws synchronously", async () => {
     const fn = vi.fn(() => {
       throw new Error("boom");

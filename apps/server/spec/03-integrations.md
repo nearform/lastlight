@@ -649,7 +649,7 @@ a signed JSON POST on four discrete events. Nothing is sent per phase.
 |---|---|---|
 | `run.started` | A run first becomes `running` (created running, or admitted from the queue). Not on resume from a gate, not on retry. | `WorkflowRunStore` start observer |
 | `run.approval_requested` | A run pauses on an `approve` gate. Reply gates (the explore loop) are not sent. | approval observer, after `pauseForApproval` commits |
-| `run.finished` | Every terminal status: `succeeded`, `failed`, `cancelled`. | terminal observer |
+| `run.finished` | Every terminal status: `succeeded`, `failed`, `cancelled`. A run restarted from the dashboard keeps its id and is not started again, so a receiver can see `failed` and later `succeeded` for one run with no `run.started` between. | terminal observer |
 | `autonomy.held` | An autonomous dispatch was held by the usage check; once per (provider, window, reset). | build gate |
 
 **Payload** (`src/notify/webhook/types.ts`):
