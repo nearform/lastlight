@@ -103,6 +103,39 @@ afterEach(() => {
   resetRuntimeConfigForTests();
 });
 
+describe("token counts are not secrets", () => {
+  it("shows a token-count setting such as providers.<name>.maxTokens when its value is a number", () => {
+    expect(
+      redactPublic({
+        providers: {
+          cc: { maxTokens: 65536, max_tokens: 8192, maxOutputTokens: 4096, contextTokens: 128000, apiKey: "leaked" },
+        },
+      }),
+    ).toEqual({
+      providers: {
+        cc: { maxTokens: 65536, max_tokens: 8192, maxOutputTokens: 4096, contextTokens: 128000, apiKey: "[redacted]" },
+      },
+    });
+  });
+
+  it("still redacts a count key whose value is not a number — a credential pasted there by mistake", () => {
+    // Review feedback: the repo-config route redacts UNVALIDATED repo YAML, so
+    // the key alone cannot vouch for what sits under it.
+    for (const value of ["sk-live-credential", "65536", { nested: "x" }, ["a"], true, null, Number.NaN]) {
+      expect(redactPublic({ maxTokens: value }), JSON.stringify(value)).toEqual({ maxTokens: "[redacted]" });
+    }
+  });
+
+  it("exempts only a whole count key: adminToken and friends stay redacted even with a number", () => {
+    for (const key of [
+      "token", "tokens", "githubToken", "accessToken", "apiTokens", "token_path", "botTokenEnv",
+      "adminToken", "admin_token", "adminTokens", "maxToken", "inputToken", "maxTokensSecret", "x\nmaxTokens",
+    ]) {
+      expect(redactPublic({ [key]: 12345 }), key).toEqual({ [key]: "[redacted]" });
+    }
+  });
+});
+
 describe("GET /repos/:owner/:repo/config", () => {
   it("redacts every key the exported rule matches, at any depth", async () => {
     const secrets = Object.fromEntries(SECRET_KEY_NAMES.map((k) => [k, `leaked-${k}`]));
