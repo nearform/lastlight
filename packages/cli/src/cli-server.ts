@@ -228,7 +228,7 @@ async function runningOptionalSidecars(home: string): Promise<string[]> {
 async function recreateAndVerifySidecars(home: string): Promise<void> {
   const optional = await runningOptionalSidecars(home);
   await composeRun(home, "Recreate egress sidecars", recreateSidecarsArgv(optional));
-  await verifySidecarAddresses(home, "lastlight server update --no-build", optional);
+  await verifySidecarAddresses(home, "lastlight server update --no-build", [...SIDECARS, ...optional]);
 }
 
 // ── state database (`server db …`) ───────────────────────────────────────────
@@ -617,7 +617,9 @@ export function sidecarAddressMismatches(
 async function verifySidecarAddresses(
   home: string,
   rerun = "lastlight server update --no-build",
-  optional: readonly string[] = [],
+  /** The sidecars to check. A single-service start passes just that one, so a
+   *  sidecar that is merely stopped doesn't fail an unrelated start. */
+  services: readonly string[] = SIDECARS,
 ): Promise<void> {
   const c = compose();
   const raw = await captureSoft(c.cmd, composeArgv(home, ["config", "--format", "json"], c.pre), home);
@@ -637,7 +639,7 @@ async function verifySidecarAddresses(
     const name = cfg.networks?.["sandbox-egress"]?.name;
     if (!name) return;
     net = name;
-    for (const svc of [...SIDECARS, ...optional]) {
+    for (const svc of services) {
       const pin = cfg.services?.[svc]?.networks?.["sandbox-egress"]?.ipv4_address;
       if (pin) desired[svc] = pin;
     }
@@ -663,7 +665,7 @@ async function verifySidecarAddresses(
     `Egress sidecars are not on their static ${chalk.bold(net)} addresses, so sandboxes can't resolve or reach anything:\n` +
       bad.map((m) => `    ${m.service}: want ${m.want}, got ${m.got || "(not attached)"}`).join("\n") +
       `\n  Recreate them with ${chalk.cyan(rerun)}, or\n` +
-      `  ${chalk.cyan(`docker compose up -d --no-deps --force-recreate ${[...SIDECARS, ...optional].join(" ")}`)}`,
+      `  ${chalk.cyan(`docker compose up -d --no-deps --force-recreate ${bad.map((m) => m.service).join(" ")}`)}`,
   );
   process.exit(1);
 }
@@ -1007,8 +1009,13 @@ export async function serverStart(service: string | undefined, opts: ServerOpts)
   }
   await guardSandboxNetwork(home, "lastlight server start");
   await composeRun(home, service ? `Start ${service}` : "Start stack", startArgv(service));
-  if (!service || SIDECARS.includes(service) || OPTIONAL_PINNED_SIDECARS.includes(service)) {
-    await verifySidecarAddresses(home, "lastlight server update --no-build", await runningOptionalSidecars(home));
+  if (!service) {
+    await verifySidecarAddresses(home, "lastlight server update --no-build", [
+      ...SIDECARS,
+      ...(await runningOptionalSidecars(home)),
+    ]);
+  } else if (SIDECARS.includes(service) || OPTIONAL_PINNED_SIDECARS.includes(service)) {
+    await verifySidecarAddresses(home, "lastlight server update --no-build", [service]);
   }
   p.log.success("Started.");
 }
