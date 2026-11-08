@@ -315,7 +315,8 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 		<code>gondolin</code> and <code>none</code> call the provider host-side and ignore it.</li>
 		<li><strong>The <code>baseUrl</code> must be <code>https://</code></strong>, origin and path
 		only, and the key env var must belong to this provider alone.</li>
-		<li><strong>Rotating the key</strong> needs an agent restart, then
+		<li><strong>Rotating the key</strong> needs the agent recreated with
+		<code>lastlight server start agent</code> (a plain restart keeps the old key), then
 		<code>docker compose restart model-gateway</code>.</li>
 		<li><strong>If the gateway is down</strong>, model calls to that provider fail.</li>
 	</ul>

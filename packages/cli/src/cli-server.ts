@@ -200,8 +200,35 @@ export function upArgv(): string[] {
  * Recreate, not restart — see {@link SIDECARS}. `--no-deps` keeps it to these
  * five; it never touches the network, so an attached sandbox doesn't block it.
  */
-export function recreateSidecarsArgv(): string[] {
-  return ["up", "-d", "--no-deps", "--force-recreate", ...SIDECARS];
+export function recreateSidecarsArgv(extra: readonly string[] = []): string[] {
+  return ["up", "-d", "--no-deps", "--force-recreate", ...SIDECARS, ...extra];
+}
+
+/**
+ * Pinned `sandbox-egress` services behind an opt-in compose profile — today
+ * only `model-gateway` (172.30.0.40; sandboxes dial it by IP). Recreated and
+ * address-checked only when already running: naming a profiled service on the
+ * command line activates its profile, which would start it on a host that has
+ * no `sandboxGateway` provider (and no config for it to read).
+ */
+export const OPTIONAL_PINNED_SIDECARS = ["model-gateway"];
+
+/** The optional pinned sidecars with a running container. */
+async function runningOptionalSidecars(home: string): Promise<string[]> {
+  const c = compose();
+  const out: string[] = [];
+  for (const svc of OPTIONAL_PINNED_SIDECARS) {
+    const id = await captureSoft(c.cmd, composeArgv(home, ["ps", "-q", svc], c.pre), home);
+    if (id) out.push(svc);
+  }
+  return out;
+}
+
+/** Recreate the egress sidecars (plus any running optional one), then check their addresses. */
+async function recreateAndVerifySidecars(home: string): Promise<void> {
+  const optional = await runningOptionalSidecars(home);
+  await composeRun(home, "Recreate egress sidecars", recreateSidecarsArgv(optional));
+  await verifySidecarAddresses(home, "lastlight server update --no-build", optional);
 }
 
 // ── state database (`server db …`) ───────────────────────────────────────────
@@ -587,10 +614,19 @@ export function sidecarAddressMismatches(
  * that for two days). Best-effort like {@link guardSandboxNetwork}: if docker
  * can't be queried, it proceeds.
  */
-async function verifySidecarAddresses(home: string, rerun = "lastlight server update --no-build"): Promise<void> {
+async function verifySidecarAddresses(
+  home: string,
+  rerun = "lastlight server update --no-build",
+  optional: readonly string[] = [],
+): Promise<void> {
   const c = compose();
   const raw = await captureSoft(c.cmd, composeArgv(home, ["config", "--format", "json"], c.pre), home);
-  if (!raw) return;
+  if (!raw) {
+    // Legacy docker-compose v1 has no `config --format json`; say so rather
+    // than let the deploy look checked.
+    p.log.warn("Couldn't read the compose config, so the egress sidecar addresses were not checked.");
+    return;
+  }
   let net: string;
   const desired: Record<string, string> = {};
   try {
@@ -601,7 +637,7 @@ async function verifySidecarAddresses(home: string, rerun = "lastlight server up
     const name = cfg.networks?.["sandbox-egress"]?.name;
     if (!name) return;
     net = name;
-    for (const svc of SIDECARS) {
+    for (const svc of [...SIDECARS, ...optional]) {
       const pin = cfg.services?.[svc]?.networks?.["sandbox-egress"]?.ipv4_address;
       if (pin) desired[svc] = pin;
     }
@@ -627,7 +663,7 @@ async function verifySidecarAddresses(home: string, rerun = "lastlight server up
     `Egress sidecars are not on their static ${chalk.bold(net)} addresses, so sandboxes can't resolve or reach anything:\n` +
       bad.map((m) => `    ${m.service}: want ${m.want}, got ${m.got || "(not attached)"}`).join("\n") +
       `\n  Recreate them with ${chalk.cyan(rerun)}, or\n` +
-      `  ${chalk.cyan(`docker compose up -d --no-deps --force-recreate ${SIDECARS.join(" ")}`)}`,
+      `  ${chalk.cyan(`docker compose up -d --no-deps --force-recreate ${[...SIDECARS, ...optional].join(" ")}`)}`,
   );
   process.exit(1);
 }
@@ -971,7 +1007,9 @@ export async function serverStart(service: string | undefined, opts: ServerOpts)
   }
   await guardSandboxNetwork(home, "lastlight server start");
   await composeRun(home, service ? `Start ${service}` : "Start stack", startArgv(service));
-  if (!service) await verifySidecarAddresses(home, "lastlight server update --no-build");
+  if (!service || SIDECARS.includes(service) || OPTIONAL_PINNED_SIDECARS.includes(service)) {
+    await verifySidecarAddresses(home, "lastlight server update --no-build", await runningOptionalSidecars(home));
+  }
   p.log.success("Started.");
 }
 
@@ -1156,8 +1194,7 @@ export async function serverUpdate(opts: UpdateOpts): Promise<void> {
     await pullImages(home, tag, isAgent); // agent only — the serving container
     await guardSandboxNetwork(home);
     await composeRun(home, "Recreate services", upArgv());
-    await composeRun(home, "Recreate egress sidecars", recreateSidecarsArgv());
-    await verifySidecarAddresses(home);
+    await recreateAndVerifySidecars(home);
     await pullImages(home, tag, (img) => !isAgent(img)); // sandbox images, agent already up
   } else {
     if (doBuild && opts.local) {
@@ -1165,8 +1202,7 @@ export async function serverUpdate(opts: UpdateOpts): Promise<void> {
     }
     await guardSandboxNetwork(home);
     await composeRun(home, "Recreate services", upArgv());
-    await composeRun(home, "Recreate egress sidecars", recreateSidecarsArgv());
-    await verifySidecarAddresses(home);
+    await recreateAndVerifySidecars(home);
   }
 
   // Reclaim disk from the versions this update superseded. After `up`, so the

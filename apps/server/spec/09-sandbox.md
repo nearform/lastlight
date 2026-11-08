@@ -852,8 +852,10 @@ it is not on `internal`. Sandboxes mount the shared data volume at `/data`, so
 can neither read the key nor rewrite a config a sidecar loads.
 
 nginx reads the config, and so the key, only when it starts. After rotating a
-gateway provider's key, restart the agent (it rewrites the config), then
-`docker compose restart model-gateway`; until then the gateway sends the old key.
+gateway provider's key, recreate the agent with `lastlight server start agent`
+(it rewrites the config from its environment, which a plain restart doesn't
+refresh), then `docker compose restart model-gateway`; until then the gateway
+sends the old key.
 A gateway provider's `baseUrl` must be `https://` and may not carry a query string, fragment or
 `user:password`: the gateway forwards origin and path only, so boot fails rather
 than dropping them silently.

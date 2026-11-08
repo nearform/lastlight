@@ -62,6 +62,11 @@ describe("cli-server argv builders", () => {
 
   it("recreate sidecars: force-recreates (a restart keeps a drifted address), sidecars only", () => {
     expect(recreateSidecarsArgv()).toEqual(["up", "-d", "--no-deps", "--force-recreate", ...SIDECARS]);
+    // A running opt-in sidecar (model-gateway) is recreated with them, never started by default.
+    expect(recreateSidecarsArgv(["model-gateway"])).toEqual([
+      "up", "-d", "--no-deps", "--force-recreate", ...SIDECARS, "model-gateway",
+    ]);
+    expect(SIDECARS).not.toContain("model-gateway");
     expect(SIDECARS).toContain("coredns-strict");
     expect(SIDECARS).toContain("otel-collector");
   });
