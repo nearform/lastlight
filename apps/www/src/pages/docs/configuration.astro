@@ -279,6 +279,51 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 		offers this as a provider choice ("Self-hosted / gateway endpoint") and writes the block for you.
 	</p>
 
+	<h4 id="provider-headers">Request headers and keeping the key out of the sandbox</h4>
+
+	<p>
+		A provider of your own can send fixed request headers on every model call — flags a gateway
+		reads, such as routing or data retention. They are plain config, so they are never for
+		credentials: <code>authorization</code> and <code>x-api-key</code> are refused, and so are
+		values that pi would expand (<code>!command</code>, <code>$NAME</code>). The key still travels
+		through <code>envKey</code>. A built-in provider can't carry <code>headers</code>; declare your
+		own prefix instead.
+	</p>
+
+	<pre><code>{`providers:
+  commandcode:
+    baseUrl: https://api.commandcode.ai/provider/v1
+    api: openai-completions
+    envKey: COMMANDCODE_API_KEY
+    headers:
+      x-cmd-zdr: "1"           # values are strings — quote numbers
+    sandboxGateway: true       # docker backend: the key stays out of the sandbox`}</code></pre>
+
+	<p>
+		By default a container sandbox holds every provider key it might need, because the model call
+		runs inside it. With <code>sandboxGateway: true</code> on the <strong>docker</strong> backend,
+		the sandbox gets only a placeholder key and calls the provider through the <strong>model
+		gateway</strong> sidecar, which adds the real key and the provider's headers and forwards over
+		verified TLS. It forwards only the model-call paths, and the provider's host leaves the
+		sandbox's strict egress allowlist, so the sandbox can't reach it directly. Enable the sidecar
+		with <code>COMPOSE_PROFILES=model-gateway</code>.
+	</p>
+
+	<ul>
+		<li><strong>Custom providers on docker only.</strong> A built-in provider refuses the flag, and
+		so do the <code>smol</code> and <code>kubernetes</code> backends (they have no gateway).
+		<code>gondolin</code> and <code>none</code> call the provider host-side and ignore it.</li>
+		<li><strong>The <code>baseUrl</code> must be <code>https://</code></strong>, origin and path
+		only, and the key env var must belong to this provider alone.</li>
+		<li><strong>Rotating the key</strong> needs an agent restart, then
+		<code>docker compose restart model-gateway</code>.</li>
+		<li><strong>If the gateway is down</strong>, model calls to that provider fail.</li>
+	</ul>
+
+	<p>
+		The full rules are in <a href="/spec/02-configuration#provider-endpoints--pointing-at-a-gateway">the configuration spec</a>.
+	</p>
+
 	<table class="docs-table config-table">
 		<colgroup>
 			<col class="col-var" />

@@ -289,8 +289,10 @@ docker compose up -d agent</code></pre>
 	<p>
 		Or let the CLI do it. With <code>lastlight</code> installed on the host,
 		<code>lastlight server update</code> pulls your overlay + the core repo,
-		rebuilds, recreates the stack, restarts the egress sidecars, and
-		health-checks — the same flow, with live progress. <code>server
+		pulls the release images, recreates the stack, recreates the egress
+		sidecars and checks each is back on its static network address (the
+		deploy fails if one isn't), and health-checks — the same flow, with live
+		progress. <code>server
 		start\|stop\|restart\|status</code> cover the rest of the lifecycle, and
 		the dashboard shows an "update available" banner when you're behind.
 	</p>
