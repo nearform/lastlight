@@ -1212,7 +1212,7 @@ setup\|start\|stop\|restart\|update\|status` shell out to `git` + `docker
 compose` in `LASTLIGHT_HOME` (resolved `--home` → env → `serverHome` in
 `~/.lastlight/config.json` → `~/lastlight`). `server update` reproduces the
 production `deploy.sh` flow (pull overlay → converge core → **pull prebuilt
-images** → `up -d --remove-orphans` → restart egress sidecars → health-check).
+images** → `up -d --remove-orphans` → force-recreate egress sidecars + check their static IPs → health-check).
 By default it *pulls* the four images from GHCR
 (`ghcr.io/nearform/lastlight-{agent,sandbox-base,sandbox,sandbox-qa}`, published
 on GitHub Release by the `images` job of `.github/workflows/publish.yml`; the

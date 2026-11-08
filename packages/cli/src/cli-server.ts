@@ -55,8 +55,12 @@ export const OVERRIDE_FILE = "docker-compose.override.yml";
 export function serverDir(home: string): string {
   return path.join(home, "apps", "server");
 }
-/** Egress firewall + collector sidecars force-restarted after an update so they
- *  re-read any regenerated nginx/coredns/collector configs (mirrors deploy.sh). */
+/** Egress firewall + collector sidecars force-RECREATED after an update so they
+ *  re-read any regenerated nginx/coredns/collector configs AND come back on their
+ *  static `ipv4_address` on `sandbox-egress`. A `restart` would keep whatever
+ *  address they hold: when compose recreates the network (an IPAM change, as
+ *  v0.41.0's `ip_range` did) it reattaches them WITHOUT the pin, docker hands out
+ *  dynamic addresses, and every sandbox's `--dns 172.30.0.10` then hangs. */
 export const SIDECARS = [
   "coredns-strict",
   "coredns-open",
@@ -191,9 +195,13 @@ export function upArgv(): string[] {
   return ["up", "-d", "--remove-orphans"];
 }
 
-/** `docker compose restart <sidecars…>` for an update. */
-export function restartSidecarsArgv(): string[] {
-  return ["restart", ...SIDECARS];
+/**
+ * `docker compose up -d --no-deps --force-recreate <sidecars…>` for an update.
+ * Recreate, not restart — see {@link SIDECARS}. `--no-deps` keeps it to these
+ * five; it never touches the network, so an attached sandbox doesn't block it.
+ */
+export function recreateSidecarsArgv(): string[] {
+  return ["up", "-d", "--no-deps", "--force-recreate", ...SIDECARS];
 }
 
 // ── state database (`server db …`) ───────────────────────────────────────────
@@ -545,6 +553,85 @@ async function guardSandboxNetwork(home: string, rerun = "lastlight server updat
   }
 }
 
+// ── sidecar address check ───────────────────────────────────────────────────
+
+/** A sidecar whose `sandbox-egress` address differs from its compose pin. */
+export interface SidecarAddressMismatch {
+  service: string;
+  want: string;
+  /** The container's actual address; empty when it isn't on the network at all. */
+  got: string;
+}
+
+/**
+ * Compare each pinned sidecar's compose `ipv4_address` with the address its
+ * container actually holds. Only services with a pin in `desired` are checked;
+ * one missing from `actual` (not running, or not on the network) is a mismatch,
+ * since sandboxes dial these IPs directly and nothing else answers there.
+ */
+export function sidecarAddressMismatches(
+  desired: Record<string, string>,
+  actual: Record<string, string>,
+): SidecarAddressMismatch[] {
+  return Object.entries(desired)
+    .filter(([service, want]) => (actual[service] ?? "") !== want)
+    .map(([service, want]) => ({ service, want, got: actual[service] ?? "" }))
+    .sort((a, b) => a.service.localeCompare(b.service));
+}
+
+/**
+ * After `up`: fail the command when an egress sidecar isn't on its static
+ * `sandbox-egress` address. Sandboxes are started with `--dns <coredns IP>` and
+ * reach nginx by that IP, so a drifted sidecar makes every model call hang
+ * until it times out while `/health` stays green (v0.41.0 shipped exactly
+ * that for two days). Best-effort like {@link guardSandboxNetwork}: if docker
+ * can't be queried, it proceeds.
+ */
+async function verifySidecarAddresses(home: string, rerun = "lastlight server update --no-build"): Promise<void> {
+  const c = compose();
+  const raw = await captureSoft(c.cmd, composeArgv(home, ["config", "--format", "json"], c.pre), home);
+  if (!raw) return;
+  let net: string;
+  const desired: Record<string, string> = {};
+  try {
+    const cfg = JSON.parse(raw) as {
+      networks?: Record<string, { name?: string }>;
+      services?: Record<string, { networks?: Record<string, { ipv4_address?: string } | null> }>;
+    };
+    const name = cfg.networks?.["sandbox-egress"]?.name;
+    if (!name) return;
+    net = name;
+    for (const svc of SIDECARS) {
+      const pin = cfg.services?.[svc]?.networks?.["sandbox-egress"]?.ipv4_address;
+      if (pin) desired[svc] = pin;
+    }
+  } catch {
+    return;
+  }
+  if (Object.keys(desired).length === 0) return;
+
+  const actual: Record<string, string> = {};
+  for (const svc of Object.keys(desired)) {
+    const id = await captureSoft(c.cmd, composeArgv(home, ["ps", "-q", svc], c.pre), home);
+    if (!id) continue;
+    const ip = await captureSoft("docker", [
+      "inspect", id.split("\n")[0],
+      "--format", `{{with index .NetworkSettings.Networks "${net}"}}{{.IPAddress}}{{end}}`,
+    ]);
+    if (ip) actual[svc] = ip;
+  }
+
+  const bad = sidecarAddressMismatches(desired, actual);
+  if (bad.length === 0) return;
+  p.log.error(
+    `Egress sidecars are not on their static ${chalk.bold(net)} addresses, so sandboxes can't resolve or reach anything:\n` +
+      bad.map((m) => `    ${m.service}: want ${m.want}, got ${m.got || "(not attached)"}`).join("\n") +
+      `\n  Recreate them with ${chalk.cyan(rerun)}, or\n` +
+      `  ${chalk.cyan(`docker compose up -d --no-deps --force-recreate ${SIDECARS.join(" ")}`)}`,
+  );
+  process.exit(1);
+}
+
 // ── filesystem helpers ───────────────────────────────────────────────────────
 
 function isGitRepo(dir: string): boolean {
@@ -884,6 +971,7 @@ export async function serverStart(service: string | undefined, opts: ServerOpts)
   }
   await guardSandboxNetwork(home, "lastlight server start");
   await composeRun(home, service ? `Start ${service}` : "Start stack", startArgv(service));
+  if (!service) await verifySidecarAddresses(home, "lastlight server update --no-build");
   p.log.success("Started.");
 }
 
@@ -1068,7 +1156,8 @@ export async function serverUpdate(opts: UpdateOpts): Promise<void> {
     await pullImages(home, tag, isAgent); // agent only — the serving container
     await guardSandboxNetwork(home);
     await composeRun(home, "Recreate services", upArgv());
-    await composeRun(home, "Restart egress sidecars", restartSidecarsArgv());
+    await composeRun(home, "Recreate egress sidecars", recreateSidecarsArgv());
+    await verifySidecarAddresses(home);
     await pullImages(home, tag, (img) => !isAgent(img)); // sandbox images, agent already up
   } else {
     if (doBuild && opts.local) {
@@ -1076,7 +1165,8 @@ export async function serverUpdate(opts: UpdateOpts): Promise<void> {
     }
     await guardSandboxNetwork(home);
     await composeRun(home, "Recreate services", upArgv());
-    await composeRun(home, "Restart egress sidecars", restartSidecarsArgv());
+    await composeRun(home, "Recreate egress sidecars", recreateSidecarsArgv());
+    await verifySidecarAddresses(home);
   }
 
   // Reclaim disk from the versions this update superseded. After `up`, so the

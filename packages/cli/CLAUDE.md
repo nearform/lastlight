@@ -146,7 +146,7 @@ lastlight server start|stop|restart [service]   # docker compose up -d / stop|do
 lastlight server update                # the canonical deploy: pull core+overlay, then PULL the
                                         # prebuilt images from GHCR (ghcr.io/nearform/lastlight-*)
                                         # tagged by deploy.version (else :latest) + re-tag to the
-                                        # local names, up -d --remove-orphans, restart sidecars,
+                                        # local names, up -d --remove-orphans, recreate sidecars,
                                         # health-check, then prune superseded image versions
                                         # (keeps the newest two per repo, or deploy.keepImageVersions). --local builds from
                                         # source instead. [--no-core --no-overlay --no-build
@@ -191,7 +191,8 @@ pull the `instance/` overlay first (so a freshly-bumped `deploy.version` core pi
 is visible), converge the core checkout to that pin (`readCorePin`, else `main`),
 **pull** the prebuilt GHCR images (`--local` builds from source in dependency
 waves: `sandbox-base` before `sandbox`/`sandbox-qa`), `up -d --remove-orphans`,
-force-restart the egress sidecars, health-check `:8644/health`, then prune
+force-recreate the egress sidecars and check each is on its static
+`sandbox-egress` IP (a drifted one fails the command), health-check `:8644/health`, then prune
 superseded image versions (keeps the newest `KEEP_IMAGE_VERSIONS` = 2 per repo,
 or the overlay's `deploy.keepImageVersions`; a pinned deploy also drops a stale
 `:latest`).

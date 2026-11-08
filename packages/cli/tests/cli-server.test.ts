@@ -10,7 +10,7 @@ import {
   buildSandboxArgv,
   buildQaArgv,
   upArgv,
-  restartSidecarsArgv,
+  recreateSidecarsArgv,
   parseLsRemoteSha,
   resolveImageTag,
   tagsToPrune,
@@ -19,6 +19,7 @@ import {
   PUBLISHED_IMAGES,
   SIDECARS,
   sandboxNetworkVerdict,
+  sidecarAddressMismatches,
 } from "../src/cli-server.js";
 
 describe("cli-server argv builders", () => {
@@ -59,8 +60,8 @@ describe("cli-server argv builders", () => {
     expect(upArgv()).toEqual(["up", "-d", "--remove-orphans"]);
   });
 
-  it("restart sidecars: all egress + collector services", () => {
-    expect(restartSidecarsArgv()).toEqual(["restart", ...SIDECARS]);
+  it("recreate sidecars: force-recreates (a restart keeps a drifted address), sidecars only", () => {
+    expect(recreateSidecarsArgv()).toEqual(["up", "-d", "--no-deps", "--force-recreate", ...SIDECARS]);
     expect(SIDECARS).toContain("coredns-strict");
     expect(SIDECARS).toContain("otel-collector");
   });
@@ -191,5 +192,29 @@ describe("sandboxNetworkVerdict", () => {
   it("ignores pool order", () => {
     const two = [desired[0], { subnet: "10.0.0.0/24", ipRange: "" }];
     expect(sandboxNetworkVerdict(two, [...two].reverse(), [sandbox], project)).toEqual({ kind: "ok" });
+  });
+});
+
+describe("sidecarAddressMismatches", () => {
+  const desired = { "coredns-strict": "172.30.0.10", "nginx-egress-strict": "172.30.0.20" };
+
+  it("none when every pinned sidecar holds its address", () => {
+    expect(sidecarAddressMismatches(desired, { ...desired })).toEqual([]);
+  });
+
+  it("reports a sidecar docker re-addressed after the network was recreated", () => {
+    expect(
+      sidecarAddressMismatches(desired, { "coredns-strict": "172.30.0.129", "nginx-egress-strict": "172.30.0.20" }),
+    ).toEqual([{ service: "coredns-strict", want: "172.30.0.10", got: "172.30.0.129" }]);
+  });
+
+  it("reports a pinned sidecar that isn't attached at all", () => {
+    expect(sidecarAddressMismatches(desired, { "coredns-strict": "172.30.0.10" })).toEqual([
+      { service: "nginx-egress-strict", want: "172.30.0.20", got: "" },
+    ]);
+  });
+
+  it("ignores containers with no pin", () => {
+    expect(sidecarAddressMismatches({}, { "coredns-strict": "172.30.0.129" })).toEqual([]);
   });
 });
