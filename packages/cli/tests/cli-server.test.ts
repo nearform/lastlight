@@ -20,6 +20,7 @@ import {
   SIDECARS,
   sandboxNetworkVerdict,
   sidecarAddressMismatches,
+  sidecarConfigArgv,
 } from "../src/cli-server.js";
 
 describe("cli-server argv builders", () => {
@@ -221,5 +222,18 @@ describe("sidecarAddressMismatches", () => {
 
   it("ignores containers with no pin", () => {
     expect(sidecarAddressMismatches({}, { "coredns-strict": "172.30.0.129" })).toEqual([]);
+  });
+});
+
+describe("sidecarConfigArgv", () => {
+  it("plain config for the always-on sidecars", () => {
+    expect(sidecarConfigArgv(SIDECARS)).toEqual(["config", "--format", "json"]);
+  });
+
+  it("activates the profile of an opt-in sidecar so its pin is in the config", () => {
+    expect(sidecarConfigArgv([...SIDECARS, "model-gateway"])).toEqual([
+      "--profile", "model-gateway", "config", "--format", "json",
+    ]);
+    expect(sidecarConfigArgv(["model-gateway"])).toEqual(["--profile", "model-gateway", "config", "--format", "json"]);
   });
 });

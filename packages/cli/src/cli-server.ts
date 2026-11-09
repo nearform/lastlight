@@ -213,6 +213,17 @@ export function recreateSidecarsArgv(extra: readonly string[] = []): string[] {
  */
 export const OPTIONAL_PINNED_SIDECARS = ["model-gateway"];
 
+/**
+ * `docker compose config` args that can see every sidecar in `services`.
+ * `config` omits a profile-gated service unless its profile is active, and the
+ * CLI's own env rarely sets `COMPOSE_PROFILES`, so without `--profile` the
+ * model-gateway pin is never found and the check passes it blind.
+ */
+export function sidecarConfigArgv(services: readonly string[]): string[] {
+  const profiles = services.filter((s) => OPTIONAL_PINNED_SIDECARS.includes(s));
+  return [...profiles.flatMap((s) => ["--profile", s]), "config", "--format", "json"];
+}
+
 /** The optional pinned sidecars with a running container. */
 async function runningOptionalSidecars(home: string): Promise<string[]> {
   const c = compose();
@@ -622,7 +633,7 @@ async function verifySidecarAddresses(
   services: readonly string[] = SIDECARS,
 ): Promise<void> {
   const c = compose();
-  const raw = await captureSoft(c.cmd, composeArgv(home, ["config", "--format", "json"], c.pre), home);
+  const raw = await captureSoft(c.cmd, composeArgv(home, sidecarConfigArgv(services), c.pre), home);
   if (!raw) {
     // Legacy docker-compose v1 has no `config --format json`; say so rather
     // than let the deploy look checked.
