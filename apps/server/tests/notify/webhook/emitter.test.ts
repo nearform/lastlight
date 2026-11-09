@@ -203,6 +203,27 @@ describe("installWebhookObservers", () => {
     });
   });
 
+  it("a run finished twice in the same state reports once; a retry that finishes again reports again", () => {
+    // The engine finishes a run when its last phase ends, and the workflow
+    // wrapper finishes it again; both writes fire the terminal observers.
+    const { db, obs } = fakeDb();
+    const emit = vi.fn();
+    installWebhookObservers(db as never, { emit } as never, ctx);
+    const phase = { phase: "pr", timestamp: "2026-11-07T09:10:00Z", success: true };
+    const done = run({ status: "succeeded", phaseHistory: [phase] });
+
+    obs.terminal[0](done, "succeeded");
+    obs.terminal[0]({ ...done, updatedAt: "2026-11-07T09:10:02Z" }, "succeeded");
+    obs.terminal[0](run({ id: "run-2", status: "succeeded", phaseHistory: [phase] }), "succeeded");
+    // A retry runs more phases before it finishes again.
+    obs.terminal[0](
+      run({ status: "succeeded", phaseHistory: [phase, { ...phase, timestamp: "2026-11-07T10:00:00Z" }] }),
+      "succeeded",
+    );
+
+    expect(emit.mock.calls.map((c) => (c[0] as WebhookPayload).run?.id)).toEqual(["run-1", "run-2", "run-1"]);
+  });
+
   it("an emitter that throws never escapes the observer", () => {
     const { db, obs } = fakeDb();
     installWebhookObservers(db as never, { emit: () => { throw new Error("boom"); } } as never, ctx);

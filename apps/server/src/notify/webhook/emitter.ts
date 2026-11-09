@@ -124,7 +124,17 @@ export function installWebhookObservers(
     if (approval.kind !== "approve") return;
     send("run.approval_requested", run, { approval: { gate: approval.gate, summary: approval.summary } });
   });
+  // The engine finishes a run when its last phase ends and the workflow
+  // wrapper finishes it again, and the store fires its observers for both
+  // writes. One report per (run, status, phases run): a retry that finishes
+  // again has run more phases, so it is reported.
+  const reported = new Map<string, string>();
   db.runs.addTerminalObserver((run, status) => {
+    const key = `${status}|${run.phaseHistory?.length ?? 0}`;
+    if (reported.get(run.id) === key) return;
+    reported.delete(run.id);
+    reported.set(run.id, key);
+    if (reported.size > 500) reported.delete(reported.keys().next().value as string);
     const repo = qualifyRepo(run.owner, run.repo);
     const prNumber = numberField(run.context?.prNumber) ?? numberField(run.scratch?.prNumber);
     const error = typeof run.context?.error === "string" ? run.context.error : undefined;
