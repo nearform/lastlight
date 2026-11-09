@@ -988,6 +988,17 @@ function clonePublic(obj: Record<string, unknown> | null): Record<string, unknow
  */
 export const SENSITIVE_KEY_RE =
   /secret|token|password|passwd|credential|private[-_]?key|signing[-_]?key|api[-_]?key|key[-_]?path|\bpem\b/i;
+/**
+ * A WHOLE key that names a count of tokens (`maxTokens`, `max_tokens`,
+ * `maxOutputTokens`, `contextTokens`). `SENSITIVE_KEY_RE` matches it for the
+ * `token` in it, but its value is a number the operator tunes and needs to read
+ * back, so `redactPublic` shows it — when, and only when, the value IS a finite
+ * number. Anchored at both ends, so `adminToken` or `maxTokensSecret` never
+ * qualifies, and the value check keeps a credential pasted under a count key
+ * (repo YAML is redacted before validation) masked.
+ */
+export const TOKEN_COUNT_KEY_RE =
+  /^(?:max|min|max[-_]?output|output|input|context|reasoning|thinking)[-_]?tokens$/i;
 // `url` deliberately does NOT match — `database.url` is masked by VALUE below
 // instead, so `file:/app/data/lastlight.db` stays legible in the provenance
 // view while `postgres://user:pass@host/db` does not. A key rule could not
@@ -1008,7 +1019,8 @@ export function redactPublic<T>(value: T): T {
   if (isPlainObject(value)) {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
-      out[k] = SENSITIVE_KEY_RE.test(k) ? "[redacted]" : redactPublic(v);
+      const tokenCount = TOKEN_COUNT_KEY_RE.test(k) && typeof v === "number" && Number.isFinite(v);
+      out[k] = SENSITIVE_KEY_RE.test(k) && !tokenCount ? "[redacted]" : redactPublic(v);
     }
     return out as unknown as T;
   }
