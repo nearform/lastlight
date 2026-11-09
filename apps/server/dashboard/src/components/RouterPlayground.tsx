@@ -423,8 +423,10 @@ export function RouterPlayground() {
           where the event would route, and why.
         </p>
       </div>
-      <div className="flex flex-1 overflow-hidden">
-        <div ref={wrapperRef} className="flex-1 min-w-0">
+      {/* Below lg the graph sits above the form instead of beside it: a fixed
+          w-80 side panel left a phone no room for the graph at all. */}
+      <div className="flex flex-1 flex-col lg:flex-row overflow-hidden">
+        <div ref={wrapperRef} className="flex-1 min-w-0 min-h-[14rem]">
           <ReactFlow
             nodes={nodes}
             edges={edges}
@@ -451,7 +453,7 @@ export function RouterPlayground() {
         </div>
 
         {/* Form + why panel */}
-        <div className="w-80 shrink-0 border-l border-hairline overflow-auto p-4 space-y-4 bg-base-100">
+        <div className="max-h-[55%] lg:max-h-none lg:w-80 shrink-0 border-t lg:border-t-0 lg:border-l border-hairline overflow-auto p-4 space-y-4 bg-base-100">
           {!selectedType || !fields ? (
             <p className="text-xs text-muted">
               Pick an input on the left, then click an event type to configure and trigger a test.

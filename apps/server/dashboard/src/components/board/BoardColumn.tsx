@@ -76,7 +76,7 @@ export function BoardColumn({
         dnd?.onDrop(target, e.dataTransfer.getData(DRAG_MIME) || null);
       }}
       className={clsx(
-        "ll-board-column flex w-96 shrink-0 flex-col overflow-hidden rounded-panel border transition-colors",
+        "ll-board-column flex w-[min(24rem,calc(100vw-6rem))] shrink-0 flex-col overflow-hidden rounded-panel border transition-colors",
         over && accepts
           ? "border-primary bg-primary/[0.06] ring-1 ring-primary/40"
           : "border-hairline",

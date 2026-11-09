@@ -7,6 +7,8 @@ import { MessageFeed, type MessageOrder } from "./components/MessageFeed";
 import { Login } from "./components/Login";
 import { CliAuthorize } from "./components/CliAuthorize";
 import { useSessionStream } from "./hooks/useSessionStream";
+import { useIsNarrow } from "./hooks/useIsNarrow";
+import { Tabs, TabButton } from "./components/Tabs";
 import { WorkflowList } from "./components/WorkflowList";
 import { WorkflowDefinitions } from "./components/WorkflowDefinitions";
 import { HomePage } from "./components/HomePage";
@@ -212,9 +214,15 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     }
   }, [filteredSessions, selectedId]);
 
+  // Below lg the list and the message feed are two tabs, not a split — the
+  // same idiom as the Workflow Runs and Workflows pages.
+  const narrow = useIsNarrow();
+  const [sessionPane, setSessionPane] = useState<"list" | "messages">("list");
+
   const handleSelect = (id: string) => {
     setUserSelected(true);
     setSelectedId(id);
+    setSessionPane("messages");
   };
 
   const selectedSession = useMemo(
@@ -379,7 +387,18 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             sourceFilter={sourceFilter}
             onFilterChange={setSourceFilter}
           />
+          {narrow && (
+            <Tabs className="px-2 bg-base-200/40">
+              <TabButton active={sessionPane === "list"} onClick={() => setSessionPane("list")}>
+                Sessions
+              </TabButton>
+              <TabButton active={sessionPane === "messages"} onClick={() => setSessionPane("messages")}>
+                Messages
+              </TabButton>
+            </Tabs>
+          )}
           <div className="flex flex-1 overflow-hidden">
+            {(!narrow || sessionPane === "list") && (
             <SessionList
               sessions={filteredSessions}
               error={error}
@@ -389,7 +408,10 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
               onLoadMore={() => setLimit((l) => l + PAGE_SIZE)}
               totalAvailable={sessions.length}
               showLiveOnly={showLiveOnly}
+              className={narrow ? "flex-1 min-w-0" : undefined}
             />
+            )}
+            {(!narrow || sessionPane === "messages") && (
             <MessageFeed
               sessionId={selectedId}
               sourcePath={sessionSourcePath}
@@ -401,6 +423,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
               // terminate. Hide the kill button for that tab.
               onTerminate={isChatSessionsTab ? undefined : handleTerminate}
             />
+            )}
           </div>
         </div>
       ) : tab === "crons" ? (
