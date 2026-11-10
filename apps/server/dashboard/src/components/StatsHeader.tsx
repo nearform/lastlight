@@ -149,7 +149,12 @@ export function StatsHeader({
   const statusInfo = STATUS_LABEL[streamStatus];
 
   return (
-    <header className="bg-base-200/85 backdrop-blur-sm border-b border-hairline flex items-center gap-3 px-4 h-12 shrink-0 z-30">
+    // Below lg (the dashboard's narrow breakpoint, see useIsNarrow) the header
+    // wraps: brand and the icon buttons on the first row, the search, time
+    // range and repo scope on a second. The wrapper around those three is
+    // `lg:contents`, so on a wide screen they sit in the one row exactly where
+    // they always did.
+    <header className="bg-base-200/85 backdrop-blur-sm border-b border-hairline flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2 lg:py-0 lg:h-12 lg:flex-nowrap shrink-0 z-30">
       <div className="flex items-center gap-2.5 shrink-0">
         <NearformLogo size={28} className="nf-logo" />
         <span className="text-base font-bold tracking-tight">Last Light</span>
@@ -159,7 +164,8 @@ export function StatsHeader({
         />
       </div>
 
-      <div className="relative shrink-0 w-64">
+      <div className="order-last flex w-full flex-wrap items-center gap-x-3 gap-y-2 min-w-0 lg:contents">
+      <div className="relative flex-1 min-w-[8rem] lg:flex-none lg:shrink-0 lg:w-64">
         <input
           type="text"
           value={query}
@@ -182,7 +188,7 @@ export function StatsHeader({
         )}
       </div>
 
-      <div className="flex items-center gap-0.5 shrink-0 border-l border-hairline pl-3">
+      <div className="flex items-center gap-0.5 shrink-0 lg:border-l lg:border-hairline lg:pl-3">
         <Clock size={12} className="text-faint shrink-0 mr-0.5" />
         {!hideLive && (
           <button
@@ -211,6 +217,7 @@ export function StatsHeader({
       </div>
 
       <RepoScopeToggle />
+      </div>
 
       <div className="flex-1" />
 

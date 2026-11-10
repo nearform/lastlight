@@ -64,6 +64,8 @@ interface Props {
   onLoadMore: () => void;
   totalAvailable: number;
   showLiveOnly: boolean;
+  /** Width classes; the default is the fixed side column of the wide split. */
+  className?: string;
 }
 
 export function SessionList({
@@ -75,6 +77,7 @@ export function SessionList({
   onLoadMore,
   totalAvailable,
   showLiveOnly,
+  className = "w-80 shrink-0",
 }: Props) {
   const { allowed: allowedRepos } = useVisibleRepos();
   // Per-repo visibility (issue #169). `allowed === null` is the fail-open
@@ -84,7 +87,7 @@ export function SessionList({
   const displayed = showLiveOnly ? visible.filter((s) => s.live) : visible;
 
   return (
-    <aside className="w-80 shrink-0 border-r border-hairline bg-base-200/40 overflow-y-auto flex flex-col">
+    <aside className={clsx(className, "border-r border-hairline bg-base-200/40 overflow-y-auto flex flex-col")}>
       {error && (
         <div className="px-3 py-2 text-2xs text-error border-b border-hairline">{error}</div>
       )}

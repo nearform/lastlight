@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { ExternalLink } from "lucide-react";
+import { ArrowLeft, ExternalLink } from "lucide-react";
 import clsx from "clsx";
 import { api, type RepoEntry } from "../api";
 import { WorkflowList } from "./WorkflowList";
 import { ArtifactsPage } from "./ArtifactsPage";
 import { RepoConfigPane } from "./RepoConfigPane";
 import { GhLink } from "./GhLink";
+import { useIsNarrow } from "../hooks/useIsNarrow";
 import { repoUrl } from "../lib/githubLinks";
 import {
   useUrlState,
@@ -62,6 +63,9 @@ export function ReposPage({ timeRange, query }: ReposPageProps) {
     enumSerializer<RepoTab>("workflows"),
   );
 
+  // Below lg the list and the detail are one column: the list until a repo is
+  // picked, then the detail with a way back.
+  const narrow = useIsNarrow();
   const [repos, setRepos] = useState<RepoEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -88,7 +92,12 @@ export function ReposPage({ timeRange, query }: ReposPageProps) {
   return (
     <div className="flex flex-1 overflow-hidden bg-base-100">
       {/* ── Repo list ──────────────────────────────────────────────────── */}
-      <div className="w-72 shrink-0 border-r border-hairline flex flex-col overflow-hidden">
+      <div
+        className={clsx(
+          narrow ? (repo ? "hidden" : "flex-1 min-w-0") : "w-72 shrink-0",
+          "border-r border-hairline flex flex-col overflow-hidden",
+        )}
+      >
         <div className="border-b border-hairline px-3 py-3">
           <div className="text-xs font-semibold text-strong">Repositories</div>
           {/* Phase 2 (issue #169): a GitHub-team filter <select> lands here,
@@ -180,7 +189,16 @@ export function ReposPage({ timeRange, query }: ReposPageProps) {
       {repo ? (
         <div className="flex flex-1 flex-col overflow-hidden">
           {/* Sub-tab strip */}
-          <div className="flex items-center gap-2 border-b border-hairline bg-base-200/40 px-4 py-2 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 border-b border-hairline bg-base-200/40 px-4 py-2 shrink-0">
+            {narrow && (
+              <button
+                onClick={() => setRepo("")}
+                className="btn btn-ghost btn-xs ll-control text-muted"
+                aria-label="Back to the repository list"
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+              </button>
+            )}
             {(() => {
               const href = repoUrl(repo);
               const cls = "text-sm font-semibold text-base-content font-mono";
@@ -192,7 +210,7 @@ export function ReposPage({ timeRange, query }: ReposPageProps) {
                 <span className={cls}>{repo}</span>
               );
             })()}
-            <div className="ml-4 flex gap-1">
+            <div className="flex gap-1 lg:ml-4">
               {REPO_TABS.map((t) => (
                 <button
                   key={t}
@@ -219,7 +237,7 @@ export function ReposPage({ timeRange, query }: ReposPageProps) {
             )}
           </div>
         </div>
-      ) : (
+      ) : narrow ? null : (
         <div className="flex flex-1 items-center justify-center text-sm text-faint">
           select a repository
         </div>
