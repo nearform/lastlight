@@ -76,7 +76,7 @@ directory (a full checkout + `instance/` overlay) resolved from `--home` →
 lastlight server setup                 # scaffold/adopt the working dir; create or clone the overlay
 lastlight server build                 # build the docker images from source
 lastlight server start | stop | restart [service]
-lastlight server update                # pull core + overlay, fetch prebuilt images, recreate, restart sidecars
+lastlight server update                # pull core + overlay, fetch prebuilt images, recreate, recreate sidecars
 lastlight server status                # compose state + core/overlay version drift
 lastlight server list                  # the lastlight-* containers
 lastlight server logs [service] [--tail n] [--since 10m] [--follow]

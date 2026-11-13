@@ -27,13 +27,13 @@ lastlight server restart [service] # restart (default service: agent)
 ## Redeploy after a code change (the canonical deploy)
 
 ```bash
-lastlight server update            # pull core + overlay, build images, recreate, restart sidecars, health-check
+lastlight server update            # pull core + overlay, build images, recreate, recreate sidecars, health-check
 #   flags: --no-core --no-overlay --no-build --yes
 ```
 
 This: git-pulls the core repo and the `instance/` overlay, builds the `agent` +
 `sandbox` (+ best-effort `sandbox-qa`) images, `docker compose up -d
---remove-orphans`, force-restarts the egress sidecars (coredns + nginx + otel),
+--remove-orphans`, force-recreates the egress sidecars (coredns + nginx + otel) and checks each is back on its static IP,
 and health-checks `http://127.0.0.1:8644/health`.
 
 ## Logs & health

@@ -200,8 +200,9 @@ services:
   # rest of agent-data. Not on `internal`, like the firewalls. Opt-in
   # (`COMPOSE_PROFILES=model-gateway`): without a `sandboxGateway` provider
   # there is no config for it to load. nginx reads the config (and so the
-  # keys) only at start: after rotating a key, restart the agent (it rewrites
-  # the config), then `docker compose restart model-gateway`.
+  # keys) only at start: after rotating a key, recreate the agent with
+  # `lastlight server start agent` (a plain restart keeps the old env), then
+  # `docker compose restart model-gateway`.
   model-gateway:
     image: nginx:1.31-alpine
     profiles: ["model-gateway"]

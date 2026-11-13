@@ -852,8 +852,10 @@ it is not on `internal`. Sandboxes mount the shared data volume at `/data`, so
 can neither read the key nor rewrite a config a sidecar loads.
 
 nginx reads the config, and so the key, only when it starts. After rotating a
-gateway provider's key, restart the agent (it rewrites the config), then
-`docker compose restart model-gateway`; until then the gateway sends the old key.
+gateway provider's key, recreate the agent with `lastlight server start agent`
+(it rewrites the config from its environment, which a plain restart doesn't
+refresh), then `docker compose restart model-gateway`; until then the gateway
+sends the old key.
 A gateway provider's `baseUrl` must be `https://` and may not carry a query string, fragment or
 `user:password`: the gateway forwards origin and path only, so boot fails rather
 than dropping them silently.
@@ -869,6 +871,18 @@ names the containers. It checks again immediately before `compose up`, since a
 run can spawn a sandbox while images are pulled or built; `lastlight server
 start` runs the same check. Let those runs finish (or `docker stop` them) and
 run the command again; it then recreates the network once.
+
+Recreating the network detaches the sidecars, and compose reattaches the
+existing containers **without** their `ipv4_address` pin, so docker gives them
+dynamic addresses from the new `ip_range`. Sandboxes keep dialing
+`--dns 172.30.0.10`, every lookup hangs, and each model call ends in "Request
+timed out" while `/health` stays green. v0.41.0 shipped exactly this to both
+production hosts for two days. So `server update` force-*recreates* the five
+sidecars (`up -d --no-deps --force-recreate`, never `restart`, which keeps the
+drifted address) and then checks that each is on its compose `ipv4_address`,
+exiting non-zero and naming the sidecar when one isn't. `server start` runs the
+same check. By hand: `docker compose up -d --no-deps --force-recreate
+coredns-strict coredns-open nginx-egress-strict nginx-egress-open otel-collector`.
 
 The strict allowlist the docker firewalls render is `dockerSandboxAllowlist()`:
 the default allowlist minus every host that only gateway providers use. An entry

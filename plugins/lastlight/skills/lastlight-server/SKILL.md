@@ -129,7 +129,7 @@ key list and value formats.
 ## 5. Build and launch
 
 ```bash
-lastlight server update           # build images, bring stack up, restart sidecars, health-check
+lastlight server update           # build images, bring stack up, recreate sidecars, health-check
 ```
 
 Then verify:

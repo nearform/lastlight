@@ -735,7 +735,9 @@ Either way the sandbox has only the placeholder ([Sandbox](/spec/09-sandbox)).
   config load even for loopback or with `LASTLIGHT_ALLOW_INSECURE_PROVIDER_URLS`,
   since the gateway adds the real key to every request. A query string, fragment
   or `user:password` fails the boot instead of being dropped.
-- **Rotating the key** needs an agent restart (it rewrites the gateway config)
+- **Rotating the key** needs the agent *recreated*, `lastlight server start
+  agent` (it rewrites the gateway config from its environment, and compose fixes
+  `env_file` values at container creation, so a plain restart keeps the old key),
   and then a restart of the `model-gateway` service, which reads its config only
   at start.
 - **A phase with `unrestricted_egress`** can still resolve and reach the
@@ -1212,7 +1214,7 @@ setup\|start\|stop\|restart\|update\|status` shell out to `git` + `docker
 compose` in `LASTLIGHT_HOME` (resolved `--home` → env → `serverHome` in
 `~/.lastlight/config.json` → `~/lastlight`). `server update` reproduces the
 production `deploy.sh` flow (pull overlay → converge core → **pull prebuilt
-images** → `up -d --remove-orphans` → restart egress sidecars → health-check).
+images** → `up -d --remove-orphans` → force-recreate egress sidecars + check their static IPs → health-check).
 By default it *pulls* the four images from GHCR
 (`ghcr.io/nearform/lastlight-{agent,sandbox-base,sandbox,sandbox-qa}`, published
 on GitHub Release by the `images` job of `.github/workflows/publish.yml`; the

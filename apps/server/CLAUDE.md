@@ -1498,9 +1498,15 @@ sudo -u lastlight -i lastlight server update
    the COPY layer is content-addressed on the bundle, so an unchanged agentic-pi
    doesn't rebuild the tail and sandbox-qa's ~300 MB Chromium stays cached.
 4. `docker compose up -d --remove-orphans` (recreates only what changed).
-5. Force-restarts the egress sidecars (`coredns-strict`, `coredns-open`,
+5. Force-**recreates** the egress sidecars (`coredns-strict`, `coredns-open`,
    `nginx-egress-strict`, `nginx-egress-open`, `otel-collector`) so they
-   re-read any regenerated nginx/coredns/collector configs.
+   re-read any regenerated nginx/coredns/collector configs, then checks each is
+   on its static `sandbox-egress` IP and fails the command if one isn't.
+   Recreate, never `restart`: when compose recreates the network (an IPAM
+   change, as v0.41.0's `ip_range` did) it reattaches the sidecars without
+   their `ipv4_address`. A restart keeps the dynamic address, sandboxes' `--dns
+   172.30.0.10` then hangs, and every sandboxed model call times out while
+   `/health` stays green (both prod hosts, two days).
 6. Health-checks `http://127.0.0.1:8644/health`, with live progress throughout.
 7. **Prunes superseded images.** Each pulled version leaves the previous
    `ghcr.io/nearform/lastlight-*:vX.Y.Z` tags on disk (four repos × ~3 GB), so
