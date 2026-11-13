@@ -86,6 +86,8 @@ export interface Sandbox {
   ): Promise<RunResult | undefined>;
   /** Run a deterministic shell command (no LLM). Resolves with its raw result. */
   runCommand(taskId: string, command: string, opts: RunCommandOpts): Promise<RawCommandResult>;
+  /** Process access for the `claude-code` runtime; only the docker adapter has one. */
+  claudeCodePort?(taskId: string): ClaudeCodeExecPort;
   /** Tear down the isolation primitive (container/VM destroy; no-op in-process). */
   dispose(): Promise<void> | void;
   /**
@@ -172,6 +174,19 @@ export interface ProvisionResult {
 }
 
 export type SandboxEvent = Record<string, unknown>;
+
+/**
+ * Raw process access to a provisioned sandbox, for the `claude-code` runtime:
+ * run a command as the `agent` user (argv, never a shell string from the
+ * caller), or stream one's stdout lines. Docker only.
+ */
+export interface ClaudeCodeExecPort {
+  exec(
+    argv: string[],
+    opts?: { stdin?: string; timeoutMs?: number; cwd?: string },
+  ): Promise<{ code: number; stdout: string; stderr: string }>;
+  stream(argv: string[], onLine: (line: string) => void): { stop(): void; done: Promise<number> };
+}
 
 export interface RunAgentOpts {
   model: string;
@@ -441,6 +456,11 @@ class DockerSandbox implements Sandbox {
       timeoutSeconds: opts.timeoutSeconds,
       onLine: () => {},
     });
+  }
+
+  claudeCodePort(taskId: string): ClaudeCodeExecPort {
+    if (!this.sbx) throw new Error("DockerSandbox.claudeCodePort before provision");
+    return this.sbx.sandbox.claudeCodePort(taskId);
   }
 
   async dispose(): Promise<void> {
@@ -837,6 +857,8 @@ export interface FakeBehavior {
   throwOnProvision?: Error | string;
   /** What `usage()` reports; omitted → undefined, as an in-process backend. */
   usage?: ResourceUsage;
+  /** The exec port `claudeCodePort()` hands out; omitted → it throws. */
+  claudeCodePort?: ClaudeCodeExecPort;
 }
 
 /**
@@ -921,6 +943,11 @@ export class FakeSandbox implements Sandbox {
     if (this.behavior.throwOnRunAgent) throw asError(this.behavior.throwOnRunAgent);
     for (const record of this.behavior.events ?? []) onEvent(record);
     return this.behavior.returnRunResult;
+  }
+
+  claudeCodePort(_taskId: string): ClaudeCodeExecPort {
+    if (!this.behavior.claudeCodePort) throw new Error("FakeSandbox has no claudeCodePort configured");
+    return this.behavior.claudeCodePort;
   }
 
   async runCommand(_taskId: string, command: string, opts: RunCommandOpts): Promise<RawCommandResult> {

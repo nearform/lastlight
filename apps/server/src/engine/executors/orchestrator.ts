@@ -1,4 +1,4 @@
-import { basename, join } from "path";
+import { basename, dirname, join, relative } from "path";
 import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { resolveAuthFile } from "../oauth.js";
 import { randomUUID } from "crypto";
@@ -46,6 +46,19 @@ import { recordError, recordExecutionMetrics, setSpanAttributes } from "../../te
 import { AgentSpanTree, recordPiEvent } from "../../telemetry/pi-events.js";
 import { OI, llmTokenAttributes } from "../../telemetry/openinference.js";
 import { logger } from "../../logging/logger.js";
+import { appendFileSync, chmodSync, readFileSync, rmSync } from "fs";
+import { gitAuthEnv } from "agentic-pi/dist/extensions/github/credentials.js";
+import {
+  CLAUDE_CODE_DEFAULTS,
+  CLAUDE_CODE_NEEDS_DOCKER,
+  claudeCodeModelId,
+  isClaudeCodeModel,
+} from "../claude-code/model-ref.js";
+import { runClaudeCodeSession, type ClaudeCodeExecPort, type ClaudeCodeOutcome } from "../claude-code/session.js";
+import { findTokenLeak, redactInSandbox, scanTreeForToken, scrubToken } from "../claude-code/leak-scan.js";
+import { NotesSecretError, publishClaudeNotes, readNotesDir } from "../claude-code/publish-notes.js";
+import { UNTRUSTED_CLOSE, UNTRUSTED_OPEN } from "../screen/screen.js";
+import { GitHubClient } from "agentic-pi/dist/extensions/github/client.js";
 import {
   DEFAULT_MODEL,
   RunResultAccumulator,
@@ -100,6 +113,11 @@ export interface SandboxRunContext {
   agentTimeoutSeconds?: number;
   /** Test seam — substitute a FakeSandbox. Defaults to {@link sandboxFor}. */
   sandboxFactory?: SandboxFactory;
+  /**
+   * The run's minted GitHub token, HOST-side only (never in `env` for a
+   * claude-code phase): Last Light publishes such a phase's notes with it.
+   */
+  hostGitToken?: string;
 }
 
 /**
@@ -220,6 +238,7 @@ export async function withSandbox<T>(
     imageName: ctx.config.sandboxImage === "qa" ? SANDBOX_IMAGE_QA : undefined,
     otel: ctx.config.otel,
   });
+  if (ctx.backend === "docker") ensureClaudeCodeStateDir(ctx.stateDir);
   let provisioned: ProvisionResult | undefined;
   try {
     provisioned = await sandbox.provision(ctx.prePopulate);
@@ -359,6 +378,11 @@ export async function runAgentIn(
   const thinking = coerceThinking(config.variant);
   const profile = access ? AGENTIC_PROFILE_FOR[access.profile] : undefined;
   const sessionsDir = resolveSessionsDir(config);
+  const claudeCode = isClaudeCodeModel(model);
+  if (claudeCode) {
+    const refusal = claudeCodeRefusal(sandbox, prompt, config.telemetry?.phaseName);
+    if (refusal) return { success: false, output: "", turns: 0, durationMs: 0, stopReason: "error_fatal", error: refusal };
+  }
 
   return await (async () => {
     log.info("Running agent", { taskId: ctx.taskId, sandbox: ctx.backend });
@@ -429,7 +453,64 @@ export async function runAgentIn(
 
     let returned;
     try {
-      returned = await sandbox.runAgent(
+      if (claudeCode) {
+        const ccConfig = getRuntimeConfig()?.claudeCode ?? CLAUDE_CODE_DEFAULTS;
+        const token = process.env[ccConfig.tokenEnv] ?? "";
+        // The token never reaches the dashboard, telemetry or the kept
+        // transcript, even when the session printed it (an `env` tool call).
+        // The raw final answer is remembered to check it before it is used.
+        let lastAnswerRaw = "";
+        // An attempt a usage limit stopped is resumed, once, from its kept
+        // transcript; any other attempt starts a fresh session (and transcript).
+        const resume = takeClaudeResume(ctx);
+        const keep = claudeTranscriptKeeper(ctx);
+        const port = sandbox.claudeCodePort!(ctx.taskId);
+        let outcome: ClaudeCodeOutcome;
+        try {
+          outcome = await runClaudeCodeSession(port, {
+          model: claudeCodeModelId(model),
+          prompt: resume ? "continue" : prompt,
+          ...(resume ? { resume } : {}),
+          cwd: prov.agentCwd,
+          skillDirs,
+          memory: claudeMemory(ctx),
+          config: ccConfig,
+          timeoutSeconds: ctx.agentTimeoutSeconds ?? getSandboxTimeouts().agentTimeoutSeconds,
+          onEvent: (e) => {
+            const text = assistantText(e);
+            if (text) lastAnswerRaw = text;
+            onEvent(token ? (JSON.parse(scrubToken(JSON.stringify(e), token)) as SandboxEvent) : e);
+          },
+          onRawLine: (line) => keep(token ? scrubToken(line, token) : line),
+        });
+        } catch (err: unknown) {
+          // Whatever the session got to write is checked on every way out.
+          const leak = await claudeCodeLeaks(token, lastAnswerRaw, prov, port);
+          if (leak) {
+            tree.end();
+            return await claudeCodeStop("error_secret_leak", leak, "", shim, startTime, ctx, model);
+          }
+          throw err;
+        }
+        const leak = await claudeCodeLeaks(token, lastAnswerRaw, prov, port);
+        if (leak) {
+          tree.end();
+          return await claudeCodeStop("error_secret_leak", leak, outcome.sessionId ?? "", shim, startTime, ctx, model);
+        }
+        if (outcome.kind !== "done") {
+          if (outcome.kind === "usage_limit") markClaudeResume(ctx, outcome.sessionId);
+          tree.end();
+          return await claudeCodeFailure(outcome, shim, startTime, ctx, model);
+        }
+        const publishStop = await publishClaudeNotesFor(ctx, prov, token);
+        if (publishStop) {
+          tree.end();
+          return await claudeCodeStop(publishStop.stopReason, publishStop.error, outcome.sessionId, shim, startTime, ctx, model);
+        }
+        onEvent({ type: "agent_end" });
+      } else {
+        await syncOntoClaudeNotes(sandbox, prov, ctx);
+        returned = await sandbox.runAgent(
         ctx.taskId,
         prompt,
         {
@@ -455,6 +536,7 @@ export async function runAgentIn(
         },
         onEvent,
       );
+      }
     } catch (err: unknown) {
       // The single converged fallback path (was three near-identical catches).
       const msg = err instanceof Error ? err.message : String(err);
@@ -545,6 +627,380 @@ export async function runAgentIn(
     });
     return finalResult;
   })();
+}
+
+// ── claude-code runtime ─────────────────────────────────────────────
+
+/** A GitHub tool named in a prompt: the Claude session has none of them. */
+const GITHUB_TOOL_RE = /\bgithub_[a-z][a-z_]*/;
+
+/**
+ * Why a `claude-code` phase cannot run here, or null. Checked before anything
+ * is provisioned so an operator's misconfiguration fails in seconds.
+ */
+function claudeCodeRefusal(sandbox: Sandbox, prompt: string, phase: string | undefined): string | null {
+  if (sandbox.backend !== "docker" || typeof sandbox.claudeCodePort !== "function") return CLAUDE_CODE_NEEDS_DOCKER;
+  // Quoted issue or comment text is not the phase's instructions: an issue
+  // that mentions `github_publish` must neither block nor enable a phase.
+  if (GITHUB_TOOL_RE.test(withoutUntrustedBlocks(prompt))) {
+    return `claude-code is not supported for the ${phase ?? "this"} phase yet: it needs GitHub tools`;
+  }
+  return null;
+}
+
+/** The prompt with every fenced untrusted block cut out (an unclosed one runs to the end). */
+function withoutUntrustedBlocks(prompt: string): string {
+  let out = "";
+  let at = 0;
+  for (;;) {
+    const open = prompt.indexOf(UNTRUSTED_OPEN, at);
+    if (open < 0) return out + prompt.slice(at);
+    out += prompt.slice(at, open);
+    const close = prompt.indexOf(UNTRUSTED_CLOSE, open);
+    if (close < 0) return out;
+    at = close + UNTRUSTED_CLOSE.length;
+  }
+}
+
+/** The phase's agent context, for Claude's user memory; undefined when there is none. */
+function claudeMemory(ctx: SandboxRunContext): string | undefined {
+  try {
+    return agentContextFor(ctx.config) || undefined;
+  } catch (err: unknown) {
+    log.warn("Could not compose the agent context for the Claude Code session", { err });
+    return undefined;
+  }
+}
+
+/**
+ * Every docker sandbox masks `/data/claude-code` with an empty tmpfs. Create
+ * the mountpoint first, as the harness and private, so docker never creates
+ * it (as root) on the shared volume. Best effort.
+ */
+function ensureClaudeCodeStateDir(stateDir: string): void {
+  try {
+    mkdirSync(join(stateDir, "claude-code"), { recursive: true, mode: 0o700 });
+  } catch (err: unknown) {
+    log.warn("Could not create the claude-code state dir", { err });
+  }
+}
+
+/** Where a claude-code phase's raw transcript is kept, so a later attempt can resume it. */
+export function claudeTranscriptPath(stateDir: string, runKey: string, phase: string | undefined): string {
+  const safe = (v: string) => v.replace(/[^A-Za-z0-9._-]/g, "_");
+  return join(stateDir, "claude-code", safe(runKey), `${safe(phase ?? "phase")}.jsonl`);
+}
+
+function claudeRunKey(ctx: SandboxRunContext): string {
+  return ctx.access?.runId ?? basename(ctx.taskId);
+}
+
+/** Host-side record of the last notes commit the host published for a run. */
+function claudePendingSyncPath(ctx: SandboxRunContext): string {
+  return join(dirname(claudeTranscriptPath(ctx.stateDir, claudeRunKey(ctx), undefined)), "pending-sync.json");
+}
+
+/**
+ * The host published a Claude phase's notes through the API, so this run's
+ * checkout is now one commit behind its branch, and agentic-pi's
+ * `github_publish` refuses a checkout that does not descend from the remote
+ * tip. Before the next agentic-pi phase starts, move the pointer forward,
+ * inside THAT phase's sandbox (which holds the GitHub credential anyway; the
+ * Claude sandbox never does, and the host never runs git in a sandbox-written
+ * tree). Only a fast-forward on the checked-out branch: `reset --mixed`
+ * leaves every file as it is. Best effort, once: a failed sync leaves the
+ * phase to recover with the steps `github_publish`'s refusal spells out.
+ */
+async function syncOntoClaudeNotes(sandbox: Sandbox, prov: ProvisionResult, ctx: SandboxRunContext): Promise<void> {
+  if (ctx.backend !== "docker") return;
+  const file = claudePendingSyncPath(ctx);
+  let pending: { branch?: unknown; oid?: unknown };
+  try {
+    pending = JSON.parse(readFileSync(file, "utf8")) as typeof pending;
+  } catch {
+    return;
+  }
+  rmSync(file, { force: true });
+  const { branch, oid } = pending;
+  const token = ctx.env.GIT_TOKEN;
+  if (
+    typeof branch !== "string" || !/^[A-Za-z0-9._/-]+$/.test(branch) || branch.includes("..") ||
+    typeof oid !== "string" || !/^[0-9a-f]{40}$/.test(oid) || !token
+  ) {
+    log.warn("Skipping the sync onto the Claude Code notes commit", { taskId: ctx.taskId });
+    return;
+  }
+  // The checkout was last written by an agent, so no hook or fsmonitor it may
+  // have planted runs here with the credential. What is left: git still reads
+  // the repo's own config (a remote URL, a credential helper), so this is no
+  // stronger than the phase's own git use, which already trusts that tree.
+  const git = "git -c core.hooksPath=/dev/null -c core.fsmonitor=false";
+  const command =
+    `[ "$(${git} rev-parse --abbrev-ref HEAD)" = '${branch}' ] || exit 3; ` +
+    `${git} fetch origin '${branch}' && ${git} merge-base --is-ancestor HEAD ${oid} && ${git} reset --mixed ${oid} >/dev/null`;
+  try {
+    const r = await sandbox.runCommand(ctx.taskId, command, {
+      cwd: prov.agentCwd,
+      sandboxEnv: { ...gitAuthEnv(token), GIT_TERMINAL_PROMPT: "0" },
+      timeoutSeconds: 120,
+    });
+    if (r.exitCode !== 0) log.warn("Sync onto the Claude Code notes commit failed", { taskId: ctx.taskId, exitCode: r.exitCode });
+  } catch (err: unknown) {
+    log.warn("Sync onto the Claude Code notes commit failed", { taskId: ctx.taskId, err: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function claudeTranscriptFile(ctx: SandboxRunContext): string {
+  return claudeTranscriptPath(ctx.stateDir, claudeRunKey(ctx), ctx.config.telemetry?.phaseName);
+}
+
+/** Remember that this phase's session stopped on a usage limit, to resume it. */
+function markClaudeResume(ctx: SandboxRunContext, sessionId: string): void {
+  try {
+    writeFileSync(`${claudeTranscriptFile(ctx)}.resume.json`, JSON.stringify({ sessionId }), { mode: 0o600 });
+  } catch (err: unknown) {
+    log.warn("Could not record the Claude session for a resume", { err });
+  }
+}
+
+/**
+ * The session to resume for this phase, consumed: its id and kept transcript.
+ * Without one, the old transcript is cleared so the next resume never mixes
+ * two sessions' lines.
+ */
+function takeClaudeResume(ctx: SandboxRunContext): { sessionId: string; lines: string[] } | undefined {
+  const file = claudeTranscriptFile(ctx);
+  const marker = `${file}.resume.json`;
+  let sessionId: unknown;
+  try {
+    sessionId = (JSON.parse(readFileSync(marker, "utf8")) as { sessionId?: unknown }).sessionId;
+  } catch {
+    sessionId = undefined;
+  }
+  rmSync(marker, { force: true });
+  if (typeof sessionId === "string" && /^[0-9a-f-]{36}$/i.test(sessionId)) {
+    try {
+      const lines = readFileSync(file, "utf8").split("\n").filter(Boolean);
+      if (lines.length > 0) return { sessionId, lines };
+    } catch {
+      // no transcript kept: start fresh
+    }
+  }
+  rmSync(file, { force: true });
+  return undefined;
+}
+
+function claudeTranscriptKeeper(ctx: SandboxRunContext): (line: string) => void {
+  const file = claudeTranscriptFile(ctx);
+  let ready = false;
+  return (line) => {
+    try {
+      if (!ready) {
+        mkdirSync(join(file, ".."), { recursive: true, mode: 0o700 });
+        ready = true;
+      }
+      appendFileSync(file, line + "\n", { mode: 0o600 });
+      chmodSync(file, 0o600);
+    } catch (err: unknown) {
+      log.warn("Could not keep the Claude transcript line", { err });
+    }
+  };
+}
+
+type ClaudeStop = "usage_limit" | Extract<ClaudeCodeOutcome, { kind: "failed" }>["reason"];
+
+const CLAUDE_FAILURE: Record<ClaudeStop, { stopReason: string; error: (o: ClaudeCodeOutcome, tokenEnv: string) => string }> = {
+  usage_limit: {
+    stopReason: "usage_limit",
+    error: (o) => {
+      const at = o.kind === "usage_limit" ? o.resetsAt : null;
+      return at ? `Claude usage limit reached; the window resets at ${at}` : "Claude usage limit reached; reset time unknown";
+    },
+  },
+  not_ready: { stopReason: "error_sandbox", error: () => "Claude Code did not reach its input prompt in time" },
+  stalled: { stopReason: "error_stalled", error: () => "Claude Code session stalled: its transcript stopped growing" },
+  timeout: { stopReason: "error_timeout", error: () => "Claude Code session hit the phase timeout" },
+  auth_failed: {
+    stopReason: "error_auth",
+    error: (_o, tokenEnv) => `Claude Code sign-in failed or expired: run \`claude setup-token\` and replace ${tokenEnv}`,
+  },
+  exited: { stopReason: "error_sandbox", error: () => "Claude Code session ended before finishing its turn" },
+};
+
+/** The joined text blocks of an assistant `message_end`, else "". */
+function assistantText(e: SandboxEvent): string {
+  if (e.type !== "message_end") return "";
+  const m = e.message as { role?: string; content?: Array<{ type?: string; text?: unknown }> } | undefined;
+  if (m?.role !== "assistant" || !Array.isArray(m.content)) return "";
+  return m.content.map((c) => (c.type === "text" && typeof c.text === "string" ? c.text : "")).join("");
+}
+
+/**
+ * Check what this phase would hand on for the token: its final answer, and
+ * every file in the workspace. Files that hold it are redacted from inside the
+ * sandbox. A walk the file cap cut short fails closed. Returns the phase's
+ * error message, or null when clean.
+ */
+async function claudeCodeLeaks(
+  token: string,
+  finalAnswer: string,
+  prov: ProvisionResult,
+  port: ClaudeCodeExecPort,
+): Promise<string | null> {
+  if (!token) return null;
+  if (findTokenLeak(token, [{ name: "final answer", text: finalAnswer }])) {
+    return "The Claude Code phase's output contained the Claude token (in the final answer); nothing was published";
+  }
+  const { hits, incomplete } = await scanTreeForToken(prov.hostWorkspaceDir, token);
+  if (hits.length > 0) {
+    const rel = relative(prov.hostWorkspaceDir, prov.hostAgentCwd).split("\\").join("/");
+    const root = !rel ? prov.agentCwd : prov.agentCwd.endsWith(`/${rel}`) ? prov.agentCwd.slice(0, -rel.length - 1) : null;
+    if (root) await redactInSandbox(port, root, hits);
+    else log.warn("Could not map the workspace into the sandbox to redact it");
+    const where = hits.slice(0, 5).join(", ") + (hits.length > 5 ? ` and ${hits.length - 5} more` : "");
+    return `The Claude Code phase's output contained the Claude token (in ${where}); it was redacted and nothing was published`;
+  }
+  if (incomplete) {
+    return "The Claude Code phase's workspace is too large to check for the Claude token; nothing was published";
+  }
+  return null;
+}
+
+/**
+ * Repo mode: commit the phase's `.lastlight/` notes to the run's branch from
+ * the host, since the Claude session had no way to. Returns an error message,
+ * or null when published (or when there is nothing to do).
+ */
+async function publishClaudeNotesFor(
+  ctx: SandboxRunContext,
+  prov: ProvisionResult,
+  claudeToken: string,
+): Promise<{ stopReason: string; error: string } | null> {
+  if (ctx.config.buildAssets === "server") return null;
+  const access = ctx.access;
+  const branch = access?.prePopulateBranch;
+  const notesDir = ctx.config.notesDir;
+  if (!access || !branch || !ctx.hostGitToken) {
+    const { files } = await readNotesDir(prov.hostAgentCwd, { dir: notesDir });
+    return files.length === 0
+      ? null
+      : {
+          stopReason: "error_publish",
+          error: "The Claude Code phase wrote notes but this run has no branch or GitHub token to publish them with",
+        };
+  }
+  const token = ctx.hostGitToken;
+  const client = new GitHubClient({ getToken: async () => token, expiresAt: null, canRefresh: false });
+  try {
+    const out = await publishClaudeNotes({
+      gh: {
+        getBranchTip: (o, r, b) => client.getBranchTip(o, r, b),
+        getDefaultBranchTip: async (o, r) => {
+          const repo = await client.getRepository(o, r);
+          const tip = await client.getBranchTip(o, r, repo.default_branch);
+          if (!tip) throw new Error(`default branch ${repo.default_branch} of ${o}/${r} has no tip`);
+          return tip;
+        },
+        createBranchAt: (o, r, b, sha) => client.createBranchAt(o, r, b, sha),
+        publishSignedCommit: (c) => client.publishSignedCommit({ ...c, additions: c.additions.map((a) => ({ ...a, status: "M" as const })) }),
+      },
+      owner: access.owner,
+      repo: access.repo,
+      branch,
+      workspace: prov.hostAgentCwd,
+      notesDir,
+      message: `docs(lastlight): ${ctx.config.telemetry?.phaseName ?? "phase"} notes`,
+      holdsSecret: (b) => !!claudeToken && findTokenLeak(claudeToken, [{ name: "note", text: b.toString("latin1") }]) !== null,
+    });
+    if (out.published && out.oid) recordPendingSync(ctx, branch, out.oid);
+    return null;
+  } catch (err: unknown) {
+    if (err instanceof NotesSecretError) {
+      return {
+        stopReason: "error_secret_leak",
+        error: `The Claude Code phase's notes contained the Claude token (in ${err.path}); nothing was published`,
+      };
+    }
+    return {
+      stopReason: "error_publish",
+      error: `Publishing the Claude Code phase's notes failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+/**
+ * Remember the notes commit for the run's next agentic-pi phase. The notes are
+ * already published, so a failure here only costs that phase the fast-forward.
+ */
+function recordPendingSync(ctx: SandboxRunContext, branch: string, oid: string): void {
+  try {
+    const file = claudePendingSyncPath(ctx);
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+    writeFileSync(file, JSON.stringify({ branch, oid }), { mode: 0o600 });
+  } catch (err: unknown) {
+    log.warn("Could not record the Claude Code notes commit for the next phase", { err });
+  }
+}
+
+async function claudeCodeStop(
+  stopReason: string,
+  error: string,
+  sessionId: string,
+  shim: AgenticShim,
+  startTime: number,
+  ctx: SandboxRunContext,
+  model: string,
+): Promise<ExecutionResult> {
+  const durationMs = Date.now() - startTime;
+  recordExecutionMetrics("agent", {
+    "sandbox.backend": ctx.backend,
+    model,
+    success: false,
+    stop_reason: stopReason,
+    durationMs,
+    "workflow.name": ctx.config.telemetry?.workflowName,
+    "phase.name": ctx.config.telemetry?.phaseName,
+  });
+  await shim.finalizeWithFallback(emptyResult(stopReason, durationMs), sessionId, error).catch(() => null);
+  return { success: false, output: "", turns: 0, error, durationMs, sessionId, stopReason };
+}
+
+async function claudeCodeFailure(
+  outcome: Exclude<ClaudeCodeOutcome, { kind: "done" }>,
+  shim: AgenticShim,
+  startTime: number,
+  ctx: SandboxRunContext,
+  model: string,
+): Promise<ExecutionResult> {
+  const key = outcome.kind === "failed" ? outcome.reason : outcome.kind;
+  const spec = CLAUDE_FAILURE[key];
+  const tokenEnv = (getRuntimeConfig()?.claudeCode ?? CLAUDE_CODE_DEFAULTS).tokenEnv;
+  const error = spec.error(outcome, tokenEnv);
+  const durationMs = Date.now() - startTime;
+  recordExecutionMetrics("agent", {
+    "sandbox.backend": ctx.backend,
+    model,
+    success: false,
+    stop_reason: spec.stopReason,
+    durationMs,
+    "workflow.name": ctx.config.telemetry?.workflowName,
+    "phase.name": ctx.config.telemetry?.phaseName,
+  });
+  const sessionId =
+    (await shim
+      .finalizeWithFallback(emptyResult(spec.stopReason, durationMs), outcome.sessionId ?? `exec-${basename(ctx.taskId)}`, error)
+      .catch(() => null)) ??
+    outcome.sessionId;
+  return {
+    success: false,
+    output: "",
+    turns: 0,
+    error,
+    durationMs,
+    sessionId: sessionId ?? undefined,
+    stopReason: spec.stopReason,
+    ...(outcome.kind === "usage_limit" && outcome.resetsAt ? { retryAfter: outcome.resetsAt } : {}),
+  };
 }
 
 /**

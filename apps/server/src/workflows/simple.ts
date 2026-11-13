@@ -64,6 +64,7 @@ import {
   isPrFixShaped,
 } from "./target-policy.js";
 import { logger } from "../logging/logger.js";
+import { isNotesDir } from "../engine/claude-code/publish-notes.js";
 
 const repoConfigLog = logger("repo-config");
 const simpleLog = logger("simple");
@@ -1108,7 +1109,7 @@ export async function runSimpleWorkflow(
   bootstrapLabel = "lastlight:bootstrap",
   variants?: VariantConfig,
   concurrency?: { maxWorkflows: number; maxQueueWaitMs: number },
-): Promise<WorkflowResult & { backpressure?: boolean }> {
+): Promise<WorkflowResult & { backpressure?: boolean; notBefore?: string }> {
   // The run this dispatch holds live (`./live-runs.ts`), from before its row is
   // created or reused until this function returns — so a duplicate trigger in
   // ANY part of that window (the start hooks, the scheduler, the wrap-up) meets
@@ -1140,7 +1141,7 @@ async function runSimpleWorkflowBody(
   bootstrapLabel: string,
   variants: VariantConfig | undefined,
   concurrency: { maxWorkflows: number; maxQueueWaitMs: number } | undefined,
-): Promise<WorkflowResult & { backpressure?: boolean }> {
+): Promise<WorkflowResult & { backpressure?: boolean; notBefore?: string }> {
   // Kill switch — the BACKSTOP copy.
   //
   // The switch is read twice above this line, and has to be: `dispatch` reads
@@ -1538,6 +1539,9 @@ async function runSimpleWorkflowBody(
     // never committed into the target repo (they're harvested to the server
     // store instead). Absent/false ⇒ repo behaviour (commit the docs).
     externalizeArtifacts: config.buildAssets === "server",
+    // The agent publishes its own notes unless they are externalized; a
+    // claude-code phase also skips it (runner `promptContextFor`).
+    skipAgentPublish: config.buildAssets === "server",
     // Dashboard base URL for the {{artifactUrl}} helper (server-mode doc links).
     publicUrl: callbacks.publicUrl,
     // Public, unauthenticated, image-only base URL for inline screenshot embeds
@@ -1619,6 +1623,8 @@ async function runSimpleWorkflowBody(
   // at `<buildAssetsDir>/<owner>/<repo>/<issueKey>/`, plus whether the docs
   // live at the workspace root (relocated) so `hostRepoDirFor` stages/harvests
   // there instead of inside the repo checkout.
+  // In repo mode, name the run's own notes dir, so a claude-code phase's notes
+  // are published from there alone (never another run's).
   const runConfig: ExecutorConfig =
     config.buildAssets === "server"
       ? {
@@ -1626,7 +1632,9 @@ async function runSimpleWorkflowBody(
           buildAssetsKey: { owner, repo, issueKey },
           buildAssetsRelocated,
         }
-      : config;
+      : isNotesDir(issueDir)
+        ? { ...config, notesDir: issueDir }
+        : config;
 
   try {
     const result = await runWorkflow(
@@ -1651,9 +1659,11 @@ async function runSimpleWorkflowBody(
     } else if (result.backpressure) {
       // k8s ResourceQuota rejected a pod-create: requeue, don't fail. The
       // AdmissionController promotes it again as capacity frees (spec/09-sandbox.md (Concurrency)).
-      await db.runs.requeueRunning(workflowId);
+      await db.runs.requeueRunning(workflowId, result.notBefore ? { notBefore: result.notBefore } : {});
       await notify(
-        `\`${workflowName}\` is waiting for cluster capacity — it'll start automatically when a slot frees.`,
+        result.notBefore
+          ? `\`${workflowName}\` hit its model's usage limit — it'll resume automatically after ${result.notBefore}.`
+          : `\`${workflowName}\` is waiting for cluster capacity — it'll start automatically when a slot frees.`,
       );
       return { success: true, queued: true, backpressure: true, phases: result.phases };
     } else if (!result.success && !result.paused) {

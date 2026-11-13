@@ -1,0 +1,1 @@
+ALTER TABLE `workflow_runs` ADD `not_before` text;

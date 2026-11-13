@@ -172,6 +172,16 @@ gate:
 buildAssets:
   location: repo
 
+# Claude Code runtime. Off unless a role names it: set `models.<role>:
+# claude-code/<model>` in your overlay to run that role's phases in the real,
+# interactive Claude Code CLI (docker sandbox only), signed in with your own
+# subscription token from `claude setup-token`. See docs/claude-code-runtime.md.
+# claudeCode:
+#   tokenEnv: CLAUDE_CODE_OAUTH_TOKEN   # env var holding the token
+#   readyTimeoutSeconds: 60             # session must reach its prompt by then
+#   stallMinutes: 15                    # no transcript growth this long = stalled
+#   pollSeconds: 2                      # done-marker check interval
+
 # State database. `url` is either a libsql-style URL
 # ("file:/app/data/lastlight.db", ":memory:") or a "postgres://…" URL for an
 # external/managed Postgres. null/absent → `file:` + the DB_PATH /

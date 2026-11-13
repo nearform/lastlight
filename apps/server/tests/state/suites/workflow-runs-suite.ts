@@ -1015,6 +1015,35 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
       });
     });
 
+    describe("requeueRunning with notBefore — a run waiting for a usage reset", () => {
+      it("stores not_before on the requeue and clears it on the next admit", async () => {
+        const id = "run-nb-1";
+        await db.runs.createRun({
+          id, workflowName: "build", triggerId: "tnb1", owner: "o", repo: "r",
+          issueNumber: 1, currentPhase: "phase_0", status: "running",
+          startedAt: new Date().toISOString(),
+        } as any);
+        const at = "2026-11-04T15:00:00.000Z";
+        expect(await db.runs.requeueRunning(id, { notBefore: at })).toBe(1);
+        const queued = (await db.runs.getRun(id))!;
+        expect(queued.status).toBe("queued");
+        expect(queued.notBefore).toBe(at);
+        expect(await db.runs.admitRun(id)).toBe(1);
+        expect((await db.runs.getRun(id))!.notBefore ?? null).toBeNull();
+      });
+
+      it("a plain requeue carries no not_before", async () => {
+        const id = "run-nb-2";
+        await db.runs.createRun({
+          id, workflowName: "build", triggerId: "tnb2", owner: "o", repo: "r",
+          issueNumber: 2, currentPhase: "phase_0", status: "running",
+          startedAt: new Date().toISOString(),
+        } as any);
+        await db.runs.requeueRunning(id);
+        expect((await db.runs.getRun(id))!.notBefore ?? null).toBeNull();
+      });
+    });
+
     describe("countRunsForRepoSince — the autonomy pipeline's per-repo day quota", () => {
       const TODAY = new Date().toISOString();
       const YESTERDAY = new Date(Date.now() - 36 * 3_600_000).toISOString();

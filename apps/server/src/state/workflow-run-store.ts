@@ -147,6 +147,11 @@ export interface WorkflowRun {
    * retried forever.
    */
   restartCount?: number;
+  /**
+   * A queued run is not admitted before this ISO time: it is waiting for a
+   * model provider's usage limit to reset. Absent = admissible now.
+   */
+  notBefore?: string;
   startedAt: string;
   updatedAt: string;
   finishedAt?: string;
@@ -906,7 +911,7 @@ export class WorkflowRunStore {
     const now = new Date().toISOString();
     const result = await this.client
       .update(workflowRuns)
-      .set({ status: "running", updatedAt: now })
+      .set({ status: "running", updatedAt: now, notBefore: null })
       .where(and(eq(workflowRuns.id, id), eq(workflowRuns.status, "queued"), ownedRunSql(this.t)));
     return changes(result);
   }
@@ -1285,13 +1290,14 @@ export class WorkflowRunStore {
    * sweep doesn't instantly expire a run that had been running for a while.
    * CAS-guarded on `status = 'running'`; returns rows changed (0 = safe no-op,
    * e.g. the run already finished or was cancelled between phases).
+   * `notBefore` holds it back until a usage-limit reset; admission clears it.
    */
-  async requeueRunning(id: string): Promise<number> {
+  async requeueRunning(id: string, opts: { notBefore?: string } = {}): Promise<number> {
     const { workflowRuns } = this.t;
     const now = new Date().toISOString();
     const result = await this.client
       .update(workflowRuns)
-      .set({ status: "queued", startedAt: now, updatedAt: now })
+      .set({ status: "queued", startedAt: now, updatedAt: now, notBefore: opts.notBefore ?? null })
       .where(and(eq(workflowRuns.id, id), eq(workflowRuns.status, "running"), ownedRunSql(this.t)));
     return changes(result);
   }
