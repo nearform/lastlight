@@ -321,8 +321,9 @@ src/
                         endpoint override moves the allowed host with it (#373).
                         Leading-dot entries (e.g. ".github.com") are
                         wildcards matching apex + all subdomains. Both
-                        backends import it: gondolin passes the list to
-                        agentic-pi's `allowedHttpHosts`; docker generates
+                        backends import it: gondolin passes host + `*.host`
+                        (gondolinHostPatterns) to agentic-pi's
+                        `allowedHttpHosts`; docker generates
                         the nginx ssl_preread + coredns sinkhole configs
                         from it at boot.
     egress-firewall-config.ts

@@ -11,7 +11,7 @@ import { createTaskSandbox, setupTaskWorktree, prePopulateWorkspace } from "./in
 import { GITHUB_EXTRAHEADER_KEY, githubExtraheaderValue } from "./git-http-auth.js";
 import type { DockerSandbox as DockerDriver } from "./docker.js";
 import { SmolSandbox as SmolDriver, smolAvailable, SMOL_WORKSPACE_DIR } from "./smol.js";
-import { ALLOW_ALL_SENTINEL } from "./egress-allowlist.js";
+import { ALLOW_ALL_SENTINEL, gondolinHostPatterns } from "./egress-allowlist.js";
 import { getDockerSandboxOtelEnv, getOtelEnvForSandbox } from "../telemetry/index.js";
 import { KubernetesSandbox } from "./k8s/kubernetes-sandbox.js";
 import type { ResourceUsage } from "./resource-usage.js";
@@ -646,7 +646,14 @@ class InProcessSandbox implements Sandbox {
     // writing it back was a no-op with a race attached. agentic-pi and pi-ai
     // read that same ambient env directly, which is correct for values that are
     // identical for every run.
-    const allowedHttpHosts = this.opts.egress.unrestricted ? [ALLOW_ALL_SENTINEL] : this.opts.egress.hosts;
+    // gondolin matches hostnames exactly, so each host also needs its `*.`
+    // form (issue #503). Under `none` there is no VM and nothing is enforced,
+    // so the list is passed as it is.
+    const allowedHttpHosts = this.opts.egress.unrestricted
+      ? [ALLOW_ALL_SENTINEL]
+      : this.mode === "gondolin"
+        ? gondolinHostPatterns(this.opts.egress.hosts)
+        : this.opts.egress.hosts;
     // Loaded lazily: agentic-pi transitively poisons the global undici
     // dispatcher on import, which would break the harness's own fetch. The
     // dynamic import keeps the harness clean unless an in-process run happens.

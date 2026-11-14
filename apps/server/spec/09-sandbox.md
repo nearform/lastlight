@@ -109,7 +109,8 @@ call inside `InProcessSandbox.runAgent` (`src/sandbox/sandbox.ts`,
 `mode: gondolin`). The agent's working directory is
 the host worktree mounted at `/workspace` inside the VM. Network
 isolation is at the VM layer — agentic-pi's HTTP interceptor 502s any
-outbound request whose host isn't on `allowedHttpHosts`.
+outbound request whose host isn't on `allowedHttpHosts` (each allowlist
+host plus its `*.` form; see [gondolin enforcement](#gondolin-enforcement)).
 
 ### `docker` — container backend
 
@@ -183,7 +184,7 @@ and doesn't expose the egress allowlist.
   each host to IP(s) *at VM start* and aborts `create` on an unresolvable
   entry, so apex-only entries with no A record (e.g. `githubusercontent.com`)
   are pre-resolved and dropped. The filter is therefore **IP-pinned, not
-  apex+subdomain** like docker (SNI) / gondolin (hostname) — `--allow-host
+  apex+subdomain** like docker (SNI) / gondolin (`host` + `*.host`) — `--allow-host
   github.com` does not cover `api.github.com` or rotating CDN IPs. A faithful
   policy would enumerate concrete subdomains; this is a known spike gap. There
   is also no SSRF metadata floor in `unrestrictedEgress` mode.
@@ -613,7 +614,7 @@ result = await agenticRun({
   cwd: agentCwd,            // the pre-cloned repo (workspace root if not pre-cloned)
   noSession: true,
   skillPaths,               // per-phase skill bundle dirs, absolute (see Skills §)
-  allowedHttpHosts,         // egress allowlist or ["*"]
+  allowedHttpHosts,         // gondolin: gondolinHostPatterns(allowlist); none: allowlist; unrestricted: ["*"]
   webSearch: config.webSearch === true,
   webSearchProvider: config.webSearchProvider,
   onEvent: (record) => { shim.feed(record); /* ... */ },
@@ -802,8 +803,13 @@ because the provider hosts are deployment-resolved:
 
 ### gondolin enforcement
 
-`allowedHttpHosts` is passed verbatim to `agenticRun()`. The VM's HTTP
-interceptor returns 502 for any off-list request. Unrestricted egress
+gondolin matches each hostname against the whole pattern, with `*` as the
+only wildcard, so a bare `crates.io` would admit `crates.io` and block
+`index.crates.io`. `gondolinHostPatterns()` (`egress-allowlist.ts`) therefore
+passes every host twice, as `host` and `*.host` (IP literals once), which
+gives the same apex + subdomain policy as docker and kubernetes;
+`*.crates.io` does not admit `crates.io` itself or `evilcrates.io`. The VM's
+HTTP interceptor returns 502 for any off-list request. Unrestricted egress
 passes `["*"]`.
 
 ### docker enforcement — SNI peek
