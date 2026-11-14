@@ -291,6 +291,21 @@ deploy:
 
 approval: {}
 
+# Outgoing webhooks: POST a signed JSON event to each endpoint when a run starts,
+# waits for an approval, finishes, or when an autonomous build is held. Operator
+# only (a repo's .lastlight/ cannot set this key). None by default.
+#
+# webhooks:
+#   - url: https://hooks.example.com/lastlight
+#     secretEnv: LASTLIGHT_WEBHOOK_SECRET   # env var holding the HMAC key (required, never inline)
+#     events: [run.started, run.approval_requested, run.finished, autonomy.held]   # default: all
+#     repos: []                             # owner/repo filter; default: all repos
+#
+# Each POST carries X-Hub-Signature-256: sha256=<HMAC-SHA256(key, raw body)>,
+# X-Lastlight-Event and X-Request-ID (the payload's deliveryId, kept on retries).
+# See spec/03-integrations.md.
+webhooks: []
+
 # Per-repository configuration (issue #180). A managed repo may commit a
 # `.lastlight/` directory — mirroring the instance overlay's on-disk shape
 # (`lastlight.yml`, `workflows/prompts/*.md`, `skills/<name>/SKILL.md`,

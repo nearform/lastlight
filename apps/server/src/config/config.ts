@@ -25,6 +25,12 @@ import { installProviderOverrides } from "./provider-registry.js";
 import { HOST_READABLE_WORKSPACE } from "../workflows/handlers/host-repo-dir.js";
 import type { SandboxBackend, BuildAssetsLocation, OtelConfig } from "lastlight-workflow-engine";
 import { logger } from "../logging/logger.js";
+import {
+  assertWebhookSecrets,
+  displayWebhookUrl,
+  normalizeWebhooks,
+  type WebhookEndpointConfig,
+} from "../notify/webhook/types.js";
 
 const log = logger("config");
 
@@ -375,6 +381,12 @@ export interface LastLightConfig {
    * by default: it only starts mattering once a repo commits `.lastlight/`.
    */
   repoConfig: RepoConfigPolicy;
+  /**
+   * Outgoing webhook endpoints (`webhooks:`), operator-only: a top-level key,
+   * not under `notifications`, because a repo's `.lastlight/` may set
+   * `notifications`. Empty by default. See spec/03-integrations.md.
+   */
+  webhooks: WebhookEndpointConfig[];
 }
 
 /**
@@ -1020,6 +1032,13 @@ export function redactPublic<T>(value: T): T {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
       const tokenCount = TOKEN_COUNT_KEY_RE.test(k) && typeof v === "number" && Number.isFinite(v);
+      if (k === "webhooks" && Array.isArray(v)) {
+        // An endpoint URL may carry a token in its query string; show it without.
+        out[k] = v.map((e) =>
+          isPlainObject(e) && typeof e.url === "string" ? redactPublic({ ...e, url: displayWebhookUrl(e.url) }) : redactPublic(e),
+        );
+        continue;
+      }
       out[k] = SENSITIVE_KEY_RE.test(k) && !tokenCount ? "[redacted]" : redactPublic(v);
     }
     return out as unknown as T;
@@ -1234,7 +1253,9 @@ export function loadConfig(): LastLightConfig {
     digest: fileCfg.digest,
     teamVisibility: fileCfg.teamVisibility,
     repoConfig: fileCfg.repoConfig,
+    webhooks: fileCfg.webhooks,
   };
+  assertWebhookSecrets(config.webhooks, process.env);
   setRuntimeConfig(config);
   return config;
 }
@@ -1283,6 +1304,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   slack: { repoChannels: Record<string, string> };
   teamVisibility: TeamVisibilityConfig;
   repoConfig: RepoConfigPolicy;
+  webhooks: WebhookEndpointConfig[];
 } {
   const managedRepos = stringArray(raw.managedRepos, "managedRepos");
   const botName = typeof raw.botName === "string" && raw.botName.trim() ? raw.botName.trim() : "last-light";
@@ -1751,6 +1773,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     slack: { repoChannels: slackRepoChannels },
     teamVisibility,
     repoConfig,
+    webhooks: normalizeWebhooks(raw.webhooks),
   };
 }
 

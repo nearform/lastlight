@@ -1,5 +1,5 @@
 import { and, asc, count, desc, eq, gte, inArray, isNotNull, isNull, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
-import type { ApprovalStore } from "./approval-store.js";
+import type { ApprovalStore, WorkflowApproval } from "./approval-store.js";
 import type { TriggerActorType } from "./user-store.js";
 import {
   nullsToUndefined,
@@ -270,6 +270,21 @@ export type TerminalRunObserver = (
 ) => void;
 
 /**
+ * Fired once per run, when it first becomes `running`: created running, or
+ * admitted from the queue. Not on a resume from `paused` and not on a retry.
+ * Same contract as {@link TerminalRunObserver}: synchronous, never throws,
+ * never re-enters the store.
+ */
+export type StartRunObserver = (run: WorkflowRun) => void;
+
+/**
+ * Fired after {@link WorkflowRunStore.pauseForApproval} commits, with the run
+ * (now `paused`) and the pending approval. Same contract as
+ * {@link TerminalRunObserver}.
+ */
+export type ApprovalObserver = (run: WorkflowRun, approval: WorkflowApproval) => void;
+
+/**
  * Match one `owner/repo` against a `workflow_runs` row, in SQL.
  *
  * Exists because callers filter by the qualified name while the table stores
@@ -303,6 +318,8 @@ export class WorkflowRunStore {
   private approvals: ApprovalStore;
   private serialize: OpSerializer;
   private terminalObservers: TerminalRunObserver[] = [];
+  private startObservers: StartRunObserver[] = [];
+  private approvalObservers: ApprovalObserver[] = [];
 
   /**
    * Table objects for THIS client's dialect. Every method destructures what it
@@ -323,6 +340,63 @@ export class WorkflowRunStore {
   /** Add a {@link TerminalRunObserver}. Wired at boot; order is registration order. */
   addTerminalObserver(fn: TerminalRunObserver): void {
     this.terminalObservers.push(fn);
+  }
+
+  /** Add a {@link StartRunObserver}. Wired at boot; order is registration order. */
+  addStartObserver(fn: StartRunObserver): void {
+    this.startObservers.push(fn);
+  }
+
+  /** Add an {@link ApprovalObserver}. Wired at boot; order is registration order. */
+  addApprovalObserver(fn: ApprovalObserver): void {
+    this.approvalObservers.push(fn);
+  }
+
+  /** Read the run once and hand it to every observer, swallowing per observer. */
+  private async notifyRun(id: string, what: string, each: (run: WorkflowRun) => void, count: number): Promise<void> {
+    if (count === 0) return;
+    let run: WorkflowRun | null = null;
+    try {
+      run = await this.getRun(id);
+    } catch (err: unknown) {
+      log.warn(`Could not read a run for its ${what} observers`, { runId: id, err });
+      return;
+    }
+    if (run) each(run);
+  }
+
+  private async notifyStart(id: string): Promise<void> {
+    await this.notifyRun(
+      id,
+      "start",
+      (run) => {
+        for (const observe of this.startObservers) {
+          try {
+            observe(run);
+          } catch (err: unknown) {
+            log.warn("Start observer failed", { runId: id, err });
+          }
+        }
+      },
+      this.startObservers.length,
+    );
+  }
+
+  private async notifyApproval(id: string, approval: WorkflowApproval): Promise<void> {
+    await this.notifyRun(
+      id,
+      "approval",
+      (run) => {
+        for (const observe of this.approvalObservers) {
+          try {
+            observe(run, approval);
+          } catch (err: unknown) {
+            log.warn("Approval observer failed", { runId: id, err });
+          }
+        }
+      },
+      this.approvalObservers.length,
+    );
   }
 
   /**
@@ -411,6 +485,7 @@ export class WorkflowRunStore {
       triggerActorType: run.triggerActorType ?? null,
       engine: run.engine ?? null,
     });
+    if (run.status === "running") await this.notifyStart(run.id);
   }
 
   /**
@@ -908,7 +983,9 @@ export class WorkflowRunStore {
       .update(workflowRuns)
       .set({ status: "running", updatedAt: now })
       .where(and(eq(workflowRuns.id, id), eq(workflowRuns.status, "queued"), ownedRunSql(this.t)));
-    return changes(result);
+    const changed = changes(result);
+    if (changed === 1) await this.notifyStart(id);
+    return changed;
   }
 
   /**
@@ -1413,6 +1490,7 @@ export class WorkflowRunStore {
         await this.setPaused(runId, tx);
       }),
     );
+    await this.notifyApproval(runId, { ...approval, status: "pending", kind: approval.kind ?? "approve" });
   }
 
   /**
