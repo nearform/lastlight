@@ -649,7 +649,7 @@ a signed JSON POST on four discrete events. Nothing is sent per phase.
 |---|---|---|
 | `run.started` | A run first becomes `running` (created running, or admitted from the queue). Not on resume from a gate, not on retry. | `WorkflowRunStore` start observer |
 | `run.approval_requested` | A run pauses on an `approve` gate. Reply gates (the explore loop) are not sent. | approval observer, after `pauseForApproval` commits |
-| `run.finished` | Every terminal status: `succeeded`, `failed`, `cancelled`. A run restarted from the dashboard keeps its id and is not started again, so a receiver can see `failed` and later `succeeded` for one run with no `run.started` between. Sent once per run, status and phases run: the store fires its terminal observers on each finish write, and a run is written finished twice (when its last phase ends, then by the workflow wrapper). | terminal observer |
+| `run.finished` | Every terminal status: `succeeded`, `failed`, `cancelled`. A run restarted from the dashboard keeps its id and is not started again, so a receiver can see `failed` and later `succeeded` for one run with no `run.started` between. Sent once per run, status, retry and phases run: the store fires its terminal observers on each finish write, and a run is written finished twice (when its last phase ends, then by the workflow wrapper). | terminal observer |
 | `autonomy.held` | An autonomous dispatch was held by the usage check; once per (provider, window, reset). | build gate |
 
 **Payload** (`src/notify/webhook/types.ts`):
@@ -670,12 +670,14 @@ a signed JSON POST on four discrete events. Nothing is sent per phase.
 
 Only the block for the event is present; `subject` replaces `run` on
 `autonomy.held`, which has no run yet. `approval.summary` and `result.error`
-are agent- or reporter-written text: they are cut at 2000 characters and never
-copied into `text`, so a receiver can forward `text` as is and treat the rest
-as data. Before a payload leaves the process, every string in it has the
-value of each sensitive env var (key matching `SENSITIVE_KEY_RE`, or any
-endpoint's `secretEnv`; values of 8+ characters) replaced by `[redacted]`
-(`redactEnvValues`), since error text comes from exception messages.
+are agent- or reporter-written text: they are never copied into `text`, so a
+receiver can forward `text` as is and treat the rest as data. Before a payload
+leaves the process, every string in it has the value of each sensitive env var
+(key matching `SENSITIVE_KEY_RE`, or any endpoint's `secretEnv`; values of 8+
+characters) replaced by `[redacted]` (`redactEnvValues`), since error text
+comes from exception messages. Only then are those two fields cut at 2000
+characters (`capUntrusted`): a cut made first could split a secret so its
+leading part escapes the match.
 `dashboardUrl` needs `PUBLIC_URL`.
 
 **Delivery** (`src/notify/webhook/deliver.ts`): `POST`, `Content-Type:

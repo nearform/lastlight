@@ -2,7 +2,7 @@ import type { StateDb } from "../../state/db.js";
 import { qualifyRepo } from "../../state/repo-ref.js";
 import type { WorkflowRun } from "../../state/workflow-run-store.js";
 import { deliverWebhook, type DeliveryResult } from "./deliver.js";
-import { buildRunPayload, redactEnvValues, type PayloadExtra } from "./payload.js";
+import { buildRunPayload, capUntrusted, redactEnvValues, type PayloadExtra } from "./payload.js";
 import type { WebhookEndpointConfig, WebhookEventType, WebhookPayload } from "./types.js";
 
 interface EmitterLog {
@@ -49,7 +49,7 @@ export class WebhookEmitter {
 
   emit(raw: WebhookPayload, repo?: string): void {
     const want = repo?.toLowerCase();
-    const payload = redactEnvValues(raw, this.env, this.endpoints.map((e) => e.secretEnv));
+    const payload = capUntrusted(redactEnvValues(raw, this.env, this.endpoints.map((e) => e.secretEnv)));
     for (const endpoint of this.endpoints) {
       if (!endpoint.events.includes(payload.type)) continue;
       if (endpoint.repos.length > 0 && (!want || !endpoint.repos.some((r) => r.toLowerCase() === want))) continue;
@@ -126,11 +126,12 @@ export function installWebhookObservers(
   });
   // The engine finishes a run when its last phase ends and the workflow
   // wrapper finishes it again, and the store fires its observers for both
-  // writes. One report per (run, status, phases run): a retry that finishes
-  // again has run more phases, so it is reported.
+  // writes. One report per (run, status, retries, phases run): a retry bumps
+  // restartCount, so it is reported even when it ends in the phase that
+  // failed before.
   const reported = new Map<string, string>();
   db.runs.addTerminalObserver((run, status) => {
-    const key = `${status}|${run.phaseHistory?.length ?? 0}`;
+    const key = `${status}|${run.restartCount ?? 0}|${run.phaseHistory?.length ?? 0}`;
     if (reported.get(run.id) === key) return;
     reported.delete(run.id);
     reported.set(run.id, key);

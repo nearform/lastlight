@@ -32,7 +32,7 @@ function overlayWith(block: string): string {
 describe("loadConfig — webhooks", () => {
   beforeEach(() => {
     for (const k of ["GITHUB_APP_ID", "SLACK_BOT_TOKEN", "LASTLIGHT_MODEL", "LASTLIGHT_MODELS"]) vi.stubEnv(k, "");
-    vi.stubEnv("HOOK_SECRET", "s3cr3t-value");
+    vi.stubEnv("HOOK_SECRET", "s3cr3t-value-0123456789");
   });
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -106,6 +106,33 @@ describe("loadConfig — webhooks", () => {
     vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlayWith("webhooks:\n  - url: https://hooks.example.com/a\n"));
     expect(() => loadConfig()).toThrow(/webhooks\[0\]\.secretEnv/);
   });
+
+  it("refuses a signing secret shorter than 16 characters, naming the variable and never the value", () => {
+    vi.stubEnv("SHORT_HOOK_SECRET", "abc123");
+    vi.stubEnv(
+      "LASTLIGHT_OVERLAY_DIR",
+      overlayWith("webhooks:\n  - url: https://hooks.example.com/a\n    secretEnv: SHORT_HOOK_SECRET\n"),
+    );
+    let message = "";
+    try {
+      loadConfig();
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toMatch(/SHORT_HOOK_SECRET.*16/);
+    expect(message).not.toContain("abc123");
+  });
+
+  it.each(["/widgets", "acme/", "/", "acme/widgets/extra", "acme /widgets", "acme"])(
+    "refuses a repos entry that is not owner/repo: %j",
+    (bad) => {
+      vi.stubEnv(
+        "LASTLIGHT_OVERLAY_DIR",
+        overlayWith(`webhooks:\n  - url: https://hooks.example.com/a\n    secretEnv: HOOK_SECRET\n    repos: [${JSON.stringify(bad)}]\n`),
+      );
+      expect(() => loadConfig()).toThrow(/webhooks\[0\]\.repos/);
+    },
+  );
 
   it("refuses a webhooks value that is not a list", () => {
     vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlayWith("webhooks:\n  url: https://hooks.example.com/a\n"));

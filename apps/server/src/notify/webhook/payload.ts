@@ -12,6 +12,19 @@ function truncate(s: string): string {
   return s.length > SUMMARY_MAX_CHARS ? s.slice(0, SUMMARY_MAX_CHARS) + "…" : s;
 }
 
+/**
+ * A copy of `payload` with its untrusted text (approval summary, failure
+ * reason) capped at {@link SUMMARY_MAX_CHARS}. Run it after
+ * {@link redactEnvValues}: a cut made first can split a secret so the
+ * full-value match misses and its leading part is sent.
+ */
+export function capUntrusted(payload: WebhookPayload): WebhookPayload {
+  const out = { ...payload };
+  if (out.approval) out.approval = { ...out.approval, summary: truncate(out.approval.summary) };
+  if (out.result?.error !== undefined) out.result = { ...out.result, error: truncate(out.result.error) };
+  return out;
+}
+
 /** Shorter values are too likely to occur by chance to be worth replacing. */
 const MIN_REDACT_LENGTH = 8;
 
@@ -57,7 +70,7 @@ export interface PayloadContext {
 /**
  * Build one webhook payload. `text` is assembled from fixed words and
  * identifiers only (event, workflow, repo, issue number, gate name, status,
- * window); agent- or reporter-written text stays in its own named, truncated
+ * window); agent- or reporter-written text stays in its own named
  * field so a receiver can treat it as data.
  */
 export function buildRunPayload(
@@ -108,7 +121,7 @@ export function buildRunPayload(
       const gate = extra.approval?.gate ?? "approval";
       payload.approval = {
         gate,
-        summary: truncate(extra.approval?.summary ?? ""),
+        summary: extra.approval?.summary ?? "",
         approveCommand: `@${ctx.botName} approve`,
         rejectCommand: `@${ctx.botName} reject <reason>`,
       };
@@ -120,7 +133,7 @@ export function buildRunPayload(
       payload.result = {
         status,
         ...(extra.result?.prUrl ? { prUrl: extra.result.prUrl } : {}),
-        ...(extra.result?.error ? { error: truncate(extra.result.error) } : {}),
+        ...(extra.result?.error ? { error: extra.result.error } : {}),
       };
       payload.text = `[run.finished] ${workflow}run${where} ${status}.${payload.result.prUrl ? ` PR: ${payload.result.prUrl}` : ""}`;
       break;

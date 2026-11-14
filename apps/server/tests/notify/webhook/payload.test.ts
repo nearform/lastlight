@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildRunPayload, redactEnvValues, SUMMARY_MAX_CHARS } from "#src/notify/webhook/payload.js";
+import { buildRunPayload, capUntrusted, redactEnvValues, SUMMARY_MAX_CHARS } from "#src/notify/webhook/payload.js";
 import type { WorkflowRun } from "#src/state/workflow-run-store.js";
 
 const now = new Date("2026-11-07T10:00:00Z");
@@ -59,13 +59,13 @@ describe("buildRunPayload", () => {
     expect(p.run?.autonomous).toBe(false);
   });
 
-  it("truncates an approval summary to the cap and gives the exact commands", () => {
-    const p = buildRunPayload(
+  it("caps an approval summary (capUntrusted) and gives the exact commands", () => {
+    const p = capUntrusted(buildRunPayload(
       "run.approval_requested",
       run({ status: "paused" }),
       { approval: { gate: "post_architect", summary: "x".repeat(5000) } },
       ctx,
-    );
+    ));
     expect(SUMMARY_MAX_CHARS).toBe(2000);
     expect(p.approval?.summary).toBe("x".repeat(2000) + "…");
     expect(p.approval?.gate).toBe("post_architect");
@@ -84,13 +84,13 @@ describe("buildRunPayload", () => {
     expect(p.text).not.toContain("IGNORE");
   });
 
-  it("truncates a failure reason too", () => {
-    const p = buildRunPayload(
+  it("caps a failure reason too", () => {
+    const p = capUntrusted(buildRunPayload(
       "run.finished",
       run({ status: "failed" }),
       { result: { status: "failed", error: "e".repeat(3000) } },
       ctx,
-    );
+    ));
     expect(p.result?.error?.length).toBe(2001);
     expect(p.text).toContain("failed");
   });

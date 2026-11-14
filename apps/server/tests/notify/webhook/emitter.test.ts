@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { WebhookEmitter, installWebhookObservers, installWebhooks } from "#src/notify/webhook/emitter.js";
 import type { WebhookEndpointConfig, WebhookPayload } from "#src/notify/webhook/types.js";
+import { SUMMARY_MAX_CHARS } from "#src/notify/webhook/payload.js";
 import type { WorkflowRun } from "#src/state/workflow-run-store.js";
 import type { WorkflowApproval } from "#src/state/approval-store.js";
 
@@ -58,6 +59,24 @@ describe("WebhookEmitter", () => {
     const sent = deliver.mock.calls[0][2] as WebhookPayload;
     expect(sent.result?.error).toBe("[redacted] / [redacted]");
     expect(deliver.mock.calls[0][1]).toBe("hooksecret99");
+  });
+
+  it("redacts a secret before capping long error text, so no prefix survives at the cut", async () => {
+    const deliver = ok();
+    const secret = "hooksecret-0123456789abcdef";
+    const e = new WebhookEmitter({
+      endpoints: [ep({ secretEnv: "HOOK_SIGNING" })],
+      env: { HOOK_SIGNING: secret } as NodeJS.ProcessEnv,
+      deliver,
+      log: log(),
+    });
+    // The secret straddles the 2000-character cap.
+    const error = "x".repeat(SUMMARY_MAX_CHARS - 10) + secret + " tail";
+    e.emit({ ...payload("run.finished"), result: { status: "failed", error } });
+    await flush();
+    const sent = (deliver.mock.calls[0][2] as WebhookPayload).result?.error ?? "";
+    expect(sent).not.toContain(secret.slice(0, 10));
+    expect(sent).toBe("x".repeat(SUMMARY_MAX_CHARS - 10) + "[redacted]" + "…");
   });
 
   it("matches the repo filter case-insensitively, and an unscoped event only reaches unfiltered endpoints", async () => {
@@ -222,6 +241,20 @@ describe("installWebhookObservers", () => {
     );
 
     expect(emit.mock.calls.map((c) => (c[0] as WebhookPayload).run?.id)).toEqual(["run-1", "run-2", "run-1"]);
+  });
+
+  it("a retry that fails again without running another phase is reported again", () => {
+    // restartRun keeps phaseHistory and bumps restartCount; a retry can fail
+    // in the same phase it failed in before.
+    const { db, obs } = fakeDb();
+    const emit = vi.fn();
+    installWebhookObservers(db as never, { emit } as never, ctx);
+    const phase = { phase: "executor", timestamp: "2026-11-07T09:10:00Z", success: false };
+
+    obs.terminal[0](run({ status: "failed", phaseHistory: [phase], restartCount: 0 }), "failed");
+    obs.terminal[0](run({ status: "failed", phaseHistory: [phase], restartCount: 1 }), "failed");
+
+    expect(emit).toHaveBeenCalledTimes(2);
   });
 
   it("an emitter that throws never escapes the observer", () => {

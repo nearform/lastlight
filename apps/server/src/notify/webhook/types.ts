@@ -8,6 +8,9 @@
  * nor redirect one.
  */
 
+/** `owner/repo`: two non-empty parts, no spaces, no further slashes. */
+const OWNER_REPO_RE = /^[^/\s]+\/[^/\s]+$/;
+
 export const WEBHOOK_EVENT_TYPES = [
   "run.started",
   "run.approval_requested",
@@ -104,7 +107,7 @@ export function normalizeWebhooks(raw: unknown): WebhookEndpointConfig[] {
 
     let repos: string[] = [];
     if (entry.repos !== undefined) {
-      if (!Array.isArray(entry.repos) || entry.repos.some((r) => typeof r !== "string" || !r.includes("/"))) {
+      if (!Array.isArray(entry.repos) || entry.repos.some((r) => typeof r !== "string" || !OWNER_REPO_RE.test(r.trim()))) {
         throw new Error(`${at}.repos must be a list of owner/repo names`);
       }
       repos = (entry.repos as string[]).map((r) => r.trim());
@@ -114,11 +117,24 @@ export function normalizeWebhooks(raw: unknown): WebhookEndpointConfig[] {
   });
 }
 
-/** Every endpoint's key must be set at boot. Names the variable, never a value. */
+/**
+ * Shortest accepted signing key. A short key is weak for HMAC, and the
+ * payload redaction skips values under 8 characters, so it could be sent in
+ * clear.
+ */
+export const MIN_WEBHOOK_SECRET_LENGTH = 16;
+
+/** Every endpoint's key must be set at boot, and long enough. Names the variable, never a value. */
 export function assertWebhookSecrets(endpoints: WebhookEndpointConfig[], env: NodeJS.ProcessEnv): void {
   endpoints.forEach((w, i) => {
-    if (!env[w.secretEnv]) {
+    const secret = env[w.secretEnv];
+    if (!secret) {
       throw new Error(`webhooks[${i}].secretEnv: environment variable ${w.secretEnv} is not set`);
+    }
+    if (secret.length < MIN_WEBHOOK_SECRET_LENGTH) {
+      throw new Error(
+        `webhooks[${i}].secretEnv: ${w.secretEnv} must be at least ${MIN_WEBHOOK_SECRET_LENGTH} characters`,
+      );
     }
   });
 }
