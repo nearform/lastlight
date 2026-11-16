@@ -96,9 +96,11 @@ describe("packaged prompts publish through github_publish", () => {
 
 describe("the artifact-commit branch publishes rather than pushes", () => {
   for (const file of ARTIFACT_COMMIT_PROMPTS) {
-    it(`${file} keeps its {{#if !externalizeArtifacts}} branch on github_publish`, () => {
-      const block = read(file).match(/\{\{#if !externalizeArtifacts\}\}([\s\S]*?)\{\{\/if\}\}/);
-      expect(block, `${file} no longer has a !externalizeArtifacts branch`).not.toBeNull();
+    // The gate is `!skipAgentPublish` where a no-GitHub-tools runtime can run the
+    // phase (it is false in repo mode on agentic-pi), else `!externalizeArtifacts`.
+    it(`${file} keeps its agent-publish branch on github_publish`, () => {
+      const block = read(file).match(/\{\{#if !(?:externalizeArtifacts|skipAgentPublish)\}\}([\s\S]*?)\{\{\/if\}\}/);
+      expect(block, `${file} no longer has an agent-publish branch`).not.toBeNull();
       const body = block![1]!;
       expect(body, `${file}'s artifact branch does not publish`).toContain("github_publish");
       // Without `include`, the publish widens to the whole working tree and

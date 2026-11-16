@@ -600,6 +600,11 @@ export class PhaseExecutor {
     return { model, variant };
   }
 
+  /** The app's extra prompt context for a phase on `model` (else the run's default model). */
+  private promptContextFor(model: string | undefined): Partial<TemplateContext> {
+    return this.ports.promptContextFor?.(model || this.run.config?.model) ?? {};
+  }
+
   private async runPhaseCall(
     label: string,
     prompt: string,
@@ -647,7 +652,10 @@ export class PhaseExecutor {
     await this.reporter.step(phaseName, "running", phase.messages?.on_start);
 
     const { model, variant } = this.resolveModelVariant(phase.model, phase.variant, phaseName);
-    const prompt = buildPhasePrompt(phase, this.run.ctx, this.ports.assets, { phaseOutputs: outputs });
+    const prompt = buildPhasePrompt(phase, this.run.ctx, this.ports.assets, {
+      ...this.promptContextFor(model),
+      phaseOutputs: outputs,
+    });
 
     const pr = await this.runPhaseCall(phaseName, prompt, phase, model, variant);
 
@@ -1133,12 +1141,12 @@ export class PhaseExecutor {
           : { insert: true, label: `${phase.label ?? phaseName} (cycle ${fixCycles + 1})` },
       );
 
+      const { model, variant } = this.resolveModelVariant(phase.model, phase.variant, phaseName);
+      const reviewCtx = { ...this.promptContextFor(model), phaseOutputs: outputs, fixCycle: fixCycles };
       const reviewPrompt =
         fixCycles === 0
-          ? buildPhasePrompt(phase, this.run.ctx, this.ports.assets, { phaseOutputs: outputs, fixCycle: fixCycles })
-          : this.resolver.renderPrompt(loop.on_request_changes.re_review_prompt, { phaseOutputs: outputs, fixCycle: fixCycles });
-
-      const { model, variant } = this.resolveModelVariant(phase.model, phase.variant, phaseName);
+          ? buildPhasePrompt(phase, this.run.ctx, this.ports.assets, reviewCtx)
+          : this.resolver.renderPrompt(loop.on_request_changes.re_review_prompt, reviewCtx);
       const rr = await this.runPhaseCall(reviewLabel, reviewPrompt, phase, model, variant);
 
       // Derive this review's verdict. A dedup-`done` review (resume) is NOT
@@ -1371,8 +1379,11 @@ export class PhaseExecutor {
         phaseOutputs: outputs,
         scratch,
       };
-      const prompt = buildPhasePrompt(phase, this.run.ctx, this.ports.assets, iterCtx);
       const { model, variant } = this.resolveModelVariant(phase.model, phase.variant, phaseName);
+      const prompt = buildPhasePrompt(phase, this.run.ctx, this.ports.assets, {
+        ...this.promptContextFor(model),
+        ...iterCtx,
+      });
 
       let ir = await this.runPhaseCall(iterLabel, prompt, phase, model, variant);
 

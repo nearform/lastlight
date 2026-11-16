@@ -117,6 +117,23 @@ describe("resumeSimpleRun — the dispatch's template context survives", () => {
     expect((await db.runs.getRun("run-1"))?.status).toBe("succeeded");
   });
 
+  it("a resumed repo-mode run tells the executor its own notes dir", async () => {
+    await db.runs.createRun({
+      id: "run-2",
+      workflowName: "pr-review",
+      triggerId: "acme/widgets#8",
+      owner: "acme",
+      repo: "widgets",
+      issueNumber: 8,
+      currentPhase: "analysis",
+      status: "running",
+      context: { kind: "agent", taskId: "widgets-8-pr-review", branch: "feature", issueDir: ".lastlight/pr-8", analysisEnabled: "true" },
+      startedAt: new Date().toISOString(),
+    });
+    await resumeSimpleRun((await db.runs.getRun("run-2"))!, opts());
+    expect((mockExecuteAgent.mock.calls[0]![1] as ExecutorConfig).notesDir).toBe(".lastlight/pr-8");
+  });
+
   it("restoredDispatchContext keeps the template keys and drops what resume owns", () => {
     expect(
       restoredDispatchContext({
