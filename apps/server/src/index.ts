@@ -78,6 +78,7 @@ import {
   openAndBindReviewCheck,
 } from "./engine/review-check.js";
 import { installStageObserver } from "./engine/stage-observer.js";
+import { installWebhooks } from "./notify/webhook/emitter.js";
 import { invalidateBoard } from "./admin/board-cache.js";
 import { noteBoardRunChange } from "./admin/board-stream.js";
 import { runDashboardUrl } from "./notify/model.js";
@@ -385,6 +386,13 @@ async function main() {
     // disagrees with itself in the meantime.
     onAdvanced: (repo) => invalidateBoard(repo),
   });
+
+  // Outgoing webhooks (`webhooks:`): run started, approval requested, finished.
+  // Inert without config. Wired as store observers for the same reason as the
+  // two projections above: every path into those transitions goes through the
+  // store, so no dispatch path can be added without its event.
+  const webhookEmitter = installWebhooks(db, config, process.env, logger("webhooks"));
+  if (webhookEmitter) logger("webhooks").info("Outgoing webhooks enabled", { endpoints: config.webhooks.length });
 
   // Feedback signals recorded while telemetry was off carry no export watermark
   // (issue #255), so enabling OTel later can still put them on the traces they

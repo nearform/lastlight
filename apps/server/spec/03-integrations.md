@@ -640,6 +640,58 @@ It **dispatches** when the card lands on a stage's `enter` or `running` column, 
 
 The freshest the board gets is a function of the TTL, and the highest-value lever on that is not a shorter TTL but `invalidateBoard(repo)` — exported for a later slice to wire to the `issue.labeled` webhook, so a human moving a card sees it move.
 
+## 6. Outgoing webhooks
+
+Operator-configured endpoints (`webhooks:`, see `02-configuration.md`) receive
+a signed JSON POST on four discrete events. Nothing is sent per phase.
+
+| Event | When | Source |
+|---|---|---|
+| `run.started` | A run first becomes `running` (created running, or admitted from the queue). Not on resume from a gate, not on retry. | `WorkflowRunStore` start observer |
+| `run.approval_requested` | A run pauses on an `approve` gate. Reply gates (the explore loop) are not sent. | approval observer, after `pauseForApproval` commits |
+| `run.finished` | Every terminal status: `succeeded`, `failed`, `cancelled`. A run restarted from the dashboard keeps its id and is not started again, so a receiver can see `failed` and later `succeeded` for one run with no `run.started` between. Sent once per run, status, retry and phases run: the store fires its terminal observers on each finish write, and a run is written finished twice (when its last phase ends, then by the workflow wrapper). | terminal observer |
+| `autonomy.held` | An autonomous dispatch was held by the usage check; once per (provider, window, reset). | build gate |
+
+**Payload** (`src/notify/webhook/types.ts`):
+
+```json
+{
+  "type": "run.approval_requested",
+  "deliveryId": "<uuid, same on every retry>",
+  "timestamp": "<ISO>",
+  "text": "<one line built from fixed words and identifiers only>",
+  "run": { "id", "workflow", "repo", "issueNumber", "issueUrl", "dashboardUrl", "autonomous", "trigger" },
+  "approval": { "gate", "summary", "approveCommand", "rejectCommand" },
+  "result": { "status", "prUrl", "error" },
+  "hold": { "provider", "window", "usedPct", "maxPercent", "resetsAt" },
+  "subject": { "repo", "issueNumber", "issueUrl" }
+}
+```
+
+Only the block for the event is present; `subject` replaces `run` on
+`autonomy.held`, which has no run yet. `approval.summary` and `result.error`
+are agent- or reporter-written text: they are never copied into `text`, so a
+receiver can forward `text` as is and treat the rest as data. Before a payload
+leaves the process, every string in it has the value of each sensitive env var
+(key matching `SENSITIVE_KEY_RE`, or any endpoint's `secretEnv`; values of 8+
+characters) replaced by `[redacted]` (`redactEnvValues`), since error text
+comes from exception messages. Only then are those two fields cut at 2000
+characters (`capUntrusted`): a cut made first could split a secret so its
+leading part escapes the match.
+`dashboardUrl` needs `PUBLIC_URL`.
+
+**Delivery** (`src/notify/webhook/deliver.ts`): `POST`, `Content-Type:
+application/json`, `X-Hub-Signature-256: sha256=<hex HMAC-SHA256(key, raw
+body)>` (GitHub's format, so existing verifiers work unchanged),
+`X-Lastlight-Event: <type>`, `X-Request-ID: <deliveryId>`. Each attempt is
+aborted at 5 s. A network error, timeout, 5xx or 429 is retried three times
+(1 s, 4 s, 16 s); any other status is final. Delivery is fire-and-forget: a
+run never waits on, or fails because of, a receiver; a failure is logged with
+the endpoint's host only.
+
+Routing: an endpoint gets an event when the event is in its `events` and its
+`repos` is empty or names the run's repo (case-insensitive).
+
 ## Invariants
 
 - **One handler in, one envelope out.** Every connector's `event` emitter

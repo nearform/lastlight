@@ -1537,6 +1537,79 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
       });
     });
 
+    /**
+     * Start and approval observers: same contract as the terminal one
+     * (synchronous, never throws, fired after the write). They feed outgoing
+     * webhooks, so "once" matters: a run that pauses and resumes is not a new
+     * start.
+     */
+    describe("start and approval observers", () => {
+      function pause(runId: string, gate = "post_architect", kind: "approve" | "reply" = "approve") {
+        return db.runs.pauseForApproval(
+          runId,
+          { id: randomUUID(), workflowRunId: runId, gate, summary: "Plan ready", kind, createdAt: new Date().toISOString() },
+          { phase: "waiting_approval", summary: `Waiting for approval: ${gate}` },
+        );
+      }
+
+      it("fires start once for queued -> running -> paused -> running", async () => {
+        const seen: Array<[string, string]> = [];
+        db.runs.addStartObserver((run) => seen.push([run.id, run.status]));
+        const id = await makeRun({ status: "queued" });
+        expect(seen).toEqual([]);
+        expect(await db.runs.admitRun(id)).toBe(1);
+        expect(seen).toEqual([[id, "running"]]);
+        await pause(id);
+        await db.runs.setRunning(id);
+        expect(seen).toEqual([[id, "running"]]);
+      });
+
+      it("fires start for a run created already running, and not for a lost admission race", async () => {
+        const seen: string[] = [];
+        db.runs.addStartObserver((run) => seen.push(run.id));
+        const id = await makeRun({ status: "running" });
+        expect(await db.runs.admitRun(id)).toBe(0);
+        expect(seen).toEqual([id]);
+      });
+
+      it("does not fire start for a run created queued or paused", async () => {
+        const seen: string[] = [];
+        db.runs.addStartObserver((run) => seen.push(run.id));
+        await makeRun({ status: "queued" });
+        await makeRun({ status: "paused" });
+        expect(seen).toEqual([]);
+      });
+
+      it("fires approval after the pause commits, with the gate and summary", async () => {
+        const seen: Array<[string, string, string, string]> = [];
+        db.runs.addApprovalObserver((run, approval) => seen.push([run.id, run.status, approval.gate, approval.summary]));
+        const id = await makeRun();
+        await pause(id);
+        expect(seen).toEqual([[id, "paused", "post_architect", "Plan ready"]]);
+      });
+
+      it("passes the gate kind, so a reply gate can be told apart", async () => {
+        const kinds: string[] = [];
+        db.runs.addApprovalObserver((_run, approval) => kinds.push(approval.kind));
+        await pause(await makeRun(), "socratic", "reply");
+        expect(kinds).toEqual(["reply"]);
+      });
+
+      it("a throwing observer does not stop the others or the write", async () => {
+        const starts: string[] = [];
+        const approvals: string[] = [];
+        db.runs.addStartObserver(() => { throw new Error("boom"); });
+        db.runs.addStartObserver((run) => starts.push(run.id));
+        db.runs.addApprovalObserver(() => { throw new Error("boom"); });
+        db.runs.addApprovalObserver((run) => approvals.push(run.id));
+        const id = await makeRun();
+        await expect(pause(id)).resolves.not.toThrow();
+        expect(starts).toEqual([id]);
+        expect(approvals).toEqual([id]);
+        expect((await db.runs.getRun(id))?.status).toBe("paused");
+      });
+    });
+
     describe("list() ordering — in-flight runs float above the queue", () => {
       /** Seed a run with an explicit start time so ordering is deterministic. */
       const at = (status: string, minutesAgo: number) =>
