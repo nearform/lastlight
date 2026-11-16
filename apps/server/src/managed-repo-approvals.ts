@@ -37,8 +37,9 @@ async function save(db: SettingsDb, state: RepoApprovalState, actor?: string): P
 }
 
 /**
- * The state a write starts from: the STORED row (another process may have
- * changed it since this process last refreshed), else the YAML values.
+ * The state a write starts from: the STORED row, not the in-memory copy (so a
+ * write always builds on the latest stored state), else the YAML values.
+ * Last Light runs as one instance; `serialized()` is the only write guard.
  */
 async function current(db: SettingsDb): Promise<RepoApprovalState> {
   const row = await db.getSetting<unknown>(REPO_APPROVAL_SETTING_KEY);
