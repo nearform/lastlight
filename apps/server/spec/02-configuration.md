@@ -49,6 +49,7 @@ interface LastLightConfig {
   buildAssetsDir: string;                  // server-mode store root ($STATE_DIR/build-assets)
   deploy: { version: string | null };      // core-version pin (git tag/ref) or null = track main
   managedRepos: string[];                 // empty = source the list from the App installation
+  requireRepoApproval: boolean;           // true = only approved repos get work, even with an empty list
   routes: RouteConfig;                    // { github: Record<string,string>; slack: Record<string,string> }
                                           // mirrored by defaultRouteConfig() for the
                                           // no-config-loaded case; pinned equal in tests
@@ -1268,6 +1269,7 @@ These have no env var — they're set in `config/default.yaml` or the overlay's
 | Key | Type / default | Meaning | Repo-settable |
 |---|---|---|---|
 | `managedRepos` | `string[]`, `[]` | The repos Last Light acts on. **Empty is meaningful**: the effective list is then sourced from the GitHub App *installation* (fetched at boot, kept live by `installation` / `installation_repositories` webhooks). A non-empty list wins and restricts to exactly those repos. Enforced at ingress **and** at the `dispatchWorkflow` choke point. Surfaced by `GET /admin/api/managed-repos` (configured / installation / effective / source). | no |
+| `requireRepoApproval` | `boolean`, `false` | When `true`, a repo gets work only once approved: the effective list is the approved list even when it is empty, so a repo newly granted to the App waits until an operator approves it. The approved list and this flag can also be changed live from the dashboard (Config → Managed repos); the first dashboard change stores both in the state database, and from then on the stored values win over these two keys. | no |
 | `botName` | `string`, `last-light` | The GitHub App slug, no `[bot]` suffix. Single source of truth for the bot's identity — derives the `@mention` handle the router triggers on, `botLogin` (`<botName>[bot]`, the self-comment/self-review filter), and the git commit author. Env: `GITHUB_APP_BOT_NAME`. | no |
 | `routes` | `{ github, slack }` maps | Deterministic event/intent → workflow name routing. Deep-merges over the defaults, so an overlay adds or repoints one key without restating the table. See `05-router.md`. | no |
 | `disabled.workflows` | `string[]`, `[]` | Workflow names dropped at asset-load time. | **yes** (a repo opting *itself* out; refused at dispatch) |

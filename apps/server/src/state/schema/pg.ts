@@ -362,6 +362,14 @@ export const githubVisibilitySync = pgTable("github_visibility_sync", {
   detail: text("detail"),
 });
 
+/** @see sqlite.ts → `harnessSettings` */
+export const harnessSettings = pgTable("harness_settings", {
+  key: text("key").primaryKey(),
+  value: jsonb("value").$type<unknown>().notNull(),
+  updatedAt: text("updated_at").notNull(),
+  updatedBy: text("updated_by"),
+});
+
 /** @see sqlite.ts → `messagingSessions` */
 export const messagingSessions = pgTable(
   "messaging_sessions",
