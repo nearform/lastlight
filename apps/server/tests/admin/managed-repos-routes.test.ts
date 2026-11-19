@@ -30,11 +30,13 @@ import { createToken } from "#src/admin/auth.js";
 import type { StateDb } from "#src/state/db.js";
 import type { SessionSource } from "#src/admin/sessions.js";
 import {
+  defaultAutonomyConfig,
   setRuntimeConfig,
   resetRuntimeConfigForTests,
   type LastLightConfig,
 } from "#src/config/config.js";
 import { makeTestDb } from "../helpers/state-db.js";
+import { resetAutonomyReposForTests } from "#src/autonomy-repos.js";
 
 const SECRET = "test-secret";
 /** A GitHub-OAuth session for `octocat` — carries a verified login. */
@@ -98,6 +100,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  resetAutonomyReposForTests();
   resetRuntimeConfigForTests();
   resetInstallationReposForTests();
   vi.restoreAllMocks();
@@ -255,5 +258,66 @@ describe("POST /managed-repos/*", () => {
   it("requires authentication", async () => {
     const res = await send("POST", "/managed-repos/require-approval", { body: { enabled: true } });
     expect(res.status).toBe(401);
+  });
+});
+
+describe("Managed repos — autonomous builds", () => {
+  function config(approved: string[], autonomy: string[]): void {
+    setRuntimeConfig({
+      botName: "last-light",
+      managedRepos: approved,
+      requireRepoApproval: false,
+      autonomy: { ...defaultAutonomyConfig(), repos: autonomy },
+    } as unknown as LastLightConfig);
+  }
+
+  beforeEach(() => {
+    setInstallationRepos("1", ["a/one", "a/two", "a/three"]);
+  });
+
+  it("view reports the autonomy list and where it came from", async () => {
+    config(["a/one", "a/two"], ["a/one"]);
+    const { status, body } = await send("GET", "/managed-repos", { token: GITHUB_TOKEN });
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ autonomous: ["a/one"], autonomyStored: false });
+  });
+
+  it("autonomy toggle returns the new view, writes one activity row and refreshes the board", async () => {
+    config(["a/one", "a/two"], ["a/one"]);
+    const res = await send("POST", "/managed-repos/autonomy", {
+      token: GITHUB_TOKEN,
+      body: { repo: "a/two", enabled: true },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ autonomous: ["a/one", "a/two"], autonomyStored: true });
+    const { activity, total } = await db.activity.list();
+    expect(total).toBe(1);
+    expect(activity[0]).toMatchObject({
+      action: "managed-repos.autonomy",
+      actorLogin: "octocat",
+      targetType: "managed-repos",
+      outcome: "ok",
+    });
+    expect(activity[0].detail).toEqual({ repo: "a/two", enabled: true });
+  });
+
+  it("autonomy toggle with a malformed body is 400", async () => {
+    config(["a/one", "a/two"], []);
+    for (const body of [{ repo: "nope", enabled: true }, { repo: "a/two" }]) {
+      const res = await send("POST", "/managed-repos/autonomy", { token: GITHUB_TOKEN, body });
+      expect(res.status).toBe(400);
+    }
+    expect((await db.activity.list()).total).toBe(0);
+  });
+
+  it("autonomy toggle of an unmanaged repo is 400", async () => {
+    config(["a/one"], []);
+    const res = await send("POST", "/managed-repos/autonomy", {
+      token: GITHUB_TOKEN,
+      body: { repo: "a/nine", enabled: true },
+    });
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "not a managed repo: a/nine" });
+    expect((await db.activity.list()).total).toBe(0);
   });
 });

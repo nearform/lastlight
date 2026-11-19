@@ -7,6 +7,7 @@
  * trigger ids, which feed the run join. Faking any of those links would fake
  * the thing being measured. Only GitHub is stubbed, and it counts its calls.
  */
+import { resetAutonomyReposForTests, setStoredAutonomyRepos } from "#src/autonomy-repos.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createAdminRoutes, type AdminConfig } from "#src/admin/routes.js";
 import type { StateDb } from "#src/state/db.js";
@@ -140,6 +141,18 @@ describe("GET /board scope", () => {
 
     expect(json.scope.repos).toEqual([REPOS[0]]);
     expect(json.scope.eligible).toEqual([REPOS[0], REPOS[1]]);
+  });
+
+  it("board eligible follows the stored autonomy row", async () => {
+    setRuntimeConfig(runtimeConfig({ autonomy: { repos: [REPOS[0]], stages: STAGES, budget: {} } }));
+    setStoredAutonomyRepos({ repos: [REPOS[2]] });
+    const { github } = fakeGithub();
+    const app = makeApp({ github });
+
+    const { json } = await board(app, "");
+
+    expect(json.scope.eligible).toEqual([REPOS[2]]);
+    resetAutonomyReposForTests();
   });
 
   it("matches the autonomy allow-list against managed repos case-insensitively", async () => {

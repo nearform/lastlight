@@ -65,6 +65,7 @@ import {
 import {
   approveRepos,
   removeRepos,
+  setRepoAutonomy,
   setRequireApproval,
   type ApprovalResult,
   type WhenEmpty,
@@ -199,6 +200,7 @@ import { issueTriggerId } from "../engine/build-decisions.js";
 import { applyBuildDispatchGate } from "../engine/build-gate.js";
 import { buildBoard, type BoardStage, type BoardDegradation } from "./board.js";
 import { getBoardItems, invalidateBoard, BOARD_TTL_MS } from "./board-cache.js";
+import { getAutonomyReposState } from "../autonomy-repos.js";
 import { boardSignature, BOARD_TICK_MS, BOARD_HEARTBEAT_MS } from "./board-stream.js";
 import { reapSandboxWorkspace } from "../sandbox/reap.js";
 import { artifactStore } from "../sandbox/artifact-store.js";
@@ -815,6 +817,7 @@ export function createAdminRoutes(
     // is not approved; null until installation discovery has run, so the pane
     // can say "not discovered yet" rather than "no gap".
     const { state: approval, stored } = getRepoApprovalState();
+    const autonomy = getAutonomyReposState();
     const grant = getInstallationRepos();
     const discovered = getInstallationReposRefreshedAt() !== null;
     const gap = discovered ? grant.filter((g) => !approval.approved.some((a) => sameRepo(a, g))) : null;
@@ -877,6 +880,10 @@ export function createAdminRoutes(
       }),
       approved: approval.approved,
       requireApproval: approval.requireApproval,
+      // The autonomy allow-list (board + ready-for-agent builds): the stored
+      // list once the pane writes it, else YAML `autonomy.repos`.
+      autonomous: autonomy.state.repos,
+      autonomyStored: autonomy.stored,
       stored,
       gap,
       approvedNoAccess,
@@ -944,6 +951,24 @@ export function createAdminRoutes(
       });
     }
     return answer(c, res);
+  });
+
+  app.post("/managed-repos/autonomy", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as { repo?: unknown; enabled?: unknown } | null;
+    const repo = body?.repo;
+    const enabled = body?.enabled;
+    if (typeof repo !== "string" || !/^[^/\s]+\/[^/\s]+$/.test(repo) || typeof enabled !== "boolean") {
+      return c.json({ error: "repo must be owner/repo and enabled true or false" }, 400);
+    }
+    const res = await setRepoAutonomy(db, repo, enabled, actorFromContext(c));
+    if (!res.ok) return c.json({ error: res.error }, res.status);
+    await recordActivityFor(c, db, {
+      action: "managed-repos.autonomy",
+      targetType: "managed-repos",
+      detail: { repo, enabled },
+    });
+    invalidateBoard(repo);
+    return c.json(managedReposView());
   });
 
   app.post("/managed-repos/require-approval", async (c) => {
