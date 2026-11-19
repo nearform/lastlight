@@ -85,6 +85,7 @@ import {
 } from "./engine/review-check.js";
 import { installStageObserver } from "./engine/stage-observer.js";
 import { invalidateBoard } from "./admin/board-cache.js";
+import { refreshAutonomyRepos } from "./autonomy-repos.js";
 import { noteBoardRunChange } from "./admin/board-stream.js";
 import { runDashboardUrl } from "./notify/model.js";
 import { harvestFixMarkers } from "./engine/fix-harvest.js";
@@ -278,10 +279,18 @@ async function main() {
   // written. Load it before anything can route an event; a failed read here is
   // fatal on purpose (the db is unusable). Re-read every minute so a second
   // process sharing the db picks up changes; a failed re-read keeps the last copy.
+  // The autonomy allow-list (board + ready-for-agent builds) follows the same
+  // rule: a stored row from Config → Managed repos wins over `autonomy.repos`.
   await refreshRepoApproval(db);
+  await refreshAutonomyRepos(db);
   setInterval(() => {
     refreshRepoApproval(db).catch((err: unknown) =>
       configLog.warn("Repo approval refresh failed; keeping the last copy", {
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+    refreshAutonomyRepos(db).catch((err: unknown) =>
+      configLog.warn("Autonomy repos refresh failed; keeping the last copy", {
         error: err instanceof Error ? err.message : String(err),
       }),
     );

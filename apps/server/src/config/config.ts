@@ -604,6 +604,7 @@ export function getRuntimeConfig(): LastLightConfig | undefined {
 export function resetRuntimeConfigForTests(): void {
   currentConfig = undefined;
   currentPublicConfig = undefined;
+  autonomyReposOverride = null;
 }
 
 export function getPublicConfig(): PublicConfigBundle {
@@ -676,14 +677,31 @@ export function stageWorkflow(stage: AutonomyStageConfig): string {
 }
 
 /**
- * Is `repo` ("owner/name") one the operator listed under `autonomy.repos`?
+ * Is `repo` ("owner/name") on the autonomy allow-list ({@link getAutonomyRepos}:
+ * the dashboard's stored list, else YAML `autonomy.repos`)?
  *
  * EXACT MATCH by design — no globs, no org prefixes. Enabling an org by pattern
  * is how a repo nobody reviewed acquires an agent, and a budget, the moment
  * somebody creates it; listing a repo has to be a decision per repository.
  */
 export function isAutonomousRepo(repo: string): boolean {
-  return getAutonomyConfig().repos.includes(repo);
+  return getAutonomyRepos().includes(repo);
+}
+
+/**
+ * The dashboard's stored autonomy list (Config → Managed repos), set by
+ * `autonomy-repos.ts`; null = none stored, so YAML `autonomy.repos` applies.
+ */
+let autonomyReposOverride: string[] | null = null;
+
+/** Set (or clear, with null) the stored autonomy list. Only `autonomy-repos.ts` calls this. */
+export function setAutonomyReposOverride(repos: string[] | null): void {
+  autonomyReposOverride = repos ? [...repos] : null;
+}
+
+/** The autonomy allow-list in effect: the stored list, else YAML `autonomy.repos`. A copy. */
+export function getAutonomyRepos(): string[] {
+  return [...(autonomyReposOverride ?? getAutonomyConfig().repos)];
 }
 
 // ── Packaged defaults, derived from config/default.yaml (issue #385) ─────────

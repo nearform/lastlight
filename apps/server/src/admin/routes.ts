@@ -182,6 +182,7 @@ import {
   // pasted credential. It must stay single-source (see config.ts).
   redactPublic,
   getAutonomyConfig,
+  getAutonomyRepos,
   stageWorkflow,
   getHoldLabel,
   type RepoConfigPolicy,
@@ -2406,18 +2407,20 @@ export function createAdminRoutes(
 
     // ── The board's universe is the AUTONOMY ALLOW-LIST, not the managed list ──
     //
-    // This board is a view of ONE pipeline, and `autonomy.repos` is what decides
-    // which repos have one. A managed repo that is not on the list has no stage
-    // labels anybody writes, no `build` the gate would admit, and every action
-    // offered on its cards answers `409 not-autonomous` — because the card
-    // actions cross the real dispatch gate, which checks exactly this list. So
-    // showing those repos renders columns and menus for work that structurally
-    // cannot run, and pays a live GitHub read per repo to do it.
+    // This board is a view of ONE pipeline, and the autonomy allow-list is what
+    // decides which repos have one: the stored list from Config → Managed repos
+    // once written, else YAML `autonomy.repos` (see `getAutonomyRepos`). A
+    // managed repo that is not on the list has no stage labels anybody writes,
+    // no `build` the gate would admit, and every action offered on its cards
+    // answers `409 not-autonomous` — because the card actions cross the real
+    // dispatch gate, which checks exactly this list. So showing those repos
+    // renders columns and menus for work that structurally cannot run, and
+    // pays a live GitHub read per repo to do it.
     //
     // Intersected with the managed set rather than trusted outright: the two are
     // configured independently, and a repo named in `autonomy.repos` that the
     // App cannot see is a typo, not a target.
-    const eligible = new Set(autonomy.repos.filter((r) => isManagedRepo(r)));
+    const eligible = new Set(getAutonomyRepos().filter((r) => isManagedRepo(r)));
 
     // Scope, in precedence order. Each step narrows to `eligible`.
     const requested = (c.req.query("repos") || "")
