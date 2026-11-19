@@ -253,6 +253,31 @@ describe("managed-repo approvals — autonomy toggle", () => {
     expect(getAutonomyRepos()).toEqual(["a/one"]);
   });
 
+  it("enable over a case-variant YAML entry rewrites it to the managed spelling", async () => {
+    config(["a/one"], ["A/One"]);
+    expect(isAutonomousRepo("a/one")).toBe(false);
+    const res = await setRepoAutonomy(db, "a/one", true);
+    expect(res).toEqual({ ok: true, repos: ["a/one"] });
+    expect(isAutonomousRepo("a/one")).toBe(true);
+  });
+
+  it("enable stores the App grant's spelling over an approved spelling typed differently", async () => {
+    config(["a/One"], []);
+    const res = await setRepoAutonomy(db, "a/One", true);
+    expect(res).toEqual({ ok: true, repos: ["a/one"] });
+    expect(isAutonomousRepo("a/one")).toBe(true);
+  });
+
+  it("turning approval on drops autonomy for repos that are no longer managed", async () => {
+    config([], ["a/two"]);
+    expect(isAutonomousRepo("a/two")).toBe(true);
+    const res = await setRequireApproval(db, true);
+    expect(res.ok).toBe(true);
+    expect(getAutonomyRepos()).toEqual([]);
+    await approveRepos(db, ["a/two"]);
+    expect(isAutonomousRepo("a/two")).toBe(false);
+  });
+
   it("concurrent toggles do not lose updates", async () => {
     config(["a/one", "a/two"], []);
     await Promise.all([setRepoAutonomy(db, "a/one", true), setRepoAutonomy(db, "a/two", true)]);

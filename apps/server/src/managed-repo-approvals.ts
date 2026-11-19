@@ -69,6 +69,13 @@ async function saveAutonomy(db: SettingsDb, repos: string[], actor?: string): Pr
   setStoredAutonomyRepos({ repos });
 }
 
+/** Drop autonomy entries `keep` rejects; writes the row only when something was dropped. */
+async function pruneAutonomy(db: SettingsDb, keep: (repo: string) => boolean, actor?: string): Promise<void> {
+  const autonomy = await currentAutonomy(db);
+  const kept = autonomy.filter(keep);
+  if (kept.length !== autonomy.length) await saveAutonomy(db, kept, actor);
+}
+
 /** Writes run one at a time in this process, so two requests cannot interleave a read-modify-write. */
 let queue: Promise<unknown> = Promise.resolve();
 function serialized<T>(fn: () => Promise<T>): Promise<T> {
@@ -139,9 +146,7 @@ async function removeNow(
     requireApproval = opts.whenEmpty === "require-approval";
   }
   const res = await save(db, { requireApproval, approved }, actor);
-  const autonomy = await currentAutonomy(db);
-  const kept = autonomy.filter((a) => !repos.some((r) => sameRepo(a, r)));
-  if (kept.length !== autonomy.length) await saveAutonomy(db, kept, actor);
+  await pruneAutonomy(db, (a) => !repos.some((r) => sameRepo(a, r)), actor);
   return res;
 }
 
@@ -165,16 +170,27 @@ export function setRequireApproval(
     // A no-op click must not store a row: that would detach the deployment
     // from its YAML values for nothing.
     if (state.requireApproval === enabled) return { ok: true, state };
-    return save(db, { ...state, requireApproval: enabled }, actor);
+    const res = await save(db, { ...state, requireApproval: enabled }, actor);
+    // Turning approval on can un-manage repos (those the bot followed through
+    // the App grant). Drop them from the autonomy list too, so approving one
+    // later does not quietly turn its builds back on.
+    if (enabled) {
+      const managed = getManagedRepos();
+      await pruneAutonomy(db, (a) => managed.some((m) => sameRepo(m, a)), actor);
+    }
+    return res;
   });
 }
 
 export type AutonomyResult = { ok: true; repos: string[] } | { ok: false; status: 400; error: string };
 
 /**
- * Turn autonomous builds on or off for one managed repo. Stored as the managed
- * list spells the name, because `isAutonomousRepo` is an exact match. A change
- * that changes nothing stores no row, so the deployment stays on its YAML list.
+ * Turn autonomous builds on or off for one managed repo. `isAutonomousRepo` is
+ * an exact match against the webhook's `owner/repo`, so the entry is stored as
+ * GitHub spells it: the App grant's spelling when known, else the managed
+ * list's. Turning it on also rewrites an entry that differs only in case. A
+ * change that changes nothing stores no row, so the deployment stays on its
+ * YAML list.
  */
 export function setRepoAutonomy(
   db: SettingsDb,
@@ -188,8 +204,9 @@ export function setRepoAutonomy(
     if (enabled) {
       const managed = getManagedRepos().find((m) => sameRepo(m, repo));
       if (!managed) return { ok: false, status: 400, error: `not a managed repo: ${repo}` };
-      if (has) return { ok: true, repos };
-      const next = [...repos, managed];
+      const canonical = getInstallationRepos().find((g) => sameRepo(g, repo)) ?? managed;
+      if (repos.includes(canonical)) return { ok: true, repos };
+      const next = [...repos.filter((a) => !sameRepo(a, repo)), canonical];
       await saveAutonomy(db, next, actor);
       return { ok: true, repos: next };
     }
