@@ -1,11 +1,19 @@
 import { useState } from "react";
 import { api, ApiError, type ManagedRepos, type WhenEmpty } from "../api";
-import { followAppPhrase, removeNeedsChoice, showGapSection, toggleConfirmText } from "../lib/managed-repos-view";
+import {
+  autonomyConfirmText,
+  followAppPhrase,
+  isAutonomous,
+  removeNeedsChoice,
+  showGapSection,
+  toggleConfirmText,
+} from "../lib/managed-repos-view";
 
 /**
  * Config → Managed repos, the writable part: the "Require repo approval"
  * switch, the approved list (remove) and the gap — repos the GitHub App can
- * see that are not approved (approve selected / all).
+ * see that are not approved (approve selected / all). Each approved repo also
+ * has a Builds toggle: the autonomy allow-list (board + ready-for-agent builds).
  *
  * Every write answers with the full `/managed-repos` view, which replaces the
  * pane's data via `onChange`, so what is shown is always the server's state.
@@ -29,6 +37,8 @@ export function RepoApprovalPanel({
   const [pendingRemove, setPendingRemove] = useState<string[] | null>(null);
   /** The switch position waiting on its confirm. */
   const [pendingToggle, setPendingToggle] = useState<boolean | null>(null);
+  /** The repo whose autonomous builds are waiting on the enable confirm. */
+  const [pendingAutonomy, setPendingAutonomy] = useState<string | null>(null);
 
   /**
    * Send a write and adopt the view it answers with. A 409 means this pane was
@@ -41,6 +51,7 @@ export function RepoApprovalPanel({
     setError(null);
     setPendingRemove(null);
     setPendingToggle(null);
+    setPendingAutonomy(null);
     try {
       const next = await write();
       onChange(next);
@@ -68,6 +79,11 @@ export function RepoApprovalPanel({
   function toggle(enable: boolean) {
     if (toggleConfirmText(data, enable)) setPendingToggle(enable);
     else void run(() => api.setRequireRepoApproval(enable), { toggle: enable });
+  }
+
+  function setAutonomy(repo: string, enabled: boolean) {
+    if (enabled) setPendingAutonomy(repo);
+    else void run(() => api.setRepoAutonomy(repo, false));
   }
 
   const gap = data.gap;
@@ -130,6 +146,19 @@ export function RepoApprovalPanel({
                   >
                     <span className="font-mono text-base-content break-all min-w-0 flex-1">{r}</span>
                     {noAccess.has(r.toLowerCase()) && <span className="text-warning">App has no access</span>}
+                    <label
+                      className="flex items-center gap-1 text-muted cursor-pointer"
+                      title="Autonomous builds (board and ready-for-agent)"
+                    >
+                      <input
+                        type="checkbox"
+                        className="toggle toggle-xs"
+                        checked={isAutonomous(data, r)}
+                        disabled={busy}
+                        onChange={(e) => setAutonomy(r, e.target.checked)}
+                      />
+                      Builds
+                    </label>
                     <button className="btn btn-xs btn-ghost" disabled={busy} onClick={() => remove([r])}>
                       Remove
                     </button>
@@ -202,6 +231,22 @@ export function RepoApprovalPanel({
             { label: "Cancel", className: "btn-ghost", onClick: () => setPendingRemove(null) },
             { label: "No", className: "btn-ghost", onClick: () => removeWith("require-approval") },
             { label: "Yes", className: "btn-primary", onClick: () => removeWith("follow-app") },
+          ]}
+        />
+      )}
+
+      {pendingAutonomy !== null && (
+        <Confirm
+          title={`Turn on autonomous builds for ${pendingAutonomy}?`}
+          body={autonomyConfirmText(pendingAutonomy)}
+          busy={busy}
+          actions={[
+            { label: "Cancel", className: "btn-ghost", onClick: () => setPendingAutonomy(null) },
+            {
+              label: "Turn on builds",
+              className: "btn-primary",
+              onClick: () => void run(() => api.setRepoAutonomy(pendingAutonomy, true)),
+            },
           ]}
         />
       )}

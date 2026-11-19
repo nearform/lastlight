@@ -6,7 +6,15 @@
  */
 import { describe, it, expect } from "vitest";
 import type { ManagedRepos } from "../src/api";
-import { followAppCount, followAppPhrase, removeNeedsChoice, showGapSection, toggleConfirmText } from "../src/lib/managed-repos-view";
+import {
+  autonomyConfirmText,
+  followAppCount,
+  followAppPhrase,
+  isAutonomous,
+  removeNeedsChoice,
+  showGapSection,
+  toggleConfirmText,
+} from "../src/lib/managed-repos-view";
 
 function view(over: Partial<ManagedRepos>): ManagedRepos {
   return {
@@ -27,6 +35,8 @@ function view(over: Partial<ManagedRepos>): ManagedRepos {
     yamlDiffers: false,
     showApprovalLists: true,
     discoveryFailedAccounts: [],
+    autonomous: [],
+    autonomyStored: false,
     ...over,
   };
 }
@@ -95,5 +105,18 @@ describe("before the App's repo list is discovered", () => {
 
   it("names the count once discovered", () => {
     expect(followAppPhrase(view({}))).toBe("all 7 repos the App can see");
+  });
+});
+
+describe("autonomous builds", () => {
+  it("isAutonomous is an exact match, like the server", () => {
+    expect(isAutonomous(view({ autonomous: ["a/one"] }), "a/one")).toBe(true);
+    expect(isAutonomous(view({ autonomous: ["a/one"] }), "A/One")).toBe(false);
+  });
+
+  it("names the repo and the gates in the enable confirm", () => {
+    expect(autonomyConfirmText("a/one")).toBe(
+      "A ready-for-agent label on a/one will start a build. Builds still wait at the approval gates and the build budget.",
+    );
   });
 });

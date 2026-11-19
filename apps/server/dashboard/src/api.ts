@@ -177,6 +177,13 @@ export interface ManagedRepos {
   yamlDiffers: boolean;
   /** Whether the pane shows the approved and gap lists. */
   showApprovalLists: boolean;
+  /**
+   * The autonomy allow-list (board + ready-for-agent builds): the stored list
+   * once this pane writes it, else the config file's `autonomy.repos`.
+   */
+  autonomous: string[];
+  /** The autonomy list comes from the stored setting, not the config file. */
+  autonomyStored: boolean;
   /** Accounts whose installation repo list failed to load; their repos are missing from `gap`. */
   discoveryFailedAccounts: string[];
 }
@@ -1591,6 +1598,12 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ repos }),
+    }),
+  setRepoAutonomy: (repo: string, enabled: boolean) =>
+    reqAction<ManagedRepos>("/managed-repos/autonomy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repo, enabled }),
     }),
   removeManagedRepos: (repos: string[], whenEmpty?: WhenEmpty) =>
     reqAction<ManagedRepos>("/managed-repos/remove", {

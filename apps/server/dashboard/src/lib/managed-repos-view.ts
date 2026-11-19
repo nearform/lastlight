@@ -43,3 +43,16 @@ export function toggleConfirmText(data: ManagedRepos, enable: boolean): string |
 export function showGapSection(data: ManagedRepos): boolean {
   return data.requireApproval || data.gap === null || data.gap.length > 0;
 }
+
+/**
+ * Is `repo` on the autonomy allow-list (board + ready-for-agent builds)? An
+ * EXACT match, the same as the server's `isAutonomousRepo`.
+ */
+export function isAutonomous(data: ManagedRepos, repo: string): boolean {
+  return data.autonomous.includes(repo);
+}
+
+/** The confirm text for turning on autonomous builds for `repo`. */
+export function autonomyConfirmText(repo: string): string {
+  return `A ready-for-agent label on ${repo} will start a build. Builds still wait at the approval gates and the build budget.`;
+}
