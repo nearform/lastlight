@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { approveRepos, removeRepos, setRequireApproval } from "#src/managed-repo-approvals.js";
+import { approveRepos, removeRepos, setRepoAutonomy, setRequireApproval } from "#src/managed-repo-approvals.js";
+import { AUTONOMY_REPOS_SETTING_KEY, resetAutonomyReposForTests } from "#src/autonomy-repos.js";
 import {
   getManagedRepos,
   getRepoApprovalState,
@@ -8,7 +9,14 @@ import {
   REPO_APPROVAL_SETTING_KEY,
   setInstallationDiscoveryError,
 } from "#src/managed-repos.js";
-import { setRuntimeConfig, resetRuntimeConfigForTests, type LastLightConfig } from "#src/config/config.js";
+import {
+  defaultAutonomyConfig,
+  getAutonomyRepos,
+  isAutonomousRepo,
+  setRuntimeConfig,
+  resetRuntimeConfigForTests,
+  type LastLightConfig,
+} from "#src/config/config.js";
 import type { StateDb } from "#src/state/db.js";
 import { makeTestDb } from "./helpers/state-db.js";
 
@@ -164,5 +172,90 @@ describe("managed-repo approvals — no silent widening", () => {
       requireApproval: false,
       approved: ["a/two", "a/three"],
     });
+  });
+});
+
+describe("managed-repo approvals — autonomy toggle", () => {
+  let db: StateDb;
+
+  function config(approved: string[], autonomy: string[]): void {
+    setRuntimeConfig({
+      managedRepos: approved,
+      requireRepoApproval: false,
+      autonomy: { ...defaultAutonomyConfig(), repos: autonomy },
+    } as unknown as LastLightConfig);
+  }
+
+  beforeEach(async () => {
+    db = await makeTestDb();
+    setInstallationRepos("1", ["a/one", "a/two", "a/three"]);
+  });
+
+  afterEach(() => {
+    resetAutonomyReposForTests();
+    resetRuntimeConfigForTests();
+    resetInstallationReposForTests();
+  });
+
+  it("enable seeds from YAML and adds", async () => {
+    config(["a/one", "a/two"], ["a/one"]);
+    const res = await setRepoAutonomy(db, "a/two", true, "octocat");
+    expect(res).toEqual({ ok: true, repos: ["a/one", "a/two"] });
+    const row = await db.getSetting(AUTONOMY_REPOS_SETTING_KEY);
+    expect(row?.value).toEqual({ repos: ["a/one", "a/two"] });
+    expect(row?.updatedBy).toBe("octocat");
+    expect(isAutonomousRepo("a/two")).toBe(true);
+  });
+
+  it("enable stores the approved spelling", async () => {
+    config(["a/one"], []);
+    const res = await setRepoAutonomy(db, "A/One", true);
+    expect(res).toEqual({ ok: true, repos: ["a/one"] });
+    expect(isAutonomousRepo("a/one")).toBe(true);
+  });
+
+  it("enable of a repo that is not managed is 400 and writes nothing", async () => {
+    config(["a/one"], []);
+    const res = await setRepoAutonomy(db, "a/three", true);
+    expect(res).toEqual({ ok: false, status: 400, error: "not a managed repo: a/three" });
+    expect(await db.getSetting(AUTONOMY_REPOS_SETTING_KEY)).toBeNull();
+  });
+
+  it("disable removes it; disabling an absent repo writes nothing", async () => {
+    config(["a/one", "a/two"], []);
+    expect(await setRepoAutonomy(db, "a/two", false)).toEqual({ ok: true, repos: [] });
+    expect(await db.getSetting(AUTONOMY_REPOS_SETTING_KEY)).toBeNull();
+    await setRepoAutonomy(db, "a/one", true);
+    await setRepoAutonomy(db, "a/two", true);
+    expect(await setRepoAutonomy(db, "A/Two", false)).toEqual({ ok: true, repos: ["a/one"] });
+    expect(isAutonomousRepo("a/two")).toBe(false);
+  });
+
+  it("remove drops repo from autonomy", async () => {
+    config(["a/one", "a/two"], ["a/one", "a/two"]);
+    const res = await removeRepos(db, ["a/two"], {});
+    expect(res.ok).toBe(true);
+    expect(getAutonomyRepos()).toEqual(["a/one"]);
+    expect((await db.getSetting(AUTONOMY_REPOS_SETTING_KEY))?.value).toEqual({ repos: ["a/one"] });
+  });
+
+  it("remove drops repo from autonomy even when it empties approved", async () => {
+    config(["a/one"], ["a/one"]);
+    const res = await removeRepos(db, ["a/one"], { whenEmpty: "follow-app" });
+    expect(res.ok).toBe(true);
+    expect(getAutonomyRepos()).toEqual([]);
+  });
+
+  it("remove of a repo not in autonomy writes no autonomy row", async () => {
+    config(["a/one", "a/two"], ["a/one"]);
+    await removeRepos(db, ["a/two"], {});
+    expect(await db.getSetting(AUTONOMY_REPOS_SETTING_KEY)).toBeNull();
+    expect(getAutonomyRepos()).toEqual(["a/one"]);
+  });
+
+  it("concurrent toggles do not lose updates", async () => {
+    config(["a/one", "a/two"], []);
+    await Promise.all([setRepoAutonomy(db, "a/one", true), setRepoAutonomy(db, "a/two", true)]);
+    expect((await db.getSetting(AUTONOMY_REPOS_SETTING_KEY))?.value).toEqual({ repos: ["a/one", "a/two"] });
   });
 });

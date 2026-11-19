@@ -1,9 +1,16 @@
 import type { StateDb } from "./state/db.js";
 import {
+  AUTONOMY_REPOS_SETTING_KEY,
+  normalizeAutonomyRepos,
+  setStoredAutonomyRepos,
+  yamlAutonomyRepos,
+} from "./autonomy-repos.js";
+import {
   REPO_APPROVAL_SETTING_KEY,
   getInstallationDiscoveryFailures,
   getInstallationRepos,
   getInstallationReposRefreshedAt,
+  getManagedRepos,
   normalizeApprovalState,
   sameRepo,
   setStoredRepoApproval,
@@ -19,6 +26,11 @@ import {
  *
  * The first write therefore copies the YAML values into the row; from then on
  * the row wins (see `getRepoApprovalState`).
+ *
+ * The autonomy allow-list (which repos the board shows and a `ready-for-agent`
+ * label may build) is a second row, `autonomy-repos`, written the same way and
+ * through the same write queue: removing an approved repo drops it from both,
+ * so approving it again later does not quietly turn its builds back on.
  */
 
 /** What to do when a removal would leave no approved repo with the flag off. */
@@ -44,6 +56,17 @@ async function save(db: SettingsDb, state: RepoApprovalState, actor?: string): P
 async function current(db: SettingsDb): Promise<RepoApprovalState> {
   const row = await db.getSetting<unknown>(REPO_APPROVAL_SETTING_KEY);
   return row ? normalizeApprovalState(row.value) : yamlRepoApprovalState();
+}
+
+/** The autonomy list a write starts from: the STORED row, else YAML `autonomy.repos`. */
+async function currentAutonomy(db: SettingsDb): Promise<string[]> {
+  const row = await db.getSetting<unknown>(AUTONOMY_REPOS_SETTING_KEY);
+  return row ? normalizeAutonomyRepos(row.value).repos : yamlAutonomyRepos();
+}
+
+async function saveAutonomy(db: SettingsDb, repos: string[], actor?: string): Promise<void> {
+  await db.setSetting(AUTONOMY_REPOS_SETTING_KEY, { repos }, actor);
+  setStoredAutonomyRepos({ repos });
 }
 
 /** Writes run one at a time in this process, so two requests cannot interleave a read-modify-write. */
@@ -115,7 +138,11 @@ async function removeNow(
     }
     requireApproval = opts.whenEmpty === "require-approval";
   }
-  return save(db, { requireApproval, approved }, actor);
+  const res = await save(db, { requireApproval, approved }, actor);
+  const autonomy = await currentAutonomy(db);
+  const kept = autonomy.filter((a) => !repos.some((r) => sameRepo(a, r)));
+  if (kept.length !== autonomy.length) await saveAutonomy(db, kept, actor);
+  return res;
 }
 
 /**
@@ -139,5 +166,36 @@ export function setRequireApproval(
     // from its YAML values for nothing.
     if (state.requireApproval === enabled) return { ok: true, state };
     return save(db, { ...state, requireApproval: enabled }, actor);
+  });
+}
+
+export type AutonomyResult = { ok: true; repos: string[] } | { ok: false; status: 400; error: string };
+
+/**
+ * Turn autonomous builds on or off for one managed repo. Stored as the managed
+ * list spells the name, because `isAutonomousRepo` is an exact match. A change
+ * that changes nothing stores no row, so the deployment stays on its YAML list.
+ */
+export function setRepoAutonomy(
+  db: SettingsDb,
+  repo: string,
+  enabled: boolean,
+  actor?: string,
+): Promise<AutonomyResult> {
+  return serialized(async () => {
+    const repos = await currentAutonomy(db);
+    const has = repos.some((a) => sameRepo(a, repo));
+    if (enabled) {
+      const managed = getManagedRepos().find((m) => sameRepo(m, repo));
+      if (!managed) return { ok: false, status: 400, error: `not a managed repo: ${repo}` };
+      if (has) return { ok: true, repos };
+      const next = [...repos, managed];
+      await saveAutonomy(db, next, actor);
+      return { ok: true, repos: next };
+    }
+    if (!has) return { ok: true, repos };
+    const next = repos.filter((a) => !sameRepo(a, repo));
+    await saveAutonomy(db, next, actor);
+    return { ok: true, repos: next };
   });
 }
