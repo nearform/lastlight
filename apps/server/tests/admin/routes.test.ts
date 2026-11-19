@@ -1774,6 +1774,21 @@ describe("GET /repos", () => {
     // No overlay managedRepos in tests → repos with activity are unmanaged.
     expect(api.managed).toBe(false);
   });
+
+  it("matches managed repos case-insensitively and lists each repo once", async () => {
+    setRuntimeConfig({ managedRepos: ["Acme/Web"] } as unknown as LastLightConfig);
+    try {
+      vi.mocked(mockDb.runs.distinctRepos).mockResolvedValueOnce([
+        { repo: "acme/web", runCount: 2, lastRunAt: "2026-01-01T00:00:00.000Z" },
+      ]);
+      const app = createAdminRoutes(mockDb, mockSessions, mockSessions, makeConfig({ adminPassword: "" }));
+      const body = (await (await request(app, "/repos")).json()) as { repos: { repo: string; managed: boolean }[] };
+      expect(body.repos).toHaveLength(1);
+      expect(body.repos[0]).toMatchObject({ repo: "acme/web", managed: true });
+    } finally {
+      resetRuntimeConfigForTests();
+    }
+  });
 });
 
 describe("GET /workflow-runs ?repo=", () => {

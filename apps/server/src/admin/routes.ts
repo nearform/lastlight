@@ -57,8 +57,19 @@ import {
   getInstallationRepoBreakdown,
   getInstallationRepos,
   getInstallationReposRefreshedAt,
+  getInstallationDiscoveryFailures,
+  getRepoApprovalState,
   isManagedRepo,
+  sameRepo,
 } from "../managed-repos.js";
+import {
+  approveRepos,
+  removeRepos,
+  setRepoAutonomy,
+  setRequireApproval,
+  type ApprovalResult,
+  type WhenEmpty,
+} from "../managed-repo-approvals.js";
 import {
   getInstallationDirectory,
   installationSettingsUrl,
@@ -172,6 +183,7 @@ import {
   // pasted credential. It must stay single-source (see config.ts).
   redactPublic,
   getAutonomyConfig,
+  getAutonomyRepos,
   stageWorkflow,
   getHoldLabel,
   type RepoConfigPolicy,
@@ -188,6 +200,7 @@ import { issueTriggerId } from "../engine/build-decisions.js";
 import { applyBuildDispatchGate } from "../engine/build-gate.js";
 import { buildBoard, type BoardStage, type BoardDegradation } from "./board.js";
 import { getBoardItems, invalidateBoard, BOARD_TTL_MS } from "./board-cache.js";
+import { getAutonomyReposState } from "../autonomy-repos.js";
 import { boardSignature, BOARD_TICK_MS, BOARD_HEARTBEAT_MS } from "./board-stream.js";
 import { reapSandboxWorkspace } from "../sandbox/reap.js";
 import { artifactStore } from "../sandbox/artifact-store.js";
@@ -794,9 +807,29 @@ export function createAdminRoutes(
   // list; `installation` is what the GitHub App can access (discovered at boot +
   // kept live by installation webhooks); `effective` is what actually gates
   // events (config wins when set, else installation). See src/managed-repos.ts.
-  app.get("/managed-repos", (c) => {
-    const configured = getRuntimeConfig()?.managedRepos ?? [];
+  // The GET body, also returned by every write below so the pane re-renders
+  // from one shape.
+  const managedReposView = () => {
+    const cfg = getRuntimeConfig();
+    const configured = cfg?.managedRepos ?? [];
     const effective = getManagedRepos();
+    // Repo approval (Config → Managed repos). `gap` = what the App can see that
+    // is not approved; null until installation discovery has run, so the pane
+    // can say "not discovered yet" rather than "no gap".
+    const { state: approval, stored } = getRepoApprovalState();
+    const autonomy = getAutonomyReposState();
+    const grant = getInstallationRepos();
+    const discovered = getInstallationReposRefreshedAt() !== null;
+    const gap = discovered ? grant.filter((g) => !approval.approved.some((a) => sameRepo(a, g))) : null;
+    const approvedNoAccess = discovered
+      ? approval.approved.filter((a) => !grant.some((g) => sameRepo(g, a)))
+      : [];
+    const sameList = (x: string[], y: string[]) =>
+      x.length === y.length && x.every((a) => y.some((b) => sameRepo(a, b)));
+    const yamlDiffers =
+      stored &&
+      (approval.requireApproval !== (cfg?.requireRepoApproval ?? false) ||
+        !sameList(approval.approved, configured));
     // Every ACCOUNT the App is installed on, with its repo grant. A GitHub App
     // is installed per account and each installation mints its own tokens, so a
     // `managedRepos` entry whose owner has no installation cannot be acted on —
@@ -814,11 +847,11 @@ export function createAdminRoutes(
           .filter((owner) => owner && !installedOwners.has(owner.toLowerCase())),
       ),
     ];
-    return c.json({
+    return {
       configured,
       installation: getInstallationRepos(),
       effective,
-      source: configured.length > 0 ? "config" : "installation",
+      source: approval.requireApproval || approval.approved.length > 0 ? "config" : "installation",
       refreshedAt: getInstallationReposRefreshedAt(),
       installations: installations.map((i) => ({
         id: i.id,
@@ -845,7 +878,112 @@ export function createAdminRoutes(
         const layer = getCachedRepoLayer(repo);
         return { repo, hasRepoConfig: Boolean(layer), fetchedAt: layer?.fetchedAt ?? null };
       }),
+      approved: approval.approved,
+      requireApproval: approval.requireApproval,
+      // The autonomy allow-list (board + ready-for-agent builds): the stored
+      // list once the pane writes it, else YAML `autonomy.repos`.
+      autonomous: autonomy.state.repos,
+      autonomyStored: autonomy.stored,
+      stored,
+      gap,
+      approvedNoAccess,
+      yamlDiffers,
+      discoveryFailedAccounts: getInstallationDiscoveryFailures(),
+      // Shown whenever approval is required or anything is approved, so every
+      // approved repo stays removable (also right after "Approve all", and for
+      // an approved repo the App lost access to). The Not-approved section in
+      // the pane hides itself when the gap is empty.
+      showApprovalLists: approval.requireApproval || approval.approved.length > 0,
+    };
+  };
+
+  app.get("/managed-repos", (c) => c.json(managedReposView()));
+
+  // Writes behind Config → Managed repos. The rules live in
+  // managed-repo-approvals.ts; these routes validate the body, record activity,
+  // and answer with the new view so the pane re-renders from one shape.
+  const repoList = (raw: unknown): string[] | null =>
+    Array.isArray(raw) &&
+    raw.length > 0 &&
+    raw.every((r) => typeof r === "string" && /^[^/\s]+\/[^/\s]+$/.test(r))
+      ? (raw as string[])
+      : null;
+  const answer = (c: Context, res: ApprovalResult) =>
+    res.ok
+      ? c.json(managedReposView())
+      : c.json(
+          res.installationCount === undefined
+            ? { error: res.error }
+            : { error: res.error, installationCount: res.installationCount },
+          res.status,
+        );
+
+  app.post("/managed-repos/approve", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as { repos?: unknown } | null;
+    const repos = repoList(body?.repos);
+    if (!repos) return c.json({ error: "repos must be a non-empty array of owner/repo" }, 400);
+    const res = await approveRepos(db, repos, actorFromContext(c));
+    if (res.ok) {
+      await recordActivityFor(c, db, {
+        action: "managed-repos.approve",
+        targetType: "managed-repos",
+        detail: { repos: repos.join(",") },
+      });
+    }
+    return answer(c, res);
+  });
+
+  app.post("/managed-repos/remove", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as { repos?: unknown; whenEmpty?: unknown } | null;
+    const repos = repoList(body?.repos);
+    if (!repos) return c.json({ error: "repos must be a non-empty array of owner/repo" }, 400);
+    const raw = body?.whenEmpty;
+    if (raw !== undefined && raw !== "follow-app" && raw !== "require-approval") {
+      return c.json({ error: 'whenEmpty must be "follow-app" or "require-approval"' }, 400);
+    }
+    const whenEmpty = raw as WhenEmpty | undefined;
+    const res = await removeRepos(db, repos, { whenEmpty }, actorFromContext(c));
+    if (res.ok) {
+      await recordActivityFor(c, db, {
+        action: "managed-repos.remove",
+        targetType: "managed-repos",
+        detail: whenEmpty ? { repos: repos.join(","), whenEmpty } : { repos: repos.join(",") },
+      });
+    }
+    return answer(c, res);
+  });
+
+  app.post("/managed-repos/autonomy", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as { repo?: unknown; enabled?: unknown } | null;
+    const repo = body?.repo;
+    const enabled = body?.enabled;
+    if (typeof repo !== "string" || !/^[^/\s]+\/[^/\s]+$/.test(repo) || typeof enabled !== "boolean") {
+      return c.json({ error: "repo must be owner/repo and enabled true or false" }, 400);
+    }
+    const res = await setRepoAutonomy(db, repo, enabled, actorFromContext(c));
+    if (!res.ok) return c.json({ error: res.error }, res.status);
+    await recordActivityFor(c, db, {
+      action: "managed-repos.autonomy",
+      targetType: "managed-repos",
+      detail: { repo, enabled },
     });
+    invalidateBoard(repo);
+    return c.json(managedReposView());
+  });
+
+  app.post("/managed-repos/require-approval", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as { enabled?: unknown; confirm?: unknown } | null;
+    const enabled = body?.enabled;
+    if (typeof enabled !== "boolean") return c.json({ error: "enabled must be true or false" }, 400);
+    const res = await setRequireApproval(db, enabled, actorFromContext(c), { confirm: body?.confirm === true });
+    if (res.ok) {
+      await recordActivityFor(c, db, {
+        action: "managed-repos.require-approval",
+        targetType: "managed-repos",
+        detail: { enabled },
+      });
+    }
+    return answer(c, res);
   });
 
   // The managed repos THIS user should see by default, from their GitHub team
@@ -2291,22 +2429,23 @@ export function createAdminRoutes(
       workflow: stageWorkflow(stage),
     }));
 
-    const managedSet = new Set(getManagedRepos());
 
     // ── The board's universe is the AUTONOMY ALLOW-LIST, not the managed list ──
     //
-    // This board is a view of ONE pipeline, and `autonomy.repos` is what decides
-    // which repos have one. A managed repo that is not on the list has no stage
-    // labels anybody writes, no `build` the gate would admit, and every action
-    // offered on its cards answers `409 not-autonomous` — because the card
-    // actions cross the real dispatch gate, which checks exactly this list. So
-    // showing those repos renders columns and menus for work that structurally
-    // cannot run, and pays a live GitHub read per repo to do it.
+    // This board is a view of ONE pipeline, and the autonomy allow-list is what
+    // decides which repos have one: the stored list from Config → Managed repos
+    // once written, else YAML `autonomy.repos` (see `getAutonomyRepos`). A
+    // managed repo that is not on the list has no stage labels anybody writes,
+    // no `build` the gate would admit, and every action offered on its cards
+    // answers `409 not-autonomous` — because the card actions cross the real
+    // dispatch gate, which checks exactly this list. So showing those repos
+    // renders columns and menus for work that structurally cannot run, and
+    // pays a live GitHub read per repo to do it.
     //
     // Intersected with the managed set rather than trusted outright: the two are
     // configured independently, and a repo named in `autonomy.repos` that the
     // App cannot see is a typo, not a target.
-    const eligible = new Set(autonomy.repos.filter((r) => managedSet.has(r)));
+    const eligible = new Set(getAutonomyRepos().filter((r) => isManagedRepo(r)));
 
     // Scope, in precedence order. Each step narrows to `eligible`.
     const requested = (c.req.query("repos") || "")
@@ -2519,7 +2658,6 @@ export function createAdminRoutes(
   });
 
   app.get("/repos", async (c) => {
-    const managed = new Set(getManagedRepos());
     const activity = new Map(
       (await db.runs.distinctRepos()).map((r) => [r.repo, r]),
     );
@@ -2536,16 +2674,21 @@ export function createAdminRoutes(
       }
     }
 
-    const names = new Set<string>([
-      ...managed,
-      ...activity.keys(),
-      ...artifactCounts.keys(),
-    ]);
+    const names = new Set<string>([...activity.keys(), ...artifactCounts.keys()]);
+    // A managed repo is listed under the spelling activity already uses, so a
+    // case difference (overlay `Acme/Web`, runs `acme/web`) is one row, not two.
+    const seen = new Set([...names].map((n) => n.toLowerCase()));
+    for (const r of getManagedRepos()) {
+      if (!seen.has(r.toLowerCase())) {
+        names.add(r);
+        seen.add(r.toLowerCase());
+      }
+    }
 
     const repos = [...names]
       .map((repo) => ({
         repo,
-        managed: managed.has(repo),
+        managed: isManagedRepo(repo),
         runCount: activity.get(repo)?.runCount ?? 0,
         lastRunAt: activity.get(repo)?.lastRunAt ?? null,
         artifactKeyCount: artifactCounts.get(repo) ?? 0,

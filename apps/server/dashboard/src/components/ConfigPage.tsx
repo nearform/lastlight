@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type ConfigBundle, type OverridesBundle, type OverlayAsset, type ManagedRepos } from "../api";
+import { RepoApprovalPanel } from "./RepoApprovalPanel";
 
 type Pane = "default" | "overlay" | "merged" | "sources" | "overrides" | "repos";
 
@@ -75,16 +76,24 @@ function OverridesPane({ data }: { data: OverridesBundle | null }) {
   );
 }
 
-function ManagedReposPane({ data }: { data: ManagedRepos | null }) {
+function ManagedReposPane({
+  data,
+  onChange,
+}: {
+  data: ManagedRepos | null;
+  onChange: (next: ManagedRepos) => void;
+}) {
   if (!data) return <div className="text-sm text-muted">Loading managed repos…</div>;
   return (
     <div className="overflow-auto space-y-3">
       <div className="rounded border border-hairline ll-surface p-3 text-sm text-strong">
         Events are gated to the <strong>effective</strong> list below. Source:{" "}
         <span className="font-medium text-base-content">
-          {data.source === "config"
-            ? "overlay config (managedRepos is set)"
-            : "GitHub App installations (managedRepos empty — tracking the App grant across every account)"}
+          {data.source === "installation"
+            ? "GitHub App installations (no repo approved — tracking the App grant across every account)"
+            : data.stored
+              ? "the approved list below (set from the dashboard)"
+              : "the approved list below (overlay managedRepos / requireRepoApproval)"}
         </span>
         .{" "}
         {data.refreshedAt && (
@@ -148,8 +157,11 @@ function ManagedReposPane({ data }: { data: ManagedRepos | null }) {
       )}
       {data.effective.length === 0 ? (
         <div className="rounded border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
-          No managed repos — the bot will respond to nothing. Set an overlay{" "}
-          <code className="text-xs">managedRepos</code> list, or wait for installation discovery.
+          {data.requireApproval ? (
+            <>No repo is approved and approval is required — the bot will respond to nothing. Approve repos below.</>
+          ) : (
+            <>No managed repos — the bot will respond to nothing. Wait for installation discovery, or approve repos below.</>
+          )}
         </div>
       ) : (
         <ul className="text-xs font-mono grid gap-1">
@@ -162,6 +174,7 @@ function ManagedReposPane({ data }: { data: ManagedRepos | null }) {
         {data.configured.length} configured · {data.installation.length} accessible across{" "}
         {data.installations.length} installation{data.installations.length === 1 ? "" : "s"}
       </p>
+      <RepoApprovalPanel data={data} onChange={onChange} />
     </div>
   );
 }
@@ -198,7 +211,8 @@ export function ConfigPage() {
           The Sources pane shows each value's provenance (default / overlay / env); the
           Overrides pane lists assets the deployment overlay forks; the Managed repos pane
           shows which repos events are gated to, where that list comes from, and every
-          account the GitHub App is installed on.
+          account the GitHub App is installed on, and is the one place here you can change
+          something live: which repos are approved, and whether approval is required.
         </p>
       </div>
       <div className="flex flex-wrap gap-1 shrink-0 border-b border-hairline bg-base-200/60 px-4 py-2">
@@ -218,7 +232,7 @@ export function ConfigPage() {
         ) : pane === "overrides" ? (
           <OverridesPane data={overrides} />
         ) : pane === "repos" ? (
-          <ManagedReposPane data={repos} />
+          <ManagedReposPane data={repos} onChange={setRepos} />
         ) : !config ? (
           <div className="text-sm text-muted">Loading configuration…</div>
         ) : value === null ? (
