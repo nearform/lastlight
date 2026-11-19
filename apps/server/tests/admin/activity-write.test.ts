@@ -237,6 +237,7 @@ describe("activity log — the write side", () => {
       "POST /managed-repos/approve",
       "POST /managed-repos/remove",
       "POST /managed-repos/require-approval",
+      "POST /managed-repos/autonomy",
     ]);
 
     /** Deliberately unlogged, with the reason. */
