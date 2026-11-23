@@ -19,14 +19,14 @@
     "agentic-pi": "workspace:*",
     "ansi-to-html": "^0.7.2",
     "clsx": "^2.1.1",
-    "dompurify": "^3.4.17",
-    "lucide-react": "^1.72.0",
-    "marked": "^18.2.0",
+    "dompurify": "^3.4.18",
+    "lucide-react": "^1.76.0",
+    "marked": "^18.2.1",
     "prismjs": "^1.30.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "react-resizable-panels": "^4.21.0",
-    "recharts": "^3.10.1"
+    "react-resizable-panels": "^4.24.1",
+    "recharts": "^3.11.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.5",
