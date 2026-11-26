@@ -174,6 +174,16 @@ COPY --from=agentic-pi-build /bundle /opt/agentic-pi
 RUN chmod +x /opt/agentic-pi/dist/cli.js \
  && ln -sf /opt/agentic-pi/dist/cli.js /usr/local/bin/agentic-pi
 
+# Claude Code CLI for the opt-in `claude-code` runtime (`models.<role>:
+# claude-code/<model>`). Installed as published at a pinned version and never
+# patched; inert unless an operator puts a role on it. tmux hosts the
+# interactive session the harness drives.
+ARG CLAUDE_CODE_VERSION=2.1.305
+RUN apt-get update && apt-get install -y --no-install-recommends tmux \
+ && rm -rf /var/lib/apt/lists/* \
+ && npm i -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+ && claude --version
+
 # lastlight CLI (`lastlight facts` + the lastlight-facts dependency bin) —
 # wrappers pin the image's system node; see sandbox.Dockerfile for rationale.
 COPY --from=lastlight-cli-build /bundle /opt/lastlight

@@ -120,6 +120,8 @@ export const workflowRuns = pgTable(
     triggerActorType: text("trigger_actor_type"),
     scratch: jsonb("scratch").$type<Record<string, unknown>>(),
     restartCount: integer("restart_count").notNull().default(0),
+    /** ISO time a queued run waiting for a usage-limit reset may be admitted again; null = now. */
+    notBefore: text("not_before"),
     traceId: text("trace_id"),
     spanId: text("span_id"),
     engine: text("engine"),

@@ -38,6 +38,6 @@ AFTER WRITING:
 1. mkdir -p {{issueDir}}
 2. Write architect-plan.md
 3. Write status.md with current_phase: architect
-{{#if !externalizeArtifacts}}4. `github_publish` with `{ owner: "{{owner}}", repo: "{{repo}}", message: "docs: architect plan for #{{issueNumber}}", include: [".lastlight"] }` — one signed commit of `.lastlight/` only, which also creates the branch on GitHub if it isn't there yet. Write the plan first: with nothing under `.lastlight/` it reports `published: false` and creates no branch.{{/if}}{{#if externalizeArtifacts}}4. Do NOT git add or commit {{issueDir}}/ — the harness persists it to the Last Light server automatically.{{/if}}
+{{#if !skipAgentPublish}}4. `github_publish` with `{ owner: "{{owner}}", repo: "{{repo}}", message: "docs: architect plan for #{{issueNumber}}", include: [".lastlight"] }` — one signed commit of `.lastlight/` only, which also creates the branch on GitHub if it isn't there yet. Write the plan first: with nothing under `.lastlight/` it reports `published: false` and creates no branch.{{/if}}{{#if externalizeArtifacts}}4. Do NOT git add or commit {{issueDir}}/ — the harness persists it to the Last Light server automatically.{{/if}}{{#if hostPublishesArtifacts}}4. Do NOT commit {{issueDir}}/ and do not try to publish it: Last Light publishes it to the branch after this phase.{{/if}}
 
 OUTPUT: The branch name and a brief summary (3-5 lines).

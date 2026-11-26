@@ -311,4 +311,47 @@ describe("runSimpleWorkflow — concurrency cap (issue #172)", () => {
     const runs = await db.runs.listActive();
     expect(runs.find((r) => r.workflowName === "explore")!.status).toBe("queued");
   });
+
+  it("requeues a run that hit a usage limit with its not_before", async () => {
+    const notBefore = "2026-11-04T15:00:00.000Z";
+    mockRunWorkflow.mockResolvedValue({
+      success: false,
+      phases: [{ phase: "socratic", success: false, output: "", error: "Claude usage limit reached" }],
+      backpressure: true,
+      notBefore,
+    });
+    const result = await runSimpleWorkflow(
+      "explore",
+      makeRequest(),
+      { ...makeConfig(), sandbox: "docker" as const },
+      makeCallbacks(),
+      db,
+      undefined,
+      undefined,
+      "lastlight:bootstrap",
+      undefined,
+      { maxWorkflows: 1000, maxQueueWaitMs: 1_800_000 },
+    );
+    expect(result.queued).toBe(true);
+    const run = (await db.runs.listActive()).find((r) => r.workflowName === "explore")!;
+    expect(run.status).toBe("queued");
+    expect(run.notBefore).toBe(notBefore);
+  });
+});
+
+describe("runSimpleWorkflow — repo-mode notes dir", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("tells the executor which notes dir is this run's own", async () => {
+    const db = await makeDb();
+    mockRunWorkflow.mockResolvedValue({ success: true, phases: [{ phase: "socratic", success: true, output: "ok" }] });
+    await runSimpleWorkflow("explore", makeRequest(), makeConfig(), makeCallbacks(), db, undefined, undefined, "lastlight:bootstrap", undefined, {
+      maxWorkflows: 4,
+      maxQueueWaitMs: 1_800_000,
+    });
+    const runConfig = mockRunWorkflow.mock.calls[0]![2] as { notesDir?: string };
+    expect(runConfig.notesDir).toMatch(/^\.lastlight\/[^/.][^/]*$/);
+  });
 });

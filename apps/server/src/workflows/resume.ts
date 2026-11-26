@@ -22,6 +22,7 @@ import {
 } from "../notify/index.js";
 import { logger } from "../logging/logger.js";
 import { logPhaseEnd, logPhaseStart } from "../logging/phase-log.js";
+import { isNotesDir } from "../engine/claude-code/publish-notes.js";
 
 const log = logger("resume");
 
@@ -374,6 +375,9 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
     // externalizing (and linking docs to the dashboard) instead of silently
     // reverting to committing them on the branch.
     externalizeArtifacts: opts.config.buildAssets === "server",
+    // The agent publishes its own notes unless they are externalized; a
+    // claude-code phase also skips it (runner `promptContextFor`).
+    skipAgentPublish: opts.config.buildAssets === "server",
     publicUrl: opts.publicUrl,
     bootstrapLabel: opts.bootstrapLabel || "lastlight:bootstrap",
     contextSnapshot: "",
@@ -486,7 +490,9 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
         buildAssetsKey: { owner, repo, issueKey: issueDir.replace(/^(\.\.\/)?\.lastlight\//, "") },
         buildAssetsRelocated: issueDir.startsWith("../"),
       }
-    : opts.config;
+    : isNotesDir(issueDir)
+      ? { ...opts.config, notesDir: issueDir }
+      : opts.config;
 
   try {
     const result = await runWorkflow(
@@ -517,8 +523,12 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
     } else if (result.backpressure) {
       // Same backpressure requeue as the fresh-dispatch path: a promoted run
       // that re-hits the quota goes back to `queued` for the next admission tick.
-      await opts.db.runs.requeueRunning(run.id);
-      log.info("Requeued — cluster at capacity", { workflowName: run.workflowName, runId: run.id });
+      await opts.db.runs.requeueRunning(run.id, result.notBefore ? { notBefore: result.notBefore } : {});
+      log.info(result.notBefore ? "Requeued — waiting for the usage limit to reset" : "Requeued — cluster at capacity", {
+        workflowName: run.workflowName,
+        runId: run.id,
+        ...(result.notBefore ? { notBefore: result.notBefore } : {}),
+      });
     } else {
       await opts.db.runs.finishRun(run.id, "failed", {
         error: result.phases.find((p) => !p.success)?.error || "workflow failed during resume",

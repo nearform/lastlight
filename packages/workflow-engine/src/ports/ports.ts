@@ -407,4 +407,11 @@ export interface EnginePorts {
   verdictReader?: VerdictArtifactReader;
   /** App-registered handlers for non-generic phase types (e.g. post-review). */
   handlers?: Map<string, PhaseTypeHandler>;
+  /**
+   * Extra template context for one phase's prompt, given the model that phase
+   * will run on (its resolved model, else the run's default). Lets the app
+   * tell a prompt facts that depend on the runtime the model selects — e.g.
+   * who publishes the phase's handoff notes. Absent → no extra context.
+   */
+  promptContextFor?: (model: string | undefined) => Partial<TemplateContext>;
 }
