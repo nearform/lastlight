@@ -49,7 +49,7 @@ interface LastLightConfig {
   buildAssetsDir: string;                  // server-mode store root ($STATE_DIR/build-assets)
   deploy: { version: string | null };      // core-version pin (git tag/ref) or null = track main
   managedRepos: string[];                 // empty = source the list from the App installation
-  routes: RouteConfig;                    // { github: Record<string,string>; slack: Record<string,string> }
+  routes: RouteConfig;                    // { github, slack, jira }: each Record<string,string>
                                           // mirrored by defaultRouteConfig() for the
                                           // no-config-loaded case; pinned equal in tests
   disabled: DisabledConfig;               // { workflows, crons, prompts, skills, agentContext }: string[]
@@ -63,6 +63,7 @@ interface LastLightConfig {
   };
   githubToken?: string;                   // PAT fallback — ONLY when no App is configured
   slack?: SlackConfig;
+  jira?: JiraConfig;                      // Jira connector (#501); present only when enabled + JIRA_* set
   approval?: Record<string, boolean>;     // gate-name → enabled
   bootstrapLabel: string;
   holdLabel: string;                      // the HOLD label — a human applies it to stop Last Light
@@ -110,6 +111,19 @@ interface SlackConfig {
   allowedUsers: string[];
   deliveryChannel?: string;                // last-resort channel (SLACK_DELIVERY_CHANNEL)
   repoChannels: Record<string, string>;    // "owner/repo" -> channel id (overlay `slack.repoChannels`)
+}
+
+interface JiraConfig {                      // the Jira connector (#501); present only when enabled + JIRA_* set
+  siteUrl: string;                         // JIRA_SITE_URL (no trailing slash)
+  cloudId?: string;                        // JIRA_CLOUD_ID — scoped-token gateway only; absent for a classic token
+  email: string;                           // JIRA_EMAIL \ basic auth for the bot account
+  apiToken: string;                        // JIRA_API_TOKEN /
+  webhookSecret: string;                   // JIRA_WEBHOOK_SECRET — HMAC secret the webhook is signed with
+  triggerLabel: string;                    // Jira label that opts a ticket in (default `lastlight`)
+  allowedAccountIds: string[];             // accountIds allowed to trigger/comment/approve; EMPTY = nobody
+  projects: Record<string, { repo: string; components?: Record<string, string> }>;
+  transitions: { started?: string; prOpened?: string; merged?: string };  // target status names
+  webhook: { url: string | null; autoSync: boolean };
 }
 
 interface DigestConfig {                   // the weekly repo digest; operator-only
@@ -626,6 +640,22 @@ parse as PEM. Missing or malformed PEM exits `78` (`EX_CONFIG`).
 
 Presence of `SLACK_BOT_TOKEN` gates the `slack` config sub-object.
 Without it, the Slack connector never registers.
+
+### Jira (#501)
+
+Behaviour lives in the overlay `jira:` block; credentials are env-only. The
+connector is inert until `jira.enabled: true`, at which point the secrets are
+required and a missing one fails the boot.
+
+| Var | Purpose | Default |
+|---|---|---|
+| `JIRA_SITE_URL` | the site, e.g. `https://acme.atlassian.net` | — |
+| `JIRA_EMAIL` / `JIRA_API_TOKEN` | basic auth for the bot account | — |
+| `JIRA_WEBHOOK_SECRET` | HMAC secret the inbound webhook is signed with | — |
+| `JIRA_CLOUD_ID` | gateway cloudId — **only** a scoped token needs it; a classic token uses the site URL | none |
+
+`jira.enabled` gates the `jira` config sub-object; with it off, no
+`/webhooks/jira` route is mounted and no Jira API call is made.
 
 ### Models and reasoning
 

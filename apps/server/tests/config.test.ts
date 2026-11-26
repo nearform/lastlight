@@ -380,7 +380,11 @@ describe('loadConfig — concurrency defaults and env overrides', () => {
 describe("defaultRouteConfig mirrors config/default.yaml", () => {
   const yamlRoutes = parseYaml(
     readFileSync(resolve("config/default.yaml"), "utf-8"),
-  ).routes as { github: Record<string, string>; slack: Record<string, string> };
+  ).routes as {
+    github: Record<string, string>;
+    slack: Record<string, string>;
+    jira: Record<string, string>;
+  };
 
   it("matches the packaged github routes exactly", () => {
     expect(defaultRouteConfig().github).toEqual(yamlRoutes.github);
@@ -388,5 +392,9 @@ describe("defaultRouteConfig mirrors config/default.yaml", () => {
 
   it("matches the packaged slack routes exactly", () => {
     expect(defaultRouteConfig().slack).toEqual(yamlRoutes.slack);
+  });
+
+  it("matches the packaged jira routes exactly", () => {
+    expect(defaultRouteConfig().jira).toEqual(yamlRoutes.jira);
   });
 });
