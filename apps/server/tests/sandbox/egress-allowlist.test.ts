@@ -1,3 +1,6 @@
+import { dirname, join } from "node:path";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, it, expect } from "vitest";
 import { installProviderOverrides, resetProviderRegistry } from "#src/config/provider-registry.js";
 import {
@@ -5,6 +8,7 @@ import {
   defaultAllowlist,
   dockerSandboxAllowlist,
   gatewayHostsStillAllowed,
+  gondolinHostPatterns,
   GITHUB_HOSTS,
   PACKAGE_REGISTRY_HOSTS,
   providerHosts,
@@ -115,5 +119,55 @@ describe("dockerSandboxAllowlist (model gateway)", () => {
   it("equals defaultAllowlist when no provider uses the gateway", () => {
     installProviderOverrides({ acme: { baseUrl: "https://gw.example/v1" } });
     expect(dockerSandboxAllowlist()).toEqual(defaultAllowlist());
+  });
+});
+
+// gondolin's own hostname matcher. It is not exported from the package root,
+// so load it from agentic-pi's copy of the package: the test then checks the
+// patterns against the code that enforces them, at the version agentic-pi pins.
+const agenticPiRequire = createRequire(new URL("../../../../packages/agentic-pi/package.json", import.meta.url));
+const gondolinDir = dirname(agenticPiRequire.resolve("@earendil-works/gondolin/package.json"));
+const { matchesAnyHost } = (await import(
+  pathToFileURL(join(gondolinDir, "dist/src/host/patterns.js")).href
+)) as { matchesAnyHost: (hostname: string, patterns: string[]) => boolean };
+
+describe("gondolinHostPatterns (apex + subdomains on gondolin, issue #503)", () => {
+  it("pairs each bare host with a *. pattern", () => {
+    expect(gondolinHostPatterns(["crates.io", "npmjs.org"])).toEqual([
+      "crates.io", "*.crates.io", "npmjs.org", "*.npmjs.org",
+    ]);
+  });
+
+  it("leaves IP literals exact: a *. prefix on an address is meaningless", () => {
+    expect(gondolinHostPatterns(["203.0.113.7", "[2001:db8::1]"])).toEqual(["203.0.113.7", "[2001:db8::1]"]);
+  });
+
+  it("admits registry subdomains through gondolin's matcher", () => {
+    const patterns = gondolinHostPatterns(defaultAllowlist());
+    for (const host of [
+      "index.crates.io", "static.crates.io", "registry.npmjs.org",
+      "files.pythonhosted.org", "proxy.golang.org", "api.github.com",
+      "a.b.npmjs.org",
+    ]) {
+      expect(matchesAnyHost(host, patterns), host).toBe(true);
+    }
+  });
+
+  it("keeps the apex hosts allowed", () => {
+    const patterns = gondolinHostPatterns(defaultAllowlist());
+    for (const host of ["crates.io", "npmjs.org", "github.com"]) {
+      expect(matchesAnyHost(host, patterns), host).toBe(true);
+    }
+  });
+
+  it("keeps off-list hosts and lookalikes blocked", () => {
+    const patterns = gondolinHostPatterns(defaultAllowlist());
+    for (const host of ["example.com", "evilcrates.io", "crates.io.evil.com", "x.crates.io.evil.com"]) {
+      expect(matchesAnyHost(host, patterns), host).toBe(false);
+    }
+  });
+
+  it("documents the bug: bare hosts alone match only the apex", () => {
+    expect(matchesAnyHost("index.crates.io", ["crates.io"])).toBe(false);
   });
 });
