@@ -488,7 +488,7 @@ export class SmolSandbox {
    * bare apexes have no A record — they'd abort the whole VM. So we pre-resolve
    * here and drop the unresolvable ones.
    *
-   * CAVEAT: unlike docker (SNI) / gondolin (hostname), smolvm's filter is
+   * CAVEAT: unlike docker (SNI) / gondolin (`host` + `*.host`), smolvm's filter is
    * IP-pinned at start — `--allow-host github.com` allows github.com's IPs only,
    * NOT api.github.com or rotating CDN IPs. A faithful apex+subdomain policy
    * would need each concrete subdomain enumerated; that's a spike gap.

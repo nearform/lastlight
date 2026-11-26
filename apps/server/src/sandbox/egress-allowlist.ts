@@ -5,8 +5,10 @@ import { providerRegistry } from "../config/provider-registry.js";
  * Single source of truth for sandbox HTTP egress allowlists.
  *
  * Both sandbox backends consume this list:
- *   - gondolin: passed verbatim to `agenticRun({ allowedHttpHosts })` so the
- *     QEMU-layer HTTP interceptor 502s anything off-list.
+ *   - gondolin: passed to `agenticRun({ allowedHttpHosts })` through
+ *     {@link gondolinHostPatterns}, so the QEMU-layer HTTP interceptor 502s
+ *     anything off-list. gondolin matches hostnames exactly, so each bare host
+ *     goes in twice: as itself and as `*.host`.
  *   - docker: nginx-egress + coredns configs are generated from these hosts
  *     at harness boot. Sandbox containers spawn with `--dns <coredns-ip>`;
  *     coredns sinkholes allowlisted hostnames to the nginx firewall IP,
@@ -24,7 +26,8 @@ import { providerRegistry } from "../config/provider-registry.js";
  *
  * Bare hostnames only — no leading dot, no `*.` prefix. The config
  * generator emits the right syntax for each backend (nginx's
- * `.example.com` map form, CoreDNS regex `(^|\.)example\.com\.$`).
+ * `.example.com` map form, CoreDNS regex `(^|\.)example\.com\.$`,
+ * gondolin's `example.com` + `*.example.com` pair).
  *
  * Exact-only matching isn't currently supported because we haven't
  * needed it — every host in the list is one we want apex+subdomain
@@ -210,6 +213,25 @@ export function normalizeAllowlistHost(host: string): string | null {
   parsed = parsed.replace(/^\.+|\.+$/g, "").replace(/^\[|\]$/g, "");
   if (!parsed || parsed.includes("*") || INTERNAL_HOSTNAMES.has(parsed) || isPrivateOrInternalIp(parsed)) return null;
   return parsed;
+}
+
+/**
+ * The gondolin form of an allowlist: each bare host followed by `*.host`.
+ *
+ * gondolin's matcher anchors the whole pattern (`^pattern$`) and treats `*` as
+ * "any substring", so a bare `crates.io` admits only `crates.io` and blocks
+ * `index.crates.io` (issue #503), while `*.crates.io` admits every subdomain,
+ * however deep, but not the apex or a lookalike like `evilcrates.io`. Same
+ * pairing as the kubernetes policy's `matchName` + `matchPattern`
+ * (`k8s/egress-policy.ts`). IP literals stay as they are.
+ *
+ * Takes hosts already normalised by {@link mergeAllowlist}; the allow-all
+ * sentinel is handled by the caller and never reaches here.
+ */
+export function gondolinHostPatterns(hosts: readonly string[]): string[] {
+  return hosts.flatMap((host) =>
+    isIP(host.replace(/^\[|\]$/g, "")) ? [host] : [host, `*.${host}`],
+  );
 }
 
 export function mergeAllowlist(base: readonly string[], extra: readonly string[] = []): string[] {
