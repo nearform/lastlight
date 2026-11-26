@@ -42,7 +42,7 @@
   "author": "Clifton Cunningham",
   "license": "MIT",
   "dependencies": {
-    "@clack/prompts": "^1.8.1",
+    "@clack/prompts": "^1.9.0",
     "chalk": "^6.0.1",
     "lastlight-code-facts": "workspace:*",
     "lastlight-core": "workspace:*",
@@ -57,7 +57,7 @@
     "agentic-pi": "workspace:*",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^5.1.0",
-    "wrangler": "^4.158.0"
+    "vitest": "^5.1.1",
+    "wrangler": "^4.165.0"
   }
 }

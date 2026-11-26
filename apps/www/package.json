@@ -19,15 +19,15 @@
     "sync-releases": "node scripts/sync-releases.mjs"
   },
   "dependencies": {
-    "@astrojs/sitemap": "^3.7.4",
-    "astro": "^7.4.7"
+    "@astrojs/sitemap": "^3.7.6",
+    "astro": "^7.4.13"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.12",
     "cheerio": "^1.2.0",
     "node-html-markdown": "^2.0.0",
     "typescript": "^7.0.2",
-    "wrangler": "^4.158.0",
+    "wrangler": "^4.165.0",
     "zod": "^4.6.7"
   }
 }

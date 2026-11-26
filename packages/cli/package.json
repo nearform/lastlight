@@ -40,7 +40,7 @@
     "lint:boundaries": "node ../../scripts/lint-import-boundaries.mjs cli"
   },
   "dependencies": {
-    "@clack/prompts": "^1.8.1",
+    "@clack/prompts": "^1.9.0",
     "lastlight-code-facts": "workspace:*",
     "lastlight-shared": "workspace:*",
     "lastlight-workflow-engine": "workspace:*",
@@ -51,6 +51,6 @@
     "@types/node": "^26.6.6",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^5.1.0"
+    "vitest": "^5.1.1"
   }
 }
