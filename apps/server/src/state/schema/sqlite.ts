@@ -456,6 +456,18 @@ export const githubVisibilitySync = sqliteTable("github_visibility_sync", {
 });
 
 /**
+ * Operator settings the dashboard changes live, one JSON value per key. First
+ * user: `managed-repos` (approved list + requireApproval flag, see
+ * src/managed-repos.ts). A missing row means "use the YAML config value".
+ */
+export const harnessSettings = sqliteTable("harness_settings", {
+  key: text("key").primaryKey(),
+  value: text("value", { mode: "json" }).$type<unknown>().notNull(),
+  updatedAt: text("updated_at").notNull(),
+  updatedBy: text("updated_by"),
+});
+
+/**
  * Per-thread messaging conversations. Legacy owner: `SessionManager`, which
  * self-migrated this DDL against the raw handle.
  */

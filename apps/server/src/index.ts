@@ -53,7 +53,13 @@ import { authMiddleware, authIsEnabled, actorFromContext } from "./admin/auth.js
 import { recordActivity } from "./activity.js";
 import { readPackageVersion } from "./admin/version.js";
 import { GitHubClient } from "./engine/github/github.js";
-import { setInstallationRepos, isManagedRepo, unmanagedReposInContext } from "./managed-repos.js";
+import {
+  setInstallationRepos,
+  isManagedRepo,
+  unmanagedReposInContext,
+  refreshRepoApproval,
+  setInstallationDiscoveryError,
+} from "./managed-repos.js";
 import { screenForInjection, flagPrefix } from "./engine/screen/screen.js";
 import {
   runSimpleWorkflow,
@@ -79,6 +85,7 @@ import {
 } from "./engine/review-check.js";
 import { installStageObserver } from "./engine/stage-observer.js";
 import { invalidateBoard } from "./admin/board-cache.js";
+import { refreshAutonomyRepos } from "./autonomy-repos.js";
 import { noteBoardRunChange } from "./admin/board-stream.js";
 import { runDashboardUrl } from "./notify/model.js";
 import { harvestFixMarkers } from "./engine/fix-harvest.js";
@@ -267,6 +274,28 @@ async function main() {
   // and operational logs go to a sink that outlives the process.
   configLog.info("Database", { path: redactDbUrl(dbTarget), dialect: db.dialect });
 
+  // The dashboard's repo approval state (Config → Managed repos) lives in the
+  // state db and wins over the overlay's managedRepos / requireRepoApproval once
+  // written. Load it before anything can route an event; a failed read here is
+  // fatal on purpose (the db is unusable). Re-read every minute so a second
+  // process sharing the db picks up changes; a failed re-read keeps the last copy.
+  // The autonomy allow-list (board + ready-for-agent builds) follows the same
+  // rule: a stored row from Config → Managed repos wins over `autonomy.repos`.
+  await refreshRepoApproval(db);
+  await refreshAutonomyRepos(db);
+  setInterval(() => {
+    refreshRepoApproval(db).catch((err: unknown) =>
+      configLog.warn("Repo approval refresh failed; keeping the last copy", {
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+    refreshAutonomyRepos(db).catch((err: unknown) =>
+      configLog.warn("Autonomy repos refresh failed; keeping the last copy", {
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+  }, 60_000).unref();
+
   // Session manager for messaging connectors (shared across Slack, Discord, etc.)
   const sessionManager = new SessionManager(db.client, db.dialect);
 
@@ -410,6 +439,7 @@ async function main() {
             installationId: grant.installationId,
             error: grant.error,
           });
+          setInstallationDiscoveryError(grant.installationId, grant.account);
           continue;
         }
         setInstallationRepos(grant.installationId, grant.repos);

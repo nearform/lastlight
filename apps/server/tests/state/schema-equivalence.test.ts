@@ -28,12 +28,13 @@ import * as sqliteSchema from "#src/state/schema/sqlite.js";
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("../../drizzle/sqlite", import.meta.url));
 /**
  * Migrations in `drizzle/sqlite`: the baseline, the #279 repo-ref backfill, the
- * #206 `activity_log` table, and the sandbox resource-usage columns. Bump it
+ * #206 `activity_log` table, the sandbox resource-usage columns and the
+ * `harness_settings` table. Bump it
  * when one is added — deliberately not derived from the journal, so a migration
  * that fails to record itself shows up here as a diff rather than agreeing with
  * whatever happened.
  */
-const MIGRATION_COUNT = 5;
+const MIGRATION_COUNT = 6;
 
 const LEGACY_SCHEMA = readFileSync(
   fileURLToPath(new URL("./fixtures/legacy-schema.sql", import.meta.url)),

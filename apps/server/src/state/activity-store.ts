@@ -89,6 +89,17 @@ export const ACTIVITY_ACTIONS = [
    * label refused the move; `"error"` when the label write itself failed.
    */
   "issue.stage",
+  /**
+   * Config → Managed repos (src/managed-repo-approvals.ts). `targetType:
+   * "managed-repos"`, no `targetId`; `detail.repos` is the comma-joined list
+   * (approve / remove, plus `whenEmpty` when the request named one), or
+   * `detail.enabled` for the require-approval switch. `managed-repos.autonomy`
+   * (the per-repo Builds toggle) carries `detail.repo` and `detail.enabled`.
+   */
+  "managed-repos.approve",
+  "managed-repos.remove",
+  "managed-repos.require-approval",
+  "managed-repos.autonomy",
 ] as const;
 
 export type ActivityAction = (typeof ACTIVITY_ACTIONS)[number];

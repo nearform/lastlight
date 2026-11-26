@@ -26,7 +26,7 @@
  *   different schema versions is the failure this prevents.
  * - **FK order is load-bearing** for exactly one pair —
  *   `messaging_sessions` → `messaging_messages`, the only declared foreign key
- *   in the 15-table schema. {@link TABLE_ORDER} encodes it.
+ *   in the schema. {@link TABLE_ORDER} encodes it.
  * - **The target must be empty**, unless `truncate` is passed. Copying into a
  *   populated database would half-succeed on primary-key collisions and leave
  *   an interleaved mess that is worse than either input.
@@ -75,6 +75,7 @@ export const TABLE_ORDER: readonly TableSpec[] = [
   { key: "githubTeamRepos", orderBy: ["org", "teamSlug", "repo"] },
   { key: "githubTeamMembers", orderBy: ["org", "teamSlug", "login"] },
   { key: "githubVisibilitySync", orderBy: ["login"] },
+  { key: "harnessSettings", orderBy: ["key"] },
   // ── The one foreign key in the schema: sessions before their messages. ──
   { key: "messagingSessions", orderBy: ["id"] },
   { key: "messagingMessages", orderBy: ["id"], omit: ["id"] },
