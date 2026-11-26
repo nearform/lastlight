@@ -449,6 +449,38 @@ describe("per-repo config — effective config reaches a run (issue #180)", () =
     expect(run?.status).toBe("paused");
   });
 
+  it("keeps an autonomy stage gate when the repo layer's approval map is empty", async () => {
+    // The autonomous-dispatch shape: `dispatchWorkflow` stamps the stage's
+    // gates on the context (`extra._autonomyGates`) and `runSimpleWorkflow`
+    // unions them onto the effective map it hands the runner. The `repoConfig`
+    // here is exactly what `resolveRepoRunConfig` returns when the repo has no
+    // `.lastlight/` layer — `approval: {}`, present but empty. The old
+    // `repoConfig?.approval ?? approvalConfig` read that empty object as an
+    // answer and replaced the caller's effective map with it, silently
+    // dropping the stage's gate; an autonomous build never paused.
+    writeWorkflow(builtIn, "pr-review", GATED_YAML);
+    clearWorkflowCache();
+
+    const result = await runSimpleWorkflow(
+      "pr-review",
+      baseRequest({
+        extra: { _stage: "build", _autonomous: true, _autonomyGates: { post_review: true } },
+        repoConfig: runRepoConfig({ repo: "acme/widgets" }),
+      }),
+      makeConfig(),
+      {},
+      db,
+      { default: "anthropic/operator-default" },
+      {},
+      "lastlight:bootstrap",
+      {},
+    );
+
+    expect(result.paused).toBe(true);
+    const run = await db.runs.getByTrigger("acme/widgets#7");
+    expect(run?.status).toBe("paused");
+  });
+
   it("stages the repo's skill directory instead of the built-in one of the same name", async () => {
     // Skills travel to every backend as HOST paths (docker copies them, k8s
     // tars them, in-process symlinks them), so a repo-cache dir needs no
