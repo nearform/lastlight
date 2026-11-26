@@ -234,6 +234,9 @@ describe("activity log — the write side", () => {
       "POST /prs/:owner/:repo/:number/retry",
       "POST /issues/:owner/:repo/:number/dispatch",
       "POST /issues/:owner/:repo/:number/stage",
+      "POST /managed-repos/approve",
+      "POST /managed-repos/remove",
+      "POST /managed-repos/require-approval",
     ]);
 
     /** Deliberately unlogged, with the reason. */

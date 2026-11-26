@@ -113,6 +113,13 @@ export interface WorkflowOverride {
   updatedBy: string | null;
 }
 
+/** One `harness_settings` row: a live operator setting the dashboard wrote. */
+export interface HarnessSetting<T> {
+  value: T;
+  updatedAt: string;
+  updatedBy: string | null;
+}
+
 /**
  * Lightweight SQLite state for operational tracking.
  * NOT for conversation history — only execution logs and rate limits.
@@ -377,6 +384,32 @@ export class StateDb {
       .onConflictDoUpdate({
         target: workflowOverrides.name,
         set: { enabled, updatedAt: now, updatedBy: updatedBy ?? null },
+      });
+  }
+
+  // ── Harness settings (live operator settings, key → JSON) ──────
+
+  /** The stored value for `key`, or null when none was ever written. */
+  async getSetting<T>(key: string): Promise<HarnessSetting<T> | null> {
+    const { harnessSettings } = this.t;
+    const [row] = await this._client
+      .select()
+      .from(harnessSettings)
+      .where(eq(harnessSettings.key, key))
+      .limit(1);
+    return row ? { value: row.value as T, updatedAt: row.updatedAt, updatedBy: row.updatedBy ?? null } : null;
+  }
+
+  /** Upsert `key` → `value` (replaces the whole value). */
+  async setSetting(key: string, value: unknown, updatedBy?: string): Promise<void> {
+    const { harnessSettings } = this.t;
+    const now = new Date().toISOString();
+    await this._client
+      .insert(harnessSettings)
+      .values({ key, value, updatedAt: now, updatedBy: updatedBy ?? null })
+      .onConflictDoUpdate({
+        target: harnessSettings.key,
+        set: { value, updatedAt: now, updatedBy: updatedBy ?? null },
       });
   }
 

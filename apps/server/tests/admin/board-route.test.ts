@@ -142,6 +142,18 @@ describe("GET /board scope", () => {
     expect(json.scope.eligible).toEqual([REPOS[0], REPOS[1]]);
   });
 
+  it("matches the autonomy allow-list against managed repos case-insensitively", async () => {
+    setRuntimeConfig(
+      runtimeConfig({ autonomy: { repos: [REPOS[0].toUpperCase()], stages: STAGES, budget: {} } }),
+    );
+    const { github } = fakeGithub();
+    const app = makeApp({ github });
+
+    const { json } = await board(app, "");
+
+    expect(json.scope.eligible).toEqual([REPOS[0].toUpperCase()]);
+  });
+
   it("excludes a MANAGED repo that is not on the autonomy allow-list", async () => {
     // The board is a view of ONE pipeline. A managed repo outside
     // `autonomy.repos` has no stage labels anybody writes and no `build` the
