@@ -23,7 +23,7 @@ interface ClaudeUsage {
 
 const ZERO_USAGE: ClaudeUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
-const LIMIT_RE = /\b(usage limit|limit reached|hit your limit|limit (?:will )?resets?)\b/i;
+const LIMIT_RE = /\b(usage limit|limit reached|hit your (?:\w+ )?limit|limit (?:will )?resets?)\b/i;
 const AUTH_RE = /authentication_error|invalid api key|oauth token (?:has )?(?:expired|revoked)|please run \/login|not logged in/i;
 
 function isObject(v: unknown): v is Json {
@@ -78,7 +78,9 @@ export class ClaudeTranscriptTranslator {
     const out: SandboxEvent[] = [];
 
     if (rec.type === "assistant" && msg.role === "assistant" && Array.isArray(msg.content)) {
-      if (rec.isApiErrorMessage === true) return this.withSession(out, this.apiError(textOf(msg.content)), rec);
+      if (rec.isApiErrorMessage === true) {
+        return this.withSession(out, this.apiError(textOf(msg.content), rec.apiError === "usage_limit_reached"), rec);
+      }
       const content = this.assistantContent(msg.content);
       if (content.length === 0) return [];
       out.push({
@@ -158,12 +160,13 @@ export class ClaudeTranscriptTranslator {
     };
   }
 
-  private apiError(text: string): SandboxEvent[] {
+  /** `usageLimitFlag`: Claude Code set `apiError: "usage_limit_reached"`, which beats matching the wording. */
+  private apiError(text: string, usageLimitFlag = false): SandboxEvent[] {
     if (AUTH_RE.test(text)) {
       this.auth = true;
       return [{ type: "fatal_error", error: { name: "auth_failed", message: "Claude Code sign-in failed or expired" } }];
     }
-    if (LIMIT_RE.test(text)) {
+    if (usageLimitFlag || LIMIT_RE.test(text)) {
       this.limit = { resetsAt: parseLimitReset(text, this.now()) };
       return [{ type: "fatal_error", error: { name: "usage_limit", message: text.slice(0, 200) } }];
     }

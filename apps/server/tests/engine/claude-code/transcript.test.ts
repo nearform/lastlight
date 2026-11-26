@@ -70,6 +70,34 @@ describe("ClaudeTranscriptTranslator", () => {
     expect(events.filter((e) => e.type === "message_end")).toHaveLength(0);
   });
 
+  it("detects the session-limit wording and the structured usage_limit_reached flag", () => {
+    // Claude Code's wording on 2026-11-25: "hit your session limit", with apiError set.
+    const line = JSON.stringify({
+      type: "assistant",
+      isApiErrorMessage: true,
+      error: "rate_limit",
+      apiError: "usage_limit_reached",
+      message: { role: "assistant", model: "<synthetic>", content: [{ type: "text", text: "You've hit your session limit · resets 7:10pm (UTC)" }] },
+    });
+    const t = new ClaudeTranscriptTranslator({ sessionId: SESSION, now: () => new Date("2026-11-25T16:04:40Z") });
+    expect(t.translate(line).filter((e) => e.type === "fatal_error")).toEqual([
+      expect.objectContaining({ error: expect.objectContaining({ name: "usage_limit" }) }),
+    ]);
+    expect(t.usageLimit).toEqual({ resetsAt: "2026-11-25T19:10:00.000Z" });
+  });
+
+  it("trusts apiError usage_limit_reached whatever the wording", () => {
+    const line = JSON.stringify({
+      type: "assistant",
+      isApiErrorMessage: true,
+      apiError: "usage_limit_reached",
+      message: { role: "assistant", content: [{ type: "text", text: "Out of credits for now" }] },
+    });
+    const t = new ClaudeTranscriptTranslator({ sessionId: SESSION });
+    t.translate(line);
+    expect(t.usageLimit).toEqual({ resetsAt: null });
+  });
+
   it("detects an auth failure", () => {
     const { t, events } = run("auth.jsonl");
     expect(t.authFailed).toBe(true);
