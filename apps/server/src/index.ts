@@ -21,7 +21,7 @@ import {
   getInstallationDirectory,
   initInstallationDirectory,
 } from "./engine/github/installations.js";
-import { StateDb, isTriggerActorType, type TriggerActorType } from "./state/db.js";
+import { StateDb, isTriggerActorType, type TriggerActorType, type WorkflowRun } from "./state/db.js";
 import { redactDbUrl } from "lastlight-shared/database-url";
 import { CronScheduler, type WorkflowRunner } from "./cron/scheduler.js";
 import { getJobs } from "./cron/jobs.js";
@@ -1930,9 +1930,9 @@ async function main() {
       // so an approval can't overrun maxWorkflows (#519 review). admitNext
       // promotes it now if a slot is free, else it waits in the queue; null means
       // the run was cancelled while the approval sat pending (#518).
-      let run;
+      let resolved: WorkflowRun | null;
       try {
-        run = await db.runs.resolveGateAndResume(approvalId, sender);
+        resolved = await db.runs.resolveGateAndResume(approvalId, sender);
       } catch (err) {
         // A racing responder resolved this gate between the dispatcher's
         // pre-read and the serialized respond CAS — the loser. Report it so the
@@ -1940,7 +1940,11 @@ async function main() {
         if (err instanceof Error && /not pending/.test(err.message)) return "already-resolved";
         throw err;
       }
-      if (!run) return "inactive";
+      if (!resolved) return "inactive";
+      // Capture the narrowed run as a const so the admitNext `.catch` closure
+      // below reads a plainly non-null `WorkflowRun`, with no reliance on
+      // flow-narrowing reaching into the lambda.
+      const run = resolved;
       await admissionController.admitNext().catch((err) =>
         logger("dispatch").error("admitNext after approval failed", { runId: run.id, err }));
       const after = await db.runs.getRun(run.id);
