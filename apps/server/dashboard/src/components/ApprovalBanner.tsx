@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api, type WorkflowApproval } from "../api";
+import { resumeNotice } from "../lib/resume-outcome";
 
 interface Props {
   approvals: WorkflowApproval[];
@@ -22,12 +23,22 @@ function ApprovalItem({ approval, onResponded }: { approval: WorkflowApproval; o
   const [reason, setReason] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const respond = async (decision: "approved" | "rejected") => {
     setPending(true);
     setError(null);
     try {
-      await api.respondToApproval(approval.id, decision, reason || undefined);
+      const res = await api.respondToApproval(approval.id, decision, reason || undefined);
+      const note = decision === "approved" ? resumeNotice(res.resume) : null;
+      if (note) {
+        // Gate resolved, but the run was gone (cancelled/expired) and nothing
+        // resumed. Hold the card in a resolved state showing why — rather than
+        // dropping it silently as done, or leaving Approve/Reject live on a gate
+        // the server has already settled.
+        setNotice(note);
+        return;
+      }
       onResponded();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Request failed");
@@ -51,31 +62,37 @@ function ApprovalItem({ approval, onResponded }: { approval: WorkflowApproval; o
           </button>
         )}
       </div>
-      <textarea
-        className="textarea textarea-bordered textarea-xs w-full resize-none"
-        placeholder="Optional reason…"
-        rows={2}
-        value={reason}
-        onChange={(e) => setReason(e.target.value)}
-        disabled={pending}
-      />
-      {error && <span className="text-2xs text-error">{error}</span>}
-      <div className="flex gap-2">
-        <button
-          className="btn btn-xs btn-success"
-          onClick={() => respond("approved")}
-          disabled={pending}
-        >
-          Approve
-        </button>
-        <button
-          className="btn btn-xs btn-error btn-outline"
-          onClick={() => respond("rejected")}
-          disabled={pending}
-        >
-          Reject
-        </button>
-      </div>
+      {notice ? (
+        <span className="text-2xs text-warning">{notice}</span>
+      ) : (
+        <>
+          <textarea
+            className="textarea textarea-bordered textarea-xs w-full resize-none"
+            placeholder="Optional reason…"
+            rows={2}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            disabled={pending}
+          />
+          {error && <span className="text-2xs text-error">{error}</span>}
+          <div className="flex gap-2">
+            <button
+              className="btn btn-xs btn-success"
+              onClick={() => respond("approved")}
+              disabled={pending}
+            >
+              Approve
+            </button>
+            <button
+              className="btn btn-xs btn-error btn-outline"
+              onClick={() => respond("rejected")}
+              disabled={pending}
+            >
+              Reject
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }

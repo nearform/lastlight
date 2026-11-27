@@ -1,4 +1,5 @@
 import { api, ApiError, type BoardCard, type BoardCardAction } from "../../api";
+import { resumeNotice } from "../../lib/resume-outcome";
 import { stageMoveOutcome } from "./stageDrop";
 
 /**
@@ -152,9 +153,14 @@ export async function performIntent(
     case "open":
       window.open(intent.url, "_blank", "noopener,noreferrer");
       return {};
-    case "approve":
-      await api.respondToApproval(intent.approvalId, "approved", reason);
-      return {};
+    case "approve": {
+      // A 200 that resolved the gate but resumed nothing (the run was cancelled
+      // or expired while paused) is the approve twin of the parked-PR retry: it
+      // looks done but isn't, so say so on the card.
+      const res = await api.respondToApproval(intent.approvalId, "approved", reason);
+      const note = resumeNotice(res.resume);
+      return note ? { note } : {};
+    }
     case "reject":
       await api.respondToApproval(intent.approvalId, "rejected", reason);
       return {};

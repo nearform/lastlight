@@ -337,6 +337,12 @@ carries a stale `started_at` that the sweep would instantly TTL-reap. On boot,
 it normally instead of dropping it. (`running` orphans are re-dispatched;
 `paused` are left for the approval flow.)
 
+Every path that puts a run into the admission queue — `requeue` (re-queue an
+orphan), `requeueRunning` (k8s backpressure), and the approval enqueue — goes
+through one private `markQueued(id, fromStatus)` that always re-stamps
+`started_at`. Keeping the enqueue-clock re-stamp in a single primitive is what
+stops a new queue path from forgetting it and having its run TTL-reaped.
+
 **Retrying a stopped run.** `restartRun` (CAS on `status IN ('failed',
 'cancelled')`) flips the row back to `running`, clears `finished_at` and the
 `context.error` annotation, and re-dispatches via the ledger-driven resume path.
@@ -380,6 +386,19 @@ It powers the run-detail pipeline's approval-gate nodes (status-colored, labeled
 by gate) and their read-only history (who approved / rejected, when, and any
 comment) — distinct from `GET /admin/api/approvals`, which lists only pending
 gates across all runs.
+
+Approving resolves the gate atomically (`resolveGateAndResume`): it wins the
+compare-and-set over any racing responder (a second approve, or a reject), then —
+**only while the run is still `paused`** — moves it into the admission queue,
+**re-stamping the enqueue clock** (`startedAt`, as `requeue` does) so a gate open
+past `maxQueueWaitMs` isn't expired by the TTL sweep. The **admission controller
+owns the cap and the resume**: its serialized `admitNext` promotes the run (via
+`resumeSimpleRun`) when a slot is free, so an approval can't overrun
+`maxWorkflows` (issue #519 review). A run cancelled while its approval sat pending
+(`cancelRun` leaves the approval row pending) is **not** revived; the op returns
+null and the approver is told the run is no longer active (issue #518). The
+dashboard path (`enqueuePausedRun`) enqueues the same way, after the route has
+already recorded the response.
 
 ### `cron_overrides`
 

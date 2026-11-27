@@ -706,7 +706,7 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
     });
 
     describe("resolveGateAndResume — approve path", () => {
-      it("approves the gate and sets the run running, returning the run", async () => {
+      it("approves the gate and enqueues the run for admission, returning it", async () => {
         const runId = await makeRun({ status: "paused" });
         const approvalId = randomUUID();
         await db.approvals.create({
@@ -716,11 +716,15 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
           summary: "Plan ready",
           createdAt: new Date().toISOString(),
         });
+        const before = (await db.runs.getRun(runId))!.startedAt;
 
-        const run = await db.runs.resolveGateAndResume(approvalId, "bob");
+        const result = await db.runs.resolveGateAndResume(approvalId, "bob");
 
-        expect(run!.id).toBe(runId);
-        expect(run!.status).toBe("running");
+        // ENQUEUES for the admission controller (which owns the cap and does the
+        // resume), re-stamping the enqueue clock — not a straight flip to running.
+        expect(result!.id).toBe(runId);
+        expect(result!.status).toBe("queued");
+        expect(Date.parse(result!.startedAt)).toBeGreaterThanOrEqual(Date.parse(before));
         const approval = await db.approvals.getById(approvalId);
         expect(approval!.status).toBe("approved");
         expect(approval!.respondedBy).toBe("bob");
@@ -766,7 +770,7 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
         await expect(db.runs.resolveGateAndFail(approvalId, "carol", "too late")).rejects.toThrow(
           "not pending",
         );
-        expect((await db.runs.getRun(runId))!.status).toBe("running");
+        expect((await db.runs.getRun(runId))!.status).toBe("queued"); // approve enqueued it
         expect((await db.approvals.getById(approvalId))!.status).toBe("approved");
       });
 

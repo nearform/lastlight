@@ -48,7 +48,6 @@ import { recordActivity } from "../activity.js";
 
 const eventLog = logger("event");
 const dispatchLog = logger("dispatch");
-const approvalLog = logger("approval");
 
 /**
  * Route handlers that are NOT workflows.
@@ -99,6 +98,18 @@ export interface DispatchDeps {
   db: StateDb;
   github: GitHubClient | null;
   dispatchWorkflow: DispatchWorkflowFn;
+  /**
+   * Resolve an approved gate and admit its run respecting the concurrency cap:
+   * `"resumed"` now (under cap), `"queued"` for the admission controller to
+   * promote (at cap), or `"inactive"` (the run was cancelled/ended while the
+   * approval sat pending — not revived). INJECTED because the cap, the admission
+   * controller and `resumeSimpleRun` all live in `index.ts`. Omitted (chat-only
+   * wiring, tests) means an approval is recorded but not resumed.
+   */
+  resumeGatedRun?: (
+    approvalId: string,
+    sender: string,
+  ) => Promise<"resumed" | "queued" | "inactive" | "already-resolved">;
   sessionManager: SessionManager;
   runChat: RunChatFn;
   route?: (envelope: EventEnvelope, deps: RouterDeps) => Promise<Route>;
@@ -1135,31 +1146,30 @@ async function handleApprovalResponse(
       );
       return handled;
     }
-    if (workflowRun && deps.github) {
-      await envelope.reply(`Approved by ${sender}. Resuming \`${workflowRun.workflowName}\`...`);
-      const [owner, repo] = workflowRun.triggerId.includes("/")
-        ? workflowRun.triggerId.replace(/#\d+$/, "").split("/")
-        : ["", ""];
-      const issueNumber = workflowRun.issueNumber;
-      if (owner && repo && issueNumber) {
-        // One transaction: respond 'approved' + flip the run to running. The
-        // long-running re-dispatch happens after the commit.
-        await deps.db.runs.resolveGateAndResume(approval.id, sender);
-        deps.dispatchWorkflow(workflowRun.workflowName, {
-          repo: `${owner}/${repo}`,
-          issueNumber,
-          title: `Issue #${issueNumber}`,
-          body: "",
-          sender,
-          _triggerType: "approval",
-        }).catch((err) => approvalLog.error("Resume failed", { err }));
+    if (workflowRun && deps.github && deps.resumeGatedRun) {
+      // Resolve the gate and admit the run under the concurrency cap: resume now
+      // (under cap), queue for admission (at cap), or inactive (cancelled/ended
+      // while the approval sat pending — not revived). Owning the cap here keeps
+      // approval-resume from overrunning maxWorkflows (#519 review), and the
+      // stored-row resume carries a Slack-/Jira-keyed run too (#518).
+      const outcome = await deps.resumeGatedRun(approval.id, sender);
+      if (outcome === "resumed") {
+        await envelope.reply(`Approved by ${sender}. Resuming \`${workflowRun.workflowName}\`...`);
+      } else if (outcome === "queued") {
+        await envelope.reply(
+          `Approved by ${sender}. \`${workflowRun.workflowName}\` is queued — it will resume when a run slot frees.`,
+        );
+      } else if (outcome === "already-resolved") {
+        await envelope.reply("This approval gate was already resolved by another response.");
       } else {
-        // Can't reconstruct the dispatch target — record without resuming.
-        await deps.db.approvals.respond(approval.id, "approved", sender, reason);
+        await envelope.reply(`Approval noted, but \`${workflowRun.workflowName}\` is no longer active — not resumed.`);
       }
     } else {
-      // No workflow run for this approval — just record the response.
+      // No workflow run for this approval (cancelled/removed), or no resume
+      // wiring — record the decision and tell the approver it won't resume,
+      // rather than leaving them to guess from silence (issue #518).
       await deps.db.approvals.respond(approval.id, "approved", sender, reason);
+      await envelope.reply("Approval recorded, but the run could not be resumed — it may have been cancelled or removed.");
     }
   } else {
     // One transaction: respond 'rejected' + fail the run (a no-op if the run

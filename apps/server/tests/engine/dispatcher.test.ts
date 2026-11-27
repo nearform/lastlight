@@ -370,9 +370,9 @@ describe('dispatch — approval-response handler', () => {
     expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/no pending approval/i));
   });
 
-  it('approves: resolves the gate + resumes the run atomically, and re-dispatches the workflow', async () => {
+  it('approves: hands the gate to resumeGatedRun and reports resuming', async () => {
     const envelope = makeEnvelope({ type: 'comment.created' });
-    const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
+    const resumeGatedRun = vi.fn().mockResolvedValue('resumed');
     const db = mockDb({
       getPendingByTrigger: vi.fn().mockReturnValue({ id: 'appr-1', workflowRunId: 'run-1' }),
       getRun: vi.fn().mockReturnValue({
@@ -384,19 +384,114 @@ describe('dispatch — approval-response handler', () => {
     });
     const deps = makeDeps(
       approvalRoute({ decision: 'approved', repo: 'cliftonc/lastlight', issueNumber: 3 }),
-      { db: db as any, github: {} as any, dispatchWorkflow },
+      { db: db as any, github: {} as any, resumeGatedRun },
     );
 
     await dispatch(envelope, deps);
 
-    // The atomic op is the single respond('approved') + setRunning path.
-    expect(db.runs.resolveGateAndResume).toHaveBeenCalledWith('appr-1', 'maintainer');
+    // The dispatcher delegates the resolve + cap-aware admit + resume to the
+    // injected callback (wired to resolveGateAndResume + resumeSimpleRun in index.ts).
+    expect(resumeGatedRun).toHaveBeenCalledWith('appr-1', 'maintainer');
     expect(db.approvals.respond).not.toHaveBeenCalled();
-    expect(dispatchWorkflow).toHaveBeenCalledWith(
-      'build',
-      expect.objectContaining({ repo: 'cliftonc/lastlight', issueNumber: 3, _triggerType: 'approval' }),
+    expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/resuming/i));
+  });
+
+  it('approves: hands a Slack-keyed gated run to resumeGatedRun (regression for #518)', async () => {
+    const envelope = makeEnvelope({ type: 'comment.created' });
+    const resumeGatedRun = vi.fn().mockResolvedValue('resumed');
+    const db = mockDb({
+      getPendingForWorkflow: vi.fn().mockReturnValue({ id: 'appr-s', workflowRunId: 'run-s' }),
+      getRun: vi.fn().mockReturnValue({
+        id: 'run-s',
+        workflowName: 'explore',
+        triggerId: 'slack:T1:C1:1680000000.1',
+        issueNumber: null,
+      }),
+    });
+    const deps = makeDeps(
+      approvalRoute({ decision: 'approved', workflowRunId: 'run-s' }),
+      { db: db as any, github: {} as any, resumeGatedRun },
     );
-    expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/approved/i));
+
+    await dispatch(envelope, deps);
+
+    // Before #518 the handler dropped a Slack-keyed run here; now it delegates it.
+    expect(resumeGatedRun).toHaveBeenCalledWith('appr-s', 'maintainer');
+    expect(db.approvals.respond).not.toHaveBeenCalled();
+  });
+
+  it('approves at capacity: reports the run is queued', async () => {
+    const envelope = makeEnvelope({ type: 'comment.created' });
+    const resumeGatedRun = vi.fn().mockResolvedValue('queued');
+    const db = mockDb({
+      getPendingByTrigger: vi.fn().mockReturnValue({ id: 'appr-q', workflowRunId: 'run-q' }),
+      getRun: vi.fn().mockReturnValue({ id: 'run-q', workflowName: 'build', triggerId: 'o/r#2', issueNumber: 2 }),
+    });
+    const deps = makeDeps(
+      approvalRoute({ decision: 'approved', repo: 'o/r', issueNumber: 2 }),
+      { db: db as any, github: {} as any, resumeGatedRun },
+    );
+
+    await dispatch(envelope, deps);
+
+    expect(resumeGatedRun).toHaveBeenCalledWith('appr-q', 'maintainer');
+    expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/queued/i));
+  });
+
+  it("approves but the run is gone: records and tells the approver it won't resume", async () => {
+    const envelope = makeEnvelope({ type: 'comment.created' });
+    const resumeRun = vi.fn();
+    const db = mockDb({
+      getPendingByTrigger: vi.fn().mockReturnValue({ id: 'appr-x', workflowRunId: 'run-x' }),
+      getRun: vi.fn().mockReturnValue(undefined), // the run was cancelled/removed
+    });
+    const deps = makeDeps(
+      approvalRoute({ decision: 'approved', repo: 'o/r', issueNumber: 1 }),
+      { db: db as any, github: {} as any, resumeRun },
+    );
+
+    await dispatch(envelope, deps);
+
+    expect(resumeRun).not.toHaveBeenCalled();
+    expect(db.approvals.respond).toHaveBeenCalledWith('appr-x', 'approved', 'maintainer', undefined);
+    expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/could not be resumed/i));
+  });
+
+  it('approving a cancelled gated run reports it inactive (regression for #518 review)', async () => {
+    const envelope = makeEnvelope({ type: 'comment.created' });
+    // The run was cancelled while the approval sat pending, so the cap-aware
+    // resolve refuses to revive it and reports "inactive".
+    const resumeGatedRun = vi.fn().mockResolvedValue('inactive');
+    const db = mockDb({
+      getPendingByTrigger: vi.fn().mockReturnValue({ id: 'appr-c', workflowRunId: 'run-c' }),
+      getRun: vi.fn().mockReturnValue({ id: 'run-c', workflowName: 'build', triggerId: 'o/r#5', issueNumber: 5 }),
+    });
+    const deps = makeDeps(
+      approvalRoute({ decision: 'approved', repo: 'o/r', issueNumber: 5 }),
+      { db: db as any, github: {} as any, resumeGatedRun },
+    );
+
+    await dispatch(envelope, deps);
+
+    expect(resumeGatedRun).toHaveBeenCalledWith('appr-c', 'maintainer');
+    expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/no longer active/i));
+  });
+
+  it('approving a gate a racing responder already resolved replies instead of throwing', async () => {
+    const envelope = makeEnvelope({ type: 'comment.created' });
+    const resumeGatedRun = vi.fn().mockResolvedValue('already-resolved');
+    const db = mockDb({
+      getPendingByTrigger: vi.fn().mockReturnValue({ id: 'appr-r', workflowRunId: 'run-r' }),
+      getRun: vi.fn().mockReturnValue({ id: 'run-r', workflowName: 'build', triggerId: 'o/r#7', issueNumber: 7 }),
+    });
+    const deps = makeDeps(
+      approvalRoute({ decision: 'approved', repo: 'o/r', issueNumber: 7 }),
+      { db: db as any, github: {} as any, resumeGatedRun },
+    );
+
+    await dispatch(envelope, deps);
+
+    expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/already resolved/i));
   });
 
   it('approves but cannot resume without a GitHub App', async () => {

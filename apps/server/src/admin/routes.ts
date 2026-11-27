@@ -308,8 +308,20 @@ export interface AdminConfig {
   builtInRoot?: string;
   /** Active deployment overlay root (`$LASTLIGHT_OVERLAY_DIR`), if any. */
   overlayDir?: string;
-  /** Optional callback to actively resume a paused workflow after dashboard approval */
-  resumeWorkflow?: (workflowRun: WorkflowRun, sender: string) => Promise<void>;
+  /**
+   * Optional callback to resume a paused workflow after dashboard approval.
+   * Returns how it went, so the route can tell the operator the real reason
+   * rather than always reporting success — and distinct causes stay distinct
+   * (an operator told "no longer active" when the cause is config can't act on
+   * it): `resumed` (running now), `queued` (admitted, waiting on a slot),
+   * `inactive` (the run was no longer paused — nothing resumed), or
+   * `unavailable` (the GitHub App isn't configured, so the run stays paused).
+   * The route adds `error` when the callback itself throws.
+   */
+  resumeWorkflow?: (
+    workflowRun: WorkflowRun,
+    sender: string,
+  ) => Promise<"resumed" | "queued" | "inactive" | "unavailable">;
   /**
    * Optional callback to retry a FAILED workflow run, resuming from the phase
    * that failed with the same context (ledger-driven). Wired in `src/index.ts`;
@@ -2831,19 +2843,18 @@ export function createAdminRoutes(
     // Actor logging (issue #205): attribute the approval to the authenticated
     // user, falling back to `admin` for password/anonymous sessions.
     const actor = actorFromContext(c) ?? "admin";
+    let resume: "resumed" | "queued" | "inactive" | "unavailable" | "error" | undefined;
     if (body.decision === "rejected") {
       // One transaction: respond 'rejected' + fail the run.
       await db.runs.resolveGateAndFail(id, actor, body.reason);
     } else {
       // Record the approval, then let resumeWorkflow flip the run back to
-      // `running` — but only as part of an actual dispatch. resumeWorkflow
-      // validates the target (GitHub App present, triggerId is an owner/repo#N
-      // issue) and calls setRunning right before dispatching, so a
-      // non-resumable approval (no resumeWorkflow wired, App down, or a
-      // non-issue trigger) leaves the run paused rather than flipping it to
-      // `running` with no worker. We deliberately do NOT use the atomic
-      // resolveGateAndResume here: unlike the GitHub/Slack path, the dashboard
-      // can't prove a dispatch will follow before responding.
+      // `running` and resume it from its stored row — the full-context resume
+      // (`resumeSimpleRun`), so a Slack-/Jira-keyed run resumes too, not only an
+      // owner/repo#N issue run (issue #518). It still requires the GitHub App (a
+      // build needs it to push); without one the run stays paused. We
+      // deliberately do NOT use the atomic resolveGateAndResume here: unlike the
+      // chat path, the dashboard can't prove a dispatch will follow before responding.
       //
       // respond() is a compare-and-set on the still-pending row, so a racing
       // responder (the status check above is a TOCTOU read) changes 0 rows.
@@ -2854,8 +2865,13 @@ export function createAdminRoutes(
       }
       const workflowRun = await db.runs.getRun(approval.workflowRunId);
       if (workflowRun && config.resumeWorkflow) {
-        config.resumeWorkflow(workflowRun, actor).catch((err) => {
+        // Await so the response can report how the resume actually went — a run
+        // cancelled while the approval sat pending reports `inactive`, a missing
+        // GitHub App `unavailable`, a thrown resume `error` — rather than a
+        // misleading plain success, and without conflating the three (#519 review).
+        resume = await config.resumeWorkflow(workflowRun, actor).catch((err) => {
           log.error("Failed to resume workflow", { workflowRunId: workflowRun.id, err });
+          return "error" as const;
         });
       }
     }
@@ -2869,7 +2885,7 @@ export function createAdminRoutes(
         ...(body.reason ? { reason: body.reason } : {}),
       },
     });
-    return c.json({ status: body.decision });
+    return c.json({ status: body.decision, ...(resume ? { resume } : {}) });
   });
 
   // ── Crons ──────────────────────────────────────────────────────

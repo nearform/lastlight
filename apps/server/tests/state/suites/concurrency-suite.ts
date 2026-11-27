@@ -87,11 +87,26 @@ export function runConcurrencySuite(makeDb: MakeDb, _opts: SuiteOpts): void {
         const run = await db.runs.getRun(runId);
         if (approval?.status === "approved") {
           expect(approval.respondedBy).toBe("alice");
-          expect(run?.status).toBe("running");
+          expect(run?.status).toBe("queued"); // approve enqueues for admission
         } else {
           expect(approval?.respondedBy).toBe("bob");
           expect(run?.status).toBe("failed");
         }
+      });
+    });
+
+    describe("resolveGateAndResume refuses a cancelled run (#518 review)", () => {
+      it("does not revive a run cancelled while it waited at the gate", async () => {
+        const { runId, approvalId } = await seedPausedRun();
+        // The operator cancels the run while it waits at the gate; cancelRun
+        // leaves the approval pending, so the lookup still succeeds.
+        await db.runs.cancelRun(runId);
+
+        const resumed = await db.runs.resolveGateAndResume(approvalId, "late-approver");
+
+        // The run is NOT flipped back to running.
+        expect(resumed).toBeNull();
+        expect((await db.runs.getRun(runId))?.status).toBe("cancelled");
       });
     });
 
@@ -133,7 +148,7 @@ export function runConcurrencySuite(makeDb: MakeDb, _opts: SuiteOpts): void {
         // Both stores' writes actually landed — a rolled-back transaction that
         // resolved successfully would be the worse failure.
         for (const [i, { runId }] of seeded.entries()) {
-          expect((await db.runs.getRun(runId))?.status).toBe("running");
+          expect((await db.runs.getRun(runId))?.status).toBe("queued");
           const visible = await db.teams.reposForLogin(`login-${i}`);
           expect(visible.repos).toContain("acme/widgets");
         }
@@ -150,7 +165,7 @@ export function runConcurrencySuite(makeDb: MakeDb, _opts: SuiteOpts): void {
 
         const { runId: laterRun, approvalId: laterApproval } = await seedPausedRun();
         await db.runs.resolveGateAndResume(laterApproval, "third");
-        expect((await db.runs.getRun(laterRun))?.status).toBe("running");
+        expect((await db.runs.getRun(laterRun))?.status).toBe("queued");
       });
     });
 
