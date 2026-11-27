@@ -88,7 +88,7 @@ import { feedbackAnchorObserver, pollFeedbackReactions } from "./cron/feedback-p
 import { drainFeedbackExport } from "./engine/feedback/ingest.js";
 import type { RunnerCallbacks } from "./workflows/runner.js";
 import { resumeOrphanedWorkflows, resumeSimpleRun, type ResumeOptions } from "./workflows/resume.js";
-import { createAdmissionController, type AdmissionController } from "./workflows/admission.js";
+import { createAdmissionController, K8S_SANITY_FUSE, type AdmissionController } from "./workflows/admission.js";
 import {
   ProgressNotifier,
   GitHubTransport,
@@ -1687,6 +1687,12 @@ async function main() {
     backpressureMode: config.sandbox === "kubernetes",
   });
 
+  // The concurrency cap an approval-resume admits against — the same authority
+  // simple.ts uses at dispatch: app-level maxWorkflows on docker/gondolin, the
+  // sanity fuse on k8s (which defers to the namespace ResourceQuota).
+  const admitCap =
+    config.sandbox === "kubernetes" ? K8S_SANITY_FUSE : config.concurrency.maxWorkflows;
+
   // Mount admin dashboard on the shared HTTP server (always available).
   {
     const adminLog = logger("admin");
@@ -1738,34 +1744,35 @@ async function main() {
           adminLog.warn("Cannot resume workflow: GitHub App not configured", { runId: workflowRun.id });
           return;
         }
-        // Don't revive a run cancelled/ended while the approval sat pending
-        // (#518 review): re-read and resume only while it is still PAUSED.
-        const fresh = await db.runs.getRun(workflowRun.id);
-        if (!fresh || fresh.status !== "paused") {
-          adminLog.warn("Not resuming: run is no longer paused", {
-            runId: workflowRun.id,
-            status: fresh?.status,
-          });
+        // The route already recorded the approval; admit the run under the
+        // concurrency cap. A run cancelled/ended while the approval sat pending
+        // is NOT revived (#518 review); at the cap it is queued for the admission
+        // controller instead of overrunning maxWorkflows (#519 review). The
+        // stored-row resume carries a Slack-/Jira-keyed run too (#518).
+        const outcome = await db.runs.admitPausedRun(workflowRun.id, admitCap);
+        if (outcome === "inactive") {
+          adminLog.warn("Not resuming: run is no longer paused", { runId: workflowRun.id });
           return;
         }
-        // Resume from the stored row via `resumeSimpleRun`, so a run keyed on a
-        // non-GitHub triggerId (Slack thread, Jira ticket) resumes too — the old
-        // owner/repo#N rebuild bailed on any run without an issueNumber (#518).
-        await db.runs.setRunning(workflowRun.id);
-        adminLog.info("Resuming after dashboard approval", {
+        adminLog.info("Admitted after dashboard approval", {
           workflowName: workflowRun.workflowName,
           runId: workflowRun.id,
+          outcome,
           sender,
         });
-        resumeRunFromRow(workflowRun.id).catch((err) =>
-          adminLog.error("Resume failed", { runId: workflowRun.id, err }));
+        if (outcome === "resumed") {
+          resumeRunFromRow(workflowRun.id).catch((err) =>
+            adminLog.error("Resume failed", { runId: workflowRun.id, err }));
+        } else {
+          admissionController.admitNext().catch((err) =>
+            adminLog.error("admitNext after approval failed", { runId: workflowRun.id, err }));
+        }
       },
       // Retry a FAILED or CANCELLED run, resuming from where it stopped with the
-      // same context. Unlike `resumeWorkflow` (approval-gate resume, which
-      // rebuilds a lossy owner/repo/issueNumber context and bails on non-issue
-      // runs), this re-enters via `resumeSimpleRun`, reconstructing the full
-      // context from the stored `workflow_runs.context` + `scratch` — so it also
-      // retries Slack-thread-scoped runs (e.g. an `explore` started from Slack).
+      // full context reconstructed from the stored `workflow_runs.context` +
+      // `scratch` — so it also retries Slack-thread-scoped runs (e.g. an
+      // `explore` started from Slack). Same `resumeSimpleRun` path the approval
+      // resume (`resumeWorkflow` / `resumeGatedRun`) now takes.
       // The failed phase's ledger row is `success=0`, so it re-runs while
       // already-succeeded phases skip; a queue-dropped `cancelled` run ran no
       // phases and starts clean.
@@ -1930,11 +1937,24 @@ async function main() {
     db,
     github,
     dispatchWorkflow,
-    // Resume a gated run through the same full-context path the dashboard retry
-    // uses, so an approval from Slack/Jira resumes the run (issue #518).
-    resumeRun: (runId, sender) =>
-      resumeRunFromRow(runId).catch((err) =>
-        logger("dispatch").error("Approval resume failed", { runId, sender, err })),
+    // Resolve an approved gate and admit its run under the concurrency cap:
+    // resume now (under cap), queue for admission (at cap), or inactive
+    // (cancelled while the approval sat pending). Full-context resume, so a
+    // Slack-/Jira-keyed run resumes too (#518) without overrunning the cap (#519).
+    resumeGatedRun: async (approvalId, sender) => {
+      const result = await db.runs.resolveGateAndResume(approvalId, sender, admitCap);
+      if (!result) return "inactive";
+      if (result.outcome === "resumed") {
+        resumeRunFromRow(result.run.id).catch((err) =>
+          logger("dispatch").error("Approval resume failed", { runId: result.run.id, sender, err }));
+        return "resumed";
+      }
+      // Queued at the cap — kick admission to close the just-freed-a-slot race;
+      // otherwise it promotes on the next run completion.
+      admissionController.admitNext().catch((err) =>
+        logger("dispatch").error("admitNext after approval failed", { runId: result.run.id, err }));
+      return "queued";
+    },
     sessionManager,
     // One in-process chat turn. handleChatMessage manages session resume via
     // sessionManager internally; the dispatcher uses resumeAgentSessionId only

@@ -383,10 +383,15 @@ gates across all runs.
 
 Approving resolves the gate atomically (`resolveGateAndResume`): it wins the
 compare-and-set over any racing responder (a second approve, or a reject), then
-flips the run back to `running` and resumes it via `resumeSimpleRun` — **but only
-while the run is still `paused`**. A run cancelled while its approval sat pending
-(`cancelRun` leaves the approval row pending) is **not** revived; the op returns
-null and the approver is told the run is no longer active (issue #518).
+**admits the run under the concurrency cap** — resuming it via `resumeSimpleRun`
+when a slot is free, or setting it `queued` for the admission controller to
+promote when the system is already at `maxWorkflows` (the same queue a fresh
+over-cap dispatch takes, so an approval can't overrun the cap — issue #519
+review). Both happen **only while the run is still `paused`**: a run cancelled
+while its approval sat pending (`cancelRun` leaves the approval row pending) is
+**not** revived; the op returns null and the approver is told the run is no
+longer active (issue #518). The dashboard path (`admitPausedRun`) admits the same
+way, after the route has already recorded the response.
 
 ### `cron_overrides`
 

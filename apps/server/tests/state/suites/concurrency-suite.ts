@@ -63,7 +63,7 @@ export function runConcurrencySuite(makeDb: MakeDb, _opts: SuiteOpts): void {
         const { runId, approvalId } = await seedPausedRun();
 
         const results = await Promise.allSettled([
-          db.runs.resolveGateAndResume(approvalId, "alice"),
+          db.runs.resolveGateAndResume(approvalId, "alice", 100),
           db.runs.resolveGateAndFail(approvalId, "bob", "changed my mind"),
         ]);
 
@@ -102,7 +102,7 @@ export function runConcurrencySuite(makeDb: MakeDb, _opts: SuiteOpts): void {
         // leaves the approval pending, so the lookup still succeeds.
         await db.runs.cancelRun(runId);
 
-        const resumed = await db.runs.resolveGateAndResume(approvalId, "late-approver");
+        const resumed = await db.runs.resolveGateAndResume(approvalId, "late-approver", 100);
 
         // The run is NOT flipped back to running.
         expect(resumed).toBeNull();
@@ -120,7 +120,7 @@ export function runConcurrencySuite(makeDb: MakeDb, _opts: SuiteOpts): void {
 
         const ops: Promise<unknown>[] = [];
         for (const [i, { approvalId }] of seeded.entries()) {
-          ops.push(db.runs.resolveGateAndResume(approvalId, `user-${i}`));
+          ops.push(db.runs.resolveGateAndResume(approvalId, `user-${i}`, 100));
           ops.push(
             db.teams.recordResolution({
               login: `login-${i}`,
@@ -157,14 +157,14 @@ export function runConcurrencySuite(makeDb: MakeDb, _opts: SuiteOpts): void {
       it("keeps the chain alive after an operation rejects", async () => {
         // A rejection must not poison the serializer for everyone queued behind it.
         const { approvalId } = await seedPausedRun();
-        await db.runs.resolveGateAndResume(approvalId, "first");
+        await db.runs.resolveGateAndResume(approvalId, "first", 100);
 
-        await expect(db.runs.resolveGateAndResume(approvalId, "second")).rejects.toThrow(
+        await expect(db.runs.resolveGateAndResume(approvalId, "second", 100)).rejects.toThrow(
           /not pending/i,
         );
 
         const { runId: laterRun, approvalId: laterApproval } = await seedPausedRun();
-        await db.runs.resolveGateAndResume(laterApproval, "third");
+        await db.runs.resolveGateAndResume(laterApproval, "third", 100);
         expect((await db.runs.getRun(laterRun))?.status).toBe("running");
       });
     });
@@ -175,7 +175,7 @@ export function runConcurrencySuite(makeDb: MakeDb, _opts: SuiteOpts): void {
         for (let batch = 0; batch < 5; batch++) {
           const seeded = await Promise.all([seedPausedRun(), seedPausedRun(), seedPausedRun(), seedPausedRun()]);
           const results = await Promise.allSettled(
-            seeded.map(({ approvalId }) => db.runs.resolveGateAndResume(approvalId, "racer")),
+            seeded.map(({ approvalId }) => db.runs.resolveGateAndResume(approvalId, "racer", 100)),
           );
           const failures = results
             .filter((r): r is PromiseRejectedResult => r.status === "rejected")
