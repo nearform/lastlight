@@ -153,13 +153,17 @@ function blocksFromMarkdown(markdown: string): AdfNode[] {
       continue;
     }
 
-    const fence = line.match(/^```(\w*)\s*$/);
+    // Any ``` line opens a fence (isBlockStart agrees), so a non-word info
+    // string like ```c++ or ```ts title can't fall through and stall the loop.
+    // The language is the info string's first token; the rest (a title) is dropped.
+    const fence = line.match(/^```(.*)$/);
     if (fence) {
       const code: string[] = [];
       i++;
       while (i < lines.length && !/^```\s*$/.test(lines[i])) code.push(lines[i++]);
       i++; // closing fence
-      const attrs = fence[1] ? { attrs: { language: fence[1] } } : {};
+      const lang = fence[1].trim().split(/\s+/)[0];
+      const attrs = lang ? { attrs: { language: lang } } : {};
       blocks.push({ type: "codeBlock", ...attrs, content: [{ type: "text", text: code.join("\n") }] });
       continue;
     }
@@ -191,8 +195,9 @@ function blocksFromMarkdown(markdown: string): AdfNode[] {
       continue;
     }
 
-    // Paragraph: consecutive non-blank lines that don't start a new block.
-    const para: string[] = [];
+    // Paragraph: the current line (always consumed, so the loop can't stall),
+    // plus any following non-blank lines that don't start a new block.
+    const para: string[] = [lines[i++]];
     while (i < lines.length && lines[i].trim() !== "" && !isBlockStart(lines[i])) para.push(lines[i++]);
     blocks.push({ type: "paragraph", content: parseInline(para.join(" ")) });
   }

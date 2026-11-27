@@ -162,6 +162,16 @@ describe("JiraClient error + rate-limit handling", () => {
     expect(sleep).toHaveBeenCalledTimes(1);
   });
 
+  it("terminates instead of spinning when 429 Retry-After is 0", async () => {
+    // Regression: wait=0 left `waited` at 0, so the bound never tripped.
+    const sleep = vi.fn(async () => {});
+    const f = stubFetch([{ status: 429, headers: { "retry-after": "0" } }]);
+    await expect(
+      new JiraClient(CREDS, { fetch: f.impl, sleep, maxRetryWaitMs: 1500 }).myself(),
+    ).rejects.toBeInstanceOf(JiraRateLimitError);
+    expect(sleep).toHaveBeenCalledTimes(1); // floored to 1s, so the 1.5s bound trips on the 2nd 429
+  });
+
   it("gives up with JiraRateLimitError when 429 exceeds the wait bound", async () => {
     const sleep = vi.fn(async () => {});
     const f = stubFetch([{ status: 429, headers: { "retry-after": "600" } }]);

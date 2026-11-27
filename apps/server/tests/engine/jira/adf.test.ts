@@ -92,6 +92,21 @@ describe("markdownToAdf", () => {
     });
   });
 
+  it("handles a fence with a non-word info string without hanging", () => {
+    // Regression: `/^```(\w*)\s*$/` rejected these and the loop spun forever.
+    expect(markdownToAdf("```c++\nint x;\n```").content).toEqual([
+      { type: "codeBlock", attrs: { language: "c++" }, content: [{ type: "text", text: "int x;" }] },
+    ]);
+  });
+
+  it("uses the first token of a fence info string as the language", () => {
+    expect(markdownToAdf("```ts title=foo\nx\n```").content[0]).toEqual({
+      type: "codeBlock",
+      attrs: { language: "ts" },
+      content: [{ type: "text", text: "x" }],
+    });
+  });
+
   it("does not treat underscores as emphasis", () => {
     const para = markdownToAdf("call some_snake_case()").content[0];
     expect(para).toEqual({ type: "paragraph", content: [{ type: "text", text: "call some_snake_case()" }] });

@@ -15,6 +15,13 @@ const log = logger("jira");
 /** The longest one call waits out 429s before giving up (same bound as elsewhere). */
 const MAX_RETRY_WAIT_MS = 5 * 60 * 1000;
 
+/**
+ * Floor for a single 429 wait. A `Retry-After: 0` or a past date would otherwise
+ * leave `waited` at 0, so the MAX_RETRY_WAIT_MS bound would never trip and the
+ * loop would busy-spin on the rate limiter. The floor guarantees progress.
+ */
+const MIN_RETRY_WAIT_MS = 1_000;
+
 /** A Jira request that kept getting 429'd past the wait bound. */
 export class JiraRateLimitError extends Error {
   constructor(message: string) {
@@ -249,9 +256,9 @@ export class JiraClient {
 function retryAfterMs(header: string | null, now: number = Date.now()): number {
   if (!header) return 60_000;
   const seconds = Number(header);
-  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  if (Number.isFinite(seconds)) return Math.max(MIN_RETRY_WAIT_MS, seconds * 1000);
   const at = Date.parse(header);
-  return Number.isNaN(at) ? 60_000 : Math.max(0, at - now);
+  return Number.isNaN(at) ? 60_000 : Math.max(MIN_RETRY_WAIT_MS, at - now);
 }
 
 function webhookBody(spec: JiraWebhookSpec): Record<string, unknown> {
