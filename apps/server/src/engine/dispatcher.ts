@@ -99,6 +99,13 @@ export interface DispatchDeps {
   db: StateDb;
   github: GitHubClient | null;
   dispatchWorkflow: DispatchWorkflowFn;
+  /**
+   * Resume a gated run from its stored row via `resumeSimpleRun` (full context),
+   * the same path the dashboard retry takes. INJECTED because `resumeSimpleRun`
+   * lives in the runner, which the dispatcher keeps no edge to. Omitted
+   * (chat-only wiring, tests) means an approval is recorded but not resumed.
+   */
+  resumeRun?: (runId: string, sender: string) => Promise<void>;
   sessionManager: SessionManager;
   runChat: RunChatFn;
   route?: (envelope: EventEnvelope, deps: RouterDeps) => Promise<Route>;
@@ -1135,30 +1142,16 @@ async function handleApprovalResponse(
       );
       return handled;
     }
-    if (workflowRun && deps.github) {
+    if (workflowRun && deps.github && deps.resumeRun) {
       await envelope.reply(`Approved by ${sender}. Resuming \`${workflowRun.workflowName}\`...`);
-      const [owner, repo] = workflowRun.triggerId.includes("/")
-        ? workflowRun.triggerId.replace(/#\d+$/, "").split("/")
-        : ["", ""];
-      const issueNumber = workflowRun.issueNumber;
-      if (owner && repo && issueNumber) {
-        // One transaction: respond 'approved' + flip the run to running. The
-        // long-running re-dispatch happens after the commit.
-        await deps.db.runs.resolveGateAndResume(approval.id, sender);
-        deps.dispatchWorkflow(workflowRun.workflowName, {
-          repo: `${owner}/${repo}`,
-          issueNumber,
-          title: `Issue #${issueNumber}`,
-          body: "",
-          sender,
-          _triggerType: "approval",
-        }).catch((err) => approvalLog.error("Resume failed", { err }));
-      } else {
-        // Can't reconstruct the dispatch target — record without resuming.
-        await deps.db.approvals.respond(approval.id, "approved", sender, reason);
-      }
+      // One transaction: respond 'approved' + flip the run to running. Then
+      // resume from the stored row (full context), so a Slack-/Jira-keyed run
+      // resumes too — not only an owner/repo#N GitHub issue run (issue #518).
+      await deps.db.runs.resolveGateAndResume(approval.id, sender);
+      deps.resumeRun(approval.workflowRunId, sender).catch((err) =>
+        approvalLog.error("Resume failed", { runId: approval.workflowRunId, err }));
     } else {
-      // No workflow run for this approval — just record the response.
+      // No workflow run, or no resume wiring (chat-only/tests) — record only.
       await deps.db.approvals.respond(approval.id, "approved", sender, reason);
     }
   } else {

@@ -1667,6 +1667,15 @@ async function main() {
       : undefined,
   };
 
+  // Resume a run from its stored row (full context) via `resumeSimpleRun` — the
+  // one path both the approval-gate resume and the dashboard retry take, so a
+  // Slack-/Jira-keyed gated run resumes just like a GitHub-issue one (issue #518).
+  const resumeRunFromRow = async (runId: string): Promise<void> => {
+    const fresh = await db.runs.getRun(runId);
+    if (!fresh) return;
+    await resumeSimpleRun(fresh, resumeOpts);
+  };
+
   // Construct the admission controller now that resumeOpts is ready.
   // `admissionController` was declared (let) above dispatchWorkflow so the
   // closure can reference it; we assign here, after resumeOpts.
@@ -1729,38 +1738,17 @@ async function main() {
           adminLog.warn("Cannot resume workflow: GitHub App not configured", { runId: workflowRun.id });
           return;
         }
-        // Derive owner/repo for the resume dispatch. Prefer the triggerId
-        // (owner/repo#N) but fall back to the row's own (owner, BARE repo) pair
-        // so a run keyed on a non-GitHub triggerId (e.g. a Slack-thread
-        // override) still resumes from the dashboard/focused-approval flow.
-        let [owner, repo] = workflowRun.triggerId.includes("/")
-          ? workflowRun.triggerId.replace(/#\d+$/, "").split("/")
-          : ["", ""];
-        if (!owner || !repo) {
-          const ctxOwner = (workflowRun.context?.owner as string | undefined) || "";
-          owner = workflowRun.owner || ctxOwner;
-          repo = workflowRun.repo || "";
-        }
-        const issueNumber = workflowRun.issueNumber;
-        if (!owner || !repo || !issueNumber) {
-          adminLog.warn("Cannot resume workflow: missing owner/repo/issueNumber", { runId: workflowRun.id });
-          return;
-        }
+        // Resume from the stored row via `resumeSimpleRun`, so a run keyed on a
+        // non-GitHub triggerId (Slack thread, Jira ticket) resumes too — the old
+        // owner/repo#N rebuild bailed on any run without an issueNumber (#518).
         await db.runs.setRunning(workflowRun.id);
         adminLog.info("Resuming after dashboard approval", {
           workflowName: workflowRun.workflowName,
-          repo: `${owner}/${repo}`,
-          issueNumber,
+          runId: workflowRun.id,
           sender,
         });
-        dispatchWorkflow(workflowRun.workflowName, {
-          repo: `${owner}/${repo}`,
-          issueNumber,
-          title: `Issue #${issueNumber}`,
-          body: "",
-          sender,
-          _triggerType: "admin",
-        }).catch((err) => adminLog.error("Resume failed", { err }));
+        resumeRunFromRow(workflowRun.id).catch((err) =>
+          adminLog.error("Resume failed", { runId: workflowRun.id, err }));
       },
       // Retry a FAILED or CANCELLED run, resuming from where it stopped with the
       // same context. Unlike `resumeWorkflow` (approval-gate resume, which
@@ -1932,6 +1920,11 @@ async function main() {
     db,
     github,
     dispatchWorkflow,
+    // Resume a gated run through the same full-context path the dashboard retry
+    // uses, so an approval from Slack/Jira resumes the run (issue #518).
+    resumeRun: (runId, sender) =>
+      resumeRunFromRow(runId).catch((err) =>
+        logger("dispatch").error("Approval resume failed", { runId, sender, err })),
     sessionManager,
     // One in-process chat turn. handleChatMessage manages session resume via
     // sessionManager internally; the dispatcher uses resumeAgentSessionId only

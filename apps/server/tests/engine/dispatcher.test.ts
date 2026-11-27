@@ -370,9 +370,9 @@ describe('dispatch — approval-response handler', () => {
     expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/no pending approval/i));
   });
 
-  it('approves: resolves the gate + resumes the run atomically, and re-dispatches the workflow', async () => {
+  it('approves: resolves the gate + resumes the run from its stored row', async () => {
     const envelope = makeEnvelope({ type: 'comment.created' });
-    const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
+    const resumeRun = vi.fn().mockResolvedValue(undefined);
     const db = mockDb({
       getPendingByTrigger: vi.fn().mockReturnValue({ id: 'appr-1', workflowRunId: 'run-1' }),
       getRun: vi.fn().mockReturnValue({
@@ -384,19 +384,42 @@ describe('dispatch — approval-response handler', () => {
     });
     const deps = makeDeps(
       approvalRoute({ decision: 'approved', repo: 'cliftonc/lastlight', issueNumber: 3 }),
-      { db: db as any, github: {} as any, dispatchWorkflow },
+      { db: db as any, github: {} as any, resumeRun },
     );
 
     await dispatch(envelope, deps);
 
-    // The atomic op is the single respond('approved') + setRunning path.
+    // The atomic op is the single respond('approved') + setRunning path, then a
+    // full-context resume from the row (not a lossy owner/repo#N re-dispatch).
     expect(db.runs.resolveGateAndResume).toHaveBeenCalledWith('appr-1', 'maintainer');
     expect(db.approvals.respond).not.toHaveBeenCalled();
-    expect(dispatchWorkflow).toHaveBeenCalledWith(
-      'build',
-      expect.objectContaining({ repo: 'cliftonc/lastlight', issueNumber: 3, _triggerType: 'approval' }),
-    );
+    expect(resumeRun).toHaveBeenCalledWith('run-1', 'maintainer');
     expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/approved/i));
+  });
+
+  it('approves: resumes a Slack-keyed gated run with no issueNumber (regression for #518)', async () => {
+    const envelope = makeEnvelope({ type: 'comment.created' });
+    const resumeRun = vi.fn().mockResolvedValue(undefined);
+    const db = mockDb({
+      getPendingForWorkflow: vi.fn().mockReturnValue({ id: 'appr-s', workflowRunId: 'run-s' }),
+      getRun: vi.fn().mockReturnValue({
+        id: 'run-s',
+        workflowName: 'explore',
+        triggerId: 'slack:T1:C1:1680000000.1',
+        issueNumber: null,
+      }),
+    });
+    const deps = makeDeps(
+      approvalRoute({ decision: 'approved', workflowRunId: 'run-s' }),
+      { db: db as any, github: {} as any, resumeRun },
+    );
+
+    await dispatch(envelope, deps);
+
+    // Before #518 this recorded the approval and never resumed.
+    expect(db.runs.resolveGateAndResume).toHaveBeenCalledWith('appr-s', 'maintainer');
+    expect(resumeRun).toHaveBeenCalledWith('run-s', 'maintainer');
+    expect(db.approvals.respond).not.toHaveBeenCalled();
   });
 
   it('approves but cannot resume without a GitHub App', async () => {
