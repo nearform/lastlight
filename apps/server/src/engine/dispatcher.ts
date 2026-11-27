@@ -1143,13 +1143,19 @@ async function handleApprovalResponse(
       return handled;
     }
     if (workflowRun && deps.github && deps.resumeRun) {
-      await envelope.reply(`Approved by ${sender}. Resuming \`${workflowRun.workflowName}\`...`);
-      // One transaction: respond 'approved' + flip the run to running. Then
-      // resume from the stored row (full context), so a Slack-/Jira-keyed run
-      // resumes too — not only an owner/repo#N GitHub issue run (issue #518).
-      await deps.db.runs.resolveGateAndResume(approval.id, sender);
-      deps.resumeRun(approval.workflowRunId, sender).catch((err) =>
-        approvalLog.error("Resume failed", { runId: approval.workflowRunId, err }));
+      // One transaction: respond 'approved' + flip the run to running — but only
+      // if it is still PAUSED at the gate. It returns null for a run cancelled/
+      // ended while the approval was pending, so we don't revive it (#518 review).
+      const resumed = await deps.db.runs.resolveGateAndResume(approval.id, sender);
+      if (resumed) {
+        await envelope.reply(`Approved by ${sender}. Resuming \`${workflowRun.workflowName}\`...`);
+        // Resume from the stored row (full context), so a Slack-/Jira-keyed run
+        // resumes too — not only an owner/repo#N GitHub issue run (issue #518).
+        deps.resumeRun(approval.workflowRunId, sender).catch((err) =>
+          approvalLog.error("Resume failed", { runId: approval.workflowRunId, err }));
+      } else {
+        await envelope.reply(`Approval noted, but \`${workflowRun.workflowName}\` is no longer active — not resumed.`);
+      }
     } else {
       // No workflow run for this approval (cancelled/removed), or no resume
       // wiring — record the decision and tell the approver it won't resume,

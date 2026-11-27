@@ -1738,6 +1738,16 @@ async function main() {
           adminLog.warn("Cannot resume workflow: GitHub App not configured", { runId: workflowRun.id });
           return;
         }
+        // Don't revive a run cancelled/ended while the approval sat pending
+        // (#518 review): re-read and resume only while it is still PAUSED.
+        const fresh = await db.runs.getRun(workflowRun.id);
+        if (!fresh || fresh.status !== "paused") {
+          adminLog.warn("Not resuming: run is no longer paused", {
+            runId: workflowRun.id,
+            status: fresh?.status,
+          });
+          return;
+        }
         // Resume from the stored row via `resumeSimpleRun`, so a run keyed on a
         // non-GitHub triggerId (Slack thread, Jira ticket) resumes too — the old
         // owner/repo#N rebuild bailed on any run without an issueNumber (#518).

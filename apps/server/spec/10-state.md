@@ -381,6 +381,13 @@ by gate) and their read-only history (who approved / rejected, when, and any
 comment) — distinct from `GET /admin/api/approvals`, which lists only pending
 gates across all runs.
 
+Approving resolves the gate atomically (`resolveGateAndResume`): it wins the
+compare-and-set over any racing responder (a second approve, or a reject), then
+flips the run back to `running` and resumes it via `resumeSimpleRun` — **but only
+while the run is still `paused`**. A run cancelled while its approval sat pending
+(`cancelRun` leaves the approval row pending) is **not** revived; the op returns
+null and the approver is told the run is no longer active (issue #518).
+
 ### `cron_overrides`
 
 ```sql

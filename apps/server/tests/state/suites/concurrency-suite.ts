@@ -95,6 +95,21 @@ export function runConcurrencySuite(makeDb: MakeDb, _opts: SuiteOpts): void {
       });
     });
 
+    describe("resolveGateAndResume refuses a cancelled run (#518 review)", () => {
+      it("does not revive a run cancelled while it waited at the gate", async () => {
+        const { runId, approvalId } = await seedPausedRun();
+        // The operator cancels the run while it waits at the gate; cancelRun
+        // leaves the approval pending, so the lookup still succeeds.
+        await db.runs.cancelRun(runId);
+
+        const resumed = await db.runs.resolveGateAndResume(approvalId, "late-approver");
+
+        // The run is NOT flipped back to running.
+        expect(resumed).toBeNull();
+        expect((await db.runs.getRun(runId))?.status).toBe("cancelled");
+      });
+    });
+
     describe("a run transaction racing a team transaction", () => {
       it("survives interleaving on the shared client", async () => {
         // The serializer is per-CONNECTION, not per-store, precisely because these

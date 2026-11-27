@@ -1434,10 +1434,18 @@ export class WorkflowRunStore {
         const approval = await this.approvals.getById(approvalId, tx);
         if (!approval) throw new Error(`approval ${approvalId} not found`);
         await this.assertOwned(approval.workflowRunId, tx);
+        // Lose the compare-and-set to any other responder FIRST (a second
+        // approve, or a reject that won the race) — that path still throws.
         const changed = await this.approvals.respond(approvalId, "approved", responder, undefined, tx);
         if (changed !== 1) {
           throw new Error(`approval ${approvalId} is not pending (already resolved?)`);
         }
+        // We won the CAS, so the approval WAS pending. But a run cancelled/ended
+        // while it sat pending (`cancelRun` leaves the approval pending) must NOT
+        // be revived — `setRunning` is an unguarded UPDATE. Return null so the
+        // caller can tell the approver the run is no longer active (#518 review).
+        const current = await this.getRun(approval.workflowRunId, tx);
+        if (!current || current.status !== "paused") return null;
         await this.setRunning(approval.workflowRunId, tx);
         return this.getRun(approval.workflowRunId, tx);
       }),

@@ -381,6 +381,7 @@ describe('dispatch — approval-response handler', () => {
         triggerId: 'cliftonc/lastlight#3',
         issueNumber: 3,
       }),
+      resolveGateAndResume: vi.fn().mockReturnValue({ id: 'run-1', status: 'running' }),
     });
     const deps = makeDeps(
       approvalRoute({ decision: 'approved', repo: 'cliftonc/lastlight', issueNumber: 3 }),
@@ -408,6 +409,7 @@ describe('dispatch — approval-response handler', () => {
         triggerId: 'slack:T1:C1:1680000000.1',
         issueNumber: null,
       }),
+      resolveGateAndResume: vi.fn().mockReturnValue({ id: 'run-s', status: 'running' }),
     });
     const deps = makeDeps(
       approvalRoute({ decision: 'approved', workflowRunId: 'run-s' }),
@@ -439,6 +441,28 @@ describe('dispatch — approval-response handler', () => {
     expect(resumeRun).not.toHaveBeenCalled();
     expect(db.approvals.respond).toHaveBeenCalledWith('appr-x', 'approved', 'maintainer', undefined);
     expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/could not be resumed/i));
+  });
+
+  it('approving a cancelled gated run does not revive it (regression for #518 review)', async () => {
+    const envelope = makeEnvelope({ type: 'comment.created' });
+    const resumeRun = vi.fn();
+    const db = mockDb({
+      getPendingByTrigger: vi.fn().mockReturnValue({ id: 'appr-c', workflowRunId: 'run-c' }),
+      getRun: vi.fn().mockReturnValue({ id: 'run-c', workflowName: 'build', triggerId: 'o/r#5', issueNumber: 5 }),
+      // The run was cancelled while the approval sat pending, so the gate
+      // resolve refuses to revive it and returns null.
+      resolveGateAndResume: vi.fn().mockReturnValue(null),
+    });
+    const deps = makeDeps(
+      approvalRoute({ decision: 'approved', repo: 'o/r', issueNumber: 5 }),
+      { db: db as any, github: {} as any, resumeRun },
+    );
+
+    await dispatch(envelope, deps);
+
+    expect(db.runs.resolveGateAndResume).toHaveBeenCalledWith('appr-c', 'maintainer');
+    expect(resumeRun).not.toHaveBeenCalled();
+    expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/no longer active/i));
   });
 
   it('approves but cannot resume without a GitHub App', async () => {
