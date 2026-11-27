@@ -957,6 +957,25 @@ routes:
     answer: answer
     chat: chat
     explore_reply: explore-reply
+  # Jira ticket routes (issue #501). Must stay identical to defaultRouteConfig()
+  # in src/config/config.ts — tests/config pins the two together. `ticket_labeled`
+  # defaults to `answer` until the Jira-triage phase lands; the rest mirror the
+  # classifier intents a ticket comment resolves to, exactly as `slack` does.
+  jira:
+    ticket_labeled: answer
+    build: build
+    triage: issue-triage
+    review: pr-review
+    security: security-review
+    verify: verify
+    qa_test: qa-test
+    demo: demo
+    explore: explore
+    answer: answer
+    chat: chat
+    approve: approval-response
+    reject: approval-response
+    explore_reply: explore-reply
 
 cron:
   webhooksEnabledCondition: true
@@ -988,6 +1007,33 @@ slack:
   #
   # Channel ids are not secrets, so they show up unredacted on /admin/api/config.
   repoChannels: {}
+
+# Jira Cloud connector (issue #501). INERT by default: with `enabled: false`
+# no `/webhooks/jira` route is mounted and no Jira API call is made. Turn it on
+# in the instance overlay's config.yaml and set the `JIRA_*` secrets in
+# secrets/.env — the site + credentials are env-only, this block is behaviour.
+#
+# Secrets (env, not here): JIRA_SITE_URL, JIRA_EMAIL, JIRA_API_TOKEN,
+# JIRA_WEBHOOK_SECRET, and — only for a scoped token — JIRA_CLOUD_ID.
+jira:
+  enabled: false
+  # Jira label that opts a ticket in.
+  triggerLabel: lastlight
+  # Jira accountIds allowed to trigger / comment / approve. EMPTY = nobody
+  # (fail-closed identity — the deliberate opposite of Slack's empty allowlist).
+  allowedAccountIds: []
+  # Project key -> repo (and optional per-component repos), e.g.
+  #   projects:
+  #     PROJ: { repo: owner/repo, components: { Backend: owner/api } }
+  projects: {}
+  # Optional target STATUS names for lifecycle transitions, all optional:
+  #   transitions: { started: "In Progress", prOpened: "In Review", merged: "Done" }
+  transitions: {}
+  webhook:
+    # Public URL of /webhooks/jira (used by `lastlight jira webhook sync`).
+    url: null
+    # Reconcile the webhook at boot (needs a site-admin token).
+    autoSync: false
 
 # The weekly repo digest — what happened in a repo, and what Last Light did
 # about it, posted to that repo's Slack channel.

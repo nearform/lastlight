@@ -588,6 +588,10 @@ const INTERNAL_ROUTE_TARGETS: Record<string, ReadonlySet<string>> = {
   "slack.status": new Set(["status-report"]),
   "slack.chat": new Set(["chat"]),
   "slack.explore_reply": new Set(["explore-reply"]),
+  "jira.approve": new Set(["approval-response"]),
+  "jira.reject": new Set(["approval-response"]),
+  "jira.chat": new Set(["chat"]),
+  "jira.explore_reply": new Set(["explore-reply"]),
 };
 
 /**

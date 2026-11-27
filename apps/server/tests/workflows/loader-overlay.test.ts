@@ -81,19 +81,19 @@ describe("workflow asset overlay", () => {
   it("fails fast when a route targets a missing workflow", () => {
     mkdirSync(join(builtIn, "workflows"), { recursive: true });
     writeFileSync(join(builtIn, "workflows", "triage.yaml"), wf("issue-triage"));
-    expect(() => validateAssets({ github: { issue_opened: "missing-workflow" }, slack: {} })).toThrow(/missing workflow/i);
+    expect(() => validateAssets({ github: { issue_opened: "missing-workflow" }, slack: {}, jira: {} })).toThrow(/missing workflow/i);
   });
 
   it("fails fast when a route targets a disabled workflow", () => {
     mkdirSync(join(builtIn, "workflows"), { recursive: true });
     writeFileSync(join(builtIn, "workflows", "triage.yaml"), wf("issue-triage"));
     configureWorkflowAssets({ builtInRoot: builtIn, overlayRoot: overlay, disabled: { workflows: ["issue-triage"] } });
-    expect(() => validateAssets({ github: { issue_opened: "issue-triage" }, slack: {} })).toThrow(/disabled workflow/i);
+    expect(() => validateAssets({ github: { issue_opened: "issue-triage" }, slack: {}, jira: {} })).toThrow(/disabled workflow/i);
   });
 
   it("allows configured internal route handlers", () => {
     mkdirSync(join(builtIn, "workflows"), { recursive: true });
-    expect(() => validateAssets({ github: { approval_response: "approval-response" }, slack: { chat: "chat" } })).not.toThrow();
+    expect(() => validateAssets({ github: { approval_response: "approval-response" }, slack: { chat: "chat" }, jira: {} })).not.toThrow();
   });
 
   it("fails fast when a cron targets a missing workflow", () => {

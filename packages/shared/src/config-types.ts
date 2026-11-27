@@ -23,6 +23,8 @@ export interface DisabledConfig {
 export interface RouteConfig {
   github: Record<string, string>;
   slack: Record<string, string>;
+  /** Jira ticket routes (issue #501) — `ticket_labeled` plus the comment intents. */
+  jira: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------

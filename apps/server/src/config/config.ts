@@ -89,6 +89,42 @@ export interface SlackConfig {
   repoChannels: Record<string, string>;
 }
 
+/** A Jira project's mapping to a GitHub repo, with optional per-component overrides. */
+export interface JiraProjectMapping {
+  /** Project default repo, `owner/repo`. */
+  repo: string;
+  /** Optional component-name → `owner/repo` overrides, resolved before the default. */
+  components?: Record<string, string>;
+}
+
+/**
+ * The live Jira connector config (issue #501). Credentials + the site come from
+ * env (secret); behaviour comes from the YAML `jira:` block. Present only when
+ * enabled with the secrets set — otherwise the feature is inert.
+ */
+export interface JiraConfig {
+  /** `JIRA_SITE_URL`, e.g. `https://acme.atlassian.net` (no trailing slash). */
+  siteUrl: string;
+  /**
+   * `JIRA_CLOUD_ID` — only a SCOPED token needs it (gateway base); a classic
+   * token leaves it unset and uses `siteUrl`. Supplied from config, not resolved
+   * at boot (`tenantInfo` 404s on some sites; `accessible-resources` is OAuth-only).
+   */
+  cloudId?: string;
+  /** `JIRA_EMAIL` / `JIRA_API_TOKEN` — basic auth for the bot account. */
+  email: string;
+  apiToken: string;
+  /** `JIRA_WEBHOOK_SECRET` — HMAC secret the inbound webhook is signed with. */
+  webhookSecret: string;
+  /** Jira label that opts a ticket in. */
+  triggerLabel: string;
+  /** Jira accountIds allowed to trigger / comment / approve. EMPTY = nobody. */
+  allowedAccountIds: string[];
+  projects: Record<string, JiraProjectMapping>;
+  transitions: { started?: string; prOpened?: string; merged?: string };
+  webhook: { url: string | null; autoSync: boolean };
+}
+
 /** The weekly Slack repo digest. Operator-only — see {@link RuntimeConfig.digest}. */
 export interface DigestConfig {
   /** How far back a digest looks, in days. */
@@ -285,6 +321,8 @@ export interface LastLightConfig {
    */
   githubToken?: string;
   slack?: SlackConfig;
+  /** Jira connector (issue #501) — present only when enabled with `JIRA_*` set. */
+  jira?: JiraConfig;
   approval?: Record<string, boolean>;
   bootstrapLabel: string;
   /**
@@ -1180,6 +1218,37 @@ export function loadConfig(): LastLightConfig {
       })()
     : undefined;
 
+  // Jira connector (issue #501). Built only when the YAML opts in; then the
+  // credentials are required, so a missing one fails the boot (the secret-combo
+  // fail-hard rule) rather than starting a connector that cannot authenticate.
+  const jira = fileCfg.jira.enabled
+    ? ((): JiraConfig => {
+        const siteUrl = process.env.JIRA_SITE_URL?.trim();
+        const email = process.env.JIRA_EMAIL?.trim();
+        const apiToken = process.env.JIRA_API_TOKEN;
+        const webhookSecret = process.env.JIRA_WEBHOOK_SECRET;
+        if (!siteUrl) throw new Error("jira.enabled requires JIRA_SITE_URL");
+        if (!email || !apiToken) {
+          throw new Error("jira.enabled requires JIRA_EMAIL and JIRA_API_TOKEN");
+        }
+        if (!webhookSecret) throw new Error("jira.enabled requires JIRA_WEBHOOK_SECRET");
+        return {
+          siteUrl: siteUrl.replace(/\/+$/, ""),
+          // Optional — only a scoped token needs the gateway base. A classic
+          // token leaves this unset and uses `siteUrl` directly.
+          cloudId: process.env.JIRA_CLOUD_ID?.trim() || undefined,
+          email,
+          apiToken,
+          webhookSecret,
+          triggerLabel: fileCfg.jira.triggerLabel,
+          allowedAccountIds: fileCfg.jira.allowedAccountIds,
+          projects: fileCfg.jira.projects,
+          transitions: fileCfg.jira.transitions,
+          webhook: fileCfg.jira.webhook,
+        };
+      })()
+    : undefined;
+
   const config: LastLightConfig = {
     port: parseInt(process.env.WEBHOOK_PORT || process.env.PORT || "8644", 10),
     webhookSecret: process.env.WEBHOOK_SECRET || "",
@@ -1216,6 +1285,7 @@ export function loadConfig(): LastLightConfig {
     githubApp,
     githubToken,
     slack,
+    jira,
     approval,
     bootstrapLabel: fileCfg.bootstrapLabel,
     holdLabel: fileCfg.holdLabel,
@@ -1281,6 +1351,15 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
    * impractical to express in an env var.
    */
   slack: { repoChannels: Record<string, string> };
+  /** The non-secret half of the Jira config (issue #501); the `JIRA_*` secrets are env-only. */
+  jira: {
+    enabled: boolean;
+    triggerLabel: string;
+    allowedAccountIds: string[];
+    projects: Record<string, JiraProjectMapping>;
+    transitions: { started?: string; prOpened?: string; merged?: string };
+    webhook: { url: string | null; autoSync: boolean };
+  };
   teamVisibility: TeamVisibilityConfig;
   repoConfig: RepoConfigPolicy;
 } {
@@ -1649,6 +1728,48 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     if (typeof channel === "string" && channel.trim()) slackRepoChannels[repo.trim()] = channel.trim();
   }
 
+  // The non-secret half of the Jira config (issue #501). Lenient like every
+  // block here: a malformed entry is dropped, never a boot failure.
+  const jiraRaw = isPlainObject(raw.jira) ? raw.jira : {};
+  const jiraTriggerLabel =
+    typeof jiraRaw.triggerLabel === "string" && jiraRaw.triggerLabel.trim()
+      ? jiraRaw.triggerLabel.trim()
+      : "lastlight";
+  const jiraAllowedAccountIds: string[] = Array.isArray(jiraRaw.allowedAccountIds)
+    ? jiraRaw.allowedAccountIds
+        .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+        .map((v) => v.trim())
+    : [];
+  // projects: "PROJ" -> { repo: "owner/repo", components?: { Name: "owner/repo" } }.
+  // An entry with no string `repo` is dropped (there's nothing to route to).
+  const jiraProjectsRaw = isPlainObject(jiraRaw.projects) ? jiraRaw.projects : {};
+  const jiraProjects: Record<string, JiraProjectMapping> = {};
+  for (const [key, val] of Object.entries(jiraProjectsRaw)) {
+    if (!isPlainObject(val)) continue;
+    const repo = typeof val.repo === "string" && val.repo.trim() ? val.repo.trim() : undefined;
+    if (!repo) continue;
+    const componentsRaw = isPlainObject(val.components) ? val.components : {};
+    const components: Record<string, string> = {};
+    for (const [comp, r] of Object.entries(componentsRaw)) {
+      if (typeof r === "string" && r.trim()) components[comp.trim()] = r.trim();
+    }
+    jiraProjects[key.trim()] = Object.keys(components).length ? { repo, components } : { repo };
+  }
+  const jiraTransitionsRaw = isPlainObject(jiraRaw.transitions) ? jiraRaw.transitions : {};
+  const jiraTransitions: { started?: string; prOpened?: string; merged?: string } = {};
+  for (const k of ["started", "prOpened", "merged"] as const) {
+    const v = jiraTransitionsRaw[k];
+    if (typeof v === "string" && v.trim()) jiraTransitions[k] = v.trim();
+  }
+  const jiraWebhookRaw = isPlainObject(jiraRaw.webhook) ? jiraRaw.webhook : {};
+  const jiraWebhook = {
+    url:
+      typeof jiraWebhookRaw.url === "string" && jiraWebhookRaw.url.trim()
+        ? jiraWebhookRaw.url.trim()
+        : null,
+    autoSync: jiraWebhookRaw.autoSync === true,
+  };
+
   const digestRaw = isPlainObject(raw.digest) ? raw.digest : {};
   const digest: DigestConfig = {
     windowDays: positiveNumber(digestRaw.windowDays) ?? 7,
@@ -1749,6 +1870,14 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     feedback,
     digest,
     slack: { repoChannels: slackRepoChannels },
+    jira: {
+      enabled: jiraRaw.enabled === true,
+      triggerLabel: jiraTriggerLabel,
+      allowedAccountIds: jiraAllowedAccountIds,
+      projects: jiraProjects,
+      transitions: jiraTransitions,
+      webhook: jiraWebhook,
+    },
     teamVisibility,
     repoConfig,
   };
@@ -1933,6 +2062,7 @@ function normalizeRoutes(raw: unknown): RouteConfig {
   return {
     github: { ...defaults.github, ...(isPlainObject(raw.github) ? stringRecord(raw.github, "routes.github") : {}) },
     slack: { ...defaults.slack, ...(isPlainObject(raw.slack) ? stringRecord(raw.slack, "routes.slack") : {}) },
+    jira: { ...defaults.jira, ...(isPlainObject(raw.jira) ? stringRecord(raw.jira, "routes.jira") : {}) },
   };
 }
 
@@ -1993,6 +2123,26 @@ export function defaultRouteConfig(): RouteConfig {
       explore: "explore",
       answer: "answer",
       chat: "chat",
+      explore_reply: "explore-reply",
+    },
+    // Jira ticket routes (issue #501). `ticket_labeled` is the trigger-label
+    // entry — it defaults to `answer` (assess + reply) until the Jira-triage
+    // phase lands. The rest mirror the classifier intents a `ticket.comment`
+    // resolves to, exactly as `slack` does.
+    jira: {
+      ticket_labeled: "answer",
+      build: "build",
+      triage: "issue-triage",
+      review: "pr-review",
+      security: "security-review",
+      verify: "verify",
+      qa_test: "qa-test",
+      demo: "demo",
+      explore: "explore",
+      answer: "answer",
+      chat: "chat",
+      approve: "approval-response",
+      reject: "approval-response",
       explore_reply: "explore-reply",
     },
   };
