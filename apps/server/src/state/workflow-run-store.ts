@@ -868,9 +868,9 @@ export class WorkflowRunStore {
    * since those are not holding a sandbox slot. Used by the concurrency cap
    * (issue #172) to decide whether to queue a fresh run.
    */
-  async countRunning(dbc: StateDbc = this.client): Promise<number> {
+  async countRunning(): Promise<number> {
     const { workflowRuns } = this.t;
-    const [row] = await dbc
+    const [row] = await this.client
       .select({ c: count() })
       .from(workflowRuns)
       .where(and(eq(workflowRuns.status, "running"), ownedRunSql(this.t)));
@@ -1428,8 +1428,7 @@ export class WorkflowRunStore {
   async resolveGateAndResume(
     approvalId: string,
     responder: string,
-    admitCap: number,
-  ): Promise<{ run: WorkflowRun; outcome: "resumed" | "queued" } | null> {
+  ): Promise<WorkflowRun | null> {
     return this.serialize(() =>
       this.client.transaction(async (tx) => {
         const approval = await this.approvals.getById(approvalId, tx);
@@ -1441,53 +1440,42 @@ export class WorkflowRunStore {
         if (changed !== 1) {
           throw new Error(`approval ${approvalId} is not pending (already resolved?)`);
         }
-        // We won the CAS, so the approval WAS pending — now admit the run under
-        // the concurrency cap (or refuse a run cancelled while it sat pending).
-        const outcome = await this.admitPausedLocked(approval.workflowRunId, admitCap, tx);
-        if (outcome === "inactive") return null;
-        const run = await this.getRun(approval.workflowRunId, tx);
-        return run ? { run, outcome } : null;
+        // Won the CAS, so the approval WAS pending — enqueue the run for the
+        // admission controller to promote (it owns the cap and does the resume).
+        // Returns null for a run cancelled while the approval sat pending.
+        if (!(await this.enqueuePausedLocked(approval.workflowRunId, tx))) return null;
+        return this.getRun(approval.workflowRunId, tx);
       }),
     );
   }
 
   /**
-   * Admit a PAUSED run respecting the concurrency cap, in `tx`:
-   *  - not paused (cancelled/ended while the approval sat pending) → `"inactive"`;
-   *    the run is NOT revived (`cancelRun` leaves the approval pending and
-   *    `setRunning` is an unguarded UPDATE — issue #518 review).
-   *  - at/over `admitCap` running → set `queued`; the admission controller
-   *    promotes it when a slot frees, exactly as a fresh over-cap dispatch.
-   *  - under the cap → set `running`; the caller resumes it now.
-   * `admitCap` is passed in because the cap (app-level `maxWorkflows`, or the k8s
-   * sanity fuse) is a runtime fact the store does not hold.
+   * Move a PAUSED run into the admission queue, in `tx`. Returns false when the
+   * run is NOT paused — cancelled/ended while the approval sat pending — so the
+   * caller can report it inactive instead of reviving it (`cancelRun` leaves the
+   * approval pending; issue #518 review). The cap and the actual resume stay with
+   * the admission controller (serialized, so an approval can't overrun
+   * `maxWorkflows` — issue #519 review). `startedAt` is RE-STAMPED as the enqueue
+   * clock — exactly as `requeue` does — so a gate that was open past
+   * `maxQueueWaitMs` doesn't get its approved run expired by the TTL sweep.
    */
-  private async admitPausedLocked(
-    runId: string,
-    admitCap: number,
-    tx: StateDbc,
-  ): Promise<"resumed" | "queued" | "inactive"> {
-    const run = await this.getRun(runId, tx);
-    if (!run || run.status !== "paused") return "inactive";
-    if ((await this.countRunning(tx)) >= admitCap) {
-      await tx
-        .update(this.t.workflowRuns)
-        .set({ status: "queued", updatedAt: new Date().toISOString() })
-        .where(and(eq(this.t.workflowRuns.id, runId), ownedRunSql(this.t)));
-      return "queued";
-    }
-    await this.setRunning(runId, tx);
-    return "resumed";
+  private async enqueuePausedLocked(runId: string, tx: StateDbc): Promise<boolean> {
+    const now = new Date().toISOString();
+    const result = await tx
+      .update(this.t.workflowRuns)
+      .set({ status: "queued", startedAt: now, updatedAt: now })
+      .where(and(eq(this.t.workflowRuns.id, runId), eq(this.t.workflowRuns.status, "paused"), ownedRunSql(this.t)));
+    return changes(result) === 1;
   }
 
   /**
    * The dashboard variant: the approval is already recorded (the route responds
-   * before this), so just admit the paused run under the cap. Returns the same
-   * outcomes as {@link admitPausedLocked}.
+   * before this), so just enqueue the paused run for admission. Returns whether
+   * it was enqueued (false = no longer paused). See {@link enqueuePausedLocked}.
    */
-  async admitPausedRun(runId: string, admitCap: number): Promise<"resumed" | "queued" | "inactive"> {
+  async enqueuePausedRun(runId: string): Promise<boolean> {
     return this.serialize(() =>
-      this.client.transaction((tx) => this.admitPausedLocked(runId, admitCap, tx)),
+      this.client.transaction((tx) => this.enqueuePausedLocked(runId, tx)),
     );
   }
 

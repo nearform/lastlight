@@ -382,16 +382,17 @@ comment) — distinct from `GET /admin/api/approvals`, which lists only pending
 gates across all runs.
 
 Approving resolves the gate atomically (`resolveGateAndResume`): it wins the
-compare-and-set over any racing responder (a second approve, or a reject), then
-**admits the run under the concurrency cap** — resuming it via `resumeSimpleRun`
-when a slot is free, or setting it `queued` for the admission controller to
-promote when the system is already at `maxWorkflows` (the same queue a fresh
-over-cap dispatch takes, so an approval can't overrun the cap — issue #519
-review). Both happen **only while the run is still `paused`**: a run cancelled
-while its approval sat pending (`cancelRun` leaves the approval row pending) is
-**not** revived; the op returns null and the approver is told the run is no
-longer active (issue #518). The dashboard path (`admitPausedRun`) admits the same
-way, after the route has already recorded the response.
+compare-and-set over any racing responder (a second approve, or a reject), then —
+**only while the run is still `paused`** — moves it into the admission queue,
+**re-stamping the enqueue clock** (`startedAt`, as `requeue` does) so a gate open
+past `maxQueueWaitMs` isn't expired by the TTL sweep. The **admission controller
+owns the cap and the resume**: its serialized `admitNext` promotes the run (via
+`resumeSimpleRun`) when a slot is free, so an approval can't overrun
+`maxWorkflows` (issue #519 review). A run cancelled while its approval sat pending
+(`cancelRun` leaves the approval row pending) is **not** revived; the op returns
+null and the approver is told the run is no longer active (issue #518). The
+dashboard path (`enqueuePausedRun`) enqueues the same way, after the route has
+already recorded the response.
 
 ### `cron_overrides`
 

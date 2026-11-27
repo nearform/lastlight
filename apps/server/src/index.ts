@@ -88,7 +88,7 @@ import { feedbackAnchorObserver, pollFeedbackReactions } from "./cron/feedback-p
 import { drainFeedbackExport } from "./engine/feedback/ingest.js";
 import type { RunnerCallbacks } from "./workflows/runner.js";
 import { resumeOrphanedWorkflows, resumeSimpleRun, type ResumeOptions } from "./workflows/resume.js";
-import { createAdmissionController, K8S_SANITY_FUSE, type AdmissionController } from "./workflows/admission.js";
+import { createAdmissionController, type AdmissionController } from "./workflows/admission.js";
 import {
   ProgressNotifier,
   GitHubTransport,
@@ -1667,15 +1667,6 @@ async function main() {
       : undefined,
   };
 
-  // Resume a run from its stored row (full context) via `resumeSimpleRun` — the
-  // one path both the approval-gate resume and the dashboard retry take, so a
-  // Slack-/Jira-keyed gated run resumes just like a GitHub-issue one (issue #518).
-  const resumeRunFromRow = async (runId: string): Promise<void> => {
-    const fresh = await db.runs.getRun(runId);
-    if (!fresh) return;
-    await resumeSimpleRun(fresh, resumeOpts);
-  };
-
   // Construct the admission controller now that resumeOpts is ready.
   // `admissionController` was declared (let) above dispatchWorkflow so the
   // closure can reference it; we assign here, after resumeOpts.
@@ -1686,12 +1677,6 @@ async function main() {
     maxQueueWaitMs: config.concurrency.maxQueueWaitMs,
     backpressureMode: config.sandbox === "kubernetes",
   });
-
-  // The concurrency cap an approval-resume admits against — the same authority
-  // simple.ts uses at dispatch: app-level maxWorkflows on docker/gondolin, the
-  // sanity fuse on k8s (which defers to the namespace ResourceQuota).
-  const admitCap =
-    config.sandbox === "kubernetes" ? K8S_SANITY_FUSE : config.concurrency.maxWorkflows;
 
   // Mount admin dashboard on the shared HTTP server (always available).
   {
@@ -1744,29 +1729,23 @@ async function main() {
           adminLog.warn("Cannot resume workflow: GitHub App not configured", { runId: workflowRun.id });
           return;
         }
-        // The route already recorded the approval; admit the run under the
-        // concurrency cap. A run cancelled/ended while the approval sat pending
-        // is NOT revived (#518 review); at the cap it is queued for the admission
-        // controller instead of overrunning maxWorkflows (#519 review). The
-        // stored-row resume carries a Slack-/Jira-keyed run too (#518).
-        const outcome = await db.runs.admitPausedRun(workflowRun.id, admitCap);
-        if (outcome === "inactive") {
+        // The route already recorded the approval; enqueue the paused run for
+        // the admission controller, which owns the cap and does the resume
+        // (resumeSimpleRun) when it promotes (#519 review). A run cancelled/ended
+        // while the approval sat pending is NOT revived (#518). The stored-row
+        // resume carries a Slack-/Jira-keyed run too (#518).
+        const enqueued = await db.runs.enqueuePausedRun(workflowRun.id);
+        if (!enqueued) {
           adminLog.warn("Not resuming: run is no longer paused", { runId: workflowRun.id });
           return;
         }
-        adminLog.info("Admitted after dashboard approval", {
+        adminLog.info("Enqueued after dashboard approval", {
           workflowName: workflowRun.workflowName,
           runId: workflowRun.id,
-          outcome,
           sender,
         });
-        if (outcome === "resumed") {
-          resumeRunFromRow(workflowRun.id).catch((err) =>
-            adminLog.error("Resume failed", { runId: workflowRun.id, err }));
-        } else {
-          admissionController.admitNext().catch((err) =>
-            adminLog.error("admitNext after approval failed", { runId: workflowRun.id, err }));
-        }
+        await admissionController.admitNext().catch((err) =>
+          adminLog.error("admitNext after approval failed", { runId: workflowRun.id, err }));
       },
       // Retry a FAILED or CANCELLED run, resuming from where it stopped with the
       // full context reconstructed from the stored `workflow_runs.context` +
@@ -1942,18 +1921,17 @@ async function main() {
     // (cancelled while the approval sat pending). Full-context resume, so a
     // Slack-/Jira-keyed run resumes too (#518) without overrunning the cap (#519).
     resumeGatedRun: async (approvalId, sender) => {
-      const result = await db.runs.resolveGateAndResume(approvalId, sender, admitCap);
-      if (!result) return "inactive";
-      if (result.outcome === "resumed") {
-        resumeRunFromRow(result.run.id).catch((err) =>
-          logger("dispatch").error("Approval resume failed", { runId: result.run.id, sender, err }));
-        return "resumed";
-      }
-      // Queued at the cap — kick admission to close the just-freed-a-slot race;
-      // otherwise it promotes on the next run completion.
-      admissionController.admitNext().catch((err) =>
-        logger("dispatch").error("admitNext after approval failed", { runId: result.run.id, err }));
-      return "queued";
+      // Resolve the gate and ENQUEUE the run; the admission controller owns the
+      // cap and does the resume (resumeSimpleRun) when it promotes — serialized,
+      // so an approval can't overrun maxWorkflows (#519 review). admitNext
+      // promotes it now if a slot is free, else it waits in the queue; null means
+      // the run was cancelled while the approval sat pending (#518).
+      const run = await db.runs.resolveGateAndResume(approvalId, sender);
+      if (!run) return "inactive";
+      await admissionController.admitNext().catch((err) =>
+        logger("dispatch").error("admitNext after approval failed", { runId: run.id, err }));
+      const after = await db.runs.getRun(run.id);
+      return after?.status === "running" ? "resumed" : "queued";
     },
     sessionManager,
     // One in-process chat turn. handleChatMessage manages session resume via

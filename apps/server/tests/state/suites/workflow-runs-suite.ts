@@ -584,7 +584,7 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
         const runId = await makeRun({ ...foreign, status: "paused", currentPhase: "waiting_approval" });
         const approvalId = await pendingGate(runId);
 
-        await expect(db.runs.resolveGateAndResume(approvalId, "bob", 100)).rejects.toBeInstanceOf(ForeignEngineRunError);
+        await expect(db.runs.resolveGateAndResume(approvalId, "bob")).rejects.toBeInstanceOf(ForeignEngineRunError);
         await expect(db.runs.resolveGateAndFail(approvalId, "bob", "no")).rejects.toBeInstanceOf(ForeignEngineRunError);
         await expect(
           db.runs.resolveReplyGateAndResume(runId, approvalId, "hi", "bob", { socratic: {} }),
@@ -706,7 +706,7 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
     });
 
     describe("resolveGateAndResume — approve path", () => {
-      it("approves the gate and sets the run running, returning the run", async () => {
+      it("approves the gate and enqueues the run for admission, returning it", async () => {
         const runId = await makeRun({ status: "paused" });
         const approvalId = randomUUID();
         await db.approvals.create({
@@ -716,38 +716,22 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
           summary: "Plan ready",
           createdAt: new Date().toISOString(),
         });
+        const before = (await db.runs.getRun(runId))!.startedAt;
 
-        const result = await db.runs.resolveGateAndResume(approvalId, "bob", 100);
+        const result = await db.runs.resolveGateAndResume(approvalId, "bob");
 
-        expect(result!.run.id).toBe(runId);
-        expect(result!.outcome).toBe("resumed");
-        expect(result!.run.status).toBe("running");
+        // ENQUEUES for the admission controller (which owns the cap and does the
+        // resume), re-stamping the enqueue clock — not a straight flip to running.
+        expect(result!.id).toBe(runId);
+        expect(result!.status).toBe("queued");
+        expect(Date.parse(result!.startedAt)).toBeGreaterThanOrEqual(Date.parse(before));
         const approval = await db.approvals.getById(approvalId);
         expect(approval!.status).toBe("approved");
         expect(approval!.respondedBy).toBe("bob");
       });
 
-      it("queues the run instead of resuming when at the concurrency cap", async () => {
-        const runId = await makeRun({ status: "paused" });
-        const approvalId = randomUUID();
-        await db.approvals.create({
-          id: approvalId,
-          workflowRunId: runId,
-          gate: "post_architect",
-          summary: "Plan ready",
-          createdAt: new Date().toISOString(),
-        });
-
-        // admitCap 0 → already at capacity, so admit queues instead of running.
-        const result = await db.runs.resolveGateAndResume(approvalId, "bob", 0);
-
-        expect(result!.outcome).toBe("queued");
-        expect((await db.runs.getRun(runId))!.status).toBe("queued");
-        expect((await db.approvals.getById(approvalId))!.status).toBe("approved");
-      });
-
       it("throws on an unknown approval id", async () => {
-        await expect(db.runs.resolveGateAndResume("no-such-approval", "bob", 100)).rejects.toThrow();
+        await expect(db.runs.resolveGateAndResume("no-such-approval", "bob")).rejects.toThrow();
       });
 
       it("does not resume a stale approval that was already resolved", async () => {
@@ -763,7 +747,7 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
 
         await db.runs.resolveGateAndFail(approvalId, "carol", "plan incomplete");
 
-        await expect(db.runs.resolveGateAndResume(approvalId, "bob", 100)).rejects.toThrow("not pending");
+        await expect(db.runs.resolveGateAndResume(approvalId, "bob")).rejects.toThrow("not pending");
         expect((await db.runs.getRun(runId))!.status).toBe("failed");
         expect((await db.approvals.getById(approvalId))!.status).toBe("rejected");
       });
@@ -781,12 +765,12 @@ export function runWorkflowRunsSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
           createdAt: new Date().toISOString(),
         });
 
-        await db.runs.resolveGateAndResume(approvalId, "bob", 100);
+        await db.runs.resolveGateAndResume(approvalId, "bob");
 
         await expect(db.runs.resolveGateAndFail(approvalId, "carol", "too late")).rejects.toThrow(
           "not pending",
         );
-        expect((await db.runs.getRun(runId))!.status).toBe("running");
+        expect((await db.runs.getRun(runId))!.status).toBe("queued"); // approve enqueued it
         expect((await db.approvals.getById(approvalId))!.status).toBe("approved");
       });
 
