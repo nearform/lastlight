@@ -172,6 +172,36 @@ describe("JiraClient error + rate-limit handling", () => {
     expect(sleep).toHaveBeenCalledTimes(1); // floored to 1s, so the 1.5s bound trips on the 2nd 429
   });
 
+  it("terminates when 429 Retry-After is a past HTTP date", async () => {
+    // The other half of the reviewer's finding: a past date gives a negative
+    // `at - now`, which must still floor to a positive wait so `waited` advances.
+    const sleep = vi.fn(async () => {});
+    const pastDate = new Date(Date.now() - 60_000).toUTCString();
+    const f = stubFetch([{ status: 429, headers: { "retry-after": pastDate } }]);
+    await expect(
+      new JiraClient(CREDS, { fetch: f.impl, sleep, maxRetryWaitMs: 1500 }).myself(),
+    ).rejects.toBeInstanceOf(JiraRateLimitError);
+    expect(sleep).toHaveBeenCalledTimes(1); // floored to 1s, so the 1.5s bound trips on the 2nd 429
+  });
+
+  it("backs off exponentially rather than hammering when 429 persists", async () => {
+    // With a flat 1s wait a persistent 429 would mean ~300 requests over the
+    // 5-min bound; exponential backoff (1s, 2s, 4s… capped) keeps it to ~10.
+    const sleep = vi.fn(async () => {});
+    const f = stubFetch([{ status: 429, headers: { "retry-after": "0" } }]);
+    await expect(
+      new JiraClient(CREDS, { fetch: f.impl, sleep }).myself(), // default 5-min bound
+    ).rejects.toBeInstanceOf(JiraRateLimitError);
+    expect(f.calls.length).toBeLessThanOrEqual(12);
+  });
+
+  it("honours a genuine Retry-After over the backoff floor", async () => {
+    const sleep = vi.fn(async (_ms: number) => {});
+    const f = stubFetch([{ status: 429, headers: { "retry-after": "30" } }, { json: myselfFixture }]);
+    await new JiraClient(CREDS, { fetch: f.impl, sleep }).myself();
+    expect(sleep).toHaveBeenCalledWith(30_000); // the 30s hint wins over the 1s first backoff
+  });
+
   it("gives up with JiraRateLimitError when 429 exceeds the wait bound", async () => {
     const sleep = vi.fn(async () => {});
     const f = stubFetch([{ status: 429, headers: { "retry-after": "600" } }]);

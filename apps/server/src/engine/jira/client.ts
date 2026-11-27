@@ -16,11 +16,15 @@ const log = logger("jira");
 const MAX_RETRY_WAIT_MS = 5 * 60 * 1000;
 
 /**
- * Floor for a single 429 wait. A `Retry-After: 0` or a past date would otherwise
- * leave `waited` at 0, so the MAX_RETRY_WAIT_MS bound would never trip and the
- * loop would busy-spin on the rate limiter. The floor guarantees progress.
+ * Exponential-backoff base and per-step cap for a 429 wait. The wait is
+ * `max(Retry-After, base * 2^(attempt-1))`, capped per step — so a genuine
+ * Retry-After is honoured, but a server that keeps answering 429 with a zero or
+ * past hint is retried a handful of times (1s, 2s, 4s…) within the total bound,
+ * not ~300 times at one request per second. The growing base also guarantees
+ * `waited` advances, so the bound always trips.
  */
-const MIN_RETRY_WAIT_MS = 1_000;
+const RETRY_BACKOFF_BASE_MS = 1_000;
+const RETRY_BACKOFF_STEP_CAP_MS = 60_000;
 
 /** A Jira request that kept getting 429'd past the wait bound. */
 export class JiraRateLimitError extends Error {
@@ -233,32 +237,40 @@ export class JiraClient {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     };
 
-    // Bounded wait on 429 — see the note on MAX_RETRY_WAIT_MS.
+    // Exponential backoff on 429, bounded by total wait — see the backoff note.
     let waited = 0;
+    let attempt = 0;
     for (;;) {
       const res = await this.fetchImpl(url, init);
       if (res.status !== 429) return res;
-      const wait = retryAfterMs(res.headers.get("retry-after"));
+      attempt += 1;
+      const backoff = Math.min(RETRY_BACKOFF_BASE_MS * 2 ** (attempt - 1), RETRY_BACKOFF_STEP_CAP_MS);
+      const wait = Math.max(retryAfterMs(res.headers.get("retry-after")), backoff);
       if (waited + wait > this.maxWaitMs) {
         throw new JiraRateLimitError(
-          `Jira rate limited; Retry-After ${Math.round(wait / 1000)}s exceeds the ` +
-            `${Math.round(this.maxWaitMs / 1000)}s wait bound`,
+          `Jira rate limited; next wait ${Math.round(wait / 1000)}s would exceed the ` +
+            `${Math.round(this.maxWaitMs / 1000)}s bound (attempt ${attempt})`,
         );
       }
-      log.warn("rate limited; waiting it out", { url, waitMs: wait, waited });
+      log.warn("rate limited; backing off", { url, waitMs: wait, waited, attempt });
       await this.sleep(wait);
       waited += wait;
     }
   }
 }
 
-/** `Retry-After` in ms. Jira sends seconds or an HTTP date; absent → a minute, never zero. */
+/**
+ * The server's `Retry-After` in ms, or 0 when it gives no usable guidance (a
+ * zero, a past HTTP date, or an unparseable value). The caller takes the max of
+ * this and its exponential backoff, so 0 means "no hint — use backoff". Absent
+ * stays a minute: the server said nothing, so don't retry eagerly.
+ */
 function retryAfterMs(header: string | null, now: number = Date.now()): number {
   if (!header) return 60_000;
   const seconds = Number(header);
-  if (Number.isFinite(seconds)) return Math.max(MIN_RETRY_WAIT_MS, seconds * 1000);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
   const at = Date.parse(header);
-  return Number.isNaN(at) ? 60_000 : Math.max(MIN_RETRY_WAIT_MS, at - now);
+  return Number.isNaN(at) ? 60_000 : Math.max(0, at - now);
 }
 
 function webhookBody(spec: JiraWebhookSpec): Record<string, unknown> {
