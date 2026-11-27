@@ -1726,8 +1726,10 @@ async function main() {
       githubAllowedOrg: process.env.GITHUB_ALLOWED_ORG,
       resumeWorkflow: async (workflowRun, sender) => {
         if (!github) {
+          // Config, not a dead run — the run stays paused and resumes once the
+          // App is configured, so don't tell the operator it's "no longer active".
           adminLog.warn("Cannot resume workflow: GitHub App not configured", { runId: workflowRun.id });
-          return "inactive";
+          return "unavailable";
         }
         // The route already recorded the approval; enqueue the paused run for
         // the admission controller, which owns the cap and does the resume

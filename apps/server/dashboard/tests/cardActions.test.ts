@@ -17,7 +17,10 @@ import type { BoardCard, BoardCardAction } from "../src/api";
 const { apiMock } = vi.hoisted(() => ({
   apiMock: {
     respondToApproval: vi.fn(
-      async (): Promise<{ status: string; resume?: "resumed" | "queued" | "inactive" }> => ({ status: "ok" }),
+      async (): Promise<{
+        status: string;
+        resume?: "resumed" | "queued" | "inactive" | "unavailable" | "error";
+      }> => ({ status: "ok" }),
     ),
     cancelWorkflowRun: vi.fn(async () => ({ cancelled: "run-1" })),
     retryWorkflowRun: vi.fn(async () => ({ retrying: "run-1" })),
@@ -348,10 +351,16 @@ describe("performIntent", () => {
     expect(apiMock.respondToApproval).toHaveBeenCalledWith("ap-2", "rejected", "wrong file");
   });
 
-  it("surfaces a note when an approve resolved the gate but resumed nothing", async () => {
-    apiMock.respondToApproval.mockResolvedValueOnce({ status: "approved", resume: "inactive" });
-    const out = await performIntent({ kind: "approve", approvalId: "ap-9" });
-    expect(out.note).toMatch(/no longer active/);
+  it("surfaces a note, by cause, when an approve resolved the gate but didn't resume", async () => {
+    for (const [resume, pattern] of [
+      ["inactive", /no longer active/],
+      ["unavailable", /GitHub App/],
+      ["error", /failed/],
+    ] as const) {
+      apiMock.respondToApproval.mockResolvedValueOnce({ status: "approved", resume });
+      const out = await performIntent({ kind: "approve", approvalId: "ap-9" });
+      expect(out.note).toMatch(pattern);
+    }
 
     // A resume that landed — running now, or queued and about to — is plain
     // success and says nothing.

@@ -1282,6 +1282,29 @@ describe("POST /approvals/:id/respond", () => {
     expect(calls.resolveGateAndResume).toEqual([]);
   });
 
+  it("forwards the resume outcome to the operator, and maps a thrown resume to `error` (#519 review)", async () => {
+    // The route must report the REAL reason a resume didn't land, without
+    // conflating causes: a dead run (`inactive`), a missing App (`unavailable`)
+    // and a thrown callback (`error`) are three different things to the operator.
+    for (const outcome of ["resumed", "queued", "inactive", "unavailable"] as const) {
+      const { db } = makeApprovalDb();
+      const res = await respond(db, "appr-1", { decision: "approved" }, {
+        resumeWorkflow: vi.fn(async () => outcome),
+      });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { resume?: string }).resume).toBe(outcome);
+    }
+    // A callback that throws is caught and reported as `error`, not swallowed.
+    const { db } = makeApprovalDb();
+    const res = await respond(db, "appr-1", { decision: "approved" }, {
+      resumeWorkflow: vi.fn(async () => {
+        throw new Error("boom");
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { resume?: string }).resume).toBe("error");
+  });
+
   it("hands a Slack-keyed run with no issueNumber to resumeWorkflow (regression for #518)", async () => {
     // The dashboard approval path must resume a Slack-thread run, not drop it
     // for lacking an issueNumber. The route hands it to resumeWorkflow, which

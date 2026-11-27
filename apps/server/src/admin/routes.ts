@@ -310,14 +310,18 @@ export interface AdminConfig {
   overlayDir?: string;
   /**
    * Optional callback to resume a paused workflow after dashboard approval.
-   * Returns how it went: `resumed` (running now), `queued` (admitted, waiting on
-   * a slot), or `inactive` (the run was no longer paused — nothing resumed), so
-   * the route can tell the operator rather than always reporting success.
+   * Returns how it went, so the route can tell the operator the real reason
+   * rather than always reporting success — and distinct causes stay distinct
+   * (an operator told "no longer active" when the cause is config can't act on
+   * it): `resumed` (running now), `queued` (admitted, waiting on a slot),
+   * `inactive` (the run was no longer paused — nothing resumed), or
+   * `unavailable` (the GitHub App isn't configured, so the run stays paused).
+   * The route adds `error` when the callback itself throws.
    */
   resumeWorkflow?: (
     workflowRun: WorkflowRun,
     sender: string,
-  ) => Promise<"resumed" | "queued" | "inactive">;
+  ) => Promise<"resumed" | "queued" | "inactive" | "unavailable">;
   /**
    * Optional callback to retry a FAILED workflow run, resuming from the phase
    * that failed with the same context (ledger-driven). Wired in `src/index.ts`;
@@ -2839,7 +2843,7 @@ export function createAdminRoutes(
     // Actor logging (issue #205): attribute the approval to the authenticated
     // user, falling back to `admin` for password/anonymous sessions.
     const actor = actorFromContext(c) ?? "admin";
-    let resume: "resumed" | "queued" | "inactive" | undefined;
+    let resume: "resumed" | "queued" | "inactive" | "unavailable" | "error" | undefined;
     if (body.decision === "rejected") {
       // One transaction: respond 'rejected' + fail the run.
       await db.runs.resolveGateAndFail(id, actor, body.reason);
@@ -2861,12 +2865,13 @@ export function createAdminRoutes(
       }
       const workflowRun = await db.runs.getRun(approval.workflowRunId);
       if (workflowRun && config.resumeWorkflow) {
-        // Await so the response can report whether the run actually resumed — a
-        // run cancelled while the approval sat pending reports `inactive` rather
-        // than a misleading plain success (#519 review).
+        // Await so the response can report how the resume actually went — a run
+        // cancelled while the approval sat pending reports `inactive`, a missing
+        // GitHub App `unavailable`, a thrown resume `error` — rather than a
+        // misleading plain success, and without conflating the three (#519 review).
         resume = await config.resumeWorkflow(workflowRun, actor).catch((err) => {
           log.error("Failed to resume workflow", { workflowRunId: workflowRun.id, err });
-          return "inactive" as const;
+          return "error" as const;
         });
       }
     }
