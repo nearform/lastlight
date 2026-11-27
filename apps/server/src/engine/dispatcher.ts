@@ -106,7 +106,10 @@ export interface DispatchDeps {
    * controller and `resumeSimpleRun` all live in `index.ts`. Omitted (chat-only
    * wiring, tests) means an approval is recorded but not resumed.
    */
-  resumeGatedRun?: (approvalId: string, sender: string) => Promise<"resumed" | "queued" | "inactive">;
+  resumeGatedRun?: (
+    approvalId: string,
+    sender: string,
+  ) => Promise<"resumed" | "queued" | "inactive" | "already-resolved">;
   sessionManager: SessionManager;
   runChat: RunChatFn;
   route?: (envelope: EventEnvelope, deps: RouterDeps) => Promise<Route>;
@@ -1156,6 +1159,8 @@ async function handleApprovalResponse(
         await envelope.reply(
           `Approved by ${sender}. \`${workflowRun.workflowName}\` is queued — it will resume when a run slot frees.`,
         );
+      } else if (outcome === "already-resolved") {
+        await envelope.reply("This approval gate was already resolved by another response.");
       } else {
         await envelope.reply(`Approval noted, but \`${workflowRun.workflowName}\` is no longer active — not resumed.`);
       }

@@ -477,6 +477,23 @@ describe('dispatch — approval-response handler', () => {
     expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/no longer active/i));
   });
 
+  it('approving a gate a racing responder already resolved replies instead of throwing', async () => {
+    const envelope = makeEnvelope({ type: 'comment.created' });
+    const resumeGatedRun = vi.fn().mockResolvedValue('already-resolved');
+    const db = mockDb({
+      getPendingByTrigger: vi.fn().mockReturnValue({ id: 'appr-r', workflowRunId: 'run-r' }),
+      getRun: vi.fn().mockReturnValue({ id: 'run-r', workflowName: 'build', triggerId: 'o/r#7', issueNumber: 7 }),
+    });
+    const deps = makeDeps(
+      approvalRoute({ decision: 'approved', repo: 'o/r', issueNumber: 7 }),
+      { db: db as any, github: {} as any, resumeGatedRun },
+    );
+
+    await dispatch(envelope, deps);
+
+    expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/already resolved/i));
+  });
+
   it('approves but cannot resume without a GitHub App', async () => {
     const envelope = makeEnvelope({ type: 'comment.created' });
     const dispatchWorkflow = vi.fn();

@@ -1727,17 +1727,18 @@ async function main() {
       resumeWorkflow: async (workflowRun, sender) => {
         if (!github) {
           adminLog.warn("Cannot resume workflow: GitHub App not configured", { runId: workflowRun.id });
-          return;
+          return "inactive";
         }
         // The route already recorded the approval; enqueue the paused run for
         // the admission controller, which owns the cap and does the resume
         // (resumeSimpleRun) when it promotes (#519 review). A run cancelled/ended
         // while the approval sat pending is NOT revived (#518). The stored-row
-        // resume carries a Slack-/Jira-keyed run too (#518).
+        // resume carries a Slack-/Jira-keyed run too (#518). The outcome flows
+        // back so the route can tell the operator it didn't resume (#519 review).
         const enqueued = await db.runs.enqueuePausedRun(workflowRun.id);
         if (!enqueued) {
           adminLog.warn("Not resuming: run is no longer paused", { runId: workflowRun.id });
-          return;
+          return "inactive";
         }
         adminLog.info("Enqueued after dashboard approval", {
           workflowName: workflowRun.workflowName,
@@ -1746,6 +1747,7 @@ async function main() {
         });
         await admissionController.admitNext().catch((err) =>
           adminLog.error("admitNext after approval failed", { runId: workflowRun.id, err }));
+        return (await db.runs.getRun(workflowRun.id))?.status === "running" ? "resumed" : "queued";
       },
       // Retry a FAILED or CANCELLED run, resuming from where it stopped with the
       // full context reconstructed from the stored `workflow_runs.context` +
@@ -1926,7 +1928,16 @@ async function main() {
       // so an approval can't overrun maxWorkflows (#519 review). admitNext
       // promotes it now if a slot is free, else it waits in the queue; null means
       // the run was cancelled while the approval sat pending (#518).
-      const run = await db.runs.resolveGateAndResume(approvalId, sender);
+      let run;
+      try {
+        run = await db.runs.resolveGateAndResume(approvalId, sender);
+      } catch (err) {
+        // A racing responder resolved this gate between the dispatcher's
+        // pre-read and the serialized respond CAS — the loser. Report it so the
+        // approver gets a reply rather than a swallowed "Dispatch threw" (#519 review).
+        if (err instanceof Error && /not pending/.test(err.message)) return "already-resolved";
+        throw err;
+      }
       if (!run) return "inactive";
       await admissionController.admitNext().catch((err) =>
         logger("dispatch").error("admitNext after approval failed", { runId: run.id, err }));

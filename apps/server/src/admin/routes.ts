@@ -308,8 +308,16 @@ export interface AdminConfig {
   builtInRoot?: string;
   /** Active deployment overlay root (`$LASTLIGHT_OVERLAY_DIR`), if any. */
   overlayDir?: string;
-  /** Optional callback to actively resume a paused workflow after dashboard approval */
-  resumeWorkflow?: (workflowRun: WorkflowRun, sender: string) => Promise<void>;
+  /**
+   * Optional callback to resume a paused workflow after dashboard approval.
+   * Returns how it went: `resumed` (running now), `queued` (admitted, waiting on
+   * a slot), or `inactive` (the run was no longer paused — nothing resumed), so
+   * the route can tell the operator rather than always reporting success.
+   */
+  resumeWorkflow?: (
+    workflowRun: WorkflowRun,
+    sender: string,
+  ) => Promise<"resumed" | "queued" | "inactive">;
   /**
    * Optional callback to retry a FAILED workflow run, resuming from the phase
    * that failed with the same context (ledger-driven). Wired in `src/index.ts`;
@@ -2831,6 +2839,7 @@ export function createAdminRoutes(
     // Actor logging (issue #205): attribute the approval to the authenticated
     // user, falling back to `admin` for password/anonymous sessions.
     const actor = actorFromContext(c) ?? "admin";
+    let resume: "resumed" | "queued" | "inactive" | undefined;
     if (body.decision === "rejected") {
       // One transaction: respond 'rejected' + fail the run.
       await db.runs.resolveGateAndFail(id, actor, body.reason);
@@ -2852,8 +2861,12 @@ export function createAdminRoutes(
       }
       const workflowRun = await db.runs.getRun(approval.workflowRunId);
       if (workflowRun && config.resumeWorkflow) {
-        config.resumeWorkflow(workflowRun, actor).catch((err) => {
+        // Await so the response can report whether the run actually resumed — a
+        // run cancelled while the approval sat pending reports `inactive` rather
+        // than a misleading plain success (#519 review).
+        resume = await config.resumeWorkflow(workflowRun, actor).catch((err) => {
           log.error("Failed to resume workflow", { workflowRunId: workflowRun.id, err });
+          return "inactive" as const;
         });
       }
     }
@@ -2867,7 +2880,7 @@ export function createAdminRoutes(
         ...(body.reason ? { reason: body.reason } : {}),
       },
     });
-    return c.json({ status: body.decision });
+    return c.json({ status: body.decision, ...(resume ? { resume } : {}) });
   });
 
   // ── Crons ──────────────────────────────────────────────────────

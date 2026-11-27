@@ -1,3 +1,5 @@
+import type { ResumeOutcome } from "./lib/resume-outcome";
+
 const TOKEN_KEY = "lastlight-token";
 const BASE = "/admin/api";
 
@@ -1538,7 +1540,7 @@ export const api = {
       body: JSON.stringify({ reason }),
     }),
   respondToApproval: (id: string, decision: "approved" | "rejected", reason?: string) =>
-    reqAction<{ status: string }>(`/approvals/${id}/respond`, {
+    reqAction<{ status: string; resume?: ResumeOutcome }>(`/approvals/${id}/respond`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ decision, reason }),

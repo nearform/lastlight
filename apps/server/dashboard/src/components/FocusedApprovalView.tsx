@@ -3,6 +3,7 @@ import { api, type WorkflowApproval, type ArtifactRef, type WorkflowRun } from "
 import { ArtifactEditor } from "./ArtifactEditor";
 import { GhLink } from "./GhLink";
 import { repoUrl, issueUrl } from "../lib/githubLinks";
+import { resumeNotice } from "../lib/resume-outcome";
 
 interface Props {
   approvalId: string;
@@ -37,6 +38,7 @@ export function FocusedApprovalView({ approvalId, onClose }: Props) {
   const [pending, setPending] = useState(false);
   const [respondError, setRespondError] = useState<string | null>(null);
   const [resolved, setResolved] = useState<"approved" | "rejected" | null>(null);
+  const [resumeMessage, setResumeMessage] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,7 +54,8 @@ export function FocusedApprovalView({ approvalId, onClose }: Props) {
     setPending(true);
     setRespondError(null);
     try {
-      await api.respondToApproval(approvalId, decision, reason || undefined);
+      const res = await api.respondToApproval(approvalId, decision, reason || undefined);
+      if (decision === "approved") setResumeMessage(resumeNotice(res.resume));
       setResolved(decision);
     } catch (e) {
       setRespondError(e instanceof Error ? e.message : "Request failed");
@@ -183,8 +186,8 @@ export function FocusedApprovalView({ approvalId, onClose }: Props) {
                 <span className={`ll-status badge ${(resolved ?? approval.status) === "approved" ? "text-success" : "text-error"}`}>
                   {resolved ?? approval.status}
                 </span>
-                <span className="text-sm text-strong">
-                  This approval is resolved.
+                <span className={`text-sm ${resumeMessage ? "text-warning" : "text-strong"}`}>
+                  {resumeMessage ?? "This approval is resolved."}
                 </span>
                 <button className="btn btn-xs btn-ghost ml-auto" onClick={onClose}>
                   Back to dashboard
