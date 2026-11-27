@@ -1,0 +1,19 @@
+{
+  "self": "https://nearform-test.atlassian.net/rest/api/3/user?accountId=712020:00000000-0000-0000-0000-000000000000",
+  "accountId": "712020:00000000-0000-0000-0000-000000000000",
+  "accountType": "atlassian",
+  "emailAddress": "redacted@example.com",
+  "displayName": "Test Bot",
+  "active": true,
+  "timeZone": "Europe/London",
+  "locale": "en_US",
+  "groups": {
+    "size": 12,
+    "items": []
+  },
+  "applicationRoles": {
+    "size": 1,
+    "items": []
+  },
+  "expand": "groups,applicationRoles"
+}
