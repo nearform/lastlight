@@ -2836,14 +2836,12 @@ export function createAdminRoutes(
       await db.runs.resolveGateAndFail(id, actor, body.reason);
     } else {
       // Record the approval, then let resumeWorkflow flip the run back to
-      // `running` — but only as part of an actual dispatch. resumeWorkflow
-      // validates the target (GitHub App present, triggerId is an owner/repo#N
-      // issue) and calls setRunning right before dispatching, so a
-      // non-resumable approval (no resumeWorkflow wired, App down, or a
-      // non-issue trigger) leaves the run paused rather than flipping it to
-      // `running` with no worker. We deliberately do NOT use the atomic
-      // resolveGateAndResume here: unlike the GitHub/Slack path, the dashboard
-      // can't prove a dispatch will follow before responding.
+      // `running` and resume it from its stored row — the full-context resume
+      // (`resumeSimpleRun`), so a Slack-/Jira-keyed run resumes too, not only an
+      // owner/repo#N issue run (issue #518). It still requires the GitHub App (a
+      // build needs it to push); without one the run stays paused. We
+      // deliberately do NOT use the atomic resolveGateAndResume here: unlike the
+      // chat path, the dashboard can't prove a dispatch will follow before responding.
       //
       // respond() is a compare-and-set on the still-pending row, so a racing
       // responder (the status check above is a TOCTOU read) changes 0 rows.

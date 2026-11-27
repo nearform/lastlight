@@ -1282,6 +1282,21 @@ describe("POST /approvals/:id/respond", () => {
     expect(calls.resolveGateAndResume).toEqual([]);
   });
 
+  it("hands a Slack-keyed run with no issueNumber to resumeWorkflow (regression for #518)", async () => {
+    // The dashboard approval path must resume a Slack-thread run, not drop it
+    // for lacking an issueNumber. The route hands it to resumeWorkflow, which
+    // resumes from the stored row (resumeSimpleRun) regardless of trigger shape.
+    const { db, calls } = makeApprovalDb({
+      approval: { id: "appr-s", status: "pending", workflowRunId: "run-s" },
+      run: { id: "run-s", workflowName: "build", triggerId: "slack:T1:C1:1680.1", issueNumber: null },
+    });
+    const resumeWorkflow = vi.fn(async () => {});
+    const res = await respond(db, "appr-s", { decision: "approved" }, { resumeWorkflow });
+    expect(res.status).toBe(200);
+    expect(calls.respond).toEqual([["appr-s", "approved", "admin", undefined]]);
+    expect(resumeWorkflow).toHaveBeenCalledWith(expect.objectContaining({ id: "run-s" }), "admin");
+  });
+
   it("records the approval WITHOUT flipping the run to running when no resume can be dispatched", async () => {
     // Regression (PR #105 review): the atomic approve+resume flipped the run to
     // `running` even when no worker would be dispatched (no resumeWorkflow

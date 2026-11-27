@@ -422,6 +422,25 @@ describe('dispatch — approval-response handler', () => {
     expect(db.approvals.respond).not.toHaveBeenCalled();
   });
 
+  it("approves but the run is gone: records and tells the approver it won't resume", async () => {
+    const envelope = makeEnvelope({ type: 'comment.created' });
+    const resumeRun = vi.fn();
+    const db = mockDb({
+      getPendingByTrigger: vi.fn().mockReturnValue({ id: 'appr-x', workflowRunId: 'run-x' }),
+      getRun: vi.fn().mockReturnValue(undefined), // the run was cancelled/removed
+    });
+    const deps = makeDeps(
+      approvalRoute({ decision: 'approved', repo: 'o/r', issueNumber: 1 }),
+      { db: db as any, github: {} as any, resumeRun },
+    );
+
+    await dispatch(envelope, deps);
+
+    expect(resumeRun).not.toHaveBeenCalled();
+    expect(db.approvals.respond).toHaveBeenCalledWith('appr-x', 'approved', 'maintainer', undefined);
+    expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/could not be resumed/i));
+  });
+
   it('approves but cannot resume without a GitHub App', async () => {
     const envelope = makeEnvelope({ type: 'comment.created' });
     const dispatchWorkflow = vi.fn();

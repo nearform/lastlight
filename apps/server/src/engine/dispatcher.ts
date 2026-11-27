@@ -1151,8 +1151,11 @@ async function handleApprovalResponse(
       deps.resumeRun(approval.workflowRunId, sender).catch((err) =>
         approvalLog.error("Resume failed", { runId: approval.workflowRunId, err }));
     } else {
-      // No workflow run, or no resume wiring (chat-only/tests) — record only.
+      // No workflow run for this approval (cancelled/removed), or no resume
+      // wiring — record the decision and tell the approver it won't resume,
+      // rather than leaving them to guess from silence (issue #518).
       await deps.db.approvals.respond(approval.id, "approved", sender, reason);
+      await envelope.reply("Approval recorded, but the run could not be resumed — it may have been cancelled or removed.");
     }
   } else {
     // One transaction: respond 'rejected' + fail the run (a no-op if the run
