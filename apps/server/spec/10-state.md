@@ -337,6 +337,12 @@ carries a stale `started_at` that the sweep would instantly TTL-reap. On boot,
 it normally instead of dropping it. (`running` orphans are re-dispatched;
 `paused` are left for the approval flow.)
 
+Every path that puts a run into the admission queue — `requeue` (re-queue an
+orphan), `requeueRunning` (k8s backpressure), and the approval enqueue — goes
+through one private `markQueued(id, fromStatus)` that always re-stamps
+`started_at`. Keeping the enqueue-clock re-stamp in a single primitive is what
+stops a new queue path from forgetting it and having its run TTL-reaped.
+
 **Retrying a stopped run.** `restartRun` (CAS on `status IN ('failed',
 'cancelled')`) flips the row back to `running`, clears `finished_at` and the
 `context.error` annotation, and re-dispatches via the ledger-driven resume path.
